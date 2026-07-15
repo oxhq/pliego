@@ -1,0 +1,116 @@
+name: Pliego Linux baseline
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/pliego-linux-baseline.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pliego-linux-baseline-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  LIBCLANG_PATH: /usr/lib/llvm-14/lib
+  RUST_BACKTRACE: 1
+  SHELL: /bin/bash
+
+jobs:
+  baseline:
+    name: Unchanged Servo build
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+
+    steps:
+      - name: Check out the fork
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Verify the Servo source is unchanged
+        env:
+          SERVO_BASE_SHA: 313b6d5ecc113b08010ce434140db3ca5abcc71c
+        run: |
+          git cat-file -e "${SERVO_BASE_SHA}^{commit}"
+          git diff --exit-code "${SERVO_BASE_SHA}" -- . \
+            ':(exclude).github/workflows/pliego-linux-baseline.yml' \
+            ':(exclude)docs/pliego/linux-baseline.md'
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version-file: .python-version
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.16"
+          enable-cache: false
+
+      - name: Bootstrap Servo
+        timeout-minutes: 30
+        run: |
+          mkdir -p artifacts/linux-baseline
+          set -o pipefail
+          ./mach bootstrap --yes --skip-lints --skip-nextest 2>&1 \
+            | tee artifacts/linux-baseline/bootstrap.log
+
+      - name: Record the baseline environment
+        env:
+          SERVO_BASE_SHA: 313b6d5ecc113b08010ce434140db3ca5abcc71c
+        run: |
+          {
+            echo "repository=${GITHUB_REPOSITORY}"
+            echo "source_sha=$(git rev-parse HEAD)"
+            echo "event_sha=${GITHUB_SHA}"
+            echo "servo_base_sha=${SERVO_BASE_SHA}"
+            echo "runner_image=${ImageOS:-unknown}"
+            echo "runner_image_version=${ImageVersion:-unknown}"
+            echo "profile=checked-release"
+            uname -a
+            cat /etc/os-release
+            rustc -Vv
+            cargo -Vv
+            python --version
+            uv --version
+            df -h .
+          } | tee artifacts/linux-baseline/environment.txt
+
+      - name: Install Crown
+        run: |
+          set -o pipefail
+          cargo install --path support/crown 2>&1 \
+            | tee artifacts/linux-baseline/crown.log
+
+      - name: Build unchanged Servo
+        run: |
+          set -o pipefail
+          ./mach build --use-crown --locked --profile checked-release 2>&1 \
+            | tee artifacts/linux-baseline/build.log
+
+      - name: Run the Servo smoketest
+        run: |
+          set -o pipefail
+          xvfb-run ./mach smoketest --profile checked-release 2>&1 \
+            | tee artifacts/linux-baseline/smoketest.log
+
+      - name: Record final disk usage
+        if: always()
+        run: |
+          mkdir -p artifacts/linux-baseline
+          df -h . | tee artifacts/linux-baseline/final-disk.txt
+
+      - name: Retain baseline evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: pliego-linux-baseline-${{ github.sha }}
+          path: |
+            artifacts/linux-baseline/
+            target/cargo-timings/
+          if-no-files-found: warn
+          retention-days: 7
