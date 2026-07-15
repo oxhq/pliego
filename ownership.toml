@@ -25,6 +25,10 @@ pattern = ".github/workflows/pliego-*"
 ownership = "pliego"
 
 [[path]]
+pattern = "PULL_REQUEST_TEMPLATE.md"
+ownership = "pliego"
+
+[[path]]
 pattern = "docs/pliego/**"
 ownership = "pliego"
 
