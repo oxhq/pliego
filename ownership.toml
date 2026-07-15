@@ -1,0 +1,37 @@
+# Rules are evaluated in order; the last matching rule wins.
+
+[[path]]
+pattern = "components/script/**"
+ownership = "upstream"
+
+[[path]]
+pattern = "components/layout/**"
+ownership = "shared"
+
+[[path]]
+pattern = "components/layout/fragmentation/**"
+ownership = "pliego"
+
+[[path]]
+pattern = "components/layout/pages/**"
+ownership = "pliego"
+
+[[path]]
+pattern = "components/document_*/**"
+ownership = "pliego"
+
+[[path]]
+pattern = ".github/workflows/pliego-*"
+ownership = "pliego"
+
+[[path]]
+pattern = "docs/pliego/**"
+ownership = "pliego"
+
+[[path]]
+pattern = "tools/ownership-report/**"
+ownership = "pliego"
+
+[[path]]
+pattern = "ownership.toml"
+ownership = "pliego"
