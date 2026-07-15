@@ -42,6 +42,24 @@ Crown, build, and smoketest logs, plus the exact source SHA, runner image,
 toolchain versions, operating system, and disk usage. Evidence is retained for
 seven days.
 
+## Proven run
+
+[GitHub Actions run 29381566622](https://github.com/oxhq/pliego/actions/runs/29381566622)
+passed on 2026-07-15 for commit
+`4e157c21233dd0309c13b342584639fae1213279`:
+
+- Servo base: `313b6d5ecc113b08010ce434140db3ca5abcc71c`
+- Runner image: `ubuntu22` version `20260705.219.1` (Ubuntu 22.04.5 LTS)
+- Rust/Cargo: `1.95.0`
+- Python: `3.11.15`
+- uv: `0.11.16`
+- Bootstrap, Crown install, checked-release build, and smoketest: passed
+- Cargo build time: 23m49s; complete job time: 26m17s
+- Disk available before/after build: 85 GB / 80 GB
+- Retained artifact:
+  `pliego-linux-baseline-4e157c21233dd0309c13b342584639fae1213279`
+  (expires 2026-07-22)
+
 ## Scope boundary
 
 This job intentionally has no cache, secrets, write permission, WPT, unit-test
