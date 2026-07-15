@@ -90,6 +90,34 @@ Those upstream self-hosted runs skipped shellcheck and the tshark-backed script
 check. The fork-owned hosted job installs both, an intentional coverage delta
 that is recorded with their versions.
 
+## Fork repeated proof
+
+[GitHub Actions run 29383797613](https://github.com/oxhq/pliego/actions/runs/29383797613)
+executed twice on 2026-07-15 against commit
+`e4fa44e35a0d769c28a35d6c50905b416c645b8e` and Servo base
+`313b6d5ecc113b08010ce434140db3ca5abcc71c`:
+
+- [Attempt 1 job 87252775404](https://github.com/oxhq/pliego/actions/runs/29383797613/job/87252775404)
+  passed in 36m53s.
+- [Attempt 2 job 87257237157](https://github.com/oxhq/pliego/actions/runs/29383797613/job/87257237157)
+  passed in 59m19s.
+
+Both captured result sets report the same evidence:
+
+- `test-scripts`, `test-unit`, clippy, and tidy: `success`
+- Script tests: 56 passed, with no skip or failure
+- Crown preflight: 1 passed; workspace unit tests: 941 passed, 0 skipped
+- Nextest JUnit: 941 tests, 0 failures, 0 errors
+- Tools: cargo-nextest 0.9.140, taplo 0.10.0, cargo-deny 0.19.0,
+  shellcheck 0.8.0, and tshark 3.6.2
+
+The only observed delta was elapsed time. This no-cache workflow used fresh
+hosted runners; attempt 2 spent longer in build, tool installation, unit tests,
+and clippy, while source SHA, versions, counts, and outcomes remained identical.
+The latest retained artifact is
+`pliego-linux-baseline-e4fa44e35a0d769c28a35d6c50905b416c645b8e`
+(artifact 8332055113, expires 2026-07-22).
+
 ## Scope boundary
 
 This job intentionally has no cache, secrets, write permission, WPT, unit-test
