@@ -60,6 +60,36 @@ passed on 2026-07-15 for commit
   `pliego-linux-baseline-4e157c21233dd0309c13b342584639fae1213279`
   (expires 2026-07-22)
 
+## Selected upstream test gate
+
+After the unchanged checked-release build and smoketest, the same clean runner
+executes the Linux script, unit, clippy, and tidy checks used by Servo CI:
+
+```bash
+./mach test-scripts
+./mach test-unit --profile checked-release --nextest-profile ci
+./mach clippy --locked --github-annotations -- -- --deny warnings
+./mach test-tidy --no-progress --all --github-annotations
+```
+
+The workflow retains one log per command and Nextest's JUnit report. A failed
+command fails the job; no upstream failure is suppressed or fixed here.
+
+At Servo base `313b6d5ecc113b08010ce434140db3ca5abcc71c`, the selected gate
+passed in both upstream runs:
+
+- [Merge-group run 29372601544](https://github.com/servo/servo/actions/runs/29372601544)
+- [Push run 29377645459](https://github.com/servo/servo/actions/runs/29377645459)
+
+In both, 56 script tests and 941 unit tests passed, while clippy and tidy each
+passed as one command-level check. The latter run still failed in full WPT on
+`css/css-values/rex-invalidation.html`; a `same-document-refresh.html` result
+was classified as flaky. Both are outside this ticket's selected gate.
+
+Those upstream self-hosted runs skipped shellcheck and the tshark-backed script
+check. The fork-owned hosted job installs both, an intentional coverage delta
+that is recorded with their versions.
+
 ## Scope boundary
 
 This job intentionally has no cache, secrets, write permission, WPT, unit-test
