@@ -29,8 +29,24 @@ pattern = "PULL_REQUEST_TEMPLATE.md"
 ownership = "pliego"
 
 [[path]]
+pattern = "CONTRIBUTING.md"
+ownership = "pliego"
+
+[[path]]
 pattern = "docs/pliego/**"
 ownership = "pliego"
+
+[[path]]
+pattern = "etc/about.hbs"
+ownership = "shared"
+
+[[path]]
+pattern = "python/servo/package_commands.py"
+ownership = "shared"
+
+[[path]]
+pattern = "resources/resource_protocol/license.html"
+ownership = "shared"
 
 [[path]]
 pattern = "tools/ownership-report/**"

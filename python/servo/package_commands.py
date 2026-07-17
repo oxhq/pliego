@@ -585,10 +585,10 @@ class PackageCommands(CommandBase):
 
             print(f"Updated occurrence in {filename}.")
         print("\r ➤  Updating license.html...")
-        # cargo about generate etc/about.hbs > resources/resource_protocol/license.html
+        # cargo about generate --locked --output-file resources/resource_protocol/license.html etc/about.hbs
         if shutil.which("cargo-about") is None:
             print("Updating license.html requires cargo-about, but it is not installed.", file=sys.stderr)
-            print("Install it with: `cargo install cargo-about --locked`", file=sys.stderr)
+            print("Install it with: `cargo install cargo-about --locked --features cli`", file=sys.stderr)
             return 1
         try:
             # Remove resources/resource_protocol/license.html before regenerating it
@@ -600,9 +600,11 @@ class PackageCommands(CommandBase):
                     "cargo",
                     "about",
                     "generate",
+                    "--locked",
+                    "--output-file",
+                    license_html_path,
                     "etc/about.hbs",
                 ],
-                stdout=open("resources/resource_protocol/license.html", "w"),
             )
         except subprocess.CalledProcessError as e:
             print("Updating license.html exited with return value %d" % e.returncode)
