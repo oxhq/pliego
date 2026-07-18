@@ -1498,6 +1498,10 @@ where
             ) => {
                 self.handle_evaluate_javascript(webview_id, evaluation_id, script);
             },
+            EmbedderToConstellationMessage::RequestLayoutDebugSnapshot(
+                webview_id,
+                response,
+            ) => self.handle_request_layout_debug_snapshot(webview_id, response),
             EmbedderToConstellationMessage::CreateMemoryReport(sender) => {
                 self.mem_profiler_chan.send(ProfilerMsg::Report(sender));
             },
@@ -1680,6 +1684,34 @@ where
                 evaluation_id,
                 Err(JavaScriptEvaluationError::InternalError),
             );
+        }
+    }
+
+    fn handle_request_layout_debug_snapshot(
+        &mut self,
+        webview_id: WebViewId,
+        response: GenericCallback<Option<String>>,
+    ) {
+        let browsing_context_id = BrowsingContextId::from(webview_id);
+        let Some(pipeline) = self
+            .browsing_contexts
+            .get(&browsing_context_id)
+            .and_then(|browsing_context| self.pipelines.get(&browsing_context.pipeline_id))
+        else {
+            let _ = response.send(None);
+            return;
+        };
+
+        let response_on_error = response.clone();
+        if pipeline
+            .event_loop
+            .send(ScriptThreadMessage::GetLayoutDebugSnapshot(
+                pipeline.id,
+                response,
+            ))
+            .is_err()
+        {
+            let _ = response_on_error.send(None);
         }
     }
 

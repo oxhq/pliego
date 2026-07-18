@@ -183,6 +183,8 @@ pub enum ScriptThreadMessage {
     /// Retrieve the origin of a document for a pipeline, in case a child needs to retrieve the
     /// origin of a parent in a different script thread.
     GetDocumentOrigin(PipelineId, GenericSender<Option<String>>),
+    /// Return the cached layout debug snapshot for a pipeline without triggering layout.
+    GetLayoutDebugSnapshot(PipelineId, GenericCallback<Option<String>>),
     /// Notifies script thread of a change to one of its document's activity
     SetDocumentActivity(PipelineId, DocumentActivity),
     /// Set whether to use less resources by running timers at a heavily limited rate.

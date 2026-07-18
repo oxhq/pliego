@@ -5,6 +5,18 @@ pattern = "components/script/**"
 ownership = "upstream"
 
 [[path]]
+pattern = "components/constellation/**"
+ownership = "upstream"
+
+[[path]]
+pattern = "components/servo/**"
+ownership = "upstream"
+
+[[path]]
+pattern = "components/shared/**"
+ownership = "shared"
+
+[[path]]
 pattern = "components/layout/**"
 ownership = "shared"
 

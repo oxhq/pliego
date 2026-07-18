@@ -81,7 +81,7 @@ use script_traits::{
 };
 use servo_arc::Arc as ServoArc;
 use servo_base::cross_process_instant::CrossProcessInstant;
-use servo_base::generic_channel::GenericSender;
+use servo_base::generic_channel::{GenericCallback, GenericSender};
 use servo_base::id::{
     BrowsingContextId, HistoryStateId, PipelineId, PipelineNamespace, ScriptEventLoopId, WebViewId,
 };
@@ -1820,6 +1820,9 @@ impl ScriptThread {
             ScriptThreadMessage::GetDocumentOrigin(pipeline_id, result_sender) => {
                 self.handle_get_document_origin(pipeline_id, result_sender);
             },
+            ScriptThreadMessage::GetLayoutDebugSnapshot(pipeline_id, result_sender) => {
+                self.handle_get_layout_debug_snapshot(pipeline_id, result_sender);
+            },
             ScriptThreadMessage::GetTitle(pipeline_id) => self.handle_get_title_msg(pipeline_id),
             ScriptThreadMessage::SetDocumentActivity(pipeline_id, activity) => {
                 self.handle_set_document_activity_msg(cx, pipeline_id, activity)
@@ -2762,6 +2765,24 @@ impl ScriptThread {
                 .find_document(id)
                 .map(|document| document.origin().immutable().ascii_serialization()),
         );
+    }
+
+    fn handle_get_layout_debug_snapshot(
+        &self,
+        id: PipelineId,
+        result_sender: GenericCallback<Option<String>>,
+    ) {
+        let snapshot = self
+            .documents
+            .borrow()
+            .find_window(id)
+            .and_then(|window| window.layout().debug_snapshot())
+            .and_then(|snapshot| {
+                serde_json::to_string(&snapshot)
+                    .inspect_err(|error| warn!("Could not serialize layout debug snapshot: {error}"))
+                    .ok()
+            });
+        let _ = result_sender.send(snapshot);
     }
 
     // exit_fullscreen creates a new JS promise object, so we need to have entered a realm

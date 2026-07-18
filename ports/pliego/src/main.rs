@@ -161,6 +161,19 @@ fn render(input: PathBuf) {
             "document remained pending after stable capture",
         ),
     };
+    let layout_debug_json = result.layout_debug.unwrap_or_else(|| {
+        fail_session(
+            &artifacts,
+            "LAYOUT_CAPTURE_UNAVAILABLE",
+            "Servo did not return cached layout data",
+        )
+    });
+    let layout_debug: serde_json::Value =
+        serde_json::from_str(&layout_debug_json).unwrap_or_else(|error| {
+            fail_session(&artifacts, "LAYOUT_CAPTURE_INVALID", &error.to_string())
+        });
+    record_artifact(artifacts.write_layout_debug(&layout_debug));
+    let layout_debug_path = artifacts.directory().join("layout-debug.json");
 
     let rendered_bytes = std::fs::metadata(&proof)
         .map(|metadata| metadata.len())
@@ -181,6 +194,7 @@ fn render(input: PathBuf) {
             "engine": "pliego",
             "document_root": document.root().to_string_lossy(),
             "input": document.path().to_string_lossy(),
+            "layout_debug": layout_debug_path.to_string_lossy(),
             "readiness": readiness_payload,
             "rendered_image": proof.to_string_lossy(),
             "servo_base_sha": SERVO_BASE_SHA,

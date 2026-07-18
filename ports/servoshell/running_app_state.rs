@@ -513,7 +513,7 @@ impl RunningAppState {
                     error!("Could not take screenshot: {error:?}");
                     #[cfg(not(any(target_os = "android", target_env = "ohos")))]
                     if let Some(evaluation) = stable_javascript {
-                        evaluation.complete(Err(StableJavaScriptError::Screenshot(error)));
+                        evaluation.complete(Err(StableJavaScriptError::Screenshot(error)), None);
                     }
                     achieved_stable_image.set(true);
                     return;
@@ -532,8 +532,17 @@ impl RunningAppState {
             #[cfg(not(any(target_os = "android", target_env = "ohos")))]
             if let Some(evaluation) = stable_javascript {
                 let script = evaluation.script.clone();
+                let layout_webview = evaluation_webview.clone();
                 evaluation_webview.evaluate_javascript(script, move |result| {
-                    evaluation.complete(result.map_err(StableJavaScriptError::Evaluation));
+                    let layout_debug = if result.is_ok() {
+                        layout_webview.debug_layout_snapshot()
+                    } else {
+                        None
+                    };
+                    evaluation.complete(
+                        result.map_err(StableJavaScriptError::Evaluation),
+                        layout_debug,
+                    );
                     achieved_stable_image.set(true);
                 });
                 return;

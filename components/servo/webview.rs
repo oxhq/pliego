@@ -23,7 +23,7 @@ use log::debug;
 use paint_api::WebViewTrait;
 use paint_api::rendering_context::RenderingContext;
 use servo_base::Epoch;
-use servo_base::generic_channel::GenericSender;
+use servo_base::generic_channel::{GenericCallback, GenericSender};
 use servo_base::id::WebViewId;
 use servo_config::pref;
 use servo_constellation_traits::{EmbedderToConstellationMessage, TraversalDirection};
@@ -773,6 +773,18 @@ impl WebView {
             script.to_string(),
             Box::new(callback),
         );
+    }
+
+    /// Return a serialized snapshot of cached layout state without triggering layout.
+    #[doc(hidden)]
+    pub fn debug_layout_snapshot(&self) -> Option<String> {
+        let (response, receiver) = GenericCallback::new_blocking().ok()?;
+        self.inner().servo.constellation_proxy().send(
+            EmbedderToConstellationMessage::RequestLayoutDebugSnapshot(self.id(), response),
+        );
+        receiver
+            .try_recv_timeout(Duration::from_secs(5))
+            .unwrap_or(None)
     }
 
     /// Asynchronously take a screenshot of the [`WebView`] contents, given a `rect` or the whole

@@ -81,6 +81,7 @@ pub struct StableJavaScriptResult {
     pub value: JSValue,
     pub console: Vec<ConsoleMessage>,
     pub resources: Vec<ResourceEvent>,
+    pub layout_debug: Option<String>,
 }
 
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
@@ -150,11 +151,16 @@ impl StableJavaScriptEvaluation {
         self.console.clone()
     }
 
-    fn complete(&self, result: Result<JSValue, StableJavaScriptError>) {
+    fn complete(
+        &self,
+        result: Result<JSValue, StableJavaScriptError>,
+        layout_debug: Option<String>,
+    ) {
         let result = result.map(|value| StableJavaScriptResult {
             value,
             console: self.console.borrow().clone(),
             resources: Vec::new(),
+            layout_debug,
         });
         let _ = self.result.send(result);
     }

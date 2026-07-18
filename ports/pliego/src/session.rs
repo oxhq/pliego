@@ -148,8 +148,16 @@ impl SessionArtifacts {
             "render_id".into(),
             serde_json::Value::String(self.render_id()),
         );
-        let mut file = File::create(self.directory.join("readiness.json"))?;
-        serde_json::to_writer_pretty(&mut file, &readiness).map_err(io::Error::other)?;
+        self.write_json("readiness.json", &readiness)
+    }
+
+    pub fn write_layout_debug(&self, snapshot: &serde_json::Value) -> io::Result<()> {
+        self.write_json("layout-debug.json", snapshot)
+    }
+
+    fn write_json(&self, name: &str, value: &serde_json::Value) -> io::Result<()> {
+        let mut file = File::create(self.directory.join(name))?;
+        serde_json::to_writer_pretty(&mut file, value).map_err(io::Error::other)?;
         file.write_all(b"\n")
     }
 
@@ -291,6 +299,12 @@ mod tests {
                 "payload": { "fixture": true }
             }))
             .unwrap();
+        artifacts
+            .write_layout_debug(&serde_json::json!({
+                "boxes": [{ "depth": 0, "kind": "block" }],
+                "fragments": [{ "depth": 0, "kind": "box" }]
+            }))
+            .unwrap();
 
         assert_eq!(artifacts.directory(), directory);
         let state: serde_json::Value = serde_json::from_str(
@@ -314,11 +328,15 @@ mod tests {
         let readiness: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(directory.join("readiness.json")).unwrap())
                 .unwrap();
+        let layout_debug: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(directory.join("layout-debug.json")).unwrap())
+                .unwrap();
         assert_eq!(state["state"], "started");
         assert_eq!(console["message"], "fixture-ready");
         assert_eq!(resource["bytes"], 42);
         assert_eq!(readiness["payload"]["fixture"], true);
         assert_eq!(readiness["render_id"], artifacts.render_id());
+        assert_eq!(layout_debug["boxes"][0]["kind"], "block");
 
         fs::remove_dir_all(directory).unwrap();
     }
