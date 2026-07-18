@@ -6554,8 +6554,10 @@ dependencies = [
 name = "pliego"
 version = "0.1.0"
 dependencies = [
+ "serde",
  "serde_json",
  "servoshell",
+ "sha2 0.11.0",
  "url",
 ]
 
