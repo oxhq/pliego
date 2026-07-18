@@ -37,6 +37,26 @@ pattern = "docs/pliego/**"
 ownership = "pliego"
 
 [[path]]
+pattern = "ports/pliego/**"
+ownership = "pliego"
+
+[[path]]
+pattern = "tests/pliego/**"
+ownership = "pliego"
+
+[[path]]
+pattern = "Cargo.toml"
+ownership = "shared"
+
+[[path]]
+pattern = "Cargo.lock"
+ownership = "shared"
+
+[[path]]
+pattern = "ports/servoshell/**"
+ownership = "shared"
+
+[[path]]
 pattern = "etc/about.hbs"
 ownership = "shared"
 

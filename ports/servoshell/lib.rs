@@ -41,6 +41,11 @@ pub fn main() {
     desktop::cli::main()
 }
 
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+pub fn run(args: &[String]) {
+    desktop::cli::run(args)
+}
+
 pub fn init_crypto() {
     rustls::crypto::aws_lc_rs::default_provider()
         .install_default()

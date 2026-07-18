@@ -10,6 +10,11 @@ use crate::panic_hook;
 use crate::prefs::{ArgumentParsingResult, parse_command_line_arguments};
 
 pub fn main() {
+    let args: Vec<String> = env::args().skip(1).collect();
+    run(&args)
+}
+
+pub(crate) fn run(args: &[String]) {
     crate::crash_handler::install();
     crate::init_crypto();
 
@@ -17,9 +22,7 @@ pub fn main() {
     // log_panics::init()?
     panic::set_hook(Box::new(panic_hook::panic_hook));
 
-    // Skip the first argument, which is the binary name.
-    let args: Vec<String> = env::args().skip(1).collect();
-    let (opts, preferences, servoshell_preferences) = match parse_command_line_arguments(&*args) {
+    let (opts, preferences, servoshell_preferences) = match parse_command_line_arguments(args) {
         ArgumentParsingResult::ContentProcess(token) => return servo::run_content_process(token),
         ArgumentParsingResult::ChromeProcess(opts, preferences, servoshell_preferences) => {
             (opts, preferences, servoshell_preferences)
