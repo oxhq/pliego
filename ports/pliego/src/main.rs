@@ -2,16 +2,22 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::PathBuf;
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use session::LocalDocument;
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+use readiness::{Readiness, parse_snapshot};
+use session::{LocalDocument, SessionArtifacts};
 
+mod readiness;
 mod session;
 
 const SERVO_BASE_SHA: &str = "313b6d5ecc113b08010ce434140db3ca5abcc71c";
+const READINESS_TIMEOUT_MS: u64 = 10_000;
 
 #[derive(Debug, PartialEq)]
 enum Command {
@@ -76,43 +82,194 @@ fn render(input: PathBuf) {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    let proof =
-        std::env::temp_dir().join(format!("pliego-render-{}-{unique}.png", std::process::id()));
+    let artifacts = SessionArtifacts::create(
+        std::env::temp_dir().join(format!("pliego-session-{}-{unique}", std::process::id())),
+    )
+    .unwrap_or_else(|error| {
+        eprintln!("pliego: cannot create session artifacts: {error}");
+        std::process::exit(1)
+    });
+    let proof = artifacts.directory().join("render.png");
+    let userscripts = artifacts.directory().join("userscripts");
+    record_artifact(std::fs::create_dir_all(&userscripts));
+    record_artifact(std::fs::write(
+        userscripts.join("00-pliego-readiness.js"),
+        readiness::document_start_script(READINESS_TIMEOUT_MS),
+    ));
 
-    servoshell::run(&[
+    record_artifact(artifacts.record_state("started", None));
+
+    let servo_args = [
         "--headless".into(),
         "--exit".into(),
         "--output".into(),
         proof.to_string_lossy().into_owned(),
+        "--userscripts".into(),
+        userscripts.to_string_lossy().into_owned(),
         input_url.to_string(),
-    ]);
+    ];
+    let result = servoshell::run_with_stable_javascript_and_console(
+        &servo_args,
+        readiness::HOST_EVALUATION_EXPRESSION,
+    )
+    .unwrap_or_else(|error| {
+        fail_session(
+            &artifacts,
+            "READINESS_EVALUATION_FAILED",
+            &error.to_string(),
+        )
+    });
+
+    for message in result.console {
+        record_artifact(artifacts.record_console(
+            &format!("{:?}", message.level).to_ascii_lowercase(),
+            &message.message,
+        ));
+    }
+    let missing_resource = record_resources(&artifacts, result.resources);
+
+    let snapshot_json = match result.value {
+        servoshell::JSValue::String(json) => json,
+        value => fail_session(
+            &artifacts,
+            "READINESS_INVALID_RESULT",
+            &format!("expected readiness JSON string, got {value:?}"),
+        ),
+    };
+    let readiness = parse_snapshot(&snapshot_json)
+        .unwrap_or_else(|error| fail_session(&artifacts, "READINESS_INVALID_RESULT", &error));
+    let readiness_json: serde_json::Value =
+        serde_json::from_str(&snapshot_json).unwrap_or_else(|error| {
+            fail_session(&artifacts, "READINESS_INVALID_RESULT", &error.to_string())
+        });
+    record_artifact(artifacts.write_readiness(&readiness_json));
+    let readiness_payload = match readiness {
+        Readiness::Ready { payload } => {
+            if let Some(url) = missing_resource {
+                fail_session(
+                    &artifacts,
+                    "RESOURCE_LOAD_FAILED",
+                    &format!("local resource did not load: {url}"),
+                );
+            }
+            payload
+        },
+        Readiness::Failed { error } => fail_session(&artifacts, &error.code, &error.message),
+        Readiness::Pending => fail_session(
+            &artifacts,
+            "READINESS_PENDING",
+            "document remained pending after stable capture",
+        ),
+    };
 
     let rendered_bytes = std::fs::metadata(&proof)
         .map(|metadata| metadata.len())
         .unwrap_or(0);
     if rendered_bytes == 0 {
-        eprintln!("pliego: Servo did not produce a rendered image");
-        std::process::exit(1);
-    }
-    if let Err(error) = std::fs::remove_file(&proof) {
-        eprintln!(
-            "pliego: warning: could not remove {}: {error}",
-            proof.display()
+        fail_session(
+            &artifacts,
+            "RENDER_OUTPUT_MISSING",
+            "Servo did not produce a rendered image",
         );
     }
+    record_artifact(artifacts.record_state("rendered", None));
 
     println!(
         "{}",
         serde_json::json!({
+            "artifacts": artifacts.directory().to_string_lossy(),
             "engine": "pliego",
             "document_root": document.root().to_string_lossy(),
             "input": document.path().to_string_lossy(),
+            "readiness": readiness_payload,
+            "rendered_image": proof.to_string_lossy(),
             "servo_base_sha": SERVO_BASE_SHA,
             "servo_build": servoshell::VERSION,
             "rendered_bytes": rendered_bytes,
             "status": "rendered"
         })
     );
+}
+
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+fn record_resources(
+    artifacts: &SessionArtifacts,
+    resources: Vec<servoshell::ResourceEvent>,
+) -> Option<String> {
+    let mut pending = HashMap::new();
+
+    for resource in resources {
+        match resource.event {
+            servoshell::NetworkEvent::HttpRequest(request) => {
+                let url = request.url.into_string();
+                record_artifact(artifacts.record_resource(&url, "requested", None));
+                pending.insert(resource.request_id, url);
+            },
+            servoshell::NetworkEvent::HttpResponse(response) => {
+                let Some((url, bytes)) = complete_resource(
+                    &mut pending,
+                    &resource.request_id,
+                    response.body.map(|body| body.len()),
+                ) else {
+                    continue;
+                };
+                record_artifact(artifacts.record_resource(&url, "loaded", Some(bytes)));
+            },
+            servoshell::NetworkEvent::HttpRequestUpdate(_)
+            | servoshell::NetworkEvent::SecurityInfo(_) => {},
+        }
+    }
+
+    pending
+        .into_values()
+        .filter(|url| url.starts_with("file:"))
+        .min()
+}
+
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+fn complete_resource(
+    pending: &mut HashMap<String, String>,
+    request_id: &str,
+    bytes: Option<usize>,
+) -> Option<(String, u64)> {
+    let bytes = bytes? as u64;
+    pending.remove(request_id).map(|url| (url, bytes))
+}
+
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+fn record_artifact(result: std::io::Result<()>) {
+    if let Err(error) = result {
+        eprintln!("pliego: cannot write session artifact: {error}");
+        std::process::exit(1);
+    }
+}
+
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+fn fail_session(artifacts: &SessionArtifacts, code: &str, message: &str) -> ! {
+    let failure = serde_json::json!({
+        "status": "failed",
+        "error": {
+            "code": code,
+            "message": message,
+        }
+    });
+    if let Err(error) = artifacts.write_readiness(&failure) {
+        eprintln!("pliego: warning: cannot write readiness artifact: {error}");
+    }
+    if let Err(error) = artifacts.record_state("failed", Some(message)) {
+        eprintln!("pliego: warning: cannot record failed session state: {error}");
+    }
+    println!(
+        "{}",
+        serde_json::json!({
+            "artifacts": artifacts.directory().to_string_lossy(),
+            "engine": "pliego",
+            "error": failure["error"],
+            "status": "failed",
+        })
+    );
+    eprintln!("pliego: {code}: {message}");
+    std::process::exit(1)
 }
 
 #[cfg(any(target_os = "android", target_env = "ohos"))]
@@ -123,7 +280,9 @@ fn render(_input: PathBuf) {
 
 #[cfg(test)]
 mod tests {
-    use super::{Command, parse_args};
+    use std::collections::HashMap;
+
+    use super::{Command, complete_resource, parse_args};
     use std::ffi::OsString;
     use std::path::PathBuf;
 
@@ -145,5 +304,18 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[test]
+    fn completes_a_resource_only_when_its_body_arrives() {
+        let mut pending = HashMap::from([("request-1".to_owned(), "file:///style.css".to_owned())]);
+
+        assert_eq!(complete_resource(&mut pending, "request-1", None), None);
+        assert!(pending.contains_key("request-1"));
+        assert_eq!(
+            complete_resource(&mut pending, "request-1", Some(42)),
+            Some(("file:///style.css".to_owned(), 42))
+        );
+        assert!(pending.is_empty());
     }
 }

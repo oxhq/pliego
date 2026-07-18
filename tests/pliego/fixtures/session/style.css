@@ -1,0 +1,10 @@
+body {
+  background: #f7f2e8;
+  color: #14213d;
+  font: 20px sans-serif;
+}
+
+main {
+  display: flex;
+  gap: 1rem;
+}

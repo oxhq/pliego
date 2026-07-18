@@ -4,8 +4,10 @@
 
 use std::error::Error;
 use std::fmt;
-use std::io;
+use std::fs::{File, OpenOptions};
+use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug)]
 pub struct LocalDocument {
@@ -75,6 +77,99 @@ impl LocalDocument {
 }
 
 #[derive(Debug)]
+pub struct SessionArtifacts {
+    directory: PathBuf,
+}
+
+impl SessionArtifacts {
+    pub fn create(directory: impl AsRef<Path>) -> io::Result<Self> {
+        let directory = directory.as_ref().to_owned();
+        std::fs::create_dir_all(&directory)?;
+        for name in ["console.jsonl", "resources.jsonl", "session-state.jsonl"] {
+            File::create(directory.join(name))?;
+        }
+        Ok(Self { directory })
+    }
+
+    pub fn directory(&self) -> &Path {
+        &self.directory
+    }
+
+    pub fn render_id(&self) -> String {
+        self.directory
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    }
+
+    pub fn record_state(&self, state: &str, message: Option<&str>) -> io::Result<()> {
+        self.append(
+            "session-state.jsonl",
+            serde_json::json!({
+                "timestamp_ms": timestamp_ms(),
+                "state": state,
+                "message": message,
+            }),
+        )
+    }
+
+    pub fn record_console(&self, level: &str, message: &str) -> io::Result<()> {
+        self.append(
+            "console.jsonl",
+            serde_json::json!({
+                "timestamp_ms": timestamp_ms(),
+                "level": level,
+                "message": message,
+            }),
+        )
+    }
+
+    pub fn record_resource(&self, url: &str, status: &str, bytes: Option<u64>) -> io::Result<()> {
+        self.append(
+            "resources.jsonl",
+            serde_json::json!({
+                "timestamp_ms": timestamp_ms(),
+                "url": url,
+                "status": status,
+                "bytes": bytes,
+            }),
+        )
+    }
+
+    pub fn write_readiness(&self, readiness: &serde_json::Value) -> io::Result<()> {
+        let mut readiness = readiness.clone();
+        let object = readiness.as_object_mut().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "readiness must be a JSON object",
+            )
+        })?;
+        object.insert(
+            "render_id".into(),
+            serde_json::Value::String(self.render_id()),
+        );
+        let mut file = File::create(self.directory.join("readiness.json"))?;
+        serde_json::to_writer_pretty(&mut file, &readiness).map_err(io::Error::other)?;
+        file.write_all(b"\n")
+    }
+
+    fn append(&self, name: &str, event: serde_json::Value) -> io::Result<()> {
+        let mut file = OpenOptions::new()
+            .append(true)
+            .open(self.directory.join(name))?;
+        serde_json::to_writer(&mut file, &event).map_err(io::Error::other)?;
+        file.write_all(b"\n")
+    }
+}
+
+fn timestamp_ms() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+}
+
+#[derive(Debug)]
 pub enum SessionFailure {
     RootUnavailable { path: PathBuf, source: io::Error },
     RootNotDirectory(PathBuf),
@@ -140,7 +235,7 @@ mod tests {
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use super::{LocalDocument, SessionFailure};
+    use super::{LocalDocument, SessionArtifacts, SessionFailure};
 
     #[test]
     fn resolves_a_local_file_and_rejects_escape_paths() {
@@ -173,5 +268,58 @@ mod tests {
         ));
 
         fs::remove_dir_all(sandbox).unwrap();
+    }
+
+    #[test]
+    fn writes_the_three_session_traces_as_json_lines() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory =
+            std::env::temp_dir().join(format!("pliego-artifacts-{}-{unique}", std::process::id()));
+        let artifacts = SessionArtifacts::create(&directory).unwrap();
+
+        artifacts.record_state("started", None).unwrap();
+        artifacts.record_console("info", "fixture-ready").unwrap();
+        artifacts
+            .record_resource("file:///index.html", "loaded", Some(42))
+            .unwrap();
+        artifacts
+            .write_readiness(&serde_json::json!({
+                "status": "ready",
+                "payload": { "fixture": true }
+            }))
+            .unwrap();
+
+        assert_eq!(artifacts.directory(), directory);
+        let state: serde_json::Value = serde_json::from_str(
+            fs::read_to_string(directory.join("session-state.jsonl"))
+                .unwrap()
+                .trim(),
+        )
+        .unwrap();
+        let console: serde_json::Value = serde_json::from_str(
+            fs::read_to_string(directory.join("console.jsonl"))
+                .unwrap()
+                .trim(),
+        )
+        .unwrap();
+        let resource: serde_json::Value = serde_json::from_str(
+            fs::read_to_string(directory.join("resources.jsonl"))
+                .unwrap()
+                .trim(),
+        )
+        .unwrap();
+        let readiness: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(directory.join("readiness.json")).unwrap())
+                .unwrap();
+        assert_eq!(state["state"], "started");
+        assert_eq!(console["message"], "fixture-ready");
+        assert_eq!(resource["bytes"], 42);
+        assert_eq!(readiness["payload"]["fixture"], true);
+        assert_eq!(readiness["render_id"], artifacts.render_id());
+
+        fs::remove_dir_all(directory).unwrap();
     }
 }

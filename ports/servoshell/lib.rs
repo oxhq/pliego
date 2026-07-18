@@ -4,6 +4,18 @@
 
 use cfg_if::cfg_if;
 
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+use std::cell::RefCell;
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+use std::rc::Rc;
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+use std::sync::mpsc::Sender;
+
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+pub use servo::{ConsoleLogLevel, JSValue, NetworkEvent};
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+use servo::{JavaScriptEvaluationError, ScreenshotCaptureError};
+
 #[cfg(test)]
 mod test;
 
@@ -44,6 +56,108 @@ pub fn main() {
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
 pub fn run(args: &[String]) {
     desktop::cli::run(args)
+}
+
+/// Run servoshell and evaluate JavaScript after its stable screenshot is captured.
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+pub fn run_with_stable_javascript(
+    args: &[String],
+    script: &str,
+) -> Result<JSValue, StableJavaScriptError> {
+    desktop::cli::run_with_stable_javascript(args, script)
+}
+
+/// Run servoshell, evaluate JavaScript after its stable screenshot, and return page console output.
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+pub fn run_with_stable_javascript_and_console(
+    args: &[String],
+    script: &str,
+) -> Result<StableJavaScriptResult, StableJavaScriptError> {
+    desktop::cli::run_with_stable_javascript_and_console(args, script)
+}
+
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+pub struct StableJavaScriptResult {
+    pub value: JSValue,
+    pub console: Vec<ConsoleMessage>,
+    pub resources: Vec<ResourceEvent>,
+}
+
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+#[derive(Debug)]
+pub struct ResourceEvent {
+    pub request_id: String,
+    pub event: NetworkEvent,
+}
+
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+#[derive(Clone, Debug)]
+pub struct ConsoleMessage {
+    pub level: ConsoleLogLevel,
+    pub message: String,
+}
+
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+#[derive(Debug)]
+pub enum StableJavaScriptError {
+    /// Servo could not capture the stable image.
+    Screenshot(ScreenshotCaptureError),
+    /// Servo could not evaluate or serialize the expression.
+    Evaluation(JavaScriptEvaluationError),
+    /// The application stopped before evaluation completed.
+    SessionEnded,
+}
+
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+impl std::fmt::Display for StableJavaScriptError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Screenshot(error) => write!(formatter, "stable screenshot failed: {error:?}"),
+            Self::Evaluation(error) => write!(formatter, "JavaScript evaluation failed: {error:?}"),
+            Self::SessionEnded => formatter.write_str("session ended before JavaScript evaluation"),
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+impl std::error::Error for StableJavaScriptError {}
+
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+#[derive(Clone)]
+pub(crate) struct StableJavaScriptEvaluation {
+    script: String,
+    console: ConsoleMessages,
+    result: Sender<Result<StableJavaScriptResult, StableJavaScriptError>>,
+}
+
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+pub(crate) type ConsoleMessages = Rc<RefCell<Vec<ConsoleMessage>>>;
+
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+impl StableJavaScriptEvaluation {
+    fn new(
+        script: &str,
+        result: Sender<Result<StableJavaScriptResult, StableJavaScriptError>>,
+    ) -> Self {
+        Self {
+            script: script.to_owned(),
+            console: Default::default(),
+            result,
+        }
+    }
+
+    fn console_messages(&self) -> ConsoleMessages {
+        self.console.clone()
+    }
+
+    fn complete(&self, result: Result<JSValue, StableJavaScriptError>) {
+        let result = result.map(|value| StableJavaScriptResult {
+            value,
+            console: self.console.borrow().clone(),
+            resources: Vec::new(),
+        });
+        let _ = self.result.send(result);
+    }
 }
 
 pub fn init_crypto() {

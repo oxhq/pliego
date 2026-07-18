@@ -22,6 +22,7 @@ use winit::dpi::PhysicalSize;
 
 use crate::prefs::ServoShellPreferences;
 use crate::window::{MIN_WINDOW_INNER_SIZE, PlatformWindow, ServoShellWindow, ServoShellWindowId};
+use crate::{ConsoleMessage, ConsoleMessages};
 
 pub struct HeadlessWindow {
     id: ServoShellWindowId,
@@ -32,11 +33,15 @@ pub struct HeadlessWindow {
     // virtual top-left position of the window in device pixels.
     window_position: Cell<Point2D<i32, DevicePixel>>,
     rendering_context: Rc<SoftwareRenderingContext>,
+    console_messages: Option<ConsoleMessages>,
 }
 
 impl HeadlessWindow {
     #[servo::servo_tracing::instrument(level = "debug", name = "HeadlessWindow::new", skip_all)]
-    pub fn new(servoshell_preferences: &ServoShellPreferences) -> Rc<Self> {
+    pub fn new(
+        servoshell_preferences: &ServoShellPreferences,
+        console_messages: Option<ConsoleMessages>,
+    ) -> Rc<Self> {
         let size = servoshell_preferences.initial_window_size;
 
         let device_pixel_ratio_override = servoshell_preferences.device_pixel_ratio_override;
@@ -66,6 +71,7 @@ impl HeadlessWindow {
             screen_size,
             window_position: Cell::new(Point2D::zero()),
             rendering_context: Rc::new(rendering_context),
+            console_messages,
         };
 
         Rc::new(window)
@@ -174,6 +180,13 @@ impl PlatformWindow for HeadlessWindow {
     }
 
     fn show_console_message(&self, level: servo::ConsoleLogLevel, message: &str) {
+        if let Some(console_messages) = &self.console_messages {
+            console_messages.borrow_mut().push(ConsoleMessage {
+                level: level.clone(),
+                message: message.to_owned(),
+            });
+            return;
+        }
         println!("{message}");
         log::log!(level.into(), "{message}");
     }

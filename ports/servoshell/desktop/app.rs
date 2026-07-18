@@ -9,9 +9,11 @@ use std::rc::Rc;
 use std::time::Instant;
 use std::{env, fs};
 
+use crossbeam_channel::Sender;
 use servo::protocol_handler::ProtocolRegistry;
 use servo::{
-    EventLoopWaker, Opts, Preferences, ServoBuilder, ServoUrl, UserContentManager, UserScript,
+    DevtoolsControlMsg, EventLoopWaker, Opts, Preferences, ServoBuilder, ServoUrl,
+    UserContentManager, UserScript,
 };
 use url::Url;
 use winit::application::ApplicationHandler;
@@ -20,6 +22,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
 use winit::window::WindowId;
 
 use super::event_loop::AppEvent;
+use crate::StableJavaScriptEvaluation;
 use crate::desktop::event_loop::ServoShellEventLoop;
 use crate::desktop::headed_window::HeadedWindow;
 use crate::desktop::headless_window::HeadlessWindow;
@@ -48,6 +51,8 @@ pub struct App {
     t_start: Instant,
     t: Instant,
     state: AppState,
+    stable_javascript: Option<StableJavaScriptEvaluation>,
+    resource_event_sender: Option<Sender<DevtoolsControlMsg>>,
 }
 
 impl App {
@@ -56,6 +61,8 @@ impl App {
         preferences: Preferences,
         servo_shell_preferences: ServoShellPreferences,
         event_loop: &ServoShellEventLoop,
+        stable_javascript: Option<StableJavaScriptEvaluation>,
+        resource_event_sender: Option<Sender<DevtoolsControlMsg>>,
     ) -> Self {
         let initial_url = get_default_url(
             servo_shell_preferences.url.as_deref(),
@@ -75,6 +82,8 @@ impl App {
             t_start: t,
             t,
             state: AppState::Initializing,
+            stable_javascript,
+            resource_event_sender,
         }
     }
 
@@ -92,11 +101,14 @@ impl App {
             protocols::resource::ResourceProtocolHandler::default(),
         );
 
-        let servo_builder = ServoBuilder::default()
+        let mut servo_builder = ServoBuilder::default()
             .opts(self.opts.clone())
             .preferences(self.preferences.clone())
             .protocol_registry(protocol_registry)
             .event_loop_waker(self.waker.clone());
+        if let Some(resource_event_sender) = &self.resource_event_sender {
+            servo_builder = servo_builder.resource_event_sender(resource_event_sender.clone());
+        }
 
         let url = self.initial_url.as_url().clone();
         let platform_window = self.create_platform_window(url, active_event_loop);
@@ -132,6 +144,7 @@ impl App {
             #[cfg(feature = "gamepad")]
             ServoshellGamepadDelegate::maybe_new().map(Rc::new),
         ));
+        running_state.set_stable_javascript_evaluation(self.stable_javascript.clone());
         running_state.open_window(platform_window, self.initial_url.as_url().clone());
 
         self.state = AppState::Running(running_state);
@@ -149,7 +162,12 @@ impl App {
         );
 
         let Some(active_event_loop) = active_event_loop else {
-            return HeadlessWindow::new(&self.servoshell_preferences);
+            return HeadlessWindow::new(
+                &self.servoshell_preferences,
+                self.stable_javascript
+                    .as_ref()
+                    .map(StableJavaScriptEvaluation::console_messages),
+            );
         };
 
         HeadedWindow::new(

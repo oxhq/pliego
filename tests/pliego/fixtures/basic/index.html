@@ -13,6 +13,9 @@
       <h1>Pliego is rendering</h1>
       <p id="result">JavaScript has not run.</p>
     </article>
-    <script>document.querySelector('#result').textContent = 'JavaScript, style, and layout are active.';</script>
+    <script>
+      document.querySelector('#result').textContent = 'JavaScript, style, and layout are active.';
+      queueMicrotask(() => window.pliego?.ready({ fixture: 'basic' }));
+    </script>
   </body>
 </html>

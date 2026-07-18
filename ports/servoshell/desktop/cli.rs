@@ -4,10 +4,17 @@
 
 use std::{env, panic};
 
+use crossbeam_channel::{Sender, unbounded};
+use servo::{ChromeToDevtoolsControlMsg, DevtoolsControlMsg};
+
 use crate::desktop::app::App;
 use crate::desktop::event_loop::ServoShellEventLoop;
 use crate::panic_hook;
 use crate::prefs::{ArgumentParsingResult, parse_command_line_arguments};
+use crate::{
+    JSValue, ResourceEvent, StableJavaScriptError, StableJavaScriptEvaluation,
+    StableJavaScriptResult,
+};
 
 pub fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -15,6 +22,47 @@ pub fn main() {
 }
 
 pub(crate) fn run(args: &[String]) {
+    run_inner(args, None, None)
+}
+
+pub(crate) fn run_with_stable_javascript(
+    args: &[String],
+    script: &str,
+) -> Result<JSValue, StableJavaScriptError> {
+    run_with_stable_javascript_and_console(args, script).map(|result| result.value)
+}
+
+pub(crate) fn run_with_stable_javascript_and_console(
+    args: &[String],
+    script: &str,
+) -> Result<StableJavaScriptResult, StableJavaScriptError> {
+    let (result_sender, result_receiver) = std::sync::mpsc::channel();
+    let (resource_event_sender, resource_event_receiver) = unbounded();
+    let evaluation = StableJavaScriptEvaluation::new(script, result_sender);
+    run_inner(args, Some(evaluation), Some(resource_event_sender));
+    let mut result = result_receiver
+        .recv()
+        .unwrap_or(Err(StableJavaScriptError::SessionEnded))?;
+    result
+        .resources
+        .extend(resource_event_receiver.try_iter().filter_map(|message| {
+            let DevtoolsControlMsg::FromChrome(ChromeToDevtoolsControlMsg::NetworkEvent(
+                request_id,
+                event,
+            )) = message
+            else {
+                return None;
+            };
+            Some(ResourceEvent { request_id, event })
+        }));
+    Ok(result)
+}
+
+fn run_inner(
+    args: &[String],
+    stable_javascript: Option<StableJavaScriptEvaluation>,
+    resource_event_sender: Option<Sender<DevtoolsControlMsg>>,
+) {
     crate::crash_handler::install();
     crate::init_crypto();
 
@@ -44,7 +92,14 @@ pub(crate) fn run(args: &[String]) {
     };
 
     {
-        let mut app = App::new(opts, preferences, servoshell_preferences, &event_loop);
+        let mut app = App::new(
+            opts,
+            preferences,
+            servoshell_preferences,
+            &event_loop,
+            stable_javascript,
+            resource_event_sender,
+        );
         event_loop.run_app(&mut app);
     }
 

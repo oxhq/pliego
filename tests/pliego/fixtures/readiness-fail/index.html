@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>Pliego readiness failure</title>
+  </head>
+  <body>
+    <p>failure fixture</p>
+    <script>
+      queueMicrotask(() => {
+        console.error("pliego fixture failed");
+        window.pliego.fail({
+          code: "FIXTURE_FAILED",
+          message: "The fixture requested a controlled failure",
+        });
+      });
+    </script>
+  </body>
+</html>

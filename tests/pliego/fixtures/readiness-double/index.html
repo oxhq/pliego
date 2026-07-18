@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>Pliego readiness is terminal</title>
+  </head>
+  <body>
+    <p id="result">waiting</p>
+    <script>
+      queueMicrotask(() => {
+        document.querySelector("#result").textContent = "first terminal call wins";
+        window.pliego.ready({ fixture: "readiness-double", winner: "ready" });
+        window.pliego.fail({ code: "TOO_LATE", message: "must be ignored" });
+      });
+    </script>
+  </body>
+</html>

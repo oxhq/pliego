@@ -37,6 +37,8 @@ pub(crate) use crate::desktop::gamepad::ServoshellGamepadDelegate;
 use crate::prefs::{EXPERIMENTAL_PREFS, ServoShellPreferences};
 use crate::webdriver::WebDriverEmbedderControls;
 use crate::window::{PlatformWindow, ServoShellWindow, ServoShellWindowId};
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+use crate::{StableJavaScriptError, StableJavaScriptEvaluation};
 
 #[cfg(all(
     any(coverage, llvm_pgo),
@@ -194,6 +196,9 @@ pub(crate) struct RunningAppState {
     /// for the `exit_after_stable_image` option.
     pub(crate) achieved_stable_image: Rc<Cell<bool>>,
 
+    #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+    stable_javascript: RefCell<Option<StableJavaScriptEvaluation>>,
+
     /// The [`UserContentManager`] for all `WebView`s created.
     pub(crate) user_content_manager: Rc<UserContentManager>,
 
@@ -265,6 +270,8 @@ impl RunningAppState {
             servoshell_preferences,
             servo,
             achieved_stable_image: Default::default(),
+            #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+            stable_javascript: Default::default(),
             exit_scheduled: Default::default(),
             user_content_manager,
             experimental_preferences_enabled,
@@ -363,6 +370,14 @@ impl RunningAppState {
                 __llvm_profile_write_file()
             }
         }
+    }
+
+    #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+    pub(crate) fn set_stable_javascript_evaluation(
+        &self,
+        evaluation: Option<StableJavaScriptEvaluation>,
+    ) {
+        *self.stable_javascript.borrow_mut() = evaluation;
     }
 
     #[cfg_attr(any(target_os = "android", target_env = "ohos"), expect(dead_code))]
@@ -486,27 +501,45 @@ impl RunningAppState {
             return;
         }
 
+        #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+        let stable_javascript = self.stable_javascript.borrow_mut().take();
+        #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+        let evaluation_webview = webview.clone();
+
         webview.take_screenshot(None, move |image| {
-            achieved_stable_image.set(true);
-
-            let Some(output_path) = output_path else {
-                return;
-            };
-
             let image = match image {
                 Ok(image) => image,
                 Err(error) => {
                     error!("Could not take screenshot: {error:?}");
+                    #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+                    if let Some(evaluation) = stable_javascript {
+                        evaluation.complete(Err(StableJavaScriptError::Screenshot(error)));
+                    }
+                    achieved_stable_image.set(true);
                     return;
                 },
             };
 
-            let image_format = ImageFormat::from_path(&output_path).unwrap_or(ImageFormat::Png);
-            if let Err(error) =
-                DynamicImage::ImageRgba8(image).save_with_format(output_path, image_format)
-            {
-                error!("Failed to save screenshot: {error}.");
+            if let Some(output_path) = output_path {
+                let image_format = ImageFormat::from_path(&output_path).unwrap_or(ImageFormat::Png);
+                if let Err(error) =
+                    DynamicImage::ImageRgba8(image).save_with_format(output_path, image_format)
+                {
+                    error!("Failed to save screenshot: {error}.");
+                }
             }
+
+            #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+            if let Some(evaluation) = stable_javascript {
+                let script = evaluation.script.clone();
+                evaluation_webview.evaluate_javascript(script, move |result| {
+                    evaluation.complete(result.map_err(StableJavaScriptError::Evaluation));
+                    achieved_stable_image.set(true);
+                });
+                return;
+            }
+
+            achieved_stable_image.set(true);
         });
     }
 

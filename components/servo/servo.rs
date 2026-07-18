@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crossbeam_channel::{Receiver, Sender, unbounded};
+pub use devtools_traits::{ChromeToDevtoolsControlMsg, DevtoolsControlMsg, NetworkEvent};
 pub use embedder_traits::*;
 use env_logger::Builder as EnvLoggerBuilder;
 use fonts::SystemFontService;
@@ -961,9 +962,12 @@ impl Servo {
         });
 
         let protocols = Arc::new(protocols);
+        let resource_event_sender = builder
+            .resource_event_sender
+            .or_else(|| devtools_sender.clone());
         let (public_resource_threads, private_resource_threads, async_runtime) =
             new_resource_threads(
-                devtools_sender.clone(),
+                resource_event_sender,
                 time_profiler_chan.clone(),
                 mem_profiler_chan.clone(),
                 net_embedder_proxy,
@@ -1414,6 +1418,7 @@ pub struct ServoBuilder {
     preferences: Option<Box<Preferences>>,
     event_loop_waker: Box<dyn EventLoopWaker>,
     protocol_registry: ProtocolRegistry,
+    resource_event_sender: Option<Sender<DevtoolsControlMsg>>,
     #[cfg(feature = "webxr")]
     webxr_registry: Box<dyn webxr::WebXrRegistry>,
 }
@@ -1425,6 +1430,7 @@ impl Default for ServoBuilder {
             preferences: Default::default(),
             event_loop_waker: Box::new(DefaultEventLoopWaker),
             protocol_registry: Default::default(),
+            resource_event_sender: Default::default(),
             #[cfg(feature = "webxr")]
             webxr_registry: Box::new(DefaultWebXrRegistry),
         }
@@ -1453,6 +1459,14 @@ impl ServoBuilder {
 
     pub fn protocol_registry(mut self, protocol_registry: ProtocolRegistry) -> Self {
         self.protocol_registry = protocol_registry;
+        self
+    }
+
+    pub fn resource_event_sender(
+        mut self,
+        resource_event_sender: Sender<DevtoolsControlMsg>,
+    ) -> Self {
+        self.resource_event_sender = Some(resource_event_sender);
         self
     }
 
