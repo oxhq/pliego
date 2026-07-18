@@ -5,7 +5,7 @@
 use app_units::Au;
 use euclid::Rect;
 use euclid::default::Size2D as UntypedSize2D;
-use layout_api::{AxesOverflow, LayoutElement, LayoutNode};
+use layout_api::{AxesOverflow, LayoutDebugBox, LayoutElement, LayoutNode};
 use malloc_size_of_derive::MallocSizeOf;
 use paint_api::display_list::AxesScrollSensitivity;
 use script::layout_dom::ServoLayoutNode;
@@ -36,6 +36,50 @@ pub struct BoxTree {
 }
 
 impl BoxTree {
+    pub(crate) fn debug_boxes(&self) -> Vec<LayoutDebugBox> {
+        fn visit_container(
+            container: &BlockContainer,
+            depth: usize,
+            rows: &mut Vec<LayoutDebugBox>,
+        ) {
+            match container {
+                BlockContainer::BlockLevelBoxes(boxes) => {
+                    for box_ in boxes {
+                        let box_ = box_.borrow();
+                        let kind = match &*box_ {
+                            BlockLevelBox::Independent(_) => "independent",
+                            BlockLevelBox::OutOfFlowAbsolutelyPositionedBox(_) => "absolute",
+                            BlockLevelBox::OutOfFlowFloatBox(_) => "float",
+                            BlockLevelBox::OutsideMarker(_) => "outside-marker",
+                            BlockLevelBox::SameFormattingContextBlock(_) => "block",
+                        };
+                        rows.push(LayoutDebugBox {
+                            depth,
+                            kind: kind.into(),
+                            tag_id: box_.with_base(|base| {
+                                base.base_fragment_info
+                                    .tag
+                                    .map(|tag| tag.to_display_list_fragment_id())
+                            }),
+                        });
+                        if let BlockLevelBox::SameFormattingContextBlock(block) = &*box_ {
+                            visit_container(&block.contents, depth + 1, rows);
+                        }
+                    }
+                },
+                BlockContainer::InlineFormattingContext(_) => rows.push(LayoutDebugBox {
+                    depth,
+                    kind: "inline-formatting-context".into(),
+                    tag_id: None,
+                }),
+            }
+        }
+
+        let mut rows = Vec::new();
+        visit_container(&self.root.contents, 0, &mut rows);
+        rows
+    }
+
     #[servo_tracing::instrument(name = "Box Tree Construction", skip_all)]
     pub(crate) fn construct(context: &LayoutContext, root_element: ServoLayoutNode<'_>) -> Self {
         let boxes = construct_for_root_element(context, root_element);

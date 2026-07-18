@@ -26,6 +26,7 @@ use layout_api::{
     ReflowRequestRestyle, ReflowResult, ReflowStatistics, ScrollContainerQueryFlags,
     ScrollContainerResponse, TrustedNodeAddress, with_layout_state,
 };
+use layout_api::{LayoutDebugFragment, LayoutDebugRect, LayoutDebugSnapshot};
 use log::{debug, warn};
 use malloc_size_of::{MallocConditionalSizeOf, MallocSizeOf, MallocSizeOfOps};
 use net_traits::image_cache::ImageCache;
@@ -84,6 +85,7 @@ use crate::accessibility_tree::AccessibilityTree;
 use crate::context::{CachedImageOrError, ImageResolver, LayoutContext};
 use crate::display_list::{DisplayListBuilder, HitTest, PaintTimingHandler, StackingContextTree};
 use crate::dom::NodeExt;
+use crate::fragment_tree::Fragment;
 use crate::query::{
     find_character_offset_in_fragment_descendants, get_the_text_steps, process_box_area_request,
     process_box_areas_request, process_client_rect_request,
@@ -250,6 +252,63 @@ impl Drop for LayoutThread {
 }
 
 impl Layout for LayoutThread {
+    fn debug_snapshot(&self) -> Option<LayoutDebugSnapshot> {
+        if self.need_new_stacking_context_tree.get() || self.need_new_display_list.get() {
+            return None;
+        }
+        let boxes = self.box_tree.borrow().as_ref()?.debug_boxes();
+        let fragments = {
+            let fragment_tree = self.fragment_tree.borrow();
+            let mut rows = Vec::new();
+            fragment_tree
+                .as_ref()?
+                .find(|fragment, depth, containing_block| {
+                    let kind = match fragment {
+                        Fragment::LayoutRoot(_) => return None,
+                        Fragment::Box(_) => "box",
+                        Fragment::Float(_) => "float",
+                        Fragment::Positioning(_) => "positioning",
+                        Fragment::AbsoluteOrFixedPositionedPlaceholder(_) => {
+                            "absolute-or-fixed-placeholder"
+                        },
+                        Fragment::Text(_) => "text",
+                        Fragment::Image(_) => "image",
+                        Fragment::IFrame(_) => "iframe",
+                    };
+                    let rect = fragment.base().map(|base| {
+                        let rect = base.rect().translate(containing_block.origin.to_vector());
+                        LayoutDebugRect {
+                            x: rect.origin.x.to_f32_px(),
+                            y: rect.origin.y.to_f32_px(),
+                            width: rect.size.width.to_f32_px(),
+                            height: rect.size.height.to_f32_px(),
+                        }
+                    });
+                    rows.push(LayoutDebugFragment {
+                        depth,
+                        kind: kind.into(),
+                        rect,
+                        tag_id: fragment.tag().map(|tag| tag.to_display_list_fragment_id()),
+                    });
+                    None::<()>
+                });
+            rows
+        };
+        let stacking_context_tree = self.stacking_context_tree.borrow();
+        let paint = &stacking_context_tree.as_ref()?.paint_info;
+        Some(LayoutDebugSnapshot {
+            boxes,
+            fragments,
+            paint_epoch: paint.epoch.0,
+            paint_content_width: paint.content_size.width,
+            paint_content_height: paint.content_size.height,
+            paint_scroll_node_count: paint.scroll_tree.nodes.len(),
+            paintable: paint.is_paintable,
+            contentful: paint.is_contentful,
+            first_reflow: paint.first_reflow,
+        })
+    }
+
     fn device(&self) -> &Device {
         self.stylist.device()
     }

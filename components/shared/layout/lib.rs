@@ -268,6 +268,43 @@ pub trait LayoutFactory: Send + Sync {
     fn create(&self, config: LayoutConfig) -> Box<dyn Layout>;
 }
 
+/// A read-only view of the layout data retained after a reflow.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct LayoutDebugSnapshot {
+    pub boxes: Vec<LayoutDebugBox>,
+    pub fragments: Vec<LayoutDebugFragment>,
+    pub paint_epoch: u32,
+    pub paint_content_width: f32,
+    pub paint_content_height: f32,
+    pub paint_scroll_node_count: usize,
+    pub paintable: bool,
+    pub contentful: bool,
+    pub first_reflow: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct LayoutDebugBox {
+    pub depth: usize,
+    pub kind: String,
+    pub tag_id: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct LayoutDebugFragment {
+    pub depth: usize,
+    pub kind: String,
+    pub rect: Option<LayoutDebugRect>,
+    pub tag_id: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+pub struct LayoutDebugRect {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
 pub trait Layout {
     /// Get a reference to this Layout's Stylo `Device` used to handle media queries and
     /// resolve font metrics.
@@ -314,6 +351,9 @@ pub trait Layout {
     /// Do not request a reflow, but ensure that any previous reflow completes building a stacking
     /// context tree so that it is ready to query the final size of any elements in script.
     fn ensure_stacking_context_tree(&self, viewport_details: ViewportDetails);
+
+    /// Return a snapshot of already-cached layout data without triggering layout.
+    fn debug_snapshot(&self) -> Option<LayoutDebugSnapshot>;
 
     /// Tells layout that script has added some paint worklet modules.
     fn register_paint_worklet_modules(
