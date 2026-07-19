@@ -14,7 +14,9 @@ use vello_cpu::kurbo::{BezPath, Shape};
 use crate::hybrid_canvas::{
     CanvasDiagnostics, CanvasResource, CanvasTranscript, HybridCanvasCapture, adapt_canvas,
 };
-use crate::{Color, DocumentScene, FillRule, Glyph, Operation, OperationMeta, Page, Rect, Size, Stroke};
+use crate::{
+    Color, DocumentScene, FillRule, Glyph, Operation, OperationMeta, Page, Rect, Size, Stroke,
+};
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct SceneCapture {
@@ -1208,12 +1210,7 @@ fn append_vector_image(
     font_resources: &mut BTreeMap<String, CapturedFontResource>,
     font_instances: &mut BTreeMap<String, CapturedFontInstance>,
     font_selections: &mut BTreeMap<
-        (
-            String,
-            CapturedFontSource,
-            Vec<String>,
-            Option<String>,
-        ),
+        (String, CapturedFontSource, Vec<String>, Option<String>),
         CapturedFontSelection,
     >,
     vector_image: &CaptureVectorImage,

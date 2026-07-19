@@ -1188,8 +1188,8 @@ fn render(request: RenderRequest) {
             &error.to_string(),
         )
     });
-    if !request.allow_host_fonts &&
-        let Some(selection) = scene_capture
+    if !request.allow_host_fonts
+        && let Some(selection) = scene_capture
             .font_selections
             .iter()
             .find(|selection| selection.source.is_host())
@@ -1988,9 +1988,7 @@ fn persist_scene_capture(
         .filter(|selection| {
             matches!(
                 selection.source,
-                CapturedFontSource::Bundled
-                    | CapturedFontSource::Data
-                    | CapturedFontSource::Memory
+                CapturedFontSource::Bundled | CapturedFontSource::Data | CapturedFontSource::Memory
             )
         })
         .collect::<Vec<_>>();
@@ -2678,8 +2676,7 @@ mod tests {
             OsString::from("--allow-host-fonts"),
             OsString::from("invoice.html"),
         ])
-        .unwrap()
-        else {
+        .unwrap() else {
             panic!("document should parse as a render request")
         };
         assert!(opted_in.allow_host_fonts);
@@ -3231,7 +3228,10 @@ mod tests {
         assert_eq!(fonts["manifest"]["entries"], fonts["selections"]);
         assert_eq!(fonts["font_resources"][0]["resource"], resource);
         assert_eq!(fonts["selections"][0]["source"], "bundled");
-        assert_eq!(fonts["selections"][0]["requested_families"][0], "Missing Preferred");
+        assert_eq!(
+            fonts["selections"][0]["requested_families"][0],
+            "Missing Preferred"
+        );
         assert_eq!(fonts["selections"][0]["selected_family"], "DejaVu Sans");
         assert_eq!(fonts["warnings"][0]["code"], "FONT_FALLBACK_USED");
         let report: serde_json::Value =

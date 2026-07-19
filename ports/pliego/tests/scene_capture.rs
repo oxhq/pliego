@@ -11,7 +11,9 @@ use pliego::capture::{
     UnsupportedPaintKind, capture_document_scene,
 };
 use pliego::pdf::{PdfFontResource, render_document_pdf};
-use pliego::raster::{RasterFontResource, render_first_page_png, render_first_page_png_with_images};
+use pliego::raster::{
+    RasterFontResource, render_first_page_png, render_first_page_png_with_images,
+};
 use pliego::{Color, FillRule, Glyph, Operation, OperationMeta, Rect, Size};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -502,8 +504,8 @@ fn retains_svg_text_font_identity_and_embedded_png_for_both_backends() {
     let face = ttf_parser::Face::parse(FONT_BYTES, 0).unwrap();
     let glyph_id = face.glyph_index('A').unwrap();
     let font_size = 8.0_f32;
-    let advance = f32::from(face.glyph_hor_advance(glyph_id).unwrap()) * font_size /
-        f32::from(face.units_per_em());
+    let advance = f32::from(face.glyph_hor_advance(glyph_id).unwrap()) * font_size
+        / f32::from(face.units_per_em());
     let font_resource = content_address(FONT_BYTES);
     let font_instance = font_instance_address(FONT_BYTES, 0, &[]);
 
@@ -553,26 +555,54 @@ fn retains_svg_text_font_identity_and_embedded_png_for_both_backends() {
         }),
     );
 
-    let captured = capture_document_scene(&serde_json::to_vec(&snapshot).unwrap(), |_| None).unwrap();
+    let captured =
+        capture_document_scene(&serde_json::to_vec(&snapshot).unwrap(), |_| None).unwrap();
     assert_eq!(captured.embedded_image_resources.len(), 1);
-    assert_eq!(captured.embedded_image_resources[0].resource, image_resource);
+    assert_eq!(
+        captured.embedded_image_resources[0].resource,
+        image_resource
+    );
     assert_eq!(captured.embedded_image_resources[0].png, source_png);
     assert_eq!(captured.font_resources.len(), 1);
     assert_eq!(captured.font_resources[0].resource, font_resource);
     assert_eq!(captured.font_instances.len(), 1);
     assert_eq!(captured.font_instances[0].id, font_instance);
     assert_eq!(captured.font_selections.len(), 1);
-    assert_eq!(captured.font_selections[0].source, CapturedFontSource::Memory);
-    assert_eq!(captured.font_selections[0].selected_family.as_deref(), Some("Ahem"));
+    assert_eq!(
+        captured.font_selections[0].source,
+        CapturedFontSource::Memory
+    );
+    assert_eq!(
+        captured.font_selections[0].selected_family.as_deref(),
+        Some("Ahem")
+    );
 
     let operations = &captured.scene.pages[0].operations;
     assert_eq!(operations.len(), 3);
-    let Operation::Image { resource, bounds, .. } = &operations[1] else {
+    let Operation::Image {
+        resource, bounds, ..
+    } = &operations[1]
+    else {
         panic!("expected retained embedded SVG image");
     };
     assert_eq!(resource, &image_resource);
-    assert_eq!(bounds, &Rect { x: 54.0, y: 24.0, width: 8.0, height: 4.0 });
-    let Operation::Text { text, font, font_size, glyphs, .. } = &operations[2] else {
+    assert_eq!(
+        bounds,
+        &Rect {
+            x: 54.0,
+            y: 24.0,
+            width: 8.0,
+            height: 4.0
+        }
+    );
+    let Operation::Text {
+        text,
+        font,
+        font_size,
+        glyphs,
+        ..
+    } = &operations[2]
+    else {
         panic!("expected retained SVG text run");
     };
     assert_eq!(text, "A");
@@ -580,7 +610,10 @@ fn retains_svg_text_font_identity_and_embedded_png_for_both_backends() {
     assert_eq!(*font_size, 16.0);
     assert_eq!(glyphs[0].x, 58.0);
     assert_eq!(glyphs[0].y, 44.0);
-    assert_eq!(glyphs[0].text_range, Some(pliego::Utf8Range { start: 0, end: 1 }));
+    assert_eq!(
+        glyphs[0].text_range,
+        Some(pliego::Utf8Range { start: 0, end: 1 })
+    );
 
     let preview = render_first_page_png_with_images(
         &captured.scene,
@@ -608,7 +641,10 @@ fn retains_svg_text_font_identity_and_embedded_png_for_both_backends() {
     )
     .unwrap();
     assert!(pdf.starts_with(b"%PDF-"));
-    assert!(pdf.windows(b"/ToUnicode".len()).any(|window| window == b"/ToUnicode"));
+    assert!(
+        pdf.windows(b"/ToUnicode".len())
+            .any(|window| window == b"/ToUnicode")
+    );
 }
 
 #[test]

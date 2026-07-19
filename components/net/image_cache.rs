@@ -332,11 +332,11 @@ fn snapshot_vector_path(path: &usvg::Path, items: &mut Vec<VectorImageSnapshotIt
     let stroke = path.stroke().and_then(|stroke| {
         let transform = path.abs_transform();
         let (scale_x, scale_y) = transform.get_scale();
-        let supported_style = stroke.dasharray().is_none() &&
-            stroke.linecap() == usvg::LineCap::Butt &&
-            stroke.linejoin() == usvg::LineJoin::Miter &&
-            approximately_equal(stroke.miterlimit().get(), 4.0) &&
-            approximately_equal(scale_x, scale_y);
+        let supported_style = stroke.dasharray().is_none()
+            && stroke.linecap() == usvg::LineCap::Butt
+            && stroke.linejoin() == usvg::LineJoin::Miter
+            && approximately_equal(stroke.miterlimit().get(), 4.0)
+            && approximately_equal(scale_x, scale_y);
         let usvg::Paint::Color(color) = stroke.paint() else {
             items.push(VectorImageSnapshotItem::Unsupported {
                 reason: VectorImageUnsupportedReason::Paint,
@@ -413,10 +413,7 @@ fn snapshot_vector_path(path: &usvg::Path, items: &mut Vec<VectorImageSnapshotIt
     });
 }
 
-fn snapshot_vector_embedded_image(
-    image: &usvg::Image,
-    items: &mut Vec<VectorImageSnapshotItem>,
-) {
+fn snapshot_vector_embedded_image(image: &usvg::Image, items: &mut Vec<VectorImageSnapshotItem>) {
     if !image.is_visible() {
         return;
     }
@@ -450,10 +447,10 @@ fn snapshot_vector_text(
     items: &mut Vec<VectorImageSnapshotItem>,
 ) {
     let transform = text.abs_transform();
-    if transform.has_skew() ||
-        transform.sx <= 0.0 ||
-        transform.sy <= 0.0 ||
-        !approximately_equal(transform.sx, transform.sy)
+    if transform.has_skew()
+        || transform.sx <= 0.0
+        || transform.sy <= 0.0
+        || !approximately_equal(transform.sx, transform.sy)
     {
         items.push(VectorImageSnapshotItem::Unsupported {
             reason: VectorImageUnsupportedReason::Text,
@@ -465,12 +462,12 @@ fn snapshot_vector_text(
         if !span.visible {
             continue;
         }
-        let supported_paint = span.stroke.is_none() &&
-            span.underline.is_none() &&
-            span.overline.is_none() &&
-            span.line_through.is_none() &&
-            span.variations.is_empty() &&
-            matches!(
+        let supported_paint = span.stroke.is_none()
+            && span.underline.is_none()
+            && span.overline.is_none()
+            && span.line_through.is_none()
+            && span.variations.is_empty()
+            && matches!(
                 span.fill.as_ref().map(|fill| (fill.paint(), fill.opacity().get())),
                 Some((usvg::Paint::Color(color), opacity))
                     if *color == usvg::Color::black() && approximately_equal(opacity, 1.0)
@@ -488,9 +485,9 @@ fn snapshot_vector_text(
             let font = glyphs[start].font;
             let font_size = glyphs[start].font_size();
             let mut end = start + 1;
-            while end < glyphs.len() &&
-                glyphs[end].font == font &&
-                approximately_equal(glyphs[end].font_size(), font_size)
+            while end < glyphs.len()
+                && glyphs[end].font == font
+                && approximately_equal(glyphs[end].font_size(), font_size)
             {
                 end += 1;
             }
@@ -509,9 +506,9 @@ fn snapshot_vector_text(
                 let mut captured_glyphs = Vec::with_capacity(run.len());
                 for glyph in run {
                     let glyph_transform = glyph.transform();
-                    if glyph_transform.has_skew() ||
-                        !approximately_equal(glyph_transform.sx, expected_glyph_scale) ||
-                        !approximately_equal(glyph_transform.sy, expected_glyph_scale)
+                    if glyph_transform.has_skew()
+                        || !approximately_equal(glyph_transform.sx, expected_glyph_scale)
+                        || !approximately_equal(glyph_transform.sy, expected_glyph_scale)
                     {
                         return None;
                     }
@@ -530,12 +527,7 @@ fn snapshot_vector_text(
                         text_end,
                     });
                 }
-                Some((
-                    source_text,
-                    bytes.to_vec(),
-                    face_index,
-                    captured_glyphs,
-                ))
+                Some((source_text, bytes.to_vec(), face_index, captured_glyphs))
             });
             let Some(Some((source_text, bytes, face_index, captured_glyphs))) = captured else {
                 items.push(VectorImageSnapshotItem::Unsupported {
@@ -883,8 +875,9 @@ impl ImageCacheStore {
     /// If a key is available the image will be immediately loaded, otherwise it will load then the next batch of
     /// keys is received. Only call this if the image does not have a `LoadKey` yet.
     fn load_image_with_keycache(&mut self, pending_image: PendingKey) {
-        if let PendingKey::Svg((pending_id, ref _raster_image, requested_size)) = pending_image &&
-            self.key_cache
+        if let PendingKey::Svg((pending_id, ref _raster_image, requested_size)) = pending_image
+            && self
+                .key_cache
                 .evicted_images
                 .remove(&(pending_id, requested_size))
         {
@@ -1036,9 +1029,9 @@ impl ImageCacheStore {
     ) {
         if let Some(loaded_image) =
             self.completed_loads
-                .remove(&(url.clone(), origin.clone(), *cors_setting)) &&
-            let ImageResponse::Loaded(Image::Raster(image), _) = loaded_image.image_response &&
-            let Some(id) = image.id
+                .remove(&(url.clone(), origin.clone(), *cors_setting))
+            && let ImageResponse::Loaded(Image::Raster(image), _) = loaded_image.image_response
+            && let Some(id) = image.id
         {
             self.paint_api.update_images(
                 self.webview_id.into(),
@@ -1347,10 +1340,10 @@ impl ImageCache for ImageCacheImpl {
             return Some(result.clone());
         }
 
-        if let Some(svg_id) = svg_id &&
-            let Some(old_mapped_image_id) =
-                self.svg_id_image_id_map.lock().insert(svg_id, image_id) &&
-            old_mapped_image_id != image_id
+        if let Some(svg_id) = svg_id
+            && let Some(old_mapped_image_id) =
+                self.svg_id_image_id_map.lock().insert(svg_id, image_id)
+            && old_mapped_image_id != image_id
         {
             store.vector_images.remove(&old_mapped_image_id);
             store
@@ -1511,8 +1504,8 @@ impl ImageCache for ImageCacheImpl {
     /// Inform the image cache about a response for a pending request.
     fn notify_pending_response(&self, id: PendingImageId, action: FetchResponseMsg) {
         match (action, id) {
-            (FetchResponseMsg::ProcessRequestBody(..), _) |
-            (FetchResponseMsg::ProcessCspViolations(..), _) => (),
+            (FetchResponseMsg::ProcessRequestBody(..), _)
+            | (FetchResponseMsg::ProcessCspViolations(..), _) => (),
             (FetchResponseMsg::ProcessResponse(_, response), _) => {
                 debug!("Received {:?} for {:?}", response.as_ref().map(|_| ()), id);
                 let mut store = self.store.lock();
@@ -1525,8 +1518,8 @@ impl ImageCache for ImageCacheImpl {
                                     FilteredMetadata::Basic(_) | FilteredMetadata::Cors(_) => {
                                         CorsStatus::Safe
                                     },
-                                    FilteredMetadata::Opaque |
-                                    FilteredMetadata::OpaqueRedirect(_) => CorsStatus::Unsafe,
+                                    FilteredMetadata::Opaque
+                                    | FilteredMetadata::OpaqueRedirect(_) => CorsStatus::Unsafe,
                                 },
                                 Some(unsafe_),
                             ),

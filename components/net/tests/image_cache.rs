@@ -576,7 +576,10 @@ fn test_svg_rasterization() {
     };
 
     let snapshot = cache.vector_image_snapshot(vec_img.id).unwrap();
-    assert_eq!((snapshot.viewport_width, snapshot.viewport_height), (16.0, 16.0));
+    assert_eq!(
+        (snapshot.viewport_width, snapshot.viewport_height),
+        (16.0, 16.0)
+    );
     assert_eq!(snapshot.items.len(), 1);
     let VectorImageSnapshotItem::Path {
         segments,
