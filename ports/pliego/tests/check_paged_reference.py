@@ -77,7 +77,42 @@ def extract_reference(
                 "ordered_text": [operation["text"] for operation in text_operations],
             }
         )
-    return {"page_count": len(pages), "pages": extracted}
+    continuations = []
+    raw_continuations = page_sequence.get("continuations", [])
+    if not isinstance(raw_continuations, list):
+        fail("layout-debug.json page continuations are not an array")
+    for index, continuation in enumerate(raw_continuations):
+        if not isinstance(continuation, dict) or not isinstance(
+            continuation.get("token"), dict
+        ):
+            fail(f"layout-debug.json continuation {index} is invalid")
+        token = continuation["token"]
+        kind = token.get("kind")
+        normalized = {
+            "page_index": continuation.get("page_index"),
+            "kind": kind,
+            "resume_page_index": token.get("resume_page_index"),
+        }
+        if kind == "block":
+            normalized["next_child_index"] = token.get("next_child_index")
+        elif kind == "inline":
+            normalized.update(
+                {
+                    "child_index": token.get("child_index"),
+                    "next_line_index": token.get("next_line_index"),
+                    "inline_item_index": token.get("inline_item_index"),
+                    "text_offset": token.get("text_offset"),
+                    "shaping_result_index": token.get("shaping_result_index"),
+                }
+            )
+        else:
+            fail(f"layout-debug.json continuation {index} has unknown kind {kind!r}")
+        continuations.append(normalized)
+    return {
+        "page_count": len(pages),
+        "pages": extracted,
+        "continuations": continuations,
+    }
 
 
 def compare_reference(actual: dict[str, Any], expected: dict[str, Any]) -> list[str]:
@@ -140,6 +175,11 @@ def compare_reference(actual: dict[str, Any], expected: dict[str, Any]) -> list[
                 f"page {index} text order: expected {expected_page['ordered_text']!r}, "
                 f"got {actual_page['ordered_text']!r}"
             )
+    if "continuations" in expected and actual.get("continuations") != expected["continuations"]:
+        errors.append(
+            f"continuations: expected {expected['continuations']!r}, "
+            f"got {actual.get('continuations')!r}"
+        )
     return errors
 
 
