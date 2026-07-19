@@ -26,10 +26,12 @@
           }
           if (!window.pliego) throw new Error('Pliego bridge was not installed');
           let fontLaidOut = false;
-          for (let attempt = 0; !fontLaidOut && attempt < 120; attempt += 1) {
+          for (let attempt = 0; !fontLaidOut && attempt < 200; attempt += 1) {
             const rect = document.querySelector('p').getBoundingClientRect();
             fontLaidOut = rect.width > 0 && rect.height > 0;
-            if (!fontLaidOut) await new Promise(requestAnimationFrame);
+            if (!fontLaidOut) {
+              await new Promise(resolve => setTimeout(resolve, 25));
+            }
           }
           if (!fontLaidOut) throw new Error('Pliego Fixture did not produce text geometry');
           await new Promise(requestAnimationFrame);
