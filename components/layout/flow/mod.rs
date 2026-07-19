@@ -20,6 +20,7 @@ use style::context::SharedStyleContext;
 use style::logical_geometry::Direction;
 use style::properties::ComputedValues;
 use style::servo::selector_parser::PseudoElement;
+use style::values::computed::BreakBetween;
 use style::values::specified::align::AlignFlags;
 use style::values::specified::{Display, TextAlignKeyword};
 
@@ -39,7 +40,7 @@ use crate::geom::{
 };
 use crate::layout_box_base::{IndependentFormattingContextLayoutResult, LayoutBoxBase};
 use crate::pages::{
-    BlockBoundaryPlacement, BlockPageBuilder, InlineLine, InlineResumePoint,
+    BlockBoundaryPlacement, BlockPageBuilder, ChildPageBreaks, InlineLine, InlineResumePoint,
 };
 use crate::positioned::{AbsolutelyPositionedBox, PositioningContext, PositioningContextLength};
 use crate::sizing::{
@@ -966,9 +967,22 @@ fn prepare_fragmentainer_boundary(
             .tag
             .map(|tag| tag.to_display_list_fragment_id())
     });
+    let breaks = child_box.with_base(|base| {
+        let box_style = base.style.get_box();
+        ChildPageBreaks {
+            before: forces_page_break(box_style.break_before),
+            after: forces_page_break(box_style.break_after),
+        }
+    });
     if let Some((lines, line_fragments, box_fragment)) =
         retained_inline_lines(fragment, placement_state)
-        && let Some(placement) = page_builder.place_inline_child(child_index, &lines)
+        && let Some(placement) = page_builder.place_inline_child(
+            child_index,
+            node,
+            placement_state.current_block_direction_position,
+            &lines,
+            breaks,
+        )
     {
         let writing_mode = placement_state.containing_block.style.writing_mode;
         for (line, translation) in line_fragments
@@ -1005,9 +1019,14 @@ fn prepare_fragmentainer_boundary(
         placement_state.current_block_direction_position,
         metrics.current_page_contribution,
         metrics.fresh_page_contribution,
+        breaks,
     ) {
         placement_state.start_new_fragmentainer(block_origin);
     }
+}
+
+fn forces_page_break(value: BreakBetween) -> bool {
+    matches!(value, BreakBetween::Always | BreakBetween::Page)
 }
 
 struct RetainedLineSource {

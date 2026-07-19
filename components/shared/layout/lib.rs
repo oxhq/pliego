@@ -323,6 +323,8 @@ pub enum LayoutDebugContinuation {
     Block {
         next_child_index: usize,
         next_node: Option<u64>,
+        #[serde(default)]
+        forced: bool,
         resume_page_index: usize,
     },
     Inline {

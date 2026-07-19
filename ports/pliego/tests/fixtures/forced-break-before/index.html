@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>Pliego break-before fixture</title>
+    <style>
+      body { margin: 0; font: 16px/20px sans-serif; }
+      #beta { break-before: page; }
+    </style>
+  </head>
+  <body>
+    <div>Alpha.</div>
+    <div id="beta">Beta.</div>
+    <script>
+      queueMicrotask(() => window.pliego?.ready({ fixture: 'forced-break-before' }));
+    </script>
+  </body>
+</html>

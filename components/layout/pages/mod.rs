@@ -196,6 +196,7 @@ impl PageSequenceContext {
 pub(crate) struct BlockContinuationToken {
     pub next_child_index: usize,
     pub next_node: Option<u64>,
+    pub forced: bool,
     pub resume_page_index: usize,
 }
 
@@ -242,6 +243,12 @@ pub(crate) struct InlineChildPlacement {
 pub(crate) enum BlockBoundaryPlacement {
     CurrentPage,
     NewPage { block_origin: Au },
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct ChildPageBreaks {
+    pub before: bool,
+    pub after: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -333,6 +340,7 @@ pub(crate) struct BlockPageBuilder {
     current_page_origin: Au,
     next_child_index: usize,
     page_has_content: bool,
+    previous_break_after: bool,
     outcome: BlockPaginationOutcome,
 }
 
@@ -344,6 +352,7 @@ impl BlockPageBuilder {
             current_page_origin: Au::zero(),
             next_child_index: 0,
             page_has_content: false,
+            previous_break_after: false,
             outcome: BlockPaginationOutcome {
                 page_count: 1,
                 ..Default::default()
@@ -358,9 +367,19 @@ impl BlockPageBuilder {
         current_block_position: Au,
         current_page_contribution: Au,
         fresh_page_contribution: Au,
+        breaks: ChildPageBreaks,
     ) -> BlockBoundaryPlacement {
         assert_eq!(child_index, self.next_child_index);
         self.next_child_index += 1;
+
+        if let Some(block_origin) =
+            self.forced_break_before(child_index, node, current_block_position, breaks)
+        {
+            self.warn_if_oversized(child_index, node, fresh_page_contribution);
+            self.page_has_content = true;
+            self.include_content_through(block_origin + fresh_page_contribution);
+            return BlockBoundaryPlacement::NewPage { block_origin };
+        }
 
         let used = (current_block_position - self.current_page_origin).max(Au::zero());
         let remaining = (self.request.available_block_size - used).max(Au::zero());
@@ -383,6 +402,7 @@ impl BlockPageBuilder {
         let token = BlockContinuationToken {
             next_child_index: child_index,
             next_node: node,
+            forced: false,
             resume_page_index: self.current_page_index,
         };
         self.outcome.continuations.push(PageContinuation {
@@ -403,7 +423,10 @@ impl BlockPageBuilder {
     pub(crate) fn place_inline_child(
         &mut self,
         child_index: usize,
+        node: Option<u64>,
+        current_block_position: Au,
         lines: &[InlineLine],
+        breaks: ChildPageBreaks,
     ) -> Option<InlineChildPlacement> {
         assert_eq!(child_index, self.next_child_index);
         if !self.supports_inline_lines(lines) {
@@ -412,7 +435,11 @@ impl BlockPageBuilder {
         self.next_child_index += 1;
 
         let mut line_translations = Vec::with_capacity(lines.len());
-        let mut translation = Au::zero();
+        let mut translation = self
+            .forced_break_before(child_index, node, current_block_position, breaks)
+            .map_or_else(Au::zero, |block_origin| {
+                block_origin - current_block_position
+            });
         for (line_index, line) in lines.iter().enumerate() {
             let mut block_start = line.block_start + translation;
             let page_end = self.current_page_origin + self.request.available_block_size;
@@ -450,6 +477,40 @@ impl BlockPageBuilder {
             added_block_size: *line_translations.last().expect("inline lines are non-empty"),
             line_translations,
         })
+    }
+
+    fn forced_break_before(
+        &mut self,
+        child_index: usize,
+        node: Option<u64>,
+        current_block_position: Au,
+        breaks: ChildPageBreaks,
+    ) -> Option<Au> {
+        // https://drafts.csswg.org/css-break/#forced-breaks
+        let forced = self.previous_break_after || breaks.before;
+        self.previous_break_after = breaks.after;
+        if !forced || !self.page_has_content {
+            return None;
+        }
+
+        let previous_page_index = self.current_page_index;
+        loop {
+            self.current_page_index += 1;
+            self.current_page_origin += self.request.page_stride;
+            if self.current_page_origin >= current_block_position {
+                break;
+            }
+        }
+        self.outcome.continuations.push(PageContinuation {
+            page_index: previous_page_index,
+            token: FragmentainerContinuation::Block(BlockContinuationToken {
+                next_child_index: child_index,
+                next_node: node,
+                forced: true,
+                resume_page_index: self.current_page_index,
+            }),
+        });
+        Some(self.current_page_origin)
     }
 
     fn supports_inline_lines(&self, lines: &[InlineLine]) -> bool {
@@ -593,6 +654,7 @@ impl PageSequence {
                                     LayoutDebugContinuation::Block {
                                         next_child_index: token.next_child_index,
                                         next_node: token.next_node,
+                                        forced: token.forced,
                                         resume_page_index: token.resume_page_index,
                                     }
                                 },
@@ -827,6 +889,7 @@ mod tests {
                 Au::from_px(0),
                 Au::from_px(60),
                 Au::from_px(60),
+                ChildPageBreaks::default(),
             ),
             BlockBoundaryPlacement::CurrentPage
         );
@@ -837,6 +900,7 @@ mod tests {
                 Au::from_px(60),
                 Au::from_px(60),
                 Au::from_px(60),
+                ChildPageBreaks::default(),
             ),
             BlockBoundaryPlacement::NewPage {
                 block_origin: Au::from_px(120),
@@ -849,6 +913,7 @@ mod tests {
                 Au::from_px(180),
                 Au::from_px(20),
                 Au::from_px(20),
+                ChildPageBreaks::default(),
             ),
             BlockBoundaryPlacement::CurrentPage
         );
@@ -862,6 +927,7 @@ mod tests {
                 token: FragmentainerContinuation::Block(BlockContinuationToken {
                     next_child_index: 1,
                     next_node: Some(20),
+                    forced: false,
                     resume_page_index: 1,
                 }),
             }]
@@ -877,8 +943,191 @@ mod tests {
                 token: LayoutDebugContinuation::Block {
                     next_child_index: 1,
                     next_node: Some(20),
+                    forced: false,
                     resume_page_index: 1,
                 },
+            }]
+        );
+    }
+
+    #[test]
+    fn forced_breaks_collapse_without_empty_edge_pages() {
+        let mut builder = BlockPageBuilder::new(BlockPaginationRequest {
+            available_block_size: Au::from_px(100),
+            page_stride: Au::from_px(120),
+        });
+        assert_eq!(
+            builder.place_child(
+                0,
+                Some(10),
+                Au::zero(),
+                Au::from_px(20),
+                Au::from_px(20),
+                ChildPageBreaks {
+                    before: true,
+                    after: true,
+                },
+            ),
+            BlockBoundaryPlacement::CurrentPage
+        );
+        assert_eq!(
+            builder.place_child(
+                1,
+                Some(20),
+                Au::from_px(20),
+                Au::from_px(20),
+                Au::from_px(20),
+                ChildPageBreaks {
+                    before: true,
+                    after: false,
+                },
+            ),
+            BlockBoundaryPlacement::NewPage {
+                block_origin: Au::from_px(120),
+            }
+        );
+        assert_eq!(
+            builder.place_child(
+                2,
+                Some(30),
+                Au::from_px(140),
+                Au::from_px(20),
+                Au::from_px(20),
+                ChildPageBreaks {
+                    before: true,
+                    after: true,
+                },
+            ),
+            BlockBoundaryPlacement::NewPage {
+                block_origin: Au::from_px(240),
+            }
+        );
+
+        let outcome = builder.finish();
+        assert_eq!(outcome.page_count, 3);
+        assert_eq!(
+            outcome.continuations,
+            vec![
+                PageContinuation {
+                    page_index: 0,
+                    token: FragmentainerContinuation::Block(BlockContinuationToken {
+                        next_child_index: 1,
+                        next_node: Some(20),
+                        forced: true,
+                        resume_page_index: 1,
+                    }),
+                },
+                PageContinuation {
+                    page_index: 1,
+                    token: FragmentainerContinuation::Block(BlockContinuationToken {
+                        next_child_index: 2,
+                        next_node: Some(30),
+                        forced: true,
+                        resume_page_index: 2,
+                    }),
+                },
+            ]
+        );
+        assert_eq!(
+            PageSequenceContext { definition: page() }
+                .page_sequence(outcome)
+                .debug_snapshot()
+                .continuations,
+            vec![
+                LayoutDebugPageContinuation {
+                    page_index: 0,
+                    token: LayoutDebugContinuation::Block {
+                        next_child_index: 1,
+                        next_node: Some(20),
+                        forced: true,
+                        resume_page_index: 1,
+                    },
+                },
+                LayoutDebugPageContinuation {
+                    page_index: 1,
+                    token: LayoutDebugContinuation::Block {
+                        next_child_index: 2,
+                        next_node: Some(30),
+                        forced: true,
+                        resume_page_index: 2,
+                    },
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_forced_break_moves_retained_inline_lines_as_one_child() {
+        let mut builder = BlockPageBuilder::new(BlockPaginationRequest {
+            available_block_size: Au::from_px(100),
+            page_stride: Au::from_px(120),
+        });
+        assert_eq!(
+            builder.place_child(
+                0,
+                Some(10),
+                Au::zero(),
+                Au::from_px(20),
+                Au::from_px(20),
+                ChildPageBreaks {
+                    before: false,
+                    after: true,
+                },
+            ),
+            BlockBoundaryPlacement::CurrentPage
+        );
+        let lines = [
+            InlineLine {
+                block_start: Au::from_px(20),
+                block_size: Au::from_px(20),
+                source_start: 0,
+                source_end: 4,
+                resume: InlineResumePoint {
+                    inline_item_index: 0,
+                    text_offset: 0,
+                    shaping_result_index: 0,
+                },
+            },
+            InlineLine {
+                block_start: Au::from_px(40),
+                block_size: Au::from_px(20),
+                source_start: 4,
+                source_end: 8,
+                resume: InlineResumePoint {
+                    inline_item_index: 0,
+                    text_offset: 4,
+                    shaping_result_index: 1,
+                },
+            },
+        ];
+        let placement = builder
+            .place_inline_child(
+                1,
+                Some(20),
+                Au::from_px(20),
+                &lines,
+                ChildPageBreaks {
+                    before: true,
+                    after: false,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            placement.line_translations,
+            vec![Au::from_px(100), Au::from_px(100)]
+        );
+        let outcome = builder.finish();
+        assert_eq!(outcome.page_count, 2);
+        assert_eq!(
+            outcome.continuations,
+            vec![PageContinuation {
+                page_index: 0,
+                token: FragmentainerContinuation::Block(BlockContinuationToken {
+                    next_child_index: 1,
+                    next_node: Some(20),
+                    forced: true,
+                    resume_page_index: 1,
+                }),
             }]
         );
     }
@@ -904,7 +1153,9 @@ mod tests {
             page_stride: Au::from_px(120),
         });
 
-        let placement = builder.place_inline_child(0, &lines).unwrap();
+        let placement = builder
+            .place_inline_child(0, Some(10), Au::zero(), &lines, ChildPageBreaks::default())
+            .unwrap();
         assert_eq!(
             placement.line_translations,
             vec![
@@ -1016,6 +1267,7 @@ mod tests {
                 Au::from_px(0),
                 Au::from_px(150),
                 Au::from_px(150),
+                ChildPageBreaks::default(),
             ),
             BlockBoundaryPlacement::CurrentPage
         );
@@ -1026,6 +1278,7 @@ mod tests {
                 Au::from_px(150),
                 Au::from_px(10),
                 Au::from_px(10),
+                ChildPageBreaks::default(),
             ),
             BlockBoundaryPlacement::NewPage {
                 block_origin: Au::from_px(240),

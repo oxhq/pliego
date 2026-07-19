@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>Pliego forced page breaks fixture</title>
+    <style>
+      body {
+        margin: 0;
+        font: 16px/20px sans-serif;
+      }
+
+      div {
+        height: 20px;
+      }
+
+      #alpha {
+        break-before: page;
+        break-after: page;
+      }
+
+      #beta {
+        break-before: page;
+        break-after: page;
+      }
+
+      #gamma {
+        break-before: page;
+        break-after: page;
+      }
+
+      #delta {
+        break-before: page;
+        break-after: page;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="alpha">Alpha.</div>
+    <div id="beta">Beta.</div>
+    <div id="gamma">Gamma.</div>
+    <div id="delta">Delta.</div>
+    <script>
+      queueMicrotask(() => window.pliego?.ready({ fixture: 'forced-breaks' }));
+    </script>
+  </body>
+</html>

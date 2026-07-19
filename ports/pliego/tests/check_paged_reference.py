@@ -95,6 +95,7 @@ def extract_reference(
         }
         if kind == "block":
             normalized["next_child_index"] = token.get("next_child_index")
+            normalized["forced"] = token.get("forced")
         elif kind == "inline":
             normalized.update(
                 {

@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>Pliego break-after fixture</title>
+    <style>
+      body { margin: 0; font: 16px/20px sans-serif; }
+      #alpha { break-after: page; }
+    </style>
+  </head>
+  <body>
+    <div id="alpha">Alpha.</div>
+    <div>Beta.</div>
+    <script>
+      queueMicrotask(() => window.pliego?.ready({ fixture: 'forced-break-after' }));
+    </script>
+  </body>
+</html>

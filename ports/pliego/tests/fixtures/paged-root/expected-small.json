@@ -53,7 +53,8 @@
       "page_index": 0,
       "kind": "block",
       "resume_page_index": 1,
-      "next_child_index": 1
+      "next_child_index": 1,
+      "forced": false
     }
   ]
 }
