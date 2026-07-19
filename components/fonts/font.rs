@@ -24,6 +24,7 @@ use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use servo_base::id::PainterId;
 use servo_base::text::{UnicodeBlock, UnicodeBlockMethod};
+use servo_config::pref;
 use smallvec::SmallVec;
 use style::computed_values::font_variant_caps;
 use style::computed_values::font_variant_position::T as FontVariantPosition;
