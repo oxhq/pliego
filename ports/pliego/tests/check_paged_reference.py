@@ -326,6 +326,7 @@ def check_reference(
         result = subprocess.run(
             [
                 str(binary),
+                "--allow-host-fonts",
                 "--page-size",
                 page_size,
                 "--page-margins",
@@ -368,6 +369,7 @@ def check_paragraph_continuation(binary: Path) -> None:
         result = subprocess.run(
             [
                 str(binary),
+                "--allow-host-fonts",
                 "--page-size",
                 "180x80",
                 "--page-margins",

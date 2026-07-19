@@ -100,7 +100,9 @@ impl SystemFontService {
                     free_font_instance_keys: Default::default(),
                 };
 
-                cache.refresh_local_families();
+                if pref!(fonts_host_enabled) {
+                    cache.refresh_local_families();
+                }
 
                 memory_profiler_sender.run_with_memory_reporting(
                     || cache.run(),
@@ -318,6 +320,9 @@ impl SystemFontService {
             SingleFontFamily::FamilyName(family_name) => return family_name.name.clone().into(),
             SingleFontFamily::Generic(generic) => generic,
         };
+        if !pref!(fonts_host_enabled) {
+            return "".into();
+        }
 
         let resolved_font = match generic {
             GenericFontFamily::None => &self.generic_fonts.default,

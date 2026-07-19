@@ -7,8 +7,8 @@ use std::io::Cursor;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use pliego::capture::{
-    CaptureError, MissingTextMapping, UnsupportedPaintEvent, UnsupportedPaintKind,
-    capture_document_scene,
+    CaptureError, CapturedFontSource, MissingTextMapping, UnsupportedPaintEvent,
+    UnsupportedPaintKind, capture_document_scene,
 };
 use pliego::pdf::render_document_pdf;
 use pliego::raster::render_first_page_png;
@@ -67,6 +67,8 @@ fn text_run(
         "text": text,
         "font_instance_id": font_instance,
         "font_identifier": { "Web": diagnostic_font_id },
+        "requested_families": ["Pliego Fixture"],
+        "selected_family": "pliego fixture",
         "font_size": 12.0,
         "glyphs": [{
             "id": glyph_id,
@@ -76,6 +78,36 @@ fn text_run(
             "text_range": { "start": 0, "end": 1 }
         }]
     })
+}
+
+#[test]
+fn reports_font_source_resolution_order_and_fallbacks() {
+    let mut capture: Value = serde_json::from_slice(&snapshot(10, 1000)).unwrap();
+    capture["fragments"][1]["text_run"]["font_identifier"] = json!({ "Local": {} });
+    capture["fragments"][1]["text_run"]["requested_families"] =
+        json!(["Missing Preferred", "Pliego Fixture"]);
+
+    let captured = convert(&serde_json::to_vec(&capture).unwrap());
+    let instance = capture["fragments"][1]["text_run"]["font_instance_id"]
+        .as_str()
+        .unwrap();
+    let selection = captured
+        .font_selections
+        .iter()
+        .find(|selection| selection.instance == instance)
+        .unwrap();
+    assert_eq!(selection.source, CapturedFontSource::Host);
+    assert_eq!(
+        selection.requested_families,
+        ["Missing Preferred", "Pliego Fixture"]
+    );
+    assert_eq!(selection.selected_family.as_deref(), Some("pliego fixture"));
+    assert_eq!(captured.font_warnings.len(), 1);
+    assert_eq!(captured.font_warnings[0].code, "FONT_FALLBACK_USED");
+    assert_eq!(
+        captured.font_warnings[0].fallback_chain,
+        ["Missing Preferred", "Pliego Fixture"]
+    );
 }
 
 fn snapshot(local_id_base: usize, link_tag: u64) -> Vec<u8> {

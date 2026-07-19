@@ -79,11 +79,11 @@ use style::stylesheets::{DocumentStyleSheet, Origin, Stylesheet};
 use style::stylist::Stylist;
 use style::traversal::DomTraversal;
 use style::traversal_flags::TraversalFlags;
-use style::values::computed::font::GenericFontFamily;
+use style::values::computed::font::{GenericFontFamily, SingleFontFamily};
 use style::values::computed::{CSSPixelLength, FontSize, Length, NonNegativeLength};
 use style::values::specified::font::{KeywordInfo, QueryFontMetricsFlags};
 use style::{Zero, driver};
-use style_traits::{CSSPixel, SpeculativePainter};
+use style_traits::{CSSPixel, SpeculativePainter, ToCss};
 use stylo_atoms::Atom;
 use url::Url;
 use webrender_api::ExternalScrollId;
@@ -505,6 +505,22 @@ impl Layout for LayoutThread {
                                 ),
                                 font_instance_id,
                                 font_identifier: text_fragment.font.identifier(),
+                                requested_families: text_fragment
+                                    .base
+                                    .style()
+                                    .get_font()
+                                    .font_family
+                                    .iter()
+                                    .map(|family| match family {
+                                        SingleFontFamily::FamilyName(family) => {
+                                            family.name.to_string()
+                                        },
+                                        SingleFontFamily::Generic(generic) => {
+                                            generic.to_css_string()
+                                        },
+                                    })
+                                    .collect(),
+                                selected_family: text_fragment.font.selected_family_name(),
                                 font_size: text_fragment.font.descriptor.pt_size.to_f32_px(),
                                 glyphs,
                             })

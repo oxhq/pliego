@@ -25,7 +25,7 @@ use layout::pages::{PageDefinition, PageMargins};
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
 use pliego::Operation;
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
-use pliego::capture::{SceneCapture, capture_document_scene};
+use pliego::capture::{CapturedFontSource, SceneCapture, capture_document_scene};
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
 use pliego::pdf::{CSS_PX_TO_PDF_PT, PdfFontResource, PdfFontVariation, render_document_pdf};
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
@@ -98,6 +98,7 @@ struct RenderRequest {
     environment: RenderEnvironment,
     page: PageDefinition,
     resources: ResourcePolicyConfig,
+    allow_host_fonts: bool,
     explicit_paths: Option<ExplicitRenderPaths>,
 }
 
@@ -420,6 +421,7 @@ fn parse_args(mut args: Vec<OsString>) -> Result<Command, String> {
     let mut allowed_http_roots = Vec::new();
     let mut virtual_resources = Vec::new();
     let mut resource_timeout_ms = None;
+    let mut allow_host_fonts = false;
     let mut args = args.into_iter();
     while let Some(argument) = args.next() {
         if argument == "--locale" {
@@ -500,6 +502,8 @@ fn parse_args(mut args: Vec<OsString>) -> Result<Command, String> {
                 .next()
                 .ok_or_else(|| "--resource-timeout-ms requires a value".to_owned())?;
             resource_timeout_ms = Some(parse_resource_timeout(&value)?);
+        } else if argument == "--allow-host-fonts" {
+            allow_host_fonts = true;
         } else if argument.to_string_lossy().starts_with('-') {
             return Err(format!("unknown option: {}", argument.to_string_lossy()));
         } else if input.replace(PathBuf::from(argument)).is_some() {
@@ -551,6 +555,7 @@ fn parse_args(mut args: Vec<OsString>) -> Result<Command, String> {
             virtual_resources,
             timeout_ms: resource_timeout_ms.unwrap_or(READINESS_TIMEOUT_MS),
         },
+        allow_host_fonts,
         explicit_paths,
     }))
 }
@@ -698,7 +703,7 @@ fn main() {
 
 fn print_help() {
     println!(
-        "Pliego — native document rendering on Servo\n\nUsage:\n  pliego render <document.html> --output <document.pdf> --artifacts <directory> [options]\n  pliego [options] <document.html>\n  pliego --version\n\nOptions:\n  --locale en-US|es-MX\n  --timezone UTC|PST8PDT\n  --page-size WIDTHxHEIGHT\n  --page-margins TOP,RIGHT,BOTTOM,LEFT\n  --allow-http-root URL       Allow GET/HEAD below one explicit http(s) URL root\n  --virtual-resource URL=FILE Serve one exact URL from a host-provided file\n  --resource-timeout-ms MS    Bound controlled network connection time (1..60000)\n\nNetwork and redirects are denied by default. The shorthand form writes outputs to a temporary artifact directory. Page geometry is expressed in CSS pixels."
+        "Pliego — native document rendering on Servo\n\nUsage:\n  pliego render <document.html> --output <document.pdf> --artifacts <directory> [options]\n  pliego [options] <document.html>\n  pliego --version\n\nOptions:\n  --locale en-US|es-MX\n  --timezone UTC|PST8PDT\n  --page-size WIDTHxHEIGHT\n  --page-margins TOP,RIGHT,BOTTOM,LEFT\n  --allow-host-fonts          Opt in to observable system-font resolution\n  --allow-http-root URL       Allow GET/HEAD below one explicit http(s) URL root\n  --virtual-resource URL=FILE Serve one exact URL from a host-provided file\n  --resource-timeout-ms MS    Bound controlled network connection time (1..60000)\n\nHost fonts, network, and redirects are denied by default. The shorthand form writes outputs to a temporary artifact directory. Page geometry is expressed in CSS pixels."
     );
 }
 
@@ -784,6 +789,7 @@ fn render(request: RenderRequest) {
         request.environment,
         request.page,
         &resource_policy,
+        request.allow_host_fonts,
     );
     let input_url = url::Url::from_file_path(document.path()).unwrap_or_else(|_| {
         eprintln!("pliego: cannot convert document path to a file URL");
@@ -836,6 +842,9 @@ fn render(request: RenderRequest) {
     let mut environment = request.environment.artifact();
     environment["page"] = page_artifact(request.page);
     environment["resource_policy"] = resource_policy.artifact(&render_id);
+    environment["fonts"] = serde_json::json!({
+        "host_fonts": if request.allow_host_fonts { "allowed" } else { "denied" },
+    });
     set_document_pdf_environment(&mut environment, &document_pdf_path, "pending", None);
     record_artifact(artifacts.write_environment(&environment));
     if request.explicit_paths.is_some() {
@@ -893,6 +902,8 @@ fn render(request: RenderRequest) {
         ),
         "--pref".into(),
         format!("intl_locale_override={}", request.environment.locale),
+        "--pref".into(),
+        format!("fonts_host_enabled={}", request.allow_host_fonts),
         "--pref".into(),
         format!(
             "network_connection_timeout={}",
@@ -1082,7 +1093,27 @@ fn render(request: RenderRequest) {
             &error.to_string(),
         )
     });
-    let scene_artifacts = match persist_scene_capture(&artifacts, &scene_capture) {
+    if !request.allow_host_fonts &&
+        let Some(selection) = scene_capture
+            .font_selections
+            .iter()
+            .find(|selection| selection.source.is_host())
+    {
+        fail_session(
+            &artifacts,
+            &document_pdf_path,
+            "HOST_FONT_POLICY_VIOLATION",
+            &format!(
+                "Servo selected host font {} while host fonts were disabled",
+                selection.resource
+            ),
+        )
+    }
+    let scene_artifacts = match persist_scene_capture(
+        &artifacts,
+        &scene_capture,
+        request.allow_host_fonts,
+    ) {
         Ok(summary) => summary,
         Err(error) => {
             if error.code.starts_with("DOCUMENT_PDF_") {
@@ -1245,6 +1276,7 @@ fn stable_render_id(
     environment: RenderEnvironment,
     page: PageDefinition,
     resource_policy: &ResourcePolicy,
+    allow_host_fonts: bool,
 ) -> String {
     fn update_field(hasher: &mut Sha256, bytes: &[u8]) {
         hasher.update((bytes.len() as u64).to_be_bytes());
@@ -1266,6 +1298,9 @@ fn stable_render_id(
         margins.left,
     ] {
         hasher.update(value.to_bits().to_be_bytes());
+    }
+    if allow_host_fonts {
+        update_field(&mut hasher, b"pliego.host-fonts.v1");
     }
     if !resource_policy.allowed_http_roots.is_empty()
         || !resource_policy.virtual_resources.is_empty()
@@ -1700,6 +1735,7 @@ struct PreviewUnsupported {
 fn persist_scene_capture(
     artifacts: &SessionArtifacts,
     capture: &SceneCapture,
+    allow_host_fonts: bool,
 ) -> Result<SceneArtifactSummary, SceneArtifactError> {
     let scene_bytes = capture.scene.normalized_json().map_err(|message| {
         SceneArtifactError::new("SCENE_CAPTURE_NORMALIZATION_FAILED", message)
@@ -1801,9 +1837,32 @@ fn persist_scene_capture(
     artifacts.write_scene(&scene_bytes).map_err(|error| {
         SceneArtifactError::new("SCENE_CAPTURE_SCENE_WRITE_FAILED", error.to_string())
     })?;
+    let manifest = capture
+        .font_selections
+        .iter()
+        .filter(|selection| {
+            matches!(
+                selection.source,
+                CapturedFontSource::Bundled
+                    | CapturedFontSource::Data
+                    | CapturedFontSource::Memory
+            )
+        })
+        .collect::<Vec<_>>();
     let fonts = serde_json::json!({
+        "schema": "pliego.font-report",
+        "version": 1,
+        "policy": {
+            "host_fonts": if allow_host_fonts { "allowed" } else { "denied" },
+        },
+        "manifest": {
+            "resolution": "css-order",
+            "entries": manifest,
+        },
         "font_resources": capture.font_resources,
         "font_instances": capture.font_instances,
+        "selections": capture.font_selections,
+        "warnings": capture.font_warnings,
     });
     artifacts.write_fonts(&fonts).map_err(|error| {
         SceneArtifactError::new("SCENE_CAPTURE_FONTS_WRITE_FAILED", error.to_string())
@@ -2221,8 +2280,9 @@ mod tests {
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
     use pliego::capture::{
-        CapturedFontInstance, CapturedFontResource, MissingTextMapping, SceneCapture,
-        UnsupportedPaintEvent, UnsupportedPaintKind,
+        CapturedFontInstance, CapturedFontResource, CapturedFontSelection, CapturedFontSource,
+        CapturedFontWarning, MissingTextMapping, SceneCapture, UnsupportedPaintEvent,
+        UnsupportedPaintKind,
     };
     use pliego::{DocumentScene, Glyph, Operation, OperationMeta, Page, Rect, Size, Utf8Range};
 
@@ -2260,6 +2320,7 @@ mod tests {
                 },
                 page: default_page(),
                 resources: ResourcePolicyConfig::default(),
+                allow_host_fonts: false,
                 explicit_paths: None,
             })
         );
@@ -2289,6 +2350,7 @@ mod tests {
                 environment: RenderEnvironment::default(),
                 page: default_page(),
                 resources: ResourcePolicyConfig::default(),
+                allow_host_fonts: false,
                 explicit_paths: Some(ExplicitRenderPaths {
                     output: PathBuf::from("requested/invoice.pdf"),
                     artifacts: PathBuf::from("diagnostics/render-1"),
@@ -2367,10 +2429,10 @@ mod tests {
 
         let input = b"<!doctype html><title>Invoice</title>";
         let policy = ResourcePolicy::default();
-        let render_id = stable_render_id(input, first.environment, first.page, &policy);
+        let render_id = stable_render_id(input, first.environment, first.page, &policy, false);
         assert_eq!(
             render_id,
-            stable_render_id(input, second.environment, second.page, &policy)
+            stable_render_id(input, second.environment, second.page, &policy, false)
         );
         assert!(render_id.starts_with("sha256:"));
         assert_eq!(render_id.len(), 71);
@@ -2381,6 +2443,7 @@ mod tests {
                 first.environment,
                 first.page,
                 &policy,
+                false,
             )
         );
         assert_ne!(
@@ -2393,6 +2456,7 @@ mod tests {
                 },
                 first.page,
                 &policy,
+                false,
             )
         );
         assert_ne!(
@@ -2403,13 +2467,24 @@ mod tests {
                 PageDefinition::new(612.0, 792.0, PageMargins::new(72.0, 54.0, 36.0, 18.0),)
                     .unwrap(),
                 &policy,
+                false,
             )
         );
         let canonical_page =
             PageDefinition::new(612.0, 792.0, PageMargins::new(72.0, 54.0, 36.0, 18.0)).unwrap();
         assert_eq!(
-            stable_render_id(input, RenderEnvironment::default(), canonical_page, &policy),
+            stable_render_id(
+                input,
+                RenderEnvironment::default(),
+                canonical_page,
+                &policy,
+                false,
+            ),
             "sha256:9ca553323bf5eb8118c51a46c00b174e1ef1febc7e6bbdb3d763ac2dcf5291a3"
+        );
+        assert_ne!(
+            render_id,
+            stable_render_id(input, first.environment, first.page, &policy, true)
         );
     }
 
@@ -2432,6 +2507,7 @@ mod tests {
                 },
                 page: default_page(),
                 resources: ResourcePolicyConfig::default(),
+                allow_host_fonts: false,
                 explicit_paths: None,
             })
         );
@@ -2451,6 +2527,16 @@ mod tests {
         ])
         .unwrap_err();
         assert!(invalid_timezone.contains("unsupported timezone"));
+
+        let Command::Render(opted_in) = parse_args(vec![
+            OsString::from("--allow-host-fonts"),
+            OsString::from("invoice.html"),
+        ])
+        .unwrap()
+        else {
+            panic!("document should parse as a render request")
+        };
+        assert!(opted_in.allow_host_fonts);
     }
 
     #[test]
@@ -2829,11 +2915,13 @@ mod tests {
             scene,
             font_resources: vec![],
             font_instances: vec![],
+            font_selections: vec![],
+            font_warnings: vec![],
             unsupported_events: vec![],
             text_mapping_gaps: vec![],
         };
 
-        let summary = persist_scene_capture(&artifacts, &capture).unwrap();
+        let summary = persist_scene_capture(&artifacts, &capture, false).unwrap();
         assert!(!directory.join("scene-preview.png").exists());
         assert_eq!(summary.preview_paths.len(), 2);
         assert_eq!(
@@ -2891,16 +2979,31 @@ mod tests {
                 bytes_base64: BASE64_STANDARD.encode(DEJAVU_SANS),
             }],
             font_instances: vec![CapturedFontInstance {
-                id: font,
+                id: font.clone(),
                 resource: resource.clone(),
                 face_index: 0,
                 variations: vec![],
+            }],
+            font_selections: vec![CapturedFontSelection {
+                instance: font.clone(),
+                resource: resource.clone(),
+                face_index: 0,
+                source: CapturedFontSource::Bundled,
+                requested_families: vec!["Missing Preferred".into(), "DejaVu Sans".into()],
+                selected_family: Some("DejaVu Sans".into()),
+            }],
+            font_warnings: vec![CapturedFontWarning {
+                code: "FONT_FALLBACK_USED",
+                instance: font,
+                requested_family: "Missing Preferred".into(),
+                selected_family: "DejaVu Sans".into(),
+                fallback_chain: vec!["Missing Preferred".into(), "DejaVu Sans".into()],
             }],
             unsupported_events: vec![],
             text_mapping_gaps: vec![],
         };
 
-        let summary = persist_scene_capture(&artifacts, &capture).unwrap();
+        let summary = persist_scene_capture(&artifacts, &capture, false).unwrap();
         let exact_scene = capture.scene.normalized_json().unwrap();
         assert_eq!(summary.capture_status, "complete");
         assert_eq!(summary.capture_code, None);
@@ -2955,7 +3058,16 @@ mod tests {
         );
         let fonts: serde_json::Value =
             serde_json::from_slice(&fs::read(&summary.fonts_path).unwrap()).unwrap();
+        assert_eq!(fonts["schema"], "pliego.font-report");
+        assert_eq!(fonts["version"], 1);
+        assert_eq!(fonts["policy"]["host_fonts"], "denied");
+        assert_eq!(fonts["manifest"]["resolution"], "css-order");
+        assert_eq!(fonts["manifest"]["entries"], fonts["selections"]);
         assert_eq!(fonts["font_resources"][0]["resource"], resource);
+        assert_eq!(fonts["selections"][0]["source"], "bundled");
+        assert_eq!(fonts["selections"][0]["requested_families"][0], "Missing Preferred");
+        assert_eq!(fonts["selections"][0]["selected_family"], "DejaVu Sans");
+        assert_eq!(fonts["warnings"][0]["code"], "FONT_FALLBACK_USED");
         let report: serde_json::Value =
             serde_json::from_slice(&fs::read(&summary.report_path).unwrap()).unwrap();
         assert_eq!(report["scene"]["hash"], summary.scene_hash);
@@ -3014,7 +3126,7 @@ mod tests {
             glyph_index: 0,
         }];
         let partial_error =
-            persist_scene_capture(&partial_artifacts, &partial_capture).unwrap_err();
+            persist_scene_capture(&partial_artifacts, &partial_capture, false).unwrap_err();
         assert_eq!(partial_error.code, "DOCUMENT_PDF_GENERATION_FAILED");
         assert!(partial_error.message.contains("source-text mapping"));
         let partial_report: serde_json::Value =
@@ -3065,6 +3177,8 @@ mod tests {
             }),
             font_resources: vec![],
             font_instances: vec![],
+            font_selections: vec![],
+            font_warnings: vec![],
             unsupported_events: vec![UnsupportedPaintEvent {
                 sequence: 0,
                 kind: UnsupportedPaintKind::Box,
@@ -3072,7 +3186,7 @@ mod tests {
             text_mapping_gaps: vec![],
         };
 
-        let error = persist_scene_capture(&artifacts, &capture).unwrap_err();
+        let error = persist_scene_capture(&artifacts, &capture, false).unwrap_err();
         assert_eq!(error.code, "DOCUMENT_PDF_GENERATION_FAILED");
         assert!(
             error

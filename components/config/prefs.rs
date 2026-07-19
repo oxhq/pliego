@@ -111,6 +111,7 @@ macro_rules! pref {
 #[derive(Clone, Deserialize, Serialize, ServoPreferences)]
 pub struct Preferences {
     pub fonts_default: String,
+    pub fonts_host_enabled: bool,
     pub fonts_serif: String,
     pub fonts_sans_serif: String,
     pub fonts_monospace: String,
@@ -513,6 +514,7 @@ impl Preferences {
             accessibility_enabled: false,
             expensive_accessibility_test_assertions_enabled: false,
             fonts_default: String::new(),
+            fonts_host_enabled: true,
             fonts_default_monospace_size: 13,
             fonts_default_size: 16,
             fonts_monospace: String::new(),

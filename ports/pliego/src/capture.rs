@@ -18,6 +18,8 @@ pub struct SceneCapture {
     pub scene: DocumentScene,
     pub font_resources: Vec<CapturedFontResource>,
     pub font_instances: Vec<CapturedFontInstance>,
+    pub font_selections: Vec<CapturedFontSelection>,
+    pub font_warnings: Vec<CapturedFontWarning>,
     pub unsupported_events: Vec<UnsupportedPaintEvent>,
     pub text_mapping_gaps: Vec<MissingTextMapping>,
 }
@@ -40,6 +42,43 @@ pub struct CapturedFontInstance {
 pub struct CapturedFontVariation {
     pub tag: u32,
     pub value: f32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CapturedFontSource {
+    Bundled,
+    Data,
+    Host,
+    Memory,
+    Remote,
+    Unknown,
+}
+
+impl CapturedFontSource {
+    pub fn is_host(self) -> bool {
+        self == Self::Host
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct CapturedFontSelection {
+    pub instance: String,
+    pub resource: String,
+    pub face_index: u32,
+    pub source: CapturedFontSource,
+    pub requested_families: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected_family: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct CapturedFontWarning {
+    pub code: &'static str,
+    pub instance: String,
+    pub requested_family: String,
+    pub selected_family: String,
+    pub fallback_chain: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -348,8 +387,8 @@ impl std::error::Error for CaptureError {}
 /// Convert the retained layout snapshot JSON into a canonical document scene.
 ///
 /// The converter consumes only retained capture data. Capture-local fragment, tag, spatial-node,
-/// clip, and diagnostic font identifiers are used only for joins and never enter the returned
-/// scene or reports.
+/// clip, and diagnostic font identifiers never enter the canonical scene. Font identifiers are
+/// reduced to a portable source kind in the inspect report.
 pub fn capture_document_scene(
     snapshot_json: &[u8],
     mut resolve_image: impl FnMut(&str) -> Option<String>,
@@ -365,6 +404,8 @@ pub fn capture_document_scene(
     let mut emitted_links = HashSet::new();
     let mut unsupported_events = Vec::new();
     let mut text_mapping_gaps = Vec::new();
+    let mut font_selections = BTreeMap::new();
+    let mut font_warnings = BTreeMap::new();
     let mut operations = Vec::new();
     let mut stacking_context_depth = 0usize;
 
@@ -410,6 +451,44 @@ pub fn capture_document_scene(
                         sequence: event.sequence,
                         instance: font.clone(),
                     });
+                }
+                let instance = &font_instances[font];
+                let source = captured_font_source(&text_run.font_identifier);
+                let selection_key = (
+                    font.clone(),
+                    source,
+                    text_run.requested_families.clone(),
+                    text_run.selected_family.clone(),
+                );
+                font_selections
+                    .entry(selection_key)
+                    .or_insert_with(|| CapturedFontSelection {
+                        instance: font.clone(),
+                        resource: instance.resource.clone(),
+                        face_index: instance.face_index,
+                        source,
+                        requested_families: text_run.requested_families.clone(),
+                        selected_family: text_run.selected_family.clone(),
+                    });
+                if let (Some(requested), Some(selected)) = (
+                    text_run.requested_families.first(),
+                    text_run.selected_family.as_ref(),
+                ) && !requested.eq_ignore_ascii_case(selected)
+                {
+                    font_warnings
+                        .entry((
+                            font.clone(),
+                            requested.clone(),
+                            selected.clone(),
+                            text_run.requested_families.clone(),
+                        ))
+                        .or_insert_with(|| CapturedFontWarning {
+                            code: "FONT_FALLBACK_USED",
+                            instance: font.clone(),
+                            requested_family: requested.clone(),
+                            selected_family: selected.clone(),
+                            fallback_chain: text_run.requested_families.clone(),
+                        });
                 }
                 text_mapping_gaps.extend(
                     text_run
@@ -580,9 +659,32 @@ pub fn capture_document_scene(
         scene,
         font_resources: font_resources.into_values().collect(),
         font_instances: font_instances.into_values().collect(),
+        font_selections: font_selections.into_values().collect(),
+        font_warnings: font_warnings.into_values().collect(),
         unsupported_events,
         text_mapping_gaps,
     })
+}
+
+fn captured_font_source(identifier: &serde_json::Value) -> CapturedFontSource {
+    let Some(identifier) = identifier.as_object() else {
+        return CapturedFontSource::Unknown;
+    };
+    if identifier.contains_key("Local") {
+        return CapturedFontSource::Host;
+    }
+    if identifier.contains_key("ArrayBuffer") {
+        return CapturedFontSource::Memory;
+    }
+    let Some(url) = identifier.get("Web").and_then(serde_json::Value::as_str) else {
+        return CapturedFontSource::Unknown;
+    };
+    match url.split_once(':').map(|(scheme, _)| scheme) {
+        Some("file") => CapturedFontSource::Bundled,
+        Some("data") => CapturedFontSource::Data,
+        Some("http" | "https") => CapturedFontSource::Remote,
+        _ => CapturedFontSource::Unknown,
+    }
 }
 
 fn capture_pages(capture: &LayoutCapture) -> Result<Vec<CapturePage>, CaptureError> {
@@ -1231,8 +1333,11 @@ struct CapturePaintEvent {
 struct CaptureTextRun {
     text: String,
     font_instance_id: Option<String>,
-    #[serde(rename = "font_identifier")]
-    _font_identifier: serde_json::Value,
+    font_identifier: serde_json::Value,
+    #[serde(default)]
+    requested_families: Vec<String>,
+    #[serde(default)]
+    selected_family: Option<String>,
     font_size: f32,
     glyphs: Vec<CaptureGlyph>,
 }

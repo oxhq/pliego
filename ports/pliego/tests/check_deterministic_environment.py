@@ -54,7 +54,7 @@ def run(
             "TEMP": str(temp_root),
         }
     )
-    command = [str(binary)]
+    command = [str(binary), "--allow-host-fonts"]
     if requested_locale is not None:
         command.extend(["--locale", requested_locale])
     if requested_timezone is not None:
@@ -139,6 +139,21 @@ def verify_environment_artifact(
                     "bottom": 45.349998474121094,
                     "left": 60.46666717529297,
                 },
+            },
+            "fonts": {
+                "host_fonts": "allowed",
+            },
+            "resource_policy": {
+                "schema": "pliego.resource-policy.v1",
+                "version": 1,
+                "render_id": summary.get("render_id"),
+                "network": "deny",
+                "http_roots": [],
+                "filesystem": "document-root",
+                "data_urls": "allow",
+                "redirects": "deny",
+                "timeout_ms": 10000,
+                "virtual_resources": [],
             },
             "document_pdf": {
                 "artifact": summary.get("document_pdf"),

@@ -356,6 +356,16 @@ impl Font {
         self.template.identifier()
     }
 
+    /// The family declared by the `@font-face` rule that supplied this font, if any.
+    pub fn selected_family_name(&self) -> Option<String> {
+        self.template
+            .borrow()
+            .font_face_rule
+            .as_ref()
+            .and_then(|rule| rule.font_family.as_ref())
+            .map(|family| family.name.to_string())
+    }
+
     pub(crate) fn webrender_font_instance_flags(&self) -> FontInstanceFlags {
         self.handle.webrender_font_instance_flags()
     }
@@ -775,23 +785,26 @@ impl FontGroup {
             return font_or_synthesized_small_caps(fallback.clone());
         }
 
-        if let Some(font) = self.find_fallback_using_system_font_list(
-            font_context,
-            options.clone(),
-            &char_in_template,
-            &font_has_glyph_and_presentation,
-        ) {
-            let fallback = font_or_synthesized_small_caps(font);
-            if let Some(fallback) = fallback.clone() {
-                self.fallbacks.write().insert(fallback_key, fallback);
+        if pref!(fonts_host_enabled) {
+            if let Some(font) = self.find_fallback_using_system_font_list(
+                font_context,
+                options.clone(),
+                &char_in_template,
+                &font_has_glyph_and_presentation,
+            ) {
+                let fallback = font_or_synthesized_small_caps(font);
+                if let Some(fallback) = fallback.clone() {
+                    self.fallbacks.write().insert(fallback_key, fallback);
+                }
+                return fallback;
             }
-            return fallback;
         }
 
         let first_font = self.first(font_context);
-        if let Some(fallback) = first_font
-            .as_ref()
-            .and_then(|font| font.find_fallback_using_system_font_api(&options)) &&
+        if pref!(fonts_host_enabled) &&
+            let Some(fallback) = first_font
+                .as_ref()
+                .and_then(|font| font.find_fallback_using_system_font_api(&options)) &&
             font_has_glyph_and_presentation(&fallback)
         {
             return Some(fallback);
@@ -813,6 +826,9 @@ impl FontGroup {
         let font_predicate = |_: &FontRef| true;
         self.find(font_context, &space_in_template, &font_predicate)
             .or_else(|| {
+                if !pref!(fonts_host_enabled) {
+                    return None;
+                }
                 self.find_fallback_using_system_font_list(
                     font_context,
                     FallbackFontSelectionOptions::default(),

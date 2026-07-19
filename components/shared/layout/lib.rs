@@ -435,6 +435,11 @@ pub struct LayoutDebugTextRun {
     pub font_instance_id: Option<String>,
     /// Diagnostic compatibility identifier. This is not a stable resource identity.
     pub font_identifier: FontIdentifier,
+    /// CSS fallback chain requested by the fragment, in resolution order.
+    pub requested_families: Vec<String>,
+    /// Family declared by the selected `@font-face`, when the selected font came from one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_family: Option<String>,
     pub font_size: f32,
     /// Positioned glyphs, including retained whitespace slices.
     pub glyphs: Vec<LayoutDebugGlyph>,

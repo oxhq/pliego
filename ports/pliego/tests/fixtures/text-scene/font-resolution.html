@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>Pliego deterministic font resolution fixture</title>
+    <style>
+      @font-face {
+        font-family: "Pliego Fixture";
+        src: url("Ahem.ttf");
+      }
+
+      body {
+        font-family: "Missing Preferred", "Pliego Fixture";
+        font-size: 12px;
+        margin: 0;
+      }
+    </style>
+  </head>
+  <body>
+    <p>PLIEGO FONT FALLBACK</p>
+    <script>
+      queueMicrotask(async () => {
+        await document.fonts.ready;
+        window.pliego?.ready({ fixture: 'font-resolution' });
+      });
+    </script>
+  </body>
+</html>

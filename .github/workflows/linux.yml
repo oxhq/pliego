@@ -230,6 +230,23 @@ jobs:
           path: target/pliego-canonical-scene/${{ github.run_id }}-${{ github.run_attempt }}
           if-no-files-found: warn
           retention-days: 7
+      - name: Pliego deterministic font resolution
+        run: |
+          mkdir -p target/pliego-font-resolution
+          set -o pipefail
+          {
+            python ports/pliego/tests/check_font_resolution.py --self-test &&
+            xvfb-run python ports/pliego/tests/check_font_resolution.py \
+              target/${{ inputs.profile }}/pliego
+          } 2>&1 | tee target/pliego-font-resolution/output.log
+      - name: Retain Pliego font resolution proof
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: pliego-font-resolution-${{ inputs.profile }}-${{ needs.runner-select.outputs.unique-id }}
+          path: target/pliego-font-resolution/output.log
+          if-no-files-found: warn
+          retention-days: 7
       - name: Pliego image limits
         run: |
           output=target/pliego-image-limits/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}
