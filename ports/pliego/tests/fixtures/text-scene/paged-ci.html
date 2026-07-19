@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>Pliego combined paged layout CI fixture</title>
+    <style>
+      @font-face {
+        font-family: "Pliego Fixture";
+        src: url("Ahem.ttf");
+      }
+
+      html,
+      body,
+      p {
+        margin: 0;
+      }
+
+      body {
+        font: 16px/20px "Pliego Fixture";
+      }
+
+      .natural {
+        height: 40px;
+      }
+
+      #forced-paragraph {
+        break-before: page;
+      }
+
+      #kept {
+        break-inside: avoid;
+        height: 40px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="natural" data-source>Natural alpha.</div>
+    <div class="natural" data-source>Natural beta.</div>
+    <p id="forced-paragraph" data-source>aaaaaaaaa bbbbbbbbb ccccccccc ddddddddd eeeeeeeee fffffffff ggggggggg hhhhhhhhh iiiiiiiii</p>
+    <div id="kept" data-source>Kept together.</div>
+    <script>
+      queueMicrotask(async () => {
+        try {
+          await document.fonts.ready;
+          const source = [...document.querySelectorAll('[data-source]')]
+            .map((node) => node.textContent)
+            .join('');
+          window.pliego?.ready({ fixture: 'paged-ci', source });
+        } catch (error) {
+          window.pliego?.fail({
+            code: 'FIXTURE_FONT_LOAD_FAILED',
+            message: String(error),
+          });
+        }
+      });
+    </script>
+  </body>
+</html>

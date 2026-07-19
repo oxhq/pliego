@@ -1,0 +1,89 @@
+{
+  "schema": "pliego.paged-ci-reference.v1",
+  "source_unicode": "Natural alpha.Natural beta.aaaaaaaaa bbbbbbbbb ccccccccc ddddddddd eeeeeeeee fffffffff ggggggggg hhhhhhhhh iiiiiiiiiKept together.",
+  "page": {
+    "width": 180.0,
+    "height": 80.0,
+    "margin_top": 10.0,
+    "margin_right": 10.0,
+    "margin_bottom": 10.0,
+    "margin_left": 10.0,
+    "available_inline_size": 160.0,
+    "available_block_size": 60.0
+  },
+  "pages": [
+    {
+      "index": 0,
+      "text": "Natural alpha."
+    },
+    {
+      "index": 1,
+      "text": "Natural beta."
+    },
+    {
+      "index": 2,
+      "text": "aaaaaaaaa bbbbbbbbb ccccccccc"
+    },
+    {
+      "index": 3,
+      "text": " ddddddddd eeeeeeeee fffffffff"
+    },
+    {
+      "index": 4,
+      "text": " ggggggggg hhhhhhhhh iiiiiiiii"
+    },
+    {
+      "index": 5,
+      "text": "Kept together."
+    }
+  ],
+  "continuations": [
+    {
+      "page_index": 0,
+      "kind": "block",
+      "next_child_index": 1,
+      "node_order": 0,
+      "forced": false,
+      "break_inside_avoid": false,
+      "retry_count": 0,
+      "resume_page_index": 1
+    },
+    {
+      "page_index": 1,
+      "kind": "block",
+      "next_child_index": 2,
+      "node_order": 1,
+      "forced": true,
+      "break_inside_avoid": false,
+      "retry_count": 0,
+      "resume_page_index": 2
+    },
+    {
+      "page_index": 2,
+      "kind": "inline",
+      "child_index": 2,
+      "next_line_index": 3,
+      "text_offset": 30,
+      "resume_page_index": 3
+    },
+    {
+      "page_index": 3,
+      "kind": "inline",
+      "child_index": 2,
+      "next_line_index": 6,
+      "text_offset": 60,
+      "resume_page_index": 4
+    },
+    {
+      "page_index": 4,
+      "kind": "block",
+      "next_child_index": 3,
+      "node_order": 2,
+      "forced": false,
+      "break_inside_avoid": true,
+      "retry_count": 1,
+      "resume_page_index": 5
+    }
+  ],
+  "warnings": []
+}
