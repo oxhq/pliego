@@ -4,9 +4,9 @@
 
 //! The Pliego-owned paged-document root.
 //!
-//! Simple normal-flow block children are continued at child boundaries while their fragments are
-//! placed. Unsupported content can still overflow, but nothing here clips, slices, or paginates a
-//! completed fragment tree.
+//! Simple normal-flow blocks are continued at child boundaries, and retained paragraph line
+//! fragments can continue at line boundaries. Unsupported content can still overflow, but nothing
+//! here clips rendered output or reshapes text.
 
 use std::fmt;
 use std::sync::OnceLock;
@@ -197,6 +197,45 @@ pub(crate) struct BlockContinuationToken {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct InlineContinuationToken {
+    pub child_index: usize,
+    pub next_line_index: usize,
+    pub inline_item_index: usize,
+    pub text_offset: usize,
+    pub shaping_result_index: usize,
+    pub resume_page_index: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum FragmentainerContinuation {
+    Block(BlockContinuationToken),
+    Inline(InlineContinuationToken),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct InlineResumePoint {
+    pub inline_item_index: usize,
+    pub text_offset: usize,
+    pub shaping_result_index: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct InlineLine {
+    /// Unpaginated block start in the root fragmentainer coordinate space.
+    pub block_start: Au,
+    pub block_size: Au,
+    pub source_start: usize,
+    pub source_end: usize,
+    pub resume: InlineResumePoint,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct InlineChildPlacement {
+    pub line_translations: Vec<Au>,
+    pub added_block_size: Au,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum BlockBoundaryPlacement {
     CurrentPage,
     NewPage { block_origin: Au },
@@ -246,9 +285,10 @@ impl BlockPaginationController {
         &self,
         child_count: usize,
         supports_simple_block_pagination: bool,
+        supports_single_inline_child: bool,
     ) -> Option<BlockPageBuilder> {
         let mut state = self.state.lock();
-        if child_count < 2 || state.claimed {
+        if (child_count < 2 && !supports_single_inline_child) || state.claimed {
             return None;
         }
         let request = state.request?;
@@ -273,7 +313,7 @@ impl BlockPaginationController {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct PageContinuation {
     page_index: usize,
-    token: BlockContinuationToken,
+    token: FragmentainerContinuation,
 }
 
 #[derive(Default)]
@@ -344,7 +384,7 @@ impl BlockPageBuilder {
         };
         self.outcome.continuations.push(PageContinuation {
             page_index: previous_page_index,
-            token,
+            token: FragmentainerContinuation::Block(token),
         });
         self.warn_if_oversized(child_index, node, fresh_page_contribution);
         self.page_has_content = true;
@@ -352,6 +392,97 @@ impl BlockPageBuilder {
         BlockBoundaryPlacement::NewPage {
             block_origin: self.current_page_origin,
         }
+    }
+
+    /// Place already-shaped lines without rebuilding the inline formatting context. Each output
+    /// translation corresponds one-to-one with the input line, so pagination cannot consume or
+    /// duplicate a retained line fragment.
+    pub(crate) fn place_inline_child(
+        &mut self,
+        child_index: usize,
+        lines: &[InlineLine],
+    ) -> Option<InlineChildPlacement> {
+        assert_eq!(child_index, self.next_child_index);
+        if !self.supports_inline_lines(lines) {
+            return None;
+        }
+        self.next_child_index += 1;
+
+        let mut line_translations = Vec::with_capacity(lines.len());
+        let mut translation = Au::zero();
+        for (line_index, line) in lines.iter().enumerate() {
+            let mut block_start = line.block_start + translation;
+            let page_end = self.current_page_origin + self.request.available_block_size;
+            if block_start + line.block_size > page_end {
+                let previous_page_index = self.current_page_index;
+                let mut resume_page_index = self.current_page_index + 1;
+                let mut resume_page_origin = self.current_page_origin + self.request.page_stride;
+                while resume_page_origin < block_start {
+                    resume_page_index += 1;
+                    resume_page_origin += self.request.page_stride;
+                }
+                translation += resume_page_origin - block_start;
+                block_start = resume_page_origin;
+                self.current_page_index = resume_page_index;
+                self.current_page_origin = resume_page_origin;
+                self.outcome.continuations.push(PageContinuation {
+                    page_index: previous_page_index,
+                    token: FragmentainerContinuation::Inline(InlineContinuationToken {
+                        child_index,
+                        next_line_index: line_index,
+                        inline_item_index: line.resume.inline_item_index,
+                        text_offset: line.resume.text_offset,
+                        shaping_result_index: line.resume.shaping_result_index,
+                        resume_page_index,
+                    }),
+                });
+            }
+
+            line_translations.push(translation);
+            self.page_has_content = true;
+            self.include_content_through(block_start + line.block_size);
+        }
+
+        Some(InlineChildPlacement {
+            added_block_size: *line_translations.last().expect("inline lines are non-empty"),
+            line_translations,
+        })
+    }
+
+    fn supports_inline_lines(&self, lines: &[InlineLine]) -> bool {
+        if lines.len() < 2 {
+            return false;
+        }
+        let mut previous: Option<&InlineLine> = None;
+        for line in lines {
+            if line.block_size <= Au::zero()
+                || line.block_size > self.request.available_block_size
+                || line.source_start >= line.source_end
+                || line.resume.text_offset != line.source_start
+            {
+                return false;
+            }
+            if let Some(previous) = previous {
+                let previous_progress = (
+                    previous.resume.inline_item_index,
+                    previous.resume.shaping_result_index,
+                    previous.resume.text_offset,
+                );
+                let progress = (
+                    line.resume.inline_item_index,
+                    line.resume.shaping_result_index,
+                    line.resume.text_offset,
+                );
+                if line.block_start < previous.block_start
+                    || line.source_start < previous.source_end
+                    || progress <= previous_progress
+                {
+                    return false;
+                }
+            }
+            previous = Some(line);
+        }
+        true
     }
 
     fn warn_if_oversized(&mut self, child_index: usize, node: Option<u64>, block_size: Au) {
@@ -403,7 +534,7 @@ pub(crate) struct FragmentainerContext {
     pub page_index: usize,
     pub available_inline_size: Au,
     pub available_block_size: Au,
-    pub continuation: Option<BlockContinuationToken>,
+    pub continuation: Option<FragmentainerContinuation>,
     pub overflow: FragmentainerOverflow,
 }
 
@@ -676,24 +807,104 @@ mod tests {
             outcome.continuations,
             vec![PageContinuation {
                 page_index: 0,
-                token: BlockContinuationToken {
+                token: FragmentainerContinuation::Block(BlockContinuationToken {
                     next_child_index: 1,
                     next_node: Some(20),
                     resume_page_index: 1,
-                },
+                }),
             }]
         );
         assert!(outcome.warnings.is_empty());
     }
 
     #[test]
+    fn paragraph_lines_continue_without_text_loss_or_duplicate_progress() {
+        let source = "abcdefghijklmnopqrst";
+        let lines = (0..5)
+            .map(|line_index| InlineLine {
+                block_start: Au::from_px(line_index as i32 * 40),
+                block_size: Au::from_px(40),
+                source_start: line_index * 4,
+                source_end: line_index * 4 + 4,
+                resume: InlineResumePoint {
+                    inline_item_index: 3,
+                    text_offset: line_index * 4,
+                    shaping_result_index: line_index,
+                },
+            })
+            .collect::<Vec<_>>();
+        let mut builder = BlockPageBuilder::new(BlockPaginationRequest {
+            available_block_size: Au::from_px(100),
+            page_stride: Au::from_px(120),
+        });
+
+        let placement = builder.place_inline_child(0, &lines).unwrap();
+        assert_eq!(
+            placement.line_translations,
+            vec![
+                Au::from_px(0),
+                Au::from_px(0),
+                Au::from_px(40),
+                Au::from_px(40),
+                Au::from_px(80),
+            ]
+        );
+        assert_eq!(placement.added_block_size, Au::from_px(80));
+        assert_eq!(placement.line_translations.len(), lines.len());
+        assert_eq!(
+            lines
+                .iter()
+                .map(|line| &source[line.source_start..line.source_end])
+                .collect::<String>(),
+            source
+        );
+
+        let outcome = builder.finish();
+        assert_eq!(outcome.page_count, 3);
+        assert_eq!(
+            outcome.continuations,
+            vec![
+                PageContinuation {
+                    page_index: 0,
+                    token: FragmentainerContinuation::Inline(InlineContinuationToken {
+                        child_index: 0,
+                        next_line_index: 2,
+                        inline_item_index: 3,
+                        text_offset: 8,
+                        shaping_result_index: 2,
+                        resume_page_index: 1,
+                    }),
+                },
+                PageContinuation {
+                    page_index: 1,
+                    token: FragmentainerContinuation::Inline(InlineContinuationToken {
+                        child_index: 0,
+                        next_line_index: 4,
+                        inline_item_index: 3,
+                        text_offset: 16,
+                        shaping_result_index: 4,
+                        resume_page_index: 2,
+                    }),
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn outer_unsupported_container_prevents_a_nested_claim() {
         let controller = BlockPaginationController::default();
         controller.begin(page());
-        assert!(controller.claim(1, true).is_none());
-        assert!(controller.claim(3, false).is_none());
-        assert!(controller.claim(3, true).is_none());
+        assert!(controller.claim(1, true, false).is_none());
+        assert!(controller.claim(3, false, false).is_none());
+        assert!(controller.claim(3, true, false).is_none());
         assert_eq!(controller.finish().page_count, 0);
+    }
+
+    #[test]
+    fn a_single_inline_child_can_claim_the_paged_root() {
+        let controller = BlockPaginationController::default();
+        controller.begin(page());
+        assert!(controller.claim(1, true, true).is_some());
     }
 
     #[test]
@@ -727,8 +938,14 @@ mod tests {
 
         let outcome = builder.finish();
         assert_eq!(outcome.page_count, 3);
-        assert_eq!(outcome.continuations[0].token.next_child_index, 1);
-        assert_eq!(outcome.continuations[0].token.resume_page_index, 2);
+        assert!(matches!(
+            outcome.continuations[0].token,
+            FragmentainerContinuation::Block(BlockContinuationToken {
+                next_child_index: 1,
+                resume_page_index: 2,
+                ..
+            })
+        ));
         assert_eq!(
             outcome.warnings,
             vec![BlockPaginationWarning::OversizedUnbreakable {

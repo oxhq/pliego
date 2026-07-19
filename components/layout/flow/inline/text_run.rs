@@ -38,7 +38,7 @@ use crate::context::LayoutContext;
 use crate::dom::WeakLayoutBox;
 use crate::flow::inline::line::TextRunOffsets;
 use crate::flow::inline::{BidiLevels, LineBlockSizes, LineItem, SegmentContentFlags};
-use crate::fragment_tree::BaseFragmentInfo;
+use crate::fragment_tree::{BaseFragmentInfo, TextFragmentSource};
 
 // There are two reasons why we might want to break at the start:
 //
@@ -235,6 +235,8 @@ impl TextRunSegment {
         text_run: &TextRun,
         mut soft_wrap_policy: SegmentStartSoftWrapPolicy,
         ifc: &mut InlineFormattingContextLayout,
+        inline_item_index: usize,
+        shaping_result_index: &mut usize,
     ) {
         if self.break_at_start && soft_wrap_policy == SegmentStartSoftWrapPolicy::FollowLinebreaker
         {
@@ -250,6 +252,11 @@ impl TextRunSegment {
             .zip(&self.run_byte_ranges)
             .enumerate()
         {
+            let source = TextFragmentSource {
+                inline_item_index,
+                shaping_result_index: *shaping_result_index,
+            };
+            *shaping_result_index += 1;
             let character_count = text_content[text_range.clone()].chars().count();
             let new_character_range_end = character_range_start + character_count;
             let offsets = ifc
@@ -273,6 +280,7 @@ impl TextRunSegment {
                 text_run,
                 &self.info,
                 offsets,
+                source,
             );
             character_range_start = new_character_range_end;
         }
@@ -651,7 +659,11 @@ impl TextRun {
         results
     }
 
-    pub(super) fn layout_into_line_items(&self, ifc: &mut InlineFormattingContextLayout) {
+    pub(super) fn layout_into_line_items(
+        &self,
+        ifc: &mut InlineFormattingContextLayout,
+        inline_item_index: usize,
+    ) {
         if self.text_range.is_empty() {
             return;
         }
@@ -666,6 +678,7 @@ impl TextRun {
             false => SegmentStartSoftWrapPolicy::FollowLinebreaker,
         };
 
+        let mut shaping_result_index = 0;
         for item in self.items.iter() {
             ifc.possibly_flush_deferred_forced_line_break();
 
@@ -678,7 +691,13 @@ impl TextRun {
                 },
                 TextRunItem::Tab { bidi_level } => self.process_preserved_tab(ifc, *bidi_level),
                 TextRunItem::TextSegment(segment) => {
-                    segment.layout_into_line_items(self, soft_wrap_policy, ifc)
+                    segment.layout_into_line_items(
+                        self,
+                        soft_wrap_policy,
+                        ifc,
+                        inline_item_index,
+                        &mut shaping_result_index,
+                    )
                 },
             }
             soft_wrap_policy = SegmentStartSoftWrapPolicy::FollowLinebreaker;

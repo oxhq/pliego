@@ -100,6 +100,9 @@ pub(crate) struct TextFragment {
     #[conditional_malloc_size_of]
     pub text_content: Arc<String>,
     pub text_ranges: Vec<Range<usize>>,
+    /// Stable box-tree coordinates for each retained shaping result. Paged layout uses these
+    /// instead of process-local pointer identity when it records an inline continuation.
+    pub sources: Vec<TextFragmentSource>,
     /// Extra space to add for each justification opportunity.
     pub justification_adjustment: Au,
     /// When necessary, this field store the [`TextRunOffsets`] for a particular
@@ -108,6 +111,12 @@ pub(crate) struct TextFragment {
     /// Whether or not this [`TextFragment`] is an empty fragment added for the
     /// benefit of placing a text cursor on an otherwise empty editable line.
     pub is_empty_for_text_cursor: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, MallocSizeOf, PartialEq)]
+pub(crate) struct TextFragmentSource {
+    pub inline_item_index: usize,
+    pub shaping_result_index: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -424,6 +433,7 @@ impl Fragment {
 impl TextFragment {
     pub(crate) fn rendered_text(&self) -> String {
         debug_assert_eq!(self.glyphs.len(), self.text_ranges.len());
+        debug_assert_eq!(self.glyphs.len(), self.sources.len());
         rendered_text_from_ranges(&self.text_content, &self.text_ranges)
     }
 

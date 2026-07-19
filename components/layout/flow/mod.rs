@@ -5,6 +5,8 @@
 
 //! Flow layout, also known as block-and-inline layout.
 
+use std::sync::Arc;
+
 use app_units::{Au, MAX_AU};
 use inline::InlineFormattingContext;
 use layout_api::LayoutNode;
@@ -29,14 +31,16 @@ use crate::flow::same_formatting_context_block::SameFormattingContextBlock;
 use crate::formatting_contexts::{Baselines, IndependentFormattingContext};
 use crate::fragment_tree::{
     BaseFragmentInfo, BlockLevelLayoutInfo, BoxFragment, CollapsedBlockMargins, CollapsedMargin,
-    Fragment, FragmentFlags,
+    Fragment, FragmentFlags, TextFragmentSource,
 };
 use crate::geom::{
     AuOrAuto, LogicalRect, LogicalSides, LogicalSides1D, LogicalVec2, PhysicalPoint, PhysicalRect,
     PhysicalSides, ToLogical, ToLogicalWithContainingBlock,
 };
 use crate::layout_box_base::{IndependentFormattingContextLayoutResult, LayoutBoxBase};
-use crate::pages::{BlockBoundaryPlacement, BlockPageBuilder};
+use crate::pages::{
+    BlockBoundaryPlacement, BlockPageBuilder, InlineLine, InlineResumePoint,
+};
 use crate::positioned::{AbsolutelyPositionedBox, PositioningContext, PositioningContextLength};
 use crate::sizing::{
     self, ComputeInlineContentSizes, ContentSizes, InlineContentSizesResult, LazySize, Size,
@@ -758,9 +762,19 @@ fn layout_block_level_children(
     let supports_simple_block_pagination = child_boxes
         .iter()
         .all(|child_box| is_simple_normal_flow_child(&child_box.borrow()));
+    let supports_single_inline_child = child_boxes.len() == 1
+        && matches!(
+            &*child_boxes[0].borrow(),
+            BlockLevelBox::SameFormattingContextBlock(block)
+                if matches!(&block.contents, BlockContainer::InlineFormattingContext(_))
+        );
     let mut page_builder = layout_context
         .block_pagination
-        .claim(child_boxes.len(), supports_simple_block_pagination);
+        .claim(
+            child_boxes.len(),
+            supports_simple_block_pagination,
+            supports_single_inline_child,
+        );
 
     let fragments = match sequential_layout_state {
         Some(ref mut sequential_layout_state) => layout_block_level_children_sequentially(
@@ -952,6 +966,39 @@ fn prepare_fragmentainer_boundary(
             .tag
             .map(|tag| tag.to_display_list_fragment_id())
     });
+    if let Some((lines, line_fragments, box_fragment)) =
+        retained_inline_lines(fragment, placement_state)
+        && let Some(placement) = page_builder.place_inline_child(child_index, &lines)
+    {
+        let writing_mode = placement_state.containing_block.style.writing_mode;
+        for (line, translation) in line_fragments
+            .iter()
+            .zip(&placement.line_translations)
+        {
+            if translation.is_zero() {
+                continue;
+            }
+            line.base.translate_rect(
+                LogicalVec2 {
+                    inline: Au::zero(),
+                    block: *translation,
+                }
+                .to_physical_size(writing_mode),
+            );
+            line.clear_scrollable_overflow();
+        }
+        if !placement.added_block_size.is_zero() {
+            let mut content_rect = box_fragment
+                .content_rect()
+                .to_logical(placement_state.containing_block);
+            content_rect.size.block += placement.added_block_size;
+            box_fragment
+                .base
+                .set_rect(content_rect.as_physical(Some(placement_state.containing_block)));
+            box_fragment.clear_scrollable_overflow();
+        }
+        return;
+    }
     if let BlockBoundaryPlacement::NewPage { block_origin } = page_builder.place_child(
         child_index,
         node,
@@ -961,6 +1008,144 @@ fn prepare_fragmentainer_boundary(
     ) {
         placement_state.start_new_fragmentainer(block_origin);
     }
+}
+
+struct RetainedLineSource {
+    text_content: Arc<String>,
+    source_start: usize,
+    source_end: usize,
+    resume: InlineResumePoint,
+}
+
+fn retained_inline_lines<'a>(
+    fragment: &'a Fragment,
+    placement_state: &PlacementState,
+) -> Option<(
+    Vec<InlineLine>,
+    Vec<&'a crate::fragment_tree::PositioningFragment>,
+    &'a BoxFragment,
+)> {
+    if !placement_state
+        .containing_block
+        .style
+        .writing_mode
+        .is_horizontal()
+    {
+        return None;
+    }
+    let Fragment::Box(box_fragment) = fragment else {
+        return None;
+    };
+    if box_fragment.padding != PhysicalSides::zero()
+        || box_fragment.border != PhysicalSides::zero()
+    {
+        return None;
+    }
+    let content_block_start = placement_state.unplaced_content_block_start(box_fragment)?;
+    let line_fragments = box_fragment
+        .children
+        .iter()
+        .map(|fragment| match fragment {
+            Fragment::Positioning(line) if line.is_line_box() => Some(line.as_ref()),
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+    if line_fragments.len() < 2 {
+        return None;
+    }
+
+    let mut text_content = None;
+    let mut lines = Vec::with_capacity(line_fragments.len());
+    for line in &line_fragments {
+        let source = retained_line_source(&line.children)?;
+        if let Some(existing) = text_content.as_ref()
+            && !Arc::ptr_eq(existing, &source.text_content)
+        {
+            return None;
+        }
+        text_content = Some(source.text_content);
+        let rect = line
+            .base
+            .rect()
+            .to_logical(placement_state.containing_block);
+        lines.push(InlineLine {
+            block_start: content_block_start + rect.start_corner.block,
+            block_size: rect.size.block,
+            source_start: source.source_start,
+            source_end: source.source_end,
+            resume: source.resume,
+        });
+    }
+    Some((lines, line_fragments, box_fragment))
+}
+
+fn retained_line_source(fragments: &[Fragment]) -> Option<RetainedLineSource> {
+    let mut text_content = None;
+    let mut retained = Vec::new();
+    if !collect_retained_line_text(fragments, &mut text_content, &mut retained)
+        || retained.is_empty()
+    {
+        return None;
+    }
+    if retained
+        .windows(2)
+        .any(|pair| pair[1].0.start < pair[0].0.end)
+    {
+        return None;
+    }
+    let (first_range, first_source) = &retained[0];
+    Some(RetainedLineSource {
+        text_content: text_content?,
+        source_start: first_range.start,
+        source_end: retained.last()?.0.end,
+        resume: InlineResumePoint {
+            inline_item_index: first_source.inline_item_index,
+            text_offset: first_range.start,
+            shaping_result_index: first_source.shaping_result_index,
+        },
+    })
+}
+
+fn collect_retained_line_text(
+    fragments: &[Fragment],
+    text_content: &mut Option<Arc<String>>,
+    retained: &mut Vec<(std::ops::Range<usize>, TextFragmentSource)>,
+) -> bool {
+    for fragment in fragments {
+        match fragment {
+            Fragment::Text(text) => {
+                if text.glyphs.len() != text.text_ranges.len()
+                    || text.glyphs.len() != text.sources.len()
+                    || text
+                        .text_ranges
+                        .iter()
+                        .any(|range| range.start >= range.end || range.end > text.text_content.len())
+                {
+                    return false;
+                }
+                if let Some(existing) = text_content.as_ref() {
+                    if !Arc::ptr_eq(existing, &text.text_content) {
+                        return false;
+                    }
+                } else {
+                    *text_content = Some(text.text_content.clone());
+                }
+                retained.extend(text.text_ranges.iter().cloned().zip(text.sources.iter().copied()));
+            },
+            Fragment::Box(box_fragment) => {
+                if !collect_retained_line_text(&box_fragment.children, text_content, retained) {
+                    return false;
+                }
+            },
+            Fragment::Positioning(positioning) => {
+                if !collect_retained_line_text(&positioning.children, text_content, retained) {
+                    return false;
+                }
+            },
+            _ => return false,
+        }
+    }
+    true
 }
 
 impl BlockLevelBox {
@@ -1948,6 +2133,27 @@ impl<'container> PlacementState<'container> {
             marker_block_size: None,
             containing_block,
         }
+    }
+
+    fn unplaced_content_block_start(&self, fragment: &BoxFragment) -> Option<Au> {
+        let BlockLevelLayoutInfo {
+            clearance,
+            block_margins_collapsed_with_children: margins,
+        } = fragment.block_level_layout_info.as_ref()?.as_ref();
+        if clearance.is_some() || margins.collapsed_through {
+            return None;
+        }
+        let margin = if self.next_in_flow_margin_collapses_with_parent_start_margin {
+            Au::zero()
+        } else {
+            self.current_margin.adjoin(&margins.start).solve()
+        };
+        let content_offset = fragment
+            .content_rect()
+            .to_logical(self.containing_block)
+            .start_corner
+            .block;
+        Some(self.current_block_direction_position + margin + content_offset)
     }
 
     fn block_boundary_metrics(&self, fragment: &Fragment) -> Option<BlockBoundaryMetrics> {

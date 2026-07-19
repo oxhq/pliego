@@ -24,7 +24,9 @@ use super::inline_box::{InlineBoxContainerState, InlineBoxIdentifier, InlineBoxT
 use super::{InlineFormattingContextLayout, LineBlockSizes, SharedInlineStyles, line_height};
 use crate::cell::ArcRefCell;
 use crate::flow::inline::text_run::FontAndScriptInfo;
-use crate::fragment_tree::{BaseFragment, BaseFragmentInfo, BoxFragment, Fragment, TextFragment};
+use crate::fragment_tree::{
+    BaseFragment, BaseFragmentInfo, BoxFragment, Fragment, TextFragment, TextFragmentSource,
+};
 use crate::geom::{
     LogicalRect, LogicalSides, LogicalVec2, PhysicalRect, PhysicalSize, ToLogical,
     ToLogicalWithContainingBlock,
@@ -714,6 +716,7 @@ impl LineItemLayout<'_, '_> {
                     glyphs: text_item.text,
                     text_content: text_item.text_content,
                     text_ranges: text_item.text_ranges,
+                    sources: text_item.sources,
                     justification_adjustment: self.justification_adjustment,
                     offsets: text_item.offsets,
                     is_empty_for_text_cursor: text_item.is_empty_for_text_cursor,
@@ -984,6 +987,7 @@ pub(super) struct TextRunLineItem {
     pub text: Vec<Arc<ShapedTextSlice>>,
     pub text_content: Arc<String>,
     pub text_ranges: Vec<Range<usize>>,
+    pub sources: Vec<TextFragmentSource>,
     /// When necessary, this field store the [`TextRunOffsets`] for a particular
     /// [`TextRunLineItem`]. This is currently only used inside of text inputs.
     pub offsets: Option<Box<TextRunOffsets>>,
@@ -995,6 +999,7 @@ pub(super) struct TextRunLineItem {
 impl TextRunLineItem {
     fn trim_whitespace_at_end(&mut self, whitespace_trimmed: &mut Au) -> bool {
         debug_assert_eq!(self.text.len(), self.text_ranges.len());
+        debug_assert_eq!(self.text.len(), self.sources.len());
         if matches!(
             self.inline_styles
                 .style
@@ -1015,12 +1020,14 @@ impl TextRunLineItem {
 
         let first_whitespace_index = index_of_last_non_whitespace.unwrap_or(0);
         self.text_ranges.drain(first_whitespace_index..);
+        self.sources.drain(first_whitespace_index..);
         *whitespace_trimmed += self
             .text
             .drain(first_whitespace_index..)
             .map(|glyph| glyph.total_advance())
             .sum();
         debug_assert_eq!(self.text.len(), self.text_ranges.len());
+        debug_assert_eq!(self.text.len(), self.sources.len());
 
         // Only keep going if we only encountered whitespace.
         index_of_last_non_whitespace.is_none()
@@ -1028,6 +1035,7 @@ impl TextRunLineItem {
 
     fn trim_whitespace_at_start(&mut self, whitespace_trimmed: &mut Au) -> bool {
         debug_assert_eq!(self.text.len(), self.text_ranges.len());
+        debug_assert_eq!(self.text.len(), self.sources.len());
         if matches!(
             self.inline_styles
                 .style
@@ -1046,12 +1054,14 @@ impl TextRunLineItem {
             .unwrap_or(self.text.len());
 
         self.text_ranges.drain(0..index_of_first_non_whitespace);
+        self.sources.drain(0..index_of_first_non_whitespace);
         *whitespace_trimmed += self
             .text
             .drain(0..index_of_first_non_whitespace)
             .map(|glyph| glyph.total_advance())
             .sum();
         debug_assert_eq!(self.text.len(), self.text_ranges.len());
+        debug_assert_eq!(self.text.len(), self.sources.len());
 
         // Only keep going if we only encountered whitespace.
         self.text.is_empty()
@@ -1063,6 +1073,7 @@ impl TextRunLineItem {
         new_glyph_store: &Arc<ShapedTextSlice>,
         new_text_content: &Arc<String>,
         new_text_range: &Range<usize>,
+        new_source: TextFragmentSource,
         new_offsets: &Option<TextRunOffsets>,
         new_inline_styles: &SharedInlineStyles,
     ) -> bool {
@@ -1074,9 +1085,12 @@ impl TextRunLineItem {
             return false;
         }
         debug_assert_eq!(self.text.len(), self.text_ranges.len());
+        debug_assert_eq!(self.text.len(), self.sources.len());
         self.text.push(new_glyph_store.clone());
         self.text_ranges.push(new_text_range.clone());
+        self.sources.push(new_source);
         debug_assert_eq!(self.text.len(), self.text_ranges.len());
+        debug_assert_eq!(self.text.len(), self.sources.len());
 
         assert_eq!(self.offsets.is_some(), new_offsets.is_some());
         if let (Some(new_offsets), Some(existing_offsets)) = (new_offsets, self.offsets.as_mut()) {

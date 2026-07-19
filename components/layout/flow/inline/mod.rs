@@ -132,6 +132,7 @@ use crate::flow::{
 use crate::formatting_contexts::{Baselines, IndependentFormattingContext};
 use crate::fragment_tree::{
     BaseFragmentInfo, BoxFragment, CollapsedMargin, Fragment, FragmentFlags, PositioningFragment,
+    TextFragmentSource,
 };
 use crate::geom::{LogicalRect, LogicalSides1D, LogicalVec2, ToLogical};
 use crate::layout_box_base::LayoutBoxBase;
@@ -1634,6 +1635,7 @@ impl InlineFormattingContextLayout<'_> {
         text_run: &TextRun,
         info: &Arc<FontAndScriptInfo>,
         offsets: Option<TextRunOffsets>,
+        source: TextFragmentSource,
     ) {
         let inline_advance = glyph_store.total_advance();
         let flags = if glyph_store.is_whitespace() {
@@ -1688,6 +1690,7 @@ impl InlineFormattingContextLayout<'_> {
                 &glyph_store,
                 &self.ifc.text_content,
                 &text_range,
+                source,
                 &offsets,
                 &text_run.inline_styles,
             )
@@ -1701,6 +1704,7 @@ impl InlineFormattingContextLayout<'_> {
                 text: vec![glyph_store],
                 text_content: self.ifc.text_content.clone(),
                 text_ranges: vec![text_range],
+                sources: vec![source],
                 base_fragment_info: text_run.base_fragment_info,
                 inline_styles: text_run.inline_styles.clone(),
                 info: info.clone(),
@@ -1745,6 +1749,7 @@ impl InlineFormattingContextLayout<'_> {
                 text: Default::default(),
                 text_content: self.ifc.text_content.clone(),
                 text_ranges: Default::default(),
+                sources: Default::default(),
                 base_fragment_info: BaseFragmentInfo::anonymous(),
                 inline_styles: self.ifc.shared_inline_styles.clone(),
                 info: Arc::new(FontAndScriptInfo::simple_for_font(font)),
@@ -2121,7 +2126,7 @@ impl InlineFormattingContext {
             text_wrap_mode: style_text.text_wrap_mode,
         };
 
-        for item in self.inline_items.iter() {
+        for (inline_item_index, item) in self.inline_items.iter().enumerate() {
             // Any new box should flush a pending hard line break.
             if !matches!(item, InlineItem::EndInlineBox) {
                 layout.possibly_flush_deferred_forced_line_break();
@@ -2132,7 +2137,9 @@ impl InlineFormattingContext {
                     layout.start_inline_box(&inline_box.borrow());
                 },
                 InlineItem::EndInlineBox => layout.finish_inline_box(),
-                InlineItem::TextRun(run) => run.borrow().layout_into_line_items(&mut layout),
+                InlineItem::TextRun(run) => run
+                    .borrow()
+                    .layout_into_line_items(&mut layout, inline_item_index),
                 InlineItem::Atomic(atomic_formatting_context, offset_in_text, bidi_level) => {
                     atomic_formatting_context.borrow().layout_into_line_items(
                         &mut layout,
