@@ -6,7 +6,7 @@
     <style>
       @font-face {
         font-family: "Pliego Fixture";
-        src: url("Ahem.ttf") format("truetype");
+        src: url("Ahem.ttf");
       }
 
       html,
@@ -65,9 +65,17 @@
       >
     </main>
     <script>
-      queueMicrotask(() => {
+      queueMicrotask(async () => {
         document.querySelector('#js-mutation').textContent = 'JS MUTATION OK';
-        window.pliego?.ready({ fixture: 'text-scene' });
+        try {
+          await document.fonts.ready;
+          window.pliego?.ready({ fixture: 'text-scene' });
+        } catch (error) {
+          window.pliego?.fail({
+            code: 'FIXTURE_FONT_LOAD_FAILED',
+            message: String(error),
+          });
+        }
       });
     </script>
   </body>

@@ -20,6 +20,8 @@ INLINE_PNG_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mN
 INLINE_PNG = base64.b64decode(INLINE_PNG_BASE64, validate=True)
 SAFE_LINK = "https://example.com/pliego"
 JS_MUTATION_TEXT = "JS MUTATION OK"
+SOURCE_AHEM_SHA256 = "b719ecb31c5b21fc573c03f6421c74ac63c271a5a3ff841e34f9705fb94b8448"
+SANITIZED_AHEM_SHA256 = "649a7613cfa59d415188415e1488eb40fc9953742338a793538380234a539869"
 RunResult = tuple[bytes, str, bytes, bytes, dict[str, Any]]
 
 
@@ -292,10 +294,14 @@ def verify_fonts(
 
     require(referenced_fonts <= instances_by_id.keys(), "scene references missing font instances")
     fixture_font_bytes = fixture_font.read_bytes()
-    fixture_resource = f"sha256:{hashlib.sha256(fixture_font_bytes).hexdigest()}"
     require(
-        resources_by_id.get(fixture_resource) == fixture_font_bytes,
-        "bundled fixture font is absent from fonts.json",
+        hashlib.sha256(fixture_font_bytes).hexdigest() == SOURCE_AHEM_SHA256,
+        "bundled Ahem source changed without updating the canonical font oracle",
+    )
+    fixture_resource = f"sha256:{SANITIZED_AHEM_SHA256}"
+    require(
+        fixture_resource in resources_by_id,
+        "sanitized bundled fixture font is absent from fonts.json",
     )
     fixture_font_ids = {
         identifier
@@ -451,7 +457,9 @@ def verify_pdf_bundle(
 
     report = read_json(artifact_path(summary, "scene_report"))
     report_pdf = require_object(report.get("document_pdf"), "report document PDF")
-    require(report_pdf.get("artifact") == str(pdf_path), repr(report_pdf))
+    artifact_pdf = Path(summary["artifacts"]) / "document.pdf"
+    require(artifact_pdf.read_bytes() == pdf_bytes, "artifact and published PDFs differ")
+    require(report_pdf.get("artifact") == str(artifact_pdf), repr(report_pdf))
     require(report_pdf.get("status") == "rendered", repr(report_pdf))
     require(report_pdf.get("error") is None, repr(report_pdf))
     report_structure = require_object(report.get("pdf_structure"), "report PDF structure")
@@ -478,6 +486,68 @@ def verify_pdf_bundle(
     }
 
 
+def verify_artifact_bundle(summary: dict[str, Any]) -> None:
+    bundle_path = artifact_path(summary, "bundle")
+    bundle = read_json(bundle_path)
+    require(bundle.get("schema") == "pliego.bundle", repr(bundle))
+    require(bundle.get("version") == 1, repr(bundle))
+    require(bundle.get("render_id") == summary.get("render_id"), repr(bundle))
+
+    artifact_root = Path(summary["artifacts"])
+    entries = [require_object(value, "bundle entry") for value in require_list(bundle.get("entries"), "bundle entries")]
+    paths = [entry.get("path") for entry in entries]
+    require(all(isinstance(path, str) and bool(path) for path in paths), repr(paths))
+    require(paths == sorted(paths), f"bundle entries are not sorted: {paths!r}")
+    require(len(paths) == len(set(paths)), f"bundle entries are duplicated: {paths!r}")
+
+    actual_paths = []
+    for artifact in artifact_root.rglob("*"):
+        if not artifact.is_file() or artifact == bundle_path:
+            continue
+        require(
+            not (
+                artifact.name.startswith(".")
+                and ".pliego-" in artifact.name
+                and artifact.name.endswith(".tmp")
+            ),
+            f"temporary publication file survived: {artifact}",
+        )
+        actual_paths.append(artifact.relative_to(artifact_root).as_posix())
+    require(paths == sorted(actual_paths), "bundle does not cover the exact artifact file set")
+
+    for entry, relative in zip(entries, paths):
+        require("\\" not in relative and ".." not in relative.split("/"), repr(entry))
+        contents = (artifact_root / relative).read_bytes()
+        require(entry.get("bytes") == len(contents), repr(entry))
+        require(
+            entry.get("sha256") == f"sha256:{hashlib.sha256(contents).hexdigest()}",
+            f"bundle hash does not match {relative}",
+        )
+
+    output = require_object(bundle.get("output"), "bundle output")
+    output_path = Path(output.get("path", ""))
+    require(output_path == artifact_path(summary, "document_pdf"), repr(output))
+    output_bytes = output_path.read_bytes()
+    require(output.get("bytes") == len(output_bytes), repr(output))
+    require(
+        output.get("sha256") == f"sha256:{hashlib.sha256(output_bytes).hexdigest()}",
+        "bundle hash does not match the published PDF",
+    )
+
+
+def materialize_fixture(source: Path, font: Path, destination: Path) -> Path:
+    marker = 'url("Ahem.ttf")'
+    document = source.read_text(encoding="utf-8")
+    require(document.count(marker) == 1, "canonical fixture has no unique font URL marker")
+    encoded_font = base64.b64encode(font.read_bytes()).decode("ascii")
+    materialized = destination / source.name
+    materialized.write_text(
+        document.replace(marker, f'url("data:font/ttf;base64,{encoded_font}")'),
+        encoding="utf-8",
+    )
+    return materialized
+
+
 def run_and_verify(
     binary: Path,
     fixture: Path,
@@ -485,13 +555,14 @@ def run_and_verify(
     temp_root: Path,
     retained_run: Path,
 ) -> RunResult:
+    materialized_fixture = materialize_fixture(fixture, fixture_font, temp_root)
     environment = os.environ.copy()
     environment.update({"TMPDIR": str(temp_root), "TMP": str(temp_root), "TEMP": str(temp_root)})
     result = subprocess.run(
         [
             str(binary),
             "render",
-            fixture.name,
+            materialized_fixture.name,
             "--output",
             str(temp_root / "document.pdf"),
             "--artifacts",
@@ -501,7 +572,7 @@ def run_and_verify(
             "--page-margins",
             "72,54,36,18",
         ],
-        cwd=fixture.parent,
+        cwd=temp_root,
         env=environment,
         capture_output=True,
         text=True,
@@ -523,6 +594,7 @@ def run_and_verify(
     fonts_bytes, fixture_font_ids = verify_fonts(summary, referenced_fonts, fixture_font)
     preview_bytes = verify_report_and_preview(summary, scene_hash, scene_bytes)
     pdf_contract = verify_pdf_bundle(summary, scene_bytes, fixture_font_ids)
+    verify_artifact_bundle(summary)
     return scene_bytes, scene_hash, fonts_bytes, preview_bytes, pdf_contract
 
 
