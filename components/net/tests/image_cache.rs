@@ -10,7 +10,8 @@ use net::image_cache::ImageCacheFactoryImpl;
 use net_traits::image_cache::{
     FontResolver, ImageCache, ImageCacheFactory, ImageCacheResponseMessage, ImageCacheResult,
     ImageLoadListener, ImageOrMetadataAvailable, ImageResponse, PendingImageId,
-    PendingImageResponse,
+    PendingImageResponse, VectorImageColor, VectorImageFillRule, VectorImagePathSegment,
+    VectorImageSnapshotItem,
 };
 use net_traits::request::RequestId;
 use net_traits::{
@@ -80,8 +81,8 @@ fn jpeg_image_bytes() -> Vec<u8> {
 }
 
 fn svg_image_bytes() -> Vec<u8> {
-    br#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100">
-    <circle cx="50" cy="50" r="40" fill="red"/>
+    br#"<svg aria-hidden="true" height="16" viewBox="0 0 16 16" width="16" xmlns="http://www.w3.org/2000/svg">
+    <path d="M1 1h14v14H1z" fill="black"/>
 </svg>"#
         .to_vec()
 }
@@ -573,6 +574,38 @@ fn test_svg_rasterization() {
         };
         break vec_img;
     };
+
+    let snapshot = cache.vector_image_snapshot(vec_img.id).unwrap();
+    assert_eq!((snapshot.viewport_width, snapshot.viewport_height), (16.0, 16.0));
+    assert_eq!(snapshot.items.len(), 1);
+    let VectorImageSnapshotItem::Path {
+        segments,
+        fill,
+        fill_rule,
+    } = &snapshot.items[0]
+    else {
+        panic!("Expected retained SVG path");
+    };
+    assert_eq!(
+        segments,
+        &vec![
+            VectorImagePathSegment::MoveTo { x: 1.0, y: 1.0 },
+            VectorImagePathSegment::LineTo { x: 15.0, y: 1.0 },
+            VectorImagePathSegment::LineTo { x: 15.0, y: 15.0 },
+            VectorImagePathSegment::LineTo { x: 1.0, y: 15.0 },
+            VectorImagePathSegment::Close,
+        ]
+    );
+    assert_eq!(
+        *fill,
+        VectorImageColor {
+            red: 0,
+            green: 0,
+            blue: 0,
+            alpha: 1.0,
+        }
+    );
+    assert_eq!(*fill_rule, VectorImageFillRule::NonZero);
 
     let size = webrender_api::units::DeviceIntSize::new(100, 100);
     cache.rasterize_vector_image(vec_img.id, size, None);

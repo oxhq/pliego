@@ -508,44 +508,51 @@ impl ReplacedContents {
 
         let base = BaseFragment::new(self.base_fragment_info, style.clone().into(), rect);
         match &self.kind {
-            ReplacedContentKind::Image(image_info) => image_info
-                .image
-                .as_ref()
-                .and_then(|image| match image {
-                    Image::Raster(raster_image) => raster_image.id,
-                    Image::Vector(vector_image) => {
-                        let scale = layout_context.style_context.device_pixel_ratio();
-                        let width = object_fit_size.width.scale_by(scale.0).to_px();
-                        let height = object_fit_size.height.scale_by(scale.0).to_px();
-                        let size = Size2D::new(width, height);
-                        let tag = self.base_fragment_info.tag?;
-                        layout_context
-                            .image_resolver
-                            .rasterize_vector_image(
-                                vector_image.id,
-                                size,
-                                tag.node,
-                                vector_image.svg_id,
-                            )
-                            .and_then(|i| i.id)
+            ReplacedContentKind::Image(image_info) => {
+                let Some(image) = image_info.image.as_ref() else {
+                    return vec![];
+                };
+                let (image_key, vector_image_id) = match image {
+                    Image::Raster(raster_image) => {
+                        let Some(image_key) = raster_image.id else {
+                            return vec![];
+                        };
+                        (Some(image_key), None)
                     },
-                })
-                .map(|image_key| {
-                    Fragment::Image(Arc::new(ImageFragment {
-                        base,
-                        clip,
-                        image_key: Some(image_key),
-                        showing_broken_image_icon: image_info.showing_broken_image_icon,
-                        url: image_info.url.clone(),
-                    }))
-                })
-                .into_iter()
-                .collect(),
+                    Image::Vector(vector_image) => {
+                        let image_key = self.base_fragment_info.tag.and_then(|tag| {
+                            let scale = layout_context.style_context.device_pixel_ratio();
+                            let width = object_fit_size.width.scale_by(scale.0).to_px();
+                            let height = object_fit_size.height.scale_by(scale.0).to_px();
+                            let size = Size2D::new(width, height);
+                            layout_context
+                                .image_resolver
+                                .rasterize_vector_image(
+                                    vector_image.id,
+                                    size,
+                                    tag.node,
+                                    vector_image.svg_id,
+                                )
+                                .and_then(|i| i.id)
+                        });
+                        (image_key, Some(vector_image.id))
+                    },
+                };
+                vec![Fragment::Image(Arc::new(ImageFragment {
+                    base,
+                    clip,
+                    image_key,
+                    vector_image_id,
+                    showing_broken_image_icon: image_info.showing_broken_image_icon,
+                    url: image_info.url.clone(),
+                }))]
+            },
             ReplacedContentKind::Video(video_info) => {
                 vec![Fragment::Image(Arc::new(ImageFragment {
                     base,
                     clip,
                     image_key: video_info.image_key,
+                    vector_image_id: None,
                     showing_broken_image_icon: false,
                     url: None,
                 }))]
@@ -586,6 +593,7 @@ impl ReplacedContents {
                     base,
                     clip,
                     image_key: Some(image_key),
+                    vector_image_id: None,
                     showing_broken_image_icon: false,
                     url: None,
                 }))]
@@ -624,7 +632,7 @@ impl ReplacedContents {
                 );
 
                 let tag = self.base_fragment_info.tag.unwrap();
-                layout_context
+                let image_key = layout_context
                     .image_resolver
                     .rasterize_vector_image(
                         vector_image.id,
@@ -632,18 +640,15 @@ impl ReplacedContents {
                         tag.node,
                         vector_image.svg_id,
                     )
-                    .and_then(|image| image.id)
-                    .map(|image_key| {
-                        Fragment::Image(Arc::new(ImageFragment {
-                            base,
-                            clip,
-                            image_key: Some(image_key),
-                            showing_broken_image_icon: false,
-                            url: None,
-                        }))
-                    })
-                    .into_iter()
-                    .collect()
+                    .and_then(|image| image.id);
+                vec![Fragment::Image(Arc::new(ImageFragment {
+                    base,
+                    clip,
+                    image_key,
+                    vector_image_id: Some(vector_image.id),
+                    showing_broken_image_icon: false,
+                    url: None,
+                }))]
             },
             ReplacedContentKind::Audio => vec![],
         }

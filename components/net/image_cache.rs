@@ -18,7 +18,9 @@ use mime::Mime;
 use net_traits::image_cache::{
     FontResolver, Image, ImageCache, ImageCacheFactory, ImageCacheResponseCallback,
     ImageCacheResponseMessage, ImageCacheResult, ImageLoadListener, ImageOrMetadataAvailable,
-    ImageResponse, PendingImageId, RasterizationCompleteResponse, VectorImage,
+    ImageResponse, PendingImageId, RasterizationCompleteResponse, VectorImage, VectorImageColor,
+    VectorImageFillRule, VectorImagePathSegment, VectorImageSnapshot, VectorImageSnapshotItem,
+    VectorImageUnsupportedReason,
 };
 use net_traits::request::CorsSettings;
 use net_traits::{FetchMetadata, FetchResponseMsg, FilteredMetadata, NetworkError};
@@ -269,6 +271,118 @@ struct VectorImageData {
     #[conditional_malloc_size_of]
     svg_tree: Arc<usvg::Tree>,
     cors_status: CorsStatus,
+}
+
+fn snapshot_vector_image(tree: &usvg::Tree) -> VectorImageSnapshot {
+    let size = tree.size();
+    let mut items = Vec::new();
+    snapshot_vector_group(tree.root(), &mut items);
+    VectorImageSnapshot {
+        viewport_width: size.width(),
+        viewport_height: size.height(),
+        items,
+    }
+}
+
+fn snapshot_vector_group(group: &usvg::Group, items: &mut Vec<VectorImageSnapshotItem>) {
+    if group.should_isolate() {
+        items.push(VectorImageSnapshotItem::Unsupported {
+            reason: VectorImageUnsupportedReason::Compositing,
+        });
+        return;
+    }
+
+    for node in group.children() {
+        match node {
+            usvg::Node::Group(group) => snapshot_vector_group(group, items),
+            usvg::Node::Path(path) => snapshot_vector_path(path, items),
+            usvg::Node::Image(_) => items.push(VectorImageSnapshotItem::Unsupported {
+                reason: VectorImageUnsupportedReason::Image,
+            }),
+            usvg::Node::Text(_) => items.push(VectorImageSnapshotItem::Unsupported {
+                reason: VectorImageUnsupportedReason::Text,
+            }),
+        }
+    }
+}
+
+fn snapshot_vector_path(path: &usvg::Path, items: &mut Vec<VectorImageSnapshotItem>) {
+    if !path.is_visible() {
+        return;
+    }
+
+    let mut unsupported = false;
+    if path.stroke().is_some() {
+        items.push(VectorImageSnapshotItem::Unsupported {
+            reason: VectorImageUnsupportedReason::Stroke,
+        });
+        unsupported = true;
+    }
+
+    let Some(fill) = path.fill() else {
+        return;
+    };
+    let usvg::Paint::Color(color) = fill.paint() else {
+        items.push(VectorImageSnapshotItem::Unsupported {
+            reason: VectorImageUnsupportedReason::Paint,
+        });
+        return;
+    };
+    if unsupported {
+        return;
+    }
+
+    let Some(path_data) = path.data().clone().transform(path.abs_transform()) else {
+        items.push(VectorImageSnapshotItem::Unsupported {
+            reason: VectorImageUnsupportedReason::InvalidPath,
+        });
+        return;
+    };
+    let segments = path_data
+        .segments()
+        .map(|segment| match segment {
+            usvg::tiny_skia_path::PathSegment::MoveTo(point) => VectorImagePathSegment::MoveTo {
+                x: point.x,
+                y: point.y,
+            },
+            usvg::tiny_skia_path::PathSegment::LineTo(point) => VectorImagePathSegment::LineTo {
+                x: point.x,
+                y: point.y,
+            },
+            usvg::tiny_skia_path::PathSegment::QuadTo(control, point) => {
+                VectorImagePathSegment::QuadTo {
+                    x1: control.x,
+                    y1: control.y,
+                    x: point.x,
+                    y: point.y,
+                }
+            },
+            usvg::tiny_skia_path::PathSegment::CubicTo(control_1, control_2, point) => {
+                VectorImagePathSegment::CubicTo {
+                    x1: control_1.x,
+                    y1: control_1.y,
+                    x2: control_2.x,
+                    y2: control_2.y,
+                    x: point.x,
+                    y: point.y,
+                }
+            },
+            usvg::tiny_skia_path::PathSegment::Close => VectorImagePathSegment::Close,
+        })
+        .collect();
+    items.push(VectorImageSnapshotItem::Path {
+        segments,
+        fill: VectorImageColor {
+            red: color.red,
+            green: color.green,
+            blue: color.blue,
+            alpha: fill.opacity().get(),
+        },
+        fill_rule: match fill.rule() {
+            usvg::FillRule::NonZero => VectorImageFillRule::NonZero,
+            usvg::FillRule::EvenOdd => VectorImageFillRule::EvenOdd,
+        },
+    });
 }
 
 impl std::fmt::Debug for VectorImageData {
@@ -1158,6 +1272,14 @@ impl ImageCache for ImageCacheImpl {
             }
         });
         None
+    }
+
+    fn vector_image_snapshot(&self, image_id: PendingImageId) -> Option<VectorImageSnapshot> {
+        self.store
+            .lock()
+            .vector_images
+            .get(&image_id)
+            .map(|image| snapshot_vector_image(&image.svg_tree))
     }
 
     /// Add a new listener for the given pending image id. If the image is already present,

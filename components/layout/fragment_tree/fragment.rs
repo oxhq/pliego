@@ -11,6 +11,7 @@ use euclid::{Point2D, Rect, Size2D};
 use fonts::{FontMetrics, FontRef, ShapedTextSlice};
 use layout_api::BoxAreaType;
 use malloc_size_of_derive::MallocSizeOf;
+use net_traits::image_cache::VectorImageId;
 use servo_base::id::PipelineId;
 use servo_base::print_tree::PrintTree;
 use servo_url::ServoUrl;
@@ -135,6 +136,7 @@ pub(crate) struct ImageFragment {
     pub base: BaseFragment,
     pub clip: PhysicalRect<Au>,
     pub image_key: Option<ImageKey>,
+    pub vector_image_id: Option<VectorImageId>,
     pub showing_broken_image_icon: bool,
     pub url: Option<ServoUrl>,
 }

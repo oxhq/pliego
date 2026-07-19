@@ -2,15 +2,20 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::io::Cursor;
+
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use pliego::capture::{
     CaptureError, MissingTextMapping, UnsupportedPaintEvent, UnsupportedPaintKind,
     capture_document_scene,
 };
-use pliego::{Glyph, Operation, OperationMeta, Rect, Size};
+use pliego::pdf::render_document_pdf;
+use pliego::raster::render_first_page_png;
+use pliego::{Color, FillRule, Glyph, Operation, OperationMeta, Rect, Size};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use vello_cpu::Pixmap;
 
 const IMAGE_URL: &str = "https://example.test/logo.png";
 const LINK_URL: &str = "https://example.test/wrapped";
@@ -332,6 +337,119 @@ fn convert(snapshot: &[u8]) -> pliego::capture::SceneCapture {
         (url == IMAGE_URL).then(|| image_resource.clone())
     })
     .unwrap()
+}
+
+fn vector_only_snapshot() -> Vec<u8> {
+    serde_json::to_vec(&json!({
+        "boxes": [],
+        "fragments": [{
+            "depth": 0,
+            "kind": "image",
+            "rect": { "x": 50.0, "y": 20.0, "width": 32.0, "height": 16.0 },
+            "tag_id": null,
+            "paint_fragment_id": 7,
+            "text_run": null,
+            "image_url": null,
+            "vector_image": {
+                "viewport_width": 16.0,
+                "viewport_height": 16.0,
+                "items": [
+                    {
+                        "kind": "path",
+                        "segments": [
+                            { "kind": "move-to", "x": 1.0, "y": 1.0 },
+                            { "kind": "line-to", "x": 15.0, "y": 1.0 },
+                            { "kind": "line-to", "x": 15.0, "y": 15.0 },
+                            { "kind": "line-to", "x": 1.0, "y": 15.0 },
+                            { "kind": "close" }
+                        ],
+                        "fill": { "red": 0, "green": 0, "blue": 0, "alpha": 1.0 },
+                        "fill_rule": "non_zero"
+                    },
+                    { "kind": "unsupported", "reason": "stroke" }
+                ]
+            }
+        }],
+        "font_resources": [],
+        "font_instances": [],
+        "page_sequence": {
+            "pages": [{
+                "index": 0,
+                "width": 100.0,
+                "height": 60.0,
+                "margin_top": 5.0,
+                "margin_right": 5.0,
+                "margin_bottom": 5.0,
+                "margin_left": 5.0,
+                "available_inline_size": 90.0,
+                "available_block_size": 50.0
+            }]
+        },
+        "paint_events": [{
+            "sequence": 0,
+            "kind": "image",
+            "fragment_id": 7,
+            "tag_id": null,
+            "spatial_node_id": 11,
+            "clip_id": null
+        }],
+        "paint_epoch": 1,
+        "paint_content_width": 100.0,
+        "paint_content_height": 60.0,
+        "paint_scroll_node_count": 1,
+        "paintable": true,
+        "contentful": true,
+        "first_reflow": false,
+        "links": []
+    }))
+    .unwrap()
+}
+
+#[test]
+fn expands_retained_filled_svg_path_for_both_backends() {
+    let captured = capture_document_scene(&vector_only_snapshot(), |_| None).unwrap();
+
+    assert_eq!(
+        captured.scene.pages[0].operations,
+        vec![Operation::Path {
+            bounds: Rect {
+                x: 52.0,
+                y: 21.0,
+                width: 28.0,
+                height: 14.0,
+            },
+            data: "M52,21 L80,21 L80,35 L52,35 Z".into(),
+            fill: Some(Color {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            }),
+            fill_rule: FillRule::NonZero,
+            stroke: None,
+            meta: OperationMeta::default(),
+        }]
+    );
+    assert_eq!(
+        captured.unsupported_events,
+        vec![UnsupportedPaintEvent {
+            sequence: 0,
+            kind: UnsupportedPaintKind::SvgStroke,
+        }]
+    );
+
+    let png = render_first_page_png(&captured.scene, |_| None).unwrap();
+    let pixmap = Pixmap::from_png(Cursor::new(png)).unwrap();
+    let data = pixmap.data_as_u8_slice();
+    let pixel = |x: usize, y: usize| {
+        let start = (y * usize::from(pixmap.width()) + x) * 4;
+        &data[start..start + 4]
+    };
+    assert_eq!(pixel(60, 25), [0, 0, 0, 255]);
+    assert_eq!(pixel(50, 20), [0, 0, 0, 0]);
+
+    let pdf = render_document_pdf(&captured.scene, |_| None, |_| None).unwrap();
+    assert!(pdf.starts_with(b"%PDF-"));
 }
 
 #[test]

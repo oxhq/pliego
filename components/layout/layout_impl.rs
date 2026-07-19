@@ -467,6 +467,12 @@ impl Layout for LayoutThread {
                         },
                         _ => None,
                     };
+                    let vector_image = match fragment {
+                        Fragment::Image(image_fragment) => image_fragment
+                            .vector_image_id
+                            .and_then(|image_id| self.image_cache.vector_image_snapshot(image_id)),
+                        _ => None,
+                    };
                     rows.push(LayoutDebugFragment {
                         depth,
                         kind: kind.into(),
@@ -480,6 +486,7 @@ impl Layout for LayoutThread {
                             },
                             _ => None,
                         },
+                        vector_image,
                     });
                     None::<()>
                 });

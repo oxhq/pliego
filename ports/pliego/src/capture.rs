@@ -9,8 +9,9 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use vello_cpu::kurbo::{BezPath, Shape};
 
-use crate::{DocumentScene, Glyph, Operation, OperationMeta, Page, Rect, Size};
+use crate::{Color, DocumentScene, FillRule, Glyph, Operation, OperationMeta, Page, Rect, Size};
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct SceneCapture {
@@ -61,6 +62,12 @@ pub enum UnsupportedPaintKind {
     Outline,
     CollapsedTableBorders,
     Iframe,
+    SvgCompositing,
+    SvgStroke,
+    SvgPaint,
+    SvgImage,
+    SvgText,
+    SvgInvalidPath,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -128,6 +135,12 @@ pub enum CaptureError {
         sequence: usize,
     },
     MissingImageUrl {
+        sequence: usize,
+    },
+    InvalidVectorImageGeometry {
+        sequence: usize,
+    },
+    InvalidVectorPath {
         sequence: usize,
     },
     UnresolvedImage {
@@ -264,6 +277,14 @@ impl fmt::Display for CaptureError {
                     "image paint event {sequence} has no retained source URL"
                 )
             },
+            Self::InvalidVectorImageGeometry { sequence } => write!(
+                formatter,
+                "image paint event {sequence} has invalid retained vector geometry"
+            ),
+            Self::InvalidVectorPath { sequence } => write!(
+                formatter,
+                "image paint event {sequence} has an invalid retained vector path"
+            ),
             Self::UnresolvedImage { sequence, url } => write!(
                 formatter,
                 "image paint event {sequence} has no content address for {url}"
@@ -450,13 +471,31 @@ pub fn capture_document_scene(
                         fragment_kind: fragment.kind.clone(),
                     });
                 }
-                let bounds = fragment
+                let rect = fragment
                     .rect
                     .as_ref()
                     .ok_or(CaptureError::MissingImageRect {
                         sequence: event.sequence,
-                    })?
-                    .into_scene_rect();
+                    })?;
+                if let Some(vector_image) = fragment.vector_image.as_ref() {
+                    append_vector_image(
+                        &mut operations,
+                        &mut unsupported_events,
+                        vector_image,
+                        rect,
+                        event.sequence,
+                    )?;
+                    append_link(
+                        &mut operations,
+                        &mut emitted_links,
+                        &links,
+                        fragment_id,
+                        fragment,
+                        event.sequence,
+                    )?;
+                    continue;
+                }
+                let bounds = rect.into_scene_rect();
                 let url = fragment
                     .image_url
                     .as_deref()
@@ -857,6 +896,108 @@ fn append_link(
     Ok(())
 }
 
+fn append_vector_image(
+    operations: &mut Vec<PositionedOperation>,
+    unsupported_events: &mut Vec<UnsupportedPaintEvent>,
+    vector_image: &CaptureVectorImage,
+    rect: &CaptureRect,
+    sequence: usize,
+) -> Result<(), CaptureError> {
+    if !positive_finite(vector_image.viewport_width)
+        || !positive_finite(vector_image.viewport_height)
+    {
+        return Err(CaptureError::InvalidVectorImageGeometry { sequence });
+    }
+    let scale_x = f64::from(rect.width) / f64::from(vector_image.viewport_width);
+    let scale_y = f64::from(rect.height) / f64::from(vector_image.viewport_height);
+    let point = |x: f32, y: f32| {
+        (
+            f64::from(rect.x) + f64::from(x) * scale_x,
+            f64::from(rect.y) + f64::from(y) * scale_y,
+        )
+    };
+
+    for item in &vector_image.items {
+        let CaptureVectorImageItem::Path {
+            segments,
+            fill,
+            fill_rule,
+        } = item
+        else {
+            let CaptureVectorImageItem::Unsupported { reason } = item else {
+                unreachable!();
+            };
+            unsupported_events.push(UnsupportedPaintEvent {
+                sequence,
+                kind: match reason {
+                    CaptureVectorUnsupportedReason::Compositing => {
+                        UnsupportedPaintKind::SvgCompositing
+                    },
+                    CaptureVectorUnsupportedReason::Stroke => UnsupportedPaintKind::SvgStroke,
+                    CaptureVectorUnsupportedReason::Paint => UnsupportedPaintKind::SvgPaint,
+                    CaptureVectorUnsupportedReason::Image => UnsupportedPaintKind::SvgImage,
+                    CaptureVectorUnsupportedReason::Text => UnsupportedPaintKind::SvgText,
+                    CaptureVectorUnsupportedReason::InvalidPath => {
+                        UnsupportedPaintKind::SvgInvalidPath
+                    },
+                },
+            });
+            continue;
+        };
+
+        let mut path = BezPath::new();
+        for segment in segments {
+            match *segment {
+                CaptureVectorPathSegment::MoveTo { x, y } => path.move_to(point(x, y)),
+                CaptureVectorPathSegment::LineTo { x, y } => path.line_to(point(x, y)),
+                CaptureVectorPathSegment::QuadTo { x1, y1, x, y } => {
+                    path.quad_to(point(x1, y1), point(x, y));
+                },
+                CaptureVectorPathSegment::CubicTo {
+                    x1,
+                    y1,
+                    x2,
+                    y2,
+                    x,
+                    y,
+                } => path.curve_to(point(x1, y1), point(x2, y2), point(x, y)),
+                CaptureVectorPathSegment::Close => path.close_path(),
+            }
+        }
+        if path.elements().is_empty() {
+            return Err(CaptureError::InvalidVectorPath { sequence });
+        }
+        let path_bounds = path.bounding_box();
+        let bounds = Rect {
+            x: path_bounds.x0,
+            y: path_bounds.y0,
+            width: path_bounds.width(),
+            height: path_bounds.height(),
+        };
+        operations.push(PositionedOperation {
+            sequence,
+            bounds: bounds.clone(),
+            operation: Operation::Path {
+                bounds,
+                data: path.to_svg(),
+                fill: Some(Color {
+                    r: f64::from(fill.red) / 255.0,
+                    g: f64::from(fill.green) / 255.0,
+                    b: f64::from(fill.blue) / 255.0,
+                    a: f64::from(fill.alpha),
+                }),
+                fill_rule: match fill_rule {
+                    CaptureVectorFillRule::NonZero => FillRule::NonZero,
+                    CaptureVectorFillRule::EvenOdd => FillRule::EvenOdd,
+                },
+                stroke: None,
+                meta: OperationMeta::default(),
+            },
+        });
+    }
+    Ok(())
+}
+
 fn ensure_content_address(resource: &str) -> Result<(), CaptureError> {
     content_address_digest(resource).map(|_| ())
 }
@@ -988,6 +1129,84 @@ struct CaptureFragment {
     paint_fragment_id: Option<usize>,
     text_run: Option<CaptureTextRun>,
     image_url: Option<String>,
+    #[serde(default)]
+    vector_image: Option<CaptureVectorImage>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CaptureVectorImage {
+    viewport_width: f32,
+    viewport_height: f32,
+    items: Vec<CaptureVectorImageItem>,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+enum CaptureVectorImageItem {
+    Path {
+        segments: Vec<CaptureVectorPathSegment>,
+        fill: CaptureVectorColor,
+        fill_rule: CaptureVectorFillRule,
+    },
+    Unsupported {
+        reason: CaptureVectorUnsupportedReason,
+    },
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+enum CaptureVectorPathSegment {
+    MoveTo {
+        x: f32,
+        y: f32,
+    },
+    LineTo {
+        x: f32,
+        y: f32,
+    },
+    QuadTo {
+        x1: f32,
+        y1: f32,
+        x: f32,
+        y: f32,
+    },
+    CubicTo {
+        x1: f32,
+        y1: f32,
+        x2: f32,
+        y2: f32,
+        x: f32,
+        y: f32,
+    },
+    Close,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CaptureVectorColor {
+    red: u8,
+    green: u8,
+    blue: u8,
+    alpha: f32,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum CaptureVectorFillRule {
+    NonZero,
+    EvenOdd,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum CaptureVectorUnsupportedReason {
+    Compositing,
+    Stroke,
+    Paint,
+    Image,
+    Text,
+    InvalidPath,
 }
 
 #[derive(Deserialize)]

@@ -35,6 +35,84 @@ pub trait FontResolver: Sync + Send {
 
 pub type VectorImageId = PendingImageId;
 
+/// A renderer-neutral snapshot of the subset of an SVG retained for document capture.
+///
+/// Coordinates have already been transformed into the SVG viewport. Consumers only need to
+/// scale and translate them into the laid-out image fragment.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct VectorImageSnapshot {
+    pub viewport_width: f32,
+    pub viewport_height: f32,
+    pub items: Vec<VectorImageSnapshotItem>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum VectorImageSnapshotItem {
+    Path {
+        segments: Vec<VectorImagePathSegment>,
+        fill: VectorImageColor,
+        fill_rule: VectorImageFillRule,
+    },
+    Unsupported {
+        reason: VectorImageUnsupportedReason,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum VectorImagePathSegment {
+    MoveTo {
+        x: f32,
+        y: f32,
+    },
+    LineTo {
+        x: f32,
+        y: f32,
+    },
+    QuadTo {
+        x1: f32,
+        y1: f32,
+        x: f32,
+        y: f32,
+    },
+    CubicTo {
+        x1: f32,
+        y1: f32,
+        x2: f32,
+        y2: f32,
+        x: f32,
+        y: f32,
+    },
+    Close,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+pub struct VectorImageColor {
+    pub red: u8,
+    pub green: u8,
+    pub blue: u8,
+    pub alpha: f32,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VectorImageFillRule {
+    NonZero,
+    EvenOdd,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum VectorImageUnsupportedReason {
+    Compositing,
+    Stroke,
+    Paint,
+    Image,
+    Text,
+    InvalidPath,
+}
+
 // Represents either a raster image for which the pixel data is available
 // or a vector image for which only the natural dimensions are available
 // and thus requires a further rasterization step to render.
@@ -220,6 +298,11 @@ pub trait ImageCache: Sync + Send {
         size: DeviceIntSize,
         svg_id: Option<Uuid>,
     ) -> Option<RasterImage>;
+
+    /// Returns a renderer-neutral snapshot of the already parsed SVG tree.
+    ///
+    /// This deliberately does not expose `usvg` types or reparse source bytes.
+    fn vector_image_snapshot(&self, image_id: VectorImageId) -> Option<VectorImageSnapshot>;
 
     /// Adds a new listener to be notified once the given `image_id` has been rasterized at
     /// the given `size`. The listener will receive a `VectorImageRasterizationComplete`

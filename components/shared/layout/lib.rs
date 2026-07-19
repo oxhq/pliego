@@ -39,7 +39,7 @@ pub use layout_node::{DangerousStyleNode, LayoutNode};
 use libc::c_void;
 use malloc_size_of::{MallocSizeOf as MallocSizeOfTrait, MallocSizeOfOps, malloc_size_of_is_0};
 use malloc_size_of_derive::MallocSizeOf;
-use net_traits::image_cache::{ImageCache, ImageCacheFactory, PendingImageId};
+use net_traits::image_cache::{ImageCache, ImageCacheFactory, PendingImageId, VectorImageSnapshot};
 use net_traits::request::InternalRequest;
 use paint_api::CrossProcessPaintApi;
 use parking_lot::RwLock;
@@ -351,6 +351,9 @@ pub struct LayoutDebugFragment {
     /// WebRender image keys are deliberately excluded from this stable snapshot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_url: Option<String>,
+    /// Renderer-neutral vector content retained from the already parsed SVG image.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vector_image: Option<VectorImageSnapshot>,
 }
 
 /// A fragment-level event observed by the real display-list paint traversal.

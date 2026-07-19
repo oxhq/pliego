@@ -896,9 +896,11 @@ impl PaintTraversalHandler for DisplayListBuilder<'_> {
             .to_webrender();
         let common = self.common_properties(state, clip, &style);
 
-        if let Some(image_key) = fragment.image_key {
+        if fragment.image_key.is_some() || fragment.vector_image_id.is_some() {
             self.debug_capture
                 .record_fragment("image", fragment, fragment.base.tag, state);
+        }
+        if let Some(image_key) = fragment.image_key {
             self.wr().push_image(
                 &common,
                 rect,
@@ -931,7 +933,7 @@ impl PaintTraversalHandler for DisplayListBuilder<'_> {
         }
 
         if fragment.showing_broken_image_icon {
-            if fragment.image_key.is_none() {
+            if fragment.image_key.is_none() && fragment.vector_image_id.is_none() {
                 self.debug_capture.record_fragment(
                     "image",
                     fragment,
