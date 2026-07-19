@@ -262,6 +262,35 @@ jobs:
           path: target/pliego-paged-typography/${{ github.run_id }}-${{ github.run_attempt }}
           if-no-files-found: warn
           retention-days: 7
+      - name: Pliego paged product gates
+        run: |
+          binary=target/${{ inputs.profile }}/pliego
+          output=target/pliego-product-gates/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}
+          mkdir -p "$output"
+          set -o pipefail
+          {
+            python ports/pliego/tests/check_forced_breaks.py --self-test &&
+            xvfb-run python ports/pliego/tests/check_forced_breaks.py "$binary" &&
+            python ports/pliego/tests/check_break_inside.py --self-test &&
+            xvfb-run python ports/pliego/tests/check_break_inside.py "$binary" &&
+            python ports/pliego/tests/check_paged_ci.py --self-test &&
+            xvfb-run python ports/pliego/tests/check_paged_ci.py "$binary" "$output/paged-ci" &&
+            xvfb-run python ports/pliego/tests/check_deterministic_environment.py "$binary" &&
+            python ports/pliego/tests/check_asset_cache.py --self-test &&
+            xvfb-run python ports/pliego/tests/check_asset_cache.py "$binary" "$output/asset-cache" &&
+            python ports/pliego/tests/check_hybrid_canvas_live.py --self-test &&
+            xvfb-run python ports/pliego/tests/check_hybrid_canvas_live.py "$binary" "$output/canvas" &&
+            python ports/pliego/tests/check_svg_vector.py --self-test &&
+            xvfb-run python ports/pliego/tests/check_svg_vector.py "$binary" "$output/svg"
+          } 2>&1 | tee "$output/output.log"
+      - name: Retain Pliego paged product-gate proof
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: pliego-product-gates-${{ inputs.profile }}-${{ needs.runner-select.outputs.unique-id }}
+          path: target/pliego-product-gates/${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: warn
+          retention-days: 7
       - name: Pliego image limits
         run: |
           output=target/pliego-image-limits/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}
