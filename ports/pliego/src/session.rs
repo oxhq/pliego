@@ -249,6 +249,36 @@ impl SessionArtifacts {
         self.write_bytes("scene-preview.png", png)
     }
 
+    pub fn write_scene_previews(&self, pages: &[Vec<u8>]) -> io::Result<Vec<PathBuf>> {
+        if pages.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "scene preview requires at least one page",
+            ));
+        }
+        if pages.len() == 1 {
+            self.write_scene_preview(&pages[0])?;
+            return Ok(vec![self.directory.join("scene-preview.png")]);
+        }
+
+        let directory = self.directory.join("pages");
+        create_private_directory(&directory)?;
+        pages
+            .iter()
+            .enumerate()
+            .map(|(index, png)| {
+                let path = directory.join(format!("page-{:04}.png", index + 1));
+                let mut file = open_private_file(&path)?;
+                file.write_all(png)?;
+                Ok(path)
+            })
+            .collect()
+    }
+
+    pub fn write_pages(&self, pages: &serde_json::Value) -> io::Result<()> {
+        self.write_json("pages.json", pages)
+    }
+
     pub fn write_document_pdf(&self, pdf: &[u8]) -> io::Result<()> {
         self.write_bytes("document.pdf", pdf)
     }

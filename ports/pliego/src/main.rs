@@ -23,7 +23,7 @@ use pliego::capture::{SceneCapture, capture_document_scene};
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
 use pliego::pdf::{CSS_PX_TO_PDF_PT, PdfFontResource, PdfFontVariation, render_document_pdf};
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
-use pliego::raster::{RasterFontResource, RasterFontVariation, render_first_page_png_with_images};
+use pliego::raster::{RasterFontResource, RasterFontVariation, render_pages_png_with_images};
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
 use readiness::{Readiness, parse_snapshot};
 use session::{LocalDocument, SessionArtifacts};
@@ -710,10 +710,12 @@ fn render(request: RenderRequest) {
                 &error.to_string(),
             )
         });
-    let scene_preview = scene_artifacts
-        .preview_path
-        .as_ref()
-        .map(|path| path.to_string_lossy().into_owned());
+    let scene_previews = scene_artifacts
+        .preview_paths
+        .iter()
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    let scene_preview = scene_previews.first().cloned();
     record_artifact(artifacts.record_state("rendered", None));
     let bundle_path = artifacts
         .write_bundle(&document_pdf_path)
@@ -738,6 +740,7 @@ fn render(request: RenderRequest) {
             "input": request.input.to_string_lossy(),
             "resolved_input": document.path().to_string_lossy(),
             "layout_debug": layout_debug_path.to_string_lossy(),
+            "pages_artifact": scene_artifacts.pages_path.to_string_lossy(),
             "readiness": readiness_payload,
             "render_id": render_id,
             "rendered_image": proof.to_string_lossy(),
@@ -756,6 +759,7 @@ fn render(request: RenderRequest) {
             "fonts_artifact": scene_artifacts.fonts_path.to_string_lossy(),
             "scene_report": scene_artifacts.report_path.to_string_lossy(),
             "scene_preview": scene_preview,
+            "scene_previews": scene_previews,
             "document_pdf": document_pdf_path.to_string_lossy(),
             "document_pdf_status": scene_artifacts.pdf_status,
             "pdf_structure": scene_artifacts.pdf_structure_path.to_string_lossy(),
@@ -1159,7 +1163,8 @@ struct SceneArtifactSummary {
     scene_path: PathBuf,
     fonts_path: PathBuf,
     report_path: PathBuf,
-    preview_path: Option<PathBuf>,
+    pages_path: PathBuf,
+    preview_paths: Vec<PathBuf>,
     pdf_path: PathBuf,
     pdf_status: &'static str,
     pdf_structure_path: PathBuf,
@@ -1173,6 +1178,7 @@ struct SceneArtifactSummary {
 #[derive(Debug, PartialEq, serde::Serialize)]
 struct PreviewUnsupported {
     code: &'static str,
+    page_index: usize,
     operation_index: usize,
     kind: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1184,15 +1190,6 @@ fn persist_scene_capture(
     artifacts: &SessionArtifacts,
     capture: &SceneCapture,
 ) -> Result<SceneArtifactSummary, SceneArtifactError> {
-    let page_count = capture.scene.pages.len();
-    if page_count != 1 {
-        return Err(SceneArtifactError::new(
-            "SCENE_OUTPUT_MULTIPAGE_UNSUPPORTED",
-            format!(
-                "canonical scene contains {page_count} pages; preview and PDF currently support exactly one page"
-            ),
-        ));
-    }
     let scene_bytes = capture.scene.normalized_json().map_err(|message| {
         SceneArtifactError::new("SCENE_CAPTURE_NORMALIZATION_FAILED", message)
     })?;
@@ -1256,31 +1253,37 @@ fn persist_scene_capture(
     }
 
     let mut unsupported = Vec::new();
-    for (operation_index, operation) in capture.scene.pages[0].operations.iter().enumerate() {
-        match operation {
-            Operation::Text { font, .. } => {
-                let instance = instances_by_id
-                    .get(font)
-                    .expect("capture validated scene font references");
-                if !instance.variations.is_empty() {
+    for (page_index, page) in capture.scene.pages.iter().enumerate() {
+        for (operation_index, operation) in page.operations.iter().enumerate() {
+            match operation {
+                Operation::Text { font, .. } => {
+                    let instance = instances_by_id
+                        .get(font)
+                        .expect("capture validated scene font references");
+                    if !instance.variations.is_empty() {
+                        unsupported.push(PreviewUnsupported {
+                            code: "SCENE_CAPTURE_PREVIEW_UNSUPPORTED_FONT_VARIATIONS",
+                            page_index,
+                            operation_index,
+                            kind: "text",
+                            font: Some(font.clone()),
+                        });
+                    }
+                },
+                Operation::Image { resource, .. }
+                    if image_resource_errors.contains_key(resource) =>
+                {
                     unsupported.push(PreviewUnsupported {
-                        code: "SCENE_CAPTURE_PREVIEW_UNSUPPORTED_FONT_VARIATIONS",
+                        code: "SCENE_CAPTURE_PREVIEW_UNSUPPORTED_OPERATION",
+                        page_index,
                         operation_index,
-                        kind: "text",
-                        font: Some(font.clone()),
+                        kind: "image",
+                        font: None,
                     });
-                }
-            },
-            Operation::Image { resource, .. } if image_resource_errors.contains_key(resource) => {
-                unsupported.push(PreviewUnsupported {
-                    code: "SCENE_CAPTURE_PREVIEW_UNSUPPORTED_OPERATION",
-                    operation_index,
-                    kind: "image",
-                    font: None,
-                });
-            },
-            Operation::Image { .. } => {},
-            Operation::Path { .. } | Operation::Link { .. } => {},
+                },
+                Operation::Image { .. } => {},
+                Operation::Path { .. } | Operation::Link { .. } => {},
+            }
         }
     }
 
@@ -1305,7 +1308,7 @@ fn persist_scene_capture(
             })?;
     }
 
-    let preview_path = if unsupported.is_empty() {
+    let preview_paths = if unsupported.is_empty() {
         let variations_by_instance = capture
             .font_instances
             .iter()
@@ -1323,7 +1326,7 @@ fn persist_scene_capture(
                 )
             })
             .collect::<BTreeMap<_, _>>();
-        let png = render_first_page_png_with_images(
+        let pngs = render_pages_png_with_images(
             &capture.scene,
             |font| {
                 let instance = instances_by_id.get(font)?;
@@ -1340,13 +1343,42 @@ fn persist_scene_capture(
         .map_err(|error| {
             SceneArtifactError::new("SCENE_CAPTURE_PREVIEW_FAILED", error.to_string())
         })?;
-        artifacts.write_scene_preview(&png).map_err(|error| {
+        artifacts.write_scene_previews(&pngs).map_err(|error| {
             SceneArtifactError::new("SCENE_CAPTURE_PREVIEW_WRITE_FAILED", error.to_string())
-        })?;
-        Some(artifacts.directory().join("scene-preview.png"))
+        })?
     } else {
-        None
+        Vec::new()
     };
+
+    let preview_pages = capture
+        .scene
+        .pages
+        .iter()
+        .enumerate()
+        .map(|(index, page)| {
+            let artifact = preview_paths.get(index).map(|path| {
+                path.strip_prefix(artifacts.directory())
+                    .expect("preview artifact stays inside the session directory")
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            });
+            serde_json::json!({
+                "index": index,
+                "artifact": artifact,
+                "page_size": &page.size,
+                "operation_counts": scene_operation_counts(&page.operations),
+            })
+        })
+        .collect::<Vec<_>>();
+    let pages = serde_json::json!({
+        "schema": "pliego.pages",
+        "version": 1,
+        "page_count": capture.scene.pages.len(),
+        "pages": &preview_pages,
+    });
+    artifacts.write_pages(&pages).map_err(|error| {
+        SceneArtifactError::new("SCENE_CAPTURE_PAGES_WRITE_FAILED", error.to_string())
+    })?;
 
     let pdf_path = artifacts.directory().join("document.pdf");
     let pdf_structure_path = artifacts.directory().join("pdf-structure.json");
@@ -1429,7 +1461,7 @@ fn persist_scene_capture(
         } else {
             "partial"
         };
-    let preview_status = if preview_path.is_some() {
+    let preview_status = if preview_paths.len() == capture.scene.pages.len() {
         "rendered"
     } else {
         "unsupported"
@@ -1456,7 +1488,9 @@ fn persist_scene_capture(
         },
         "preview": {
             "status": preview_status,
-            "artifact": preview_path.as_ref().map(|_| "scene-preview.png"),
+            "artifact": (preview_paths.len() == 1).then_some("scene-preview.png"),
+            "page_count": preview_paths.len(),
+            "pages": preview_pages,
             "page_size": &capture.scene.pages[0].size,
             "operation_counts": scene_operation_counts(&capture.scene.pages[0].operations),
             "unsupported": unsupported,
@@ -1498,7 +1532,8 @@ fn persist_scene_capture(
         scene_path: artifacts.directory().join("scene.json"),
         fonts_path: artifacts.directory().join("fonts.json"),
         report_path: artifacts.directory().join("scene-report.json"),
-        preview_path,
+        pages_path: artifacts.directory().join("pages.json"),
+        preview_paths,
         pdf_path,
         pdf_status,
         pdf_structure_path,
@@ -2071,8 +2106,8 @@ mod tests {
     }
 
     #[test]
-    fn rejects_multi_page_scene_output_before_page_zero_rendering() {
-        let directory = temporary_artifacts("pliego-scene-multipage-unsupported");
+    fn persists_multi_page_scene_previews_manifest_and_pdf() {
+        let directory = temporary_artifacts("pliego-scene-multipage");
         let artifacts = SessionArtifacts::create(&directory).unwrap();
         let page = Page {
             size: Size {
@@ -2091,12 +2126,29 @@ mod tests {
             text_mapping_gaps: vec![],
         };
 
-        let error = persist_scene_capture(&artifacts, &capture).unwrap_err();
-        assert_eq!(error.code, "SCENE_OUTPUT_MULTIPAGE_UNSUPPORTED");
-        assert!(error.message.contains("contains 2 pages"));
+        let summary = persist_scene_capture(&artifacts, &capture).unwrap();
         assert!(!directory.join("scene-preview.png").exists());
-        assert!(!directory.join("document.pdf").exists());
-        assert!(!directory.join("pdf-structure.json").exists());
+        assert_eq!(summary.preview_paths.len(), 2);
+        assert_eq!(
+            summary.preview_paths,
+            [
+                directory.join("pages/page-0001.png"),
+                directory.join("pages/page-0002.png"),
+            ]
+        );
+        for path in &summary.preview_paths {
+            assert!(fs::read(path).unwrap().starts_with(b"\x89PNG\r\n\x1a\n"));
+        }
+        let pages: serde_json::Value =
+            serde_json::from_slice(&fs::read(&summary.pages_path).unwrap()).unwrap();
+        assert_eq!(pages["schema"], "pliego.pages");
+        assert_eq!(pages["page_count"], 2);
+        assert_eq!(pages["pages"][0]["artifact"], "pages/page-0001.png");
+        assert_eq!(pages["pages"][1]["artifact"], "pages/page-0002.png");
+        let structure: serde_json::Value =
+            serde_json::from_slice(&fs::read(&summary.pdf_structure_path).unwrap()).unwrap();
+        assert_eq!(structure["page_count"], 2);
+        assert!(fs::read(&summary.pdf_path).unwrap().starts_with(b"%PDF-"));
 
         fs::remove_dir_all(directory).unwrap();
     }
@@ -2158,7 +2210,7 @@ mod tests {
             DEJAVU_SANS
         );
         assert!(
-            fs::read(summary.preview_path.as_ref().unwrap())
+            fs::read(&summary.preview_paths[0])
                 .unwrap()
                 .starts_with(b"\x89PNG\r\n\x1a\n")
         );
