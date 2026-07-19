@@ -715,11 +715,22 @@ fn render(request: RenderRequest) {
         .as_ref()
         .map(|path| path.to_string_lossy().into_owned());
     record_artifact(artifacts.record_state("rendered", None));
+    let bundle_path = artifacts
+        .write_bundle(&document_pdf_path)
+        .unwrap_or_else(|error| {
+            fail_session(
+                &artifacts,
+                &document_pdf_path,
+                "BUNDLE_WRITE_FAILED",
+                &error.to_string(),
+            )
+        });
 
     println!(
         "{}",
         serde_json::json!({
             "artifacts": artifacts.directory().to_string_lossy(),
+            "bundle": bundle_path.to_string_lossy(),
             "engine": "pliego",
             "document_root": document.root().to_string_lossy(),
             "environment": environment,

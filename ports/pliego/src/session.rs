@@ -6,9 +6,30 @@ use std::error::Error;
 use std::ffi::OsString;
 use std::fmt;
 use std::fs::{File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+use serde::Serialize;
+use sha2::{Digest, Sha256};
+
+const BUNDLE_FILE_NAME: &str = "bundle.json";
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+struct BundleEntry {
+    path: String,
+    sha256: String,
+    bytes: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct BundleManifest<'a> {
+    schema: &'static str,
+    version: u32,
+    render_id: &'a str,
+    entries: Vec<BundleEntry>,
+    output: BundleEntry,
+}
 
 #[derive(Debug)]
 pub struct LocalDocument {
@@ -237,6 +258,49 @@ impl SessionArtifacts {
         publish_new_file(&self.directory.join("document.pdf"), destination.as_ref())
     }
 
+    /// Bind the completed diagnostic artifacts and published PDF to this render ID.
+    pub fn write_bundle(&self, output: impl AsRef<Path>) -> io::Result<PathBuf> {
+        require_rendered_terminal_state(&self.directory.join("session-state.jsonl"))?;
+        require_directory_without_symlink(&self.directory)?;
+
+        let mut entries = Vec::new();
+        collect_bundle_entries(&self.directory, &self.directory, &mut entries)?;
+        entries.sort_by(|left, right| left.path.cmp(&right.path));
+
+        let output_path = output.as_ref();
+        let output_path_string = output_path.to_str().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "published output path is not valid UTF-8: {}",
+                    output_path.display()
+                ),
+            )
+        })?;
+        let (output_sha256, output_bytes) = hash_regular_file(output_path)?;
+        let manifest = BundleManifest {
+            schema: "pliego.bundle",
+            version: 1,
+            render_id: &self.render_id,
+            entries,
+            output: BundleEntry {
+                path: output_path_string.to_owned(),
+                sha256: output_sha256,
+                bytes: output_bytes,
+            },
+        };
+
+        let bundle_path = self.directory.join(BUNDLE_FILE_NAME);
+        let mut bundle = private_file_options()
+            .write(true)
+            .create_new(true)
+            .open(&bundle_path)?;
+        serde_json::to_writer_pretty(&mut bundle, &manifest).map_err(io::Error::other)?;
+        bundle.write_all(b"\n")?;
+        bundle.sync_all()?;
+        Ok(bundle_path)
+    }
+
     pub fn write_pdf_structure(&self, structure: &serde_json::Value) -> io::Result<()> {
         self.write_json("pdf-structure.json", structure)
     }
@@ -315,6 +379,193 @@ impl SessionArtifacts {
         serde_json::to_writer(&mut file, &event).map_err(io::Error::other)?;
         file.write_all(b"\n")
     }
+}
+
+fn require_rendered_terminal_state(path: &Path) -> io::Result<()> {
+    let contents = std::fs::read_to_string(path)?;
+    let event = contents
+        .lines()
+        .rev()
+        .find(|line| !line.trim().is_empty())
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "session state has no terminal event",
+            )
+        })?;
+    let event: serde_json::Value = serde_json::from_str(event).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("session terminal state is invalid JSON: {error}"),
+        )
+    })?;
+    if event.get("state").and_then(serde_json::Value::as_str) != Some("rendered") {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "bundle may only be written after the rendered terminal state",
+        ));
+    }
+    Ok(())
+}
+
+fn require_directory_without_symlink(path: &Path) -> io::Result<()> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "bundle artifact root must be a directory, not a symlink or special file: {}",
+                path.display()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn collect_bundle_entries(
+    root: &Path,
+    directory: &Path,
+    entries: &mut Vec<BundleEntry>,
+) -> io::Result<()> {
+    for entry in std::fs::read_dir(directory)? {
+        let path = entry?.path();
+        let metadata = std::fs::symlink_metadata(&path)?;
+        if metadata.file_type().is_symlink() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "bundle artifacts may not contain symlinks: {}",
+                    path.display()
+                ),
+            ));
+        }
+        if metadata.is_dir() {
+            collect_bundle_entries(root, &path, entries)?;
+            continue;
+        }
+        if !metadata.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "bundle artifacts may only contain regular files and directories: {}",
+                    path.display()
+                ),
+            ));
+        }
+
+        let relative = normalized_relative_path(root, &path)?;
+        if is_bundle_excluded(&relative) {
+            continue;
+        }
+        let (sha256, bytes) = hash_regular_file(&path)?;
+        entries.push(BundleEntry {
+            path: relative,
+            sha256,
+            bytes,
+        });
+    }
+    Ok(())
+}
+
+fn normalized_relative_path(root: &Path, path: &Path) -> io::Result<String> {
+    let relative = path.strip_prefix(root).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "bundle artifact escapes its root {}: {}",
+                root.display(),
+                path.display()
+            ),
+        )
+    })?;
+    let mut normalized = Vec::new();
+    for component in relative.components() {
+        let Component::Normal(component) = component else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("bundle artifact path is unsafe: {}", path.display()),
+            ));
+        };
+        let component = component.to_str().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("bundle artifact path is not valid UTF-8: {}", path.display()),
+            )
+        })?;
+        if component.is_empty() || component.contains('\\') {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("bundle artifact path is unsafe: {}", path.display()),
+            ));
+        }
+        normalized.push(component);
+    }
+    if normalized.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "bundle artifact path may not be the artifact root",
+        ));
+    }
+    Ok(normalized.join("/"))
+}
+
+fn is_bundle_excluded(relative: &str) -> bool {
+    if relative == BUNDLE_FILE_NAME {
+        return true;
+    }
+    let file_name = relative.rsplit('/').next().unwrap_or(relative);
+    file_name.starts_with('.') && file_name.contains(".pliego-") && file_name.ends_with(".tmp")
+}
+
+fn hash_regular_file(path: &Path) -> io::Result<(String, u64)> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "bundle entry must be a regular file, not a symlink or special file: {}",
+                path.display()
+            ),
+        ));
+    }
+
+    let mut file = File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut bytes = 0_u64;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+        bytes = bytes.checked_add(read as u64).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("bundle entry is too large to count: {}", path.display()),
+            )
+        })?;
+    }
+    if bytes != metadata.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("bundle entry changed while hashing: {}", path.display()),
+        ));
+    }
+    Ok((
+        format!("sha256:{}", lowercase_hex(&hasher.finalize())),
+        bytes,
+    ))
+}
+
+fn lowercase_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        encoded.push(HEX[(byte >> 4) as usize] as char);
+        encoded.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    encoded
 }
 
 #[cfg(unix)]
@@ -776,6 +1027,60 @@ mod tests {
                 .to_string_lossy()
                 .contains(".pliego-")
         }));
+
+        fs::remove_dir_all(sandbox).unwrap();
+    }
+
+    #[test]
+    fn binds_sorted_artifacts_and_the_published_pdf_to_the_render_id() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let sandbox =
+            std::env::temp_dir().join(format!("pliego-bundle-{}-{unique}", std::process::id()));
+        fs::create_dir(&sandbox).unwrap();
+        let artifacts = SessionArtifacts::create_with_render_id(
+            sandbox.join("artifacts"),
+            "sha256:bundle-fixture",
+        )
+        .unwrap();
+        let output = sandbox.join("invoice.pdf");
+
+        artifacts.write_scene(b"{}\n").unwrap();
+        artifacts.write_document_pdf(b"%PDF-bundle").unwrap();
+        artifacts.publish_document_pdf(&output).unwrap();
+        artifacts.record_state("started", None).unwrap();
+        artifacts.record_state("rendered", None).unwrap();
+        let bundle_path = artifacts.write_bundle(&output).unwrap();
+        let bundle: serde_json::Value =
+            serde_json::from_slice(&fs::read(bundle_path).unwrap()).unwrap();
+
+        assert_eq!(bundle["schema"], "pliego.bundle");
+        assert_eq!(bundle["version"], 1);
+        assert_eq!(bundle["render_id"], "sha256:bundle-fixture");
+        assert_eq!(bundle["output"]["path"], output.to_string_lossy().as_ref());
+        assert_eq!(bundle["output"]["bytes"], 11);
+        assert_eq!(
+            bundle["output"]["sha256"],
+            "sha256:1e3325b692c5c5d3a7e354870e4ee26947d6d4614f48e5e4d2125bb944eeae16"
+        );
+        let paths: Vec<_> = bundle["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["path"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            paths,
+            [
+                "console.jsonl",
+                "document.pdf",
+                "resources.jsonl",
+                "scene.json",
+                "session-state.jsonl",
+            ]
+        );
 
         fs::remove_dir_all(sandbox).unwrap();
     }
