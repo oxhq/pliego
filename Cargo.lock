@@ -6608,6 +6608,7 @@ dependencies = [
  "servo-layout",
  "servoshell",
  "sha2 0.11.0",
+ "ttf-parser",
  "url",
  "vello_cpu 0.0.9",
 ]
@@ -8759,6 +8760,7 @@ dependencies = [
  "tokio-util",
  "tower",
  "tracing",
+ "ttf-parser",
  "tungstenite",
  "url",
  "uuid",

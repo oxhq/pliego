@@ -29,3 +29,4 @@ vello_cpu = { workspace = true }
 
 [dev-dependencies]
 flate2 = { workspace = true }
+ttf-parser = { workspace = true }

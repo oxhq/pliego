@@ -14,13 +14,15 @@ use vello_cpu::kurbo::{BezPath, Shape};
 use crate::hybrid_canvas::{
     CanvasDiagnostics, CanvasResource, CanvasTranscript, HybridCanvasCapture, adapt_canvas,
 };
-use crate::{Color, DocumentScene, FillRule, Glyph, Operation, OperationMeta, Page, Rect, Size};
+use crate::{Color, DocumentScene, FillRule, Glyph, Operation, OperationMeta, Page, Rect, Size, Stroke};
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct SceneCapture {
     pub scene: DocumentScene,
     #[serde(skip_serializing)]
     pub canvas_resources: Vec<CanvasResource>,
+    #[serde(skip_serializing)]
+    pub embedded_image_resources: Vec<CanvasResource>,
     pub canvas_diagnostics: Vec<CapturedCanvasDiagnostics>,
     pub font_resources: Vec<CapturedFontResource>,
     pub font_instances: Vec<CapturedFontInstance>,
@@ -224,6 +226,12 @@ pub enum CaptureError {
         resource: String,
         actual: String,
     },
+    InvalidVectorImageBase64(String),
+    VectorImageDigestMismatch {
+        resource: String,
+        actual: String,
+    },
+    ConflictingVectorResource(String),
     FontInstanceIdMismatch {
         instance: String,
         actual: String,
@@ -388,6 +396,18 @@ impl fmt::Display for CaptureError {
                 formatter,
                 "font resource {resource} contains bytes addressed as {actual}"
             ),
+            Self::InvalidVectorImageBase64(resource) => write!(
+                formatter,
+                "embedded SVG image resource {resource} is not canonical padded base64"
+            ),
+            Self::VectorImageDigestMismatch { resource, actual } => write!(
+                formatter,
+                "embedded SVG image resource {resource} contains bytes addressed as {actual}"
+            ),
+            Self::ConflictingVectorResource(resource) => write!(
+                formatter,
+                "retained SVG resources disagree on bytes for {resource}"
+            ),
             Self::FontInstanceIdMismatch { instance, actual } => write!(
                 formatter,
                 "font instance {instance} has derived identity {actual}"
@@ -439,8 +459,8 @@ pub fn capture_document_scene_with_canvas(
         .map_err(|error| CaptureError::InvalidJson(error.to_string()))?;
     let pages = capture_pages(&capture)?;
 
-    let font_resources = collect_font_resources(capture.font_resources)?;
-    let font_instances = collect_font_instances(capture.font_instances, &font_resources)?;
+    let mut font_resources = collect_font_resources(capture.font_resources)?;
+    let mut font_instances = collect_font_instances(capture.font_instances, &font_resources)?;
     let fragments = collect_fragments(capture.fragments)?;
     let links = collect_links(capture.links)?;
     let mut emitted_links = HashSet::new();
@@ -450,6 +470,7 @@ pub fn capture_document_scene_with_canvas(
     let mut font_warnings = BTreeMap::new();
     let mut operations = Vec::new();
     let mut canvas_resources = BTreeMap::<String, CanvasResource>::new();
+    let mut embedded_image_resources = BTreeMap::<String, CanvasResource>::new();
     let mut canvas_diagnostics = Vec::new();
     let mut stacking_context_depth = 0usize;
 
@@ -604,6 +625,10 @@ pub fn capture_document_scene_with_canvas(
                     append_vector_image(
                         &mut operations,
                         &mut unsupported_events,
+                        &mut embedded_image_resources,
+                        &mut font_resources,
+                        &mut font_instances,
+                        &mut font_selections,
                         vector_image,
                         rect,
                         event.sequence,
@@ -734,6 +759,7 @@ pub fn capture_document_scene_with_canvas(
     Ok(SceneCapture {
         scene,
         canvas_resources: canvas_resources.into_values().collect(),
+        embedded_image_resources: embedded_image_resources.into_values().collect(),
         canvas_diagnostics,
         font_resources: font_resources.into_values().collect(),
         font_instances: font_instances.into_values().collect(),
@@ -1178,6 +1204,18 @@ fn append_link(
 fn append_vector_image(
     operations: &mut Vec<PositionedOperation>,
     unsupported_events: &mut Vec<UnsupportedPaintEvent>,
+    embedded_image_resources: &mut BTreeMap<String, CanvasResource>,
+    font_resources: &mut BTreeMap<String, CapturedFontResource>,
+    font_instances: &mut BTreeMap<String, CapturedFontInstance>,
+    font_selections: &mut BTreeMap<
+        (
+            String,
+            CapturedFontSource,
+            Vec<String>,
+            Option<String>,
+        ),
+        CapturedFontSelection,
+    >,
     vector_image: &CaptureVectorImage,
     rect: &CaptureRect,
     sequence: usize,
@@ -1197,83 +1235,286 @@ fn append_vector_image(
     };
 
     for item in &vector_image.items {
-        let CaptureVectorImageItem::Path {
-            segments,
-            fill,
-            fill_rule,
-        } = item
-        else {
-            let CaptureVectorImageItem::Unsupported { reason } = item else {
-                unreachable!();
-            };
-            unsupported_events.push(UnsupportedPaintEvent {
-                sequence,
-                kind: match reason {
-                    CaptureVectorUnsupportedReason::Compositing => {
-                        UnsupportedPaintKind::SvgCompositing
+        match item {
+            CaptureVectorImageItem::Path {
+                segments,
+                fill,
+                fill_rule,
+                stroke,
+            } => {
+                let mut path = BezPath::new();
+                for segment in segments {
+                    match *segment {
+                        CaptureVectorPathSegment::MoveTo { x, y } => path.move_to(point(x, y)),
+                        CaptureVectorPathSegment::LineTo { x, y } => path.line_to(point(x, y)),
+                        CaptureVectorPathSegment::QuadTo { x1, y1, x, y } => {
+                            path.quad_to(point(x1, y1), point(x, y));
+                        },
+                        CaptureVectorPathSegment::CubicTo {
+                            x1,
+                            y1,
+                            x2,
+                            y2,
+                            x,
+                            y,
+                        } => path.curve_to(point(x1, y1), point(x2, y2), point(x, y)),
+                        CaptureVectorPathSegment::Close => path.close_path(),
+                    }
+                }
+                if path.elements().is_empty() {
+                    return Err(CaptureError::InvalidVectorPath { sequence });
+                }
+                let path_bounds = path.bounding_box();
+                let bounds = Rect {
+                    x: path_bounds.x0,
+                    y: path_bounds.y0,
+                    width: path_bounds.width(),
+                    height: path_bounds.height(),
+                };
+                let stroke = match stroke {
+                    Some(stroke) if approximately_equal_f64(scale_x, scale_y) => Some(Stroke {
+                        color: vector_color(&stroke.color),
+                        width: f64::from(stroke.width) * scale_x,
+                    }),
+                    Some(_) => {
+                        unsupported_events.push(UnsupportedPaintEvent {
+                            sequence,
+                            kind: UnsupportedPaintKind::SvgStroke,
+                        });
+                        None
                     },
-                    CaptureVectorUnsupportedReason::Stroke => UnsupportedPaintKind::SvgStroke,
-                    CaptureVectorUnsupportedReason::Paint => UnsupportedPaintKind::SvgPaint,
-                    CaptureVectorUnsupportedReason::Image => UnsupportedPaintKind::SvgImage,
-                    CaptureVectorUnsupportedReason::Text => UnsupportedPaintKind::SvgText,
-                    CaptureVectorUnsupportedReason::InvalidPath => {
-                        UnsupportedPaintKind::SvgInvalidPath
+                    None => None,
+                };
+                operations.push(PositionedOperation {
+                    sequence,
+                    bounds: bounds.clone(),
+                    operation: Operation::Path {
+                        bounds,
+                        data: path.to_svg(),
+                        fill: fill.as_ref().map(vector_color),
+                        fill_rule: match fill_rule {
+                            CaptureVectorFillRule::NonZero => FillRule::NonZero,
+                            CaptureVectorFillRule::EvenOdd => FillRule::EvenOdd,
+                        },
+                        stroke,
+                        meta: OperationMeta::default(),
                     },
-                },
-            });
-            continue;
-        };
-
-        let mut path = BezPath::new();
-        for segment in segments {
-            match *segment {
-                CaptureVectorPathSegment::MoveTo { x, y } => path.move_to(point(x, y)),
-                CaptureVectorPathSegment::LineTo { x, y } => path.line_to(point(x, y)),
-                CaptureVectorPathSegment::QuadTo { x1, y1, x, y } => {
-                    path.quad_to(point(x1, y1), point(x, y));
-                },
-                CaptureVectorPathSegment::CubicTo {
-                    x1,
-                    y1,
-                    x2,
-                    y2,
+                });
+            },
+            CaptureVectorImageItem::Image {
+                x,
+                y,
+                width,
+                height,
+                resource,
+                bytes_base64,
+            } => {
+                if !positive_finite(*width) || !positive_finite(*height) {
+                    return Err(CaptureError::InvalidVectorImageGeometry { sequence });
+                }
+                let bytes = decode_vector_resource(resource, bytes_base64)?;
+                if let Some(existing) = embedded_image_resources.get(resource)
+                    && existing.png != bytes
+                {
+                    return Err(CaptureError::ConflictingVectorResource(resource.clone()));
+                }
+                embedded_image_resources
+                    .entry(resource.clone())
+                    .or_insert_with(|| CanvasResource {
+                        resource: resource.clone(),
+                        png: bytes,
+                    });
+                let (x, y) = point(*x, *y);
+                let bounds = Rect {
                     x,
                     y,
-                } => path.curve_to(point(x1, y1), point(x2, y2), point(x, y)),
-                CaptureVectorPathSegment::Close => path.close_path(),
-            }
-        }
-        if path.elements().is_empty() {
-            return Err(CaptureError::InvalidVectorPath { sequence });
-        }
-        let path_bounds = path.bounding_box();
-        let bounds = Rect {
-            x: path_bounds.x0,
-            y: path_bounds.y0,
-            width: path_bounds.width(),
-            height: path_bounds.height(),
-        };
-        operations.push(PositionedOperation {
-            sequence,
-            bounds: bounds.clone(),
-            operation: Operation::Path {
-                bounds,
-                data: path.to_svg(),
-                fill: Some(Color {
-                    r: f64::from(fill.red) / 255.0,
-                    g: f64::from(fill.green) / 255.0,
-                    b: f64::from(fill.blue) / 255.0,
-                    a: f64::from(fill.alpha),
-                }),
-                fill_rule: match fill_rule {
-                    CaptureVectorFillRule::NonZero => FillRule::NonZero,
-                    CaptureVectorFillRule::EvenOdd => FillRule::EvenOdd,
-                },
-                stroke: None,
-                meta: OperationMeta::default(),
+                    width: f64::from(*width) * scale_x,
+                    height: f64::from(*height) * scale_y,
+                };
+                operations.push(PositionedOperation {
+                    sequence,
+                    bounds: bounds.clone(),
+                    operation: Operation::Image {
+                        bounds,
+                        resource: resource.clone(),
+                        meta: OperationMeta::default(),
+                    },
+                });
             },
+            CaptureVectorImageItem::Text {
+                text,
+                font,
+                font_size,
+                glyphs,
+            } => {
+                if !approximately_equal_f64(scale_x, scale_y) {
+                    unsupported_events.push(UnsupportedPaintEvent {
+                        sequence,
+                        kind: UnsupportedPaintKind::SvgText,
+                    });
+                    continue;
+                }
+                let bytes = decode_vector_font_resource(font)?;
+                merge_vector_font_resource(font_resources, font, &bytes)?;
+                let resource_digest = content_address_digest(&font.resource)?;
+                let instance_id = font_instance_id(&resource_digest, font.face_index, &[]);
+                let instance = CapturedFontInstance {
+                    id: instance_id.clone(),
+                    resource: font.resource.clone(),
+                    face_index: font.face_index,
+                    variations: Vec::new(),
+                };
+                if let Some(existing) = font_instances.get(&instance_id) {
+                    if existing != &instance {
+                        return Err(CaptureError::DuplicateFontInstance(instance_id));
+                    }
+                } else {
+                    font_instances.insert(instance_id.clone(), instance);
+                }
+                let requested_families = vec![font.family.clone()];
+                let selected_family = Some(font.family.clone());
+                let selection_key = (
+                    instance_id.clone(),
+                    CapturedFontSource::Memory,
+                    requested_families.clone(),
+                    selected_family.clone(),
+                );
+                font_selections
+                    .entry(selection_key)
+                    .or_insert_with(|| CapturedFontSelection {
+                        instance: instance_id.clone(),
+                        resource: font.resource.clone(),
+                        face_index: font.face_index,
+                        source: CapturedFontSource::Memory,
+                        requested_families,
+                        selected_family,
+                    });
+                let glyphs = glyphs
+                    .iter()
+                    .map(|glyph| {
+                        let (x, y) = point(glyph.x, glyph.y);
+                        Glyph {
+                            id: glyph.id,
+                            x,
+                            y,
+                            advance: f64::from(glyph.advance) * scale_x,
+                            text_range: Some(crate::Utf8Range {
+                                start: glyph.text_start,
+                                end: glyph.text_end,
+                            }),
+                        }
+                    })
+                    .collect();
+                let bounds = rect.into_scene_rect();
+                operations.push(PositionedOperation {
+                    sequence,
+                    bounds,
+                    operation: Operation::Text {
+                        text: text.clone(),
+                        font: instance_id,
+                        font_size: f64::from(*font_size) * scale_x,
+                        glyphs,
+                        meta: OperationMeta::default(),
+                    },
+                });
+            },
+            CaptureVectorImageItem::Unsupported { reason } => {
+                unsupported_events.push(UnsupportedPaintEvent {
+                    sequence,
+                    kind: match reason {
+                        CaptureVectorUnsupportedReason::Compositing => {
+                            UnsupportedPaintKind::SvgCompositing
+                        },
+                        CaptureVectorUnsupportedReason::Stroke => UnsupportedPaintKind::SvgStroke,
+                        CaptureVectorUnsupportedReason::Paint => UnsupportedPaintKind::SvgPaint,
+                        CaptureVectorUnsupportedReason::Image => UnsupportedPaintKind::SvgImage,
+                        CaptureVectorUnsupportedReason::Text => UnsupportedPaintKind::SvgText,
+                        CaptureVectorUnsupportedReason::InvalidPath => {
+                            UnsupportedPaintKind::SvgInvalidPath
+                        },
+                    },
+                });
+            },
+        }
+    }
+    Ok(())
+}
+
+fn vector_color(color: &CaptureVectorColor) -> Color {
+    Color {
+        r: f64::from(color.red) / 255.0,
+        g: f64::from(color.green) / 255.0,
+        b: f64::from(color.blue) / 255.0,
+        a: f64::from(color.alpha),
+    }
+}
+
+fn approximately_equal_f64(left: f64, right: f64) -> bool {
+    let scale = left.abs().max(right.abs()).max(1.0);
+    (left - right).abs() <= scale * 1.0e-8
+}
+
+fn decode_vector_resource(resource: &str, bytes_base64: &str) -> Result<Vec<u8>, CaptureError> {
+    ensure_content_address(resource)?;
+    let bytes = BASE64_STANDARD
+        .decode(bytes_base64)
+        .map_err(|_| CaptureError::InvalidVectorImageBase64(resource.into()))?;
+    if BASE64_STANDARD.encode(&bytes) != bytes_base64 {
+        return Err(CaptureError::InvalidVectorImageBase64(resource.into()));
+    }
+    let digest: [u8; 32] = Sha256::digest(&bytes).into();
+    let actual = content_address(&digest);
+    if actual != resource {
+        return Err(CaptureError::VectorImageDigestMismatch {
+            resource: resource.into(),
+            actual,
         });
     }
+    Ok(bytes)
+}
+
+fn decode_vector_font_resource(font: &CaptureVectorFont) -> Result<Vec<u8>, CaptureError> {
+    ensure_content_address(&font.resource)?;
+    let bytes = BASE64_STANDARD
+        .decode(&font.bytes_base64)
+        .map_err(|_| CaptureError::InvalidFontResourceBase64(font.resource.clone()))?;
+    if BASE64_STANDARD.encode(&bytes) != font.bytes_base64 {
+        return Err(CaptureError::InvalidFontResourceBase64(
+            font.resource.clone(),
+        ));
+    }
+    let digest: [u8; 32] = Sha256::digest(&bytes).into();
+    let actual = content_address(&digest);
+    if actual != font.resource {
+        return Err(CaptureError::FontResourceDigestMismatch {
+            resource: font.resource.clone(),
+            actual,
+        });
+    }
+    Ok(bytes)
+}
+
+fn merge_vector_font_resource(
+    resources: &mut BTreeMap<String, CapturedFontResource>,
+    font: &CaptureVectorFont,
+    bytes: &[u8],
+) -> Result<(), CaptureError> {
+    if let Some(existing) = resources.get(&font.resource) {
+        let existing_bytes = BASE64_STANDARD
+            .decode(&existing.bytes_base64)
+            .map_err(|_| CaptureError::InvalidFontResourceBase64(font.resource.clone()))?;
+        if existing_bytes != bytes {
+            return Err(CaptureError::DuplicateFontResource(font.resource.clone()));
+        }
+        return Ok(());
+    }
+    resources.insert(
+        font.resource.clone(),
+        CapturedFontResource {
+            resource: font.resource.clone(),
+            bytes_base64: font.bytes_base64.clone(),
+        },
+    );
     Ok(())
 }
 
@@ -1431,8 +1672,23 @@ struct CaptureVectorImage {
 enum CaptureVectorImageItem {
     Path {
         segments: Vec<CaptureVectorPathSegment>,
-        fill: CaptureVectorColor,
+        fill: Option<CaptureVectorColor>,
         fill_rule: CaptureVectorFillRule,
+        stroke: Option<CaptureVectorStroke>,
+    },
+    Image {
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        resource: String,
+        bytes_base64: String,
+    },
+    Text {
+        text: String,
+        font: CaptureVectorFont,
+        font_size: f32,
+        glyphs: Vec<CaptureVectorGlyph>,
     },
     Unsupported {
         reason: CaptureVectorUnsupportedReason,
@@ -1474,6 +1730,33 @@ struct CaptureVectorColor {
     green: u8,
     blue: u8,
     alpha: f32,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CaptureVectorStroke {
+    color: CaptureVectorColor,
+    width: f32,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CaptureVectorFont {
+    resource: String,
+    bytes_base64: String,
+    face_index: u32,
+    family: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CaptureVectorGlyph {
+    id: u32,
+    x: f32,
+    y: f32,
+    advance: f32,
+    text_start: u32,
+    text_end: u32,
 }
 
 #[derive(Deserialize)]

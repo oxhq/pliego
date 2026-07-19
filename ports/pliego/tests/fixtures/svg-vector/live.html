@@ -1,0 +1,36 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Pliego retained SVG vector fixture</title>
+<style>
+  @font-face {
+    font-family: "Ahem";
+    src: url("../text-scene/Ahem.ttf");
+  }
+  html, body { margin: 0; }
+  img { display: block; width: 160px; height: 80px; }
+</style>
+<img id="vector" src="graphic.svg" width="160" height="80" alt="Retained SVG vector fixture">
+<script>
+  queueMicrotask(async () => {
+    try {
+      for (let attempt = 0; !window.pliego && attempt < 120; attempt += 1) {
+        await new Promise(requestAnimationFrame);
+      }
+      if (!window.pliego) throw new Error("Pliego bridge was not installed");
+      await document.fonts.load('12px "Ahem"', "SVG");
+      await document.fonts.ready;
+      const image = document.querySelector("#vector");
+      for (let attempt = 0; !image.complete && attempt < 200; attempt += 1) {
+        await new Promise(resolve => setTimeout(resolve, 25));
+      }
+      if (!image.complete || image.naturalWidth !== 160 || image.naturalHeight !== 80) {
+        throw new Error(`SVG image did not load: ${image.naturalWidth}x${image.naturalHeight}`);
+      }
+      await new Promise(requestAnimationFrame);
+      await new Promise(requestAnimationFrame);
+      window.pliego.ready({ fixture: "live-svg-vector", font: "Ahem" });
+    } catch (error) {
+      window.pliego?.fail({ code: "FIXTURE_SVG_VECTOR_FAILED", message: String(error) });
+    }
+  });
+</script>

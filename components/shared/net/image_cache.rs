@@ -51,8 +51,23 @@ pub struct VectorImageSnapshot {
 pub enum VectorImageSnapshotItem {
     Path {
         segments: Vec<VectorImagePathSegment>,
-        fill: VectorImageColor,
+        fill: Option<VectorImageColor>,
         fill_rule: VectorImageFillRule,
+        stroke: Option<VectorImageStroke>,
+    },
+    Image {
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        resource: String,
+        bytes_base64: String,
+    },
+    Text {
+        text: String,
+        font: VectorImageFont,
+        font_size: f32,
+        glyphs: Vec<VectorImageGlyph>,
     },
     Unsupported {
         reason: VectorImageUnsupportedReason,
@@ -93,6 +108,30 @@ pub struct VectorImageColor {
     pub green: u8,
     pub blue: u8,
     pub alpha: f32,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+pub struct VectorImageStroke {
+    pub color: VectorImageColor,
+    pub width: f32,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct VectorImageFont {
+    pub resource: String,
+    pub bytes_base64: String,
+    pub face_index: u32,
+    pub family: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct VectorImageGlyph {
+    pub id: u32,
+    pub x: f32,
+    pub y: f32,
+    pub advance: f32,
+    pub text_start: u32,
+    pub text_end: u32,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]

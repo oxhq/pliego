@@ -582,6 +582,7 @@ fn test_svg_rasterization() {
         segments,
         fill,
         fill_rule,
+        stroke,
     } = &snapshot.items[0]
     else {
         panic!("Expected retained SVG path");
@@ -598,14 +599,15 @@ fn test_svg_rasterization() {
     );
     assert_eq!(
         *fill,
-        VectorImageColor {
+        Some(VectorImageColor {
             red: 0,
             green: 0,
             blue: 0,
             alpha: 1.0,
-        }
+        })
     );
     assert_eq!(*fill_rule, VectorImageFillRule::NonZero);
+    assert_eq!(*stroke, None);
 
     let size = webrender_api::units::DeviceIntSize::new(100, 100);
     cache.rasterize_vector_image(vec_img.id, size, None);

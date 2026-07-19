@@ -1894,6 +1894,7 @@ fn persist_scene_capture(
     let mut image_resources = capture
         .canvas_resources
         .iter()
+        .chain(capture.embedded_image_resources.iter())
         .map(|resource| (resource.resource.clone(), resource.png.clone()))
         .collect::<BTreeMap<_, _>>();
     for (resource, bytes) in &image_resources {
@@ -3073,6 +3074,7 @@ mod tests {
         let capture = SceneCapture {
             scene,
             canvas_resources: vec![],
+            embedded_image_resources: vec![],
             canvas_diagnostics: vec![],
             font_resources: vec![],
             font_instances: vec![],
@@ -3136,6 +3138,7 @@ mod tests {
                 }],
             }),
             canvas_resources: vec![],
+            embedded_image_resources: vec![],
             canvas_diagnostics: vec![],
             font_resources: vec![CapturedFontResource {
                 resource: resource.clone(),
@@ -3339,6 +3342,7 @@ mod tests {
                 }],
             }),
             canvas_resources: vec![],
+            embedded_image_resources: vec![],
             canvas_diagnostics: vec![],
             font_resources: vec![],
             font_instances: vec![],

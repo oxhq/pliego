@@ -10,8 +10,8 @@ use pliego::capture::{
     CaptureError, CapturedFontSource, MissingTextMapping, UnsupportedPaintEvent,
     UnsupportedPaintKind, capture_document_scene,
 };
-use pliego::pdf::render_document_pdf;
-use pliego::raster::render_first_page_png;
+use pliego::pdf::{PdfFontResource, render_document_pdf};
+use pliego::raster::{RasterFontResource, render_first_page_png, render_first_page_png_with_images};
 use pliego::{Color, FillRule, Glyph, Operation, OperationMeta, Rect, Size};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -377,7 +377,7 @@ fn vector_only_snapshot() -> Vec<u8> {
         "fragments": [{
             "depth": 0,
             "kind": "image",
-            "rect": { "x": 50.0, "y": 20.0, "width": 32.0, "height": 16.0 },
+            "rect": { "x": 50.0, "y": 20.0, "width": 32.0, "height": 32.0 },
             "tag_id": null,
             "paint_fragment_id": 7,
             "text_run": null,
@@ -396,9 +396,13 @@ fn vector_only_snapshot() -> Vec<u8> {
                             { "kind": "close" }
                         ],
                         "fill": { "red": 0, "green": 0, "blue": 0, "alpha": 1.0 },
-                        "fill_rule": "non_zero"
+                        "fill_rule": "non_zero",
+                        "stroke": {
+                            "color": { "red": 204, "green": 26, "blue": 51, "alpha": 1.0 },
+                            "width": 1.5
+                        }
                     },
-                    { "kind": "unsupported", "reason": "stroke" }
+                    { "kind": "unsupported", "reason": "compositing" }
                 ]
             }
         }],
@@ -438,7 +442,7 @@ fn vector_only_snapshot() -> Vec<u8> {
 }
 
 #[test]
-fn expands_retained_filled_svg_path_for_both_backends() {
+fn expands_retained_filled_and_stroked_svg_path_for_both_backends() {
     let captured = capture_document_scene(&vector_only_snapshot(), |_| None).unwrap();
 
     assert_eq!(
@@ -446,11 +450,11 @@ fn expands_retained_filled_svg_path_for_both_backends() {
         vec![Operation::Path {
             bounds: Rect {
                 x: 52.0,
-                y: 21.0,
+                y: 22.0,
                 width: 28.0,
-                height: 14.0,
+                height: 28.0,
             },
-            data: "M52,21 L80,21 L80,35 L52,35 Z".into(),
+            data: "M52,22 L80,22 L80,50 L52,50 Z".into(),
             fill: Some(Color {
                 r: 0.0,
                 g: 0.0,
@@ -458,7 +462,15 @@ fn expands_retained_filled_svg_path_for_both_backends() {
                 a: 1.0,
             }),
             fill_rule: FillRule::NonZero,
-            stroke: None,
+            stroke: Some(pliego::Stroke {
+                color: Color {
+                    r: 0.8,
+                    g: 26.0 / 255.0,
+                    b: 0.2,
+                    a: 1.0,
+                },
+                width: 3.0,
+            }),
             meta: OperationMeta::default(),
         }]
     );
@@ -466,7 +478,7 @@ fn expands_retained_filled_svg_path_for_both_backends() {
         captured.unsupported_events,
         vec![UnsupportedPaintEvent {
             sequence: 0,
-            kind: UnsupportedPaintKind::SvgStroke,
+            kind: UnsupportedPaintKind::SvgCompositing,
         }]
     );
 
@@ -477,11 +489,126 @@ fn expands_retained_filled_svg_path_for_both_backends() {
         let start = (y * usize::from(pixmap.width()) + x) * 4;
         &data[start..start + 4]
     };
-    assert_eq!(pixel(60, 25), [0, 0, 0, 255]);
-    assert_eq!(pixel(50, 20), [0, 0, 0, 0]);
+    assert_eq!(pixel(60, 30), [0, 0, 0, 255]);
+    assert_eq!(pixel(48, 18), [0, 0, 0, 0]);
 
     let pdf = render_document_pdf(&captured.scene, |_| None, |_| None).unwrap();
     assert!(pdf.starts_with(b"%PDF-"));
+}
+
+#[test]
+fn retains_svg_text_font_identity_and_embedded_png_for_both_backends() {
+    static FONT_BYTES: &[u8] = include_bytes!("fixtures/text-scene/Ahem.ttf");
+    let face = ttf_parser::Face::parse(FONT_BYTES, 0).unwrap();
+    let glyph_id = face.glyph_index('A').unwrap();
+    let font_size = 8.0_f32;
+    let advance = f32::from(face.glyph_hor_advance(glyph_id).unwrap()) * font_size /
+        f32::from(face.units_per_em());
+    let font_resource = content_address(FONT_BYTES);
+    let font_instance = font_instance_address(FONT_BYTES, 0, &[]);
+
+    let mut source_image = Pixmap::new(2, 1);
+    source_image
+        .data_as_u8_slice_mut()
+        .copy_from_slice(&[255, 102, 0, 255, 0, 102, 204, 255]);
+    let source_png = source_image.into_png().unwrap();
+    let image_resource = content_address(&source_png);
+
+    let mut snapshot: Value = serde_json::from_slice(&vector_only_snapshot()).unwrap();
+    let items = snapshot["fragments"][0]["vector_image"]["items"]
+        .as_array_mut()
+        .unwrap();
+    items.insert(
+        1,
+        json!({
+            "kind": "image",
+            "x": 2.0,
+            "y": 2.0,
+            "width": 4.0,
+            "height": 2.0,
+            "resource": image_resource,
+            "bytes_base64": BASE64_STANDARD.encode(&source_png)
+        }),
+    );
+    items.insert(
+        2,
+        json!({
+            "kind": "text",
+            "text": "A",
+            "font": {
+                "resource": font_resource,
+                "bytes_base64": BASE64_STANDARD.encode(FONT_BYTES),
+                "face_index": 0,
+                "family": "Ahem"
+            },
+            "font_size": font_size,
+            "glyphs": [{
+                "id": u32::from(glyph_id.0),
+                "x": 4.0,
+                "y": 12.0,
+                "advance": advance,
+                "text_start": 0,
+                "text_end": 1
+            }]
+        }),
+    );
+
+    let captured = capture_document_scene(&serde_json::to_vec(&snapshot).unwrap(), |_| None).unwrap();
+    assert_eq!(captured.embedded_image_resources.len(), 1);
+    assert_eq!(captured.embedded_image_resources[0].resource, image_resource);
+    assert_eq!(captured.embedded_image_resources[0].png, source_png);
+    assert_eq!(captured.font_resources.len(), 1);
+    assert_eq!(captured.font_resources[0].resource, font_resource);
+    assert_eq!(captured.font_instances.len(), 1);
+    assert_eq!(captured.font_instances[0].id, font_instance);
+    assert_eq!(captured.font_selections.len(), 1);
+    assert_eq!(captured.font_selections[0].source, CapturedFontSource::Memory);
+    assert_eq!(captured.font_selections[0].selected_family.as_deref(), Some("Ahem"));
+
+    let operations = &captured.scene.pages[0].operations;
+    assert_eq!(operations.len(), 3);
+    let Operation::Image { resource, bounds, .. } = &operations[1] else {
+        panic!("expected retained embedded SVG image");
+    };
+    assert_eq!(resource, &image_resource);
+    assert_eq!(bounds, &Rect { x: 54.0, y: 24.0, width: 8.0, height: 4.0 });
+    let Operation::Text { text, font, font_size, glyphs, .. } = &operations[2] else {
+        panic!("expected retained SVG text run");
+    };
+    assert_eq!(text, "A");
+    assert_eq!(font, &font_instance);
+    assert_eq!(*font_size, 16.0);
+    assert_eq!(glyphs[0].x, 58.0);
+    assert_eq!(glyphs[0].y, 44.0);
+    assert_eq!(glyphs[0].text_range, Some(pliego::Utf8Range { start: 0, end: 1 }));
+
+    let preview = render_first_page_png_with_images(
+        &captured.scene,
+        |id| {
+            (id == font_instance).then_some(RasterFontResource {
+                bytes: FONT_BYTES,
+                face_index: 0,
+                variations: &[],
+            })
+        },
+        |resource| (resource == image_resource).then_some(source_png.as_slice()),
+    )
+    .unwrap();
+    assert!(preview.starts_with(b"\x89PNG\r\n\x1a\n"));
+    let pdf = render_document_pdf(
+        &captured.scene,
+        |id| {
+            (id == font_instance).then_some(PdfFontResource {
+                bytes: FONT_BYTES,
+                face_index: 0,
+                variations: &[],
+            })
+        },
+        |resource| (resource == image_resource).then_some(source_png.as_slice()),
+    )
+    .unwrap();
+    assert!(pdf.starts_with(b"%PDF-"));
+    assert!(pdf.windows(b"/ToUnicode".len()).any(|window| window == b"/ToUnicode"));
 }
 
 #[test]

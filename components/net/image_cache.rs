@@ -10,6 +10,8 @@ use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::{mem, thread_local};
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use imsz::imsz_from_reader;
 use log::{debug, error, warn};
 use malloc_size_of::{MallocConditionalSizeOf, MallocSizeOf as MallocSizeOfTrait, MallocSizeOfOps};
@@ -19,8 +21,8 @@ use net_traits::image_cache::{
     FontResolver, Image, ImageCache, ImageCacheFactory, ImageCacheResponseCallback,
     ImageCacheResponseMessage, ImageCacheResult, ImageLoadListener, ImageOrMetadataAvailable,
     ImageResponse, PendingImageId, RasterizationCompleteResponse, VectorImage, VectorImageColor,
-    VectorImageFillRule, VectorImagePathSegment, VectorImageSnapshot, VectorImageSnapshotItem,
-    VectorImageUnsupportedReason,
+    VectorImageFillRule, VectorImageFont, VectorImageGlyph, VectorImagePathSegment,
+    VectorImageSnapshot, VectorImageSnapshotItem, VectorImageStroke, VectorImageUnsupportedReason,
 };
 use net_traits::request::CorsSettings;
 use net_traits::{FetchMetadata, FetchResponseMsg, FilteredMetadata, NetworkError};
@@ -35,6 +37,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use servo_base::id::{PipelineId, WebViewId};
 use servo_base::threadpool::ThreadPool;
 use servo_url::{ImmutableOrigin, ServoUrl};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 use webrender_api::ImageKey as WebRenderImageKey;
 use webrender_api::units::DeviceIntSize;
@@ -276,7 +279,7 @@ struct VectorImageData {
 fn snapshot_vector_image(tree: &usvg::Tree) -> VectorImageSnapshot {
     let size = tree.size();
     let mut items = Vec::new();
-    snapshot_vector_group(tree.root(), &mut items);
+    snapshot_vector_group(tree, tree.root(), &mut items);
     VectorImageSnapshot {
         viewport_width: size.width(),
         viewport_height: size.height(),
@@ -284,7 +287,11 @@ fn snapshot_vector_image(tree: &usvg::Tree) -> VectorImageSnapshot {
     }
 }
 
-fn snapshot_vector_group(group: &usvg::Group, items: &mut Vec<VectorImageSnapshotItem>) {
+fn snapshot_vector_group(
+    tree: &usvg::Tree,
+    group: &usvg::Group,
+    items: &mut Vec<VectorImageSnapshotItem>,
+) {
     if group.should_isolate() {
         items.push(VectorImageSnapshotItem::Unsupported {
             reason: VectorImageUnsupportedReason::Compositing,
@@ -294,14 +301,10 @@ fn snapshot_vector_group(group: &usvg::Group, items: &mut Vec<VectorImageSnapsho
 
     for node in group.children() {
         match node {
-            usvg::Node::Group(group) => snapshot_vector_group(group, items),
+            usvg::Node::Group(group) => snapshot_vector_group(tree, group, items),
             usvg::Node::Path(path) => snapshot_vector_path(path, items),
-            usvg::Node::Image(_) => items.push(VectorImageSnapshotItem::Unsupported {
-                reason: VectorImageUnsupportedReason::Image,
-            }),
-            usvg::Node::Text(_) => items.push(VectorImageSnapshotItem::Unsupported {
-                reason: VectorImageUnsupportedReason::Text,
-            }),
+            usvg::Node::Image(image) => snapshot_vector_embedded_image(image, items),
+            usvg::Node::Text(text) => snapshot_vector_text(tree, text, items),
         }
     }
 }
@@ -311,24 +314,53 @@ fn snapshot_vector_path(path: &usvg::Path, items: &mut Vec<VectorImageSnapshotIt
         return;
     }
 
-    let mut unsupported = false;
-    if path.stroke().is_some() {
-        items.push(VectorImageSnapshotItem::Unsupported {
-            reason: VectorImageUnsupportedReason::Stroke,
-        });
-        unsupported = true;
-    }
+    let fill = path.fill().and_then(|fill| match fill.paint() {
+        usvg::Paint::Color(color) => Some(VectorImageColor {
+            red: color.red,
+            green: color.green,
+            blue: color.blue,
+            alpha: fill.opacity().get(),
+        }),
+        _ => {
+            items.push(VectorImageSnapshotItem::Unsupported {
+                reason: VectorImageUnsupportedReason::Paint,
+            });
+            None
+        },
+    });
 
-    let Some(fill) = path.fill() else {
-        return;
-    };
-    let usvg::Paint::Color(color) = fill.paint() else {
-        items.push(VectorImageSnapshotItem::Unsupported {
-            reason: VectorImageUnsupportedReason::Paint,
-        });
-        return;
-    };
-    if unsupported {
+    let stroke = path.stroke().and_then(|stroke| {
+        let transform = path.abs_transform();
+        let (scale_x, scale_y) = transform.get_scale();
+        let supported_style = stroke.dasharray().is_none() &&
+            stroke.linecap() == usvg::LineCap::Butt &&
+            stroke.linejoin() == usvg::LineJoin::Miter &&
+            approximately_equal(stroke.miterlimit().get(), 4.0) &&
+            approximately_equal(scale_x, scale_y);
+        let usvg::Paint::Color(color) = stroke.paint() else {
+            items.push(VectorImageSnapshotItem::Unsupported {
+                reason: VectorImageUnsupportedReason::Paint,
+            });
+            return None;
+        };
+        if !supported_style {
+            items.push(VectorImageSnapshotItem::Unsupported {
+                reason: VectorImageUnsupportedReason::Stroke,
+            });
+            return None;
+        }
+        Some(VectorImageStroke {
+            color: VectorImageColor {
+                red: color.red,
+                green: color.green,
+                blue: color.blue,
+                alpha: stroke.opacity().get(),
+            },
+            width: stroke.width().get() * scale_x,
+        })
+    });
+
+    if fill.is_none() && stroke.is_none() {
         return;
     }
 
@@ -372,17 +404,177 @@ fn snapshot_vector_path(path: &usvg::Path, items: &mut Vec<VectorImageSnapshotIt
         .collect();
     items.push(VectorImageSnapshotItem::Path {
         segments,
-        fill: VectorImageColor {
-            red: color.red,
-            green: color.green,
-            blue: color.blue,
-            alpha: fill.opacity().get(),
-        },
-        fill_rule: match fill.rule() {
+        fill,
+        fill_rule: match path.fill().map(|fill| fill.rule()).unwrap_or_default() {
             usvg::FillRule::NonZero => VectorImageFillRule::NonZero,
             usvg::FillRule::EvenOdd => VectorImageFillRule::EvenOdd,
         },
+        stroke,
     });
+}
+
+fn snapshot_vector_embedded_image(
+    image: &usvg::Image,
+    items: &mut Vec<VectorImageSnapshotItem>,
+) {
+    if !image.is_visible() {
+        return;
+    }
+    let transform = image.abs_transform();
+    let bounds = image.abs_bounding_box();
+    let usvg::ImageKind::PNG(bytes) = image.kind() else {
+        items.push(VectorImageSnapshotItem::Unsupported {
+            reason: VectorImageUnsupportedReason::Image,
+        });
+        return;
+    };
+    if transform.has_skew() || transform.sx <= 0.0 || transform.sy <= 0.0 {
+        items.push(VectorImageSnapshotItem::Unsupported {
+            reason: VectorImageUnsupportedReason::Image,
+        });
+        return;
+    }
+    items.push(VectorImageSnapshotItem::Image {
+        x: bounds.x(),
+        y: bounds.y(),
+        width: bounds.width(),
+        height: bounds.height(),
+        resource: vector_content_address(bytes),
+        bytes_base64: BASE64_STANDARD.encode(bytes.as_slice()),
+    });
+}
+
+fn snapshot_vector_text(
+    tree: &usvg::Tree,
+    text: &usvg::Text,
+    items: &mut Vec<VectorImageSnapshotItem>,
+) {
+    let transform = text.abs_transform();
+    if transform.has_skew() ||
+        transform.sx <= 0.0 ||
+        transform.sy <= 0.0 ||
+        !approximately_equal(transform.sx, transform.sy)
+    {
+        items.push(VectorImageSnapshotItem::Unsupported {
+            reason: VectorImageUnsupportedReason::Text,
+        });
+        return;
+    }
+
+    for span in text.layouted() {
+        if !span.visible {
+            continue;
+        }
+        let supported_paint = span.stroke.is_none() &&
+            span.underline.is_none() &&
+            span.overline.is_none() &&
+            span.line_through.is_none() &&
+            span.variations.is_empty() &&
+            matches!(
+                span.fill.as_ref().map(|fill| (fill.paint(), fill.opacity().get())),
+                Some((usvg::Paint::Color(color), opacity))
+                    if *color == usvg::Color::black() && approximately_equal(opacity, 1.0)
+            );
+        if !supported_paint {
+            items.push(VectorImageSnapshotItem::Unsupported {
+                reason: VectorImageUnsupportedReason::Text,
+            });
+            continue;
+        }
+
+        let glyphs = &span.positioned_glyphs;
+        let mut start = 0;
+        while start < glyphs.len() {
+            let font = glyphs[start].font;
+            let font_size = glyphs[start].font_size();
+            let mut end = start + 1;
+            while end < glyphs.len() &&
+                glyphs[end].font == font &&
+                approximately_equal(glyphs[end].font_size(), font_size)
+            {
+                end += 1;
+            }
+            let run = &glyphs[start..end];
+            let family = tree
+                .fontdb()
+                .face(font)
+                .and_then(|face| face.families.first())
+                .map(|family| family.0.clone())
+                .unwrap_or_default();
+            let captured = tree.fontdb().with_face_data(font, |bytes, face_index| {
+                let face = ttf_parser::Face::parse(bytes, face_index).ok()?;
+                let units_per_em = f32::from(face.units_per_em());
+                let expected_glyph_scale = font_size / units_per_em;
+                let mut source_text = String::new();
+                let mut captured_glyphs = Vec::with_capacity(run.len());
+                for glyph in run {
+                    let glyph_transform = glyph.transform();
+                    if glyph_transform.has_skew() ||
+                        !approximately_equal(glyph_transform.sx, expected_glyph_scale) ||
+                        !approximately_equal(glyph_transform.sy, expected_glyph_scale)
+                    {
+                        return None;
+                    }
+                    let text_start = u32::try_from(source_text.len()).ok()?;
+                    source_text.push_str(&glyph.text);
+                    let text_end = u32::try_from(source_text.len()).ok()?;
+                    let advance = face
+                        .glyph_hor_advance(ttf_parser::GlyphId(glyph.id.0))
+                        .map(|advance| f32::from(advance) * expected_glyph_scale)?;
+                    captured_glyphs.push(VectorImageGlyph {
+                        id: u32::from(glyph.id.0),
+                        x: glyph_transform.tx * transform.sx + transform.tx,
+                        y: glyph_transform.ty * transform.sy + transform.ty,
+                        advance: advance * transform.sx,
+                        text_start,
+                        text_end,
+                    });
+                }
+                Some((
+                    source_text,
+                    bytes.to_vec(),
+                    face_index,
+                    captured_glyphs,
+                ))
+            });
+            let Some(Some((source_text, bytes, face_index, captured_glyphs))) = captured else {
+                items.push(VectorImageSnapshotItem::Unsupported {
+                    reason: VectorImageUnsupportedReason::Text,
+                });
+                start = end;
+                continue;
+            };
+            items.push(VectorImageSnapshotItem::Text {
+                text: source_text,
+                font: VectorImageFont {
+                    resource: vector_content_address(&bytes),
+                    bytes_base64: BASE64_STANDARD.encode(&bytes),
+                    face_index,
+                    family,
+                },
+                font_size: font_size * transform.sx,
+                glyphs: captured_glyphs,
+            });
+            start = end;
+        }
+    }
+}
+
+fn approximately_equal(left: f32, right: f32) -> bool {
+    let scale = left.abs().max(right.abs()).max(1.0);
+    (left - right).abs() <= scale * 1.0e-5
+}
+
+fn vector_content_address(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let digest: [u8; 32] = Sha256::digest(bytes).into();
+    let mut encoded = String::with_capacity(71);
+    encoded.push_str("sha256:");
+    for byte in digest {
+        encoded.push(HEX[(byte >> 4) as usize] as char);
+        encoded.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    encoded
 }
 
 impl std::fmt::Debug for VectorImageData {
