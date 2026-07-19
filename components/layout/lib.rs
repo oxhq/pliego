@@ -25,6 +25,7 @@ mod taffy;
 mod construct_modern;
 mod layout_root;
 mod lists;
+pub mod pages;
 mod positioned;
 mod query;
 mod quotes;

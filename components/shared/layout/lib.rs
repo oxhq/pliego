@@ -273,6 +273,9 @@ pub trait LayoutFactory: Send + Sync {
 pub struct LayoutDebugSnapshot {
     pub boxes: Vec<LayoutDebugBox>,
     pub fragments: Vec<LayoutDebugFragment>,
+    /// Paged-root geometry retained by Pliego. Continuous Servo layouts omit this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_sequence: Option<LayoutDebugPageSequence>,
     /// Exact font payloads referenced by visible text fragments, sorted by resource ID.
     #[serde(default)]
     pub font_resources: Vec<LayoutDebugFontResource>,
@@ -293,6 +296,25 @@ pub struct LayoutDebugSnapshot {
     pub paintable: bool,
     pub contentful: bool,
     pub first_reflow: bool,
+}
+
+/// Page and fragmentainer geometry retained at the root-layout boundary.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct LayoutDebugPageSequence {
+    pub pages: Vec<LayoutDebugPage>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+pub struct LayoutDebugPage {
+    pub index: usize,
+    pub width: f32,
+    pub height: f32,
+    pub margin_top: f32,
+    pub margin_right: f32,
+    pub margin_bottom: f32,
+    pub margin_left: f32,
+    pub available_inline_size: f32,
+    pub available_block_size: f32,
 }
 
 /// Link semantics captured from the live DOM at the same boundary as a layout debug snapshot.

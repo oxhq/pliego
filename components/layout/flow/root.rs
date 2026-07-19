@@ -219,6 +219,24 @@ impl BoxTree {
         layout_context: &LayoutContext,
         viewport: UntypedSize2D<Au>,
     ) -> FragmentTree {
+        let physical_containing_block: Rect<Au, CSSPixel> =
+            PhysicalSize::from_untyped(viewport).into();
+        self.layout_in_containing_block(layout_context, physical_containing_block)
+    }
+
+    pub(crate) fn layout_root(
+        &self,
+        layout_context: &LayoutContext,
+        root: crate::pages::LayoutRoot,
+    ) -> crate::pages::RootLayout {
+        crate::pages::layout(self, layout_context, root)
+    }
+
+    pub(crate) fn layout_in_containing_block(
+        &self,
+        layout_context: &LayoutContext,
+        physical_containing_block: Rect<Au, CSSPixel>,
+    ) -> FragmentTree {
         let style = layout_context
             .style_context
             .stylist
@@ -227,8 +245,6 @@ impl BoxTree {
 
         // FIXME: use the document’s mode:
         // https://drafts.csswg.org/css-writing-modes/#principal-flow
-        let physical_containing_block: Rect<Au, CSSPixel> =
-            PhysicalSize::from_untyped(viewport).into();
         let initial_containing_block = DefiniteContainingBlock {
             size: LogicalVec2 {
                 inline: physical_containing_block.size.width,

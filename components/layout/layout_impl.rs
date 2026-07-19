@@ -323,6 +323,9 @@ pub struct LayoutThread {
     /// The fragment tree.
     fragment_tree: RefCell<Option<Rc<FragmentTree>>>,
 
+    /// The paged-root geometry associated with the fragment tree, when configured by Pliego.
+    page_sequence: RefCell<Option<crate::pages::PageSequence>>,
+
     /// The [`StackingContextTree`] cached from previous layouts.
     stacking_context_tree: RefCell<Option<StackingContextTree>>,
 
@@ -488,6 +491,11 @@ impl Layout for LayoutThread {
         Some(LayoutDebugSnapshot {
             boxes,
             fragments,
+            page_sequence: self
+                .page_sequence
+                .borrow()
+                .as_ref()
+                .map(crate::pages::PageSequence::debug_snapshot),
             font_resources,
             font_instances,
             paint_events: display_list_debug_capture.events().to_vec(),
@@ -1064,6 +1072,7 @@ impl LayoutThread {
             need_new_stacking_context_tree: Cell::new(false),
             box_tree: Default::default(),
             fragment_tree: Default::default(),
+            page_sequence: Default::default(),
             stacking_context_tree: Default::default(),
             display_list_debug_capture: Default::default(),
             paint_api: config.paint_api,
@@ -1533,19 +1542,25 @@ impl LayoutThread {
 
         let box_tree = &*box_tree;
         let viewport_size = self.stylist.device().au_viewport_size();
+        let layout_root = crate::pages::configured_layout_root(self.is_iframe, viewport_size);
         let run_layout = || {
             box_tree
                 .as_ref()
                 .unwrap()
-                .layout(recalc_style_traversal.context(), viewport_size)
+                .layout_root(recalc_style_traversal.context(), layout_root)
         };
-        let fragment_tree = Rc::new(if let Some(pool) = rayon_pool {
+        let root_layout = if let Some(pool) = rayon_pool {
             pool.install(run_layout)
         } else {
             run_layout()
-        });
+        };
+        let crate::pages::RootLayout {
+            fragment_tree,
+            page_sequence,
+        } = root_layout;
 
-        *self.fragment_tree.borrow_mut() = Some(fragment_tree);
+        *self.fragment_tree.borrow_mut() = Some(Rc::new(fragment_tree));
+        *self.page_sequence.borrow_mut() = page_sequence;
 
         if self.debug.is_enabled(DiagnosticsLoggingOption::StyleTree) {
             println!(
