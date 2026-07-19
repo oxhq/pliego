@@ -11,6 +11,7 @@ use crate::desktop::app::App;
 use crate::desktop::event_loop::ServoShellEventLoop;
 use crate::panic_hook;
 use crate::prefs::{ArgumentParsingResult, parse_command_line_arguments};
+use crate::running_app_state::WebResourcePolicyHandler;
 use crate::{
     JSValue, ResourceEvent, StableJavaScriptError, StableJavaScriptEvaluation,
     StableJavaScriptResult,
@@ -22,7 +23,7 @@ pub fn main() {
 }
 
 pub(crate) fn run(args: &[String]) {
-    run_inner(args, None, None)
+    run_inner(args, None, None, None)
 }
 
 pub(crate) fn run_with_stable_javascript(
@@ -36,10 +37,31 @@ pub(crate) fn run_with_stable_javascript_and_console(
     args: &[String],
     script: &str,
 ) -> Result<StableJavaScriptResult, StableJavaScriptError> {
+    run_with_stable_javascript_and_console_inner(args, script, None)
+}
+
+pub(crate) fn run_with_stable_javascript_and_console_and_web_resource_policy(
+    args: &[String],
+    script: &str,
+    web_resource_policy: WebResourcePolicyHandler,
+) -> Result<StableJavaScriptResult, StableJavaScriptError> {
+    run_with_stable_javascript_and_console_inner(args, script, Some(web_resource_policy))
+}
+
+fn run_with_stable_javascript_and_console_inner(
+    args: &[String],
+    script: &str,
+    web_resource_policy: Option<WebResourcePolicyHandler>,
+) -> Result<StableJavaScriptResult, StableJavaScriptError> {
     let (result_sender, result_receiver) = std::sync::mpsc::channel();
     let (resource_event_sender, resource_event_receiver) = unbounded();
     let evaluation = StableJavaScriptEvaluation::new(script, result_sender);
-    run_inner(args, Some(evaluation), Some(resource_event_sender));
+    run_inner(
+        args,
+        Some(evaluation),
+        Some(resource_event_sender),
+        web_resource_policy,
+    );
     let mut result = result_receiver
         .recv()
         .unwrap_or(Err(StableJavaScriptError::SessionEnded))?;
@@ -62,6 +84,7 @@ fn run_inner(
     args: &[String],
     stable_javascript: Option<StableJavaScriptEvaluation>,
     resource_event_sender: Option<Sender<DevtoolsControlMsg>>,
+    web_resource_policy: Option<WebResourcePolicyHandler>,
 ) {
     crate::crash_handler::install();
     crate::init_crypto();
@@ -99,6 +122,7 @@ fn run_inner(
             &event_loop,
             stable_javascript,
             resource_event_sender,
+            web_resource_policy,
         );
         event_loop.run_app(&mut app);
     }

@@ -315,3 +315,54 @@ fn test_issue_35754() {
         "https://foo/bar",
     );
 }
+
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+#[test]
+fn web_resource_policy_is_optional_and_returns_typed_decisions() {
+    use std::rc::Rc;
+
+    use crate::running_app_state::{WebResourcePolicyHandler, decide_web_resource_policy};
+    use crate::{WebResourcePolicyDecision, WebResourceRequest, WebResourceResponse};
+
+    let request: WebResourceRequest = serde_json::from_value(serde_json::json!({
+        "method": "GET",
+        "headers": {},
+        "url": "https://example.test/document.css",
+        "destination": "Style",
+        "referrer_url": null,
+        "is_for_main_frame": false,
+        "is_redirect": false
+    }))
+    .unwrap();
+
+    assert!(matches!(
+        decide_web_resource_policy(None, &request),
+        WebResourcePolicyDecision::Allow
+    ));
+
+    let allow: WebResourcePolicyHandler = Rc::new(|_| WebResourcePolicyDecision::Allow);
+    assert!(matches!(
+        decide_web_resource_policy(Some(&allow), &request),
+        WebResourcePolicyDecision::Allow
+    ));
+
+    let synthesize: WebResourcePolicyHandler =
+        Rc::new(|request| WebResourcePolicyDecision::Synthesize {
+            response: WebResourceResponse::new(request.url.clone()),
+            body: b"fixture body".to_vec(),
+        });
+    let WebResourcePolicyDecision::Synthesize { response, body } =
+        decide_web_resource_policy(Some(&synthesize), &request)
+    else {
+        panic!("expected a synthesized response")
+    };
+    assert_eq!(response.url, request.url);
+    assert_eq!(response.status_code.as_u16(), 200);
+    assert_eq!(body.as_slice(), b"fixture body");
+
+    let cancel: WebResourcePolicyHandler = Rc::new(|_| WebResourcePolicyDecision::Cancel);
+    assert!(matches!(
+        decide_web_resource_policy(Some(&cancel), &request),
+        WebResourcePolicyDecision::Cancel
+    ));
+}

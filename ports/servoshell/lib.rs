@@ -12,7 +12,7 @@ use std::rc::Rc;
 use std::sync::mpsc::Sender;
 
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
-pub use servo::{ConsoleLogLevel, JSValue, NetworkEvent};
+pub use servo::{ConsoleLogLevel, JSValue, NetworkEvent, WebResourceRequest, WebResourceResponse};
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
 use servo::{JavaScriptEvaluationError, ScreenshotCaptureError};
 
@@ -74,6 +74,34 @@ pub fn run_with_stable_javascript_and_console(
     script: &str,
 ) -> Result<StableJavaScriptResult, StableJavaScriptError> {
     desktop::cli::run_with_stable_javascript_and_console(args, script)
+}
+
+/// Run servoshell with a synchronous policy evaluated before each HTTP(S) resource load.
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+pub fn run_with_stable_javascript_and_console_and_web_resource_policy(
+    args: &[String],
+    script: &str,
+    policy: impl Fn(&WebResourceRequest) -> WebResourcePolicyDecision + 'static,
+) -> Result<StableJavaScriptResult, StableJavaScriptError> {
+    desktop::cli::run_with_stable_javascript_and_console_and_web_resource_policy(
+        args,
+        script,
+        Rc::new(policy),
+    )
+}
+
+/// The deterministic result of applying an embedder web-resource policy.
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+pub enum WebResourcePolicyDecision {
+    /// Continue through Servo's normal network loader.
+    Allow,
+    /// Complete the load without network I/O using the supplied response and body.
+    Synthesize {
+        response: WebResourceResponse,
+        body: Vec<u8>,
+    },
+    /// Cancel the load before network I/O.
+    Cancel,
 }
 
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]

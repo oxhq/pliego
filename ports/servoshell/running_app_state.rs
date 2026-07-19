@@ -27,8 +27,12 @@ use servo::{
     WebDriverCommandMsg, WebDriverJSResult, WebDriverLoadStatus, WebDriverScriptCommand,
     WebDriverSenders, WebView, WebViewDelegate, WebViewId,
 };
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+use servo::{WebResourceLoad, WebResourceRequest, WebResourceResponse};
 use url::Url;
 
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+use crate::WebResourcePolicyDecision;
 #[cfg(all(
     feature = "gamepad",
     not(any(target_os = "android", target_env = "ohos"))
@@ -39,6 +43,36 @@ use crate::webdriver::WebDriverEmbedderControls;
 use crate::window::{PlatformWindow, ServoShellWindow, ServoShellWindowId};
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
 use crate::{StableJavaScriptError, StableJavaScriptEvaluation};
+
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+pub(crate) type WebResourcePolicyHandler =
+    Rc<dyn Fn(&WebResourceRequest) -> WebResourcePolicyDecision>;
+
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+pub(crate) fn decide_web_resource_policy(
+    policy: Option<&WebResourcePolicyHandler>,
+    request: &WebResourceRequest,
+) -> WebResourcePolicyDecision {
+    policy.map_or(WebResourcePolicyDecision::Allow, |policy| policy(request))
+}
+
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+fn handle_web_resource_load(policy: Option<&WebResourcePolicyHandler>, load: WebResourceLoad) {
+    match decide_web_resource_policy(policy, load.request()) {
+        WebResourcePolicyDecision::Allow => {},
+        WebResourcePolicyDecision::Synthesize { response, body } => {
+            let mut intercepted = load.intercept(response);
+            if !body.is_empty() {
+                intercepted.send_body_data(body);
+            }
+            intercepted.finish();
+        },
+        WebResourcePolicyDecision::Cancel => {
+            let response = WebResourceResponse::new(load.request().url.clone());
+            load.intercept(response).cancel();
+        },
+    }
+}
 
 #[cfg(all(
     any(coverage, llvm_pgo),
@@ -192,6 +226,9 @@ pub(crate) struct RunningAppState {
     /// A handle to the Servo instance.
     pub(crate) servo: Servo,
 
+    #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+    web_resource_policy: Option<WebResourcePolicyHandler>,
+
     /// Whether or not the application has achieved stable image output. This is used
     /// for the `exit_after_stable_image` option.
     pub(crate) achieved_stable_image: Rc<Cell<bool>>,
@@ -233,13 +270,19 @@ impl RunningAppState {
         event_loop_waker: Box<dyn EventLoopWaker>,
         user_content_manager: Rc<UserContentManager>,
         default_preferences: Preferences,
+        #[cfg(not(any(target_os = "android", target_env = "ohos")))] web_resource_policy: Option<
+            WebResourcePolicyHandler,
+        >,
         #[cfg(all(
             feature = "gamepad",
             not(any(target_os = "android", target_env = "ohos"))
         ))]
         gamepad_delegate: Option<Rc<ServoshellGamepadDelegate>>,
     ) -> Self {
-        servo.set_delegate(Rc::new(ServoShellServoDelegate));
+        servo.set_delegate(Rc::new(ServoShellServoDelegate {
+            #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+            web_resource_policy: web_resource_policy.clone(),
+        }));
 
         let webdriver_receiver = servoshell_preferences.webdriver_port.get().map(|port| {
             let (embedder_sender, embedder_receiver) = unbounded();
@@ -269,6 +312,8 @@ impl RunningAppState {
             webdriver_receiver,
             servoshell_preferences,
             servo,
+            #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+            web_resource_policy,
             achieved_stable_image: Default::default(),
             #[cfg(not(any(target_os = "android", target_env = "ohos")))]
             stable_javascript: Default::default(),
@@ -733,6 +778,11 @@ impl RunningAppState {
 }
 
 impl WebViewDelegate for RunningAppState {
+    #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+    fn load_web_resource(&self, _webview: WebView, load: WebResourceLoad) {
+        handle_web_resource_load(self.web_resource_policy.as_ref(), load);
+    }
+
     fn screen_geometry(&self, webview: WebView) -> Option<servo::ScreenGeometry> {
         Some(self.platform_window_for_webview(&webview).screen_geometry())
     }
@@ -927,8 +977,16 @@ impl WebViewDelegate for RunningAppState {
     }
 }
 
-struct ServoShellServoDelegate;
+struct ServoShellServoDelegate {
+    #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+    web_resource_policy: Option<WebResourcePolicyHandler>,
+}
 impl ServoDelegate for ServoShellServoDelegate {
+    #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+    fn load_web_resource(&self, load: WebResourceLoad) {
+        handle_web_resource_load(self.web_resource_policy.as_ref(), load);
+    }
+
     fn notify_devtools_server_started(&self, port: u16, _token: String) {
         info!("Devtools Server running on port {port}");
     }

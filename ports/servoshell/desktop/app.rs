@@ -30,9 +30,9 @@ use crate::desktop::protocols;
 use crate::desktop::tracing::trace_winit_event;
 use crate::parser::get_default_url;
 use crate::prefs::ServoShellPreferences;
-use crate::running_app_state::RunningAppState;
 #[cfg(feature = "gamepad")]
 use crate::running_app_state::ServoshellGamepadDelegate;
+use crate::running_app_state::{RunningAppState, WebResourcePolicyHandler};
 use crate::window::{PlatformWindow, ServoShellWindowId};
 
 pub(crate) enum AppState {
@@ -53,6 +53,7 @@ pub struct App {
     state: AppState,
     stable_javascript: Option<StableJavaScriptEvaluation>,
     resource_event_sender: Option<Sender<DevtoolsControlMsg>>,
+    web_resource_policy: Option<WebResourcePolicyHandler>,
 }
 
 impl App {
@@ -63,6 +64,7 @@ impl App {
         event_loop: &ServoShellEventLoop,
         stable_javascript: Option<StableJavaScriptEvaluation>,
         resource_event_sender: Option<Sender<DevtoolsControlMsg>>,
+        web_resource_policy: Option<WebResourcePolicyHandler>,
     ) -> Self {
         let initial_url = get_default_url(
             servo_shell_preferences.url.as_deref(),
@@ -84,6 +86,7 @@ impl App {
             state: AppState::Initializing,
             stable_javascript,
             resource_event_sender,
+            web_resource_policy,
         }
     }
 
@@ -141,6 +144,7 @@ impl App {
             self.waker.clone(),
             user_content_manager,
             self.preferences.clone(),
+            self.web_resource_policy.clone(),
             #[cfg(feature = "gamepad")]
             ServoshellGamepadDelegate::maybe_new().map(Rc::new),
         ));
