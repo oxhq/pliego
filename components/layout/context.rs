@@ -61,6 +61,9 @@ pub(crate) struct LayoutContext<'a> {
 
     /// The device dimensions on which this layout is running, in device pixels.
     pub device_size: Size2D<f32, DevicePixel>,
+
+    /// Paged-root state scoped to this reflow. Continuous layout leaves it inactive.
+    pub(crate) block_pagination: crate::pages::BlockPaginationController,
 }
 
 impl LayoutContext<'_> {

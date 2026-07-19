@@ -237,6 +237,8 @@ impl BlockLevelBox {
             // Under discussion in <https://github.com/w3c/csswg-drafts/issues/13260>.
             LogicalSides1D::new(false, false),
             true, /* has_inline_parent */
+            None, /* page_builder */
+            0,    /* child_index */
         );
 
         let Some(fragment) = fragment.retrieve_box_fragment() else {

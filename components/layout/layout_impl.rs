@@ -1427,12 +1427,16 @@ impl LayoutThread {
             ),
             font_context: self.font_context.clone(),
             iframe_sizes: Mutex::default(),
-            allow_parallel_layout: rayon_pool.is_some(),
+            allow_parallel_layout: crate::pages::allow_parallel_layout(
+                self.is_iframe,
+                rayon_pool.is_some(),
+            ),
             image_resolver: image_resolver.clone(),
             painter_id: self.webview_id.into(),
             parallelism_job_count_minimum: pref!(layout_parallelism_job_count_minimum) as usize,
             parallelism_job_size_minimum: pref!(layout_parallelism_job_size_minimum) as usize,
             device_size: reflow_request.viewport_details.device_size.cast_unit(),
+            block_pagination: Default::default(),
         };
 
         let restyle = reflow_request

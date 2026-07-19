@@ -4,10 +4,9 @@
 
 //! The Pliego-owned paged-document root.
 //!
-//! This module deliberately starts with one page and no continuation. The fragment tree is laid
-//! out directly into the page content box, and overflowing fragments remain in that tree for the
-//! later fragmentation milestones to continue. Nothing in this module clips, slices, or re-lays
-//! out rendered output.
+//! Simple normal-flow block children are continued at child boundaries while their fragments are
+//! placed. Unsupported content can still overflow, but nothing here clips, slices, or paginates a
+//! completed fragment tree.
 
 use std::fmt;
 use std::sync::OnceLock;
@@ -16,6 +15,9 @@ use app_units::Au;
 use euclid::default::Size2D as UntypedSize2D;
 use euclid::{Point2D, Rect, Size2D};
 use layout_api::{LayoutDebugPage, LayoutDebugPageSequence};
+use log::warn;
+use parking_lot::Mutex;
+use style::Zero;
 use style_traits::CSSPixel;
 
 use crate::context::LayoutContext;
@@ -157,19 +159,234 @@ pub(crate) struct PageSequenceContext {
 }
 
 impl PageSequenceContext {
+    #[cfg(test)]
     fn one_page_sequence(self) -> PageSequence {
-        let fragmentainer = FragmentainerContext {
-            page_index: 0,
-            available_inline_size: self.definition.available_inline_size(),
-            available_block_size: self.definition.available_block_size(),
-            overflow: FragmentainerOverflow::RetainInFragmentTree,
-        };
-        PageSequence {
-            pages: vec![Page {
+        self.page_sequence(BlockPaginationOutcome::default())
+    }
+
+    fn page_sequence(self, outcome: BlockPaginationOutcome) -> PageSequence {
+        let page_count = outcome.page_count.max(1);
+        let pages = (0..page_count)
+            .map(|page_index| Page {
                 definition: self.definition,
-                fragmentainer,
-            }],
+                fragmentainer: FragmentainerContext {
+                    page_index,
+                    available_inline_size: self.definition.available_inline_size(),
+                    available_block_size: self.definition.available_block_size(),
+                    continuation: outcome
+                        .continuations
+                        .iter()
+                        .find(|continuation| continuation.page_index == page_index)
+                        .map(|continuation| continuation.token),
+                    overflow: FragmentainerOverflow::RetainInFragmentTree,
+                },
+            })
+            .collect();
+        PageSequence {
+            pages,
+            warnings: outcome.warnings,
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct BlockContinuationToken {
+    pub next_child_index: usize,
+    pub next_node: Option<u64>,
+    pub resume_page_index: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum BlockBoundaryPlacement {
+    CurrentPage,
+    NewPage { block_origin: Au },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum BlockPaginationWarning {
+    OversizedUnbreakable {
+        child_index: usize,
+        node: Option<u64>,
+        block_size: Au,
+        available_block_size: Au,
+    },
+}
+
+#[derive(Clone, Copy)]
+struct BlockPaginationRequest {
+    available_block_size: Au,
+    page_stride: Au,
+}
+
+#[derive(Default)]
+struct BlockPaginationControllerState {
+    request: Option<BlockPaginationRequest>,
+    claimed: bool,
+    outcome: Option<BlockPaginationOutcome>,
+}
+
+/// Per-reflow hand-off between the paged root and the outermost multi-child block container.
+#[derive(Default)]
+pub(crate) struct BlockPaginationController {
+    state: Mutex<BlockPaginationControllerState>,
+}
+
+impl BlockPaginationController {
+    fn begin(&self, definition: PageDefinition) {
+        *self.state.lock() = BlockPaginationControllerState {
+            request: Some(BlockPaginationRequest {
+                available_block_size: definition.available_block_size(),
+                page_stride: definition.size.height,
+            }),
+            ..Default::default()
+        };
+    }
+
+    pub(crate) fn claim(
+        &self,
+        child_count: usize,
+        supports_simple_block_pagination: bool,
+    ) -> Option<BlockPageBuilder> {
+        let mut state = self.state.lock();
+        if child_count < 2 || state.claimed {
+            return None;
+        }
+        let request = state.request?;
+        state.claimed = true;
+        supports_simple_block_pagination.then(|| BlockPageBuilder::new(request))
+    }
+
+    pub(crate) fn complete(&self, outcome: BlockPaginationOutcome) {
+        let mut state = self.state.lock();
+        debug_assert!(state.claimed);
+        debug_assert!(state.outcome.is_none());
+        state.outcome = Some(outcome);
+    }
+
+    fn finish(&self) -> BlockPaginationOutcome {
+        let mut state = self.state.lock();
+        state.request = None;
+        state.outcome.take().unwrap_or_default()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PageContinuation {
+    page_index: usize,
+    token: BlockContinuationToken,
+}
+
+#[derive(Default)]
+pub(crate) struct BlockPaginationOutcome {
+    page_count: usize,
+    continuations: Vec<PageContinuation>,
+    warnings: Vec<BlockPaginationWarning>,
+}
+
+/// Places one unbreakable child at a time and only advances at legal child boundaries.
+pub(crate) struct BlockPageBuilder {
+    request: BlockPaginationRequest,
+    current_page_index: usize,
+    current_page_origin: Au,
+    next_child_index: usize,
+    page_has_content: bool,
+    outcome: BlockPaginationOutcome,
+}
+
+impl BlockPageBuilder {
+    fn new(request: BlockPaginationRequest) -> Self {
+        Self {
+            request,
+            current_page_index: 0,
+            current_page_origin: Au::zero(),
+            next_child_index: 0,
+            page_has_content: false,
+            outcome: BlockPaginationOutcome {
+                page_count: 1,
+                ..Default::default()
+            },
+        }
+    }
+
+    pub(crate) fn place_child(
+        &mut self,
+        child_index: usize,
+        node: Option<u64>,
+        current_block_position: Au,
+        current_page_contribution: Au,
+        fresh_page_contribution: Au,
+    ) -> BlockBoundaryPlacement {
+        assert_eq!(child_index, self.next_child_index);
+        self.next_child_index += 1;
+
+        let used = (current_block_position - self.current_page_origin).max(Au::zero());
+        let remaining = (self.request.available_block_size - used).max(Au::zero());
+        if current_page_contribution <= remaining || !self.page_has_content {
+            self.warn_if_oversized(child_index, node, fresh_page_contribution);
+            self.page_has_content = true;
+            self.include_content_through(current_block_position + current_page_contribution);
+            return BlockBoundaryPlacement::CurrentPage;
+        }
+
+        let previous_page_index = self.current_page_index;
+        loop {
+            self.current_page_index += 1;
+            self.current_page_origin += self.request.page_stride;
+            if self.current_page_origin >= current_block_position {
+                break;
+            }
+        }
+
+        let token = BlockContinuationToken {
+            next_child_index: child_index,
+            next_node: node,
+            resume_page_index: self.current_page_index,
+        };
+        self.outcome.continuations.push(PageContinuation {
+            page_index: previous_page_index,
+            token,
+        });
+        self.warn_if_oversized(child_index, node, fresh_page_contribution);
+        self.page_has_content = true;
+        self.include_content_through(self.current_page_origin + fresh_page_contribution);
+        BlockBoundaryPlacement::NewPage {
+            block_origin: self.current_page_origin,
+        }
+    }
+
+    fn warn_if_oversized(&mut self, child_index: usize, node: Option<u64>, block_size: Au) {
+        if block_size <= self.request.available_block_size {
+            return;
+        }
+        warn!(
+            "paged layout retained oversized unbreakable child {child_index} (node {node:?}, \
+             {:.2}px > {:.2}px)",
+            block_size.to_f32_px(),
+            self.request.available_block_size.to_f32_px(),
+        );
+        self.outcome
+            .warnings
+            .push(BlockPaginationWarning::OversizedUnbreakable {
+                child_index,
+                node,
+                block_size,
+                available_block_size: self.request.available_block_size,
+            });
+    }
+
+    fn include_content_through(&mut self, block_end: Au) {
+        let mut page_origin = self.current_page_origin;
+        let mut page_index = self.current_page_index;
+        while page_origin + self.request.page_stride < block_end {
+            page_origin += self.request.page_stride;
+            page_index += 1;
+        }
+        self.outcome.page_count = self.outcome.page_count.max(page_index + 1);
+    }
+
+    pub(crate) fn finish(mut self) -> BlockPaginationOutcome {
+        self.outcome.page_count = self.outcome.page_count.max(self.current_page_index + 1);
+        self.outcome
     }
 }
 
@@ -186,6 +403,7 @@ pub(crate) struct FragmentainerContext {
     pub page_index: usize,
     pub available_inline_size: Au,
     pub available_block_size: Au,
+    pub continuation: Option<BlockContinuationToken>,
     pub overflow: FragmentainerOverflow,
 }
 
@@ -204,6 +422,7 @@ pub(crate) struct Page {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct PageSequence {
     pub pages: Vec<Page>,
+    pub warnings: Vec<BlockPaginationWarning>,
 }
 
 impl PageSequence {
@@ -249,6 +468,24 @@ pub(crate) fn configured_layout_root(is_iframe: bool, viewport: UntypedSize2D<Au
     select_layout_root(PROCESS_PAGE_DEFINITION.get().copied(), is_iframe, viewport)
 }
 
+/// Paged layout is deliberately sequential until continuation ownership is carried explicitly
+/// through every nested formatting context. Continuous documents and iframes keep Servo's setting.
+pub(crate) fn allow_parallel_layout(is_iframe: bool, pool_available: bool) -> bool {
+    parallel_layout_allowed(
+        PROCESS_PAGE_DEFINITION.get().copied(),
+        is_iframe,
+        pool_available,
+    )
+}
+
+fn parallel_layout_allowed(
+    page: Option<PageDefinition>,
+    is_iframe: bool,
+    pool_available: bool,
+) -> bool {
+    pool_available && (page.is_none() || is_iframe)
+}
+
 fn select_layout_root(
     page: Option<PageDefinition>,
     is_iframe: bool,
@@ -278,12 +515,10 @@ fn layout_one_page(
     layout_context: &LayoutContext,
     context: PageSequenceContext,
 ) -> RootLayout {
-    let page_sequence = context.one_page_sequence();
-    let fragment_tree = match page_sequence.pages[0].fragmentainer.overflow {
-        FragmentainerOverflow::RetainInFragmentTree => {
-            box_tree.layout_in_containing_block(layout_context, context.definition.content_rect())
-        },
-    };
+    layout_context.block_pagination.begin(context.definition);
+    let fragment_tree =
+        box_tree.layout_in_containing_block(layout_context, context.definition.content_rect());
+    let page_sequence = context.page_sequence(layout_context.block_pagination.finish());
     RootLayout {
         fragment_tree,
         page_sequence: Some(page_sequence),
@@ -339,6 +574,8 @@ mod tests {
         assert_eq!(page.fragmentainer.page_index, 0);
         assert_eq!(page.fragmentainer.available_inline_size.to_f32_px(), 540.0);
         assert_eq!(page.fragmentainer.available_block_size.to_f32_px(), 684.0);
+        assert_eq!(page.fragmentainer.continuation, None);
+        assert!(sequence.warnings.is_empty());
         assert_eq!(
             sequence.debug_snapshot(),
             LayoutDebugPageSequence {
@@ -388,6 +625,119 @@ mod tests {
             select_layout_root(Some(page()), false, viewport),
             LayoutRoot::Paged(_)
         ));
+        assert!(parallel_layout_allowed(None, false, true));
+        assert!(parallel_layout_allowed(Some(page()), true, true));
+        assert!(!parallel_layout_allowed(Some(page()), false, true));
+        assert!(!parallel_layout_allowed(None, false, false));
+    }
+
+    #[test]
+    fn block_children_continue_at_monotonic_child_boundaries() {
+        let mut builder = BlockPageBuilder::new(BlockPaginationRequest {
+            available_block_size: Au::from_px(100),
+            page_stride: Au::from_px(120),
+        });
+        assert_eq!(
+            builder.place_child(
+                0,
+                Some(10),
+                Au::from_px(0),
+                Au::from_px(60),
+                Au::from_px(60),
+            ),
+            BlockBoundaryPlacement::CurrentPage
+        );
+        assert_eq!(
+            builder.place_child(
+                1,
+                Some(20),
+                Au::from_px(60),
+                Au::from_px(60),
+                Au::from_px(60),
+            ),
+            BlockBoundaryPlacement::NewPage {
+                block_origin: Au::from_px(120),
+            }
+        );
+        assert_eq!(
+            builder.place_child(
+                2,
+                Some(30),
+                Au::from_px(180),
+                Au::from_px(20),
+                Au::from_px(20),
+            ),
+            BlockBoundaryPlacement::CurrentPage
+        );
+
+        let outcome = builder.finish();
+        assert_eq!(outcome.page_count, 2);
+        assert_eq!(
+            outcome.continuations,
+            vec![PageContinuation {
+                page_index: 0,
+                token: BlockContinuationToken {
+                    next_child_index: 1,
+                    next_node: Some(20),
+                    resume_page_index: 1,
+                },
+            }]
+        );
+        assert!(outcome.warnings.is_empty());
+    }
+
+    #[test]
+    fn outer_unsupported_container_prevents_a_nested_claim() {
+        let controller = BlockPaginationController::default();
+        controller.begin(page());
+        assert!(controller.claim(1, true).is_none());
+        assert!(controller.claim(3, false).is_none());
+        assert!(controller.claim(3, true).is_none());
+        assert_eq!(controller.finish().page_count, 0);
+    }
+
+    #[test]
+    fn oversized_unbreakable_child_warns_and_next_child_still_advances() {
+        let mut builder = BlockPageBuilder::new(BlockPaginationRequest {
+            available_block_size: Au::from_px(100),
+            page_stride: Au::from_px(120),
+        });
+        assert_eq!(
+            builder.place_child(
+                0,
+                Some(10),
+                Au::from_px(0),
+                Au::from_px(150),
+                Au::from_px(150),
+            ),
+            BlockBoundaryPlacement::CurrentPage
+        );
+        assert_eq!(
+            builder.place_child(
+                1,
+                Some(20),
+                Au::from_px(150),
+                Au::from_px(10),
+                Au::from_px(10),
+            ),
+            BlockBoundaryPlacement::NewPage {
+                block_origin: Au::from_px(240),
+            }
+        );
+
+        let outcome = builder.finish();
+        assert_eq!(outcome.page_count, 3);
+        assert_eq!(outcome.continuations[0].token.next_child_index, 1);
+        assert_eq!(outcome.continuations[0].token.resume_page_index, 2);
+        assert_eq!(
+            outcome.warnings,
+            vec![BlockPaginationWarning::OversizedUnbreakable {
+                child_index: 0,
+                node: Some(10),
+                block_size: Au::from_px(150),
+                available_block_size: Au::from_px(100),
+            }]
+        );
     }
 
     #[test]

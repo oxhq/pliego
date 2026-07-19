@@ -36,6 +36,7 @@ use crate::geom::{
     PhysicalSides, ToLogical, ToLogicalWithContainingBlock,
 };
 use crate::layout_box_base::{IndependentFormattingContextLayoutResult, LayoutBoxBase};
+use crate::pages::{BlockBoundaryPlacement, BlockPageBuilder};
 use crate::positioned::{AbsolutelyPositionedBox, PositioningContext, PositioningContextLength};
 use crate::sizing::{
     self, ComputeInlineContentSizes, ContentSizes, InlineContentSizesResult, LazySize, Size,
@@ -754,6 +755,12 @@ fn layout_block_level_children(
 ) -> IndependentFormattingContextLayoutResult {
     let mut placement_state =
         PlacementState::new(collapsible_with_parent_start_margin, containing_block);
+    let supports_simple_block_pagination = child_boxes
+        .iter()
+        .all(|child_box| is_simple_normal_flow_child(&child_box.borrow()));
+    let mut page_builder = layout_context
+        .block_pagination
+        .claim(child_boxes.len(), supports_simple_block_pagination);
 
     let fragments = match sequential_layout_state {
         Some(ref mut sequential_layout_state) => layout_block_level_children_sequentially(
@@ -763,6 +770,7 @@ fn layout_block_level_children(
             sequential_layout_state,
             &mut placement_state,
             ignore_block_margins_for_stretch,
+            page_builder.as_mut(),
         ),
         None => layout_block_level_children_in_parallel(
             layout_context,
@@ -770,8 +778,15 @@ fn layout_block_level_children(
             child_boxes,
             &mut placement_state,
             ignore_block_margins_for_stretch,
+            page_builder.as_mut(),
         ),
     };
+
+    if let Some(page_builder) = page_builder {
+        layout_context
+            .block_pagination
+            .complete(page_builder.finish());
+    }
 
     let depends_on_block_constraints = fragments.iter().any(|fragment| {
         fragment.base().is_some_and(|base| {
@@ -793,12 +808,20 @@ fn layout_block_level_children(
     }
 }
 
+fn is_simple_normal_flow_child(child: &BlockLevelBox) -> bool {
+    matches!(
+        child,
+        BlockLevelBox::Independent(_) | BlockLevelBox::SameFormattingContextBlock(_)
+    ) && !child.contains_floats()
+}
+
 fn layout_block_level_children_in_parallel(
     layout_context: &LayoutContext,
     positioning_context: &mut PositioningContext,
     child_boxes: &[ArcRefCell<BlockLevelBox>],
     placement_state: &mut PlacementState,
     ignore_block_margins_for_stretch: LogicalSides1D<bool>,
+    mut page_builder: Option<&mut BlockPageBuilder>,
 ) -> Vec<Fragment> {
     let mut layout_results: Vec<(Fragment, PositioningContext)> =
         Vec::with_capacity(child_boxes.len());
@@ -820,18 +843,26 @@ fn layout_block_level_children_in_parallel(
         })
         .collect_into_vec(&mut layout_results);
 
-    layout_results
-        .into_iter()
-        .map(|(mut fragment, mut child_positioning_context)| {
-            placement_state.place_fragment_and_update_baseline(&mut fragment, None);
-            child_positioning_context.adjust_static_position_of_hoisted_fragments(
-                &fragment,
-                PositioningContextLength::zero(),
-            );
-            positioning_context.append(child_positioning_context);
-            fragment
-        })
-        .collect()
+    let mut fragments = Vec::with_capacity(layout_results.len());
+    for (child_index, (mut fragment, mut child_positioning_context)) in
+        layout_results.into_iter().enumerate()
+    {
+        prepare_fragmentainer_boundary(
+            page_builder.as_deref_mut(),
+            child_index,
+            &child_boxes[child_index].borrow(),
+            &fragment,
+            placement_state,
+        );
+        placement_state.place_fragment_and_update_baseline(&mut fragment, None);
+        child_positioning_context.adjust_static_position_of_hoisted_fragments(
+            &fragment,
+            PositioningContextLength::zero(),
+        );
+        positioning_context.append(child_positioning_context);
+        fragments.push(fragment);
+    }
+    fragments
 }
 
 fn layout_block_level_children_sequentially(
@@ -841,24 +872,26 @@ fn layout_block_level_children_sequentially(
     sequential_layout_state: &mut SequentialLayoutState,
     placement_state: &mut PlacementState,
     ignore_block_margins_for_stretch: LogicalSides1D<bool>,
+    mut page_builder: Option<&mut BlockPageBuilder>,
 ) -> Vec<Fragment> {
     // Because floats are involved, we do layout for this block formatting context in tree
     // order without parallelism. This enables mutable access to a `SequentialLayoutState` that
     // tracks every float encountered so far (again in tree order).
-    child_boxes
-        .iter()
-        .map(|child_box| {
-            layout_block_level_child(
-                layout_context,
-                positioning_context,
-                &child_box.borrow(),
-                Some(sequential_layout_state),
-                placement_state,
-                ignore_block_margins_for_stretch,
-                false, /* has_inline_parent */
-            )
-        })
-        .collect()
+    let mut fragments = Vec::with_capacity(child_boxes.len());
+    for (child_index, child_box) in child_boxes.iter().enumerate() {
+        fragments.push(layout_block_level_child(
+            layout_context,
+            positioning_context,
+            &child_box.borrow(),
+            Some(sequential_layout_state),
+            placement_state,
+            ignore_block_margins_for_stretch,
+            false, /* has_inline_parent */
+            page_builder.as_deref_mut(),
+            child_index,
+        ));
+    }
+    fragments
 }
 
 fn layout_block_level_child(
@@ -869,6 +902,8 @@ fn layout_block_level_child(
     placement_state: &mut PlacementState,
     ignore_block_margins_for_stretch: LogicalSides1D<bool>,
     has_inline_parent: bool,
+    page_builder: Option<&mut BlockPageBuilder>,
+    child_index: usize,
 ) -> Fragment {
     let positioning_context_length_before_layout = positioning_context.len();
     let mut fragment = child_box.layout(
@@ -883,6 +918,13 @@ fn layout_block_level_child(
         has_inline_parent,
     );
 
+    prepare_fragmentainer_boundary(
+        page_builder,
+        child_index,
+        child_box,
+        &fragment,
+        placement_state,
+    );
     placement_state.place_fragment_and_update_baseline(&mut fragment, sequential_layout_state);
     positioning_context.adjust_static_position_of_hoisted_fragments(
         &fragment,
@@ -890,6 +932,35 @@ fn layout_block_level_child(
     );
 
     fragment
+}
+
+fn prepare_fragmentainer_boundary(
+    page_builder: Option<&mut BlockPageBuilder>,
+    child_index: usize,
+    child_box: &BlockLevelBox,
+    fragment: &Fragment,
+    placement_state: &mut PlacementState,
+) {
+    let Some(page_builder) = page_builder else {
+        return;
+    };
+    let metrics = placement_state
+        .block_boundary_metrics(fragment)
+        .expect("simple normal-flow children must produce block fragments");
+    let node = child_box.with_base(|base| {
+        base.base_fragment_info
+            .tag
+            .map(|tag| tag.to_display_list_fragment_id())
+    });
+    if let BlockBoundaryPlacement::NewPage { block_origin } = page_builder.place_child(
+        child_index,
+        node,
+        placement_state.current_block_direction_position,
+        metrics.current_page_contribution,
+        metrics.fresh_page_contribution,
+    ) {
+        placement_state.start_new_fragmentainer(block_origin);
+    }
 }
 
 impl BlockLevelBox {
@@ -1853,6 +1924,11 @@ struct PlacementState<'container> {
     containing_block: &'container ContainingBlock<'container>,
 }
 
+struct BlockBoundaryMetrics {
+    current_page_contribution: Au,
+    fresh_page_contribution: Au,
+}
+
 impl<'container> PlacementState<'container> {
     fn new(
         collapsible_with_parent_start_margin: CollapsibleWithParentStartMargin,
@@ -1872,6 +1948,53 @@ impl<'container> PlacementState<'container> {
             marker_block_size: None,
             containing_block,
         }
+    }
+
+    fn block_boundary_metrics(&self, fragment: &Fragment) -> Option<BlockBoundaryMetrics> {
+        let fragment = match fragment {
+            Fragment::LayoutRoot(..) | Fragment::Box(..) => fragment.retrieve_box_fragment()?,
+            _ => return None,
+        };
+        if fragment
+            .base
+            .flags
+            .contains(FragmentFlags::IS_OUTSIDE_LIST_ITEM_MARKER)
+        {
+            return None;
+        }
+
+        let BlockLevelLayoutInfo {
+            clearance,
+            block_margins_collapsed_with_children: margins,
+        } = fragment.block_level_layout_info.as_ref()?.as_ref();
+        let block_size = fragment
+            .border_rect()
+            .size
+            .to_logical(self.containing_block.style.writing_mode)
+            .block
+            + clearance.unwrap_or_default();
+        let current_margin = self.current_margin.adjoin(&margins.start);
+        let fresh_margin = CollapsedMargin::zero().adjoin(&margins.start);
+        let (current_margin, fresh_margin) = if margins.collapsed_through {
+            (
+                current_margin.adjoin(&margins.end),
+                fresh_margin.adjoin(&margins.end),
+            )
+        } else {
+            (current_margin, fresh_margin)
+        };
+        Some(BlockBoundaryMetrics {
+            current_page_contribution: current_margin.solve() + block_size,
+            fresh_page_contribution: fresh_margin.solve() + block_size,
+        })
+    }
+
+    fn start_new_fragmentainer(&mut self, block_origin: Au) {
+        debug_assert!(block_origin >= self.current_block_direction_position);
+        self.current_block_direction_position = block_origin;
+        self.current_margin = CollapsedMargin::zero();
+        self.next_in_flow_margin_collapses_with_parent_start_margin = false;
+        self.last_in_flow_margin_collapses_with_parent_end_margin = true;
     }
 
     fn place_fragment_and_update_baseline(
