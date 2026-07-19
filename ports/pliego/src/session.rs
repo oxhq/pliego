@@ -3,6 +3,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 use std::error::Error;
+use std::ffi::OsString;
 use std::fmt;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
@@ -79,17 +80,50 @@ impl LocalDocument {
 #[derive(Debug)]
 pub struct SessionArtifacts {
     directory: PathBuf,
+    render_id: String,
 }
 
 impl SessionArtifacts {
+    #[cfg(test)]
     pub fn create(directory: impl AsRef<Path>) -> io::Result<Self> {
         let directory = directory.as_ref().to_owned();
-        std::fs::create_dir_all(&directory)?;
-        std::fs::create_dir_all(directory.join("resources"))?;
-        for name in ["console.jsonl", "resources.jsonl", "session-state.jsonl"] {
-            File::create(directory.join(name))?;
+        let render_id = directory
+            .file_name()
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "session artifact path has no final component",
+                )
+            })?
+            .to_string_lossy()
+            .into_owned();
+        Self::create_with_render_id(directory, render_id)
+    }
+
+    pub fn create_with_render_id(
+        directory: impl AsRef<Path>,
+        render_id: impl Into<String>,
+    ) -> io::Result<Self> {
+        let directory = directory.as_ref().to_owned();
+        let render_id = render_id.into();
+        if render_id.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "render ID may not be empty",
+            ));
         }
-        Ok(Self { directory })
+        create_private_directory(&directory)?;
+        create_private_directory(&directory.join("resources"))?;
+        for name in ["console.jsonl", "resources.jsonl", "session-state.jsonl"] {
+            private_file_options()
+                .write(true)
+                .create_new(true)
+                .open(directory.join(name))?;
+        }
+        Ok(Self {
+            directory,
+            render_id,
+        })
     }
 
     pub fn directory(&self) -> &Path {
@@ -97,10 +131,7 @@ impl SessionArtifacts {
     }
 
     pub fn render_id(&self) -> String {
-        self.directory
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_default()
+        self.render_id.clone()
     }
 
     pub fn record_state(&self, state: &str, message: Option<&str>) -> io::Result<()> {
@@ -147,20 +178,7 @@ impl SessionArtifacts {
         sha256: &str,
         body: &[u8],
     ) -> io::Result<()> {
-        let artifact = format!("resources/{sha256}");
-        let path = self.directory.join(&artifact);
-        match OpenOptions::new().write(true).create_new(true).open(&path) {
-            Ok(mut file) => file.write_all(body)?,
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                if std::fs::read(&path)? != body {
-                    return Err(io::Error::new(
-                        io::ErrorKind::AlreadyExists,
-                        format!("resource digest collision for {sha256}"),
-                    ));
-                }
-            },
-            Err(error) => return Err(error),
-        }
+        let artifact = self.write_resource_digest(sha256, body)?;
 
         self.append(
             "resources.jsonl",
@@ -178,6 +196,49 @@ impl SessionArtifacts {
                 "artifact": artifact,
             }),
         )
+    }
+
+    pub fn write_content_addressed_resource(
+        &self,
+        resource: &str,
+        body: &[u8],
+    ) -> io::Result<String> {
+        let digest = resource.strip_prefix("sha256:").ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("resource is not a SHA-256 content address: {resource}"),
+            )
+        })?;
+        self.write_resource_digest(digest, body)
+    }
+
+    pub fn write_scene(&self, normalized_scene: &[u8]) -> io::Result<()> {
+        self.write_bytes("scene.json", normalized_scene)
+    }
+
+    pub fn write_fonts(&self, fonts: &serde_json::Value) -> io::Result<()> {
+        self.write_json("fonts.json", fonts)
+    }
+
+    pub fn write_scene_report(&self, report: &serde_json::Value) -> io::Result<()> {
+        self.write_json("scene-report.json", report)
+    }
+
+    pub fn write_scene_preview(&self, png: &[u8]) -> io::Result<()> {
+        self.write_bytes("scene-preview.png", png)
+    }
+
+    pub fn write_document_pdf(&self, pdf: &[u8]) -> io::Result<()> {
+        self.write_bytes("document.pdf", pdf)
+    }
+
+    /// Publish the diagnostic PDF without replacing an existing caller-owned path.
+    pub fn publish_document_pdf(&self, destination: impl AsRef<Path>) -> io::Result<()> {
+        publish_new_file(&self.directory.join("document.pdf"), destination.as_ref())
+    }
+
+    pub fn write_pdf_structure(&self, structure: &serde_json::Value) -> io::Result<()> {
+        self.write_json("pdf-structure.json", structure)
     }
 
     pub fn write_readiness(&self, readiness: &serde_json::Value) -> io::Result<()> {
@@ -203,8 +264,46 @@ impl SessionArtifacts {
         self.write_json("environment.json", environment)
     }
 
+    fn write_resource_digest(&self, digest: &str, body: &[u8]) -> io::Result<String> {
+        if digest.len() != 64
+            || !digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("invalid lowercase SHA-256 digest: {digest}"),
+            ));
+        }
+
+        let artifact = format!("resources/{digest}");
+        let path = self.directory.join(&artifact);
+        match private_file_options()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(mut file) => file.write_all(body)?,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                if std::fs::read(&path)? != body {
+                    return Err(io::Error::new(
+                        io::ErrorKind::AlreadyExists,
+                        format!("resource digest collision for {digest}"),
+                    ));
+                }
+            },
+            Err(error) => return Err(error),
+        }
+        Ok(artifact)
+    }
+
+    fn write_bytes(&self, name: &str, bytes: &[u8]) -> io::Result<()> {
+        let mut file = open_private_file(&self.directory.join(name))?;
+        file.write_all(bytes)
+    }
+
     fn write_json(&self, name: &str, value: &serde_json::Value) -> io::Result<()> {
-        let mut file = File::create(self.directory.join(name))?;
+        let mut file = open_private_file(&self.directory.join(name))?;
         serde_json::to_writer_pretty(&mut file, value).map_err(io::Error::other)?;
         file.write_all(b"\n")
     }
@@ -216,6 +315,111 @@ impl SessionArtifacts {
         serde_json::to_writer(&mut file, &event).map_err(io::Error::other)?;
         file.write_all(b"\n")
     }
+}
+
+#[cfg(unix)]
+fn create_private_directory(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+
+    let mut builder = std::fs::DirBuilder::new();
+    builder.mode(0o700);
+    builder.create(path)
+}
+
+#[cfg(not(unix))]
+fn create_private_directory(path: &Path) -> io::Result<()> {
+    std::fs::create_dir(path)
+}
+
+#[cfg(unix)]
+fn private_file_options() -> OpenOptions {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let mut options = OpenOptions::new();
+    options.mode(0o600);
+    options
+}
+
+#[cfg(not(unix))]
+fn private_file_options() -> OpenOptions {
+    OpenOptions::new()
+}
+
+fn open_private_file(path: &Path) -> io::Result<File> {
+    private_file_options()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)
+}
+
+fn publish_new_file(source: &Path, destination: &Path) -> io::Result<()> {
+    let file_name = destination.file_name().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "output path has no final component",
+        )
+    })?;
+    if destination.try_exists()? {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("output already exists: {}", destination.display()),
+        ));
+    }
+    let parent = destination
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let mut source_file = File::open(source)?;
+
+    for attempt in 0..32 {
+        let mut temporary_name = OsString::from(".");
+        temporary_name.push(file_name);
+        temporary_name.push(format!(".pliego-{}-{attempt}.tmp", std::process::id()));
+        let temporary_path = parent.join(temporary_name);
+        let mut temporary_file = match private_file_options()
+            .write(true)
+            .create_new(true)
+            .open(&temporary_path)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        };
+
+        let write_result = (|| {
+            io::copy(&mut source_file, &mut temporary_file)?;
+            temporary_file.sync_all()
+        })();
+        drop(temporary_file);
+        if let Err(error) = write_result {
+            let _ = std::fs::remove_file(&temporary_path);
+            return Err(error);
+        }
+
+        // A hard-link publish is the stdlib's portable atomic no-clobber operation. The temporary
+        // file is a sibling, so supported filesystems keep both names on the same volume.
+        match std::fs::hard_link(&temporary_path, destination) {
+            Ok(()) => {
+                // The destination is fully published at this point. A best-effort temporary-name
+                // cleanup must not turn that committed output into a reported render failure.
+                let _ = std::fs::remove_file(&temporary_path);
+                return Ok(());
+            },
+            Err(error) => {
+                let _ = std::fs::remove_file(&temporary_path);
+                return Err(error);
+            },
+        }
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        format!(
+            "all temporary output names already exist beside {}",
+            destination.display()
+        ),
+    ))
 }
 
 fn timestamp_ms() -> u128 {
@@ -412,6 +616,214 @@ mod tests {
         assert_eq!(readiness["payload"]["fixture"], true);
         assert_eq!(readiness["render_id"], artifacts.render_id());
         assert_eq!(layout_debug["boxes"][0]["kind"], "block");
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn writes_exact_scene_artifacts_and_verifies_resource_collisions() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory =
+            std::env::temp_dir().join(format!("pliego-scene-{}-{unique}", std::process::id()));
+        let artifacts = SessionArtifacts::create(&directory).unwrap();
+        let scene = br#"{"schema":"pliego.document-scene","version":1,"pages":[]}"#;
+        let fonts = serde_json::json!({
+            "resources": [{ "resource": "sha256:font" }],
+            "instances": []
+        });
+        let report = serde_json::json!({
+            "capture": { "status": "partial", "unsupported_events": [] },
+            "preview": { "status": "rendered", "unsupported": [] }
+        });
+        let pdf_structure = serde_json::json!({
+            "schema": "pliego.pdf-structure",
+            "version": 1,
+            "pages": [],
+        });
+        let digest = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
+        let resource = format!("sha256:{digest}");
+
+        artifacts.write_scene(scene).unwrap();
+        artifacts.write_fonts(&fonts).unwrap();
+        artifacts.write_scene_report(&report).unwrap();
+        artifacts.write_scene_preview(b"\x89PNG\r\n\x1a\n").unwrap();
+        artifacts.write_document_pdf(b"%PDF-fixture").unwrap();
+        artifacts.write_pdf_structure(&pdf_structure).unwrap();
+        assert_eq!(
+            artifacts
+                .write_content_addressed_resource(&resource, b"hello")
+                .unwrap(),
+            format!("resources/{digest}")
+        );
+        artifacts
+            .write_content_addressed_resource(&resource, b"hello")
+            .unwrap();
+
+        assert_eq!(fs::read(directory.join("scene.json")).unwrap(), scene);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(
+                &fs::read(directory.join("fonts.json")).unwrap()
+            )
+            .unwrap(),
+            fonts
+        );
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(
+                &fs::read(directory.join("scene-report.json")).unwrap()
+            )
+            .unwrap(),
+            report
+        );
+        assert_eq!(
+            fs::read(directory.join("scene-preview.png")).unwrap(),
+            b"\x89PNG\r\n\x1a\n"
+        );
+        assert_eq!(
+            fs::read(directory.join("document.pdf")).unwrap(),
+            b"%PDF-fixture"
+        );
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(
+                &fs::read(directory.join("pdf-structure.json")).unwrap()
+            )
+            .unwrap(),
+            pdf_structure
+        );
+        assert_eq!(
+            fs::read(directory.join("resources").join(digest)).unwrap(),
+            b"hello"
+        );
+        let collision = artifacts
+            .write_content_addressed_resource(&resource, b"different")
+            .unwrap_err();
+        assert_eq!(collision.kind(), std::io::ErrorKind::AlreadyExists);
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn refuses_to_reuse_an_existing_session_directory() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory =
+            std::env::temp_dir().join(format!("pliego-exclusive-{}-{unique}", std::process::id()));
+        let artifacts = SessionArtifacts::create(&directory).unwrap();
+        artifacts.record_console("info", "preserve-me").unwrap();
+        let original = fs::read(directory.join("console.jsonl")).unwrap();
+
+        let collision = SessionArtifacts::create(&directory).unwrap_err();
+        assert_eq!(collision.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(directory.join("console.jsonl")).unwrap(), original);
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn keeps_an_explicit_render_id_independent_of_the_artifact_path() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "pliego-explicit-id-{}-{unique}",
+            std::process::id()
+        ));
+        let artifacts =
+            SessionArtifacts::create_with_render_id(&directory, "sha256:stable-fixture").unwrap();
+
+        artifacts
+            .write_readiness(&serde_json::json!({ "status": "ready" }))
+            .unwrap();
+        let readiness: serde_json::Value =
+            serde_json::from_slice(&fs::read(directory.join("readiness.json")).unwrap()).unwrap();
+        assert_eq!(artifacts.render_id(), "sha256:stable-fixture");
+        assert_eq!(readiness["render_id"], "sha256:stable-fixture");
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn atomically_publishes_a_pdf_without_replacing_an_existing_output() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let sandbox =
+            std::env::temp_dir().join(format!("pliego-publish-{}-{unique}", std::process::id()));
+        fs::create_dir(&sandbox).unwrap();
+        let artifacts = SessionArtifacts::create(sandbox.join("artifacts")).unwrap();
+        let output = sandbox.join("invoice.pdf");
+        artifacts.write_document_pdf(b"%PDF-first").unwrap();
+
+        artifacts.publish_document_pdf(&output).unwrap();
+        assert_eq!(fs::read(&output).unwrap(), b"%PDF-first");
+        assert_eq!(
+            fs::read(artifacts.directory().join("document.pdf")).unwrap(),
+            b"%PDF-first"
+        );
+        let collision = artifacts.publish_document_pdf(&output).unwrap_err();
+        assert_eq!(collision.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(&output).unwrap(), b"%PDF-first");
+        assert!(fs::read_dir(&sandbox).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .contains(".pliego-")
+        }));
+
+        fs::remove_dir_all(sandbox).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn creates_private_session_directories_and_files() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory =
+            std::env::temp_dir().join(format!("pliego-private-{}-{unique}", std::process::id()));
+        let artifacts = SessionArtifacts::create(&directory).unwrap();
+        let digest = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
+
+        artifacts.write_scene(b"{}").unwrap();
+        artifacts
+            .write_environment(&serde_json::json!({ "phase": "initial" }))
+            .unwrap();
+        artifacts
+            .write_environment(&serde_json::json!({ "phase": "final" }))
+            .unwrap();
+        artifacts
+            .write_content_addressed_resource(&format!("sha256:{digest}"), b"hello")
+            .unwrap();
+
+        for path in [&directory, &directory.join("resources")] {
+            assert_eq!(
+                fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+        }
+        for path in [
+            directory.join("console.jsonl"),
+            directory.join("resources.jsonl"),
+            directory.join("session-state.jsonl"),
+            directory.join("scene.json"),
+            directory.join("environment.json"),
+            directory.join("resources").join(digest),
+        ] {
+            assert_eq!(
+                fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
 
         fs::remove_dir_all(directory).unwrap();
     }
