@@ -25,10 +25,10 @@
             await new Promise(requestAnimationFrame);
           }
           if (!window.pliego) throw new Error('Pliego bridge was not installed');
-          if (!(await document.fonts.load('12px "Pliego Fixture"', 'PLIEGO FONT FALLBACK')).length) {
-            throw new Error('Pliego Fixture did not load');
-          }
+          document.body.getBoundingClientRect();
           await document.fonts.ready;
+          await new Promise(requestAnimationFrame);
+          await new Promise(requestAnimationFrame);
           window.pliego.ready({ fixture: 'font-resolution' });
         } catch (error) {
           window.pliego?.fail({
