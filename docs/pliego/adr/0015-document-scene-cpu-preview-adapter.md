@@ -11,7 +11,7 @@ layout and paint-order capture. The first preview backend must preserve that bou
 scene Pliego intends to share with later document backends, rather than creating another source of
 layout truth.
 
-The current scene does not yet encode enough paint, image, variable-font, or physical-output data to
+The current scene does not yet encode enough paint, variable-font, or physical-output data to
 claim CSS visual parity. The prototype therefore needs an intentionally narrow rendering contract
 whose unsupported cases are visible to callers.
 
@@ -24,9 +24,9 @@ The structural preview is a direct `vello_cpu` adapter exposed by
 not accept DOM nodes, Servo layout objects, a WebRender display list, or a live graphics context, and
 it does not initiate layout.
 
-The resolver supplies the exact font bytes and face index named by a scene text operation. This keeps
-resource lookup outside the renderer while leaving `DocumentScene` as the only geometry and operation
-input.
+The resolvers supply the exact font bytes and face index named by a scene text operation and, for the
+image-aware entry point, the exact PNG bytes named by a scene image operation. This keeps resource
+lookup outside the renderer while leaving `DocumentScene` as the only geometry and operation input.
 
 ### Prototype raster semantics
 
@@ -39,10 +39,14 @@ Text is painted in opaque black. The adapter sends each recorded glyph ID and po
 `vello_cpu`; it does not shape the operation's text again and does not recalculate advances. A link
 operation is non-painting metadata and therefore emits no pixels.
 
-The adapter does not silently approximate scene data it cannot map truthfully. `Path` and `Image`
-operations return a typed `UnsupportedOperation` error at their operation index. A font resource with
-nonempty variation coordinates returns `UnsupportedFontVariations`. Missing fonts, invalid geometry,
-out-of-range values, and PNG encoding failures likewise remain explicit typed errors.
+Painted `Path` operations are parsed from their retained SVG path data and rendered with the scene's
+fill rule, fill color, and stroke. Malformed path data returns `InvalidPath` at its operation index.
+The image-aware entry point decodes exact content-addressed PNG bytes once per resource and maps the
+intrinsic bitmap into the retained scene bounds with deterministic low-quality sampling. The
+compatibility entry point still returns `UnsupportedOperation` for images when no resolver is
+provided. Missing, malformed, non-PNG, or oversized image resources fail explicitly. A font resource
+with nonempty variation coordinates returns `UnsupportedFontVariations`; missing fonts, invalid
+geometry, out-of-range values, and PNG encoding failures likewise remain typed errors.
 
 ### Rejected routes
 
@@ -61,11 +65,11 @@ out-of-range values, and PNG encoding failures likewise remain explicit typed er
 
 ### Deferred work
 
-Color and richer paint semantics are deferred until they are represented in the scene. DPI and
-physical-output scaling require a separate contract rather than changing the prototype's one-to-one
-mapping implicitly. Paths, images, normalized variable-font behavior, multi-page output, and visual
-parity with Servo/WebRender or a future PDF backend are also deferred. This ADR does not claim that
-the structural PNG is a production preview or an exact PDF preview.
+Text color and richer box paint semantics are deferred until they are represented in the scene. DPI
+and physical-output scaling require a separate contract rather than changing the prototype's
+one-to-one mapping implicitly. JPEG, GIF, WebP, SVG, normalized variable-font behavior, multi-page
+output, and visual parity with Servo/WebRender or a future PDF backend are also deferred. This ADR
+does not claim that the structural PNG is a production preview or an exact PDF preview.
 
 ## Consequences
 
@@ -73,7 +77,10 @@ the structural PNG is a production preview or an exact PDF preview.
   without DOM, layout, compositor, or GPU state.
 - The preview exercises the canonical scene boundary directly, so a successful render cannot hide a
   second layout or shaping pass.
-- Current previews are deliberately monochrome and one-to-one in scene units and pixels.
+- Current text previews are deliberately monochrome and one-to-one in scene units and pixels;
+  retained vector paths preserve their explicit fill and stroke colors.
+- Content-addressed PNG resources paint into their retained image bounds without DOM or layout
+  access.
 - Unsupported content stops preview generation with a specific error instead of disappearing from
   the output.
 - Adding color, scaling, or operation coverage requires an explicit scene-to-raster mapping and

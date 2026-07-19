@@ -5,9 +5,10 @@
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use pliego::capture::{
-    CaptureError, UnsupportedPaintEvent, UnsupportedPaintKind, capture_document_scene,
+    CaptureError, MissingTextMapping, UnsupportedPaintEvent, UnsupportedPaintKind,
+    capture_document_scene,
 };
-use pliego::{Glyph, Operation, OperationMeta, Rect};
+use pliego::{Glyph, Operation, OperationMeta, Rect, Size};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
@@ -66,7 +67,8 @@ fn text_run(
             "id": glyph_id,
             "x": x,
             "y": y,
-            "advance": 7.0
+            "advance": 7.0,
+            "text_range": { "start": 0, "end": 1 }
         }]
     })
 }
@@ -171,6 +173,19 @@ fn snapshot(local_id_base: usize, link_tag: u64) -> Vec<u8> {
                 "variations": []
             }
         ],
+        "page_sequence": {
+            "pages": [{
+                "index": 0,
+                "width": 612.0,
+                "height": 792.0,
+                "margin_top": 72.0,
+                "margin_right": 54.0,
+                "margin_bottom": 36.0,
+                "margin_left": 18.0,
+                "available_inline_size": 540.0,
+                "available_block_size": 684.0
+            }]
+        },
         "paint_events": [
             {
                 "sequence": 0,
@@ -265,6 +280,52 @@ fn snapshot(local_id_base: usize, link_tag: u64) -> Vec<u8> {
     .unwrap()
 }
 
+fn two_page_snapshot(local_id_base: usize, link_tag: u64) -> Value {
+    let mut capture: Value = serde_json::from_slice(&snapshot(local_id_base, link_tag)).unwrap();
+    let mut second_page = capture["page_sequence"]["pages"][0].clone();
+    second_page["index"] = json!(1);
+    second_page["width"] = json!(400.0);
+    second_page["height"] = json!(300.0);
+    second_page["margin_top"] = json!(20.0);
+    second_page["margin_right"] = json!(30.0);
+    second_page["margin_bottom"] = json!(40.0);
+    second_page["margin_left"] = json!(50.0);
+    second_page["available_inline_size"] = json!(320.0);
+    second_page["available_block_size"] = json!(240.0);
+    capture["page_sequence"]["pages"]
+        .as_array_mut()
+        .unwrap()
+        .push(second_page);
+
+    capture["fragments"][2]["rect"]["y"] = json!(812.0);
+    capture["fragments"][2]["text_run"]["glyphs"][0]["y"] = json!(822.0);
+    capture["fragments"][3]["rect"]["y"] = json!(840.0);
+
+    let shared_font = capture["fragments"][1]["text_run"]["font_instance_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    capture["fragments"][2]["text_run"]["font_instance_id"] = json!(shared_font.clone());
+    let shared_resource = capture["font_instances"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|instance| instance["id"].as_str() == Some(shared_font.as_str()))
+        .unwrap()["resource"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    capture["font_instances"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|instance| instance["id"].as_str() == Some(shared_font.as_str()));
+    capture["font_resources"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|resource| resource["resource"].as_str() == Some(shared_resource.as_str()));
+    capture
+}
+
 fn convert(snapshot: &[u8]) -> pliego::capture::SceneCapture {
     let image_resource = address('3');
     capture_document_scene(snapshot, |url| {
@@ -288,6 +349,14 @@ fn converts_dense_paint_order_without_leaking_capture_local_ids() {
     assert_eq!(first.font_resources, second.font_resources);
     assert_eq!(first.font_instances, second.font_instances);
     assert_eq!(first.unsupported_events, second.unsupported_events);
+    assert!(first.text_mapping_gaps.is_empty());
+    assert_eq!(
+        first.scene.pages[0].size,
+        Size {
+            width: 612.0,
+            height: 792.0,
+        }
+    );
 
     assert_eq!(
         first.scene.pages[0].operations,
@@ -301,6 +370,7 @@ fn converts_dense_paint_order_without_leaking_capture_local_ids() {
                     x: 10.0,
                     y: 30.0,
                     advance: 7.0,
+                    text_range: Some(pliego::Utf8Range { start: 0, end: 1 }),
                 }],
                 meta: OperationMeta::default(),
             },
@@ -323,6 +393,7 @@ fn converts_dense_paint_order_without_leaking_capture_local_ids() {
                     x: 10.0,
                     y: 42.0,
                     advance: 7.0,
+                    text_range: Some(pliego::Utf8Range { start: 0, end: 1 }),
                 }],
                 meta: OperationMeta::default(),
             },
@@ -417,6 +488,127 @@ fn converts_dense_paint_order_without_leaking_capture_local_ids() {
 }
 
 #[test]
+fn converts_two_pages_to_page_local_operations_with_shared_resources() {
+    let capture = two_page_snapshot(10, 1000);
+    let captured = convert(&serde_json::to_vec(&capture).unwrap());
+    let second = two_page_snapshot(800, 9000);
+    let second = convert(&serde_json::to_vec(&second).unwrap());
+    let shared_font = font_instance_address(b"A", 0, &[]);
+
+    assert_eq!(captured.scene, second.scene);
+    assert_eq!(captured.font_resources, second.font_resources);
+    assert_eq!(captured.font_instances, second.font_instances);
+    assert_eq!(
+        captured
+            .scene
+            .pages
+            .iter()
+            .map(|page| page.size.clone())
+            .collect::<Vec<_>>(),
+        vec![
+            Size {
+                width: 612.0,
+                height: 792.0,
+            },
+            Size {
+                width: 400.0,
+                height: 300.0,
+            },
+        ]
+    );
+    assert_eq!(
+        captured.scene.pages[0].operations,
+        vec![
+            Operation::Text {
+                text: "A".into(),
+                font: shared_font.clone(),
+                font_size: 12.0,
+                glyphs: vec![Glyph {
+                    id: 41,
+                    x: 10.0,
+                    y: 30.0,
+                    advance: 7.0,
+                    text_range: Some(pliego::Utf8Range { start: 0, end: 1 }),
+                }],
+                meta: OperationMeta::default(),
+            },
+            Operation::Link {
+                bounds: Rect {
+                    x: 10.0,
+                    y: 20.0,
+                    width: 10.0,
+                    height: 12.0,
+                },
+                target: LINK_URL.into(),
+                meta: OperationMeta::default(),
+            },
+        ]
+    );
+    assert_eq!(
+        captured.scene.pages[1].operations,
+        vec![
+            Operation::Text {
+                text: "B".into(),
+                font: shared_font.clone(),
+                font_size: 12.0,
+                glyphs: vec![Glyph {
+                    id: 42,
+                    x: 10.0,
+                    y: 30.0,
+                    advance: 7.0,
+                    text_range: Some(pliego::Utf8Range { start: 0, end: 1 }),
+                }],
+                meta: OperationMeta::default(),
+            },
+            Operation::Link {
+                bounds: Rect {
+                    x: 10.0,
+                    y: 20.0,
+                    width: 15.0,
+                    height: 12.0,
+                },
+                target: LINK_URL.into(),
+                meta: OperationMeta::default(),
+            },
+            Operation::Image {
+                bounds: Rect {
+                    x: 50.0,
+                    y: 48.0,
+                    width: 30.0,
+                    height: 20.0,
+                },
+                resource: address('3'),
+                meta: OperationMeta::default(),
+            },
+        ]
+    );
+    assert_eq!(captured.font_resources.len(), 1);
+    assert_eq!(captured.font_resources[0].resource, content_address(b"A"));
+    assert_eq!(captured.font_instances.len(), 1);
+    assert_eq!(captured.font_instances[0].id, shared_font);
+    assert!(captured.text_mapping_gaps.is_empty());
+    assert!(captured.scene.sha256().is_ok());
+}
+
+#[test]
+fn rejects_an_operation_crossing_a_page_boundary() {
+    let mut capture = two_page_snapshot(10, 1000);
+    capture["fragments"][1]["rect"]["y"] = json!(785.0);
+    capture["fragments"][1]["rect"]["height"] = json!(12.0);
+    capture["fragments"][1]["text_run"]["glyphs"][0]["y"] = json!(790.0);
+
+    assert_eq!(
+        capture_document_scene(&serde_json::to_vec(&capture).unwrap(), |url| {
+            (url == IMAGE_URL).then(|| address('3'))
+        }),
+        Err(CaptureError::OperationCrossesPageBoundary {
+            sequence: 2,
+            page_index: 0,
+        })
+    );
+}
+
+#[test]
 fn rejects_a_sparse_paint_sequence_instead_of_reordering_it() {
     let mut capture: Value = serde_json::from_slice(&snapshot(10, 1000)).unwrap();
     capture["paint_events"][4]["sequence"] = json!(5);
@@ -427,6 +619,51 @@ fn rejects_a_sparse_paint_sequence_instead_of_reordering_it() {
             expected: 4,
             actual: 5,
         })
+    );
+}
+
+#[test]
+fn rejects_missing_or_invalid_page_geometry() {
+    let original: Value = serde_json::from_slice(&snapshot(10, 1000)).unwrap();
+
+    let mut missing = original.clone();
+    missing.as_object_mut().unwrap().remove("page_sequence");
+    assert_eq!(
+        capture_document_scene(&serde_json::to_vec(&missing).unwrap(), |_| None),
+        Err(CaptureError::MissingPageSequence)
+    );
+
+    let mut empty = original.clone();
+    empty["page_sequence"]["pages"] = json!([]);
+    assert_eq!(
+        capture_document_scene(&serde_json::to_vec(&empty).unwrap(), |_| None),
+        Err(CaptureError::InvalidPageCount { actual: 0 })
+    );
+
+    let mut non_dense_pages = original.clone();
+    let mut second = non_dense_pages["page_sequence"]["pages"][0].clone();
+    second["index"] = json!(2);
+    non_dense_pages["page_sequence"]["pages"]
+        .as_array_mut()
+        .unwrap()
+        .push(second);
+    assert_eq!(
+        capture_document_scene(&serde_json::to_vec(&non_dense_pages).unwrap(), |_| None),
+        Err(CaptureError::InvalidPageIndex { actual: 2 })
+    );
+
+    let mut wrong_index = original.clone();
+    wrong_index["page_sequence"]["pages"][0]["index"] = json!(1);
+    assert_eq!(
+        capture_document_scene(&serde_json::to_vec(&wrong_index).unwrap(), |_| None),
+        Err(CaptureError::InvalidPageIndex { actual: 1 })
+    );
+
+    let mut invalid_geometry = original;
+    invalid_geometry["page_sequence"]["pages"][0]["margin_left"] = json!(-1.0);
+    assert_eq!(
+        capture_document_scene(&serde_json::to_vec(&invalid_geometry).unwrap(), |_| None),
+        Err(CaptureError::InvalidPageGeometry)
     );
 }
 
@@ -453,4 +690,41 @@ fn rejects_untrusted_font_resource_and_instance_identities() {
         capture_document_scene(&serde_json::to_vec(&mismatched_instance).unwrap(), |_| None),
         Err(CaptureError::FontInstanceIdMismatch { .. })
     ));
+}
+
+#[test]
+fn rejects_glyph_ranges_outside_the_retained_utf8_text() {
+    let mut capture: Value = serde_json::from_slice(&snapshot(10, 1000)).unwrap();
+    capture["fragments"][1]["text_run"]["glyphs"][0]["text_range"]["end"] = json!(2);
+
+    assert!(matches!(
+        capture_document_scene(&serde_json::to_vec(&capture).unwrap(), |url| {
+            (url == IMAGE_URL).then(|| address('3'))
+        }),
+        Err(CaptureError::InvalidScene(
+            "glyph text range is out of bounds"
+        ))
+    ));
+}
+
+#[test]
+fn reports_missing_glyph_source_mapping_as_a_capture_gap() {
+    let mut capture: Value = serde_json::from_slice(&snapshot(10, 1000)).unwrap();
+    capture["fragments"][1]["text_run"]["glyphs"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("text_range");
+
+    let captured = capture_document_scene(&serde_json::to_vec(&capture).unwrap(), |url| {
+        (url == IMAGE_URL).then(|| address('3'))
+    })
+    .unwrap();
+
+    assert_eq!(
+        captured.text_mapping_gaps,
+        vec![MissingTextMapping {
+            sequence: 2,
+            glyph_index: 0,
+        }]
+    );
 }

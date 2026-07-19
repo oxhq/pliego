@@ -18,6 +18,7 @@ pub struct SceneCapture {
     pub font_resources: Vec<CapturedFontResource>,
     pub font_instances: Vec<CapturedFontInstance>,
     pub unsupported_events: Vec<UnsupportedPaintEvent>,
+    pub text_mapping_gaps: Vec<MissingTextMapping>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -47,6 +48,12 @@ pub struct UnsupportedPaintEvent {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct MissingTextMapping {
+    pub sequence: usize,
+    pub glyph_index: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum UnsupportedPaintKind {
     Box,
@@ -59,6 +66,27 @@ pub enum UnsupportedPaintKind {
 #[derive(Clone, Debug, PartialEq)]
 pub enum CaptureError {
     InvalidJson(String),
+    MissingPageSequence,
+    InvalidPageCount {
+        actual: usize,
+    },
+    InvalidPageIndex {
+        actual: usize,
+    },
+    InvalidPageGeometry,
+    MissingTextRect {
+        sequence: usize,
+    },
+    OperationCrossesPageBoundary {
+        sequence: usize,
+        page_index: usize,
+    },
+    OperationOutsidePageSequence {
+        sequence: usize,
+    },
+    PageLocalPathUnsupported {
+        sequence: usize,
+    },
     NonDensePaintEvents {
         expected: usize,
         actual: usize,
@@ -136,6 +164,41 @@ impl fmt::Display for CaptureError {
             Self::InvalidJson(message) => {
                 write!(formatter, "invalid layout snapshot JSON: {message}")
             },
+            Self::MissingPageSequence => {
+                write!(formatter, "layout snapshot has no paged-root sequence")
+            },
+            Self::InvalidPageCount { actual } => write!(
+                formatter,
+                "layout snapshot must contain at least one page, found {actual}"
+            ),
+            Self::InvalidPageIndex { actual } => write!(
+                formatter,
+                "layout snapshot page index does not match its sequence position: {actual}"
+            ),
+            Self::InvalidPageGeometry => {
+                write!(formatter, "layout snapshot contains invalid page geometry")
+            },
+            Self::MissingTextRect { sequence } => {
+                write!(
+                    formatter,
+                    "text paint event {sequence} has no retained rectangle"
+                )
+            },
+            Self::OperationCrossesPageBoundary {
+                sequence,
+                page_index,
+            } => write!(
+                formatter,
+                "paint event {sequence} crosses the boundary after page {page_index}"
+            ),
+            Self::OperationOutsidePageSequence { sequence } => write!(
+                formatter,
+                "paint event {sequence} lies outside the retained page sequence"
+            ),
+            Self::PageLocalPathUnsupported { sequence } => write!(
+                formatter,
+                "path paint event {sequence} cannot be translated to a later page"
+            ),
             Self::NonDensePaintEvents { expected, actual } => write!(
                 formatter,
                 "paint event sequence is not dense: expected {expected}, found {actual}"
@@ -261,7 +324,7 @@ impl fmt::Display for CaptureError {
 
 impl std::error::Error for CaptureError {}
 
-/// Convert the retained layout snapshot JSON into a one-page canonical document scene.
+/// Convert the retained layout snapshot JSON into a canonical document scene.
 ///
 /// The converter consumes only retained capture data. Capture-local fragment, tag, spatial-node,
 /// clip, and diagnostic font identifiers are used only for joins and never enter the returned
@@ -272,6 +335,7 @@ pub fn capture_document_scene(
 ) -> Result<SceneCapture, CaptureError> {
     let capture: LayoutCapture = serde_json::from_slice(snapshot_json)
         .map_err(|error| CaptureError::InvalidJson(error.to_string()))?;
+    let pages = capture_pages(&capture)?;
 
     let font_resources = collect_font_resources(capture.font_resources)?;
     let font_instances = collect_font_instances(capture.font_instances, &font_resources)?;
@@ -279,6 +343,7 @@ pub fn capture_document_scene(
     let links = collect_links(capture.links)?;
     let mut emitted_links = HashSet::new();
     let mut unsupported_events = Vec::new();
+    let mut text_mapping_gaps = Vec::new();
     let mut operations = Vec::new();
     let mut stacking_context_depth = 0usize;
 
@@ -325,21 +390,47 @@ pub fn capture_document_scene(
                         instance: font.clone(),
                     });
                 }
-                operations.push(Operation::Text {
-                    text: text_run.text.clone(),
-                    font: font.clone(),
-                    font_size: f64::from(text_run.font_size),
-                    glyphs: text_run
+                text_mapping_gaps.extend(
+                    text_run
                         .glyphs
                         .iter()
-                        .map(|glyph| Glyph {
-                            id: glyph.id,
-                            x: f64::from(glyph.x),
-                            y: f64::from(glyph.y),
-                            advance: f64::from(glyph.advance),
-                        })
-                        .collect(),
-                    meta: OperationMeta::default(),
+                        .enumerate()
+                        .filter(|(_, glyph)| glyph.text_range.is_none())
+                        .map(|(glyph_index, _)| MissingTextMapping {
+                            sequence: event.sequence,
+                            glyph_index,
+                        }),
+                );
+                let bounds = fragment
+                    .rect
+                    .as_ref()
+                    .ok_or(CaptureError::MissingTextRect {
+                        sequence: event.sequence,
+                    })?
+                    .into_scene_rect();
+                operations.push(PositionedOperation {
+                    sequence: event.sequence,
+                    bounds,
+                    operation: Operation::Text {
+                        text: text_run.text.clone(),
+                        font: font.clone(),
+                        font_size: f64::from(text_run.font_size),
+                        glyphs: text_run
+                            .glyphs
+                            .iter()
+                            .map(|glyph| Glyph {
+                                id: glyph.id,
+                                x: f64::from(glyph.x),
+                                y: f64::from(glyph.y),
+                                advance: f64::from(glyph.advance),
+                                text_range: glyph.text_range.map(|range| crate::Utf8Range {
+                                    start: range.start,
+                                    end: range.end,
+                                }),
+                            })
+                            .collect(),
+                        meta: OperationMeta::default(),
+                    },
                 });
                 append_link(
                     &mut operations,
@@ -377,10 +468,14 @@ pub fn capture_document_scene(
                     url: url.into(),
                 })?;
                 ensure_content_address(&resource)?;
-                operations.push(Operation::Image {
-                    bounds,
-                    resource,
-                    meta: OperationMeta::default(),
+                operations.push(PositionedOperation {
+                    sequence: event.sequence,
+                    bounds: bounds.clone(),
+                    operation: Operation::Image {
+                        bounds,
+                        resource,
+                        meta: OperationMeta::default(),
+                    },
                 });
                 append_link(
                     &mut operations,
@@ -435,13 +530,11 @@ pub fn capture_document_scene(
         });
     }
 
-    let scene = DocumentScene::new(Page {
-        size: Size {
-            width: f64::from(capture.paint_content_width),
-            height: f64::from(capture.paint_content_height),
-        },
-        operations,
-    });
+    let scene = DocumentScene {
+        schema: crate::SCHEMA.into(),
+        version: crate::SCHEMA_VERSION,
+        pages: distribute_operations(&pages, operations)?,
+    };
     scene.validate().map_err(CaptureError::InvalidScene)?;
 
     Ok(SceneCapture {
@@ -449,7 +542,128 @@ pub fn capture_document_scene(
         font_resources: font_resources.into_values().collect(),
         font_instances: font_instances.into_values().collect(),
         unsupported_events,
+        text_mapping_gaps,
     })
+}
+
+fn capture_pages(capture: &LayoutCapture) -> Result<Vec<CapturePage>, CaptureError> {
+    let sequence = capture
+        .page_sequence
+        .as_ref()
+        .ok_or(CaptureError::MissingPageSequence)?;
+    if sequence.pages.is_empty() {
+        return Err(CaptureError::InvalidPageCount {
+            actual: sequence.pages.len(),
+        });
+    }
+    for (expected_index, page) in sequence.pages.iter().enumerate() {
+        if page.index != expected_index {
+            return Err(CaptureError::InvalidPageIndex { actual: page.index });
+        }
+        if !positive_finite(page.width)
+            || !positive_finite(page.height)
+            || !nonnegative_finite(page.margin_top)
+            || !nonnegative_finite(page.margin_right)
+            || !nonnegative_finite(page.margin_bottom)
+            || !nonnegative_finite(page.margin_left)
+            || !positive_finite(page.available_inline_size)
+            || !positive_finite(page.available_block_size)
+            || page.margin_left + page.margin_right >= page.width
+            || page.margin_top + page.margin_bottom >= page.height
+            || page.available_inline_size > page.width
+            || page.available_block_size > page.height
+        {
+            return Err(CaptureError::InvalidPageGeometry);
+        }
+    }
+    Ok(sequence.pages.clone())
+}
+
+struct PositionedOperation {
+    sequence: usize,
+    bounds: Rect,
+    operation: Operation,
+}
+
+fn distribute_operations(
+    pages: &[CapturePage],
+    operations: Vec<PositionedOperation>,
+) -> Result<Vec<Page>, CaptureError> {
+    let mut scene_pages = pages
+        .iter()
+        .map(|page| Page {
+            size: Size {
+                width: f64::from(page.width),
+                height: f64::from(page.height),
+            },
+            operations: Vec::new(),
+        })
+        .collect::<Vec<_>>();
+
+    for mut positioned in operations {
+        let (page_index, page_origin) = operation_page(pages, &positioned)?;
+        translate_operation_y(&mut positioned.operation, page_origin, positioned.sequence)?;
+        scene_pages[page_index]
+            .operations
+            .push(positioned.operation);
+    }
+    Ok(scene_pages)
+}
+
+fn operation_page(
+    pages: &[CapturePage],
+    operation: &PositionedOperation,
+) -> Result<(usize, f64), CaptureError> {
+    let top = operation.bounds.y;
+    let bottom = top + operation.bounds.height;
+    let mut origin = 0.0;
+    for (page_index, page) in pages.iter().enumerate() {
+        let end = origin + f64::from(page.height);
+        let is_last_zero_height_edge = page_index + 1 == pages.len() && top == end && bottom == top;
+        if top >= origin && (top < end || is_last_zero_height_edge) {
+            if bottom > end {
+                return Err(CaptureError::OperationCrossesPageBoundary {
+                    sequence: operation.sequence,
+                    page_index,
+                });
+            }
+            return Ok((page_index, origin));
+        }
+        origin = end;
+    }
+    Err(CaptureError::OperationOutsidePageSequence {
+        sequence: operation.sequence,
+    })
+}
+
+fn translate_operation_y(
+    operation: &mut Operation,
+    page_origin: f64,
+    sequence: usize,
+) -> Result<(), CaptureError> {
+    match operation {
+        Operation::Text { glyphs, .. } => {
+            for glyph in glyphs {
+                glyph.y -= page_origin;
+            }
+        },
+        Operation::Path { .. } if page_origin != 0.0 => {
+            return Err(CaptureError::PageLocalPathUnsupported { sequence });
+        },
+        Operation::Path { .. } => {},
+        Operation::Image { bounds, .. } | Operation::Link { bounds, .. } => {
+            bounds.y -= page_origin;
+        },
+    }
+    Ok(())
+}
+
+fn positive_finite(value: f32) -> bool {
+    value.is_finite() && value > 0.0
+}
+
+fn nonnegative_finite(value: f32) -> bool {
+    value.is_finite() && value >= 0.0 && !value.is_sign_negative()
 }
 
 fn collect_font_resources(
@@ -610,7 +824,7 @@ fn optionally_joined_fragment<'a>(
 }
 
 fn append_link(
-    operations: &mut Vec<Operation>,
+    operations: &mut Vec<PositionedOperation>,
     emitted: &mut HashSet<(usize, u64)>,
     links: &HashMap<u64, String>,
     fragment_id: usize,
@@ -631,10 +845,14 @@ fn append_link(
         .as_ref()
         .ok_or(CaptureError::MissingLinkRect { sequence })?
         .into_scene_rect();
-    operations.push(Operation::Link {
-        bounds,
-        target: target.clone(),
-        meta: OperationMeta::default(),
+    operations.push(PositionedOperation {
+        sequence,
+        bounds: bounds.clone(),
+        operation: Operation::Link {
+            bounds,
+            target: target.clone(),
+            meta: OperationMeta::default(),
+        },
     });
     Ok(())
 }
@@ -709,11 +927,14 @@ struct LayoutCapture {
     fragments: Vec<CaptureFragment>,
     font_resources: Vec<CaptureFontResource>,
     font_instances: Vec<CaptureFontInstance>,
+    page_sequence: Option<CapturePageSequence>,
     paint_events: Vec<CapturePaintEvent>,
     #[serde(rename = "paint_epoch")]
     _paint_epoch: u32,
-    paint_content_width: f32,
-    paint_content_height: f32,
+    #[serde(rename = "paint_content_width")]
+    _paint_content_width: f32,
+    #[serde(rename = "paint_content_height")]
+    _paint_content_height: f32,
     #[serde(rename = "paint_scroll_node_count")]
     _paint_scroll_node_count: usize,
     #[serde(rename = "paintable")]
@@ -723,6 +944,26 @@ struct LayoutCapture {
     #[serde(rename = "first_reflow")]
     _first_reflow: bool,
     links: Vec<CaptureLink>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CapturePageSequence {
+    pages: Vec<CapturePage>,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CapturePage {
+    index: usize,
+    width: f32,
+    height: f32,
+    margin_top: f32,
+    margin_right: f32,
+    margin_bottom: f32,
+    margin_left: f32,
+    available_inline_size: f32,
+    available_block_size: f32,
 }
 
 #[derive(Deserialize)]
@@ -780,6 +1021,15 @@ struct CaptureGlyph {
     x: f32,
     y: f32,
     advance: f32,
+    #[serde(default)]
+    text_range: Option<CaptureUtf8Range>,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CaptureUtf8Range {
+    start: u32,
+    end: u32,
 }
 
 #[derive(Deserialize)]
@@ -830,4 +1080,38 @@ struct CaptureFontInstance {
 struct CaptureFontVariation {
     tag: u32,
     value: f32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_later_page_paths_without_rewriting_path_data() {
+        let mut operation = Operation::Path {
+            bounds: Rect {
+                x: 10.0,
+                y: 812.0,
+                width: 20.0,
+                height: 10.0,
+            },
+            data: "M10 812h20v10z".into(),
+            fill: Some(crate::Color {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            }),
+            fill_rule: crate::FillRule::NonZero,
+            stroke: None,
+            meta: OperationMeta::default(),
+        };
+        let original = operation.clone();
+
+        assert_eq!(
+            translate_operation_y(&mut operation, 792.0, 7),
+            Err(CaptureError::PageLocalPathUnsupported { sequence: 7 })
+        );
+        assert_eq!(operation, original);
+    }
 }

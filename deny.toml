@@ -143,6 +143,11 @@ skip = [
     # wgpu crates still depend on 1.1.0
     "rustc-hash",
 
+    # Krilla 0.8.2 requires yoke 0.8 while Servo's ICU4X graph remains on yoke 0.7.
+    # Remove both exact exceptions when the graph resolves one yoke release line.
+    { crate = "yoke@0.8.3", reason = "Krilla 0.8.2 requires yoke 0.8; remove when Servo's ICU4X graph and Krilla resolve one yoke release line" },
+    { crate = "yoke-derive@0.8.2", reason = "proc macro paired with Krilla's yoke 0.8 dependency; remove with the yoke exception" },
+
     # wgpu depends on thiserror 2, while rest is still on 1
     "thiserror",
     "thiserror-impl",
