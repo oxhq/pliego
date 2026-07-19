@@ -3,7 +3,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
-use std::cell::RefCell;
+use std::cell::{OnceCell, RefCell};
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
 use std::collections::{BTreeMap, HashMap};
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
@@ -15,7 +15,7 @@ use std::path::PathBuf;
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
 use std::rc::Rc;
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
 use base64::Engine as _;
@@ -183,6 +183,7 @@ struct ResourcePolicyFailure {
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
 enum ResourcePolicyDecision {
     Allow,
+    FetchHttp,
     Synthesize {
         body: Vec<u8>,
         content_type: &'static str,
@@ -281,7 +282,7 @@ fn decide_resource_policy(
                     .iter()
                     .any(|root| http_root_allows(root, &request.url)) =>
         {
-            ResourcePolicyDecision::Allow
+            ResourcePolicyDecision::FetchHttp
         },
         "http" | "https" => failure(
             "RESOURCE_DENIED",
@@ -293,6 +294,161 @@ fn decide_resource_policy(
             "denied",
             "URL scheme is not allowed".into(),
         ),
+    }
+}
+
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+fn fetch_controlled_http(
+    client: &net::connector::ServoClient,
+    request: &servoshell::WebResourceRequest,
+    timeout_ms: u64,
+) -> Result<(servoshell::WebResourceResponse, Vec<u8>), ResourcePolicyFailure> {
+    use http_body_util::{BodyExt, Empty};
+    use hyper::body::Bytes;
+
+    let failure = |code, status, reason: String, is_redirect| ResourcePolicyFailure {
+        code,
+        status,
+        url: request.url.to_string(),
+        method: request.method.to_string(),
+        destination: format!("{:?}", request.destination),
+        referrer_url: request.referrer_url.as_ref().map(ToString::to_string),
+        is_for_main_frame: request.is_for_main_frame,
+        is_redirect,
+        reason,
+    };
+    let body = Empty::<Bytes>::new()
+        .map_err(|error: std::convert::Infallible| match error {})
+        .boxed();
+    let mut outbound = http::Request::builder()
+        .method(request.method.clone())
+        .uri(request.url.as_str())
+        .body(body)
+        .map_err(|error| {
+            failure(
+                "RESOURCE_DENIED",
+                "denied",
+                format!("controlled HTTP request is invalid: {error}"),
+                false,
+            )
+        })?;
+    *outbound.headers_mut() = request.headers.clone();
+
+    let client = client.clone();
+    let fetched = net::async_runtime::spawn_blocking_task(async move {
+        tokio::time::timeout(Duration::from_millis(timeout_ms), async move {
+            let mut response = client
+                .request(outbound)
+                .await
+                .map_err(|error| (false, error.to_string()))?;
+            let status = response.status();
+            let mut headers = response.headers().clone();
+            headers.remove(http::header::CONNECTION);
+            headers.remove(http::header::TRANSFER_ENCODING);
+            if classify_controlled_http_status(status).is_some() {
+                return Ok((status, headers, Vec::new()));
+            }
+            if headers
+                .get(http::header::CONTENT_LENGTH)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.parse::<u64>().ok())
+                .is_some_and(|bytes| bytes > asset_cache::MAX_CACHE_BYTES)
+            {
+                return Err((true, String::new()));
+            }
+            let mut body = Vec::new();
+            while let Some(frame) = response.body_mut().frame().await {
+                let frame = frame.map_err(|error| (false, error.to_string()))?;
+                let Ok(data) = frame.into_data() else {
+                    continue;
+                };
+                if body
+                    .len()
+                    .checked_add(data.len())
+                    .is_none_or(|bytes| bytes as u64 > asset_cache::MAX_CACHE_BYTES)
+                {
+                    return Err((true, String::new()));
+                }
+                body.extend_from_slice(&data);
+            }
+            Ok::<_, (bool, String)>((status, headers, body))
+        })
+        .await
+    });
+
+    let (status, headers, body) = match fetched {
+        Err(_) => {
+            return Err(failure(
+                "RESOURCE_TIMEOUT",
+                "timeout",
+                "controlled HTTP resource exceeded its configured deadline".into(),
+                false,
+            ));
+        },
+        Ok(Err((too_large, error))) => {
+            return Err(if too_large {
+                failure(
+                    "RESOURCE_DENIED",
+                    "denied",
+                    format!(
+                        "controlled HTTP resource exceeds the {}-byte limit",
+                        asset_cache::MAX_CACHE_BYTES
+                    ),
+                    false,
+                )
+            } else {
+                failure(
+                    "RESOURCE_NOT_FOUND",
+                    "not_found",
+                    format!("controlled HTTP resource is unavailable: {error}"),
+                    false,
+                )
+            });
+        },
+        Ok(Ok(response)) => response,
+    };
+
+    if let Some((code, failure_status, reason, is_redirect)) =
+        classify_controlled_http_status(status)
+    {
+        return Err(failure(code, failure_status, reason.into(), is_redirect));
+    }
+
+    let response = servoshell::WebResourceResponse::new(request.url.clone())
+        .headers(headers)
+        .status_code(status)
+        .status_message(
+            status
+                .canonical_reason()
+                .unwrap_or_default()
+                .as_bytes()
+                .to_vec(),
+        );
+    Ok((response, body))
+}
+
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+fn classify_controlled_http_status(
+    status: http::StatusCode,
+) -> Option<(&'static str, &'static str, &'static str, bool)> {
+    if status.is_redirection() {
+        Some(("RESOURCE_DENIED", "denied", "redirects are disabled", true))
+    } else if matches!(status.as_u16(), 404 | 410) {
+        Some((
+            "RESOURCE_NOT_FOUND",
+            "not_found",
+            "controlled HTTP resource was not found",
+            false,
+        ))
+    } else if matches!(status.as_u16(), 408 | 504) {
+        Some((
+            "RESOURCE_TIMEOUT",
+            "timeout",
+            "controlled HTTP resource reported a timeout",
+            false,
+        ))
+    } else {
+        None
     }
 }
 
@@ -988,6 +1144,7 @@ fn render(request: RenderRequest) {
     let captured_policy_failures = Rc::clone(&policy_failures);
     let document_root = document.root().to_owned();
     let active_resource_policy = resource_policy.clone();
+    let controlled_http_client = Rc::new(OnceCell::new());
     let _canvas_retention = servo_canvas::retained_canvas::start_retaining_canvas_commands();
     let result = servoshell::run_with_stable_javascript_and_console_and_web_resource_policy(
         &servo_args,
@@ -998,6 +1155,26 @@ fn render(request: RenderRequest) {
             request,
         ) {
             ResourcePolicyDecision::Allow => servoshell::WebResourcePolicyDecision::Allow,
+            ResourcePolicyDecision::FetchHttp => {
+                let client = controlled_http_client
+                    .get_or_init(|| {
+                        net::connector::create_http_client(net::connector::create_tls_config(
+                            net::connector::CACertificates::Default,
+                            false,
+                            net::connector::CertificateErrorOverrideManager::new(),
+                        ))
+                    })
+                    .clone();
+                match fetch_controlled_http(&client, request, active_resource_policy.timeout_ms) {
+                    Ok((response, body)) => {
+                        servoshell::WebResourcePolicyDecision::Synthesize { response, body }
+                    },
+                    Err(failure) => {
+                        captured_policy_failures.borrow_mut().push(failure);
+                        servoshell::WebResourcePolicyDecision::Cancel
+                    },
+                }
+            },
             ResourcePolicyDecision::Synthesize { body, content_type } => {
                 let mut headers = http::HeaderMap::new();
                 headers.insert(
@@ -2433,10 +2610,10 @@ mod tests {
     use super::{
         Command, DEFAULT_LOCALE, DEFAULT_TIMEZONE, ExplicitRenderPaths, PageDefinition,
         PageMargins, PendingResource, RenderEnvironment, RenderRequest, ResourceCapture,
-        ResourcePolicy, ResourcePolicyConfig, ResourcePolicyDecision, complete_resource,
-        create_session_artifacts, decide_resource_policy, default_page, page_artifact, parse_args,
-        persist_scene_capture, resolve_scene_resource, set_document_pdf_environment, sha256_hex,
-        stable_render_id,
+        ResourcePolicy, ResourcePolicyConfig, ResourcePolicyDecision,
+        classify_controlled_http_status, complete_resource, create_session_artifacts,
+        decide_resource_policy, default_page, page_artifact, parse_args, persist_scene_capture,
+        resolve_scene_resource, set_document_pdf_environment, sha256_hex, stable_render_id,
     };
     use crate::session::SessionArtifacts;
     use std::ffi::OsString;
@@ -2761,7 +2938,7 @@ mod tests {
                     false,
                 )
             ),
-            ResourcePolicyDecision::Allow
+            ResourcePolicyDecision::FetchHttp
         ));
         assert!(matches!(
             decide_resource_policy(
@@ -2858,6 +3035,32 @@ mod tests {
         assert_eq!(virtual_failure.code, "RESOURCE_NOT_FOUND");
 
         fs::remove_dir_all(sandbox).unwrap();
+    }
+
+    #[test]
+    fn classifies_controlled_http_failures_without_following_redirects() {
+        for (status, code, failure_status, is_redirect) in [
+            (http::StatusCode::FOUND, "RESOURCE_DENIED", "denied", true),
+            (
+                http::StatusCode::NOT_FOUND,
+                "RESOURCE_NOT_FOUND",
+                "not_found",
+                false,
+            ),
+            (
+                http::StatusCode::REQUEST_TIMEOUT,
+                "RESOURCE_TIMEOUT",
+                "timeout",
+                false,
+            ),
+        ] {
+            let classified = classify_controlled_http_status(status).unwrap();
+            assert_eq!(
+                (classified.0, classified.1, classified.3),
+                (code, failure_status, is_redirect)
+            );
+        }
+        assert!(classify_controlled_http_status(http::StatusCode::OK).is_none());
     }
 
     #[test]

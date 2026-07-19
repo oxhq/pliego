@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -112,6 +113,7 @@ class FixtureServer(ThreadingHTTPServer):
         self.requests: list[str] = []
         self.requests_lock = threading.Lock()
         self.stall_started = threading.Event()
+        self.stall_started_at: float | None = None
         self.release_stall = threading.Event()
 
     @property
@@ -146,6 +148,7 @@ class FixtureHandler(BaseHTTPRequestHandler):
         elif self.path == "/timeout.js":
             self.respond(408, b"request timeout\n", "text/plain")
         elif self.path == "/stall.js":
+            server.stall_started_at = time.monotonic()
             server.stall_started.set()
             server.release_stall.wait(PROCESS_TIMEOUT_SECONDS + 5)
             self.close_connection = True
@@ -453,6 +456,21 @@ def main() -> int:
                 require(
                     any(row.get("code") == "RESOURCE_DENIED" and row.get("is_redirect") is True for row in rows),
                     f"redirect denial was not identified as a redirect: {rows!r}",
+                )
+            if name == "http-stall":
+                require(server.stall_started_at is not None, "stalled response was not accepted")
+                observed_ms = round((time.monotonic() - server.stall_started_at) * 1_000)
+                require(
+                    observed_ms <= RESOURCE_TIMEOUT_MS + 5_000,
+                    f"stalled response exceeded its bounded deadline: {observed_ms}ms",
+                )
+                (output / name / "timeout-evidence.json").write_text(
+                    json.dumps(
+                        {"configured_timeout_ms": RESOURCE_TIMEOUT_MS, "observed_completion_ms": observed_ms},
+                        indent=2,
+                    )
+                    + "\n",
+                    encoding="utf-8",
                 )
 
         recovery_root = temp_root / "recovery"

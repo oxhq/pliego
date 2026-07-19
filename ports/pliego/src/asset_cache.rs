@@ -15,7 +15,7 @@ pub const MANIFEST_SCHEMA: &str = "pliego.asset-manifest";
 pub const CACHE_SCOPE: &str = "pliego.asset-cache.v1";
 const CACHE_DIRECTORY: &str = ".pliego-asset-cache-v1";
 const MAX_CACHE_ENTRIES: usize = 128;
-const MAX_CACHE_BYTES: u64 = 64 * 1024 * 1024;
+pub(crate) const MAX_CACHE_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CacheResult {

@@ -15,15 +15,19 @@ path = "src/scene.rs"
 [dependencies]
 base64 = { workspace = true }
 http = { workspace = true }
+http-body-util = { workspace = true }
+hyper = { workspace = true }
 imagesize = "0.14.0"
 libc = { workspace = true }
 krilla = { version = "0.8.2", default-features = false, features = ["raster-images"] }
 layout = { workspace = true }
+net = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 servo-canvas = { workspace = true }
 servoshell = { path = "../servoshell" }
+tokio = { workspace = true, features = ["time"] }
 unicode-segmentation = { workspace = true }
 url = { workspace = true }
 vello_cpu = { workspace = true }
