@@ -4,9 +4,13 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
+import base64
+import binascii
 import hashlib
 import json
+import math
 import os
+import struct
 import subprocess
 import sys
 import tempfile
@@ -130,6 +134,102 @@ def main() -> int:
             f"paint event sequences are not dense and ordered: {sequences!r}",
         )
         if mode == "text":
+            font_resources = snapshot.get("font_resources")
+            require(
+                isinstance(font_resources, list) and bool(font_resources),
+                "text fixture produced no captured font resources",
+            )
+            require(
+                all(isinstance(resource, dict) for resource in font_resources),
+                "font resource array contains a non-object entry",
+            )
+            resource_ids = [resource.get("resource") for resource in font_resources]
+            require(
+                all(isinstance(resource_id, str) for resource_id in resource_ids),
+                "a font resource has no resource ID",
+            )
+            require(
+                resource_ids == sorted(resource_ids) and len(resource_ids) == len(set(resource_ids)),
+                f"font resources are not sorted and unique: {resource_ids!r}",
+            )
+            for resource_index, resource in enumerate(font_resources):
+                encoded = resource.get("bytes_base64")
+                require(
+                    isinstance(encoded, str),
+                    f"font resource {resource_index} has no base64 bytes",
+                )
+                try:
+                    font_bytes = base64.b64decode(encoded, validate=True)
+                except (binascii.Error, ValueError) as error:
+                    fail(f"font resource {resource_index} has invalid base64 bytes: {error}")
+                expected_resource = f"sha256:{hashlib.sha256(font_bytes).hexdigest()}"
+                require(
+                    resource.get("resource") == expected_resource,
+                    f"font resource {resource_index} digest does not match its bytes",
+                )
+
+            font_instances = snapshot.get("font_instances")
+            require(
+                isinstance(font_instances, list) and bool(font_instances),
+                "text fixture produced no captured font instances",
+            )
+            require(
+                all(isinstance(instance, dict) for instance in font_instances),
+                "font instance array contains a non-object entry",
+            )
+            instance_ids = [instance.get("id") for instance in font_instances]
+            require(
+                all(isinstance(instance_id, str) for instance_id in instance_ids),
+                "a font instance has no instance ID",
+            )
+            require(
+                instance_ids == sorted(instance_ids) and len(instance_ids) == len(set(instance_ids)),
+                f"font instances are not sorted and unique: {instance_ids!r}",
+            )
+            for instance_index, instance in enumerate(font_instances):
+                resource_id = instance.get("resource")
+                require(
+                    resource_ids.count(resource_id) == 1,
+                    f"font instance {instance_index} does not join exactly one resource",
+                )
+                variations = instance.get("variations")
+                require(
+                    isinstance(variations, list),
+                    f"font instance {instance_index} has no variations array",
+                )
+                variation_keys = []
+                for variation_index, variation in enumerate(variations):
+                    require(
+                        isinstance(variation, dict),
+                        f"font instance {instance_index} variation {variation_index} is not an object",
+                    )
+                    tag = variation.get("tag")
+                    value = variation.get("value")
+                    require(
+                        integer(tag) and 0 <= tag <= 0xFFFFFFFF,
+                        f"font instance {instance_index} variation {variation_index} has invalid tag",
+                    )
+                    require(
+                        number(value) and math.isfinite(value),
+                        f"font instance {instance_index} variation {variation_index} is not finite",
+                    )
+                    require(
+                        value != 0 or math.copysign(1.0, value) > 0,
+                        f"font instance {instance_index} variation {variation_index} has negative zero",
+                    )
+                    try:
+                        value_bits = struct.unpack(">I", struct.pack(">f", value))[0]
+                    except (OverflowError, struct.error) as error:
+                        fail(
+                            f"font instance {instance_index} variation {variation_index} "
+                            f"is not representable as f32: {error}"
+                        )
+                    variation_keys.append((tag, value_bits))
+                require(
+                    variation_keys == sorted(variation_keys),
+                    f"font instance {instance_index} variations are not canonically sorted",
+                )
+
             text_runs = [
                 fragment.get("text_run")
                 for fragment in fragments
@@ -141,6 +241,11 @@ def main() -> int:
             captured_text = "".join(texts)
             require(captured_text == "CAFÉ OFFICE", f"captured text was {captured_text!r}")
             for run_index, run in enumerate(text_runs):
+                font_instance_id = run.get("font_instance_id")
+                require(
+                    instance_ids.count(font_instance_id) == 1,
+                    f"text run {run_index} does not join exactly one font instance",
+                )
                 require(
                     bool(run.get("font_identifier")),
                     f"text run {run_index} has an empty font_identifier",
