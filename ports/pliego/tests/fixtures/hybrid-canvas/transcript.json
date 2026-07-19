@@ -1,0 +1,28 @@
+{
+  "size": { "width": 16.0, "height": 12.0 },
+  "commands": [
+    {
+      "type": "fill_rect",
+      "bounds": { "x": 1.0, "y": 7.0, "width": 3.0, "height": 4.0 },
+      "color": { "r": 0.1, "g": 0.4, "b": 0.8, "a": 1.0 }
+    },
+    {
+      "type": "fill_rect",
+      "bounds": { "x": 6.0, "y": 4.0, "width": 3.0, "height": 7.0 },
+      "color": { "r": 0.1, "g": 0.4, "b": 0.8, "a": 1.0 }
+    },
+    {
+      "type": "fill_rect",
+      "bounds": { "x": 11.0, "y": 1.0, "width": 3.0, "height": 10.0 },
+      "color": { "r": 0.1, "g": 0.4, "b": 0.8, "a": 1.0 }
+    },
+    {
+      "type": "raster_patch",
+      "bounds": { "x": 6.0, "y": 4.0, "width": 2.0, "height": 2.0 },
+      "width": 2,
+      "height": 2,
+      "premultiplied_rgba": [255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255],
+      "reason": "pixel_readback"
+    }
+  ]
+}

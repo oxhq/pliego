@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub mod capture;
+pub mod hybrid_canvas;
 mod image_limits;
 pub mod pdf;
 pub mod raster;
