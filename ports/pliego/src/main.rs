@@ -97,56 +97,294 @@ struct RenderRequest {
     input: PathBuf,
     environment: RenderEnvironment,
     page: PageDefinition,
+    resources: ResourcePolicyConfig,
     explicit_paths: Option<ExplicitRenderPaths>,
 }
 
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+const RESOURCE_POLICY_ID: &str = "pliego.resource-policy.v1";
+const MAX_RESOURCE_TIMEOUT_MS: u64 = 60_000;
+
+#[derive(Clone, Debug, PartialEq)]
+struct ResourcePolicyConfig {
+    allowed_http_roots: Vec<url::Url>,
+    virtual_resources: Vec<VirtualResourceSpec>,
+    timeout_ms: u64,
+}
+
+impl Default for ResourcePolicyConfig {
+    fn default() -> Self {
+        Self {
+            allowed_http_roots: Vec::new(),
+            virtual_resources: Vec::new(),
+            timeout_ms: READINESS_TIMEOUT_MS,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct VirtualResourceSpec {
+    url: url::Url,
+    path: PathBuf,
+}
+
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+#[derive(Clone, Debug)]
+struct ResourcePolicy {
+    allowed_http_roots: Vec<url::Url>,
+    virtual_resources: Vec<VirtualResource>,
+    timeout_ms: u64,
+}
+
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+impl Default for ResourcePolicy {
+    fn default() -> Self {
+        Self {
+            allowed_http_roots: Vec::new(),
+            virtual_resources: Vec::new(),
+            timeout_ms: READINESS_TIMEOUT_MS,
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+#[derive(Clone, Debug)]
+struct VirtualResource {
+    url: url::Url,
+    body: Result<Vec<u8>, String>,
+    content_type: &'static str,
+}
+
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
 #[derive(Debug, PartialEq)]
-struct DeniedResource {
+struct ResourcePolicyFailure {
+    code: &'static str,
+    status: &'static str,
     url: String,
     method: String,
     destination: String,
     referrer_url: Option<String>,
     is_for_main_frame: bool,
     is_redirect: bool,
-    reason: &'static str,
+    reason: String,
 }
 
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
-fn denied_resource(
+enum ResourcePolicyDecision {
+    Allow,
+    Synthesize {
+        body: Vec<u8>,
+        content_type: &'static str,
+    },
+    Fail(ResourcePolicyFailure),
+}
+
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+fn decide_resource_policy(
+    policy: &ResourcePolicy,
     document_root: &Path,
     request: &servoshell::WebResourceRequest,
-) -> Option<DeniedResource> {
-    let reason = if request.is_redirect {
-        Some("redirects are disabled")
-    } else {
-        match request.url.scheme() {
-            "data" => None,
-            "file"
-                if request
-                    .url
-                    .to_file_path()
-                    .ok()
-                    .and_then(|path| path.canonicalize().ok())
-                    .is_some_and(|path| path.starts_with(document_root)) =>
-            {
-                None
-            },
-            "file" => Some("file is outside the document root or unavailable"),
-            "http" | "https" => Some("network access is disabled"),
-            _ => Some("URL scheme is not allowed"),
-        }
-    }?;
+) -> ResourcePolicyDecision {
+    let failure = |code, status, reason: String| {
+        ResourcePolicyDecision::Fail(ResourcePolicyFailure {
+            code,
+            status,
+            url: request.url.to_string(),
+            method: request.method.to_string(),
+            destination: format!("{:?}", request.destination),
+            referrer_url: request.referrer_url.as_ref().map(ToString::to_string),
+            is_for_main_frame: request.is_for_main_frame,
+            is_redirect: request.is_redirect,
+            reason,
+        })
+    };
 
-    Some(DeniedResource {
-        url: request.url.to_string(),
-        method: request.method.to_string(),
-        destination: format!("{:?}", request.destination),
-        referrer_url: request.referrer_url.as_ref().map(ToString::to_string),
-        is_for_main_frame: request.is_for_main_frame,
-        is_redirect: request.is_redirect,
-        reason,
-    })
+    if request.is_redirect {
+        return failure("RESOURCE_DENIED", "denied", "redirects are disabled".into());
+    }
+
+    if let Some(resource) = policy
+        .virtual_resources
+        .iter()
+        .find(|resource| resource.url == request.url)
+    {
+        return match &resource.body {
+            Ok(body) => ResourcePolicyDecision::Synthesize {
+                body: body.clone(),
+                content_type: resource.content_type,
+            },
+            Err(reason) => failure("RESOURCE_NOT_FOUND", "not_found", reason.clone()),
+        };
+    }
+
+    match request.url.scheme() {
+        "data" => ResourcePolicyDecision::Allow,
+        "file" => {
+            let Ok(path) = request.url.to_file_path() else {
+                return failure(
+                    "RESOURCE_DENIED",
+                    "denied",
+                    "file URL cannot be resolved".into(),
+                );
+            };
+            match path.canonicalize() {
+                Ok(path) if path.starts_with(document_root) => ResourcePolicyDecision::Allow,
+                Ok(_) => failure(
+                    "RESOURCE_DENIED",
+                    "denied",
+                    "file is outside the document root".into(),
+                ),
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::NotFound
+                        && nearest_existing_ancestor(&path)
+                            .is_some_and(|ancestor| ancestor.starts_with(document_root)) =>
+                {
+                    failure(
+                        "RESOURCE_NOT_FOUND",
+                        "not_found",
+                        "file does not exist inside the document root".into(),
+                    )
+                },
+                Err(_) => failure(
+                    "RESOURCE_DENIED",
+                    "denied",
+                    "file is outside the document root or unavailable".into(),
+                ),
+            }
+        },
+        "http" | "https"
+            if matches!(request.method.as_str(), "GET" | "HEAD")
+                && policy
+                    .allowed_http_roots
+                    .iter()
+                    .any(|root| http_root_allows(root, &request.url)) =>
+        {
+            ResourcePolicyDecision::Allow
+        },
+        "http" | "https" => failure(
+            "RESOURCE_DENIED",
+            "denied",
+            "network URL is outside the configured HTTP roots".into(),
+        ),
+        _ => failure(
+            "RESOURCE_DENIED",
+            "denied",
+            "URL scheme is not allowed".into(),
+        ),
+    }
+}
+
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+fn http_root_allows(root: &url::Url, requested: &url::Url) -> bool {
+    requested.username().is_empty()
+        && requested.password().is_none()
+        && root.scheme() == requested.scheme()
+        && root.host_str() == requested.host_str()
+        && root.port_or_known_default() == requested.port_or_known_default()
+        && requested.path().starts_with(root.path())
+}
+
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+fn nearest_existing_ancestor(path: &Path) -> Option<PathBuf> {
+    path.ancestors()
+        .skip(1)
+        .find_map(|ancestor| ancestor.canonicalize().ok())
+}
+
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+fn resource_content_type(url: &url::Url) -> &'static str {
+    match Path::new(url.path())
+        .extension()
+        .and_then(|value| value.to_str())
+    {
+        Some("css") => "text/css",
+        Some("html") | Some("htm") => "text/html; charset=utf-8",
+        Some("js") | Some("mjs") => "text/javascript",
+        Some("png") => "image/png",
+        Some("svg") => "image/svg+xml",
+        Some("ttf") => "font/ttf",
+        Some("woff") => "font/woff",
+        Some("woff2") => "font/woff2",
+        _ => "application/octet-stream",
+    }
+}
+
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+impl ResourcePolicy {
+    fn resolve(config: &ResourcePolicyConfig, document_root: &Path) -> Self {
+        let virtual_resources = config
+            .virtual_resources
+            .iter()
+            .map(|resource| {
+                let path = if resource.path.is_absolute() {
+                    resource.path.clone()
+                } else {
+                    document_root.join(&resource.path)
+                };
+                VirtualResource {
+                    url: resource.url.clone(),
+                    body: std::fs::read(&path)
+                        .map_err(|error| format!("host virtual resource is unavailable: {error}")),
+                    content_type: resource_content_type(&resource.url),
+                }
+            })
+            .collect();
+        Self {
+            allowed_http_roots: config.allowed_http_roots.clone(),
+            virtual_resources,
+            timeout_ms: config.timeout_ms,
+        }
+    }
+
+    fn artifact(&self, render_id: &str) -> serde_json::Value {
+        serde_json::json!({
+            "schema": RESOURCE_POLICY_ID,
+            "version": 1,
+            "render_id": render_id,
+            "network": if self.allowed_http_roots.is_empty() { "deny" } else { "configured-roots" },
+            "http_roots": self.allowed_http_roots.iter().map(url::Url::as_str).collect::<Vec<_>>(),
+            "filesystem": "document-root",
+            "data_urls": "allow",
+            "redirects": "deny",
+            "timeout_ms": self.timeout_ms,
+            "virtual_resources": self.virtual_resources.iter().map(|resource| serde_json::json!({
+                "url": resource.url,
+                "content_type": resource.content_type,
+                "available": resource.body.is_ok(),
+                "bytes": resource.body.as_ref().ok().map(Vec::len),
+                "sha256": resource.body.as_ref().ok().map(|body| sha256_hex(body)),
+            })).collect::<Vec<_>>(),
+        })
+    }
+}
+
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+fn policy_failure_for_pending(url: String, response_status: Option<u16>) -> ResourcePolicyFailure {
+    let (code, status, reason) =
+        if response_status.is_some_and(|status| matches!(status, 404 | 410)) {
+            (
+                "RESOURCE_NOT_FOUND",
+                "not_found",
+                "controlled HTTP resource was not found",
+            )
+        } else {
+            (
+                "RESOURCE_TIMEOUT",
+                "timeout",
+                "controlled HTTP resource did not complete before the render deadline",
+            )
+        };
+    ResourcePolicyFailure {
+        code,
+        status,
+        url,
+        method: "GET".into(),
+        destination: "Unknown".into(),
+        referrer_url: None,
+        is_for_main_frame: false,
+        is_redirect: false,
+        reason: reason.into(),
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -179,6 +417,9 @@ fn parse_args(mut args: Vec<OsString>) -> Result<Command, String> {
     let mut page_margins = None;
     let mut output = None;
     let mut artifacts = None;
+    let mut allowed_http_roots = Vec::new();
+    let mut virtual_resources = Vec::new();
+    let mut resource_timeout_ms = None;
     let mut args = args.into_iter();
     while let Some(argument) = args.next() {
         if argument == "--locale" {
@@ -241,6 +482,24 @@ fn parse_args(mut args: Vec<OsString>) -> Result<Command, String> {
                 return Err("--artifacts may not be empty".into());
             }
             artifacts = Some(PathBuf::from(value));
+        } else if argument == "--allow-http-root" {
+            let value = args
+                .next()
+                .ok_or_else(|| "--allow-http-root requires a value".to_owned())?;
+            allowed_http_roots.push(parse_http_root(&value)?);
+        } else if argument == "--virtual-resource" {
+            let value = args
+                .next()
+                .ok_or_else(|| "--virtual-resource requires URL=FILE".to_owned())?;
+            virtual_resources.push(parse_virtual_resource(&value)?);
+        } else if argument == "--resource-timeout-ms" {
+            if resource_timeout_ms.is_some() {
+                return Err("--resource-timeout-ms may only be specified once".into());
+            }
+            let value = args
+                .next()
+                .ok_or_else(|| "--resource-timeout-ms requires a value".to_owned())?;
+            resource_timeout_ms = Some(parse_resource_timeout(&value)?);
         } else if argument.to_string_lossy().starts_with('-') {
             return Err(format!("unknown option: {}", argument.to_string_lossy()));
         } else if input.replace(PathBuf::from(argument)).is_some() {
@@ -258,6 +517,15 @@ fn parse_args(mut args: Vec<OsString>) -> Result<Command, String> {
         None
     };
     let input = input.ok_or_else(|| "a document path is required".to_owned())?;
+    allowed_http_roots.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+    allowed_http_roots.dedup();
+    virtual_resources.sort_by(|left, right| left.url.as_str().cmp(right.url.as_str()));
+    if virtual_resources
+        .windows(2)
+        .any(|resources| resources[0].url == resources[1].url)
+    {
+        return Err("--virtual-resource URLs must be unique".into());
+    }
     let page = match (page_size, page_margins) {
         (None, None) => default_page(),
         (page_size, page_margins) => {
@@ -278,8 +546,70 @@ fn parse_args(mut args: Vec<OsString>) -> Result<Command, String> {
             timezone: timezone.unwrap_or(DEFAULT_TIMEZONE),
         },
         page,
+        resources: ResourcePolicyConfig {
+            allowed_http_roots,
+            virtual_resources,
+            timeout_ms: resource_timeout_ms.unwrap_or(READINESS_TIMEOUT_MS),
+        },
         explicit_paths,
     }))
+}
+
+fn parse_http_root(value: &OsString) -> Result<url::Url, String> {
+    let value = value
+        .to_str()
+        .ok_or_else(|| "HTTP root must be valid UTF-8".to_owned())?;
+    let mut root = url::Url::parse(value).map_err(|error| format!("invalid HTTP root: {error}"))?;
+    if !matches!(root.scheme(), "http" | "https")
+        || root.host_str().is_none()
+        || !root.username().is_empty()
+        || root.password().is_some()
+        || root.query().is_some()
+        || root.fragment().is_some()
+    {
+        return Err(
+            "HTTP root must be an http(s) URL without credentials, query, or fragment".into(),
+        );
+    }
+    if !root.path().ends_with('/') {
+        root.set_path(&format!("{}/", root.path()));
+    }
+    Ok(root)
+}
+
+fn parse_virtual_resource(value: &OsString) -> Result<VirtualResourceSpec, String> {
+    let value = value
+        .to_str()
+        .ok_or_else(|| "virtual resource must be valid UTF-8".to_owned())?;
+    let (url, path) = value
+        .split_once('=')
+        .ok_or_else(|| "virtual resource must be URL=FILE".to_owned())?;
+    if path.is_empty() {
+        return Err("virtual resource file may not be empty".into());
+    }
+    let url = url::Url::parse(url).map_err(|error| format!("invalid virtual URL: {error}"))?;
+    if matches!(url.scheme(), "data" | "file") {
+        return Err("virtual resource URL must not use the data or file scheme".into());
+    }
+    Ok(VirtualResourceSpec {
+        url,
+        path: PathBuf::from(path),
+    })
+}
+
+fn parse_resource_timeout(value: &OsString) -> Result<u64, String> {
+    let value = value
+        .to_str()
+        .ok_or_else(|| "resource timeout must be valid UTF-8".to_owned())?;
+    let timeout = value
+        .parse::<u64>()
+        .map_err(|_| "resource timeout must be an integer in milliseconds".to_owned())?;
+    if !(1..=MAX_RESOURCE_TIMEOUT_MS).contains(&timeout) {
+        return Err(format!(
+            "resource timeout must be between 1 and {MAX_RESOURCE_TIMEOUT_MS} milliseconds"
+        ));
+    }
+    Ok(timeout)
 }
 
 fn default_page_margins() -> PageMargins {
@@ -368,7 +698,7 @@ fn main() {
 
 fn print_help() {
     println!(
-        "Pliego — native document rendering on Servo\n\nUsage:\n  pliego render <document.html> --output <document.pdf> --artifacts <directory> [--locale en-US|es-MX] [--timezone UTC|PST8PDT] [--page-size WIDTHxHEIGHT] [--page-margins TOP,RIGHT,BOTTOM,LEFT]\n  pliego [--locale en-US|es-MX] [--timezone UTC|PST8PDT] [--page-size WIDTHxHEIGHT] [--page-margins TOP,RIGHT,BOTTOM,LEFT] <document.html>\n  pliego --version\n\nThe shorthand form writes all outputs to a temporary artifact directory. Page geometry is expressed in CSS pixels. The default is A4 with 12mm vertical and 16mm horizontal margins."
+        "Pliego — native document rendering on Servo\n\nUsage:\n  pliego render <document.html> --output <document.pdf> --artifacts <directory> [options]\n  pliego [options] <document.html>\n  pliego --version\n\nOptions:\n  --locale en-US|es-MX\n  --timezone UTC|PST8PDT\n  --page-size WIDTHxHEIGHT\n  --page-margins TOP,RIGHT,BOTTOM,LEFT\n  --allow-http-root URL       Allow GET/HEAD below one explicit http(s) URL root\n  --virtual-resource URL=FILE Serve one exact URL from a host-provided file\n  --resource-timeout-ms MS    Bound controlled network connection time (1..60000)\n\nNetwork and redirects are denied by default. The shorthand form writes outputs to a temporary artifact directory. Page geometry is expressed in CSS pixels."
     );
 }
 
@@ -448,7 +778,13 @@ fn render(request: RenderRequest) {
         );
         std::process::exit(2)
     });
-    let render_id = stable_render_id(&input_bytes, request.environment, request.page);
+    let resource_policy = ResourcePolicy::resolve(&request.resources, document.root());
+    let render_id = stable_render_id(
+        &input_bytes,
+        request.environment,
+        request.page,
+        &resource_policy,
+    );
     let input_url = url::Url::from_file_path(document.path()).unwrap_or_else(|_| {
         eprintln!("pliego: cannot convert document path to a file URL");
         std::process::exit(2)
@@ -499,6 +835,7 @@ fn render(request: RenderRequest) {
     let environment_path = artifacts.directory().join("environment.json");
     let mut environment = request.environment.artifact();
     environment["page"] = page_artifact(request.page);
+    environment["resource_policy"] = resource_policy.artifact(&render_id);
     set_document_pdf_environment(&mut environment, &document_pdf_path, "pending", None);
     record_artifact(artifacts.write_environment(&environment));
     if request.explicit_paths.is_some() {
@@ -556,40 +893,58 @@ fn render(request: RenderRequest) {
         ),
         "--pref".into(),
         format!("intl_locale_override={}", request.environment.locale),
+        "--pref".into(),
+        format!(
+            "network_connection_timeout={}",
+            resource_policy.timeout_ms.div_ceil(1000)
+        ),
         input_url.to_string(),
     ];
-    let denied_resources = Rc::new(RefCell::new(Vec::new()));
-    let policy_denials = Rc::clone(&denied_resources);
+    let policy_failures = Rc::new(RefCell::new(Vec::new()));
+    let captured_policy_failures = Rc::clone(&policy_failures);
     let document_root = document.root().to_owned();
+    let active_resource_policy = resource_policy.clone();
     let result = servoshell::run_with_stable_javascript_and_console_and_web_resource_policy(
         &servo_args,
         readiness::HOST_EVALUATION_EXPRESSION,
-        move |request| {
-            let Some(denial) = denied_resource(&document_root, request) else {
-                return servoshell::WebResourcePolicyDecision::Allow;
-            };
-            policy_denials.borrow_mut().push(denial);
-            servoshell::WebResourcePolicyDecision::Cancel
+        move |request| match decide_resource_policy(
+            &active_resource_policy,
+            &document_root,
+            request,
+        ) {
+            ResourcePolicyDecision::Allow => servoshell::WebResourcePolicyDecision::Allow,
+            ResourcePolicyDecision::Synthesize { body, .. } => {
+                servoshell::WebResourcePolicyDecision::Synthesize {
+                    response: servoshell::WebResourceResponse::new(request.url.clone()),
+                    body,
+                }
+            },
+            ResourcePolicyDecision::Fail(failure) => {
+                captured_policy_failures.borrow_mut().push(failure);
+                servoshell::WebResourcePolicyDecision::Cancel
+            },
         },
     );
-    let denied_resources = std::mem::take(&mut *denied_resources.borrow_mut());
-    for denial in &denied_resources {
-        record_artifact(artifacts.record_denied_resource(
-            &denial.url,
-            &denial.method,
-            &denial.destination,
-            denial.referrer_url.as_deref(),
-            denial.is_for_main_frame,
-            denial.is_redirect,
-            denial.reason,
+    let policy_failures = std::mem::take(&mut *policy_failures.borrow_mut());
+    for failure in &policy_failures {
+        record_artifact(artifacts.record_resource_failure(
+            failure.code,
+            failure.status,
+            &failure.url,
+            &failure.method,
+            &failure.destination,
+            failure.referrer_url.as_deref(),
+            failure.is_for_main_frame,
+            failure.is_redirect,
+            &failure.reason,
         ));
     }
-    if let Some(denial) = denied_resources.first() {
+    if let Some(failure) = policy_failures.first() {
         fail_session(
             &artifacts,
             &document_pdf_path,
-            "RESOURCE_DENIED",
-            &format!("{}: {}", denial.reason, denial.url),
+            failure.code,
+            &format!("{}: {}", failure.reason, failure.url),
         )
     }
     let result = result.unwrap_or_else(|error| {
@@ -607,14 +962,34 @@ fn render(request: RenderRequest) {
             &message.message,
         ));
     }
-    let resource_capture = record_resources(&artifacts, result.resources).unwrap_or_else(|error| {
+    let resource_capture = record_resources(&artifacts, result.resources, &resource_policy)
+        .unwrap_or_else(|error| {
+            fail_session(
+                &artifacts,
+                &document_pdf_path,
+                "SCENE_CAPTURE_RESOURCE_MAP_CONFLICT",
+                &error.to_string(),
+            )
+        });
+    if let Some(failure) = &resource_capture.failure {
+        record_artifact(artifacts.record_resource_failure(
+            failure.code,
+            failure.status,
+            &failure.url,
+            &failure.method,
+            &failure.destination,
+            failure.referrer_url.as_deref(),
+            failure.is_for_main_frame,
+            failure.is_redirect,
+            &failure.reason,
+        ));
         fail_session(
             &artifacts,
             &document_pdf_path,
-            "SCENE_CAPTURE_RESOURCE_MAP_CONFLICT",
-            &error.to_string(),
+            failure.code,
+            &format!("{}: {}", failure.reason, failure.url),
         )
-    });
+    }
 
     let snapshot_json = match result.value {
         servoshell::JSValue::String(json) => json,
@@ -644,17 +1019,7 @@ fn render(request: RenderRequest) {
         });
     record_artifact(artifacts.write_readiness(&readiness_json));
     let readiness_payload = match readiness {
-        Readiness::Ready { payload } => {
-            if let Some(url) = &resource_capture.missing_local_resource {
-                fail_session(
-                    &artifacts,
-                    &document_pdf_path,
-                    "RESOURCE_LOAD_FAILED",
-                    &format!("local resource did not load: {url}"),
-                );
-            }
-            payload
-        },
+        Readiness::Ready { payload } => payload,
         Readiness::Failed { error } => {
             fail_session(&artifacts, &document_pdf_path, &error.code, &error.message)
         },
@@ -879,6 +1244,7 @@ fn stable_render_id(
     input_bytes: &[u8],
     environment: RenderEnvironment,
     page: PageDefinition,
+    resource_policy: &ResourcePolicy,
 ) -> String {
     fn update_field(hasher: &mut Sha256, bytes: &[u8]) {
         hasher.update((bytes.len() as u64).to_be_bytes());
@@ -900,6 +1266,23 @@ fn stable_render_id(
         margins.left,
     ] {
         hasher.update(value.to_bits().to_be_bytes());
+    }
+    if !resource_policy.allowed_http_roots.is_empty()
+        || !resource_policy.virtual_resources.is_empty()
+        || resource_policy.timeout_ms != READINESS_TIMEOUT_MS
+    {
+        update_field(&mut hasher, RESOURCE_POLICY_ID.as_bytes());
+        update_field(&mut hasher, &resource_policy.timeout_ms.to_be_bytes());
+        for root in &resource_policy.allowed_http_roots {
+            update_field(&mut hasher, root.as_str().as_bytes());
+        }
+        for resource in &resource_policy.virtual_resources {
+            update_field(&mut hasher, resource.url.as_str().as_bytes());
+            match &resource.body {
+                Ok(body) => update_field(&mut hasher, body),
+                Err(_) => update_field(&mut hasher, b"missing"),
+            }
+        }
     }
     format!("sha256:{}", lowercase_hex(&hasher.finalize()))
 }
@@ -985,7 +1368,7 @@ struct CompletedResource {
 #[derive(Debug, Default, PartialEq)]
 struct ResourceCapture {
     url_to_resource: BTreeMap<String, String>,
-    missing_local_resource: Option<String>,
+    failure: Option<ResourcePolicyFailure>,
 }
 
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
@@ -1126,6 +1509,7 @@ fn hex_value(byte: u8) -> Option<u8> {
 fn record_resources(
     artifacts: &SessionArtifacts,
     resources: Vec<servoshell::ResourceEvent>,
+    policy: &ResourcePolicy,
 ) -> Result<ResourceCapture, ResourceMapConflict> {
     let mut pending: HashMap<String, PendingResource> = HashMap::new();
     let mut capture = ResourceCapture::default();
@@ -1143,6 +1527,16 @@ fn record_resources(
             servoshell::NetworkEvent::HttpResponse(response) => {
                 if let Some(pending_resource) = pending.get_mut(&resource.request_id) {
                     pending_resource.response_status = Some(response.status.raw_code());
+                    if matches!(response.status.raw_code(), 404 | 408 | 410 | 504) {
+                        if let Some(url) = pending_resource.urls.last() {
+                            capture.failure.get_or_insert_with(|| {
+                                policy_failure_for_pending(
+                                    url.clone(),
+                                    pending_resource.response_status,
+                                )
+                            });
+                        }
+                    }
                     if let Some(content_type) = response
                         .headers
                         .as_ref()
@@ -1174,11 +1568,42 @@ fn record_resources(
         }
     }
 
-    capture.missing_local_resource = pending
+    let mut incomplete = pending
         .into_values()
-        .flat_map(|resource| resource.urls)
-        .filter(|url| url.starts_with("file:"))
-        .min();
+        .flat_map(|resource| {
+            let response_status = resource.response_status;
+            resource
+                .urls
+                .into_iter()
+                .map(move |url| (url, response_status))
+        })
+        .filter(|(url, _)| {
+            url.starts_with("file:")
+                || policy.allowed_http_roots.iter().any(|root| {
+                    url::Url::parse(url).is_ok_and(|requested| http_root_allows(root, &requested))
+                })
+        })
+        .collect::<Vec<_>>();
+    incomplete.sort_by(|left, right| left.0.cmp(&right.0));
+    if capture.failure.is_none() {
+        capture.failure = incomplete.into_iter().next().map(|(url, response_status)| {
+            if url.starts_with("file:") {
+                ResourcePolicyFailure {
+                    code: "RESOURCE_NOT_FOUND",
+                    status: "not_found",
+                    url,
+                    method: "GET".into(),
+                    destination: "Unknown".into(),
+                    referrer_url: None,
+                    is_for_main_frame: false,
+                    is_redirect: false,
+                    reason: "local resource did not complete".into(),
+                }
+            } else {
+                policy_failure_for_pending(url, response_status)
+            }
+        });
+    }
     Ok(capture)
 }
 
@@ -1804,9 +2229,10 @@ mod tests {
     use super::{
         Command, DEFAULT_LOCALE, DEFAULT_TIMEZONE, ExplicitRenderPaths, PageDefinition,
         PageMargins, PendingResource, RenderEnvironment, RenderRequest, ResourceCapture,
-        complete_resource, create_session_artifacts, default_page, denied_resource, page_artifact,
-        parse_args, persist_scene_capture, resolve_scene_resource, set_document_pdf_environment,
-        sha256_hex, stable_render_id,
+        ResourcePolicy, ResourcePolicyConfig, ResourcePolicyDecision, complete_resource,
+        create_session_artifacts, decide_resource_policy, default_page, page_artifact, parse_args,
+        persist_scene_capture, resolve_scene_resource, set_document_pdf_environment, sha256_hex,
+        stable_render_id,
     };
     use crate::session::SessionArtifacts;
     use std::ffi::OsString;
@@ -1833,6 +2259,7 @@ mod tests {
                     timezone: DEFAULT_TIMEZONE,
                 },
                 page: default_page(),
+                resources: ResourcePolicyConfig::default(),
                 explicit_paths: None,
             })
         );
@@ -1861,6 +2288,7 @@ mod tests {
                 input: PathBuf::from("invoice.html"),
                 environment: RenderEnvironment::default(),
                 page: default_page(),
+                resources: ResourcePolicyConfig::default(),
                 explicit_paths: Some(ExplicitRenderPaths {
                     output: PathBuf::from("requested/invoice.pdf"),
                     artifacts: PathBuf::from("diagnostics/render-1"),
@@ -1938,10 +2366,11 @@ mod tests {
         assert_ne!(first.explicit_paths, second.explicit_paths);
 
         let input = b"<!doctype html><title>Invoice</title>";
-        let render_id = stable_render_id(input, first.environment, first.page);
+        let policy = ResourcePolicy::default();
+        let render_id = stable_render_id(input, first.environment, first.page, &policy);
         assert_eq!(
             render_id,
-            stable_render_id(input, second.environment, second.page)
+            stable_render_id(input, second.environment, second.page, &policy)
         );
         assert!(render_id.starts_with("sha256:"));
         assert_eq!(render_id.len(), 71);
@@ -1951,6 +2380,7 @@ mod tests {
                 b"<!doctype html><title>Changed</title>",
                 first.environment,
                 first.page,
+                &policy,
             )
         );
         assert_ne!(
@@ -1962,6 +2392,7 @@ mod tests {
                     timezone: "PST8PDT",
                 },
                 first.page,
+                &policy,
             )
         );
         assert_ne!(
@@ -1971,12 +2402,13 @@ mod tests {
                 first.environment,
                 PageDefinition::new(612.0, 792.0, PageMargins::new(72.0, 54.0, 36.0, 18.0),)
                     .unwrap(),
+                &policy,
             )
         );
         let canonical_page =
             PageDefinition::new(612.0, 792.0, PageMargins::new(72.0, 54.0, 36.0, 18.0)).unwrap();
         assert_eq!(
-            stable_render_id(input, RenderEnvironment::default(), canonical_page),
+            stable_render_id(input, RenderEnvironment::default(), canonical_page, &policy),
             "sha256:9ca553323bf5eb8118c51a46c00b174e1ef1febc7e6bbdb3d763ac2dcf5291a3"
         );
     }
@@ -1999,6 +2431,7 @@ mod tests {
                     timezone: "PST8PDT",
                 },
                 page: default_page(),
+                resources: ResourcePolicyConfig::default(),
                 explicit_paths: None,
             })
         );
@@ -2054,7 +2487,7 @@ mod tests {
     }
 
     #[test]
-    fn resource_policy_allows_only_data_and_files_inside_the_document_root() {
+    fn resource_policy_is_rooted_typed_and_can_synthesize_host_resources() {
         fn request(url: url::Url, is_redirect: bool) -> servoshell::WebResourceRequest {
             serde_json::from_value(serde_json::json!({
                 "method": "GET",
@@ -2076,56 +2509,169 @@ mod tests {
         fs::write(&inside, "body {}").unwrap();
         fs::write(&outside, "body {}").unwrap();
         let root = root.canonicalize().unwrap();
+        let virtual_url = url::Url::parse("pliego://host/style.css").unwrap();
+        let policy = ResourcePolicy::resolve(
+            &ResourcePolicyConfig {
+                allowed_http_roots: vec![url::Url::parse("https://example.test/assets/").unwrap()],
+                virtual_resources: vec![super::VirtualResourceSpec {
+                    url: virtual_url.clone(),
+                    path: PathBuf::from("style.css"),
+                }],
+                timeout_ms: 500,
+            },
+            &root,
+        );
 
-        assert_eq!(
-            denied_resource(
+        assert!(matches!(
+            decide_resource_policy(
+                &policy,
                 &root,
                 &request(
                     url::Url::parse("data:text/css,body%20%7B%7D").unwrap(),
                     false,
                 )
             ),
-            None
-        );
-        assert_eq!(
-            denied_resource(
+            ResourcePolicyDecision::Allow
+        ));
+        assert!(matches!(
+            decide_resource_policy(
+                &policy,
                 &root,
                 &request(url::Url::from_file_path(&inside).unwrap(), false),
             ),
-            None
-        );
-        assert_eq!(
-            denied_resource(
-                &root,
-                &request(url::Url::from_file_path(&outside).unwrap(), false),
-            )
-            .unwrap()
-            .reason,
-            "file is outside the document root or unavailable"
-        );
-        assert_eq!(
-            denied_resource(
+            ResourcePolicyDecision::Allow
+        ));
+        let ResourcePolicyDecision::Fail(outside_failure) = decide_resource_policy(
+            &policy,
+            &root,
+            &request(url::Url::from_file_path(&outside).unwrap(), false),
+        ) else {
+            panic!("outside-root file should fail")
+        };
+        assert_eq!(outside_failure.code, "RESOURCE_DENIED");
+
+        let missing = root.join("missing.css");
+        let ResourcePolicyDecision::Fail(missing_failure) = decide_resource_policy(
+            &policy,
+            &root,
+            &request(url::Url::from_file_path(&missing).unwrap(), false),
+        ) else {
+            panic!("missing local file should fail")
+        };
+        assert_eq!(missing_failure.code, "RESOURCE_NOT_FOUND");
+
+        assert!(matches!(
+            decide_resource_policy(
+                &policy,
                 &root,
                 &request(
-                    url::Url::parse("https://example.test/style.css").unwrap(),
+                    url::Url::parse("https://example.test/assets/style.css").unwrap(),
                     false,
-                )
-            )
-            .unwrap()
-            .reason,
-            "network access is disabled"
+                ),
+            ),
+            ResourcePolicyDecision::Allow
+        ));
+        let ResourcePolicyDecision::Fail(network_failure) = decide_resource_policy(
+            &policy,
+            &root,
+            &request(
+                url::Url::parse("https://example.test/private/style.css").unwrap(),
+                false,
+            ),
+        ) else {
+            panic!("out-of-root network URL should fail")
+        };
+        assert_eq!(network_failure.code, "RESOURCE_DENIED");
+
+        let ResourcePolicyDecision::Fail(redirect_failure) = decide_resource_policy(
+            &policy,
+            &root,
+            &request(
+                url::Url::parse("https://example.test/assets/redirect.css").unwrap(),
+                true,
+            ),
+        ) else {
+            panic!("redirect should fail")
+        };
+        assert_eq!(redirect_failure.reason, "redirects are disabled");
+
+        let ResourcePolicyDecision::Synthesize { body, content_type } =
+            decide_resource_policy(&policy, &root, &request(virtual_url, false))
+        else {
+            panic!("configured host resource should be synthesized")
+        };
+        assert_eq!(body, b"body {}");
+        assert_eq!(content_type, "text/css");
+
+        let artifact = policy.artifact("sha256:fixture");
+        assert_eq!(artifact["render_id"], "sha256:fixture");
+        assert_eq!(artifact["redirects"], "deny");
+        assert_eq!(artifact["virtual_resources"][0]["available"], true);
+
+        let missing_virtual = ResourcePolicy::resolve(
+            &ResourcePolicyConfig {
+                virtual_resources: vec![super::VirtualResourceSpec {
+                    url: url::Url::parse("pliego://host/missing.css").unwrap(),
+                    path: PathBuf::from("missing.css"),
+                }],
+                ..ResourcePolicyConfig::default()
+            },
+            &root,
         );
-        assert_eq!(
-            denied_resource(
-                &root,
-                &request(url::Url::from_file_path(&inside).unwrap(), true)
-            )
-            .unwrap()
-            .reason,
-            "redirects are disabled"
-        );
+        let ResourcePolicyDecision::Fail(virtual_failure) = decide_resource_policy(
+            &missing_virtual,
+            &root,
+            &request(url::Url::parse("pliego://host/missing.css").unwrap(), false),
+        ) else {
+            panic!("missing host resource should fail")
+        };
+        assert_eq!(virtual_failure.code, "RESOURCE_NOT_FOUND");
 
         fs::remove_dir_all(sandbox).unwrap();
+    }
+
+    #[test]
+    fn parses_bounded_resource_policy_options() {
+        let Command::Render(request) = parse_args(
+            [
+                "invoice.html",
+                "--allow-http-root",
+                "https://example.test/assets",
+                "--virtual-resource",
+                "pliego://host/style.css=style.css",
+                "--resource-timeout-ms",
+                "500",
+            ]
+            .into_iter()
+            .map(OsString::from)
+            .collect(),
+        )
+        .unwrap() else {
+            panic!("resource options should produce a render request")
+        };
+        assert_eq!(
+            request.resources.allowed_http_roots[0].as_str(),
+            "https://example.test/assets/"
+        );
+        assert_eq!(request.resources.virtual_resources.len(), 1);
+        assert_eq!(request.resources.timeout_ms, 500);
+
+        for args in [
+            vec!["invoice.html", "--allow-http-root", "file:///tmp/"],
+            vec!["invoice.html", "--resource-timeout-ms", "0"],
+            vec![
+                "invoice.html",
+                "--virtual-resource",
+                "pliego://host/style.css=one.css",
+                "--virtual-resource",
+                "pliego://host/style.css=two.css",
+            ],
+        ] {
+            assert!(
+                parse_args(args.into_iter().map(OsString::from).collect()).is_err(),
+                "invalid policy options were accepted"
+            );
+        }
     }
 
     #[test]

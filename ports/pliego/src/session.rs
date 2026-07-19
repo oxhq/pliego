@@ -182,6 +182,8 @@ impl SessionArtifacts {
             "resources.jsonl",
             serde_json::json!({
                 "timestamp_ms": timestamp_ms(),
+                "render_id": self.render_id,
+                "policy": "pliego.resource-policy.v1",
                 "request_id": request_id,
                 "url": url,
                 "status": "requested",
@@ -191,8 +193,10 @@ impl SessionArtifacts {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn record_denied_resource(
+    pub fn record_resource_failure(
         &self,
+        code: &str,
+        status: &str,
         url: &str,
         method: &str,
         destination: &str,
@@ -205,9 +209,12 @@ impl SessionArtifacts {
             "resources.jsonl",
             serde_json::json!({
                 "timestamp_ms": timestamp_ms(),
+                "render_id": self.render_id,
+                "policy": "pliego.resource-policy.v1",
                 "request_id": null,
                 "url": url,
-                "status": "denied",
+                "status": status,
+                "code": code,
                 "method": method,
                 "destination": destination,
                 "referrer_url": referrer_url,
@@ -234,6 +241,8 @@ impl SessionArtifacts {
             "resources.jsonl",
             serde_json::json!({
                 "timestamp_ms": timestamp_ms(),
+                "render_id": self.render_id,
+                "policy": "pliego.resource-policy.v1",
                 "request_id": request_id,
                 "url": urls.last(),
                 "urls": urls,
@@ -562,7 +571,10 @@ fn normalized_relative_path(root: &Path, path: &Path) -> io::Result<String> {
         let component = component.to_str().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("bundle artifact path is not valid UTF-8: {}", path.display()),
+                format!(
+                    "bundle artifact path is not valid UTF-8: {}",
+                    path.display()
+                ),
             )
         })?;
         if component.is_empty() || component.contains('\\') {
@@ -882,7 +894,9 @@ mod tests {
             )
             .unwrap();
         artifacts
-            .record_denied_resource(
+            .record_resource_failure(
+                "RESOURCE_DENIED",
+                "denied",
                 "https://example.test/font.woff2",
                 "GET",
                 "Font",
@@ -934,6 +948,8 @@ mod tests {
         assert_eq!(console["message"], "fixture-ready");
         assert_eq!(resources.len(), 3);
         assert_eq!(resources[0]["status"], "requested");
+        assert_eq!(resources[0]["render_id"], artifacts.render_id());
+        assert_eq!(resources[0]["policy"], "pliego.resource-policy.v1");
         assert_eq!(resources[0]["request_id"], "request-1");
         assert_eq!(resources[1]["status"], "loaded");
         assert_eq!(resources[1]["request_id"], "request-1");
@@ -945,6 +961,7 @@ mod tests {
         assert_eq!(resources[1]["sha256"], resource_hash);
         assert_eq!(resources[1]["resource"], format!("sha256:{resource_hash}"));
         assert_eq!(resources[2]["status"], "denied");
+        assert_eq!(resources[2]["code"], "RESOURCE_DENIED");
         assert_eq!(resources[2]["request_id"], serde_json::Value::Null);
         assert_eq!(resources[2]["url"], "https://example.test/font.woff2");
         assert_eq!(resources[2]["destination"], "Font");
