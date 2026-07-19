@@ -336,8 +336,9 @@ fn parse_page_number(value: &str, name: &str) -> Result<f32, String> {
 fn parse_locale(value: &OsString) -> Result<&'static str, String> {
     match value.to_str() {
         Some(DEFAULT_LOCALE) => Ok(DEFAULT_LOCALE),
+        Some("es-MX") => Ok("es-MX"),
         Some(value) => Err(format!(
-            "unsupported locale {value:?}; supported locale: {DEFAULT_LOCALE}"
+            "unsupported locale {value:?}; supported locales: {DEFAULT_LOCALE}, es-MX"
         )),
         None => Err("locale must be valid UTF-8".into()),
     }
@@ -367,7 +368,7 @@ fn main() {
 
 fn print_help() {
     println!(
-        "Pliego — native document rendering on Servo\n\nUsage:\n  pliego render <document.html> --output <document.pdf> --artifacts <directory> [--locale en-US] [--timezone UTC|PST8PDT] [--page-size WIDTHxHEIGHT] [--page-margins TOP,RIGHT,BOTTOM,LEFT]\n  pliego [--locale en-US] [--timezone UTC|PST8PDT] [--page-size WIDTHxHEIGHT] [--page-margins TOP,RIGHT,BOTTOM,LEFT] <document.html>\n  pliego --version\n\nThe shorthand form writes all outputs to a temporary artifact directory. Page geometry is expressed in CSS pixels. The default is A4 with 12mm vertical and 16mm horizontal margins."
+        "Pliego — native document rendering on Servo\n\nUsage:\n  pliego render <document.html> --output <document.pdf> --artifacts <directory> [--locale en-US|es-MX] [--timezone UTC|PST8PDT] [--page-size WIDTHxHEIGHT] [--page-margins TOP,RIGHT,BOTTOM,LEFT]\n  pliego [--locale en-US|es-MX] [--timezone UTC|PST8PDT] [--page-size WIDTHxHEIGHT] [--page-margins TOP,RIGHT,BOTTOM,LEFT] <document.html>\n  pliego --version\n\nThe shorthand form writes all outputs to a temporary artifact directory. Page geometry is expressed in CSS pixels. The default is A4 with 12mm vertical and 16mm horizontal margins."
     );
 }
 
@@ -1987,14 +1988,14 @@ mod tests {
                 OsString::from("--timezone"),
                 OsString::from("PST8PDT"),
                 OsString::from("--locale"),
-                OsString::from("en-US"),
+                OsString::from("es-MX"),
                 OsString::from("invoice.html"),
             ])
             .unwrap(),
             Command::Render(RenderRequest {
                 input: PathBuf::from("invoice.html"),
                 environment: RenderEnvironment {
-                    locale: "en-US",
+                    locale: "es-MX",
                     timezone: "PST8PDT",
                 },
                 page: default_page(),

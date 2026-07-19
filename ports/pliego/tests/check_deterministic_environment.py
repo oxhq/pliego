@@ -40,6 +40,7 @@ def run(
     *,
     host_locale: str,
     host_timezone: str,
+    requested_locale: str | None = None,
     requested_timezone: str | None = None,
 ) -> dict[str, object]:
     environment = os.environ.copy()
@@ -54,6 +55,8 @@ def run(
         }
     )
     command = [str(binary)]
+    if requested_locale is not None:
+        command.extend(["--locale", requested_locale])
     if requested_timezone is not None:
         command.extend(["--timezone", requested_timezone])
     command.append(fixture.name)
@@ -104,7 +107,7 @@ def document_pdf(summary: dict[str, object]) -> bytes:
 
 
 def verify_environment_artifact(
-    summary: dict[str, object], requested_timezone: str
+    summary: dict[str, object], requested_locale: str, requested_timezone: str
 ) -> None:
     value = summary.get("environment_artifact")
     require(isinstance(value, str) and bool(value), "summary has no environment artifact")
@@ -117,7 +120,10 @@ def verify_environment_artifact(
     require(
         artifact
         == {
-            "locale": {"requested": "en-US", "resolved": "en-US"},
+            "locale": {
+                "requested": requested_locale,
+                "resolved": requested_locale,
+            },
             "timezone": {
                 "requested": requested_timezone,
                 "resolved": requested_timezone,
@@ -145,20 +151,39 @@ def verify_environment_artifact(
 
 
 def verify_invalid_request(binary: Path, fixture: Path) -> None:
-    result = subprocess.run(
-        [str(binary), "--locale", "de-DE", fixture.name],
-        cwd=fixture.parent,
-        capture_output=True,
-        text=True,
-        timeout=10,
-        check=False,
-    )
-    require(result.returncode == 2, f"invalid locale exited with {result.returncode}")
-    error = final_json(result).get("error")
-    require(
-        isinstance(error, dict) and error.get("code") == "INVALID_REQUEST",
-        f"invalid locale did not produce typed INVALID_REQUEST: {error!r}",
-    )
+    for option, value in (
+        ("--locale", "not-a-locale"),
+        ("--timezone", "America/Tijuana"),
+    ):
+        result = subprocess.run(
+            [str(binary), option, value, fixture.name],
+            cwd=fixture.parent,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        require(
+            result.returncode == 2,
+            f"invalid {option} exited with {result.returncode}",
+        )
+        error = final_json(result).get("error")
+        require(
+            isinstance(error, dict) and error.get("code") == "INVALID_REQUEST",
+            f"invalid {option} did not produce typed INVALID_REQUEST: {error!r}",
+        )
+
+
+def require_only_changes(
+    baseline: dict[str, object], changed: dict[str, object], allowed: set[str]
+) -> None:
+    keys = baseline.keys() | changed.keys()
+    unexpected = {
+        key: (baseline.get(key), changed.get(key))
+        for key in keys - allowed
+        if baseline.get(key) != changed.get(key)
+    }
+    require(not unexpected, f"unexpected environment-dependent changes: {unexpected!r}")
 
 
 def main() -> int:
@@ -186,7 +211,7 @@ def main() -> int:
             host_locale="fr_FR.UTF-8",
             host_timezone="EST5EDT",
         )
-        changed = run(
+        changed_timezone = run(
             binary,
             fixture,
             temp_root,
@@ -194,16 +219,27 @@ def main() -> int:
             host_timezone="CST6CDT",
             requested_timezone="PST8PDT",
         )
+        changed_locale = run(
+            binary,
+            fixture,
+            temp_root,
+            host_locale="fr_FR.UTF-8",
+            host_timezone="EST5EDT",
+            requested_locale="es-MX",
+        )
 
         first_payload = payload(first)
         second_payload = payload(second)
-        changed_payload = payload(changed)
+        timezone_payload = payload(changed_timezone)
+        locale_payload = payload(changed_locale)
         first_scene_hash = scene_hash(first)
         second_scene_hash = scene_hash(second)
-        changed_scene_hash = scene_hash(changed)
+        timezone_scene_hash = scene_hash(changed_timezone)
+        locale_scene_hash = scene_hash(changed_locale)
         first_pdf = document_pdf(first)
         second_pdf = document_pdf(second)
-        changed_pdf = document_pdf(changed)
+        timezone_pdf = document_pdf(changed_timezone)
+        locale_pdf = document_pdf(changed_locale)
         require(
             first_payload == second_payload,
             f"defaults changed with host locale/timezone: {first_payload!r} != {second_payload!r}",
@@ -221,26 +257,47 @@ def main() -> int:
         require(first_payload.get("intlLocale") == "en-US", repr(first_payload))
         require(first_payload.get("intlTimezone") == "UTC", repr(first_payload))
         require(first_payload.get("localHour") == 12, repr(first_payload))
-        require(changed_payload.get("localHour") == 4, repr(changed_payload))
+        require(timezone_payload.get("localHour") == 4, repr(timezone_payload))
         require(
-            changed_payload.get("intlTimezone") != first_payload.get("intlTimezone"),
+            timezone_payload.get("intlTimezone") != first_payload.get("intlTimezone"),
             "changed requested timezone did not change Intl's resolved timezone",
         )
         require(
-            changed_payload.get("formatted") != first_payload.get("formatted"),
+            timezone_payload.get("formatted") != first_payload.get("formatted"),
             "changed requested timezone did not change Intl date formatting",
         )
         require(
-            changed_scene_hash != first_scene_hash,
+            timezone_scene_hash != first_scene_hash,
             "changed requested timezone did not change the formatted scene",
         )
         require(
-            changed_pdf != first_pdf,
+            timezone_pdf != first_pdf,
             "changed requested timezone did not change the formatted PDF",
         )
-        verify_environment_artifact(first, "UTC")
-        verify_environment_artifact(second, "UTC")
-        verify_environment_artifact(changed, "PST8PDT")
+        require_only_changes(
+            first_payload,
+            timezone_payload,
+            {"intlTimezone", "localHour", "formatted"},
+        )
+        require(locale_payload.get("navigatorLanguage") == "es-MX", repr(locale_payload))
+        require(locale_payload.get("intlLocale") == "es-MX", repr(locale_payload))
+        require(locale_payload.get("intlTimezone") == "UTC", repr(locale_payload))
+        require(locale_payload.get("localHour") == 12, repr(locale_payload))
+        require(
+            locale_payload.get("formatted") != first_payload.get("formatted"),
+            repr(locale_payload),
+        )
+        require(locale_scene_hash != first_scene_hash, "locale did not change formatted scene")
+        require(locale_pdf != first_pdf, "locale did not change formatted PDF")
+        require_only_changes(
+            first_payload,
+            locale_payload,
+            {"navigatorLanguage", "intlLocale", "formatted"},
+        )
+        verify_environment_artifact(first, "en-US", "UTC")
+        verify_environment_artifact(second, "en-US", "UTC")
+        verify_environment_artifact(changed_timezone, "en-US", "PST8PDT")
+        verify_environment_artifact(changed_locale, "es-MX", "UTC")
         verify_invalid_request(binary, fixture)
 
     print("deterministic environment check: ok")
