@@ -1,0 +1,16 @@
+{
+  "schema": "pliego.asset-manifest",
+  "version": 1,
+  "assets": [
+    {
+      "url": "https://assets.pliego.test/first.js",
+      "path": "first.js",
+      "sha256": "083ddeecdc3a881bf5f54215d18fd6b4112cf373048459bfc007d74d58a036e6"
+    },
+    {
+      "url": "https://assets.pliego.test/renamed.js",
+      "path": "renamed.js",
+      "sha256": "083ddeecdc3a881bf5f54215d18fd6b4112cf373048459bfc007d74d58a036e6"
+    }
+  ]
+}

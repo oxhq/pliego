@@ -36,6 +36,8 @@ use session::{LocalDocument, SessionArtifacts};
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
 use sha2::{Digest, Sha256};
 
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+mod asset_cache;
 mod readiness;
 mod session;
 
@@ -110,6 +112,7 @@ const MAX_RESOURCE_TIMEOUT_MS: u64 = 60_000;
 struct ResourcePolicyConfig {
     allowed_http_roots: Vec<url::Url>,
     virtual_resources: Vec<VirtualResourceSpec>,
+    asset_manifest: Option<PathBuf>,
     timeout_ms: u64,
 }
 
@@ -118,6 +121,7 @@ impl Default for ResourcePolicyConfig {
         Self {
             allowed_http_roots: Vec::new(),
             virtual_resources: Vec::new(),
+            asset_manifest: None,
             timeout_ms: READINESS_TIMEOUT_MS,
         }
     }
@@ -134,6 +138,9 @@ struct VirtualResourceSpec {
 struct ResourcePolicy {
     allowed_http_roots: Vec<url::Url>,
     virtual_resources: Vec<VirtualResource>,
+    asset_manifest: Option<PathBuf>,
+    assets: Option<asset_cache::AssetStore>,
+    asset_error: Option<asset_cache::AssetError>,
     timeout_ms: u64,
 }
 
@@ -143,6 +150,9 @@ impl Default for ResourcePolicy {
         Self {
             allowed_http_roots: Vec::new(),
             virtual_resources: Vec::new(),
+            asset_manifest: None,
+            assets: None,
+            asset_error: None,
             timeout_ms: READINESS_TIMEOUT_MS,
         }
     }
@@ -202,6 +212,17 @@ fn decide_resource_policy(
 
     if request.is_redirect {
         return failure("RESOURCE_DENIED", "denied", "redirects are disabled".into());
+    }
+
+    if let Some(resource) = policy
+        .assets
+        .as_ref()
+        .and_then(|assets| assets.get(&request.url))
+    {
+        return ResourcePolicyDecision::Synthesize {
+            body: resource.body.clone(),
+            content_type: resource_content_type(&resource.url),
+        };
     }
 
     if let Some(resource) = policy
@@ -330,15 +351,32 @@ impl ResourcePolicy {
                 }
             })
             .collect();
+        let asset_manifest = config.asset_manifest.as_ref().map(|path| {
+            if path.is_absolute() {
+                path.clone()
+            } else {
+                document_root.join(path)
+            }
+        });
+        let (assets, asset_error) = match asset_manifest.as_deref() {
+            Some(path) => match asset_cache::AssetStore::load(path) {
+                Ok(assets) => (Some(assets), None),
+                Err(error) => (None, Some(error)),
+            },
+            None => (None, None),
+        };
         Self {
             allowed_http_roots: config.allowed_http_roots.clone(),
             virtual_resources,
+            asset_manifest,
+            assets,
+            asset_error,
             timeout_ms: config.timeout_ms,
         }
     }
 
     fn artifact(&self, render_id: &str) -> serde_json::Value {
-        serde_json::json!({
+        let mut artifact = serde_json::json!({
             "schema": RESOURCE_POLICY_ID,
             "version": 1,
             "render_id": render_id,
@@ -355,7 +393,15 @@ impl ResourcePolicy {
                 "bytes": resource.body.as_ref().ok().map(Vec::len),
                 "sha256": resource.body.as_ref().ok().map(|body| sha256_hex(body)),
             })).collect::<Vec<_>>(),
-        })
+        });
+        if let Some(value) = match (&self.assets, &self.asset_error, &self.asset_manifest) {
+            (Some(assets), _, _) => Some(assets.artifact()),
+            (_, Some(error), Some(path)) => Some(error.artifact(path)),
+            _ => None,
+        } {
+            artifact["asset_manifest"] = value;
+        }
+        artifact
     }
 }
 
@@ -420,6 +466,7 @@ fn parse_args(mut args: Vec<OsString>) -> Result<Command, String> {
     let mut artifacts = None;
     let mut allowed_http_roots = Vec::new();
     let mut virtual_resources = Vec::new();
+    let mut asset_manifest = None;
     let mut resource_timeout_ms = None;
     let mut allow_host_fonts = false;
     let mut args = args.into_iter();
@@ -494,6 +541,17 @@ fn parse_args(mut args: Vec<OsString>) -> Result<Command, String> {
                 .next()
                 .ok_or_else(|| "--virtual-resource requires URL=FILE".to_owned())?;
             virtual_resources.push(parse_virtual_resource(&value)?);
+        } else if argument == "--asset-manifest" {
+            if asset_manifest.is_some() {
+                return Err("--asset-manifest may only be specified once".into());
+            }
+            let value = args
+                .next()
+                .ok_or_else(|| "--asset-manifest requires a file".to_owned())?;
+            if value.is_empty() {
+                return Err("--asset-manifest may not be empty".into());
+            }
+            asset_manifest = Some(PathBuf::from(value));
         } else if argument == "--resource-timeout-ms" {
             if resource_timeout_ms.is_some() {
                 return Err("--resource-timeout-ms may only be specified once".into());
@@ -553,6 +611,7 @@ fn parse_args(mut args: Vec<OsString>) -> Result<Command, String> {
         resources: ResourcePolicyConfig {
             allowed_http_roots,
             virtual_resources,
+            asset_manifest,
             timeout_ms: resource_timeout_ms.unwrap_or(READINESS_TIMEOUT_MS),
         },
         allow_host_fonts,
@@ -703,7 +762,7 @@ fn main() {
 
 fn print_help() {
     println!(
-        "Pliego — native document rendering on Servo\n\nUsage:\n  pliego render <document.html> --output <document.pdf> --artifacts <directory> [options]\n  pliego [options] <document.html>\n  pliego --version\n\nOptions:\n  --locale en-US|es-MX\n  --timezone UTC|PST8PDT\n  --page-size WIDTHxHEIGHT\n  --page-margins TOP,RIGHT,BOTTOM,LEFT\n  --allow-host-fonts          Opt in to observable system-font resolution\n  --allow-http-root URL       Allow GET/HEAD below one explicit http(s) URL root\n  --virtual-resource URL=FILE Serve one exact URL from a host-provided file\n  --resource-timeout-ms MS    Bound controlled network connection time (1..60000)\n\nHost fonts, network, and redirects are denied by default. The shorthand form writes outputs to a temporary artifact directory. Page geometry is expressed in CSS pixels."
+        "Pliego — native document rendering on Servo\n\nUsage:\n  pliego render <document.html> --output <document.pdf> --artifacts <directory> [options]\n  pliego [options] <document.html>\n  pliego --version\n\nOptions:\n  --locale en-US|es-MX\n  --timezone UTC|PST8PDT\n  --page-size WIDTHxHEIGHT\n  --page-margins TOP,RIGHT,BOTTOM,LEFT\n  --allow-host-fonts          Opt in to observable system-font resolution\n  --allow-http-root URL       Allow GET/HEAD below one explicit http(s) URL root\n  --virtual-resource URL=FILE Serve one exact URL from a host-provided file\n  --asset-manifest FILE       Verify and cache manifest-backed assets locally\n  --resource-timeout-ms MS    Bound controlled network connection time (1..60000)\n\nHost fonts, network, redirects, and asset caching are disabled by default. The shorthand form writes outputs to a temporary artifact directory. Page geometry is expressed in CSS pixels."
     );
 }
 
@@ -847,6 +906,20 @@ fn render(request: RenderRequest) {
     });
     set_document_pdf_environment(&mut environment, &document_pdf_path, "pending", None);
     record_artifact(artifacts.write_environment(&environment));
+    if let (Some(error), Some(manifest)) = (
+        resource_policy.asset_error.as_ref(),
+        resource_policy.asset_manifest.as_deref(),
+    ) {
+        record_artifact(artifacts.record_asset_failure(
+            error.code,
+            manifest,
+            error.url.as_deref(),
+            &error.message,
+            error.expected.as_deref(),
+            error.actual.as_deref(),
+        ));
+        fail_session(&artifacts, &document_pdf_path, error.code, &error.message);
+    }
     if request.explicit_paths.is_some() {
         match document_pdf_path.try_exists() {
             Ok(false) => {},
@@ -1326,6 +1399,7 @@ fn stable_render_id(
     }
     if !resource_policy.allowed_http_roots.is_empty()
         || !resource_policy.virtual_resources.is_empty()
+        || resource_policy.asset_manifest.is_some()
         || resource_policy.timeout_ms != READINESS_TIMEOUT_MS
     {
         update_field(&mut hasher, RESOURCE_POLICY_ID.as_bytes());
@@ -1339,6 +1413,15 @@ fn stable_render_id(
                 Ok(body) => update_field(&mut hasher, body),
                 Err(_) => update_field(&mut hasher, b"missing"),
             }
+        }
+        if let Some(assets) = &resource_policy.assets {
+            for (url, content_hash) in assets.identity_entries() {
+                update_field(&mut hasher, url.as_bytes());
+                update_field(&mut hasher, content_hash.as_bytes());
+            }
+        } else if let Some(error) = &resource_policy.asset_error {
+            update_field(&mut hasher, error.code.as_bytes());
+            update_field(&mut hasher, error.message.as_bytes());
         }
     }
     format!("sha256:{}", lowercase_hex(&hasher.finalize()))
@@ -1611,6 +1694,30 @@ fn record_resources(
                 ) else {
                     continue;
                 };
+                let cached_asset =
+                    policy.assets.as_ref().and_then(|assets| {
+                        completed.urls.iter().rev().find_map(|url| {
+                            url::Url::parse(url).ok().and_then(|url| assets.get(&url))
+                        })
+                    });
+                if let Some(asset) = cached_asset
+                    && asset.content_hash != format!("sha256:{}", completed.sha256)
+                {
+                    capture
+                        .failure
+                        .get_or_insert_with(|| ResourcePolicyFailure {
+                            code: "ASSET_HASH_MISMATCH",
+                            status: "hash_mismatch",
+                            url: asset.url.to_string(),
+                            method: "GET".into(),
+                            destination: "Unknown".into(),
+                            referrer_url: None,
+                            is_for_main_frame: false,
+                            is_redirect: false,
+                            reason: "Servo observed bytes that differ from the verified asset"
+                                .into(),
+                        });
+                }
                 record_artifact(artifacts.record_loaded_resource(
                     &resource.request_id,
                     &completed.urls,
@@ -1618,6 +1725,7 @@ fn record_resources(
                     completed.content_type.as_deref(),
                     &completed.sha256,
                     &completed.body,
+                    cached_asset.map(|asset| asset.cache_result.as_str()),
                 ));
                 capture.retain_completed(&completed)?;
             },
@@ -2640,6 +2748,7 @@ mod tests {
                     url: virtual_url.clone(),
                     path: PathBuf::from("style.css"),
                 }],
+                asset_manifest: None,
                 timeout_ms: 500,
             },
             &root,
@@ -2762,6 +2871,8 @@ mod tests {
                 "https://example.test/assets",
                 "--virtual-resource",
                 "pliego://host/style.css=style.css",
+                "--asset-manifest",
+                "assets.json",
                 "--resource-timeout-ms",
                 "500",
             ]
@@ -2777,11 +2888,22 @@ mod tests {
             "https://example.test/assets/"
         );
         assert_eq!(request.resources.virtual_resources.len(), 1);
+        assert_eq!(
+            request.resources.asset_manifest,
+            Some(PathBuf::from("assets.json"))
+        );
         assert_eq!(request.resources.timeout_ms, 500);
 
         for args in [
             vec!["invoice.html", "--allow-http-root", "file:///tmp/"],
             vec!["invoice.html", "--resource-timeout-ms", "0"],
+            vec![
+                "invoice.html",
+                "--asset-manifest",
+                "one.json",
+                "--asset-manifest",
+                "two.json",
+            ],
             vec![
                 "invoice.html",
                 "--virtual-resource",

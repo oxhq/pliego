@@ -234,6 +234,7 @@ impl SessionArtifacts {
         content_type: Option<&str>,
         sha256: &str,
         body: &[u8],
+        cache_result: Option<&str>,
     ) -> io::Result<()> {
         let artifact = self.write_resource_digest(sha256, body)?;
 
@@ -252,7 +253,38 @@ impl SessionArtifacts {
                 "bytes": body.len() as u64,
                 "sha256": sha256,
                 "resource": format!("sha256:{sha256}"),
+                "content_hash": format!("sha256:{sha256}"),
+                "cache_result": cache_result,
                 "artifact": artifact,
+            }),
+        )
+    }
+
+    pub fn record_asset_failure(
+        &self,
+        code: &str,
+        manifest: &Path,
+        url: Option<&str>,
+        reason: &str,
+        expected: Option<&str>,
+        actual: Option<&str>,
+    ) -> io::Result<()> {
+        self.append(
+            "resources.jsonl",
+            serde_json::json!({
+                "timestamp_ms": timestamp_ms(),
+                "render_id": self.render_id,
+                "policy": "pliego.asset-cache.v1",
+                "request_id": null,
+                "url": url,
+                "status": "failed",
+                "code": code,
+                "manifest": manifest,
+                "reason": reason,
+                "expected": expected,
+                "actual": actual,
+                "cache_result": null,
+                "bytes": null,
             }),
         )
     }
@@ -891,6 +923,7 @@ mod tests {
                 Some("text/html; charset=utf-8"),
                 resource_hash,
                 resource_body,
+                None,
             )
             .unwrap();
         artifacts
@@ -960,6 +993,11 @@ mod tests {
         assert_eq!(resources[1]["bytes"], resource_body.len());
         assert_eq!(resources[1]["sha256"], resource_hash);
         assert_eq!(resources[1]["resource"], format!("sha256:{resource_hash}"));
+        assert_eq!(
+            resources[1]["content_hash"],
+            format!("sha256:{resource_hash}")
+        );
+        assert_eq!(resources[1]["cache_result"], serde_json::Value::Null);
         assert_eq!(resources[2]["status"], "denied");
         assert_eq!(resources[2]["code"], "RESOURCE_DENIED");
         assert_eq!(resources[2]["request_id"], serde_json::Value::Null);

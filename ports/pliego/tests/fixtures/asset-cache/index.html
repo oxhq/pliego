@@ -1,0 +1,41 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Content-addressed asset cache</title>
+<style>
+  html,
+  body {
+    margin: 0;
+  }
+
+  main {
+    display: flex;
+    gap: 16px;
+    padding: 16px;
+  }
+
+  .swatch {
+    width: 72px;
+    height: 48px;
+  }
+
+  [data-asset-theme="blue"] .swatch {
+    background: #2457d6;
+  }
+
+  [data-asset-theme="orange"] .swatch {
+    background: #e05b22;
+  }
+</style>
+<main>
+  <div class="swatch"></div>
+  <div class="swatch"></div>
+</main>
+<script src="https://assets.pliego.test/first.js"></script>
+<script src="https://assets.pliego.test/renamed.js"></script>
+<script>
+  addEventListener("load", () => window.pliego?.ready({
+    fixture: "asset-cache",
+    executions: window.assetExecutions,
+    theme: document.documentElement.dataset.assetTheme,
+  }));
+</script>
