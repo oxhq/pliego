@@ -924,9 +924,15 @@ fn render(request: RenderRequest) {
             request,
         ) {
             ResourcePolicyDecision::Allow => servoshell::WebResourcePolicyDecision::Allow,
-            ResourcePolicyDecision::Synthesize { body, .. } => {
+            ResourcePolicyDecision::Synthesize { body, content_type } => {
+                let mut headers = http::HeaderMap::new();
+                headers.insert(
+                    http::header::CONTENT_TYPE,
+                    http::HeaderValue::from_static(content_type),
+                );
                 servoshell::WebResourcePolicyDecision::Synthesize {
-                    response: servoshell::WebResourceResponse::new(request.url.clone()),
+                    response: servoshell::WebResourceResponse::new(request.url.clone())
+                        .headers(headers),
                     body,
                 }
             },

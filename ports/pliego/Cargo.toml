@@ -14,6 +14,7 @@ path = "src/scene.rs"
 
 [dependencies]
 base64 = { workspace = true }
+http = { workspace = true }
 imagesize = "0.14.0"
 libc = { workspace = true }
 krilla = { version = "0.8.2", default-features = false, features = ["raster-images"] }
