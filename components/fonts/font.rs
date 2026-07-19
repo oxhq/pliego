@@ -271,6 +271,21 @@ pub struct Font {
     can_do_fast_shaping: OnceLock<bool>,
 }
 
+/// The exact font payload and face parameters retained by a [`Font`].
+///
+/// For downloaded fonts, `bytes` contains the sanitized data used to create the
+/// platform font. For local fonts, requesting this data may load the backing font
+/// file. Callers that need a stable content address should hash `bytes`; neither a
+/// [`FontIdentifier`] nor a WebRender font key is a content-derived identity.
+pub struct FontResourceData<'a> {
+    /// The complete font file bytes. A collection may contain more than one face.
+    pub bytes: &'a [u8],
+    /// The face selected from the font file, or zero for a single-face font.
+    pub face_index: u32,
+    /// Variation values accepted and normalized by the platform font implementation.
+    pub variations: &'a [FontVariation],
+}
+
 impl std::fmt::Debug for Font {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Font")
@@ -377,6 +392,16 @@ impl Font {
 
         let data_and_index = self.data_and_index.get_or_init(move || data_and_index);
         Ok(data_and_index)
+    }
+
+    /// Return the exact bytes and face parameters needed to capture this font resource.
+    pub fn resource_data(&self) -> Result<FontResourceData<'_>, FontDataError> {
+        let data_and_index = self.font_data_and_index()?;
+        Ok(FontResourceData {
+            bytes: data_and_index.data.as_ref(),
+            face_index: data_and_index.index,
+            variations: self.handle.variations(),
+        })
     }
 
     pub(crate) fn variations(&self) -> &[FontVariation] {

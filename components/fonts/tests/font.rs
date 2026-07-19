@@ -50,6 +50,30 @@ fn make_font(path: PathBuf) -> Font {
 }
 
 #[test]
+fn exposes_exact_font_resource_bytes_and_face_parameters() {
+    let path: PathBuf = [
+        env!("CARGO_MANIFEST_DIR"),
+        "tests",
+        "support",
+        "dejavu-fonts-ttf-2.37",
+        "ttf",
+        "DejaVuSans.ttf",
+    ]
+    .iter()
+    .collect();
+    let expected_bytes = std::fs::read(&path).unwrap();
+    let font = make_font(path);
+
+    let resource = font
+        .resource_data()
+        .ok()
+        .expect("font resource data should be retained");
+    assert_eq!(resource.bytes, expected_bytes);
+    assert_eq!(resource.face_index, 0);
+    assert!(resource.variations.is_empty());
+}
+
+#[test]
 fn test_font_can_do_fast_shaping() {
     let dejavu_sans = make_font(
         [
