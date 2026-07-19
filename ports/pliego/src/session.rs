@@ -328,6 +328,20 @@ impl SessionArtifacts {
         self.write_json("environment.json", environment)
     }
 
+    pub fn write_failure(&self, code: &str, message: &str) -> io::Result<()> {
+        self.write_json(
+            "failure.json",
+            &serde_json::json!({
+                "status": "failed",
+                "render_id": self.render_id,
+                "error": {
+                    "code": code,
+                    "message": message,
+                },
+            }),
+        )
+    }
+
     fn write_resource_digest(&self, digest: &str, body: &[u8]) -> io::Result<String> {
         if digest.len() != 64
             || !digest
@@ -994,6 +1008,32 @@ mod tests {
             serde_json::from_slice(&fs::read(directory.join("readiness.json")).unwrap()).unwrap();
         assert_eq!(artifacts.render_id(), "sha256:stable-fixture");
         assert_eq!(readiness["render_id"], "sha256:stable-fixture");
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn writes_a_typed_failure_bound_to_the_render_id() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "pliego-failure-artifact-{}-{unique}",
+            std::process::id()
+        ));
+        let artifacts =
+            SessionArtifacts::create_with_render_id(&directory, "sha256:failed-fixture").unwrap();
+
+        artifacts
+            .write_failure("FIXTURE_FAILED", "fixture failure")
+            .unwrap();
+        let failure: serde_json::Value =
+            serde_json::from_slice(&fs::read(directory.join("failure.json")).unwrap()).unwrap();
+        assert_eq!(failure["status"], "failed");
+        assert_eq!(failure["render_id"], "sha256:failed-fixture");
+        assert_eq!(failure["error"]["code"], "FIXTURE_FAILED");
+        assert_eq!(failure["error"]["message"], "fixture failure");
 
         fs::remove_dir_all(directory).unwrap();
     }

@@ -1636,6 +1636,9 @@ fn fail_session(
             "message": message,
         }
     });
+    if let Err(error) = artifacts.write_failure(code, message) {
+        eprintln!("pliego: warning: cannot write failure artifact: {error}");
+    }
     if let Err(error) = artifacts.write_readiness(&failure) {
         eprintln!("pliego: warning: cannot write readiness artifact: {error}");
     }
