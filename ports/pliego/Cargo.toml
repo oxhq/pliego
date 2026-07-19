@@ -19,3 +19,4 @@ serde_json = { workspace = true }
 sha2 = { workspace = true }
 servoshell = { path = "../servoshell" }
 url = { workspace = true }
+vello_cpu = { workspace = true }

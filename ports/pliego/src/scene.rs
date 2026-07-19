@@ -5,6 +5,8 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+pub mod raster;
+
 pub const SCHEMA: &str = "pliego.document-scene";
 pub const SCHEMA_VERSION: u32 = 1;
 
