@@ -5,18 +5,20 @@
 #![expect(unsafe_code)]
 
 use std::cell::{Cell, OnceCell, RefCell};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fmt::Debug;
 use std::rc::Rc;
 use std::sync::{Arc, LazyLock};
 
 use app_units::Au;
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use bitflags::bitflags;
 use embedder_traits::{
     EmbedderMsg, ScriptToEmbedderChan, Theme, UntrustedNodeAddress, ViewportDetails,
 };
 use euclid::{Point2D, Rect, Scale, Size2D};
-use fonts::{FontContext, FontContextWebFontMethods};
+use fonts::{Font as ServoFont, FontContext, FontContextWebFontMethods};
 use fonts_traits::StylesheetWebFontLoadFinishedCallback;
 use icu_locid::subtags::Language;
 use layout_api::{
@@ -27,7 +29,8 @@ use layout_api::{
     ScrollContainerResponse, TrustedNodeAddress, with_layout_state,
 };
 use layout_api::{
-    LayoutDebugFragment, LayoutDebugGlyph, LayoutDebugRect, LayoutDebugSnapshot, LayoutDebugTextRun,
+    LayoutDebugFontInstance, LayoutDebugFontResource, LayoutDebugFontVariation, LayoutDebugFragment,
+    LayoutDebugGlyph, LayoutDebugRect, LayoutDebugSnapshot, LayoutDebugTextRun,
 };
 use log::{debug, warn};
 use malloc_size_of::{MallocConditionalSizeOf, MallocSizeOf, MallocSizeOfOps};
@@ -46,6 +49,7 @@ use script::layout_dom::{
 };
 use style::properties::longhands::visibility::computed_value::T as Visibility;
 use script_traits::{DrawAPaintImageResult, PaintWorkletError, Painter, ScriptThreadMessage};
+use sha2::{Digest, Sha256};
 use servo_arc::Arc as ServoArc;
 use servo_base::Epoch;
 use servo_base::id::{PipelineId, WebViewId};
@@ -125,6 +129,126 @@ static PRESENTATIONAL_HINTS_CSS: &[u8] = include_bytes!("./stylesheets/presentat
 
 /// A CSS file to style the quirks mode.
 static QUIRKS_MODE_CSS: &[u8] = include_bytes!("./stylesheets/quirks-mode.css");
+
+#[derive(Default)]
+struct LayoutDebugFontCapture {
+    instance_ids_by_pointer: HashMap<usize, Option<String>>,
+    resources_by_id: BTreeMap<String, LayoutDebugFontResource>,
+    instances_by_id: BTreeMap<String, LayoutDebugFontInstance>,
+}
+
+impl LayoutDebugFontCapture {
+    fn capture_font(&mut self, font: &ServoFont) -> Option<String> {
+        let pointer = std::ptr::from_ref(font) as usize;
+        if let Some(instance_id) = self.instance_ids_by_pointer.get(&pointer) {
+            return instance_id.clone();
+        }
+
+        let resource_data = match font.resource_data() {
+            Ok(resource_data) => resource_data,
+            Err(_) => {
+                self.instance_ids_by_pointer.insert(pointer, None);
+                return None;
+            },
+        };
+        let instance_id = self.capture_resource_data(
+            resource_data.bytes,
+            resource_data.face_index,
+            resource_data
+                .variations
+                .iter()
+                .map(|variation| (variation.tag, variation.value)),
+        );
+        self.instance_ids_by_pointer
+            .insert(pointer, instance_id.clone());
+        instance_id
+    }
+
+    fn capture_resource_data(
+        &mut self,
+        bytes: &[u8],
+        face_index: u32,
+        variations: impl IntoIterator<Item = (u32, f32)>,
+    ) -> Option<String> {
+        let variations = canonical_font_variations(variations)?;
+        let resource_digest: [u8; 32] = Sha256::digest(bytes).into();
+        let resource = format!("sha256:{}", lowercase_hex(&resource_digest));
+        self.resources_by_id
+            .entry(resource.clone())
+            .or_insert_with(|| LayoutDebugFontResource {
+                resource: resource.clone(),
+                bytes_base64: BASE64_STANDARD.encode(bytes),
+            });
+
+        let id = font_instance_id(&resource_digest, face_index, &variations);
+        self.instances_by_id
+            .entry(id.clone())
+            .or_insert_with(|| LayoutDebugFontInstance {
+                id: id.clone(),
+                resource,
+                face_index,
+                variations,
+            });
+        Some(id)
+    }
+
+    fn into_entries(
+        self,
+    ) -> (
+        Vec<LayoutDebugFontResource>,
+        Vec<LayoutDebugFontInstance>,
+    ) {
+        (
+            self.resources_by_id.into_values().collect(),
+            self.instances_by_id.into_values().collect(),
+        )
+    }
+}
+
+fn canonical_font_variations(
+    variations: impl IntoIterator<Item = (u32, f32)>,
+) -> Option<Vec<LayoutDebugFontVariation>> {
+    let mut canonical = Vec::new();
+    for (tag, value) in variations {
+        if !value.is_finite() {
+            return None;
+        }
+        canonical.push(LayoutDebugFontVariation {
+            tag,
+            value: if value == 0.0 { 0.0 } else { value },
+        });
+    }
+    let mut variations = canonical;
+    variations.sort_unstable_by_key(|variation| (variation.tag, variation.value.to_bits()));
+    Some(variations)
+}
+
+fn font_instance_id(
+    resource_digest: &[u8; 32],
+    face_index: u32,
+    variations: &[LayoutDebugFontVariation],
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"pliego-font-instance-v1\0");
+    hasher.update(resource_digest);
+    hasher.update(face_index.to_be_bytes());
+    hasher.update((variations.len() as u64).to_be_bytes());
+    for variation in variations {
+        hasher.update(variation.tag.to_be_bytes());
+        hasher.update(variation.value.to_bits().to_be_bytes());
+    }
+    format!("sha256:{}", lowercase_hex(&hasher.finalize()))
+}
+
+fn lowercase_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        encoded.push(HEX[(byte >> 4) as usize] as char);
+        encoded.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    encoded
+}
 
 /// Information needed by layout.
 pub struct LayoutThread {
@@ -267,6 +391,8 @@ impl Layout for LayoutThread {
         let boxes = self.box_tree.borrow().as_ref()?.debug_boxes();
         let display_list_debug_capture = self.display_list_debug_capture.borrow();
         let display_list_debug_capture = display_list_debug_capture.as_ref()?;
+        let mut font_capture = LayoutDebugFontCapture::default();
+        let mut font_capture_warned = false;
         let fragments = {
             let fragment_tree = self.fragment_tree.borrow();
             let mut rows = Vec::new();
@@ -306,8 +432,16 @@ impl Layout for LayoutThread {
                             baseline_origin.y += text_fragment.font_metrics.ascent;
                             let (glyphs, _) =
                                 text_fragment.positioned_glyphs(baseline_origin, true);
+                            let font_instance_id = font_capture.capture_font(&text_fragment.font);
+                            if font_instance_id.is_none() && !font_capture_warned {
+                                warn!(
+                                    "Could not retain an exact finite font instance for layout debug snapshot"
+                                );
+                                font_capture_warned = true;
+                            }
                             Some(LayoutDebugTextRun {
                                 text: text_fragment.rendered_text(),
+                                font_instance_id,
                                 font_identifier: text_fragment.font.identifier(),
                                 font_size: text_fragment.font.descriptor.pt_size.to_f32_px(),
                                 glyphs: glyphs
@@ -341,11 +475,14 @@ impl Layout for LayoutThread {
                 });
             rows
         };
+        let (font_resources, font_instances) = font_capture.into_entries();
         let stacking_context_tree = self.stacking_context_tree.borrow();
         let paint = &stacking_context_tree.as_ref()?.paint_info;
         Some(LayoutDebugSnapshot {
             boxes,
             fragments,
+            font_resources,
+            font_instances,
             paint_events: display_list_debug_capture.events().to_vec(),
             paint_epoch: paint.epoch.0,
             paint_content_width: paint.content_size.width,
@@ -1999,5 +2136,96 @@ impl ReflowPhases {
                 Self::StackingContextTreeConstruction | Self::DisplayListConstruction
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod font_capture_tests {
+    use super::*;
+
+    #[test]
+    fn font_capture_ids_are_content_derived_canonical_and_deduplicated() {
+        const WDTH: u32 = u32::from_be_bytes(*b"wdth");
+        const WGHT: u32 = u32::from_be_bytes(*b"wght");
+        const OPSZ: u32 = u32::from_be_bytes(*b"opsz");
+
+        let mut capture = LayoutDebugFontCapture::default();
+        let canonical = capture.capture_resource_data(
+            b"abc",
+            0,
+            [(WGHT, 700.0), (WDTH, -0.0), (WGHT, 400.0)],
+        )
+        .expect("finite canonical instance should be retained");
+        let reordered = capture.capture_resource_data(
+            b"abc",
+            0,
+            [(WGHT, 400.0), (WGHT, 700.0), (WDTH, 0.0)],
+        )
+        .expect("reordered finite instance should be retained");
+        assert!(
+            capture
+                .capture_resource_data(b"reject-nan", 0, [(OPSZ, f32::NAN)])
+                .is_none()
+        );
+        assert!(
+            capture
+                .capture_resource_data(b"reject-inf", 0, [(OPSZ, f32::INFINITY)])
+                .is_none()
+        );
+        let different_face = capture
+            .capture_resource_data(b"abc", 1, [(WDTH, 0.0)])
+            .expect("different face should be retained");
+        let different_variation =
+            capture.capture_resource_data(b"abc", 0, [(WDTH, 1.0), (WGHT, 400.0)])
+                .expect("different variation should be retained");
+        let different_bytes = capture
+            .capture_resource_data(b"xyz", 0, [])
+            .expect("different bytes should be retained");
+
+        assert_eq!(canonical, reordered);
+        assert_ne!(canonical, different_face);
+        assert_ne!(canonical, different_variation);
+        assert_ne!(canonical, different_bytes);
+
+        let (resources, instances) = capture.into_entries();
+        assert_eq!(resources.len(), 2);
+        assert!(
+            resources
+                .windows(2)
+                .all(|entries| entries[0].resource < entries[1].resource)
+        );
+        let abc_resource = resources
+            .iter()
+            .find(|resource| resource.bytes_base64 == "YWJj")
+            .expect("abc font resource should be retained once");
+        assert_eq!(
+            abc_resource.resource,
+            "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+
+        assert_eq!(instances.len(), 4);
+        assert!(
+            instances
+                .windows(2)
+                .all(|entries| entries[0].id < entries[1].id)
+        );
+        let canonical_instance = instances
+            .iter()
+            .find(|instance| instance.id == canonical)
+            .expect("canonical font instance should be retained once");
+        assert_eq!(canonical_instance.resource, abc_resource.resource);
+        assert_eq!(canonical_instance.face_index, 0);
+        assert_eq!(
+            canonical_instance
+                .variations
+                .iter()
+                .map(|variation| (variation.tag, variation.value.to_bits()))
+                .collect::<Vec<_>>(),
+            vec![
+                (WDTH, 0.0f32.to_bits()),
+                (WGHT, 400.0f32.to_bits()),
+                (WGHT, 700.0f32.to_bits()),
+            ]
+        );
     }
 }

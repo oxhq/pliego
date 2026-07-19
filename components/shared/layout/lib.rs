@@ -273,6 +273,12 @@ pub trait LayoutFactory: Send + Sync {
 pub struct LayoutDebugSnapshot {
     pub boxes: Vec<LayoutDebugBox>,
     pub fragments: Vec<LayoutDebugFragment>,
+    /// Exact font payloads referenced by visible text fragments, sorted by resource ID.
+    #[serde(default)]
+    pub font_resources: Vec<LayoutDebugFontResource>,
+    /// Font faces and variation coordinates referenced by visible text fragments, sorted by ID.
+    #[serde(default)]
+    pub font_instances: Vec<LayoutDebugFontInstance>,
     /// Fragment-level events retained from the display-list traversal, in traversal order.
     ///
     /// This is diagnostic capture data, not a canonical document scene. In particular,
@@ -357,10 +363,40 @@ pub struct LayoutDebugRect {
 pub struct LayoutDebugTextRun {
     /// Text retained after layout whitespace processing and text transformation.
     pub text: String,
+    /// Stable content-derived identity for the exact face and variations used by this run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font_instance_id: Option<String>,
+    /// Diagnostic compatibility identifier. This is not a stable resource identity.
     pub font_identifier: FontIdentifier,
     pub font_size: f32,
     /// Positioned glyphs, including retained whitespace slices.
     pub glyphs: Vec<LayoutDebugGlyph>,
+}
+
+/// Owned exact bytes for a font file used by the retained layout snapshot.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct LayoutDebugFontResource {
+    /// Content address in `sha256:<lowercase hex>` form.
+    pub resource: String,
+    /// Exact post-sanitization or local-file bytes encoded with standard padded base64.
+    pub bytes_base64: String,
+}
+
+/// A stable font face and variation-coordinate instance.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct LayoutDebugFontInstance {
+    /// SHA-256 identity derived from the resource digest, face index, and variations.
+    pub id: String,
+    /// Content-addressed entry in [`LayoutDebugSnapshot::font_resources`].
+    pub resource: String,
+    pub face_index: u32,
+    pub variations: Vec<LayoutDebugFontVariation>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+pub struct LayoutDebugFontVariation {
+    pub tag: u32,
+    pub value: f32,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]

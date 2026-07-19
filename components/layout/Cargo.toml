@@ -22,6 +22,7 @@ tracing = ["dep:tracing"]
 accesskit = { workspace = true }
 app_units = { workspace = true }
 atomic_refcell = { workspace = true }
+base64 = { workspace = true }
 bitflags = { workspace = true }
 data-url = { workspace = true }
 embedder_traits = { workspace = true }
@@ -57,6 +58,7 @@ servo-geometry = { workspace = true }
 servo-tracing = { workspace = true }
 servo-url = { workspace = true }
 servo_arc = { workspace = true }
+sha2 = { workspace = true }
 smallvec = { workspace = true }
 strum = { workspace = true }
 stylo = { workspace = true }
