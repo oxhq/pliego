@@ -34,7 +34,7 @@ use js::jsapi::{
     GCOptions, GCProgress, GCReason, GetPromiseUserInputEventHandlingState, Handle as RawHandle,
     HandleObject, HandleString, HandleValue as RawHandleValue, Heap, JS_SetReservedSlot,
     JSCLASS_RESERVED_SLOTS_MASK, JSCLASS_RESERVED_SLOTS_SHIFT, JSClass, JSClassOps,
-    JSContext as RawJSContext, JSGCParamKey, JSGCStatus, JSJitCompilerOption, JSObject,
+    JSContext as RawJSContext, JSGCParamKey, JSGCStatus, JSJitCompilerOption, JSObject, JSRuntime,
     JSSecurityCallbacks, JSString, JSTracer, JobQueue, MimeType, MutableHandleObject,
     MutableHandleString, PromiseRejectionHandlingState, PromiseUserInputEventHandlingState,
     RuntimeCode, ScriptEnvironmentPreparer_Closure, SetProcessBuildIdOp,
@@ -100,6 +100,29 @@ use crate::realms::enter_auto_realm;
 use crate::script_module::EnsureModuleHooksInitialized;
 use crate::task_source::TaskSourceName;
 use crate::{DomTypeHolder, ScriptThread};
+
+// rust-mozjs does not currently generate this public LocaleSensitive.h binding.
+// Keep this declaration beside the only call site until the upstream binding exists.
+#[cfg(all(target_env = "msvc", target_pointer_width = "64"))]
+#[allow(unsafe_code)]
+unsafe extern "C" {
+    #[link_name = "\u{1}?JS_SetDefaultLocale@@YA_NPEAUJSRuntime@@PEBD@Z"]
+    fn js_set_default_locale(runtime: *mut JSRuntime, locale: *const c_char) -> bool;
+}
+
+#[cfg(all(target_env = "msvc", target_pointer_width = "32"))]
+#[allow(unsafe_code)]
+unsafe extern "C" {
+    #[link_name = "\u{1}?JS_SetDefaultLocale@@YA_NPAUJSRuntime@@PBD@Z"]
+    fn js_set_default_locale(runtime: *mut JSRuntime, locale: *const c_char) -> bool;
+}
+
+#[cfg(not(target_env = "msvc"))]
+#[allow(unsafe_code)]
+unsafe extern "C" {
+    #[link_name = "_Z19JS_SetDefaultLocaleP9JSRuntimePKc"]
+    fn js_set_default_locale(runtime: *mut JSRuntime, locale: *const c_char) -> bool;
+}
 
 static JOB_QUEUE_TRAPS: JobQueueTraps = JobQueueTraps {
     getHostDefinedData: Some(get_host_defined_data),
@@ -778,6 +801,18 @@ impl Runtime {
         } else {
             RustRuntime::new(JS_ENGINE.lock().unwrap().as_ref().unwrap().clone())
         };
+        let locale_override = pref!(intl_locale_override);
+        if !locale_override.is_empty() {
+            let locale = CString::new(locale_override)
+                .expect("intl_locale_override must not contain a null byte");
+            assert!(
+                unsafe { js_set_default_locale(runtime.rt(), locale.as_ptr()) },
+                "SpiderMonkey could not apply intl_locale_override"
+            );
+        }
+        // Embedders must explicitly invalidate SpiderMonkey's process time-zone cache.
+        unsafe { js::jsapi::JS::ResetTimeZone() };
+
         let cx = runtime.cx();
 
         let have_event_loop_sender = script_event_loop_sender.is_some();

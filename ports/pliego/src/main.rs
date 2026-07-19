@@ -4,6 +4,8 @@
 
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
 use std::collections::HashMap;
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+use std::ffi::CString;
 use std::ffi::OsString;
 use std::path::PathBuf;
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
@@ -20,44 +22,143 @@ mod session;
 
 const SERVO_BASE_SHA: &str = "313b6d5ecc113b08010ce434140db3ca5abcc71c";
 const READINESS_TIMEOUT_MS: u64 = 10_000;
+const DEFAULT_LOCALE: &str = "en-US";
+const DEFAULT_TIMEZONE: &str = "UTC";
+
+#[cfg(unix)]
+#[allow(unsafe_code)]
+unsafe extern "C" {
+    fn tzset();
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct RenderEnvironment {
+    locale: &'static str,
+    timezone: &'static str,
+}
+
+impl Default for RenderEnvironment {
+    fn default() -> Self {
+        Self {
+            locale: DEFAULT_LOCALE,
+            timezone: DEFAULT_TIMEZONE,
+        }
+    }
+}
+
+impl RenderEnvironment {
+    fn artifact(self) -> serde_json::Value {
+        serde_json::json!({
+            "locale": {
+                "requested": self.locale,
+                "resolved": self.locale,
+            },
+            "timezone": {
+                "requested": self.timezone,
+                "resolved": self.timezone,
+            },
+        })
+    }
+}
+
+#[derive(Debug, PartialEq)]
+struct RenderRequest {
+    input: PathBuf,
+    environment: RenderEnvironment,
+}
 
 #[derive(Debug, PartialEq)]
 enum Command {
     Help,
     Version,
-    Render(PathBuf),
+    Render(RenderRequest),
 }
 
 fn parse_args(args: Vec<OsString>) -> Result<Command, String> {
-    match args.as_slice() {
-        [] => Ok(Command::Help),
-        [flag] if flag == "-h" || flag == "--help" => Ok(Command::Help),
-        [flag] if flag == "-V" || flag == "--version" || flag == "--verbose-version" => {
-            Ok(Command::Version)
+    if args.is_empty() {
+        return Ok(Command::Help);
+    }
+    if matches!(args.as_slice(), [flag] if flag == "-h" || flag == "--help") {
+        return Ok(Command::Help);
+    }
+    if matches!(args.as_slice(), [flag] if flag == "-V" || flag == "--version" || flag == "--verbose-version")
+    {
+        return Ok(Command::Version);
+    }
+
+    let mut input = None;
+    let mut locale = None;
+    let mut timezone = None;
+    let mut args = args.into_iter();
+    while let Some(argument) = args.next() {
+        if argument == "--locale" {
+            if locale.is_some() {
+                return Err("--locale may only be specified once".into());
+            }
+            let value = args
+                .next()
+                .ok_or_else(|| "--locale requires a value".to_owned())?;
+            locale = Some(parse_locale(&value)?);
+        } else if argument == "--timezone" {
+            if timezone.is_some() {
+                return Err("--timezone may only be specified once".into());
+            }
+            let value = args
+                .next()
+                .ok_or_else(|| "--timezone requires a value".to_owned())?;
+            timezone = Some(parse_timezone(&value)?);
+        } else if argument.to_string_lossy().starts_with('-') {
+            return Err(format!("unknown option: {}", argument.to_string_lossy()));
+        } else if input.replace(PathBuf::from(argument)).is_some() {
+            return Err("exactly one document path is required".into());
+        }
+    }
+
+    let input = input.ok_or_else(|| "a document path is required".to_owned())?;
+    Ok(Command::Render(RenderRequest {
+        input,
+        environment: RenderEnvironment {
+            locale: locale.unwrap_or(DEFAULT_LOCALE),
+            timezone: timezone.unwrap_or(DEFAULT_TIMEZONE),
         },
-        [input] if !input.to_string_lossy().starts_with('-') => {
-            Ok(Command::Render(PathBuf::from(input)))
-        },
-        _ => Err("usage: pliego <document.html>".into()),
+    }))
+}
+
+fn parse_locale(value: &OsString) -> Result<&'static str, String> {
+    match value.to_str() {
+        Some(DEFAULT_LOCALE) => Ok(DEFAULT_LOCALE),
+        Some(value) => Err(format!(
+            "unsupported locale {value:?}; supported locale: {DEFAULT_LOCALE}"
+        )),
+        None => Err("locale must be valid UTF-8".into()),
+    }
+}
+
+fn parse_timezone(value: &OsString) -> Result<&'static str, String> {
+    match value.to_str() {
+        Some(DEFAULT_TIMEZONE) => Ok(DEFAULT_TIMEZONE),
+        Some("PST8PDT") => Ok("PST8PDT"),
+        Some(value) => Err(format!(
+            "unsupported timezone {value:?}; supported timezones: UTC, PST8PDT"
+        )),
+        None => Err("timezone must be valid UTF-8".into()),
     }
 }
 
 fn main() {
-    let command = parse_args(std::env::args_os().skip(1).collect()).unwrap_or_else(|error| {
-        eprintln!("pliego: {error}");
-        std::process::exit(2)
-    });
+    let command = parse_args(std::env::args_os().skip(1).collect())
+        .unwrap_or_else(|error| invalid_request(&error));
 
     match command {
         Command::Help => print_help(),
         Command::Version => print_version(),
-        Command::Render(input) => render(input),
+        Command::Render(request) => render(request),
     }
 }
 
 fn print_help() {
     println!(
-        "Pliego — native document rendering on Servo\n\nUsage:\n  pliego <document.html>\n  pliego --version"
+        "Pliego — native document rendering on Servo\n\nUsage:\n  pliego [--locale en-US] [--timezone UTC|PST8PDT] <document.html>\n  pliego --version"
     );
 }
 
@@ -70,9 +171,59 @@ fn print_version() {
     );
 }
 
+fn invalid_request(message: &str) -> ! {
+    println!(
+        "{}",
+        serde_json::json!({
+            "status": "failed",
+            "error": {
+                "code": "INVALID_REQUEST",
+                "message": message,
+            },
+        })
+    );
+    eprintln!("pliego: INVALID_REQUEST: {message}");
+    std::process::exit(2)
+}
+
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
-fn render(input: PathBuf) {
-    let document = LocalDocument::resolve(".", &input).unwrap_or_else(|error| {
+/// Sets the process-global timezone before Servo starts any worker threads.
+/// This is deliberately scoped to Pliego's one-render-per-process CLI model.
+fn apply_timezone(timezone: &str) -> Result<(), String> {
+    let variable = CString::new("TZ").unwrap();
+    let value = CString::new(timezone).map_err(|_| "timezone contains a null byte")?;
+
+    #[cfg(target_os = "windows")]
+    let result = unsafe { libc::putenv_s(variable.as_ptr(), value.as_ptr()) };
+    #[cfg(unix)]
+    let result = unsafe { libc::setenv(variable.as_ptr(), value.as_ptr(), 1) };
+    #[cfg(not(any(target_os = "windows", unix)))]
+    return Err("timezone overrides are unsupported on this desktop target".into());
+
+    #[cfg(any(target_os = "windows", unix))]
+    {
+        if result != 0 {
+            return Err(format!(
+                "cannot set process timezone to {timezone}: platform error {result}"
+            ));
+        }
+
+        // Keep the C runtime and SpiderMonkey's later cache reset on the same value.
+        #[cfg(target_os = "windows")]
+        unsafe {
+            libc::tzset()
+        };
+        #[cfg(unix)]
+        unsafe {
+            tzset()
+        };
+        Ok(())
+    }
+}
+
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+fn render(request: RenderRequest) {
+    let document = LocalDocument::resolve(".", &request.input).unwrap_or_else(|error| {
         eprintln!("pliego: {error}");
         std::process::exit(2)
     });
@@ -92,6 +243,12 @@ fn render(input: PathBuf) {
         std::process::exit(1)
     });
     let proof = artifacts.directory().join("render.png");
+    let environment_path = artifacts.directory().join("environment.json");
+    let environment = request.environment.artifact();
+    record_artifact(artifacts.write_environment(&environment));
+    apply_timezone(request.environment.timezone).unwrap_or_else(|error| {
+        fail_session(&artifacts, "ENVIRONMENT_CONFIGURATION_FAILED", &error)
+    });
     let userscripts = artifacts.directory().join("userscripts");
     record_artifact(std::fs::create_dir_all(&userscripts));
     record_artifact(std::fs::write(
@@ -108,6 +265,8 @@ fn render(input: PathBuf) {
         proof.to_string_lossy().into_owned(),
         "--userscripts".into(),
         userscripts.to_string_lossy().into_owned(),
+        "--pref".into(),
+        format!("intl_locale_override={}", request.environment.locale),
         input_url.to_string(),
     ];
     let result = servoshell::run_with_stable_javascript_and_console(
@@ -195,6 +354,8 @@ fn render(input: PathBuf) {
             "artifacts": artifacts.directory().to_string_lossy(),
             "engine": "pliego",
             "document_root": document.root().to_string_lossy(),
+            "environment": environment,
+            "environment_artifact": environment_path.to_string_lossy(),
             "input": document.path().to_string_lossy(),
             "layout_debug": layout_debug_path.to_string_lossy(),
             "readiness": readiness_payload,
@@ -354,7 +515,7 @@ fn fail_session(artifacts: &SessionArtifacts, code: &str, message: &str) -> ! {
 }
 
 #[cfg(any(target_os = "android", target_env = "ohos"))]
-fn render(_input: PathBuf) {
+fn render(_request: RenderRequest) {
     eprintln!("pliego: the command-line renderer is only available on desktop targets");
     std::process::exit(2);
 }
@@ -363,7 +524,10 @@ fn render(_input: PathBuf) {
 mod tests {
     use std::collections::HashMap;
 
-    use super::{Command, PendingResource, complete_resource, parse_args};
+    use super::{
+        Command, DEFAULT_LOCALE, DEFAULT_TIMEZONE, PendingResource, RenderEnvironment,
+        RenderRequest, complete_resource, parse_args,
+    };
     use std::ffi::OsString;
     use std::path::PathBuf;
 
@@ -376,7 +540,13 @@ mod tests {
         );
         assert_eq!(
             parse_args(vec![OsString::from("invoice.html")]).unwrap(),
-            Command::Render(PathBuf::from("invoice.html"))
+            Command::Render(RenderRequest {
+                input: PathBuf::from("invoice.html"),
+                environment: RenderEnvironment {
+                    locale: DEFAULT_LOCALE,
+                    timezone: DEFAULT_TIMEZONE,
+                },
+            })
         );
         assert!(
             parse_args(vec![
@@ -385,6 +555,43 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[test]
+    fn validates_and_resolves_the_deterministic_environment() {
+        assert_eq!(
+            parse_args(vec![
+                OsString::from("--timezone"),
+                OsString::from("PST8PDT"),
+                OsString::from("--locale"),
+                OsString::from("en-US"),
+                OsString::from("invoice.html"),
+            ])
+            .unwrap(),
+            Command::Render(RenderRequest {
+                input: PathBuf::from("invoice.html"),
+                environment: RenderEnvironment {
+                    locale: "en-US",
+                    timezone: "PST8PDT",
+                },
+            })
+        );
+
+        let invalid_locale = parse_args(vec![
+            OsString::from("--locale"),
+            OsString::from("de-DE"),
+            OsString::from("invoice.html"),
+        ])
+        .unwrap_err();
+        assert!(invalid_locale.contains("unsupported locale"));
+
+        let invalid_timezone = parse_args(vec![
+            OsString::from("--timezone"),
+            OsString::from("America/Tijuana"),
+            OsString::from("invoice.html"),
+        ])
+        .unwrap_err();
+        assert!(invalid_timezone.contains("unsupported timezone"));
     }
 
     #[test]

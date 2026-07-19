@@ -13,6 +13,7 @@ description = "Native document rendering entrypoint built on Servo"
 path = "src/scene.rs"
 
 [dependencies]
+libc = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 sha2 = { workspace = true }

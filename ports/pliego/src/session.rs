@@ -199,6 +199,10 @@ impl SessionArtifacts {
         self.write_json("layout-debug.json", snapshot)
     }
 
+    pub fn write_environment(&self, environment: &serde_json::Value) -> io::Result<()> {
+        self.write_json("environment.json", environment)
+    }
+
     fn write_json(&self, name: &str, value: &serde_json::Value) -> io::Result<()> {
         let mut file = File::create(self.directory.join(name))?;
         serde_json::to_writer_pretty(&mut file, value).map_err(io::Error::other)?;

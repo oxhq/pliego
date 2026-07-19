@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>Pliego deterministic environment fixture</title>
+  </head>
+  <body>
+    <p id="result">pending</p>
+    <script>
+      const instant = new Date(Date.UTC(2024, 0, 15, 12, 0, 0));
+      const resolved = new Intl.DateTimeFormat().resolvedOptions();
+      const payload = {
+        fixture: 'deterministic-environment',
+        navigatorLanguage: navigator.language,
+        intlLocale: resolved.locale,
+        intlTimezone: resolved.timeZone,
+        localHour: instant.getHours(),
+        formatted: new Intl.DateTimeFormat(undefined, {
+          dateStyle: 'full',
+          timeStyle: 'long',
+        }).format(instant),
+      };
+      document.querySelector('#result').textContent = JSON.stringify(payload);
+      queueMicrotask(() => window.pliego?.ready(payload));
+    </script>
+  </body>
+</html>
