@@ -308,6 +308,7 @@ fn bounds_image_decoding_and_recovers_after_each_typed_rejection() {
             observed: IMAGE_LIMITS.encoded_bytes + 1,
         })
     );
+    assert!(render_image(IMAGE).is_ok());
     drop(encoded);
 
     let dimension = png_with_dimensions(IMAGE_LIMITS.declared_dimension as u32 + 1, 1);
@@ -320,6 +321,19 @@ fn bounds_image_decoding_and_recovers_after_each_typed_rejection() {
             observed: IMAGE_LIMITS.declared_dimension + 1,
         })
     );
+    assert!(render_image(IMAGE).is_ok());
+
+    let height = png_with_dimensions(1, IMAGE_LIMITS.declared_dimension as u32 + 1);
+    assert_eq!(
+        render_image(&height),
+        Err(PdfError::ImageLimitExceeded {
+            resource: IMAGE_ID.into(),
+            limit: ImageLimit::DeclaredHeight,
+            configured: IMAGE_LIMITS.declared_dimension,
+            observed: IMAGE_LIMITS.declared_dimension + 1,
+        })
+    );
+    assert!(render_image(IMAGE).is_ok());
 
     let pixels = png_with_dimensions(7_122, 14_041);
     assert_eq!(
@@ -331,6 +345,7 @@ fn bounds_image_decoding_and_recovers_after_each_typed_rejection() {
             observed: 100_000_002,
         })
     );
+    assert!(render_image(IMAGE).is_ok());
 
     let mut decompressed = png_with_dimensions(8_283, 4_051);
     decompressed[24] = 16;
@@ -345,6 +360,18 @@ fn bounds_image_decoding_and_recovers_after_each_typed_rejection() {
         })
     );
 
+    assert!(render_image(IMAGE).is_ok());
+}
+
+#[test]
+fn rejects_a_malformed_pdf_image_and_recovers_on_the_next_render() {
+    assert_eq!(
+        render_image(b"not an image"),
+        Err(PdfError::InvalidImage {
+            resource: IMAGE_ID.into(),
+            message: "unsupported image format".into(),
+        })
+    );
     assert!(render_image(IMAGE).is_ok());
 }
 

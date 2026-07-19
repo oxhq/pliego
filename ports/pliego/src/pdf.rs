@@ -18,7 +18,7 @@ use krilla::{Data, Document, SerializeSettings};
 use url::Url;
 use vello_cpu::kurbo::{BezPath, PathEl};
 
-use crate::image_limits::{ImageLimitExceeded, check_decoded_image, check_encoded_bytes};
+use crate::image_limits::{ImageBudget, ImageLimitExceeded, check_encoded_bytes};
 use crate::{Color, DocumentScene, FillRule, ImageLimit, Operation};
 
 const MAX_RESOURCE_BYTES: usize = 64 * 1024 * 1024;
@@ -226,6 +226,7 @@ pub fn render_document_pdf<'font, 'image>(
     let mut document = Document::new_with(settings);
     let mut fonts = HashMap::<String, Font>::new();
     let mut images = HashMap::<String, Image>::new();
+    let mut image_budget = ImageBudget::default();
     for source_page in &scene.pages {
         let width = pdf_length(source_page.size.width, "page.width")?;
         let height = pdf_length(source_page.size.height, "page.height")?;
@@ -333,7 +334,10 @@ pub fn render_document_pdf<'font, 'image>(
                         if !images.contains_key(resource) {
                             let bytes = resolve_image(resource)
                                 .ok_or_else(|| PdfError::MissingImage(resource.clone()))?;
-                            images.insert(resource.clone(), load_image(resource, bytes)?);
+                            images.insert(
+                                resource.clone(),
+                                load_image(resource, bytes, &mut image_budget)?,
+                            );
                         }
                         let size = PdfSize::from_wh(
                             pdf_length(bounds.width, "image.width")?,
@@ -454,7 +458,11 @@ fn load_font(resource_id: &str, resource: PdfFontResource<'_>) -> Result<Font, P
     .ok_or_else(|| PdfError::InvalidFont(resource_id.into()))
 }
 
-fn load_image(resource_id: &str, bytes: &[u8]) -> Result<Image, PdfError> {
+fn load_image(
+    resource_id: &str,
+    bytes: &[u8],
+    image_budget: &mut ImageBudget,
+) -> Result<Image, PdfError> {
     check_encoded_bytes(bytes.len()).map_err(|error| image_limit_error(resource_id, error))?;
     let png = bytes.starts_with(b"\x89PNG\r\n\x1a\n");
     let jpeg = bytes.starts_with(b"\xff\xd8\xff");
@@ -478,12 +486,13 @@ fn load_image(resource_id: &str, bytes: &[u8]) -> Result<Image, PdfError> {
         resource: resource_id.into(),
         message: error.to_string(),
     })?;
-    check_decoded_image(
-        u64::try_from(dimensions.width).unwrap_or(u64::MAX),
-        u64::try_from(dimensions.height).unwrap_or(u64::MAX),
-        decompressed_bytes_per_pixel,
-    )
-    .map_err(|error| image_limit_error(resource_id, error))?;
+    let charge = image_budget
+        .check(
+            u64::try_from(dimensions.width).unwrap_or(u64::MAX),
+            u64::try_from(dimensions.height).unwrap_or(u64::MAX),
+            decompressed_bytes_per_pixel,
+        )
+        .map_err(|error| image_limit_error(resource_id, error))?;
 
     let data = Data::from(bytes.to_vec());
     let result = if png {
@@ -501,6 +510,7 @@ fn load_image(resource_id: &str, bytes: &[u8]) -> Result<Image, PdfError> {
         resource: resource_id.into(),
         message,
     })?;
+    image_budget.commit(charge);
     Ok(image)
 }
 

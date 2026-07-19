@@ -15,7 +15,7 @@ use vello_cpu::{
     Glyph, Image, ImageSource, Level, Pixmap, RenderContext, RenderMode, RenderSettings, Resources,
 };
 
-use crate::image_limits::{ImageLimitExceeded, check_decoded_image, check_encoded_bytes};
+use crate::image_limits::{ImageBudget, ImageLimitExceeded, check_encoded_bytes};
 use crate::{Color, DocumentScene, FillRule, ImageLimit, Operation, Page};
 
 /// A variation coordinate retained for a font instance.
@@ -158,6 +158,7 @@ pub fn render_pages_png_with_images<'font, 'image>(
     scene.validate().map_err(RasterError::InvalidScene)?;
     let mut fonts = HashMap::<String, FontData>::new();
     let mut images = HashMap::<String, Arc<Pixmap>>::new();
+    let mut image_budget = ImageBudget::default();
     scene
         .pages
         .iter()
@@ -169,6 +170,7 @@ pub fn render_pages_png_with_images<'font, 'image>(
                 true,
                 &mut fonts,
                 &mut images,
+                &mut image_budget,
             )
         })
         .collect()
@@ -183,6 +185,7 @@ fn render_first_page_png_impl<'font, 'image>(
     scene.validate().map_err(RasterError::InvalidScene)?;
     let mut fonts = HashMap::<String, FontData>::new();
     let mut images = HashMap::<String, Arc<Pixmap>>::new();
+    let mut image_budget = ImageBudget::default();
     render_page_png(
         &scene.pages[0],
         &mut resolve_font,
@@ -190,6 +193,7 @@ fn render_first_page_png_impl<'font, 'image>(
         images_supported,
         &mut fonts,
         &mut images,
+        &mut image_budget,
     )
 }
 
@@ -200,6 +204,7 @@ fn render_page_png<'font, 'image>(
     images_supported: bool,
     fonts: &mut HashMap<String, FontData>,
     images: &mut HashMap<String, Arc<Pixmap>>,
+    image_budget: &mut ImageBudget,
 ) -> Result<Vec<u8>, RasterError> {
     let width = raster_dimension(page.size.width, page.size.width, page.size.height)?;
     let height = raster_dimension(page.size.height, page.size.width, page.size.height)?;
@@ -294,7 +299,10 @@ fn render_page_png<'font, 'image>(
                 if !images.contains_key(resource) {
                     let bytes = resolve_image(resource)
                         .ok_or_else(|| RasterError::MissingImage(resource.clone()))?;
-                    images.insert(resource.clone(), load_png(index, resource, bytes)?);
+                    images.insert(
+                        resource.clone(),
+                        load_png(index, resource, bytes, image_budget)?,
+                    );
                 }
                 let image = images[resource].clone();
                 let x = f64::from(raster_value(bounds.x, "image.x")?);
@@ -328,7 +336,12 @@ fn render_page_png<'font, 'image>(
         .map_err(|error| RasterError::PngEncoding(error.to_string()))
 }
 
-fn load_png(index: usize, resource: &str, bytes: &[u8]) -> Result<Arc<Pixmap>, RasterError> {
+fn load_png(
+    index: usize,
+    resource: &str,
+    bytes: &[u8],
+    image_budget: &mut ImageBudget,
+) -> Result<Arc<Pixmap>, RasterError> {
     check_encoded_bytes(bytes.len()).map_err(|error| image_limit_error(resource, error))?;
     if !bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
         return Err(RasterError::InvalidImage {
@@ -342,14 +355,17 @@ fn load_png(index: usize, resource: &str, bytes: &[u8]) -> Result<Arc<Pixmap>, R
         resource: resource.into(),
         message: "PNG resource has no valid IHDR dimensions".into(),
     })?;
-    check_decoded_image(width, height, 4).map_err(|error| image_limit_error(resource, error))?;
-    Pixmap::from_png(Cursor::new(bytes))
-        .map(Arc::new)
-        .map_err(|error| RasterError::InvalidImage {
+    let charge = image_budget
+        .check(width, height, 4)
+        .map_err(|error| image_limit_error(resource, error))?;
+    let pixmap =
+        Pixmap::from_png(Cursor::new(bytes)).map_err(|error| RasterError::InvalidImage {
             index,
             resource: resource.into(),
             message: error.to_string(),
-        })
+        })?;
+    image_budget.commit(charge);
+    Ok(Arc::new(pixmap))
 }
 
 fn image_limit_error(resource: &str, error: ImageLimitExceeded) -> RasterError {

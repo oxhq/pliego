@@ -273,6 +273,7 @@ fn rasterizes_all_pages_without_dom_or_layout_and_shares_resource_caches() {
 
 #[test]
 fn bounds_image_decoding_and_recovers_after_each_typed_rejection() {
+    let healthy = image_png();
     let encoded = vec![0; usize::try_from(IMAGE_LIMITS.encoded_bytes + 1).unwrap()];
     assert_eq!(
         render_image(&encoded),
@@ -283,6 +284,7 @@ fn bounds_image_decoding_and_recovers_after_each_typed_rejection() {
             observed: IMAGE_LIMITS.encoded_bytes + 1,
         })
     );
+    assert!(render_image(&healthy).is_ok());
     drop(encoded);
 
     let dimension = png_with_dimensions(IMAGE_LIMITS.declared_dimension as u32 + 1, 1);
@@ -295,6 +297,19 @@ fn bounds_image_decoding_and_recovers_after_each_typed_rejection() {
             observed: IMAGE_LIMITS.declared_dimension + 1,
         })
     );
+    assert!(render_image(&healthy).is_ok());
+
+    let height = png_with_dimensions(1, IMAGE_LIMITS.declared_dimension as u32 + 1);
+    assert_eq!(
+        render_image(&height),
+        Err(RasterError::ImageLimitExceeded {
+            resource: "sha256:image-fixture".into(),
+            limit: ImageLimit::DeclaredHeight,
+            configured: IMAGE_LIMITS.declared_dimension,
+            observed: IMAGE_LIMITS.declared_dimension + 1,
+        })
+    );
+    assert!(render_image(&healthy).is_ok());
 
     let pixels = png_with_dimensions(7_122, 14_041);
     assert_eq!(
@@ -306,6 +321,7 @@ fn bounds_image_decoding_and_recovers_after_each_typed_rejection() {
             observed: 100_000_002,
         })
     );
+    assert!(render_image(&healthy).is_ok());
 
     let decompressed = png_with_dimensions(8_321, 8_065);
     assert_eq!(
@@ -317,8 +333,7 @@ fn bounds_image_decoding_and_recovers_after_each_typed_rejection() {
             observed: IMAGE_LIMITS.decompressed_bytes + 4,
         })
     );
-
-    assert!(render_image(&image_png()).is_ok());
+    assert!(render_image(&healthy).is_ok());
 }
 
 #[test]
@@ -328,10 +343,15 @@ fn rejects_missing_and_non_png_image_resources() {
         render_first_page_png_with_images(&scene, |_| None, |_| None),
         Err(RasterError::MissingImage("sha256:image-fixture".into()))
     );
-    assert!(matches!(
+    assert_eq!(
         render_first_page_png_with_images(&scene, |_| None, |_| Some(b"not a PNG")),
-        Err(RasterError::InvalidImage { index: 0, .. })
-    ));
+        Err(RasterError::InvalidImage {
+            index: 0,
+            resource: "sha256:image-fixture".into(),
+            message: "CPU preview supports PNG resources only".into(),
+        })
+    );
+    assert!(render_image(&image_png()).is_ok());
 }
 
 #[test]
