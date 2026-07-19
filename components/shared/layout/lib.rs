@@ -282,6 +282,17 @@ pub struct LayoutDebugSnapshot {
     pub first_reflow: bool,
 }
 
+/// Link semantics captured from the live DOM at the same boundary as a layout debug snapshot.
+///
+/// `tag_id` is a process-local join key for fragments in that snapshot. It is not a stable source
+/// identifier and must not be included in deterministic scene hashes.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct LayoutDebugLink {
+    pub tag_id: u64,
+    /// The fully resolved URL after applying the document's effective base URL.
+    pub url: String,
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct LayoutDebugBox {
     pub depth: usize,

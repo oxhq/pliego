@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>Pliego link capture</title>
+    <base href="./resolved/">
+    <style>
+      body { font: 20px sans-serif; }
+      #link-host { width: 11em; }
+      #not-rendered { display: none; }
+    </style>
+  </head>
+  <body>
+    <p id="link-host"></p>
+    <a id="no-href">Not a hyperlink</a>
+    <a id="not-rendered" href="hidden.html">Not rendered</a>
+    <script>
+      const anchor = document.createElement('a');
+      anchor.id = 'captured-link';
+      anchor.setAttribute('href', 'initial.html');
+      anchor.textContent = 'A JavaScript-created link that wraps over several lines';
+      document.querySelector('#link-host').append(anchor);
+      anchor.setAttribute('href', '../final/report.html?edition=1#summary');
+
+      queueMicrotask(() => window.pliego?.ready({ fixture: 'link-capture' }));
+    </script>
+  </body>
+</html>

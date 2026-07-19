@@ -12,6 +12,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
 use readiness::{Readiness, parse_snapshot};
 use session::{LocalDocument, SessionArtifacts};
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+use sha2::{Digest, Sha256};
 
 mod readiness;
 mod session;
@@ -206,48 +208,113 @@ fn render(input: PathBuf) {
 }
 
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+#[derive(Debug, Default, PartialEq)]
+struct PendingResource {
+    urls: Vec<String>,
+    response_status: Option<u16>,
+    content_type: Option<String>,
+}
+
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+impl PendingResource {
+    fn observe_url(&mut self, url: String) -> bool {
+        if self.urls.iter().any(|observed| observed == &url) {
+            return false;
+        }
+        self.urls.push(url);
+        true
+    }
+}
+
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+#[derive(Debug, PartialEq)]
+struct CompletedResource {
+    urls: Vec<String>,
+    response_status: Option<u16>,
+    content_type: Option<String>,
+    sha256: String,
+    body: Vec<u8>,
+}
+
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
 fn record_resources(
     artifacts: &SessionArtifacts,
     resources: Vec<servoshell::ResourceEvent>,
 ) -> Option<String> {
-    let mut pending = HashMap::new();
+    let mut pending: HashMap<String, PendingResource> = HashMap::new();
 
     for resource in resources {
         match resource.event {
-            servoshell::NetworkEvent::HttpRequest(request) => {
+            servoshell::NetworkEvent::HttpRequest(request)
+            | servoshell::NetworkEvent::HttpRequestUpdate(request) => {
                 let url = request.url.into_string();
-                record_artifact(artifacts.record_resource(&url, "requested", None));
-                pending.insert(resource.request_id, url);
+                let pending_resource = pending.entry(resource.request_id.clone()).or_default();
+                if pending_resource.observe_url(url.clone()) {
+                    record_artifact(artifacts.record_resource_request(&resource.request_id, &url));
+                }
             },
             servoshell::NetworkEvent::HttpResponse(response) => {
-                let Some((url, bytes)) = complete_resource(
+                if let Some(pending_resource) = pending.get_mut(&resource.request_id) {
+                    pending_resource.response_status = Some(response.status.raw_code());
+                    if let Some(content_type) = response
+                        .headers
+                        .as_ref()
+                        .and_then(|headers| headers.get("content-type"))
+                        .and_then(|value| value.to_str().ok())
+                    {
+                        pending_resource.content_type = Some(content_type.to_owned());
+                    }
+                }
+
+                let Some(completed) = complete_resource(
                     &mut pending,
                     &resource.request_id,
-                    response.body.map(|body| body.len()),
+                    response.body.map(|body| body.0),
                 ) else {
                     continue;
                 };
-                record_artifact(artifacts.record_resource(&url, "loaded", Some(bytes)));
+                record_artifact(artifacts.record_loaded_resource(
+                    &resource.request_id,
+                    &completed.urls,
+                    completed.response_status,
+                    completed.content_type.as_deref(),
+                    &completed.sha256,
+                    &completed.body,
+                ));
             },
-            servoshell::NetworkEvent::HttpRequestUpdate(_)
-            | servoshell::NetworkEvent::SecurityInfo(_) => {},
+            servoshell::NetworkEvent::SecurityInfo(_) => {},
         }
     }
 
     pending
         .into_values()
+        .flat_map(|resource| resource.urls)
         .filter(|url| url.starts_with("file:"))
         .min()
 }
 
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
 fn complete_resource(
-    pending: &mut HashMap<String, String>,
+    pending: &mut HashMap<String, PendingResource>,
     request_id: &str,
-    bytes: Option<usize>,
-) -> Option<(String, u64)> {
-    let bytes = bytes? as u64;
-    pending.remove(request_id).map(|url| (url, bytes))
+    body: Option<Vec<u8>>,
+) -> Option<CompletedResource> {
+    let body = body?;
+    let pending = pending.remove(request_id)?;
+    let sha256 =
+        Sha256::digest(&body)
+            .iter()
+            .fold(String::with_capacity(64), |mut output, byte| {
+                output.push_str(&format!("{byte:02x}"));
+                output
+            });
+    Some(CompletedResource {
+        urls: pending.urls,
+        response_status: pending.response_status,
+        content_type: pending.content_type,
+        sha256,
+        body,
+    })
 }
 
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
@@ -296,7 +363,7 @@ fn render(_input: PathBuf) {
 mod tests {
     use std::collections::HashMap;
 
-    use super::{Command, complete_resource, parse_args};
+    use super::{Command, PendingResource, complete_resource, parse_args};
     use std::ffi::OsString;
     use std::path::PathBuf;
 
@@ -321,15 +388,32 @@ mod tests {
     }
 
     #[test]
-    fn completes_a_resource_only_when_its_body_arrives() {
-        let mut pending = HashMap::from([("request-1".to_owned(), "file:///style.css".to_owned())]);
+    fn completes_a_resource_only_when_its_body_arrives_and_hashes_exact_bytes() {
+        let mut resource = PendingResource {
+            response_status: Some(200),
+            content_type: Some("text/css; charset=utf-8".to_owned()),
+            ..PendingResource::default()
+        };
+        assert!(resource.observe_url("file:///style.css".to_owned()));
+        assert!(!resource.observe_url("file:///style.css".to_owned()));
+        assert!(resource.observe_url("file:///theme.css".to_owned()));
+        let mut pending = HashMap::from([("request-1".to_owned(), resource)]);
 
         assert_eq!(complete_resource(&mut pending, "request-1", None), None);
         assert!(pending.contains_key("request-1"));
+        let completed = complete_resource(&mut pending, "request-1", Some(b"hello".to_vec()))
+            .expect("a body completes the resource");
+        assert_eq!(completed.urls, ["file:///style.css", "file:///theme.css"]);
+        assert_eq!(completed.response_status, Some(200));
         assert_eq!(
-            complete_resource(&mut pending, "request-1", Some(42)),
-            Some(("file:///style.css".to_owned(), 42))
+            completed.content_type.as_deref(),
+            Some("text/css; charset=utf-8")
         );
+        assert_eq!(
+            completed.sha256,
+            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+        );
+        assert_eq!(completed.body, b"hello");
         assert!(pending.is_empty());
     }
 }

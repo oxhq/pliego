@@ -57,7 +57,10 @@ use js::jsapi::{GCReason, JSContext as UnsafeJSContext};
 use js::jsval::UndefinedValue;
 use js::rust::ParentRuntime;
 use js::rust::wrappers2::{JS_AddInterruptCallback, JS_GC, SetWindowProxyClass};
-use layout_api::{LayoutConfig, LayoutFactory, RestyleReason, ScriptThreadFactory};
+use layout_api::{
+    FragmentType, LayoutConfig, LayoutDebugLink, LayoutDebugSnapshot, LayoutFactory, RestyleReason,
+    ScriptThreadFactory, combine_id_with_fragment_type,
+};
 use media::WindowGLContext;
 use metrics::MAX_TASK_NS;
 use net_traits::image_cache::{ImageCache, ImageCacheFactory, ImageCacheResponseMessage};
@@ -79,6 +82,7 @@ use script_traits::{
     NewPipelineInfo, Painter, ProgressiveWebMetricType, ScriptThreadMessage,
     UpdatePipelineIdReason,
 };
+use serde::Serialize;
 use servo_arc::Arc as ServoArc;
 use servo_base::cross_process_instant::CrossProcessInstant;
 use servo_base::generic_channel::{GenericCallback, GenericSender};
@@ -135,7 +139,9 @@ use crate::dom::document::{
 };
 use crate::dom::element::Element;
 use crate::dom::globalscope::GlobalScope;
+use crate::dom::html::htmlanchorelement::HTMLAnchorElement;
 use crate::dom::html::htmliframeelement::{HTMLIFrameElement, IframeContext, ProcessingMode};
+use crate::dom::node::iterators::ShadowIncluding;
 use crate::dom::node::{Node, NodeTraits};
 use crate::dom::servoparser::{ParserContext, ServoParser};
 use crate::dom::types::DebuggerGlobalScope;
@@ -189,6 +195,13 @@ pub(crate) struct IncompleteParserContexts(RefCell<Vec<(PipelineId, ParserContex
 unsafe_no_jsmanaged_fields!(TaskQueue<MainThreadScriptMsg>);
 
 type NodeIdSet = HashSet<String>;
+
+#[derive(Serialize)]
+struct LayoutDebugSnapshotWithLinks<'a> {
+    #[serde(flatten)]
+    snapshot: &'a LayoutDebugSnapshot,
+    links: &'a [LayoutDebugLink],
+}
 
 /// A simple guard structure that restore the user interacting state when dropped
 #[derive(Default)]
@@ -2775,11 +2788,38 @@ impl ScriptThread {
         let snapshot = self
             .documents
             .borrow()
-            .find_window(id)
-            .and_then(|window| window.layout().debug_snapshot())
-            .and_then(|snapshot| {
+            .find_document(id)
+            .and_then(|document| {
+                let snapshot = document.window().layout().debug_snapshot()?;
+                let fragment_tag_ids: FxHashSet<u64> = snapshot
+                    .fragments
+                    .iter()
+                    .filter_map(|fragment| fragment.tag_id)
+                    .collect();
+                let links: Vec<LayoutDebugLink> = document
+                    .upcast::<Node>()
+                    .traverse_preorder(ShadowIncluding::Yes)
+                    .filter_map(DomRoot::downcast::<HTMLAnchorElement>)
+                    .filter_map(|anchor| {
+                        let url = anchor.full_href_url_for_user_interface()?;
+                        let tag_id = combine_id_with_fragment_type(
+                            anchor.upcast::<Node>().to_opaque().id(),
+                            FragmentType::FragmentBody,
+                        );
+                        fragment_tag_ids.contains(&tag_id).then(|| LayoutDebugLink {
+                            tag_id,
+                            url: url.to_string(),
+                        })
+                    })
+                    .collect();
+                let snapshot = LayoutDebugSnapshotWithLinks {
+                    snapshot: &snapshot,
+                    links: &links,
+                };
                 serde_json::to_string(&snapshot)
-                    .inspect_err(|error| warn!("Could not serialize layout debug snapshot: {error}"))
+                    .inspect_err(|error| {
+                        warn!("Could not serialize layout debug snapshot: {error}")
+                    })
                     .ok()
             });
         let _ = result_sender.send(snapshot);

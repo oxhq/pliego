@@ -4,6 +4,7 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
+import hashlib
 import json
 import os
 import subprocess
@@ -51,13 +52,18 @@ def output_path(summary: dict[str, object], key: str, root: Path) -> Path:
 
 
 def main() -> int:
-    if len(sys.argv) not in (2, 3) or (len(sys.argv) == 3 and sys.argv[2] != "text"):
-        fail(f"usage: {Path(sys.argv[0]).name} <pliego-binary> [text]", 2)
+    modes = {
+        None: "session",
+        "text": "text-capture",
+        "link": "link-capture",
+    }
+    mode = sys.argv[2] if len(sys.argv) == 3 else None
+    if len(sys.argv) not in (2, 3) or mode not in modes:
+        fail(f"usage: {Path(sys.argv[0]).name} <pliego-binary> [text|link]", 2)
 
     root = Path(__file__).resolve().parents[2]
     binary = Path(sys.argv[1]).expanduser().resolve()
-    text_mode = len(sys.argv) == 3
-    fixture_name = "text-capture" if text_mode else "session"
+    fixture_name = modes[mode]
     fixture = Path(f"tests/pliego/fixtures/{fixture_name}/index.html")
     require(binary.is_file(), f"Pliego binary does not exist: {binary}")
     require((root / fixture).is_file(), f"{fixture_name} fixture does not exist: {root / fixture}")
@@ -105,7 +111,7 @@ def main() -> int:
 
         fragments = snapshot.get("fragments")
         require(isinstance(fragments, list) and bool(fragments), "fragment array is empty or missing")
-        if text_mode:
+        if mode == "text":
             text_runs = [
                 fragment.get("text_run")
                 for fragment in fragments
@@ -137,6 +143,36 @@ def main() -> int:
                             number(glyph.get(key)),
                             f"text run {run_index} glyph {glyph_index} has nonnumeric {key}",
                         )
+        elif mode == "link":
+            links = snapshot.get("links")
+            require(isinstance(links, list), "link fixture produced no links array")
+            require(len(links) == 1, f"expected one rendered hyperlink; got {links!r}")
+            link = links[0]
+            require(isinstance(link, dict), "captured link is not an object")
+            expected_target = (
+                (root / fixture.parent / "final" / "report.html").resolve().as_uri()
+                + "?edition=1#summary"
+            )
+            require(
+                link.get("url") == expected_target,
+                f"expected resolved link URL {expected_target!r}; got {link.get('url')!r}",
+            )
+            tag_id = link.get("tag_id")
+            require(
+                isinstance(tag_id, int) and not isinstance(tag_id, bool),
+                f"captured link has invalid tag_id {tag_id!r}",
+            )
+            link_rects = [
+                fragment.get("rect")
+                for fragment in fragments
+                if isinstance(fragment, dict)
+                and fragment.get("tag_id") == tag_id
+                and isinstance(fragment.get("rect"), dict)
+            ]
+            require(
+                len(link_rects) >= 2,
+                f"expected one wrapping link to join at least two fragments; got {link_rects!r}",
+            )
         else:
             box_kinds = [box.get("kind") for box in boxes if isinstance(box, dict)]
             require(
@@ -157,6 +193,53 @@ def main() -> int:
             require(
                 expected_image_url in image_urls,
                 f"expected laid-out image URL {expected_image_url!r}; got {image_urls!r}",
+            )
+            artifacts = output_path(summary, "artifacts", root)
+            resource_log = artifacts / "resources.jsonl"
+            require(resource_log.is_file(), f"resource log does not exist: {resource_log}")
+            try:
+                resources = [
+                    json.loads(line)
+                    for line in resource_log.read_text(encoding="utf-8").splitlines()
+                    if line.strip()
+                ]
+            except (OSError, json.JSONDecodeError) as error:
+                fail(f"could not load resource log {resource_log}: {error}")
+            image_resources = [
+                resource
+                for resource in resources
+                if isinstance(resource, dict)
+                and resource.get("status") == "loaded"
+                and expected_image_url in resource.get("urls", [])
+            ]
+            image_bytes = (root / fixture.parent / "mark.svg").read_bytes()
+            expected_digest = hashlib.sha256(image_bytes).hexdigest()
+            require(
+                bool(image_resources),
+                f"expected a loaded image resource; got {image_resources!r}",
+            )
+            require(
+                {resource.get("sha256") for resource in image_resources} == {expected_digest},
+                f"captured image requests did not converge on one digest: {image_resources!r}",
+            )
+            image_resource = image_resources[0]
+            require(
+                image_resource.get("resource") == f"sha256:{expected_digest}",
+                f"captured image has no content address: {image_resource!r}",
+            )
+            content_type = image_resource.get("content_type")
+            require(
+                isinstance(content_type, str)
+                and content_type.partition(";")[0].strip().lower() == "image/svg+xml",
+                f"captured image content type is not image/svg+xml: {content_type!r}",
+            )
+            artifact = image_resource.get("artifact")
+            require(isinstance(artifact, str), "captured image has no artifact path")
+            resource_path = artifacts / artifact
+            require(resource_path.is_file(), f"resource artifact does not exist: {resource_path}")
+            require(
+                resource_path.read_bytes() == image_bytes,
+                "content-addressed image bytes differ from the source fixture",
             )
 
         for key in ("paint_content_width", "paint_content_height"):

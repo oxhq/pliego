@@ -85,6 +85,7 @@ impl SessionArtifacts {
     pub fn create(directory: impl AsRef<Path>) -> io::Result<Self> {
         let directory = directory.as_ref().to_owned();
         std::fs::create_dir_all(&directory)?;
+        std::fs::create_dir_all(directory.join("resources"))?;
         for name in ["console.jsonl", "resources.jsonl", "session-state.jsonl"] {
             File::create(directory.join(name))?;
         }
@@ -124,14 +125,57 @@ impl SessionArtifacts {
         )
     }
 
-    pub fn record_resource(&self, url: &str, status: &str, bytes: Option<u64>) -> io::Result<()> {
+    pub fn record_resource_request(&self, request_id: &str, url: &str) -> io::Result<()> {
         self.append(
             "resources.jsonl",
             serde_json::json!({
                 "timestamp_ms": timestamp_ms(),
+                "request_id": request_id,
                 "url": url,
-                "status": status,
-                "bytes": bytes,
+                "status": "requested",
+                "bytes": null,
+            }),
+        )
+    }
+
+    pub fn record_loaded_resource(
+        &self,
+        request_id: &str,
+        urls: &[String],
+        response_status: Option<u16>,
+        content_type: Option<&str>,
+        sha256: &str,
+        body: &[u8],
+    ) -> io::Result<()> {
+        let artifact = format!("resources/{sha256}");
+        let path = self.directory.join(&artifact);
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut file) => file.write_all(body)?,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                if std::fs::read(&path)? != body {
+                    return Err(io::Error::new(
+                        io::ErrorKind::AlreadyExists,
+                        format!("resource digest collision for {sha256}"),
+                    ));
+                }
+            },
+            Err(error) => return Err(error),
+        }
+
+        self.append(
+            "resources.jsonl",
+            serde_json::json!({
+                "timestamp_ms": timestamp_ms(),
+                "request_id": request_id,
+                "url": urls.last(),
+                "urls": urls,
+                "status": "loaded",
+                "response_status": response_status,
+                "content_type": content_type,
+                "bytes": body.len() as u64,
+                "sha256": sha256,
+                "resource": format!("sha256:{sha256}"),
+                "artifact": artifact,
             }),
         )
     }
@@ -291,7 +335,19 @@ mod tests {
         artifacts.record_state("started", None).unwrap();
         artifacts.record_console("info", "fixture-ready").unwrap();
         artifacts
-            .record_resource("file:///index.html", "loaded", Some(42))
+            .record_resource_request("request-1", "file:///index.html")
+            .unwrap();
+        let resource_body = b"hello";
+        let resource_hash = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
+        artifacts
+            .record_loaded_resource(
+                "request-1",
+                &["file:///index.html".to_owned()],
+                Some(200),
+                Some("text/html; charset=utf-8"),
+                resource_hash,
+                resource_body,
+            )
             .unwrap();
         artifacts
             .write_readiness(&serde_json::json!({
@@ -319,12 +375,12 @@ mod tests {
                 .trim(),
         )
         .unwrap();
-        let resource: serde_json::Value = serde_json::from_str(
+        let resources: Vec<serde_json::Value> =
             fs::read_to_string(directory.join("resources.jsonl"))
                 .unwrap()
-                .trim(),
-        )
-        .unwrap();
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
         let readiness: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(directory.join("readiness.json")).unwrap())
                 .unwrap();
@@ -333,7 +389,22 @@ mod tests {
                 .unwrap();
         assert_eq!(state["state"], "started");
         assert_eq!(console["message"], "fixture-ready");
-        assert_eq!(resource["bytes"], 42);
+        assert_eq!(resources.len(), 2);
+        assert_eq!(resources[0]["status"], "requested");
+        assert_eq!(resources[0]["request_id"], "request-1");
+        assert_eq!(resources[1]["status"], "loaded");
+        assert_eq!(resources[1]["request_id"], "request-1");
+        assert_eq!(resources[1]["url"], "file:///index.html");
+        assert_eq!(resources[1]["urls"][0], "file:///index.html");
+        assert_eq!(resources[1]["response_status"], 200);
+        assert_eq!(resources[1]["content_type"], "text/html; charset=utf-8");
+        assert_eq!(resources[1]["bytes"], resource_body.len());
+        assert_eq!(resources[1]["sha256"], resource_hash);
+        assert_eq!(resources[1]["resource"], format!("sha256:{resource_hash}"));
+        assert_eq!(
+            fs::read(directory.join("resources").join(resource_hash)).unwrap(),
+            resource_body
+        );
         assert_eq!(readiness["payload"]["fixture"], true);
         assert_eq!(readiness["render_id"], artifacts.render_id());
         assert_eq!(layout_debug["boxes"][0]["kind"], "block");
