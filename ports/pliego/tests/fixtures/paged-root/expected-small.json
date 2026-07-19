@@ -1,0 +1,51 @@
+{
+  "page_count": 2,
+  "pages": [
+    {
+      "geometry_css_px": {
+        "width": 320.0,
+        "height": 40.0
+      },
+      "content_box_css_px": {
+        "x": 10.0,
+        "y": 5.0,
+        "available_inline_size": 300.0,
+        "available_block_size": 30.0
+      },
+      "first_glyph_css_px": {
+        "x": 10.0,
+        "minimum_y": 5.0,
+        "maximum_y": 25.0
+      },
+      "ordered_operations": [
+        "text"
+      ],
+      "ordered_text": [
+        "Alpha."
+      ]
+    },
+    {
+      "geometry_css_px": {
+        "width": 320.0,
+        "height": 40.0
+      },
+      "content_box_css_px": {
+        "x": 10.0,
+        "y": 5.0,
+        "available_inline_size": 300.0,
+        "available_block_size": 30.0
+      },
+      "first_glyph_css_px": {
+        "x": 10.0,
+        "minimum_y": 5.0,
+        "maximum_y": 25.0
+      },
+      "ordered_operations": [
+        "text"
+      ],
+      "ordered_text": [
+        "Beta."
+      ]
+    }
+  ]
+}

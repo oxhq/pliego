@@ -4,6 +4,7 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
+import hashlib
 import json
 import os
 import subprocess
@@ -216,9 +217,69 @@ def final_summary(result: subprocess.CompletedProcess[str]) -> dict[str, Any]:
     return summary
 
 
-def check_binary(binary: Path) -> None:
-    fixture_dir = Path(__file__).resolve().parent / "fixtures/paged-root"
-    expected = json.loads((fixture_dir / "expected.json").read_text(encoding="utf-8"))
+def verify_output_contract(summary: dict[str, Any], reference: dict[str, Any]) -> None:
+    page_count = reference["page_count"]
+    artifacts = Path(summary["artifacts"])
+    pages_path = Path(summary["pages_artifact"])
+    pages = json.loads(pages_path.read_text(encoding="utf-8"))
+    if pages.get("schema") != "pliego.pages" or pages.get("page_count") != page_count:
+        fail(f"invalid pages.json: {pages!r}")
+    preview_pages = pages.get("pages")
+    if not isinstance(preview_pages, list) or len(preview_pages) != page_count:
+        fail(f"pages.json preview count differs: {preview_pages!r}")
+    previews = summary.get("scene_previews")
+    if not isinstance(previews, list) or len(previews) != page_count:
+        fail(f"terminal preview count differs: {previews!r}")
+    if summary.get("scene_preview") != previews[0]:
+        fail("legacy scene_preview is not the first page preview")
+
+    required_bundle_paths = {"document.pdf", "pages.json"}
+    for index, (page, expected_page, preview_value) in enumerate(
+        zip(preview_pages, reference["pages"], previews)
+    ):
+        if page.get("index") != index or page.get("page_size") != expected_page["geometry_css_px"]:
+            fail(f"preview page {index} geometry differs: {page!r}")
+        preview = Path(preview_value)
+        if not preview.read_bytes().startswith(b"\x89PNG\r\n\x1a\n"):
+            fail(f"preview page {index} is not PNG: {preview}")
+        relative_preview = preview.relative_to(artifacts).as_posix()
+        if page.get("artifact") != relative_preview:
+            fail(f"preview page {index} artifact differs: {page!r}")
+        required_bundle_paths.add(relative_preview)
+
+    structure = json.loads(Path(summary["pdf_structure"]).read_text(encoding="utf-8"))
+    if structure.get("page_count") != page_count:
+        fail(f"PDF structure page count differs: {structure!r}")
+    if [page.get("scene_page_size_css_px") for page in structure.get("pages", [])] != [
+        page["geometry_css_px"] for page in reference["pages"]
+    ]:
+        fail(f"PDF structure page geometry differs: {structure!r}")
+    pdf = Path(summary["document_pdf"])
+    if not pdf.read_bytes().startswith(b"%PDF-"):
+        fail(f"published document is not PDF: {pdf}")
+
+    bundle = json.loads(Path(summary["bundle"]).read_text(encoding="utf-8"))
+    entries = {
+        entry.get("path"): entry
+        for entry in bundle.get("entries", [])
+        if isinstance(entry, dict)
+    }
+    if not required_bundle_paths <= entries.keys():
+        fail(f"bundle omits multi-page artifacts: {required_bundle_paths - entries.keys()!r}")
+    for path in required_bundle_paths:
+        contents = (artifacts / path).read_bytes()
+        if entries[path].get("sha256") != f"sha256:{hashlib.sha256(contents).hexdigest()}":
+            fail(f"bundle hash differs for {path}")
+
+
+def check_reference(
+    binary: Path,
+    fixture_dir: Path,
+    expected_name: str,
+    page_size: str,
+    page_margins: str,
+) -> None:
+    expected = json.loads((fixture_dir / expected_name).read_text(encoding="utf-8"))
     with tempfile.TemporaryDirectory(prefix="pliego-paged-reference-") as temp:
         environment = os.environ.copy()
         environment.update({"TMPDIR": temp, "TMP": temp, "TEMP": temp})
@@ -226,9 +287,9 @@ def check_binary(binary: Path) -> None:
             [
                 str(binary),
                 "--page-size",
-                "320x480",
+                page_size,
                 "--page-margins",
-                "20,30,40,50",
+                page_margins,
                 "index.html",
             ],
             cwd=fixture_dir,
@@ -250,9 +311,17 @@ def check_binary(binary: Path) -> None:
         if not isinstance(layout_path, str):
             fail(f"Pliego did not report a layout debug artifact: {summary!r}")
         layout = json.loads(Path(layout_path).read_text(encoding="utf-8"))
-        errors = compare_reference(extract_reference(scene, layout), expected)
+        reference = extract_reference(scene, layout)
+        verify_output_contract(summary, reference)
+        errors = compare_reference(reference, expected)
         if errors:
             fail("reference mismatch:\n- " + "\n- ".join(errors))
+
+
+def check_binary(binary: Path) -> None:
+    fixture_dir = Path(__file__).resolve().parent / "fixtures/paged-root"
+    check_reference(binary, fixture_dir, "expected.json", "320x480", "20,30,40,50")
+    check_reference(binary, fixture_dir, "expected-small.json", "320x40", "5,10,5,10")
 
 
 def main() -> int:
