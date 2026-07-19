@@ -305,6 +305,9 @@ pub struct LayoutDebugPageSequence {
     /// Continuation tokens recorded at page boundaries, in page order.
     #[serde(default)]
     pub continuations: Vec<LayoutDebugPageContinuation>,
+    /// Pagination warnings retained for document diagnostics.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<LayoutDebugPageWarning>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -329,6 +332,17 @@ pub enum LayoutDebugContinuation {
         text_offset: usize,
         shaping_result_index: usize,
         resume_page_index: usize,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum LayoutDebugPageWarning {
+    OversizedUnbreakable {
+        child_index: usize,
+        node: Option<u64>,
+        block_size: f32,
+        available_block_size: f32,
     },
 }
 

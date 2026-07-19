@@ -16,6 +16,7 @@ use euclid::default::Size2D as UntypedSize2D;
 use euclid::{Point2D, Rect, Size2D};
 use layout_api::{
     LayoutDebugContinuation, LayoutDebugPage, LayoutDebugPageContinuation, LayoutDebugPageSequence,
+    LayoutDebugPageWarning,
 };
 use log::warn;
 use parking_lot::Mutex;
@@ -609,6 +610,23 @@ impl PageSequence {
                         })
                 })
                 .collect(),
+            warnings: self
+                .warnings
+                .iter()
+                .map(|warning| match *warning {
+                    BlockPaginationWarning::OversizedUnbreakable {
+                        child_index,
+                        node,
+                        block_size,
+                        available_block_size,
+                    } => LayoutDebugPageWarning::OversizedUnbreakable {
+                        child_index,
+                        node,
+                        block_size: block_size.to_f32_px(),
+                        available_block_size: available_block_size.to_f32_px(),
+                    },
+                })
+                .collect(),
         }
     }
 }
@@ -754,6 +772,7 @@ mod tests {
                     available_block_size: 684.0,
                 }],
                 continuations: vec![],
+                warnings: vec![],
             }
         );
     }
@@ -1030,6 +1049,18 @@ mod tests {
                 node: Some(10),
                 block_size: Au::from_px(150),
                 available_block_size: Au::from_px(100),
+            }]
+        );
+        assert_eq!(
+            PageSequenceContext { definition: page() }
+                .page_sequence(outcome)
+                .debug_snapshot()
+                .warnings,
+            vec![LayoutDebugPageWarning::OversizedUnbreakable {
+                child_index: 0,
+                node: Some(10),
+                block_size: 150.0,
+                available_block_size: 100.0,
             }]
         );
     }

@@ -1093,6 +1093,8 @@ struct CapturePageSequence {
     pages: Vec<CapturePage>,
     #[serde(default, rename = "continuations")]
     _continuations: Vec<serde_json::Value>,
+    #[serde(default, rename = "warnings")]
+    _warnings: Vec<serde_json::Value>,
 }
 
 #[derive(Clone, Copy, Deserialize)]
