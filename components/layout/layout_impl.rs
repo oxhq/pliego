@@ -322,6 +322,12 @@ impl Layout for LayoutThread {
                         rect,
                         tag_id: fragment.tag().map(|tag| tag.to_display_list_fragment_id()),
                         text_run,
+                        image_url: match fragment {
+                            Fragment::Image(image_fragment) => {
+                                image_fragment.url.as_ref().map(ToString::to_string)
+                            },
+                            _ => None,
+                        },
                     });
                     None::<()>
                 });

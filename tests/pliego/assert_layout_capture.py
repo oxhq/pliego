@@ -148,6 +148,16 @@ def main() -> int:
                     bool(positive_rects(fragments, kind)),
                     f"expected a {kind} fragment with positive width and height",
                 )
+            expected_image_url = (root / fixture.parent / "mark.svg").resolve().as_uri()
+            image_urls = [
+                fragment.get("image_url")
+                for fragment in fragments
+                if isinstance(fragment, dict) and fragment.get("kind") == "image"
+            ]
+            require(
+                expected_image_url in image_urls,
+                f"expected laid-out image URL {expected_image_url!r}; got {image_urls!r}",
+            )
 
         for key in ("paint_content_width", "paint_content_height"):
             require(positive(snapshot.get(key)), f"{key} must be positive; got {snapshot.get(key)!r}")

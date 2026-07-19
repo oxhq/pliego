@@ -297,6 +297,10 @@ pub struct LayoutDebugFragment {
     pub tag_id: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text_run: Option<LayoutDebugTextRun>,
+    /// The resolved source URL retained by laid-out image fragments. Runtime-only
+    /// WebRender image keys are deliberately excluded from this stable snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_url: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
