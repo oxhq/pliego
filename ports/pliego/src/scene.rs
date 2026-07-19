@@ -5,6 +5,7 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+pub mod capture;
 pub mod raster;
 
 pub const SCHEMA: &str = "pliego.document-scene";
