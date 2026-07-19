@@ -96,6 +96,8 @@ def extract_reference(
         if kind == "block":
             normalized["next_child_index"] = token.get("next_child_index")
             normalized["forced"] = token.get("forced")
+            normalized["break_inside_avoid"] = token.get("break_inside_avoid")
+            normalized["retry_count"] = token.get("retry_count")
         elif kind == "inline":
             normalized.update(
                 {

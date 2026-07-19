@@ -20,7 +20,7 @@ use style::context::SharedStyleContext;
 use style::logical_geometry::Direction;
 use style::properties::ComputedValues;
 use style::servo::selector_parser::PseudoElement;
-use style::values::computed::BreakBetween;
+use style::values::computed::{BreakBetween, BreakWithin};
 use style::values::specified::align::AlignFlags;
 use style::values::specified::{Display, TextAlignKeyword};
 
@@ -972,6 +972,10 @@ fn prepare_fragmentainer_boundary(
         ChildPageBreaks {
             before: forces_page_break(box_style.break_before),
             after: forces_page_break(box_style.break_after),
+            inside_avoid: matches!(
+                box_style.break_inside,
+                BreakWithin::Avoid | BreakWithin::AvoidPage
+            ),
         }
     });
     if let Some((lines, line_fragments, box_fragment)) =

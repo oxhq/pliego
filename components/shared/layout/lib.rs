@@ -325,6 +325,10 @@ pub enum LayoutDebugContinuation {
         next_node: Option<u64>,
         #[serde(default)]
         forced: bool,
+        #[serde(default)]
+        break_inside_avoid: bool,
+        #[serde(default)]
+        retry_count: u8,
         resume_page_index: usize,
     },
     Inline {
@@ -345,6 +349,13 @@ pub enum LayoutDebugPageWarning {
         node: Option<u64>,
         block_size: f32,
         available_block_size: f32,
+    },
+    OversizedBreakInsideAvoid {
+        child_index: usize,
+        node: Option<u64>,
+        block_size: f32,
+        available_block_size: f32,
+        retry_count: u8,
     },
 }
 

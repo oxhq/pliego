@@ -197,6 +197,8 @@ pub(crate) struct BlockContinuationToken {
     pub next_child_index: usize,
     pub next_node: Option<u64>,
     pub forced: bool,
+    pub break_inside_avoid: bool,
+    pub retry_count: u8,
     pub resume_page_index: usize,
 }
 
@@ -249,6 +251,7 @@ pub(crate) enum BlockBoundaryPlacement {
 pub(crate) struct ChildPageBreaks {
     pub before: bool,
     pub after: bool,
+    pub inside_avoid: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -258,6 +261,13 @@ pub(crate) enum BlockPaginationWarning {
         node: Option<u64>,
         block_size: Au,
         available_block_size: Au,
+    },
+    OversizedBreakInsideAvoid {
+        child_index: usize,
+        node: Option<u64>,
+        block_size: Au,
+        available_block_size: Au,
+        retry_count: u8,
     },
 }
 
@@ -375,7 +385,12 @@ impl BlockPageBuilder {
         if let Some(block_origin) =
             self.forced_break_before(child_index, node, current_block_position, breaks)
         {
-            self.warn_if_oversized(child_index, node, fresh_page_contribution);
+            self.warn_if_oversized(
+                child_index,
+                node,
+                fresh_page_contribution,
+                breaks.inside_avoid,
+            );
             self.page_has_content = true;
             self.include_content_through(block_origin + fresh_page_contribution);
             return BlockBoundaryPlacement::NewPage { block_origin };
@@ -383,38 +398,32 @@ impl BlockPageBuilder {
 
         let used = (current_block_position - self.current_page_origin).max(Au::zero());
         let remaining = (self.request.available_block_size - used).max(Au::zero());
+        // https://drafts.csswg.org/css-break/#break-within
+        if breaks.inside_avoid && fresh_page_contribution > self.request.available_block_size {
+            self.warn_if_oversized(child_index, node, fresh_page_contribution, true);
+            self.page_has_content = true;
+            self.include_content_through(current_block_position + current_page_contribution);
+            return BlockBoundaryPlacement::CurrentPage;
+        }
         if current_page_contribution <= remaining || !self.page_has_content {
-            self.warn_if_oversized(child_index, node, fresh_page_contribution);
+            self.warn_if_oversized(child_index, node, fresh_page_contribution, false);
             self.page_has_content = true;
             self.include_content_through(current_block_position + current_page_contribution);
             return BlockBoundaryPlacement::CurrentPage;
         }
 
-        let previous_page_index = self.current_page_index;
-        loop {
-            self.current_page_index += 1;
-            self.current_page_origin += self.request.page_stride;
-            if self.current_page_origin >= current_block_position {
-                break;
-            }
-        }
-
-        let token = BlockContinuationToken {
-            next_child_index: child_index,
-            next_node: node,
-            forced: false,
-            resume_page_index: self.current_page_index,
-        };
-        self.outcome.continuations.push(PageContinuation {
-            page_index: previous_page_index,
-            token: FragmentainerContinuation::Block(token),
-        });
-        self.warn_if_oversized(child_index, node, fresh_page_contribution);
+        let block_origin = self.move_child_to_next_page(
+            child_index,
+            node,
+            current_block_position,
+            false,
+            breaks.inside_avoid,
+            u8::from(breaks.inside_avoid),
+        );
+        self.warn_if_oversized(child_index, node, fresh_page_contribution, false);
         self.page_has_content = true;
-        self.include_content_through(self.current_page_origin + fresh_page_contribution);
-        BlockBoundaryPlacement::NewPage {
-            block_origin: self.current_page_origin,
-        }
+        self.include_content_through(block_origin + fresh_page_contribution);
+        BlockBoundaryPlacement::NewPage { block_origin }
     }
 
     /// Place already-shaped lines without rebuilding the inline formatting context. Each output
@@ -434,12 +443,34 @@ impl BlockPageBuilder {
         }
         self.next_child_index += 1;
 
+        let forced_origin =
+            self.forced_break_before(child_index, node, current_block_position, breaks);
+        let last_line = lines.last().expect("inline lines are non-empty");
+        let fresh_block_size = (last_line.block_start + last_line.block_size -
+            current_block_position)
+            .max(Au::zero());
+        let mut translation = forced_origin.map_or_else(Au::zero, |block_origin| {
+            block_origin - current_block_position
+        });
+        if breaks.inside_avoid && fresh_block_size > self.request.available_block_size {
+            self.warn_if_oversized(child_index, node, fresh_block_size, true);
+        } else if breaks.inside_avoid && forced_origin.is_none() {
+            let used = (current_block_position - self.current_page_origin).max(Au::zero());
+            let remaining = (self.request.available_block_size - used).max(Au::zero());
+            if fresh_block_size > remaining && self.page_has_content {
+                let block_origin = self.move_child_to_next_page(
+                    child_index,
+                    node,
+                    current_block_position,
+                    false,
+                    true,
+                    1,
+                );
+                translation = block_origin - current_block_position;
+            }
+        }
+
         let mut line_translations = Vec::with_capacity(lines.len());
-        let mut translation = self
-            .forced_break_before(child_index, node, current_block_position, breaks)
-            .map_or_else(Au::zero, |block_origin| {
-                block_origin - current_block_position
-            });
         for (line_index, line) in lines.iter().enumerate() {
             let mut block_start = line.block_start + translation;
             let page_end = self.current_page_origin + self.request.available_block_size;
@@ -493,6 +524,25 @@ impl BlockPageBuilder {
             return None;
         }
 
+        Some(self.move_child_to_next_page(
+            child_index,
+            node,
+            current_block_position,
+            true,
+            false,
+            0,
+        ))
+    }
+
+    fn move_child_to_next_page(
+        &mut self,
+        child_index: usize,
+        node: Option<u64>,
+        current_block_position: Au,
+        forced: bool,
+        break_inside_avoid: bool,
+        retry_count: u8,
+    ) -> Au {
         let previous_page_index = self.current_page_index;
         loop {
             self.current_page_index += 1;
@@ -506,11 +556,13 @@ impl BlockPageBuilder {
             token: FragmentainerContinuation::Block(BlockContinuationToken {
                 next_child_index: child_index,
                 next_node: node,
-                forced: true,
+                forced,
+                break_inside_avoid,
+                retry_count,
                 resume_page_index: self.current_page_index,
             }),
         });
-        Some(self.current_page_origin)
+        self.current_page_origin
     }
 
     fn supports_inline_lines(&self, lines: &[InlineLine]) -> bool {
@@ -549,8 +601,32 @@ impl BlockPageBuilder {
         true
     }
 
-    fn warn_if_oversized(&mut self, child_index: usize, node: Option<u64>, block_size: Au) {
+    fn warn_if_oversized(
+        &mut self,
+        child_index: usize,
+        node: Option<u64>,
+        block_size: Au,
+        break_inside_avoid: bool,
+    ) {
         if block_size <= self.request.available_block_size {
+            return;
+        }
+        if break_inside_avoid {
+            warn!(
+                "paged layout fragmented oversized break-inside: avoid child {child_index} (node \
+                 {node:?}, {:.2}px > {:.2}px)",
+                block_size.to_f32_px(),
+                self.request.available_block_size.to_f32_px(),
+            );
+            self.outcome.warnings.push(
+                BlockPaginationWarning::OversizedBreakInsideAvoid {
+                    child_index,
+                    node,
+                    block_size,
+                    available_block_size: self.request.available_block_size,
+                    retry_count: 0,
+                },
+            );
             return;
         }
         warn!(
@@ -655,6 +731,8 @@ impl PageSequence {
                                         next_child_index: token.next_child_index,
                                         next_node: token.next_node,
                                         forced: token.forced,
+                                        break_inside_avoid: token.break_inside_avoid,
+                                        retry_count: token.retry_count,
                                         resume_page_index: token.resume_page_index,
                                     }
                                 },
@@ -686,6 +764,19 @@ impl PageSequence {
                         node,
                         block_size: block_size.to_f32_px(),
                         available_block_size: available_block_size.to_f32_px(),
+                    },
+                    BlockPaginationWarning::OversizedBreakInsideAvoid {
+                        child_index,
+                        node,
+                        block_size,
+                        available_block_size,
+                        retry_count,
+                    } => LayoutDebugPageWarning::OversizedBreakInsideAvoid {
+                        child_index,
+                        node,
+                        block_size: block_size.to_f32_px(),
+                        available_block_size: available_block_size.to_f32_px(),
+                        retry_count,
                     },
                 })
                 .collect(),
@@ -928,6 +1019,8 @@ mod tests {
                     next_child_index: 1,
                     next_node: Some(20),
                     forced: false,
+                    break_inside_avoid: false,
+                    retry_count: 0,
                     resume_page_index: 1,
                 }),
             }]
@@ -944,6 +1037,8 @@ mod tests {
                     next_child_index: 1,
                     next_node: Some(20),
                     forced: false,
+                    break_inside_avoid: false,
+                    retry_count: 0,
                     resume_page_index: 1,
                 },
             }]
@@ -966,6 +1061,7 @@ mod tests {
                 ChildPageBreaks {
                     before: true,
                     after: true,
+                    inside_avoid: false,
                 },
             ),
             BlockBoundaryPlacement::CurrentPage
@@ -980,6 +1076,7 @@ mod tests {
                 ChildPageBreaks {
                     before: true,
                     after: false,
+                    inside_avoid: false,
                 },
             ),
             BlockBoundaryPlacement::NewPage {
@@ -996,6 +1093,7 @@ mod tests {
                 ChildPageBreaks {
                     before: true,
                     after: true,
+                    inside_avoid: false,
                 },
             ),
             BlockBoundaryPlacement::NewPage {
@@ -1014,6 +1112,8 @@ mod tests {
                         next_child_index: 1,
                         next_node: Some(20),
                         forced: true,
+                        break_inside_avoid: false,
+                        retry_count: 0,
                         resume_page_index: 1,
                     }),
                 },
@@ -1023,6 +1123,8 @@ mod tests {
                         next_child_index: 2,
                         next_node: Some(30),
                         forced: true,
+                        break_inside_avoid: false,
+                        retry_count: 0,
                         resume_page_index: 2,
                     }),
                 },
@@ -1040,6 +1142,8 @@ mod tests {
                         next_child_index: 1,
                         next_node: Some(20),
                         forced: true,
+                        break_inside_avoid: false,
+                        retry_count: 0,
                         resume_page_index: 1,
                     },
                 },
@@ -1049,11 +1153,127 @@ mod tests {
                         next_child_index: 2,
                         next_node: Some(30),
                         forced: true,
+                        break_inside_avoid: false,
+                        retry_count: 0,
                         resume_page_index: 2,
                     },
                 },
             ]
         );
+    }
+
+    #[test]
+    fn break_inside_avoid_moves_a_fitting_child_once() {
+        let mut builder = BlockPageBuilder::new(BlockPaginationRequest {
+            available_block_size: Au::from_px(100),
+            page_stride: Au::from_px(120),
+        });
+        assert_eq!(
+            builder.place_child(
+                0,
+                Some(10),
+                Au::zero(),
+                Au::from_px(80),
+                Au::from_px(80),
+                ChildPageBreaks::default(),
+            ),
+            BlockBoundaryPlacement::CurrentPage
+        );
+        assert_eq!(
+            builder.place_child(
+                1,
+                Some(20),
+                Au::from_px(80),
+                Au::from_px(40),
+                Au::from_px(40),
+                ChildPageBreaks {
+                    inside_avoid: true,
+                    ..Default::default()
+                },
+            ),
+            BlockBoundaryPlacement::NewPage {
+                block_origin: Au::from_px(120),
+            }
+        );
+
+        let snapshot = PageSequenceContext { definition: page() }
+            .page_sequence(builder.finish())
+            .debug_snapshot();
+        assert!(snapshot.warnings.is_empty());
+        assert_eq!(snapshot.pages.len(), 2);
+        assert_eq!(
+            snapshot.continuations,
+            vec![LayoutDebugPageContinuation {
+                page_index: 0,
+                token: LayoutDebugContinuation::Block {
+                    next_child_index: 1,
+                    next_node: Some(20),
+                    forced: false,
+                    break_inside_avoid: true,
+                    retry_count: 1,
+                    resume_page_index: 1,
+                },
+            }]
+        );
+    }
+
+    #[test]
+    fn oversized_break_inside_avoid_fragments_without_retrying() {
+        let lines = (0..3)
+            .map(|line_index| InlineLine {
+                block_start: Au::from_px(line_index as i32 * 40),
+                block_size: Au::from_px(40),
+                source_start: line_index * 4,
+                source_end: line_index * 4 + 4,
+                resume: InlineResumePoint {
+                    inline_item_index: 0,
+                    text_offset: line_index * 4,
+                    shaping_result_index: line_index,
+                },
+            })
+            .collect::<Vec<_>>();
+        let mut builder = BlockPageBuilder::new(BlockPaginationRequest {
+            available_block_size: Au::from_px(100),
+            page_stride: Au::from_px(120),
+        });
+        let placement = builder
+            .place_inline_child(
+                0,
+                Some(10),
+                Au::zero(),
+                &lines,
+                ChildPageBreaks {
+                    inside_avoid: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            placement.line_translations,
+            vec![Au::zero(), Au::zero(), Au::from_px(40)]
+        );
+
+        let snapshot = PageSequenceContext { definition: page() }
+            .page_sequence(builder.finish())
+            .debug_snapshot();
+        assert_eq!(snapshot.pages.len(), 2);
+        assert_eq!(
+            snapshot.warnings,
+            vec![LayoutDebugPageWarning::OversizedBreakInsideAvoid {
+                child_index: 0,
+                node: Some(10),
+                block_size: 120.0,
+                available_block_size: 100.0,
+                retry_count: 0,
+            }]
+        );
+        assert!(matches!(
+            snapshot.continuations.as_slice(),
+            [LayoutDebugPageContinuation {
+                token: LayoutDebugContinuation::Inline { .. },
+                ..
+            }]
+        ));
     }
 
     #[test]
@@ -1072,6 +1292,7 @@ mod tests {
                 ChildPageBreaks {
                     before: false,
                     after: true,
+                    inside_avoid: false,
                 },
             ),
             BlockBoundaryPlacement::CurrentPage
@@ -1109,6 +1330,7 @@ mod tests {
                 ChildPageBreaks {
                     before: true,
                     after: false,
+                    inside_avoid: false,
                 },
             )
             .unwrap();
@@ -1126,6 +1348,8 @@ mod tests {
                     next_child_index: 1,
                     next_node: Some(20),
                     forced: true,
+                    break_inside_avoid: false,
+                    retry_count: 0,
                     resume_page_index: 1,
                 }),
             }]

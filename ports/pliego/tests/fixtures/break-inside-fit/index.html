@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>Pliego fitting break-inside fixture</title>
+    <style>
+      body {
+        margin: 0;
+        font: 16px/20px sans-serif;
+      }
+
+      #lead {
+        height: 80px;
+      }
+
+      #kept {
+        height: 40px;
+        break-inside: avoid;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="lead">Lead.</div>
+    <div id="kept">Kept together.</div>
+    <script>
+      queueMicrotask(() => window.pliego?.ready({ fixture: 'break-inside-fit' }));
+    </script>
+  </body>
+</html>

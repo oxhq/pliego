@@ -54,7 +54,9 @@
       "kind": "block",
       "resume_page_index": 1,
       "next_child_index": 1,
-      "forced": false
+      "forced": false,
+      "break_inside_avoid": false,
+      "retry_count": 0
     }
   ]
 }
