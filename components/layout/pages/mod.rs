@@ -14,7 +14,9 @@ use std::sync::OnceLock;
 use app_units::Au;
 use euclid::default::Size2D as UntypedSize2D;
 use euclid::{Point2D, Rect, Size2D};
-use layout_api::{LayoutDebugPage, LayoutDebugPageSequence};
+use layout_api::{
+    LayoutDebugContinuation, LayoutDebugPage, LayoutDebugPageContinuation, LayoutDebugPageSequence,
+};
 use log::warn;
 use parking_lot::Mutex;
 use style::Zero;
@@ -577,6 +579,36 @@ impl PageSequence {
                     }
                 })
                 .collect(),
+            continuations: self
+                .pages
+                .iter()
+                .filter_map(|page| {
+                    page.fragmentainer
+                        .continuation
+                        .map(|token| LayoutDebugPageContinuation {
+                            page_index: page.fragmentainer.page_index,
+                            token: match token {
+                                FragmentainerContinuation::Block(token) => {
+                                    LayoutDebugContinuation::Block {
+                                        next_child_index: token.next_child_index,
+                                        next_node: token.next_node,
+                                        resume_page_index: token.resume_page_index,
+                                    }
+                                },
+                                FragmentainerContinuation::Inline(token) => {
+                                    LayoutDebugContinuation::Inline {
+                                        child_index: token.child_index,
+                                        next_line_index: token.next_line_index,
+                                        inline_item_index: token.inline_item_index,
+                                        text_offset: token.text_offset,
+                                        shaping_result_index: token.shaping_result_index,
+                                        resume_page_index: token.resume_page_index,
+                                    }
+                                },
+                            },
+                        })
+                })
+                .collect(),
         }
     }
 }
@@ -721,6 +753,7 @@ mod tests {
                     available_inline_size: 540.0,
                     available_block_size: 684.0,
                 }],
+                continuations: vec![],
             }
         );
     }
@@ -815,6 +848,20 @@ mod tests {
             }]
         );
         assert!(outcome.warnings.is_empty());
+        assert_eq!(
+            PageSequenceContext { definition: page() }
+                .page_sequence(outcome)
+                .debug_snapshot()
+                .continuations,
+            vec![LayoutDebugPageContinuation {
+                page_index: 0,
+                token: LayoutDebugContinuation::Block {
+                    next_child_index: 1,
+                    next_node: Some(20),
+                    resume_page_index: 1,
+                },
+            }]
+        );
     }
 
     #[test]
@@ -885,6 +932,36 @@ mod tests {
                         shaping_result_index: 4,
                         resume_page_index: 2,
                     }),
+                },
+            ]
+        );
+        assert_eq!(
+            PageSequenceContext { definition: page() }
+                .page_sequence(outcome)
+                .debug_snapshot()
+                .continuations,
+            vec![
+                LayoutDebugPageContinuation {
+                    page_index: 0,
+                    token: LayoutDebugContinuation::Inline {
+                        child_index: 0,
+                        next_line_index: 2,
+                        inline_item_index: 3,
+                        text_offset: 8,
+                        shaping_result_index: 2,
+                        resume_page_index: 1,
+                    },
+                },
+                LayoutDebugPageContinuation {
+                    page_index: 1,
+                    token: LayoutDebugContinuation::Inline {
+                        child_index: 0,
+                        next_line_index: 4,
+                        inline_item_index: 3,
+                        text_offset: 16,
+                        shaping_result_index: 4,
+                        resume_page_index: 2,
+                    },
                 },
             ]
         );

@@ -302,6 +302,34 @@ pub struct LayoutDebugSnapshot {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct LayoutDebugPageSequence {
     pub pages: Vec<LayoutDebugPage>,
+    /// Continuation tokens recorded at page boundaries, in page order.
+    #[serde(default)]
+    pub continuations: Vec<LayoutDebugPageContinuation>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LayoutDebugPageContinuation {
+    /// Page after which layout resumes using `token`.
+    pub page_index: usize,
+    pub token: LayoutDebugContinuation,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum LayoutDebugContinuation {
+    Block {
+        next_child_index: usize,
+        next_node: Option<u64>,
+        resume_page_index: usize,
+    },
+    Inline {
+        child_index: usize,
+        next_line_index: usize,
+        inline_item_index: usize,
+        text_offset: usize,
+        shaping_result_index: usize,
+        resume_page_index: usize,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
