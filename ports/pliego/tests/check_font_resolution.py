@@ -16,6 +16,11 @@ from typing import Any
 
 EXPECTED_TEXT = "PLIEGO FONT FALLBACK"
 FALLBACK_CHAIN = ["Missing Preferred", "Pliego Fixture"]
+FONT_PLACEHOLDER = "__PLIEGO_FONT_BASE64__"
+PINNED_FONT_SHA256 = "b719ecb31c5b21fc573c03f6421c74ac63c271a5a3ff841e34f9705fb94b8448"
+SANITIZED_FONT_RESOURCE = (
+    "sha256:649a7613cfa59d415188415e1488eb40fc9953742338a793538380234a539869"
+)
 
 
 def fail(message: str, code: int = 1) -> None:
@@ -41,6 +46,21 @@ def final_json(result: subprocess.CompletedProcess[str]) -> dict[str, Any]:
     value = json.loads(lines[-1])
     require(isinstance(value, dict), "final stdout JSON is not an object")
     return value
+
+
+def materialize_fixture(template: Path, font: Path, output: Path) -> Path:
+    font_bytes = font.read_bytes()
+    require(
+        hashlib.sha256(font_bytes).hexdigest() == PINNED_FONT_SHA256,
+        f"pinned font bytes changed: {font}",
+    )
+    source = template.read_text(encoding="utf-8")
+    require(source.count(FONT_PLACEHOLDER) == 1, "font fixture placeholder is missing")
+    output.write_text(
+        source.replace(FONT_PLACEHOLDER, base64.b64encode(font_bytes).decode("ascii")),
+        encoding="utf-8",
+    )
+    return output
 
 
 def render(
@@ -91,8 +111,12 @@ def verify_fonts(summary: dict[str, Any]) -> bytes:
     selections = fonts.get("selections")
     require(isinstance(selections, list) and bool(selections), "no selected fonts")
     require(
-        all(selection.get("source") == "bundled" for selection in selections),
-        f"non-bundled selection escaped the default policy: {selections!r}",
+        all(
+            selection.get("source") == "memory"
+            and selection.get("resource") == SANITIZED_FONT_RESOURCE
+            for selection in selections
+        ),
+        f"selection did not use the pinned in-memory font: {selections!r}",
     )
     require(
         any(
@@ -118,10 +142,14 @@ def verify_fonts(summary: dict[str, Any]) -> bytes:
     require(isinstance(manifest, dict), "font report has no manifest")
     require(manifest.get("resolution") == "css-order", repr(manifest))
     entries = manifest.get("entries")
-    require(isinstance(entries, list) and bool(entries), "bundled manifest is empty")
+    require(isinstance(entries, list) and bool(entries), "font manifest is empty")
     require(
-        all(entry.get("source") in {"bundled", "data", "memory"} for entry in entries),
-        f"manifest contains a non-portable font: {entries!r}",
+        all(
+            entry.get("source") == "memory"
+            and entry.get("resource") == SANITIZED_FONT_RESOURCE
+            for entry in entries
+        ),
+        f"manifest contains an unpinned font: {entries!r}",
     )
 
     resources = fonts.get("font_resources")
@@ -132,6 +160,11 @@ def verify_fonts(summary: dict[str, Any]) -> bytes:
         require(isinstance(encoded, str) and isinstance(address, str), repr(resource))
         decoded = base64.b64decode(encoded, validate=True)
         require(address == f"sha256:{hashlib.sha256(decoded).hexdigest()}", repr(resource))
+    require(
+        {resource.get("resource") for resource in resources}
+        == {SANITIZED_FONT_RESOURCE},
+        f"unexpected font resources: {resources!r}",
+    )
     return Path(summary["fonts_artifact"]).read_bytes()
 
 
@@ -173,10 +206,14 @@ def verify_pdf(summary: dict[str, Any]) -> bytes:
 
 
 def check(binary: Path) -> None:
-    fixture = Path(__file__).resolve().parent / "fixtures/text-scene/font-resolution.html"
-    host_fixture = fixture.with_name("index.html")
+    fixture_root = Path(__file__).resolve().parent / "fixtures/text-scene"
+    fixture_template = fixture_root / "font-resolution.html"
+    host_fixture = fixture_root / "index.html"
     with tempfile.TemporaryDirectory(prefix="pliego-font-resolution-") as temp:
         root = Path(temp)
+        fixture = materialize_fixture(
+            fixture_template, fixture_root / "Ahem.ttf", root / "font-resolution.html"
+        )
         first = render(binary, fixture, root, "first")
         second = render(binary, fixture, root, "second")
         require(first["render_id"] == second["render_id"], "render IDs differ across clean homes")
