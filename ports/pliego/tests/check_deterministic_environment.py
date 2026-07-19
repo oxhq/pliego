@@ -78,6 +78,31 @@ def payload(summary: dict[str, object]) -> dict[str, object]:
     return value
 
 
+def scene_hash(summary: dict[str, object]) -> str:
+    scene = summary.get("scene")
+    require(isinstance(scene, dict), "render summary has no scene result")
+    value = scene.get("hash")
+    require(
+        isinstance(value, str) and value.startswith("sha256:"),
+        f"render summary has no content-addressed scene hash: {scene!r}",
+    )
+    return value
+
+
+def document_pdf(summary: dict[str, object]) -> bytes:
+    require(
+        summary.get("document_pdf_status") == "rendered",
+        f"render summary PDF is not rendered: {summary!r}",
+    )
+    value = summary.get("document_pdf")
+    require(isinstance(value, str) and bool(value), "render summary has no PDF artifact")
+    path = Path(value)
+    require(path.is_file(), f"PDF artifact does not exist: {path}")
+    pdf = path.read_bytes()
+    require(pdf.startswith(b"%PDF-"), f"PDF artifact is invalid: {path}")
+    return pdf
+
+
 def verify_environment_artifact(
     summary: dict[str, object], requested_timezone: str
 ) -> None:
@@ -96,6 +121,23 @@ def verify_environment_artifact(
             "timezone": {
                 "requested": requested_timezone,
                 "resolved": requested_timezone,
+            },
+            "page": {
+                "size_css_px": {
+                    "width": 793.7000122070312,
+                    "height": 1122.5167236328125,
+                },
+                "margins_css_px": {
+                    "top": 45.349998474121094,
+                    "right": 60.46666717529297,
+                    "bottom": 45.349998474121094,
+                    "left": 60.46666717529297,
+                },
+            },
+            "document_pdf": {
+                "artifact": summary.get("document_pdf"),
+                "status": "rendered",
+                "error": None,
             },
         },
         f"unexpected resolved environment artifact: {artifact!r}",
@@ -156,9 +198,24 @@ def main() -> int:
         first_payload = payload(first)
         second_payload = payload(second)
         changed_payload = payload(changed)
+        first_scene_hash = scene_hash(first)
+        second_scene_hash = scene_hash(second)
+        changed_scene_hash = scene_hash(changed)
+        first_pdf = document_pdf(first)
+        second_pdf = document_pdf(second)
+        changed_pdf = document_pdf(changed)
         require(
             first_payload == second_payload,
             f"defaults changed with host locale/timezone: {first_payload!r} != {second_payload!r}",
+        )
+        require(
+            first_scene_hash == second_scene_hash,
+            "scene hash changed with host locale/timezone: "
+            f"{first_scene_hash} != {second_scene_hash}",
+        )
+        require(
+            first_pdf == second_pdf,
+            "PDF bytes changed with host locale/timezone",
         )
         require(first_payload.get("navigatorLanguage") == "en-US", repr(first_payload))
         require(first_payload.get("intlLocale") == "en-US", repr(first_payload))
@@ -172,6 +229,14 @@ def main() -> int:
         require(
             changed_payload.get("formatted") != first_payload.get("formatted"),
             "changed requested timezone did not change Intl date formatting",
+        )
+        require(
+            changed_scene_hash != first_scene_hash,
+            "changed requested timezone did not change the formatted scene",
+        )
+        require(
+            changed_pdf != first_pdf,
+            "changed requested timezone did not change the formatted PDF",
         )
         verify_environment_artifact(first, "UTC")
         verify_environment_artifact(second, "UTC")

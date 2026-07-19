@@ -1,0 +1,30 @@
+{
+  "page_count": 1,
+  "pages": [
+    {
+      "geometry_css_px": {
+        "width": 320.0,
+        "height": 480.0
+      },
+      "content_box_css_px": {
+        "x": 50.0,
+        "y": 20.0,
+        "available_inline_size": 240.0,
+        "available_block_size": 420.0
+      },
+      "first_glyph_css_px": {
+        "x": 50.0,
+        "minimum_y": 20.0,
+        "maximum_y": 40.0
+      },
+      "ordered_operations": [
+        "text",
+        "text"
+      ],
+      "ordered_text": [
+        "Alpha.",
+        "Beta."
+      ]
+    }
+  ]
+}

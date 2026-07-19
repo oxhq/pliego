@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>Pliego paged root reference fixture</title>
+    <style>
+      body {
+        margin: 0;
+        font: 16px sans-serif;
+      }
+    </style>
+  </head>
+  <body>
+    <div>Alpha.</div>
+    <div>Beta.</div>
+    <script>
+      queueMicrotask(() => window.pliego?.ready({ fixture: 'paged-root' }));
+    </script>
+  </body>
+</html>

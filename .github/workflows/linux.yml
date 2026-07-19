@@ -189,6 +189,47 @@ jobs:
           mv target/cargo-timings target/cargo-timings-linux
       - name: Smoketest
         run: xvfb-run ./mach smoketest --profile ${{ inputs.profile  }}
+      - name: Pliego paged reference
+        env:
+          CARGO_BUILD_RUSTC: crown
+          RUSTFLAGS: ${{ inputs.profile == 'checked-release' && '-D warnings' || '' }}
+        run: |
+          mkdir -p target/pliego-paged-reference
+          set -o pipefail
+          {
+            # Match the preceding mach build so Cargo reuses Servo dependencies.
+            python ports/pliego/tests/check_paged_reference.py --self-test &&
+            cargo build -p pliego --locked --profile ${{ inputs.profile }} \
+              --features servoshell/crown,servoshell/media-gstreamer &&
+            xvfb-run python ports/pliego/tests/check_paged_reference.py \
+              target/${{ inputs.profile }}/pliego
+          } 2>&1 | tee target/pliego-paged-reference/output.log
+      - name: Retain Pliego paged reference output
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: pliego-paged-reference-${{ inputs.profile }}-${{ needs.runner-select.outputs.unique-id }}
+          path: target/pliego-paged-reference/output.log
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Pliego canonical vertical slice
+        run: |
+          output=target/pliego-canonical-scene/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}
+          mkdir -p "$output"
+          set -o pipefail
+          {
+            python ports/pliego/tests/check_scene_vertical.py --self-test &&
+            xvfb-run python ports/pliego/tests/check_scene_vertical.py \
+              target/${{ inputs.profile }}/pliego "$output"
+          } 2>&1 | tee "$output/output.log"
+      - name: Retain Pliego canonical vertical slice
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: pliego-canonical-scene-${{ inputs.profile }}-${{ needs.runner-select.outputs.unique-id }}
+          path: target/pliego-canonical-scene/${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: warn
+          retention-days: 7
       - name: Script tests
         run: ./mach test-scripts
       - name: Unit tests

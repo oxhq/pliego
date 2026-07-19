@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>Pliego canonical text scene fixture</title>
+    <style>
+      @font-face {
+        font-family: "Pliego Fixture";
+        src: url("Ahem.ttf") format("truetype");
+      }
+
+      html,
+      body {
+        margin: 0;
+      }
+
+      body {
+        color: black;
+        font-family: serif;
+        font-size: 24px;
+        line-height: 1.25;
+      }
+
+      p {
+        margin: 0;
+      }
+
+      a {
+        color: black;
+        text-decoration: none;
+      }
+
+      .canonical-layout {
+        align-items: flex-start;
+        display: flex;
+        gap: 12px;
+      }
+
+      #js-mutation {
+        font-family: "Pliego Fixture";
+        font-size: 12px;
+      }
+
+      img {
+        display: block;
+        height: 8px;
+        image-rendering: pixelated;
+        width: 8px;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="canonical-layout">
+      <div>
+        <p>Pliego rinde café y niño.</p>
+        <p><a href="https://example.com/pliego">Contenido canónico.</a></p>
+        <p id="js-mutation"></p>
+      </div>
+      <svg aria-hidden="true" height="16" viewBox="0 0 16 16" width="16">
+        <path d="M1 1h14v14H1z" fill="black"></path>
+      </svg>
+      <img
+        alt=""
+        src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+      >
+    </main>
+    <script>
+      queueMicrotask(() => {
+        document.querySelector('#js-mutation').textContent = 'JS MUTATION OK';
+        window.pliego?.ready({ fixture: 'text-scene' });
+      });
+    </script>
+  </body>
+</html>
