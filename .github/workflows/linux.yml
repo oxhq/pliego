@@ -172,7 +172,7 @@ jobs:
         run: |
           sudo apt update
           echo "wireshark-common wireshark-common/install-setuid boolean true" | sudo debconf-set-selections
-          sudo apt install -qy tshark shellcheck
+          sudo apt install -qy poppler-utils shellcheck tshark
           ./mach bootstrap --yes --skip-lints --skip-nextest
 
       # Always install crown, even on self-hosted runners, because it is tightly
@@ -245,6 +245,21 @@ jobs:
         with:
           name: pliego-font-resolution-${{ inputs.profile }}-${{ needs.runner-select.outputs.unique-id }}
           path: target/pliego-font-resolution/output.log
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Pliego paged typography
+        run: |
+          output=target/pliego-paged-typography/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}
+          mkdir -p "$(dirname "$output")"
+          python ports/pliego/tests/check_paged_typography.py --self-test
+          xvfb-run python ports/pliego/tests/check_paged_typography.py \
+            target/${{ inputs.profile }}/pliego "$output"
+      - name: Retain Pliego paged typography proof
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: pliego-paged-typography-${{ inputs.profile }}-${{ needs.runner-select.outputs.unique-id }}
+          path: target/pliego-paged-typography/${{ github.run_id }}-${{ github.run_attempt }}
           if-no-files-found: warn
           retention-days: 7
       - name: Pliego image limits

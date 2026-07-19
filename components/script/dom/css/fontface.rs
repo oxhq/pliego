@@ -364,7 +364,7 @@ impl FontFace {
                 global
                     .as_window()
                     .font_context()
-                    .construct_web_font_from_data(&data, parsed_font_face_rule.descriptors)
+                    .construct_web_font_from_data(&data, (&parsed_font_face_rule).into())
             });
 
         if let Some(template) = result {

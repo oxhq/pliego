@@ -4,6 +4,11 @@
     <meta charset="utf-8">
     <title>Pliego deterministic font resolution fixture</title>
     <style>
+      @font-face {
+        font-family: "Pliego Fixture";
+        src: url("data:font/ttf;base64,__PLIEGO_FONT_BASE64__");
+      }
+
       body {
         font-family: "Missing Preferred", "Pliego Fixture";
         font-size: 12px;
@@ -20,14 +25,6 @@
             await new Promise(requestAnimationFrame);
           }
           if (!window.pliego) throw new Error('Pliego bridge was not installed');
-          const raw = atob('__PLIEGO_FONT_BASE64__');
-          const bytes = new Uint8Array(raw.length);
-          for (let index = 0; index < raw.length; index += 1) {
-            bytes[index] = raw.charCodeAt(index);
-          }
-          const face = new FontFace('Pliego Fixture', bytes.buffer);
-          document.fonts.add(face);
-          await face.load();
           let fontLaidOut = false;
           for (let attempt = 0; !fontLaidOut && attempt < 200; attempt += 1) {
             const rect = document.querySelector('p').getBoundingClientRect();

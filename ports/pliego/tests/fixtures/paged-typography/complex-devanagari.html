@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="hi">
+  <head>
+    <meta charset="utf-8">
+    <title>Pliego paged complex Devanagari</title>
+    <style>
+      @font-face {
+        font-family: "Noto Sans Devanagari";
+        src: url("data:font/ttf;base64,__PLIEGO_FONT_BASE64__");
+      }
+
+      html,
+      body,
+      p {
+        margin: 0;
+      }
+
+      body {
+        font: 16px/20px "Noto Sans Devanagari";
+      }
+    </style>
+  </head>
+  <body>
+    <p>स्थलों स्वभाव क्लब क्रम क्षण ष्क्रस ङ्ङम ङ्क्रस स्थलों स्वभाव क्लब क्रम क्षण ष्क्रस ङ्ङम ङ्क्रस स्थलों स्वभाव क्लब क्रम क्षण ष्क्रस ङ्ङम ङ्क्रस</p>
+    <script>
+      queueMicrotask(async () => {
+        try {
+          for (let attempt = 0; !window.pliego && attempt < 120; attempt += 1) {
+            await new Promise(requestAnimationFrame);
+          }
+          if (!window.pliego) throw new Error('Pliego bridge was not installed');
+          let laidOut = false;
+          for (let attempt = 0; !laidOut && attempt < 200; attempt += 1) {
+            const bounds = document.querySelector('p').getBoundingClientRect();
+            laidOut = bounds.width > 0 && bounds.height > 0;
+            if (!laidOut) await new Promise(resolve => setTimeout(resolve, 25));
+          }
+          if (!laidOut) {
+            window.pliego.fail({
+              code: 'FIXTURE_FONT_LAYOUT_TIMEOUT',
+              message: 'Complex Devanagari paragraph did not obtain positive layout bounds',
+            });
+            return;
+          }
+          await new Promise(requestAnimationFrame);
+          await new Promise(requestAnimationFrame);
+          window.pliego.ready({ fixture: 'paged-typography-complex-devanagari' });
+        } catch (error) {
+          window.pliego?.fail({
+            code: 'FIXTURE_FONT_CAPTURE_FAILED',
+            message: String(error),
+          });
+        }
+      });
+    </script>
+  </body>
+</html>

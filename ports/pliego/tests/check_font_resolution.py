@@ -112,11 +112,11 @@ def verify_fonts(summary: dict[str, Any]) -> bytes:
     require(isinstance(selections, list) and bool(selections), "no selected fonts")
     require(
         all(
-            selection.get("source") == "memory"
+            selection.get("source") == "data"
             and selection.get("resource") == SANITIZED_FONT_RESOURCE
             for selection in selections
         ),
-        f"selection did not use the pinned in-memory font: {selections!r}",
+        f"selection did not use the pinned data font: {selections!r}",
     )
     require(
         any(
@@ -145,7 +145,7 @@ def verify_fonts(summary: dict[str, Any]) -> bytes:
     require(isinstance(entries, list) and bool(entries), "font manifest is empty")
     require(
         all(
-            entry.get("source") == "memory"
+            entry.get("source") == "data"
             and entry.get("resource") == SANITIZED_FONT_RESOURCE
             for entry in entries
         ),

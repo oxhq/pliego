@@ -882,9 +882,8 @@ impl FontContext {
     pub fn construct_web_font_from_data(
         &self,
         data: &[u8],
-        font_face_rule: FontFaceRuleDescriptors,
+        descriptors: CSSFontFaceDescriptors,
     ) -> Option<(LowercaseFontFamilyName, FontTemplate)> {
-        let descriptors = CSSFontFaceDescriptors::from(&font_face_rule);
         let bytes = fontsan::process(data)
             .inspect_err(|error| {
                 debug!(
@@ -899,11 +898,7 @@ impl FontContext {
         let handle =
             PlatformFont::new_from_data(identifier.clone(), &font_data, None, &[], false).ok()?;
 
-        let new_template = FontTemplate::new(
-            identifier.clone(),
-            handle.descriptor(),
-            Some(font_face_rule),
-        );
+        let new_template = FontTemplate::new(identifier.clone(), handle.descriptor(), None);
 
         self.font_data.write().insert(identifier, font_data);
 
