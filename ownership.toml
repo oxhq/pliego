@@ -21,6 +21,10 @@ pattern = "components/layout/**"
 ownership = "shared"
 
 [[path]]
+pattern = "components/fonts/**"
+ownership = "shared"
+
+[[path]]
 pattern = "components/layout/fragmentation/**"
 ownership = "pliego"
 
