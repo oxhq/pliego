@@ -190,6 +190,35 @@ impl SessionArtifacts {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_denied_resource(
+        &self,
+        url: &str,
+        method: &str,
+        destination: &str,
+        referrer_url: Option<&str>,
+        is_for_main_frame: bool,
+        is_redirect: bool,
+        reason: &str,
+    ) -> io::Result<()> {
+        self.append(
+            "resources.jsonl",
+            serde_json::json!({
+                "timestamp_ms": timestamp_ms(),
+                "request_id": null,
+                "url": url,
+                "status": "denied",
+                "method": method,
+                "destination": destination,
+                "referrer_url": referrer_url,
+                "is_for_main_frame": is_for_main_frame,
+                "is_redirect": is_redirect,
+                "reason": reason,
+                "bytes": null,
+            }),
+        )
+    }
+
     pub fn record_loaded_resource(
         &self,
         request_id: &str,
@@ -853,6 +882,17 @@ mod tests {
             )
             .unwrap();
         artifacts
+            .record_denied_resource(
+                "https://example.test/font.woff2",
+                "GET",
+                "Font",
+                Some("file:///index.html"),
+                false,
+                false,
+                "network access is disabled",
+            )
+            .unwrap();
+        artifacts
             .write_readiness(&serde_json::json!({
                 "status": "ready",
                 "payload": { "fixture": true }
@@ -892,7 +932,7 @@ mod tests {
                 .unwrap();
         assert_eq!(state["state"], "started");
         assert_eq!(console["message"], "fixture-ready");
-        assert_eq!(resources.len(), 2);
+        assert_eq!(resources.len(), 3);
         assert_eq!(resources[0]["status"], "requested");
         assert_eq!(resources[0]["request_id"], "request-1");
         assert_eq!(resources[1]["status"], "loaded");
@@ -904,6 +944,11 @@ mod tests {
         assert_eq!(resources[1]["bytes"], resource_body.len());
         assert_eq!(resources[1]["sha256"], resource_hash);
         assert_eq!(resources[1]["resource"], format!("sha256:{resource_hash}"));
+        assert_eq!(resources[2]["status"], "denied");
+        assert_eq!(resources[2]["request_id"], serde_json::Value::Null);
+        assert_eq!(resources[2]["url"], "https://example.test/font.woff2");
+        assert_eq!(resources[2]["destination"], "Font");
+        assert_eq!(resources[2]["reason"], "network access is disabled");
         assert_eq!(
             fs::read(directory.join("resources").join(resource_hash)).unwrap(),
             resource_body

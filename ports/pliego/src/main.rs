@@ -3,11 +3,17 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+use std::cell::RefCell;
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
 use std::collections::{BTreeMap, HashMap};
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
 use std::ffi::CString;
 use std::ffi::OsString;
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+use std::path::Path;
 use std::path::PathBuf;
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+use std::rc::Rc;
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -92,6 +98,55 @@ struct RenderRequest {
     environment: RenderEnvironment,
     page: PageDefinition,
     explicit_paths: Option<ExplicitRenderPaths>,
+}
+
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+#[derive(Debug, PartialEq)]
+struct DeniedResource {
+    url: String,
+    method: String,
+    destination: String,
+    referrer_url: Option<String>,
+    is_for_main_frame: bool,
+    is_redirect: bool,
+    reason: &'static str,
+}
+
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+fn denied_resource(
+    document_root: &Path,
+    request: &servoshell::WebResourceRequest,
+) -> Option<DeniedResource> {
+    let reason = if request.is_redirect {
+        Some("redirects are disabled")
+    } else {
+        match request.url.scheme() {
+            "data" => None,
+            "file"
+                if request
+                    .url
+                    .to_file_path()
+                    .ok()
+                    .and_then(|path| path.canonicalize().ok())
+                    .is_some_and(|path| path.starts_with(document_root)) =>
+            {
+                None
+            },
+            "file" => Some("file is outside the document root or unavailable"),
+            "http" | "https" => Some("network access is disabled"),
+            _ => Some("URL scheme is not allowed"),
+        }
+    }?;
+
+    Some(DeniedResource {
+        url: request.url.to_string(),
+        method: request.method.to_string(),
+        destination: format!("{:?}", request.destination),
+        referrer_url: request.referrer_url.as_ref().map(ToString::to_string),
+        is_for_main_frame: request.is_for_main_frame,
+        is_redirect: request.is_redirect,
+        reason,
+    })
 }
 
 #[derive(Debug, PartialEq)]
@@ -502,11 +557,41 @@ fn render(request: RenderRequest) {
         format!("intl_locale_override={}", request.environment.locale),
         input_url.to_string(),
     ];
-    let result = servoshell::run_with_stable_javascript_and_console(
+    let denied_resources = Rc::new(RefCell::new(Vec::new()));
+    let policy_denials = Rc::clone(&denied_resources);
+    let document_root = document.root().to_owned();
+    let result = servoshell::run_with_stable_javascript_and_console_and_web_resource_policy(
         &servo_args,
         readiness::HOST_EVALUATION_EXPRESSION,
-    )
-    .unwrap_or_else(|error| {
+        move |request| {
+            let Some(denial) = denied_resource(&document_root, request) else {
+                return servoshell::WebResourcePolicyDecision::Allow;
+            };
+            policy_denials.borrow_mut().push(denial);
+            servoshell::WebResourcePolicyDecision::Cancel
+        },
+    );
+    let denied_resources = std::mem::take(&mut *denied_resources.borrow_mut());
+    for denial in &denied_resources {
+        record_artifact(artifacts.record_denied_resource(
+            &denial.url,
+            &denial.method,
+            &denial.destination,
+            denial.referrer_url.as_deref(),
+            denial.is_for_main_frame,
+            denial.is_redirect,
+            denial.reason,
+        ));
+    }
+    if let Some(denial) = denied_resources.first() {
+        fail_session(
+            &artifacts,
+            &document_pdf_path,
+            "RESOURCE_DENIED",
+            &format!("{}: {}", denial.reason, denial.url),
+        )
+    }
+    let result = result.unwrap_or_else(|error| {
         fail_session(
             &artifacts,
             &document_pdf_path,
@@ -1718,9 +1803,9 @@ mod tests {
     use super::{
         Command, DEFAULT_LOCALE, DEFAULT_TIMEZONE, ExplicitRenderPaths, PageDefinition,
         PageMargins, PendingResource, RenderEnvironment, RenderRequest, ResourceCapture,
-        complete_resource, create_session_artifacts, default_page, page_artifact, parse_args,
-        persist_scene_capture, resolve_scene_resource, set_document_pdf_environment, sha256_hex,
-        stable_render_id,
+        complete_resource, create_session_artifacts, default_page, denied_resource, page_artifact,
+        parse_args, persist_scene_capture, resolve_scene_resource, set_document_pdf_environment,
+        sha256_hex, stable_render_id,
     };
     use crate::session::SessionArtifacts;
     use std::ffi::OsString;
@@ -1965,6 +2050,81 @@ mod tests {
                 "invalid page options were accepted"
             );
         }
+    }
+
+    #[test]
+    fn resource_policy_allows_only_data_and_files_inside_the_document_root() {
+        fn request(url: url::Url, is_redirect: bool) -> servoshell::WebResourceRequest {
+            serde_json::from_value(serde_json::json!({
+                "method": "GET",
+                "headers": {},
+                "url": url,
+                "destination": "Style",
+                "referrer_url": null,
+                "is_for_main_frame": false,
+                "is_redirect": is_redirect,
+            }))
+            .unwrap()
+        }
+
+        let sandbox = temporary_artifacts("pliego-resource-policy");
+        let root = sandbox.join("root");
+        let inside = root.join("style.css");
+        let outside = sandbox.join("outside.css");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(&inside, "body {}").unwrap();
+        fs::write(&outside, "body {}").unwrap();
+        let root = root.canonicalize().unwrap();
+
+        assert_eq!(
+            denied_resource(
+                &root,
+                &request(
+                    url::Url::parse("data:text/css,body%20%7B%7D").unwrap(),
+                    false,
+                )
+            ),
+            None
+        );
+        assert_eq!(
+            denied_resource(
+                &root,
+                &request(url::Url::from_file_path(&inside).unwrap(), false),
+            ),
+            None
+        );
+        assert_eq!(
+            denied_resource(
+                &root,
+                &request(url::Url::from_file_path(&outside).unwrap(), false),
+            )
+            .unwrap()
+            .reason,
+            "file is outside the document root or unavailable"
+        );
+        assert_eq!(
+            denied_resource(
+                &root,
+                &request(
+                    url::Url::parse("https://example.test/style.css").unwrap(),
+                    false,
+                )
+            )
+            .unwrap()
+            .reason,
+            "network access is disabled"
+        );
+        assert_eq!(
+            denied_resource(
+                &root,
+                &request(url::Url::from_file_path(&inside).unwrap(), true)
+            )
+            .unwrap()
+            .reason,
+            "redirects are disabled"
+        );
+
+        fs::remove_dir_all(sandbox).unwrap();
     }
 
     #[test]
