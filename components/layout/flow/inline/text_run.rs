@@ -173,6 +173,9 @@ pub(crate) struct TextRunSegment {
     /// The shaped runs within this segment.
     #[conditional_malloc_size_of]
     pub runs: Vec<Arc<ShapedTextSlice>>,
+
+    /// The exact source byte range represented by each shaped run.
+    pub run_byte_ranges: Vec<Range<usize>>,
 }
 
 impl TextRunSegment {
@@ -186,6 +189,7 @@ impl TextRunSegment {
             byte_range,
             character_range,
             runs: Vec::new(),
+            run_byte_ranges: Vec::new(),
             break_at_start: false,
         }
     }
@@ -237,9 +241,17 @@ impl TextRunSegment {
             soft_wrap_policy = SegmentStartSoftWrapPolicy::Force;
         }
 
+        let text_content = ifc.ifc.text_content.clone();
         let mut character_range_start = self.character_range.start;
-        for (run_index, run) in self.runs.iter().enumerate() {
-            let new_character_range_end = character_range_start + run.character_count();
+        debug_assert_eq!(self.runs.len(), self.run_byte_ranges.len());
+        for (run_index, (run, text_range)) in self
+            .runs
+            .iter()
+            .zip(&self.run_byte_ranges)
+            .enumerate()
+        {
+            let character_count = text_content[text_range.clone()].chars().count();
+            let new_character_range_end = character_range_start + character_count;
             let offsets = ifc
                 .ifc
                 .shared_selection
@@ -255,9 +267,16 @@ impl TextRunSegment {
                 ifc.process_soft_wrap_opportunity();
             }
 
-            ifc.push_glyph_store_to_unbreakable_segment(run.clone(), text_run, &self.info, offsets);
+            ifc.push_glyph_store_to_unbreakable_segment(
+                run.clone(),
+                text_range.clone(),
+                text_run,
+                &self.info,
+                offsets,
+            );
             character_range_start = new_character_range_end;
         }
+        debug_assert_eq!(character_range_start, self.character_range.end);
     }
 
     /// Shape the text of this [`TextRunSegment`], first finding "words" for the shaper by processing
@@ -297,7 +316,9 @@ impl TextRunSegment {
         let mut shaped_text_slicer = ShapedTextSlicer::new(shaped_text);
 
         self.runs.clear();
+        self.run_byte_ranges.clear();
         self.runs.reserve(linebreaks.len());
+        self.run_byte_ranges.reserve(linebreaks.len());
         self.break_at_start = false;
 
         let text_style = parent_style.get_inherited_text().clone();
@@ -359,12 +380,13 @@ impl TextRunSegment {
 
             // Push the non-whitespace part of the range.
             if !slice.is_empty() {
-                let character_count = formatting_context_text[slice].chars().count();
+                let character_count = formatting_context_text[slice.clone()].chars().count();
                 self.runs.push(shaped_text_slicer.slice_for_character_count(
                     character_count,
                     false, /* is_whitespace */
                     non_whitespace_slice_ends_with_whitespace,
                 ));
+                self.run_byte_ranges.push(slice);
             }
 
             if whitespace.is_empty() {
@@ -374,21 +396,27 @@ impl TextRunSegment {
             // If `white-space-collapse: break-spaces` is active, insert a line breaking opportunity
             // between each white space character in the white space that we trimmed off.
             if text_style.white_space_collapse == WhiteSpaceCollapse::BreakSpaces {
-                for _ in formatting_context_text[whitespace].chars() {
+                for (relative_start, character) in
+                    formatting_context_text[whitespace.clone()].char_indices()
+                {
+                    let start = whitespace.start + relative_start;
                     self.runs.push(shaped_text_slicer.slice_for_character_count(
                         1, true, /* is_whitespace */
                         true, /* ends_with_whitespace */
                     ));
+                    self.run_byte_ranges
+                        .push(start..start + character.len_utf8());
                 }
                 continue;
             }
 
-            let character_count = formatting_context_text[whitespace].chars().count();
+            let character_count = formatting_context_text[whitespace.clone()].chars().count();
             self.runs.push(shaped_text_slicer.slice_for_character_count(
                 character_count,
                 true, /* is_whitespace */
                 true, /* ends_with_whitespace */
             ));
+            self.run_byte_ranges.push(whitespace);
         }
     }
 

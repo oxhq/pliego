@@ -22,8 +22,12 @@ def require(condition: bool, message: str) -> None:
         fail(message)
 
 
+def number(value: object) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
 def positive(value: object) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0
+    return number(value) and value > 0
 
 
 def positive_rects(fragments: list[object], kind: str) -> list[object]:
@@ -47,14 +51,16 @@ def output_path(summary: dict[str, object], key: str, root: Path) -> Path:
 
 
 def main() -> int:
-    if len(sys.argv) != 2:
-        fail(f"usage: {Path(sys.argv[0]).name} <pliego-binary>", 2)
+    if len(sys.argv) not in (2, 3) or (len(sys.argv) == 3 and sys.argv[2] != "text"):
+        fail(f"usage: {Path(sys.argv[0]).name} <pliego-binary> [text]", 2)
 
     root = Path(__file__).resolve().parents[2]
     binary = Path(sys.argv[1]).expanduser().resolve()
-    fixture = Path("tests/pliego/fixtures/session/index.html")
+    text_mode = len(sys.argv) == 3
+    fixture_name = "text-capture" if text_mode else "session"
+    fixture = Path(f"tests/pliego/fixtures/{fixture_name}/index.html")
     require(binary.is_file(), f"Pliego binary does not exist: {binary}")
-    require((root / fixture).is_file(), f"session fixture does not exist: {root / fixture}")
+    require((root / fixture).is_file(), f"{fixture_name} fixture does not exist: {root / fixture}")
 
     with tempfile.TemporaryDirectory(prefix="pliego-layout-capture-") as temp_dir:
         environment = os.environ.copy()
@@ -72,7 +78,7 @@ def main() -> int:
         except OSError as error:
             fail(f"could not execute {binary}: {error}")
         except subprocess.TimeoutExpired:
-            fail("Pliego did not finish the session fixture within 60 seconds")
+            fail(f"Pliego did not finish the {fixture_name} fixture within 60 seconds")
 
         if result.returncode != 0:
             detail = result.stderr.strip() or result.stdout.strip() or "no process output"
@@ -96,16 +102,52 @@ def main() -> int:
 
         boxes = snapshot.get("boxes")
         require(isinstance(boxes, list), "layout debug artifact has no boxes array")
-        box_kinds = [box.get("kind") for box in boxes if isinstance(box, dict)]
-        require("independent" in box_kinds, f"expected an independent box; got kinds {box_kinds}")
 
         fragments = snapshot.get("fragments")
         require(isinstance(fragments, list) and bool(fragments), "fragment array is empty or missing")
-        for kind in ("text", "image"):
+        if text_mode:
+            text_runs = [
+                fragment.get("text_run")
+                for fragment in fragments
+                if isinstance(fragment, dict) and isinstance(fragment.get("text_run"), dict)
+            ]
+            require(bool(text_runs), "text fixture produced no captured text runs")
+            texts = [run.get("text") for run in text_runs]
+            require(all(isinstance(text, str) for text in texts), "a text run has no text string")
+            captured_text = "".join(texts)
+            require(captured_text == "CAFÉ OFFICE", f"captured text was {captured_text!r}")
+            for run_index, run in enumerate(text_runs):
+                require(
+                    bool(run.get("font_identifier")),
+                    f"text run {run_index} has an empty font_identifier",
+                )
+                require(run.get("font_size") == 20, f"text run {run_index} font_size is not 20")
+                glyphs = run.get("glyphs")
+                require(
+                    isinstance(glyphs, list) and bool(glyphs),
+                    f"text run {run_index} has no glyphs",
+                )
+                for glyph_index, glyph in enumerate(glyphs):
+                    require(
+                        isinstance(glyph, dict),
+                        f"text run {run_index} glyph {glyph_index} is not an object",
+                    )
+                    for key in ("id", "x", "y", "advance"):
+                        require(
+                            number(glyph.get(key)),
+                            f"text run {run_index} glyph {glyph_index} has nonnumeric {key}",
+                        )
+        else:
+            box_kinds = [box.get("kind") for box in boxes if isinstance(box, dict)]
             require(
-                bool(positive_rects(fragments, kind)),
-                f"expected a {kind} fragment with positive width and height",
+                "independent" in box_kinds,
+                f"expected an independent box; got kinds {box_kinds}",
             )
+            for kind in ("text", "image"):
+                require(
+                    bool(positive_rects(fragments, kind)),
+                    f"expected a {kind} fragment with positive width and height",
+                )
 
         for key in ("paint_content_width", "paint_content_height"):
             require(positive(snapshot.get(key)), f"{key} must be positive; got {snapshot.get(key)!r}")

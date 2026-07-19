@@ -9,7 +9,6 @@ use app_units::{AU_PER_PX, Au};
 use clip::Clip;
 pub(crate) use clip::ClipId;
 use euclid::{Box2D, Point2D, Rect, Scale, SideOffsets2D, Size2D, UnknownUnit, Vector2D};
-use fonts::ShapedTextSlice;
 use gradient::WebRenderGradient;
 use layout_api::ReflowStatistics;
 use net_traits::image_cache::Image as CachedImage;
@@ -1006,12 +1005,7 @@ impl Fragment {
                 .iter()
                 .any(|item| !item.line.is_empty());
 
-        let (glyphs, largest_advance) = glyphs(
-            &fragment.glyphs,
-            baseline_origin,
-            fragment.justification_adjustment,
-            include_whitespace,
-        );
+        let (glyphs, largest_advance) = glyphs(fragment, baseline_origin, include_whitespace);
 
         if glyphs.is_empty() && !fragment.is_empty_for_text_cursor {
             return;
@@ -2237,38 +2231,19 @@ fn rgba(color: AbsoluteColor) -> wr::ColorF {
 }
 
 fn glyphs(
-    shaped_text_slices: &[Arc<ShapedTextSlice>],
-    mut baseline_origin: PhysicalPoint<Au>,
-    justification_adjustment: Au,
+    fragment: &TextFragment,
+    baseline_origin: PhysicalPoint<Au>,
     include_whitespace: bool,
 ) -> (Vec<GlyphInstance>, Au) {
-    let mut glyphs = vec![];
-    let mut largest_advance = Au::zero();
-
-    for shaped_text_slice in shaped_text_slices {
-        for glyph in shaped_text_slice.glyphs() {
-            if !shaped_text_slice.is_whitespace() || include_whitespace {
-                let glyph_offset = glyph.offset().unwrap_or(Point2D::zero());
-                let point = LayoutPoint::new(
-                    baseline_origin.x.to_f32_px() + glyph_offset.x.to_f32_px(),
-                    baseline_origin.y.to_f32_px() + glyph_offset.y.to_f32_px(),
-                );
-                let glyph_instance = GlyphInstance {
-                    index: glyph.id(),
-                    point,
-                };
-                glyphs.push(glyph_instance);
-            }
-
-            if glyph.char_is_word_separator() {
-                baseline_origin.x += justification_adjustment;
-            }
-
-            let advance = glyph.advance();
-            baseline_origin.x += advance;
-            largest_advance.max_assign(advance);
-        }
-    }
+    let (positioned_glyphs, largest_advance) =
+        fragment.positioned_glyphs(baseline_origin, include_whitespace);
+    let glyphs = positioned_glyphs
+        .into_iter()
+        .map(|glyph| GlyphInstance {
+            index: glyph.id,
+            point: LayoutPoint::new(glyph.point.x, glyph.point.y),
+        })
+        .collect();
     (glyphs, largest_advance)
 }
 

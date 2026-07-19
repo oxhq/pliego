@@ -26,7 +26,9 @@ use layout_api::{
     ReflowRequestRestyle, ReflowResult, ReflowStatistics, ScrollContainerQueryFlags,
     ScrollContainerResponse, TrustedNodeAddress, with_layout_state,
 };
-use layout_api::{LayoutDebugFragment, LayoutDebugRect, LayoutDebugSnapshot};
+use layout_api::{
+    LayoutDebugFragment, LayoutDebugGlyph, LayoutDebugRect, LayoutDebugSnapshot, LayoutDebugTextRun,
+};
 use log::{debug, warn};
 use malloc_size_of::{MallocConditionalSizeOf, MallocSizeOf, MallocSizeOfOps};
 use net_traits::image_cache::ImageCache;
@@ -42,6 +44,7 @@ use rustc_hash::FxHashMap;
 use script::layout_dom::{
     ServoDangerousStyleDocument, ServoDangerousStyleElement, ServoLayoutElement, ServoLayoutNode,
 };
+use style::properties::longhands::visibility::computed_value::T as Visibility;
 use script_traits::{DrawAPaintImageResult, PaintWorkletError, Painter, ScriptThreadMessage};
 use servo_arc::Arc as ServoArc;
 use servo_base::Epoch;
@@ -275,20 +278,50 @@ impl Layout for LayoutThread {
                         Fragment::Image(_) => "image",
                         Fragment::IFrame(_) => "iframe",
                     };
-                    let rect = fragment.base().map(|base| {
-                        let rect = base.rect().translate(containing_block.origin.to_vector());
-                        LayoutDebugRect {
-                            x: rect.origin.x.to_f32_px(),
-                            y: rect.origin.y.to_f32_px(),
-                            width: rect.size.width.to_f32_px(),
-                            height: rect.size.height.to_f32_px(),
-                        }
+                    let physical_rect = fragment
+                        .base()
+                        .map(|base| base.rect().translate(containing_block.origin.to_vector()));
+                    let rect = physical_rect.as_ref().map(|rect| LayoutDebugRect {
+                        x: rect.origin.x.to_f32_px(),
+                        y: rect.origin.y.to_f32_px(),
+                        width: rect.size.width.to_f32_px(),
+                        height: rect.size.height.to_f32_px(),
                     });
+                    let text_run = match fragment {
+                        Fragment::Text(text_fragment)
+                            if text_fragment.base.style().get_inherited_box().visibility ==
+                                Visibility::Visible =>
+                        {
+                            let rect = physical_rect
+                                .as_ref()
+                                .expect("text fragments always have a physical rect");
+                            let mut baseline_origin = rect.origin;
+                            baseline_origin.y += text_fragment.font_metrics.ascent;
+                            let (glyphs, _) =
+                                text_fragment.positioned_glyphs(baseline_origin, true);
+                            Some(LayoutDebugTextRun {
+                                text: text_fragment.rendered_text(),
+                                font_identifier: text_fragment.font.identifier(),
+                                font_size: text_fragment.font.descriptor.pt_size.to_f32_px(),
+                                glyphs: glyphs
+                                    .into_iter()
+                                    .map(|glyph| LayoutDebugGlyph {
+                                        id: glyph.id,
+                                        x: glyph.point.x,
+                                        y: glyph.point.y,
+                                        advance: glyph.advance.to_f32_px(),
+                                    })
+                                    .collect(),
+                            })
+                        },
+                        _ => None,
+                    };
                     rows.push(LayoutDebugFragment {
                         depth,
                         kind: kind.into(),
                         rect,
                         tag_id: fragment.tag().map(|tag| tag.to_display_list_fragment_id()),
+                        text_run,
                     });
                     None::<()>
                 });

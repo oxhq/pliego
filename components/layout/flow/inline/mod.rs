@@ -76,6 +76,7 @@ pub mod text_run;
 
 use std::cell::{Cell, OnceCell};
 use std::mem;
+use std::ops::Range;
 use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 
@@ -156,7 +157,8 @@ pub(crate) struct InlineFormattingContext {
     inline_boxes: InlineBoxes,
 
     /// The text content of this inline formatting context.
-    text_content: String,
+    #[conditional_malloc_size_of]
+    text_content: Arc<String>,
 
     /// The [`SharedInlineStyles`] for the root of this [`InlineFormattingContext`] that are used to
     /// share styles with all [`TextRun`] children.
@@ -1626,6 +1628,7 @@ impl InlineFormattingContextLayout<'_> {
     fn push_glyph_store_to_unbreakable_segment(
         &mut self,
         glyph_store: Arc<ShapedTextSlice>,
+        text_range: Range<usize>,
         text_run: &TextRun,
         info: &Arc<FontAndScriptInfo>,
         offsets: Option<TextRunOffsets>,
@@ -1676,9 +1679,16 @@ impl InlineFormattingContextLayout<'_> {
 
         let current_inline_box_identifier = self.current_inline_box_identifier();
         if let Some(LineItem::TextRun(inline_box_identifier, line_item)) =
-            self.current_line_segment.line_items.last_mut() &&
-            *inline_box_identifier == current_inline_box_identifier &&
-            line_item.merge_if_possible(info, &glyph_store, &offsets, &text_run.inline_styles)
+            self.current_line_segment.line_items.last_mut()
+            && *inline_box_identifier == current_inline_box_identifier
+            && line_item.merge_if_possible(
+                info,
+                &glyph_store,
+                &self.ifc.text_content,
+                &text_range,
+                &offsets,
+                &text_run.inline_styles,
+            )
         {
             return;
         }
@@ -1687,6 +1697,8 @@ impl InlineFormattingContextLayout<'_> {
             current_inline_box_identifier,
             TextRunLineItem {
                 text: vec![glyph_store],
+                text_content: self.ifc.text_content.clone(),
+                text_ranges: vec![text_range],
                 base_fragment_info: text_run.base_fragment_info,
                 inline_styles: text_run.inline_styles.clone(),
                 info: info.clone(),
@@ -1729,6 +1741,8 @@ impl InlineFormattingContextLayout<'_> {
             self.current_inline_box_identifier(),
             TextRunLineItem {
                 text: Default::default(),
+                text_content: self.ifc.text_content.clone(),
+                text_ranges: Default::default(),
                 base_fragment_info: BaseFragmentInfo::anonymous(),
                 inline_styles: self.ifc.shared_inline_styles.clone(),
                 info: Arc::new(FontAndScriptInfo::simple_for_font(font)),
@@ -2013,7 +2027,7 @@ impl InlineFormattingContext {
 
         let has_right_to_left_content = bidi_levels.info.as_ref().is_some_and(BidiInfo::has_rtl);
         InlineFormattingContext {
-            text_content,
+            text_content: Arc::new(text_content),
             inline_items: builder.inline_items,
             inline_boxes: builder.inline_boxes,
             shared_inline_styles,

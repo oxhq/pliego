@@ -28,7 +28,7 @@ use background_hang_monitor_api::BackgroundHangMonitorRegister;
 use bitflags::bitflags;
 use embedder_traits::{Cursor, ScriptToEmbedderChan, Theme, UntrustedNodeAddress, ViewportDetails};
 use euclid::{Point2D, Rect};
-use fonts::{FontContext, TextByteRange, WebFontDocumentContext};
+use fonts::{FontContext, FontIdentifier, TextByteRange, WebFontDocumentContext};
 pub use layout_damage::{AccessibilityDamage, LayoutDamage};
 pub use layout_dom::{
     DangerousStyleElementOf, DangerousStyleNodeOf, LayoutDomTypeBundle, LayoutElementOf,
@@ -295,6 +295,8 @@ pub struct LayoutDebugFragment {
     pub kind: String,
     pub rect: Option<LayoutDebugRect>,
     pub tag_id: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_run: Option<LayoutDebugTextRun>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
@@ -303,6 +305,25 @@ pub struct LayoutDebugRect {
     pub y: f32,
     pub width: f32,
     pub height: f32,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct LayoutDebugTextRun {
+    /// Text retained after layout whitespace processing and text transformation.
+    pub text: String,
+    pub font_identifier: FontIdentifier,
+    pub font_size: f32,
+    /// Positioned glyphs, including retained whitespace slices.
+    pub glyphs: Vec<LayoutDebugGlyph>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+pub struct LayoutDebugGlyph {
+    pub id: u32,
+    pub x: f32,
+    pub y: f32,
+    /// Effective pen advance, including word-justification adjustment.
+    pub advance: f32,
 }
 
 pub trait Layout {

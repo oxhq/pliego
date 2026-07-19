@@ -2,12 +2,13 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::ops::Range;
 use std::sync::Arc;
 
 use app_units::Au;
 use atomic_refcell::AtomicRef;
 use euclid::{Point2D, Rect, Size2D};
-use fonts::{FontMetrics, ShapedTextSlice};
+use fonts::{FontMetrics, FontRef, ShapedTextSlice};
 use layout_api::BoxAreaType;
 use malloc_size_of_derive::MallocSizeOf;
 use servo_base::id::PipelineId;
@@ -90,11 +91,15 @@ impl LayoutRootFragment {
 pub(crate) struct TextFragment {
     pub base: BaseFragment,
     pub selected_style: SharedStyle,
+    pub font: FontRef,
     #[conditional_malloc_size_of]
     pub font_metrics: Arc<FontMetrics>,
     pub font_key: FontInstanceKey,
     #[conditional_malloc_size_of]
     pub glyphs: Vec<Arc<ShapedTextSlice>>,
+    #[conditional_malloc_size_of]
+    pub text_content: Arc<String>,
+    pub text_ranges: Vec<Range<usize>>,
     /// Extra space to add for each justification opportunity.
     pub justification_adjustment: Au,
     /// When necessary, this field store the [`TextRunOffsets`] for a particular
@@ -103,6 +108,13 @@ pub(crate) struct TextFragment {
     /// Whether or not this [`TextFragment`] is an empty fragment added for the
     /// benefit of placing a text cursor on an otherwise empty editable line.
     pub is_empty_for_text_cursor: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PositionedGlyph {
+    pub id: u32,
+    pub point: PhysicalPoint<f32>,
+    pub advance: Au,
 }
 
 #[derive(MallocSizeOf)]
@@ -406,6 +418,46 @@ impl Fragment {
 }
 
 impl TextFragment {
+    pub(crate) fn rendered_text(&self) -> String {
+        debug_assert_eq!(self.glyphs.len(), self.text_ranges.len());
+        rendered_text_from_ranges(&self.text_content, &self.text_ranges)
+    }
+
+    pub(crate) fn positioned_glyphs(
+        &self,
+        mut baseline_origin: PhysicalPoint<Au>,
+        include_whitespace: bool,
+    ) -> (Vec<PositionedGlyph>, Au) {
+        let mut positioned_glyphs = vec![];
+        let mut largest_advance = Au::zero();
+
+        for shaped_text_slice in &self.glyphs {
+            for glyph in shaped_text_slice.glyphs() {
+                let mut advance = glyph.advance();
+                if glyph.char_is_word_separator() {
+                    advance += self.justification_adjustment;
+                }
+
+                if !shaped_text_slice.is_whitespace() || include_whitespace {
+                    let glyph_offset = glyph.offset().unwrap_or(Point2D::zero());
+                    positioned_glyphs.push(PositionedGlyph {
+                        id: glyph.id(),
+                        point: PhysicalPoint::new(
+                            baseline_origin.x.to_f32_px() + glyph_offset.x.to_f32_px(),
+                            baseline_origin.y.to_f32_px() + glyph_offset.y.to_f32_px(),
+                        ),
+                        advance,
+                    });
+                }
+
+                baseline_origin.x += advance;
+                largest_advance.max_assign(glyph.advance());
+            }
+        }
+
+        (positioned_glyphs, largest_advance)
+    }
+
     pub fn print(&self, tree: &mut PrintTree) {
         tree.add_item(format!(
             "Text num_glyphs={} box={:?}",
@@ -492,6 +544,29 @@ impl TextFragment {
         }
 
         Some(current_character)
+    }
+}
+
+fn rendered_text_from_ranges(text_content: &str, text_ranges: &[Range<usize>]) -> String {
+    let capacity = text_ranges.iter().map(|range| range.len()).sum();
+    let mut text = String::with_capacity(capacity);
+    for range in text_ranges {
+        text.push_str(&text_content[range.clone()]);
+    }
+    text
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rendered_text_from_ranges;
+
+    #[test]
+    fn rendered_text_joins_utf8_byte_ranges() {
+        let text_content = "  café  office  ";
+        assert_eq!(
+            rendered_text_from_ranges(text_content, &[2..7, 9..15]),
+            "caféoffice"
+        );
     }
 }
 

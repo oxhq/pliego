@@ -708,9 +708,12 @@ impl LineItemLayout<'_, '_> {
                         PhysicalRect::zero(),
                     ),
                     selected_style: text_item.inline_styles.selected.clone(),
+                    font: text_item.info.font.clone(),
                     font_metrics: font_metrics.clone(),
                     font_key,
                     glyphs: text_item.text,
+                    text_content: text_item.text_content,
+                    text_ranges: text_item.text_ranges,
                     justification_adjustment: self.justification_adjustment,
                     offsets: text_item.offsets,
                     is_empty_for_text_cursor: text_item.is_empty_for_text_cursor,
@@ -979,6 +982,8 @@ pub(super) struct TextRunLineItem {
     pub base_fragment_info: BaseFragmentInfo,
     pub inline_styles: SharedInlineStyles,
     pub text: Vec<Arc<ShapedTextSlice>>,
+    pub text_content: Arc<String>,
+    pub text_ranges: Vec<Range<usize>>,
     /// When necessary, this field store the [`TextRunOffsets`] for a particular
     /// [`TextRunLineItem`]. This is currently only used inside of text inputs.
     pub offsets: Option<Box<TextRunOffsets>>,
@@ -989,6 +994,7 @@ pub(super) struct TextRunLineItem {
 
 impl TextRunLineItem {
     fn trim_whitespace_at_end(&mut self, whitespace_trimmed: &mut Au) -> bool {
+        debug_assert_eq!(self.text.len(), self.text_ranges.len());
         if matches!(
             self.inline_styles
                 .style
@@ -1008,17 +1014,20 @@ impl TextRunLineItem {
             .map(|offset_from_end| self.text.len() - offset_from_end);
 
         let first_whitespace_index = index_of_last_non_whitespace.unwrap_or(0);
+        self.text_ranges.drain(first_whitespace_index..);
         *whitespace_trimmed += self
             .text
             .drain(first_whitespace_index..)
             .map(|glyph| glyph.total_advance())
             .sum();
+        debug_assert_eq!(self.text.len(), self.text_ranges.len());
 
         // Only keep going if we only encountered whitespace.
         index_of_last_non_whitespace.is_none()
     }
 
     fn trim_whitespace_at_start(&mut self, whitespace_trimmed: &mut Au) -> bool {
+        debug_assert_eq!(self.text.len(), self.text_ranges.len());
         if matches!(
             self.inline_styles
                 .style
@@ -1036,11 +1045,13 @@ impl TextRunLineItem {
             .position(|glyph| !glyph.is_whitespace())
             .unwrap_or(self.text.len());
 
+        self.text_ranges.drain(0..index_of_first_non_whitespace);
         *whitespace_trimmed += self
             .text
             .drain(0..index_of_first_non_whitespace)
             .map(|glyph| glyph.total_advance())
             .sum();
+        debug_assert_eq!(self.text.len(), self.text_ranges.len());
 
         // Only keep going if we only encountered whitespace.
         self.text.is_empty()
@@ -1050,16 +1061,22 @@ impl TextRunLineItem {
         &mut self,
         new_info: &Arc<FontAndScriptInfo>,
         new_glyph_store: &Arc<ShapedTextSlice>,
+        new_text_content: &Arc<String>,
+        new_text_range: &Range<usize>,
         new_offsets: &Option<TextRunOffsets>,
         new_inline_styles: &SharedInlineStyles,
     ) -> bool {
-        if !Arc::ptr_eq(&self.info.font, &new_info.font) ||
-            self.info.bidi_level != new_info.bidi_level ||
-            !self.inline_styles.ptr_eq(new_inline_styles)
+        if !Arc::ptr_eq(&self.info.font, &new_info.font)
+            || !Arc::ptr_eq(&self.text_content, new_text_content)
+            || self.info.bidi_level != new_info.bidi_level
+            || !self.inline_styles.ptr_eq(new_inline_styles)
         {
             return false;
         }
+        debug_assert_eq!(self.text.len(), self.text_ranges.len());
         self.text.push(new_glyph_store.clone());
+        self.text_ranges.push(new_text_range.clone());
+        debug_assert_eq!(self.text.len(), self.text_ranges.len());
 
         assert_eq!(self.offsets.is_some(), new_offsets.is_some());
         if let (Some(new_offsets), Some(existing_offsets)) = (new_offsets, self.offsets.as_mut()) {
