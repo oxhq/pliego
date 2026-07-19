@@ -3,6 +3,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 use std::cell::{OnceCell, RefCell};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use app_units::{AU_PER_PX, Au};
@@ -10,7 +11,7 @@ use clip::Clip;
 pub(crate) use clip::ClipId;
 use euclid::{Box2D, Point2D, Rect, Scale, SideOffsets2D, Size2D, UnknownUnit, Vector2D};
 use gradient::WebRenderGradient;
-use layout_api::ReflowStatistics;
+use layout_api::{LayoutDebugPaintEvent, ReflowStatistics};
 use net_traits::image_cache::Image as CachedImage;
 use paint_api::display_list::{PaintDisplayListInfo, SpatialTreeNodeInfo};
 use servo_arc::Arc as ServoArc;
@@ -126,6 +127,89 @@ pub(crate) struct DisplayListBuilder<'a> {
 
     /// Statistics collected about the reflow, in order to write tests for incremental layout.
     reflow_statistics: &'a mut ReflowStatistics,
+
+    /// Fragment-level events retained from this exact paint traversal.
+    debug_capture: DisplayListDebugCapture,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct DebugFragmentAttribution {
+    id: usize,
+    tag_id: Option<u64>,
+}
+
+/// Lightweight diagnostic data produced alongside a `BuiltDisplayList`.
+///
+/// Fragment identities are pointer-based only while the retained fragment tree is alive. They are
+/// converted to dense, capture-local IDs before being exposed by `Layout::debug_snapshot()`.
+#[derive(Debug, Default)]
+pub(crate) struct DisplayListDebugCapture {
+    events: Vec<LayoutDebugPaintEvent>,
+    fragment_ids: HashMap<usize, DebugFragmentAttribution>,
+}
+
+impl DisplayListDebugCapture {
+    fn fragment_attribution<T>(
+        &mut self,
+        fragment: &Arc<T>,
+        tag: Option<Tag>,
+    ) -> DebugFragmentAttribution {
+        let key = Arc::as_ptr(fragment) as usize;
+        let next_id = self.fragment_ids.len();
+        *self
+            .fragment_ids
+            .entry(key)
+            .or_insert_with(|| DebugFragmentAttribution {
+                id: next_id,
+                tag_id: tag.map(Tag::to_display_list_fragment_id),
+            })
+    }
+
+    fn record(
+        &mut self,
+        kind: &'static str,
+        fragment: Option<DebugFragmentAttribution>,
+        spatial_node_id: ScrollTreeNodeId,
+        clip_id: ClipId,
+    ) {
+        self.events.push(LayoutDebugPaintEvent {
+            sequence: self.events.len(),
+            kind: kind.into(),
+            fragment_id: fragment.map(|fragment| fragment.id),
+            tag_id: fragment.and_then(|fragment| fragment.tag_id),
+            spatial_node_id: spatial_node_id.index,
+            clip_id: (clip_id != ClipId::INVALID).then_some(clip_id.0),
+        });
+    }
+
+    fn record_fragment<T>(
+        &mut self,
+        kind: &'static str,
+        fragment: &Arc<T>,
+        tag: Option<Tag>,
+        state: &TraversalState,
+    ) {
+        let fragment = self.fragment_attribution(fragment, tag);
+        self.record(kind, Some(fragment), state.spatial_id, state.clip_id);
+    }
+
+    pub(crate) fn events(&self) -> &[LayoutDebugPaintEvent] {
+        &self.events
+    }
+
+    pub(crate) fn fragment_id(&self, fragment: &Fragment) -> Option<usize> {
+        let key = match fragment {
+            Fragment::Box(fragment) | Fragment::Float(fragment) => Arc::as_ptr(fragment) as usize,
+            Fragment::Positioning(fragment) => Arc::as_ptr(fragment) as usize,
+            Fragment::Text(fragment) => Arc::as_ptr(fragment) as usize,
+            Fragment::Image(fragment) => Arc::as_ptr(fragment) as usize,
+            Fragment::IFrame(fragment) => Arc::as_ptr(fragment) as usize,
+            Fragment::LayoutRoot(_) | Fragment::AbsoluteOrFixedPositionedPlaceholder(_) => {
+                return None;
+            },
+        };
+        self.fragment_ids.get(&key).map(|fragment| fragment.id)
+    }
 }
 
 struct InspectorHighlight {
@@ -177,7 +261,7 @@ impl DisplayListBuilder<'_> {
         debug: &DiagnosticsLogging,
         paint_timing_handler: &mut PaintTimingHandler,
         reflow_statistics: &mut ReflowStatistics,
-    ) -> BuiltDisplayList {
+    ) -> (BuiltDisplayList, DisplayListDebugCapture) {
         // Build the rest of the display list which inclues all of the WebRender primitives.
         let paint_info = &mut stacking_context_tree.paint_info;
         let pipeline_id = paint_info.pipeline_id;
@@ -206,6 +290,7 @@ impl DisplayListBuilder<'_> {
             device_pixel_ratio,
             paint_timing_handler,
             reflow_statistics,
+            debug_capture: Default::default(),
         };
 
         // Clear any caret color from previous display list constructions.
@@ -233,7 +318,9 @@ impl DisplayListBuilder<'_> {
         PaintTraversal::traverse(&stacking_context_tree.root_stacking_context, &mut builder);
         builder.paint_dom_inspector_highlight();
 
-        webrender_display_list_builder.end().1
+        let debug_capture = std::mem::take(&mut builder.debug_capture);
+        drop(builder);
+        (webrender_display_list_builder.end().1, debug_capture)
     }
 
     fn wr(&mut self) -> &mut wr::DisplayListBuilder {
@@ -682,30 +769,47 @@ impl DisplayListBuilder<'_> {
 }
 
 impl PaintTraversalHandler for DisplayListBuilder<'_> {
-    /// A tuple composed of the number of real WebRender stacking contexts pushed
-    /// and the previous `Self::current_reference_frame_scroll_node_id` value of
-    /// the `DisplayListBuilder` when a stacking context was visited (or `None` if
-    /// the value was unmodified).
-    type StackingContextState = (usize, Option<ScrollTreeNodeId>);
+    /// State needed to close both the WebRender and retained debug stacking-context scopes.
+    type StackingContextState = (
+        usize,
+        Option<ScrollTreeNodeId>,
+        Option<DebugFragmentAttribution>,
+    );
 
     fn visit_stacking_context(
         &mut self,
         stacking_context: &StackingContext,
     ) -> Self::StackingContextState {
+        let fragment = stacking_context.fragment().map(|fragment| {
+            self.debug_capture
+                .fragment_attribution(fragment, fragment.base.tag)
+        });
+        self.debug_capture.record(
+            "stacking-context-enter",
+            fragment,
+            stacking_context.scroll_tree_node_id,
+            stacking_context.clip_id,
+        );
         let (mut stacking_contexts_pushed, old_reference_frame) =
             self.visit_stacking_context_reference_frame_info(stacking_context);
         if self.push_webrender_stacking_context_if_necessary(stacking_context) {
             stacking_contexts_pushed += 1;
         }
-        (stacking_contexts_pushed, old_reference_frame)
+        (stacking_contexts_pushed, old_reference_frame, fragment)
     }
 
     fn leave_stacking_context(
         &mut self,
-        _: &TraversalState,
+        state: &TraversalState,
         stacking_context_state: Self::StackingContextState,
     ) {
-        let (stacking_contexts_pushed, old_reference_frame) = stacking_context_state;
+        let (stacking_contexts_pushed, old_reference_frame, fragment) = stacking_context_state;
+        self.debug_capture.record(
+            "stacking-context-leave",
+            fragment,
+            state.spatial_id,
+            state.clip_id,
+        );
         for _ in 0..stacking_contexts_pushed {
             self.wr().pop_stacking_context();
         }
@@ -729,6 +833,12 @@ impl PaintTraversalHandler for DisplayListBuilder<'_> {
             return;
         };
 
+        self.debug_capture.record_fragment(
+            "box",
+            fragment.box_fragment,
+            fragment.base.tag,
+            state,
+        );
         BuilderForBoxFragment::new(fragment, state.origin).build(self, state)
     }
 
@@ -740,6 +850,8 @@ impl PaintTraversalHandler for DisplayListBuilder<'_> {
             return;
         }
 
+        self.debug_capture
+            .record_fragment("iframe", fragment, fragment.base.tag, state);
         let rect = fragment.base.rect().translate(state.origin.to_vector());
         let common = self.common_properties(state, rect.to_webrender(), &style);
         self.wr().push_iframe(
@@ -785,6 +897,8 @@ impl PaintTraversalHandler for DisplayListBuilder<'_> {
         let common = self.common_properties(state, clip, &style);
 
         if let Some(image_key) = fragment.image_key {
+            self.debug_capture
+                .record_fragment("image", fragment, fragment.base.tag, state);
             self.wr().push_image(
                 &common,
                 rect,
@@ -817,6 +931,14 @@ impl PaintTraversalHandler for DisplayListBuilder<'_> {
         }
 
         if fragment.showing_broken_image_icon {
+            if fragment.image_key.is_none() {
+                self.debug_capture.record_fragment(
+                    "image",
+                    fragment,
+                    fragment.base.tag,
+                    state,
+                );
+            }
             Fragment::build_display_list_for_broken_image_border(self, &containing_block, &common);
         }
     }
@@ -833,6 +955,8 @@ impl PaintTraversalHandler for DisplayListBuilder<'_> {
         if style.get_inherited_box().visibility != Visibility::Visible {
             return;
         }
+        self.debug_capture
+            .record_fragment("text", fragment, fragment.base.tag, state);
         Fragment::build_display_list_for_text_fragment(fragment, self, state, &containing_block);
     }
 
@@ -874,6 +998,13 @@ impl PaintTraversalHandler for DisplayListBuilder<'_> {
         if source_style.background_is_transparent() {
             return;
         }
+
+        self.debug_capture.record_fragment(
+            "root-background",
+            fragment.box_fragment,
+            fragment.base.tag,
+            state,
+        );
 
         // The painting area is theoretically the infinite 2D plane,
         // but we need a rectangle with finite coordinates.
@@ -928,6 +1059,12 @@ impl PaintTraversalHandler for DisplayListBuilder<'_> {
         if fragment.style().get_inherited_box().visibility != Visibility::Visible {
             return;
         };
+        self.debug_capture.record_fragment(
+            "outline",
+            fragment.box_fragment,
+            fragment.base.tag,
+            state,
+        );
         BuilderForBoxFragment::new(&fragment, state.origin).build_outline(self, state)
     }
 
@@ -939,6 +1076,12 @@ impl PaintTraversalHandler for DisplayListBuilder<'_> {
         if fragment.style().get_inherited_box().visibility != Visibility::Visible {
             return;
         };
+        self.debug_capture.record_fragment(
+            "collapsed-table-borders",
+            fragment.box_fragment,
+            fragment.base.tag,
+            state,
+        );
         BuilderForBoxFragment::new(fragment, state.origin)
             .build_collapsed_table_borders(self, state)
     }
@@ -2487,5 +2630,61 @@ impl BaseFragment {
             },
             FragmentStatus::Clean => {},
         }
+    }
+}
+
+#[cfg(test)]
+mod debug_capture_tests {
+    use super::*;
+
+    #[test]
+    fn retained_paint_events_match_order_and_fragment_join_fixture() {
+        let first_fragment = Arc::new(());
+        let second_fragment = Arc::new(());
+        let mut capture = DisplayListDebugCapture::default();
+
+        let first = capture.fragment_attribution(&first_fragment, None);
+        capture.record(
+            "box",
+            Some(first),
+            ScrollTreeNodeId { index: 3 },
+            ClipId(4),
+        );
+        let first_again = capture.fragment_attribution(&first_fragment, None);
+        capture.record(
+            "text",
+            Some(first_again),
+            ScrollTreeNodeId { index: 3 },
+            ClipId::INVALID,
+        );
+        let second = capture.fragment_attribution(&second_fragment, None);
+        capture.record(
+            "image",
+            Some(second),
+            ScrollTreeNodeId { index: 8 },
+            ClipId(9),
+        );
+
+        let fixture = capture
+            .events()
+            .iter()
+            .map(|event| {
+                (
+                    event.sequence,
+                    event.kind.as_str(),
+                    event.fragment_id,
+                    event.spatial_node_id,
+                    event.clip_id,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            fixture,
+            vec![
+                (0, "box", Some(0), 3, Some(4)),
+                (1, "text", Some(0), 3, None),
+                (2, "image", Some(1), 8, Some(9)),
+            ]
+        );
     }
 }

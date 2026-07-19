@@ -86,7 +86,9 @@ use webrender_api::units::{DevicePixel, LayoutVector2D};
 
 use crate::accessibility_tree::AccessibilityTree;
 use crate::context::{CachedImageOrError, ImageResolver, LayoutContext};
-use crate::display_list::{DisplayListBuilder, HitTest, PaintTimingHandler, StackingContextTree};
+use crate::display_list::{
+    DisplayListBuilder, DisplayListDebugCapture, HitTest, PaintTimingHandler, StackingContextTree,
+};
 use crate::dom::NodeExt;
 use crate::fragment_tree::Fragment;
 use crate::query::{
@@ -199,6 +201,9 @@ pub struct LayoutThread {
     /// The [`StackingContextTree`] cached from previous layouts.
     stacking_context_tree: RefCell<Option<StackingContextTree>>,
 
+    /// Fragment-level paint events retained from the most recently built display list.
+    display_list_debug_capture: RefCell<Option<DisplayListDebugCapture>>,
+
     // A cache that maps image resources specified in CSS (e.g as the `url()` value
     // for `background-image` or `content` properties) to either the final resolved
     // image data, or an error if the image cache failed to load/decode the image.
@@ -260,6 +265,8 @@ impl Layout for LayoutThread {
             return None;
         }
         let boxes = self.box_tree.borrow().as_ref()?.debug_boxes();
+        let display_list_debug_capture = self.display_list_debug_capture.borrow();
+        let display_list_debug_capture = display_list_debug_capture.as_ref()?;
         let fragments = {
             let fragment_tree = self.fragment_tree.borrow();
             let mut rows = Vec::new();
@@ -321,6 +328,7 @@ impl Layout for LayoutThread {
                         kind: kind.into(),
                         rect,
                         tag_id: fragment.tag().map(|tag| tag.to_display_list_fragment_id()),
+                        paint_fragment_id: display_list_debug_capture.fragment_id(fragment),
                         text_run,
                         image_url: match fragment {
                             Fragment::Image(image_fragment) => {
@@ -338,6 +346,7 @@ impl Layout for LayoutThread {
         Some(LayoutDebugSnapshot {
             boxes,
             fragments,
+            paint_events: display_list_debug_capture.events().to_vec(),
             paint_epoch: paint.epoch.0,
             paint_content_width: paint.content_size.width,
             paint_content_height: paint.content_size.height,
@@ -912,6 +921,7 @@ impl LayoutThread {
             box_tree: Default::default(),
             fragment_tree: Default::default(),
             stacking_context_tree: Default::default(),
+            display_list_debug_capture: Default::default(),
             paint_api: config.paint_api,
             stylist: Stylist::new(device, QuirksMode::NoQuirks),
             resolved_images_cache: Default::default(),
@@ -1530,7 +1540,7 @@ impl LayoutThread {
             },
         };
 
-        let built_display_list = DisplayListBuilder::build(
+        let (built_display_list, display_list_debug_capture) = DisplayListBuilder::build(
             stacking_context_tree,
             fragment_tree,
             image_resolver.clone(),
@@ -1540,6 +1550,7 @@ impl LayoutThread {
             paint_timing_handler,
             reflow_statistics,
         );
+        *self.display_list_debug_capture.borrow_mut() = Some(display_list_debug_capture);
         self.paint_api.send_display_list(
             self.webview_id,
             &stacking_context_tree.paint_info,
@@ -1628,6 +1639,7 @@ impl LayoutThread {
         self.box_tree.borrow_mut().take();
         self.fragment_tree.borrow_mut().take();
         self.stacking_context_tree.borrow_mut().take();
+        self.display_list_debug_capture.borrow_mut().take();
 
         // Send empty display list.
         let paint_info = PaintDisplayListInfo::new(

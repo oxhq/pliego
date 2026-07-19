@@ -27,6 +27,10 @@ def number(value: object) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
+def integer(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
 def positive(value: object) -> bool:
     return number(value) and value > 0
 
@@ -111,6 +115,20 @@ def main() -> int:
 
         fragments = snapshot.get("fragments")
         require(isinstance(fragments, list) and bool(fragments), "fragment array is empty or missing")
+        paint_events = snapshot.get("paint_events")
+        require(
+            isinstance(paint_events, list) and bool(paint_events),
+            "paint event array is empty or missing",
+        )
+        require(
+            all(isinstance(event, dict) for event in paint_events),
+            "paint event array contains a non-object entry",
+        )
+        sequences = [event.get("sequence") for event in paint_events]
+        require(
+            sequences == list(range(len(paint_events))),
+            f"paint event sequences are not dense and ordered: {sequences!r}",
+        )
         if mode == "text":
             text_runs = [
                 fragment.get("text_run")
@@ -183,6 +201,23 @@ def main() -> int:
                 require(
                     bool(positive_rects(fragments, kind)),
                     f"expected a {kind} fragment with positive width and height",
+                )
+                fragment_ids = {
+                    fragment.get("paint_fragment_id")
+                    for fragment in fragments
+                    if isinstance(fragment, dict)
+                    and fragment.get("kind") == kind
+                    and integer(fragment.get("paint_fragment_id"))
+                }
+                event_fragment_ids = {
+                    event.get("fragment_id")
+                    for event in paint_events
+                    if event.get("kind") == kind and integer(event.get("fragment_id"))
+                }
+                require(
+                    bool(fragment_ids & event_fragment_ids),
+                    f"expected a {kind} paint event joined to its captured fragment; "
+                    f"fragment ids={fragment_ids!r}, event ids={event_fragment_ids!r}",
                 )
             expected_image_url = (root / fixture.parent / "mark.svg").resolve().as_uri()
             image_urls = [

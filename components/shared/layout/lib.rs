@@ -273,6 +273,13 @@ pub trait LayoutFactory: Send + Sync {
 pub struct LayoutDebugSnapshot {
     pub boxes: Vec<LayoutDebugBox>,
     pub fragments: Vec<LayoutDebugFragment>,
+    /// Fragment-level events retained from the display-list traversal, in traversal order.
+    ///
+    /// This is diagnostic capture data, not a canonical document scene. In particular,
+    /// `fragment_id`, `spatial_node_id`, and `clip_id` are only meaningful within this
+    /// snapshot.
+    #[serde(default)]
+    pub paint_events: Vec<LayoutDebugPaintEvent>,
     pub paint_epoch: u32,
     pub paint_content_width: f32,
     pub paint_content_height: f32,
@@ -306,12 +313,36 @@ pub struct LayoutDebugFragment {
     pub kind: String,
     pub rect: Option<LayoutDebugRect>,
     pub tag_id: Option<u64>,
+    /// A capture-local join key for entries in [`LayoutDebugSnapshot::paint_events`].
+    /// It is deliberately excluded from deterministic scene identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paint_fragment_id: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text_run: Option<LayoutDebugTextRun>,
     /// The resolved source URL retained by laid-out image fragments. Runtime-only
     /// WebRender image keys are deliberately excluded from this stable snapshot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_url: Option<String>,
+}
+
+/// A fragment-level event observed by the real display-list paint traversal.
+///
+/// One event may expand to several WebRender primitives. The event stream preserves the
+/// traversal's ordering and scope without retaining or decoding a `BuiltDisplayList`.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct LayoutDebugPaintEvent {
+    /// Monotonically increasing position in this snapshot's paint stream.
+    pub sequence: usize,
+    /// The paint phase observed by the display-list traversal.
+    pub kind: String,
+    /// A capture-local fragment identifier, when the event belongs to a fragment.
+    pub fragment_id: Option<usize>,
+    /// The process-local DOM/pseudo-element join key already used by debug fragments.
+    pub tag_id: Option<u64>,
+    /// The Servo scroll-tree node active for this event.
+    pub spatial_node_id: usize,
+    /// The Servo clip-store entry active for this event; `None` means no clip.
+    pub clip_id: Option<usize>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
