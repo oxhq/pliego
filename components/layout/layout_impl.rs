@@ -400,6 +400,7 @@ impl Layout for LayoutThread {
         let fragments = {
             let fragment_tree = self.fragment_tree.borrow();
             let mut rows = Vec::new();
+            let mut text_source_ends = HashMap::<usize, usize>::new();
             fragment_tree
                 .as_ref()?
                 .find(|fragment, depth, containing_block| {
@@ -436,6 +437,29 @@ impl Layout for LayoutThread {
                             baseline_origin.y += text_fragment.font_metrics.ascent;
                             let (glyphs, _) =
                                 text_fragment.positioned_glyphs(baseline_origin, true);
+                            // A wrapped line trims its trailing space from painted fragments. Carry
+                            // that source whitespace into the next run for scene/PDF text mapping;
+                            // glyph positions and advances remain unchanged.
+                            let source_key = Arc::as_ptr(&text_fragment.text_content) as usize;
+                            let source_start = text_fragment
+                                .text_ranges
+                                .first()
+                                .map(|range| range.start);
+                            let source_end = text_fragment.text_ranges.last().map(|range| range.end);
+                            let continuation_prefix = source_start
+                                .and_then(|start| {
+                                    let previous_end = *text_source_ends.get(&source_key)?;
+                                    (previous_end <= start)
+                                        .then(|| &text_fragment.text_content[previous_end..start])
+                                })
+                                .filter(|gap| gap.chars().all(char::is_whitespace))
+                                .unwrap_or_default();
+                            if let Some(source_end) = source_end {
+                                text_source_ends
+                                    .entry(source_key)
+                                    .and_modify(|end| *end = (*end).max(source_end))
+                                    .or_insert(source_end);
+                            }
                             let font_instance_id = font_capture.capture_font(&text_fragment.font);
                             if font_instance_id.is_none() && !font_capture_warned {
                                 warn!(
@@ -443,26 +467,46 @@ impl Layout for LayoutThread {
                                 );
                                 font_capture_warned = true;
                             }
+                            let prefix_len = continuation_prefix.len();
+                            let mut glyphs = glyphs
+                                .into_iter()
+                                .map(|glyph| LayoutDebugGlyph {
+                                    id: glyph.id,
+                                    x: glyph.point.x,
+                                    y: glyph.point.y,
+                                    advance: glyph.advance.to_f32_px(),
+                                    text_range: glyph.text_range.map(|range| LayoutDebugUtf8Range {
+                                        start: range.start,
+                                        end: range.end,
+                                    }),
+                                })
+                                .collect::<Vec<_>>();
+                            if prefix_len > 0 {
+                                let first_range = glyphs.iter().find_map(|glyph| glyph.text_range);
+                                for glyph in &mut glyphs {
+                                    let Some(range) = glyph.text_range.as_mut() else {
+                                        continue;
+                                    };
+                                    let first_cluster = Some(*range) == first_range;
+                                    // Krilla maps source text through glyph ranges, so the first
+                                    // shaping cluster owns the restored prefix as ActualText.
+                                    range.start = if first_cluster {
+                                        0
+                                    } else {
+                                        range.start + prefix_len
+                                    };
+                                    range.end += prefix_len;
+                                }
+                            }
                             Some(LayoutDebugTextRun {
-                                text: text_fragment.rendered_text(),
+                                text: format!(
+                                    "{continuation_prefix}{}",
+                                    text_fragment.rendered_text()
+                                ),
                                 font_instance_id,
                                 font_identifier: text_fragment.font.identifier(),
                                 font_size: text_fragment.font.descriptor.pt_size.to_f32_px(),
-                                glyphs: glyphs
-                                    .into_iter()
-                                    .map(|glyph| LayoutDebugGlyph {
-                                        id: glyph.id,
-                                        x: glyph.point.x,
-                                        y: glyph.point.y,
-                                        advance: glyph.advance.to_f32_px(),
-                                        text_range: glyph.text_range.map(|range| {
-                                            LayoutDebugUtf8Range {
-                                                start: range.start,
-                                                end: range.end,
-                                            }
-                                        }),
-                                    })
-                                    .collect(),
+                                glyphs,
                             })
                         },
                         _ => None,

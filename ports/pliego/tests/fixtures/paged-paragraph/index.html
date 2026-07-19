@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>Pliego paragraph continuation fixture</title>
+    <style>
+      html,
+      body,
+      p {
+        margin: 0;
+      }
+
+      body {
+        font: 16px/20px sans-serif;
+      }
+    </style>
+  </head>
+  <body>
+    <p>Café niño jalapeño déjà vu coöperate façade résumé naïve voilà über großstraße. Página siguiente conserva cada carácter sin perder ni duplicar texto.</p>
+    <script>
+      queueMicrotask(() => window.pliego?.ready({ fixture: 'paged-paragraph' }));
+    </script>
+  </body>
+</html>

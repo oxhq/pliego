@@ -318,10 +318,131 @@ def check_reference(
             fail("reference mismatch:\n- " + "\n- ".join(errors))
 
 
+def check_paragraph_continuation(binary: Path) -> None:
+    fixture_dir = Path(__file__).resolve().parent / "fixtures/paged-paragraph"
+    expected = json.loads((fixture_dir / "expected.json").read_text(encoding="utf-8"))
+    source = expected["source_unicode"]
+    with tempfile.TemporaryDirectory(prefix="pliego-paged-paragraph-") as temp:
+        environment = os.environ.copy()
+        environment.update({"TMPDIR": temp, "TMP": temp, "TEMP": temp})
+        result = subprocess.run(
+            [
+                str(binary),
+                "--page-size",
+                "180x80",
+                "--page-margins",
+                "10,10,10,10",
+                "index.html",
+            ],
+            cwd=fixture_dir,
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+        if result.returncode != 0:
+            detail = result.stderr.strip() or result.stdout.strip() or "no process output"
+            fail(f"paragraph fixture exited with {result.returncode}: {detail[-4000:]}")
+        summary = final_summary(result)
+        if summary.get("status") != "rendered":
+            fail(f"paragraph fixture did not render: {summary!r}")
+        scene = json.loads(Path(summary["scene_artifact"]).read_text(encoding="utf-8"))
+        layout = json.loads(Path(summary["layout_debug"]).read_text(encoding="utf-8"))
+        reference = extract_reference(scene, layout)
+        verify_output_contract(summary, reference)
+        if reference["page_count"] < 2:
+            fail("paragraph fixture did not cross a page boundary")
+
+        page_text = []
+        for page_index, page in enumerate(scene["pages"]):
+            text_operations = [
+                operation
+                for operation in page["operations"]
+                if operation.get("type") == "text"
+            ]
+            text = "".join(operation["text"] for operation in text_operations)
+            if not text:
+                fail(f"paragraph scene page {page_index} has no text")
+            page_text.append(text)
+            for operation_index, operation in enumerate(text_operations):
+                run = operation["text"]
+                boundaries = {
+                    len(run[:character].encode("utf-8"))
+                    for character in range(len(run) + 1)
+                }
+                previous = (0, 0)
+                for glyph_index, glyph in enumerate(operation.get("glyphs", [])):
+                    text_range = glyph.get("text_range")
+                    if not isinstance(text_range, dict):
+                        fail(
+                            f"paragraph page {page_index} operation {operation_index} "
+                            f"glyph {glyph_index} has no text range"
+                        )
+                    current = (text_range.get("start"), text_range.get("end"))
+                    if (
+                        not all(isinstance(value, int) for value in current)
+                        or current[0] not in boundaries
+                        or current[1] not in boundaries
+                        or current[0] >= current[1]
+                        or current < previous
+                    ):
+                        fail(
+                            f"paragraph page {page_index} operation {operation_index} "
+                            f"glyph ranges are invalid or non-monotonic: {current!r}"
+                        )
+                    previous = current
+        actual = "".join(page_text)
+        if actual != source:
+            fail(f"paragraph text differs: expected {source!r}, got {actual!r}")
+
+        page_sequence = layout.get("page_sequence", {})
+        continuations = page_sequence.get("continuations")
+        if not isinstance(continuations, list) or len(continuations) != len(page_text) - 1:
+            fail(f"paragraph continuation count differs: {continuations!r}")
+        previous_progress = None
+        source_boundaries = {
+            len(source[:character].encode("utf-8"))
+            for character in range(len(source) + 1)
+        }
+        for boundary, continuation in enumerate(continuations):
+            token = continuation.get("token", {})
+            progress = (
+                token.get("next_line_index"),
+                token.get("text_offset"),
+                token.get("shaping_result_index"),
+            )
+            if (
+                continuation.get("page_index") != boundary
+                or token.get("kind") != "inline"
+                or token.get("resume_page_index") != boundary + 1
+                or not all(isinstance(value, int) for value in progress)
+                or token.get("text_offset") not in source_boundaries
+                or (
+                    previous_progress is not None
+                    and (
+                        progress[0] <= previous_progress[0]
+                        or progress[1] <= previous_progress[1]
+                        or progress[2] < previous_progress[2]
+                    )
+                )
+            ):
+                fail(f"paragraph continuation is invalid or non-monotonic: {continuation!r}")
+            previous_progress = progress
+
+        structure = json.loads(Path(summary["pdf_structure"]).read_text(encoding="utf-8"))
+        pdf_text = "".join(
+            page.get("expected_extracted_unicode", "") for page in structure.get("pages", [])
+        )
+        if pdf_text != source:
+            fail(f"PDF source text differs: expected {source!r}, got {pdf_text!r}")
+
+
 def check_binary(binary: Path) -> None:
     fixture_dir = Path(__file__).resolve().parent / "fixtures/paged-root"
     check_reference(binary, fixture_dir, "expected.json", "320x480", "20,30,40,50")
     check_reference(binary, fixture_dir, "expected-small.json", "320x40", "5,10,5,10")
+    check_paragraph_continuation(binary)
 
 
 def main() -> int:
