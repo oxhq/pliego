@@ -25,8 +25,13 @@
             await new Promise(requestAnimationFrame);
           }
           if (!window.pliego) throw new Error('Pliego bridge was not installed');
-          document.body.getBoundingClientRect();
-          await document.fonts.ready;
+          let fontLaidOut = false;
+          for (let attempt = 0; !fontLaidOut && attempt < 120; attempt += 1) {
+            const rect = document.querySelector('p').getBoundingClientRect();
+            fontLaidOut = rect.width > 0 && rect.height > 0;
+            if (!fontLaidOut) await new Promise(requestAnimationFrame);
+          }
+          if (!fontLaidOut) throw new Error('Pliego Fixture did not produce text geometry');
           await new Promise(requestAnimationFrame);
           await new Promise(requestAnimationFrame);
           window.pliego.ready({ fixture: 'font-resolution' });
