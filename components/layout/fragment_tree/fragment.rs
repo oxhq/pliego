@@ -110,11 +110,15 @@ pub(crate) struct TextFragment {
     pub is_empty_for_text_cursor: bool,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct PositionedGlyph {
     pub id: u32,
     pub point: PhysicalPoint<f32>,
     pub advance: Au,
+    /// UTF-8 byte range in [`TextFragment::rendered_text`] for this glyph's
+    /// shaping cluster. `None` means the shaping source range was unavailable or
+    /// could not be mapped exactly to the retained text.
+    pub text_range: Option<Range<usize>>,
 }
 
 #[derive(MallocSizeOf)]
@@ -430,9 +434,15 @@ impl TextFragment {
     ) -> (Vec<PositionedGlyph>, Au) {
         let mut positioned_glyphs = vec![];
         let mut largest_advance = Au::zero();
+        let mut rendered_text_offset = 0;
 
-        for shaped_text_slice in &self.glyphs {
-            for glyph in shaped_text_slice.glyphs() {
+        debug_assert_eq!(self.glyphs.len(), self.text_ranges.len());
+        for (shaped_text_slice, retained_text_range) in
+            self.glyphs.iter().zip(&self.text_ranges)
+        {
+            let retained_text = self.text_content.get(retained_text_range.clone());
+            let shaped_source_range = shaped_text_slice.source_text_range();
+            for (glyph, glyph_source_range) in shaped_text_slice.glyphs_with_source_ranges() {
                 let mut advance = glyph.advance();
                 if glyph.char_is_word_separator() {
                     advance += self.justification_adjustment;
@@ -447,12 +457,21 @@ impl TextFragment {
                             baseline_origin.y.to_f32_px() + glyph_offset.y.to_f32_px(),
                         ),
                         advance,
+                        text_range: retained_text.and_then(|retained_text| {
+                            remap_glyph_source_range(
+                                shaped_source_range.as_ref(),
+                                glyph_source_range,
+                                rendered_text_offset,
+                                retained_text,
+                            )
+                        }),
                     });
                 }
 
                 baseline_origin.x += advance;
                 largest_advance.max_assign(glyph.advance());
             }
+            rendered_text_offset += retained_text_range.len();
         }
 
         (positioned_glyphs, largest_advance)
@@ -556,9 +575,36 @@ fn rendered_text_from_ranges(text_content: &str, text_ranges: &[Range<usize>]) -
     text
 }
 
+fn remap_glyph_source_range(
+    shaped_slice_range: Option<&Range<usize>>,
+    glyph_source_range: Option<Range<usize>>,
+    rendered_text_offset: usize,
+    retained_text: &str,
+) -> Option<Range<usize>> {
+    let shaped_slice_range = shaped_slice_range?;
+    let glyph_source_range = glyph_source_range?;
+    if shaped_slice_range.len() != retained_text.len() ||
+        glyph_source_range.start < shaped_slice_range.start ||
+        glyph_source_range.end > shaped_slice_range.end ||
+        glyph_source_range.start > glyph_source_range.end
+    {
+        return None;
+    }
+
+    let relative_start = glyph_source_range.start - shaped_slice_range.start;
+    let relative_end = glyph_source_range.end - shaped_slice_range.start;
+    if !retained_text.is_char_boundary(relative_start) ||
+        !retained_text.is_char_boundary(relative_end)
+    {
+        return None;
+    }
+
+    Some(rendered_text_offset + relative_start..rendered_text_offset + relative_end)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::rendered_text_from_ranges;
+    use super::{remap_glyph_source_range, rendered_text_from_ranges};
 
     #[test]
     fn rendered_text_joins_utf8_byte_ranges() {
@@ -566,6 +612,30 @@ mod tests {
         assert_eq!(
             rendered_text_from_ranges(text_content, &[2..7, 9..15]),
             "caféoffice"
+        );
+    }
+
+    #[test]
+    fn glyph_source_ranges_map_to_joined_utf8_text() {
+        assert_eq!(
+            remap_glyph_source_range(Some(&(2..7)), Some(3..5), 4, "aéxx"),
+            Some(5..7)
+        );
+    }
+
+    #[test]
+    fn glyph_source_ranges_are_unsupported_when_slice_lengths_diverge() {
+        assert_eq!(
+            remap_glyph_source_range(Some(&(2..7)), Some(3..5), 4, "xxxx"),
+            None
+        );
+    }
+
+    #[test]
+    fn glyph_source_ranges_are_unsupported_at_invalid_utf8_boundaries() {
+        assert_eq!(
+            remap_glyph_source_range(Some(&(0..3)), Some(1..2), 0, "éx"),
+            None
         );
     }
 }

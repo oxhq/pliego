@@ -220,6 +220,12 @@ pub struct ShapedText {
     /// in [`Self::detailed_glyphs`].
     glyphs: Vec<GlyphEntry>,
 
+    /// Exact UTF-8 byte ranges in the string passed to the shaper for each entry in
+    /// [`Self::glyphs`]. Multiple glyphs in one shaping cluster share a range. A
+    /// missing range means the shaper returned cluster data that could not be
+    /// validated against the source string.
+    glyph_source_ranges: Vec<Option<Range<usize>>>,
+
     /// A vector of glyphs that cannot fit within a single [`GlyphEntry`] or that
     /// correspond to 0 or more than 1 character in the original string.
     detailed_glyphs: Vec<DetailedGlyphEntry>,
@@ -246,6 +252,7 @@ impl ShapedText {
     pub(crate) fn new(length: usize, is_rtl: bool) -> Self {
         Self {
             glyphs: Vec::with_capacity(length),
+            glyph_source_ranges: Vec::with_capacity(length),
             detailed_glyphs: Default::default(),
             total_advance: Au::zero(),
             character_count: 0,
@@ -275,6 +282,7 @@ impl ShapedText {
         // give us shaped glyphs in left-to-right order. We need to look at the
         // actual cluster indices in the shaped run.
         let shaped_run_is_rtl = shaped_glyph_data.is_rtl();
+        let cluster_boundaries = validated_cluster_boundaries(text, shaped_glyph_data);
         let mut characters = if !shaped_run_is_rtl {
             Either::Left(text.char_indices())
         } else {
@@ -291,11 +299,14 @@ impl ShapedText {
             // The glyph "cluster" (HarfBuzz terminology) is the byte offset in the string that
             // this glyph corresponds to. More than one glyph can share a cluster.
             let glyph_cluster = shaped_glyph.string_byte_offset;
+            let source_range = cluster_boundaries
+                .as_deref()
+                .and_then(|boundaries| source_range_for_cluster(text, boundaries, glyph_cluster));
 
             if let Some(previous_character_offset) = previous_character_offset &&
                 previous_character_offset == glyph_cluster
             {
-                glyph_store.add_glyph_for_current_character(&shaped_glyph, options);
+                glyph_store.add_glyph_for_current_character(&shaped_glyph, options, source_range);
                 continue;
             }
 
@@ -319,7 +330,7 @@ impl ShapedText {
             // characters were skipped to produce this glyph, they belong to this
             // glyph.
             if shaped_run_is_rtl {
-                glyph_store.add_glyph(character, &shaped_glyph);
+                glyph_store.add_glyph(character, &shaped_glyph, source_range.clone());
             }
 
             for _ in 0..characters_skipped {
@@ -330,7 +341,7 @@ impl ShapedText {
             // characters were skipped to produce this glyph, they belong to the
             // previous glyph.
             if !shaped_run_is_rtl {
-                glyph_store.add_glyph(character, &shaped_glyph);
+                glyph_store.add_glyph(character, &shaped_glyph, source_range);
             }
         }
 
@@ -350,9 +361,14 @@ impl ShapedText {
 
     /// Adds glyph that corresponds to a single character (as far we know) in the originating string.
     #[inline]
-    pub(crate) fn add_glyph(&mut self, character: char, glyph: &ShapedGlyph) {
+    pub(crate) fn add_glyph(
+        &mut self,
+        character: char,
+        glyph: &ShapedGlyph,
+        source_range: Option<Range<usize>>,
+    ) {
         if !glyph.can_be_simple_glyph() {
-            self.add_detailed_glyph(glyph, Some(character), 1);
+            self.add_detailed_glyph(glyph, Some(character), 1, source_range);
             return;
         }
 
@@ -364,7 +380,8 @@ impl ShapedText {
 
         self.character_count += 1;
         self.total_advance += glyph.advance;
-        self.glyphs.push(simple_glyph_entry)
+        self.glyphs.push(simple_glyph_entry);
+        self.glyph_source_ranges.push(source_range);
     }
 
     fn add_detailed_glyph(
@@ -372,6 +389,7 @@ impl ShapedText {
         shaped_glyph: &ShapedGlyph,
         character: Option<char>,
         character_count: usize,
+        source_range: Option<Range<usize>>,
     ) {
         let is_word_separator = character.is_some_and(character_is_word_separator);
         if is_word_separator {
@@ -389,6 +407,7 @@ impl ShapedText {
         });
         self.glyphs
             .push(GlyphEntry::complex(self.detailed_glyphs.len() - 1));
+        self.glyph_source_ranges.push(source_range);
     }
 
     fn extend_previous_glyph_by_character(&mut self) {
@@ -405,6 +424,7 @@ impl ShapedText {
         &mut self,
         shaped_glyph: &ShapedGlyph,
         options: &ShapingOptions,
+        source_range: Option<Range<usize>>,
     ) {
         // If this glyph cluster is extending to include another glyph and we applied
         // letter spacing to the previous glyph, ensure that the letter spacing is only
@@ -420,7 +440,7 @@ impl ShapedText {
 
         // Add a detailed glyph entry for this new glyph, but it corresponds to a character
         // we have already started processing. It should not contribute any character count.
-        self.add_detailed_glyph(shaped_glyph, None, 0);
+        self.add_detailed_glyph(shaped_glyph, None, 0, source_range);
     }
 
     /// If the last glyph added to this [`ShapedText`] was a simple glyph, convert it to a
@@ -456,6 +476,7 @@ impl ShapedText {
         &self,
         glyph_range: Range<usize>,
     ) -> impl DoubleEndedIterator<Item = GlyphInfo<'_>> + use<'_> {
+        debug_assert_eq!(self.glyphs.len(), self.glyph_source_ranges.len());
         self.glyphs[glyph_range].iter().map(|entry| {
             if entry.is_simple() {
                 GlyphInfo::Simple(entry)
@@ -464,6 +485,52 @@ impl ShapedText {
             }
         })
     }
+
+    fn glyph_source_range_slice(
+        &self,
+        glyph_range: Range<usize>,
+    ) -> impl DoubleEndedIterator<Item = Option<Range<usize>>> + use<'_> {
+        debug_assert_eq!(self.glyphs.len(), self.glyph_source_ranges.len());
+        self.glyph_source_ranges[glyph_range].iter().cloned()
+    }
+}
+
+fn validated_cluster_boundaries(
+    text: &str,
+    shaped_glyph_data: &impl GlyphShapingResult,
+) -> Option<Vec<usize>> {
+    let mut boundaries = shaped_glyph_data
+        .iter()
+        .map(|glyph| glyph.string_byte_offset)
+        .collect::<Vec<_>>();
+    boundaries.sort_unstable();
+    boundaries.dedup();
+
+    if boundaries.is_empty() {
+        return Some(boundaries);
+    }
+    if boundaries[0] != 0 ||
+        boundaries
+            .iter()
+            .any(|&offset| offset >= text.len() || !text.is_char_boundary(offset))
+    {
+        return None;
+    }
+
+    Some(boundaries)
+}
+
+fn source_range_for_cluster(
+    text: &str,
+    cluster_boundaries: &[usize],
+    cluster: usize,
+) -> Option<Range<usize>> {
+    let index = cluster_boundaries.binary_search(&cluster).ok()?;
+    let end = cluster_boundaries
+        .get(index + 1)
+        .copied()
+        .unwrap_or(text.len());
+    (cluster < end).then_some(cluster..end)
 }
 
 impl ShapedGlyph {
@@ -620,6 +687,31 @@ impl ShapedTextSlice {
     pub fn glyphs(&self) -> impl DoubleEndedIterator<Item = GlyphInfo<'_>> + use<'_> {
         self.shaped_text.glyph_slice(self.glyph_range.clone())
     }
+
+    /// Iterate glyphs with exact UTF-8 source-cluster ranges relative to the
+    /// original string passed to the shaper. A missing range denotes unsupported
+    /// or invalid shaper cluster data; callers must not reconstruct one from glyph
+    /// order.
+    pub fn glyphs_with_source_ranges(
+        &self,
+    ) -> impl Iterator<Item = (GlyphInfo<'_>, Option<Range<usize>>)> + use<'_> {
+        self.glyphs().zip(
+            self.shaped_text
+                .glyph_source_range_slice(self.glyph_range.clone()),
+        )
+    }
+
+    /// The contiguous UTF-8 source range covered by this slice, relative to the
+    /// original string passed to the shaper.
+    pub fn source_text_range(&self) -> Option<Range<usize>> {
+        let ranges = self
+            .shaped_text
+            .glyph_source_range_slice(self.glyph_range.clone())
+            .collect::<Option<Vec<_>>>()?;
+        let start = ranges.iter().map(|range| range.start).min()?;
+        let end = ranges.iter().map(|range| range.end).max()?;
+        Some(start..end)
+    }
 }
 
 /// A data structure used to efficiently slice up a [`ShapedText`] into [`ShapedTextSlice`]s.
@@ -717,5 +809,65 @@ impl ShapedTextSlicer {
             ends_with_whitespace,
             total_word_separators,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use app_units::Au;
+    use euclid::num::Zero;
+
+    use super::{source_range_for_cluster, validated_cluster_boundaries};
+    use crate::{GlyphShapingResult, ShapedGlyph};
+
+    struct TestShapingResult {
+        cluster_offsets: Vec<usize>,
+    }
+
+    impl GlyphShapingResult for TestShapingResult {
+        fn len(&self) -> usize {
+            self.cluster_offsets.len()
+        }
+
+        fn is_rtl(&self) -> bool {
+            false
+        }
+
+        fn iter(&self) -> impl Iterator<Item = ShapedGlyph> {
+            self.cluster_offsets
+                .iter()
+                .copied()
+                .enumerate()
+                .map(|(glyph_id, string_byte_offset)| ShapedGlyph {
+                    glyph_id: glyph_id as u32,
+                    string_byte_offset,
+                    advance: Au::zero(),
+                    offset: None,
+                })
+        }
+    }
+
+    #[test]
+    fn source_ranges_use_exact_utf8_cluster_boundaries() {
+        let text = "aéffi";
+        let shaping = TestShapingResult {
+            // Deliberately visual/non-source order, with two glyphs in one cluster.
+            cluster_offsets: vec![3, 1, 3, 0],
+        };
+        let boundaries = validated_cluster_boundaries(text, &shaping).unwrap();
+
+        assert_eq!(boundaries, vec![0, 1, 3]);
+        assert_eq!(source_range_for_cluster(text, &boundaries, 0), Some(0..1));
+        assert_eq!(source_range_for_cluster(text, &boundaries, 1), Some(1..3));
+        assert_eq!(source_range_for_cluster(text, &boundaries, 3), Some(3..6));
+    }
+
+    #[test]
+    fn invalid_utf8_cluster_boundaries_are_not_retained() {
+        let shaping = TestShapingResult {
+            cluster_offsets: vec![0, 1],
+        };
+
+        assert_eq!(validated_cluster_boundaries("éx", &shaping), None);
     }
 }

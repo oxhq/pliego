@@ -552,7 +552,11 @@ impl Font {
             };
             glyph.adjust_for_character(character, options);
 
-            glyph_store.add_glyph(character, &glyph);
+            glyph_store.add_glyph(
+                character,
+                &glyph,
+                Some(string_byte_offset..string_byte_offset + character.len_utf8()),
+            );
             prev_glyph_id = Some(glyph_id);
         }
         glyph_store

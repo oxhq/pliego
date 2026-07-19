@@ -31,6 +31,7 @@ use layout_api::{
 use layout_api::{
     LayoutDebugFontInstance, LayoutDebugFontResource, LayoutDebugFontVariation, LayoutDebugFragment,
     LayoutDebugGlyph, LayoutDebugRect, LayoutDebugSnapshot, LayoutDebugTextRun,
+    LayoutDebugUtf8Range,
 };
 use log::{debug, warn};
 use malloc_size_of::{MallocConditionalSizeOf, MallocSizeOf, MallocSizeOfOps};
@@ -451,6 +452,12 @@ impl Layout for LayoutThread {
                                         x: glyph.point.x,
                                         y: glyph.point.y,
                                         advance: glyph.advance.to_f32_px(),
+                                        text_range: glyph.text_range.map(|range| {
+                                            LayoutDebugUtf8Range {
+                                                start: range.start,
+                                                end: range.end,
+                                            }
+                                        }),
                                     })
                                     .collect(),
                             })

@@ -406,6 +406,17 @@ pub struct LayoutDebugGlyph {
     pub y: f32,
     /// Effective pen advance, including word-justification adjustment.
     pub advance: f32,
+    /// Exact UTF-8 byte range in [`LayoutDebugTextRun::text`] for this glyph's
+    /// shaping cluster. Multiple glyphs can share a range. `None` explicitly
+    /// denotes that Servo could not retain or validate the source cluster.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_range: Option<LayoutDebugUtf8Range>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+pub struct LayoutDebugUtf8Range {
+    pub start: usize,
+    pub end: usize,
 }
 
 pub trait Layout {
