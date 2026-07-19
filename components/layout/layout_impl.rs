@@ -510,6 +510,7 @@ impl Layout for LayoutThread {
                                     .style()
                                     .get_font()
                                     .font_family
+                                    .families
                                     .iter()
                                     .map(|family| match family {
                                         SingleFontFamily::FamilyName(family) => {
