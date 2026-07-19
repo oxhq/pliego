@@ -15,6 +15,7 @@ use krilla::page::PageSettings;
 use krilla::paint::{Fill, FillRule as PdfFillRule, Stroke as PdfStroke};
 use krilla::text::{Font, GlyphId, KrillaGlyph, Tag};
 use krilla::{Data, Document, SerializeSettings};
+use unicode_segmentation::UnicodeSegmentation;
 use url::Url;
 use vello_cpu::kurbo::{BezPath, PathEl};
 
@@ -267,18 +268,18 @@ pub fn render_document_pdf<'font, 'image>(
                         let pdf_font = fonts[font].clone();
 
                         // Keep the run intact so Krilla can span shared shaping clusters with ActualText.
+                        let text_ranges = pdf_text_ranges(text, glyphs);
                         let mut cursor_x = first_glyph.x;
                         let mut pdf_glyphs = Vec::with_capacity(glyphs.len());
-                        for (glyph_index, glyph) in glyphs.iter().enumerate() {
+                        for (glyph_index, (glyph, range)) in
+                            glyphs.iter().zip(text_ranges).enumerate()
+                        {
                             if glyph.id > u16::MAX.into() {
                                 return Err(PdfError::InvalidGlyph {
                                     operation: operation_index,
                                     glyph: glyph_index,
                                 });
                             }
-                            let range = glyph.text_range.expect("text mappings were prevalidated");
-                            let range = usize::try_from(range.start).unwrap()
-                                ..usize::try_from(range.end).unwrap();
                             pdf_glyphs.push(KrillaGlyph::new(
                                 GlyphId::new(glyph.id),
                                 pdf_number(glyph.advance / source_font_size, "glyph.advance")?,
@@ -388,6 +389,58 @@ pub fn render_document_pdf<'font, 'image>(
         krilla::error::KrillaError::Font(_, message) => PdfError::FontEmbedding(message),
         error => PdfError::Backend(error.to_string()),
     })
+}
+
+/// Coalesce per-character shaping ranges into PDF extraction units. Positioned marks inside an
+/// extended grapheme must share one `ActualText` span or PDF readers can infer word boundaries from
+/// their positioning adjustments.
+fn pdf_text_ranges(text: &str, glyphs: &[crate::Glyph]) -> Vec<std::ops::Range<usize>> {
+    let graphemes = text
+        .grapheme_indices(true)
+        .map(|(start, grapheme)| start..start + grapheme.len())
+        .collect::<Vec<_>>();
+    let expanded = glyphs
+        .iter()
+        .map(|glyph| {
+            let range = glyph.text_range.expect("text mappings were prevalidated");
+            let range = usize::try_from(range.start).unwrap()..usize::try_from(range.end).unwrap();
+            let start = graphemes
+                .iter()
+                .find(|item| item.end > range.start)
+                .unwrap()
+                .start;
+            let end = graphemes
+                .iter()
+                .rev()
+                .find(|item| item.start < range.end)
+                .unwrap()
+                .end;
+            start..end
+        })
+        .collect::<Vec<_>>();
+
+    let mut sorted = expanded.clone();
+    sorted.sort_by_key(|range| range.start);
+    let mut groups: Vec<std::ops::Range<usize>> = Vec::new();
+    for range in sorted {
+        if let Some(group) = groups.last_mut()
+            && range.start < group.end
+        {
+            group.end = group.end.max(range.end);
+        } else {
+            groups.push(range);
+        }
+    }
+    expanded
+        .into_iter()
+        .map(|range| {
+            groups
+                .iter()
+                .find(|group| group.start <= range.start && group.end >= range.end)
+                .unwrap()
+                .clone()
+        })
+        .collect()
 }
 
 fn validate_text_mappings(scene: &DocumentScene) -> Result<(), PdfError> {

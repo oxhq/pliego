@@ -24,6 +24,7 @@ serde_json = { workspace = true }
 sha2 = { workspace = true }
 servo-canvas = { workspace = true }
 servoshell = { path = "../servoshell" }
+unicode-segmentation = { workspace = true }
 url = { workspace = true }
 vello_cpu = { workspace = true }
 

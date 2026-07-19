@@ -17,11 +17,16 @@ const DEJAVU_SANS: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../components/fonts/tests/support/dejavu-fonts-ttf-2.37/ttf/DejaVuSans.ttf"
 ));
+const NOTO_SANS_DEVANAGARI: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../tests/wpt/tests/fonts/noto/NotoSansDevanagari-Regular.ttf"
+));
 const IMAGE: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../tests/wpt/tests/images/lcp-1x1.png"
 ));
 const FONT_ID: &str = "sha256:dejavu-sans-fixture";
+const DEVANAGARI_FONT_ID: &str = "sha256:noto-sans-devanagari-fixture";
 const IMAGE_ID: &str = "sha256:image-fixture";
 
 fn scene() -> DocumentScene {
@@ -293,6 +298,70 @@ fn preserves_shared_text_clusters_with_actual_text() {
             .iter()
             .any(|stream| contains(stream, b"/ActualText")),
         "glyphs sharing a shaping cluster must expose one ActualText span"
+    );
+}
+
+#[test]
+fn emits_positioned_devanagari_marks_as_one_actual_text_span() {
+    let scene = DocumentScene::new(Page {
+        size: Size {
+            width: 100.0,
+            height: 50.0,
+        },
+        operations: vec![Operation::Text {
+            text: "ङ्ङम".into(),
+            font: DEVANAGARI_FONT_ID.into(),
+            font_size: 16.0,
+            glyphs: vec![
+                Glyph {
+                    id: 29,
+                    x: 10.0,
+                    y: 30.0,
+                    advance: 11.0,
+                    text_range: Some(Utf8Range { start: 0, end: 3 }),
+                },
+                Glyph {
+                    id: 81,
+                    x: 18.833_334,
+                    y: 30.0,
+                    advance: 0.0,
+                    text_range: Some(Utf8Range { start: 3, end: 6 }),
+                },
+                Glyph {
+                    id: 29,
+                    x: 21.0,
+                    y: 30.0,
+                    advance: 11.0,
+                    text_range: Some(Utf8Range { start: 6, end: 9 }),
+                },
+                Glyph {
+                    id: 50,
+                    x: 32.0,
+                    y: 30.0,
+                    advance: 10.0,
+                    text_range: Some(Utf8Range { start: 9, end: 12 }),
+                },
+            ],
+            meta: OperationMeta::default(),
+        }],
+    });
+    let pdf = render_document_pdf(
+        &scene,
+        |font| {
+            (font == DEVANAGARI_FONT_ID).then_some(PdfFontResource {
+                bytes: NOTO_SANS_DEVANAGARI,
+                face_index: 0,
+                variations: &[],
+            })
+        },
+        |_| None,
+    )
+    .unwrap();
+
+    assert!(
+        decoded_streams(&pdf).iter().any(|stream| {
+            contains(stream, b"/ActualText") && contains(stream, b"0919094D0919")
+        })
     );
 }
 
