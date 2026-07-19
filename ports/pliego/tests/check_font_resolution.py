@@ -48,6 +48,9 @@ def render(
 ) -> dict[str, Any]:
     home = root / f"home-{host}"
     home.mkdir()
+    runtime = home / "runtime"
+    runtime.mkdir()
+    runtime.chmod(0o700)
     environment = os.environ.copy()
     environment.update(
         {
@@ -55,6 +58,7 @@ def render(
             "XDG_CACHE_HOME": str(home / "cache"),
             "XDG_CONFIG_HOME": str(home / "config"),
             "XDG_DATA_HOME": str(home / "data"),
+            "XDG_RUNTIME_DIR": str(runtime),
         }
     )
     output = root / f"{host}.pdf"

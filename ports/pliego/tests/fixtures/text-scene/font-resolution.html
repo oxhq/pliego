@@ -20,8 +20,22 @@
     <p>PLIEGO FONT FALLBACK</p>
     <script>
       queueMicrotask(async () => {
-        await document.fonts.ready;
-        window.pliego?.ready({ fixture: 'font-resolution' });
+        try {
+          for (let attempt = 0; !window.pliego && attempt < 120; attempt += 1) {
+            await new Promise(requestAnimationFrame);
+          }
+          if (!window.pliego) throw new Error('Pliego bridge was not installed');
+          if (!(await document.fonts.load('12px "Pliego Fixture"', 'PLIEGO FONT FALLBACK')).length) {
+            throw new Error('Pliego Fixture did not load');
+          }
+          await document.fonts.ready;
+          window.pliego.ready({ fixture: 'font-resolution' });
+        } catch (error) {
+          window.pliego?.fail({
+            code: 'FIXTURE_FONT_LOAD_FAILED',
+            message: String(error),
+          });
+        }
       });
     </script>
   </body>
