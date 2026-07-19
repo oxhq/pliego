@@ -6598,11 +6598,13 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "flate2",
+ "http 1.4.2",
  "imagesize",
  "krilla",
  "libc",
  "serde",
  "serde_json",
+ "servo-canvas",
  "servo-layout",
  "servoshell",
  "sha2 0.11.0",

@@ -29,9 +29,9 @@ use layout_api::{
     ScrollContainerResponse, TrustedNodeAddress, with_layout_state,
 };
 use layout_api::{
-    LayoutDebugFontInstance, LayoutDebugFontResource, LayoutDebugFontVariation, LayoutDebugFragment,
-    LayoutDebugGlyph, LayoutDebugRect, LayoutDebugSnapshot, LayoutDebugTextRun,
-    LayoutDebugUtf8Range,
+    LayoutDebugCanvasImageKey, LayoutDebugFontInstance, LayoutDebugFontResource,
+    LayoutDebugFontVariation, LayoutDebugFragment, LayoutDebugGlyph, LayoutDebugRect,
+    LayoutDebugSnapshot, LayoutDebugTextRun, LayoutDebugUtf8Range,
 };
 use log::{debug, warn};
 use malloc_size_of::{MallocConditionalSizeOf, MallocSizeOf, MallocSizeOfOps};
@@ -543,6 +543,15 @@ impl Layout for LayoutThread {
                         image_url: match fragment {
                             Fragment::Image(image_fragment) => {
                                 image_fragment.url.as_ref().map(ToString::to_string)
+                            },
+                            _ => None,
+                        },
+                        canvas_image_key: match fragment {
+                            Fragment::Image(image_fragment) if image_fragment.url.is_none() => {
+                                image_fragment.image_key.map(|key| LayoutDebugCanvasImageKey {
+                                    namespace: key.0.0,
+                                    key: key.1,
+                                })
                             },
                             _ => None,
                         },

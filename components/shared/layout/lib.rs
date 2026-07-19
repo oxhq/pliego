@@ -391,13 +391,22 @@ pub struct LayoutDebugFragment {
     pub paint_fragment_id: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text_run: Option<LayoutDebugTextRun>,
-    /// The resolved source URL retained by laid-out image fragments. Runtime-only
-    /// WebRender image keys are deliberately excluded from this stable snapshot.
+    /// The resolved source URL retained by laid-out image fragments.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_url: Option<String>,
+    /// Runtime join key for an in-process Canvas command snapshot. It is diagnostic-only and must
+    /// never enter canonical scene identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canvas_image_key: Option<LayoutDebugCanvasImageKey>,
     /// Renderer-neutral vector content retained from the already parsed SVG image.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vector_image: Option<VectorImageSnapshot>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+pub struct LayoutDebugCanvasImageKey {
+    pub namespace: u32,
+    pub key: u32,
 }
 
 /// A fragment-level event observed by the real display-list paint traversal.

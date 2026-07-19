@@ -11,17 +11,36 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use vello_cpu::kurbo::{BezPath, Shape};
 
+use crate::hybrid_canvas::{
+    CanvasDiagnostics, CanvasResource, CanvasTranscript, HybridCanvasCapture, adapt_canvas,
+};
 use crate::{Color, DocumentScene, FillRule, Glyph, Operation, OperationMeta, Page, Rect, Size};
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct SceneCapture {
     pub scene: DocumentScene,
+    #[serde(skip_serializing)]
+    pub canvas_resources: Vec<CanvasResource>,
+    pub canvas_diagnostics: Vec<CapturedCanvasDiagnostics>,
     pub font_resources: Vec<CapturedFontResource>,
     pub font_instances: Vec<CapturedFontInstance>,
     pub font_selections: Vec<CapturedFontSelection>,
     pub font_warnings: Vec<CapturedFontWarning>,
     pub unsupported_events: Vec<UnsupportedPaintEvent>,
     pub text_mapping_gaps: Vec<MissingTextMapping>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct CapturedCanvasDiagnostics {
+    pub sequence: usize,
+    pub diagnostics: CanvasDiagnostics,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct CapturedCanvasImageKey {
+    pub namespace: u32,
+    pub key: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -186,6 +205,10 @@ pub enum CaptureError {
         sequence: usize,
         url: String,
     },
+    Canvas {
+        sequence: usize,
+        message: String,
+    },
     MissingLinkRect {
         sequence: usize,
     },
@@ -328,6 +351,12 @@ impl fmt::Display for CaptureError {
                 formatter,
                 "image paint event {sequence} has no content address for {url}"
             ),
+            Self::Canvas { sequence, message } => {
+                write!(
+                    formatter,
+                    "Canvas paint event {sequence} cannot be retained: {message}"
+                )
+            },
             Self::MissingLinkRect { sequence } => write!(
                 formatter,
                 "linked paint event {sequence} has no retained rectangle"
@@ -391,7 +420,20 @@ impl std::error::Error for CaptureError {}
 /// reduced to a portable source kind in the inspect report.
 pub fn capture_document_scene(
     snapshot_json: &[u8],
+    resolve_image: impl FnMut(&str) -> Option<String>,
+) -> Result<SceneCapture, CaptureError> {
+    capture_document_scene_with_canvas(snapshot_json, resolve_image, |key| {
+        Err(format!(
+            "no live snapshot resolver for image key {}:{}",
+            key.namespace, key.key
+        ))
+    })
+}
+
+pub fn capture_document_scene_with_canvas(
+    snapshot_json: &[u8],
     mut resolve_image: impl FnMut(&str) -> Option<String>,
+    mut resolve_canvas: impl FnMut(CapturedCanvasImageKey) -> Result<CanvasTranscript, String>,
 ) -> Result<SceneCapture, CaptureError> {
     let capture: LayoutCapture = serde_json::from_slice(snapshot_json)
         .map_err(|error| CaptureError::InvalidJson(error.to_string()))?;
@@ -407,6 +449,8 @@ pub fn capture_document_scene(
     let mut font_selections = BTreeMap::new();
     let mut font_warnings = BTreeMap::new();
     let mut operations = Vec::new();
+    let mut canvas_resources = BTreeMap::<String, CanvasResource>::new();
+    let mut canvas_diagnostics = Vec::new();
     let mut stacking_context_depth = 0usize;
 
     for (expected_sequence, event) in capture.paint_events.iter().enumerate() {
@@ -574,6 +618,38 @@ pub fn capture_document_scene(
                     )?;
                     continue;
                 }
+                if let Some(key) = fragment.canvas_image_key {
+                    let transcript =
+                        resolve_canvas(key).map_err(|message| CaptureError::Canvas {
+                            sequence: event.sequence,
+                            message,
+                        })?;
+                    let canvas =
+                        adapt_canvas(transcript).map_err(|error| CaptureError::Canvas {
+                            sequence: event.sequence,
+                            message: error.to_string(),
+                        })?;
+                    append_canvas(
+                        &mut operations,
+                        &mut canvas_resources,
+                        &canvas,
+                        rect,
+                        event.sequence,
+                    )?;
+                    canvas_diagnostics.push(CapturedCanvasDiagnostics {
+                        sequence: event.sequence,
+                        diagnostics: canvas.diagnostics,
+                    });
+                    append_link(
+                        &mut operations,
+                        &mut emitted_links,
+                        &links,
+                        fragment_id,
+                        fragment,
+                        event.sequence,
+                    )?;
+                    continue;
+                }
                 let bounds = rect.into_scene_rect();
                 let url = fragment
                     .image_url
@@ -657,6 +733,8 @@ pub fn capture_document_scene(
 
     Ok(SceneCapture {
         scene,
+        canvas_resources: canvas_resources.into_values().collect(),
+        canvas_diagnostics,
         font_resources: font_resources.into_values().collect(),
         font_instances: font_instances.into_values().collect(),
         font_selections: font_selections.into_values().collect(),
@@ -664,6 +742,105 @@ pub fn capture_document_scene(
         unsupported_events,
         text_mapping_gaps,
     })
+}
+
+fn append_canvas(
+    operations: &mut Vec<PositionedOperation>,
+    resources: &mut BTreeMap<String, CanvasResource>,
+    canvas: &HybridCanvasCapture,
+    destination: &CaptureRect,
+    sequence: usize,
+) -> Result<(), CaptureError> {
+    let source_page = &canvas.scene.pages[0];
+    if source_page.size.width <= 0.0
+        || source_page.size.height <= 0.0
+        || destination.width <= 0.0
+        || destination.height <= 0.0
+    {
+        return Err(CaptureError::Canvas {
+            sequence,
+            message: "Canvas source and destination must have positive dimensions".into(),
+        });
+    }
+    for resource in &canvas.resources {
+        if let Some(existing) = resources.get(&resource.resource)
+            && existing.png != resource.png
+        {
+            return Err(CaptureError::Canvas {
+                sequence,
+                message: format!(
+                    "Canvas resource {} has conflicting bytes",
+                    resource.resource
+                ),
+            });
+        }
+        resources
+            .entry(resource.resource.clone())
+            .or_insert_with(|| resource.clone());
+    }
+
+    let destination = destination.into_scene_rect();
+    let scale_x = destination.width / source_page.size.width;
+    let scale_y = destination.height / source_page.size.height;
+    for operation in &source_page.operations {
+        let operation = match operation {
+            Operation::Path {
+                bounds,
+                fill,
+                fill_rule,
+                stroke,
+                meta,
+                ..
+            } => {
+                let bounds = place_canvas_rect(bounds, &destination, scale_x, scale_y);
+                Operation::Path {
+                    data: format!(
+                        "M{} {}h{}v{}h-{}z",
+                        bounds.x, bounds.y, bounds.width, bounds.height, bounds.width
+                    ),
+                    bounds,
+                    fill: *fill,
+                    fill_rule: *fill_rule,
+                    stroke: stroke.clone(),
+                    meta: meta.clone(),
+                }
+            },
+            Operation::Image {
+                bounds,
+                resource,
+                meta,
+            } => Operation::Image {
+                bounds: place_canvas_rect(bounds, &destination, scale_x, scale_y),
+                resource: resource.clone(),
+                meta: meta.clone(),
+            },
+            Operation::Text { .. } | Operation::Link { .. } => {
+                return Err(CaptureError::Canvas {
+                    sequence,
+                    message: "hybrid Canvas adapter emitted an unexpected operation".into(),
+                });
+            },
+        };
+        let bounds = match &operation {
+            Operation::Path { bounds, .. } | Operation::Image { bounds, .. } => bounds.clone(),
+            Operation::Text { .. } | Operation::Link { .. } => unreachable!(),
+        };
+        operations.push(PositionedOperation {
+            sequence,
+            bounds,
+            operation,
+        });
+    }
+    Ok(())
+}
+
+fn place_canvas_rect(source: &Rect, destination: &Rect, scale_x: f64, scale_y: f64) -> Rect {
+    Rect {
+        x: destination.x + source.x * scale_x,
+        y: destination.y + source.y * scale_y,
+        width: source.width * scale_x,
+        height: source.height * scale_y,
+    }
 }
 
 fn captured_font_source(identifier: &serde_json::Value) -> CapturedFontSource {
@@ -1235,6 +1412,8 @@ struct CaptureFragment {
     paint_fragment_id: Option<usize>,
     text_run: Option<CaptureTextRun>,
     image_url: Option<String>,
+    #[serde(default)]
+    canvas_image_key: Option<CapturedCanvasImageKey>,
     #[serde(default)]
     vector_image: Option<CaptureVectorImage>,
 }

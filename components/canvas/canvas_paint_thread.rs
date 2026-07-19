@@ -18,6 +18,10 @@ use servo_canvas_traits::canvas::*;
 use webrender_api::ImageKey;
 
 use crate::canvas_data::*;
+use crate::retained_canvas::{
+    RetainedCanvasUnsupportedReason, associate_image_key, finish_canvas, mark_unsupported,
+    recreate_canvas, register_canvas, retain_fill_rect, retain_pixel_readback,
+};
 
 pub struct CanvasPaintThread {
     canvases: FxHashMap<CanvasId, Canvas>,
@@ -95,6 +99,7 @@ impl CanvasPaintThread {
 
         let canvas = Canvas::new(size, self.paint_api.clone())?;
         self.canvases.insert(canvas_id, canvas);
+        register_canvas(canvas_id, size);
 
         Some(canvas_id)
     }
@@ -105,12 +110,17 @@ impl CanvasPaintThread {
     )]
     fn process_command(&mut self, message: CanvasCommand, canvas_id: CanvasId) {
         match message {
-            CanvasCommand::Recreate(size) => self.canvas(canvas_id).recreate(size),
+            CanvasCommand::Recreate(size) => {
+                self.canvas(canvas_id).recreate(size);
+                recreate_canvas(canvas_id, size);
+            },
             CanvasCommand::Destroy => {
                 self.canvases.remove(&canvas_id);
+                finish_canvas(canvas_id);
             },
             CanvasCommand::SetImageKey(image_key) => {
                 self.canvas(canvas_id).set_image_key(image_key);
+                associate_image_key(canvas_id, image_key);
             },
             CanvasCommand::FillText(
                 text_bounds,
@@ -120,6 +130,11 @@ impl CanvasPaintThread {
                 composition_options,
                 transform,
             ) => {
+                mark_unsupported(
+                    canvas_id,
+                    "fill_text",
+                    RetainedCanvasUnsupportedReason::UnsupportedCommand,
+                );
                 self.canvas(canvas_id).fill_text(
                     text_bounds,
                     text_runs,
@@ -138,6 +153,11 @@ impl CanvasPaintThread {
                 composition_options,
                 transform,
             ) => {
+                mark_unsupported(
+                    canvas_id,
+                    "stroke_text",
+                    RetainedCanvasUnsupportedReason::UnsupportedCommand,
+                );
                 self.canvas(canvas_id).stroke_text(
                     text_bounds,
                     text_runs,
@@ -155,6 +175,14 @@ impl CanvasPaintThread {
                 composition_options,
                 transform,
             ) => {
+                retain_fill_rect(
+                    canvas_id,
+                    &rect,
+                    &style,
+                    &shadow_options,
+                    composition_options,
+                    transform,
+                );
                 self.canvas(canvas_id).fill_rect(
                     &rect,
                     style,
@@ -171,6 +199,11 @@ impl CanvasPaintThread {
                 composition_options,
                 transform,
             ) => {
+                mark_unsupported(
+                    canvas_id,
+                    "stroke_rect",
+                    RetainedCanvasUnsupportedReason::UnsupportedCommand,
+                );
                 self.canvas(canvas_id).stroke_rect(
                     &rect,
                     style,
@@ -181,7 +214,12 @@ impl CanvasPaintThread {
                 );
             },
             CanvasCommand::ClearRect(ref rect, transform) => {
-                self.canvas(canvas_id).clear_rect(rect, transform)
+                self.canvas(canvas_id).clear_rect(rect, transform);
+                mark_unsupported(
+                    canvas_id,
+                    "clear_rect",
+                    RetainedCanvasUnsupportedReason::UnsupportedCommand,
+                );
             },
             CanvasCommand::FillPath(
                 style,
@@ -191,6 +229,11 @@ impl CanvasPaintThread {
                 composition_options,
                 transform,
             ) => {
+                mark_unsupported(
+                    canvas_id,
+                    "fill_path",
+                    RetainedCanvasUnsupportedReason::UnsupportedCommand,
+                );
                 self.canvas(canvas_id).fill_path(
                     &path,
                     fill_rule,
@@ -208,6 +251,11 @@ impl CanvasPaintThread {
                 composition_options,
                 transform,
             ) => {
+                mark_unsupported(
+                    canvas_id,
+                    "stroke_path",
+                    RetainedCanvasUnsupportedReason::UnsupportedCommand,
+                );
                 self.canvas(canvas_id).stroke_path(
                     &path,
                     style,
@@ -220,6 +268,11 @@ impl CanvasPaintThread {
             CanvasCommand::ClipPath(path, fill_rule, transform) => {
                 self.canvas(canvas_id)
                     .clip_path(&path, fill_rule, transform);
+                mark_unsupported(
+                    canvas_id,
+                    "clip_path",
+                    RetainedCanvasUnsupportedReason::Clip,
+                );
             },
             CanvasCommand::DrawImage(
                 snapshot,
@@ -229,15 +282,22 @@ impl CanvasPaintThread {
                 shadow_options,
                 composition_options,
                 transform,
-            ) => self.canvas(canvas_id).draw_image(
-                snapshot.to_owned(),
-                dest_rect,
-                source_rect,
-                smoothing_enabled,
-                shadow_options,
-                composition_options,
-                transform,
-            ),
+            ) => {
+                self.canvas(canvas_id).draw_image(
+                    snapshot.to_owned(),
+                    dest_rect,
+                    source_rect,
+                    smoothing_enabled,
+                    shadow_options,
+                    composition_options,
+                    transform,
+                );
+                mark_unsupported(
+                    canvas_id,
+                    "draw_image",
+                    RetainedCanvasUnsupportedReason::UnsupportedCommand,
+                );
+            },
             CanvasCommand::DrawEmptyImage(
                 image_size,
                 dest_rect,
@@ -245,15 +305,22 @@ impl CanvasPaintThread {
                 shadow_options,
                 composition_options,
                 transform,
-            ) => self.canvas(canvas_id).draw_image(
-                Snapshot::cleared(image_size),
-                dest_rect,
-                source_rect,
-                false,
-                shadow_options,
-                composition_options,
-                transform,
-            ),
+            ) => {
+                self.canvas(canvas_id).draw_image(
+                    Snapshot::cleared(image_size),
+                    dest_rect,
+                    source_rect,
+                    false,
+                    shadow_options,
+                    composition_options,
+                    transform,
+                );
+                mark_unsupported(
+                    canvas_id,
+                    "draw_empty_image",
+                    RetainedCanvasUnsupportedReason::UnsupportedCommand,
+                );
+            },
             CanvasCommand::DrawImageInOther(
                 other_canvas_id,
                 dest_rect,
@@ -275,9 +342,15 @@ impl CanvasPaintThread {
                     composition_options,
                     transform,
                 );
+                mark_unsupported(
+                    other_canvas_id,
+                    "draw_image_in_other",
+                    RetainedCanvasUnsupportedReason::UnsupportedCommand,
+                );
             },
             CanvasCommand::GetImageData(dest_rect, sender) => {
                 let snapshot = self.canvas(canvas_id).read_pixels(dest_rect);
+                retain_pixel_readback(canvas_id, dest_rect, &snapshot);
                 if let Err(error) = sender.send(snapshot.to_shared()) {
                     warn!("GetImageData response failed ({error})");
                 }
@@ -285,6 +358,11 @@ impl CanvasPaintThread {
             CanvasCommand::PutImageData(rect, snapshot) => {
                 self.canvas(canvas_id)
                     .put_image_data(snapshot.to_owned(), rect);
+                mark_unsupported(
+                    canvas_id,
+                    "put_image_data",
+                    RetainedCanvasUnsupportedReason::UnsupportedCommand,
+                );
             },
             CanvasCommand::UpdateImage(canvas_epoch) => {
                 self.canvas(canvas_id).update_image_rendering(canvas_epoch);

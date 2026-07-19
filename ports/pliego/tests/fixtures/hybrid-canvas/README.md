@@ -5,9 +5,8 @@ identity transform, source-over composition, and no clip, shadow, or filter. `ra
 the already-computed premultiplied RGBA pixels for one pixel-dependent region; Pliego places only
 that patch as an image and reports its typed reason, bounds, and pixel area.
 
-This is an adapter fixture, not live browser Canvas capture. Servo's serializable `CanvasCommand`
-stream is consumed by `CanvasPaintThread`; layout retains only a runtime `ImageKey`, so Pliego
-cannot yet recover the commands or pixels from `Layout::debug_snapshot`. A future bridge must
-retain the live commands before this adapter can be connected. WebGL, text, transforms, gradients,
-clipping, shadows, compositing, and general filters are unsupported here. The prototype uses one
-scene unit per patch pixel; scaled patches are left for the live bridge.
+`live.html` proves the matching browser path: JavaScript commands are retained at
+`CanvasPaintThread`, joined to the laid-out element by its runtime `ImageKey`, and scaled into the
+document scene. WebGL, text, transforms, gradients, clipping, shadows, compositing, and general
+filters remain typed unsupported commands. Pixel readback is retained only as its bounded RGBA
+patch; the normal Servo Canvas raster and continuous layout behavior are unchanged.

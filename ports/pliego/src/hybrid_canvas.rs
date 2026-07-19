@@ -6,6 +6,9 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
+use servo_canvas::retained_canvas::{
+    RetainedCanvasCommand, RetainedCanvasFallbackReason, RetainedCanvasSnapshot,
+};
 use sha2::{Digest, Sha256};
 use vello_cpu::Pixmap;
 
@@ -15,9 +18,8 @@ use crate::{
 
 /// Stable prototype input for the Canvas subset that Pliego can preserve without pixels.
 ///
-/// This is deliberately not Servo's `CanvasCommand`: Servo currently consumes that stream in its
-/// paint thread and exposes only a runtime `ImageKey` to layout. A later bridge must translate the
-/// live stream into this retained form before this adapter can be used by document capture.
+/// This is deliberately not Servo's full `CanvasCommand`: the paint thread translates the bounded
+/// subset into this stable form while preserving the normal raster Canvas path.
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CanvasTranscript {
@@ -100,6 +102,10 @@ pub enum CanvasError {
         actual: usize,
     },
     RasterEncoding(String),
+    UnsupportedLiveCommand {
+        command: &'static str,
+        reason: String,
+    },
 }
 
 impl fmt::Display for CanvasError {
@@ -123,11 +129,84 @@ impl fmt::Display for CanvasError {
             Self::RasterEncoding(message) => {
                 write!(formatter, "cannot encode hybrid Canvas patch: {message}")
             },
+            Self::UnsupportedLiveCommand { command, reason } => write!(
+                formatter,
+                "live Canvas command {command} is outside the retained subset: {reason}"
+            ),
         }
     }
 }
 
 impl std::error::Error for CanvasError {}
+
+pub fn transcript_from_retained(
+    snapshot: RetainedCanvasSnapshot,
+) -> Result<CanvasTranscript, CanvasError> {
+    if let Some(unsupported) = snapshot.unsupported {
+        return Err(CanvasError::UnsupportedLiveCommand {
+            command: unsupported.command,
+            reason: format!("{:?}", unsupported.reason).to_ascii_lowercase(),
+        });
+    }
+    Ok(CanvasTranscript {
+        size: Size {
+            width: f64::from(snapshot.width),
+            height: f64::from(snapshot.height),
+        },
+        commands: snapshot
+            .commands
+            .into_iter()
+            .map(|command| match command {
+                RetainedCanvasCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    red,
+                    green,
+                    blue,
+                    alpha,
+                } => CanvasCommand::FillRect {
+                    bounds: Rect {
+                        x,
+                        y,
+                        width,
+                        height,
+                    },
+                    color: Color {
+                        r: red,
+                        g: green,
+                        b: blue,
+                        a: alpha,
+                    },
+                },
+                RetainedCanvasCommand::RasterPatch {
+                    x,
+                    y,
+                    width,
+                    height,
+                    premultiplied_rgba,
+                    reason,
+                } => CanvasCommand::RasterPatch {
+                    bounds: Rect {
+                        x,
+                        y,
+                        width: f64::from(width),
+                        height: f64::from(height),
+                    },
+                    width,
+                    height,
+                    premultiplied_rgba,
+                    reason: match reason {
+                        RetainedCanvasFallbackReason::PixelReadback => {
+                            CanvasFallbackReason::PixelReadback
+                        },
+                    },
+                },
+            })
+            .collect(),
+    })
+}
 
 pub fn adapt_canvas(transcript: CanvasTranscript) -> Result<HybridCanvasCapture, CanvasError> {
     DocumentScene::new(Page {

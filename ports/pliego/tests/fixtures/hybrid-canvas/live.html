@@ -1,0 +1,16 @@
+<!doctype html>
+<meta charset="utf-8">
+<style>
+  html, body { margin: 0; }
+  canvas { display: block; width: 160px; height: 120px; }
+</style>
+<canvas id="chart" width="16" height="12"></canvas>
+<script>
+  const context = document.querySelector("#chart").getContext("2d");
+  context.fillStyle = "rgb(26, 102, 204)";
+  context.fillRect(1, 7, 3, 4);
+  context.fillRect(6, 4, 3, 7);
+  context.fillRect(11, 1, 3, 10);
+  const pixels = context.getImageData(6, 4, 2, 2);
+  window.pliego.ready({ fixture: "live-hybrid-canvas", readbackBytes: pixels.data.length });
+</script>

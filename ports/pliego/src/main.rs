@@ -25,7 +25,7 @@ use layout::pages::{PageDefinition, PageMargins};
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
 use pliego::Operation;
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
-use pliego::capture::{CapturedFontSource, SceneCapture, capture_document_scene};
+use pliego::capture::{CapturedFontSource, SceneCapture, capture_document_scene_with_canvas};
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
 use pliego::pdf::{CSS_PX_TO_PDF_PT, PdfFontResource, PdfFontVariation, render_document_pdf};
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
@@ -915,6 +915,7 @@ fn render(request: RenderRequest) {
     let captured_policy_failures = Rc::clone(&policy_failures);
     let document_root = document.root().to_owned();
     let active_resource_policy = resource_policy.clone();
+    let _canvas_retention = servo_canvas::retained_canvas::start_retaining_canvas_commands();
     let result = servoshell::run_with_stable_javascript_and_console_and_web_resource_policy(
         &servo_args,
         readiness::HOST_EVALUATION_EXPRESSION,
@@ -1076,18 +1077,33 @@ fn render(request: RenderRequest) {
         });
     let layout_debug_path = artifacts.directory().join("layout-debug.json");
     let mut resource_resolution_error = None;
-    let scene_capture = capture_document_scene(layout_debug_json.as_bytes(), |url| {
-        if resource_resolution_error.is_some() {
-            return None;
-        }
-        match resolve_scene_resource(&artifacts, &resource_capture, url) {
-            Ok(resource) => resource,
-            Err(error) => {
-                resource_resolution_error = Some(error);
-                None
-            },
-        }
-    });
+    let scene_capture = capture_document_scene_with_canvas(
+        layout_debug_json.as_bytes(),
+        |url| {
+            if resource_resolution_error.is_some() {
+                return None;
+            }
+            match resolve_scene_resource(&artifacts, &resource_capture, url) {
+                Ok(resource) => resource,
+                Err(error) => {
+                    resource_resolution_error = Some(error);
+                    None
+                },
+            }
+        },
+        |key| {
+            let snapshot =
+                servo_canvas::retained_canvas::snapshot_for_image_key(key.namespace, key.key)
+                    .ok_or_else(|| {
+                        format!(
+                            "no retained command snapshot for image key {}:{}",
+                            key.namespace, key.key
+                        )
+                    })?;
+            pliego::hybrid_canvas::transcript_from_retained(snapshot)
+                .map_err(|error| error.to_string())
+        },
+    );
     if let Some(error) = resource_resolution_error {
         fail_session(&artifacts, &document_pdf_path, error.code, &error.message);
     }
@@ -1767,7 +1783,21 @@ fn persist_scene_capture(
         .map(|instance| (instance.id.clone(), instance))
         .collect::<BTreeMap<_, _>>();
 
-    let mut image_resources = BTreeMap::<String, Vec<u8>>::new();
+    let mut image_resources = capture
+        .canvas_resources
+        .iter()
+        .map(|resource| (resource.resource.clone(), resource.png.clone()))
+        .collect::<BTreeMap<_, _>>();
+    for (resource, bytes) in &image_resources {
+        artifacts
+            .write_content_addressed_resource(resource, bytes)
+            .map_err(|error| {
+                SceneArtifactError::new(
+                    "SCENE_CAPTURE_CANVAS_RESOURCE_WRITE_FAILED",
+                    format!("cannot persist Canvas resource {resource}: {error}"),
+                )
+            })?;
+    }
     let mut image_resource_errors = BTreeMap::<String, String>::new();
     for operation in capture
         .scene
@@ -2061,6 +2091,7 @@ fn persist_scene_capture(
             "code": capture_code,
             "unsupported_events": capture.unsupported_events,
             "text_mapping_gaps": capture.text_mapping_gaps,
+            "canvases": capture.canvas_diagnostics,
         },
         "preview": {
             "status": preview_status,
@@ -2919,6 +2950,8 @@ mod tests {
         scene.pages.push(page);
         let capture = SceneCapture {
             scene,
+            canvas_resources: vec![],
+            canvas_diagnostics: vec![],
             font_resources: vec![],
             font_instances: vec![],
             font_selections: vec![],
@@ -2980,6 +3013,8 @@ mod tests {
                     meta: OperationMeta::default(),
                 }],
             }),
+            canvas_resources: vec![],
+            canvas_diagnostics: vec![],
             font_resources: vec![CapturedFontResource {
                 resource: resource.clone(),
                 bytes_base64: BASE64_STANDARD.encode(DEJAVU_SANS),
@@ -3181,6 +3216,8 @@ mod tests {
                     meta: OperationMeta::default(),
                 }],
             }),
+            canvas_resources: vec![],
+            canvas_diagnostics: vec![],
             font_resources: vec![],
             font_instances: vec![],
             font_selections: vec![],
