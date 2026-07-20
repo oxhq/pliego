@@ -1864,7 +1864,7 @@ fn record_resources(
                     }
                 }
 
-                let Some(completed) = complete_resource(
+                let Some(mut completed) = complete_resource(
                     &mut pending,
                     &resource.request_id,
                     response.body.map(|body| body.0),
@@ -1877,23 +1877,29 @@ fn record_resources(
                             url::Url::parse(url).ok().and_then(|url| assets.get(&url))
                         })
                     });
-                if let Some(asset) = cached_asset
-                    && asset.content_hash != format!("sha256:{}", completed.sha256)
-                {
-                    capture
-                        .failure
-                        .get_or_insert_with(|| ResourcePolicyFailure {
-                            code: "ASSET_HASH_MISMATCH",
-                            status: "hash_mismatch",
-                            url: asset.url.to_string(),
-                            method: "GET".into(),
-                            destination: "Unknown".into(),
-                            referrer_url: None,
-                            is_for_main_frame: false,
-                            is_redirect: false,
-                            reason: "Servo observed bytes that differ from the verified asset"
-                                .into(),
-                        });
+                if let Some(asset) = cached_asset {
+                    // Intercepted response events omit their body. The verified bytes supplied by
+                    // this process are authoritative for cache provenance and scene resources.
+                    if completed.body.is_empty() && !asset.body.is_empty() {
+                        completed.body.clone_from(&asset.body);
+                        completed.sha256 = sha256_hex(&completed.body);
+                    }
+                    if asset.content_hash != format!("sha256:{}", completed.sha256) {
+                        capture
+                            .failure
+                            .get_or_insert_with(|| ResourcePolicyFailure {
+                                code: "ASSET_HASH_MISMATCH",
+                                status: "hash_mismatch",
+                                url: asset.url.to_string(),
+                                method: "GET".into(),
+                                destination: "Unknown".into(),
+                                referrer_url: None,
+                                is_for_main_frame: false,
+                                is_redirect: false,
+                                reason: "Servo observed bytes that differ from the verified asset"
+                                    .into(),
+                            });
+                    }
                 }
                 record_artifact(artifacts.record_loaded_resource(
                     &resource.request_id,

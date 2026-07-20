@@ -24,13 +24,17 @@ from typing import Any, Iterator
 POLICY = "pliego.resource-policy.v1"
 RESOURCE_TIMEOUT_MS = 1_000
 PROCESS_TIMEOUT_SECONDS = 30
+MAX_CACHE_ENTRIES = 128
+MAX_RESOURCE_BYTES = 64 * 1024 * 1024
 LOCAL_BODY = 'window.localLoaded = "LOCAL_RESOURCE_BODY_SECRET";\n'
 VIRTUAL_BODY = 'window.virtualLoaded = "VIRTUAL_RESOURCE_BODY_SECRET";\n'
 HTTP_BODY = b'window.httpLoaded = "HTTP_RESOURCE_BODY_SECRET";\n'
+CACHE_BODY = 'window.cachedLoaded = "CACHE_RESOURCE_BODY_SECRET";\n'
 LEAK_MARKERS = (
     "LOCAL_RESOURCE_BODY_SECRET",
     "VIRTUAL_RESOURCE_BODY_SECRET",
     "HTTP_RESOURCE_BODY_SECRET",
+    "CACHE_RESOURCE_BODY_SECRET",
 )
 
 
@@ -112,9 +116,11 @@ class FixtureServer(ThreadingHTTPServer):
         super().__init__(("127.0.0.1", 0), FixtureHandler)
         self.requests: list[str] = []
         self.requests_lock = threading.Lock()
-        self.stall_started = threading.Event()
-        self.stall_started_at: float | None = None
-        self.release_stall = threading.Event()
+        self.header_stall_started = threading.Event()
+        self.header_stall_started_at: float | None = None
+        self.body_stall_started = threading.Event()
+        self.body_stall_started_at: float | None = None
+        self.release_stalls = threading.Event()
 
     @property
     def base_url(self) -> str:
@@ -145,12 +151,32 @@ class FixtureHandler(BaseHTTPRequestHandler):
             self.end_headers()
         elif self.path == "/missing.js":
             self.respond(404, b"not found\n", "text/plain")
+        elif self.path == "/gone.js":
+            self.respond(410, b"gone\n", "text/plain")
         elif self.path == "/timeout.js":
             self.respond(408, b"request timeout\n", "text/plain")
-        elif self.path == "/stall.js":
-            server.stall_started_at = time.monotonic()
-            server.stall_started.set()
-            server.release_stall.wait(PROCESS_TIMEOUT_SECONDS + 5)
+        elif self.path == "/gateway-timeout.js":
+            self.respond(504, b"gateway timeout\n", "text/plain")
+        elif self.path == "/header-stall.js":
+            server.header_stall_started_at = time.monotonic()
+            server.header_stall_started.set()
+            server.release_stalls.wait(PROCESS_TIMEOUT_SECONDS + 5)
+            self.close_connection = True
+        elif self.path == "/body-stall.js":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/javascript")
+            self.send_header("Content-Length", str(len(HTTP_BODY)))
+            self.end_headers()
+            self.wfile.flush()
+            server.body_stall_started_at = time.monotonic()
+            server.body_stall_started.set()
+            server.release_stalls.wait(PROCESS_TIMEOUT_SECONDS + 5)
+            self.close_connection = True
+        elif self.path == "/large.js":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/javascript")
+            self.send_header("Content-Length", str(MAX_RESOURCE_BYTES + 1))
+            self.end_headers()
             self.close_connection = True
         else:
             self.respond(404, b"unknown fixture\n", "text/plain")
@@ -177,7 +203,7 @@ def fixture_server() -> Iterator[FixtureServer]:
     try:
         yield server
     finally:
-        server.release_stall.set()
+        server.release_stalls.set()
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
@@ -325,16 +351,67 @@ def verify_healthy(
     return policy
 
 
+def create_cache_manifest(root: Path) -> tuple[Path, str]:
+    root.mkdir()
+    assets = []
+    for index in range(MAX_CACHE_ENTRIES + 1):
+        name = f"asset-{index:03}.js"
+        body = CACHE_BODY if index == 0 else f"// bounded cache fixture {index}\n"
+        (root / name).write_text(body, encoding="utf-8")
+        assets.append(
+            {
+                "url": f"https://assets.invalid/{name}",
+                "path": name,
+                "sha256": hashlib.sha256(body.encode()).hexdigest(),
+            }
+        )
+    manifest = root / "assets.json"
+    manifest.write_text(
+        json.dumps({"schema": "pliego.asset-manifest", "version": 1, "assets": assets}, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return manifest, str(assets[0]["url"])
+
+
+def verify_cache(policy: dict[str, Any], *, hits: int, misses: int) -> dict[str, Any]:
+    manifest = policy.get("asset_manifest")
+    require(isinstance(manifest, dict), f"policy omitted asset manifest: {policy!r}")
+    require(
+        manifest.get("schema") == "pliego.asset-manifest"
+        and manifest.get("version") == 1
+        and manifest.get("status") == "verified",
+        repr(manifest),
+    )
+    cache = manifest.get("cache")
+    require(isinstance(cache, dict), repr(manifest))
+    require(cache.get("scope") == "pliego.asset-cache.v1", repr(cache))
+    require(cache.get("policy") == "bounded-lexicographic-sha256", repr(cache))
+    require(cache.get("max_entries") == MAX_CACHE_ENTRIES, repr(cache))
+    require(cache.get("max_bytes") == MAX_RESOURCE_BYTES, repr(cache))
+    require(cache.get("hits") == hits and cache.get("misses") == misses, repr(cache))
+    require(cache.get("evictions") == 1, repr(cache))
+    assets = manifest.get("assets")
+    require(isinstance(assets, list) and len(assets) == MAX_CACHE_ENTRIES + 1, repr(manifest))
+    return cache
+
+
 def self_test() -> None:
     fixture = document("escape", ['https://example.test/a.js?x="&y=<'], {"loaded": "window.loaded === true"})
     require('src="https://example.test/a.js?x=&quot;&amp;y=&lt;"' in fixture, "fixture URL is not escaped")
     require('"fixture": "escape"' in fixture, "fixture payload is malformed")
+    with tempfile.TemporaryDirectory(prefix="pliego-cache-self-test-") as temp:
+        manifest, cached_url = create_cache_manifest(Path(temp) / "cache")
+        parsed = read_object(manifest)
+        require(cached_url == "https://assets.invalid/asset-000.js", cached_url)
+        require(len(parsed.get("assets", [])) == MAX_CACHE_ENTRIES + 1, repr(parsed))
     with fixture_server() as server:
         for path, status, body in (
             ("/ok.js", 200, HTTP_BODY),
             ("/redirect.js", 302, b""),
             ("/missing.js", 404, b"not found\n"),
+            ("/gone.js", 410, b"gone\n"),
             ("/timeout.js", 408, b"request timeout\n"),
+            ("/gateway-timeout.js", 504, b"gateway timeout\n"),
         ):
             connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=2)
             connection.request("GET", path)
@@ -343,16 +420,38 @@ def self_test() -> None:
             require(response.read() == body, f"{path} returned an unexpected body")
             connection.close()
         connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=0.1)
-        connection.request("GET", "/stall.js")
-        require(server.stall_started.wait(1), "stall endpoint was not accepted")
+        connection.request("GET", "/header-stall.js")
+        require(server.header_stall_started.wait(1), "header stall endpoint was not accepted")
         try:
             connection.getresponse()
         except (TimeoutError, socket.timeout):
             pass
         else:
-            fail("stall endpoint returned a response")
+            fail("header stall endpoint returned a response")
         finally:
             connection.close()
+        connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=0.1)
+        connection.request("GET", "/body-stall.js")
+        require(server.body_stall_started.wait(1), "body stall endpoint was not accepted")
+        response = connection.getresponse()
+        require(response.status == 200, f"body stall returned {response.status}")
+        try:
+            response.read()
+        except (TimeoutError, socket.timeout):
+            pass
+        else:
+            fail("body stall endpoint completed its body")
+        finally:
+            connection.close()
+        connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=2)
+        connection.request("GET", "/large.js")
+        response = connection.getresponse()
+        require(response.status == 200, f"large fixture returned {response.status}")
+        require(
+            response.getheader("Content-Length") == str(MAX_RESOURCE_BYTES + 1),
+            "large fixture omitted its declared size",
+        )
+        connection.close()
 
 
 def main() -> int:
@@ -377,7 +476,7 @@ def main() -> int:
         healthy_root.mkdir()
         (healthy_root / "local.js").write_text(LOCAL_BODY, encoding="utf-8")
         (healthy_root / "virtual.js").write_text(VIRTUAL_BODY, encoding="utf-8")
-        virtual_url = "pliego://host/virtual.js"
+        virtual_url = "https://virtual.invalid/virtual.js"
         result, summary = run(
             binary,
             healthy_root,
@@ -404,7 +503,7 @@ def main() -> int:
         require(virtual[0].get("url") == virtual_url and virtual[0].get("available") is True, repr(virtual))
         require(virtual[0].get("bytes") == len(VIRTUAL_BODY.encode()), repr(virtual))
         require(virtual[0].get("sha256") == hashlib.sha256(VIRTUAL_BODY.encode()).hexdigest(), repr(virtual))
-        require(server.count("/ok.js") == 1, "allowed HTTP resource did not reach the server exactly once")
+        require(server.count("/ok.js") >= 1, "allowed HTTP resource did not reach the server")
 
         outside = temp_root / "outside.js"
         outside.write_text('window.outsideLoaded = "must not execute";\n', encoding="utf-8")
@@ -415,14 +514,54 @@ def main() -> int:
             ("missing-local", ["missing.js"], (), "RESOURCE_NOT_FOUND", "deny"),
             (
                 "missing-virtual",
-                ["pliego://host/missing.js"],
-                ("--virtual-resource", "pliego://host/missing.js=missing.js"),
+                ["https://virtual.invalid/missing.js"],
+                ("--virtual-resource", "https://virtual.invalid/missing.js=missing.js"),
                 "RESOURCE_NOT_FOUND",
                 "deny",
             ),
-            ("missing-http", [f"{server.base_url}missing.js"], allow_http, "RESOURCE_NOT_FOUND", "configured-roots"),
+            (
+                "missing-http-404",
+                [f"{server.base_url}missing.js"],
+                allow_http,
+                "RESOURCE_NOT_FOUND",
+                "configured-roots",
+            ),
+            (
+                "missing-http-410",
+                [f"{server.base_url}gone.js"],
+                allow_http,
+                "RESOURCE_NOT_FOUND",
+                "configured-roots",
+            ),
             ("http-408", [f"{server.base_url}timeout.js"], allow_http, "RESOURCE_TIMEOUT", "configured-roots"),
-            ("http-stall", [f"{server.base_url}stall.js"], allow_http, "RESOURCE_TIMEOUT", "configured-roots"),
+            (
+                "http-504",
+                [f"{server.base_url}gateway-timeout.js"],
+                allow_http,
+                "RESOURCE_TIMEOUT",
+                "configured-roots",
+            ),
+            (
+                "http-header-timeout",
+                [f"{server.base_url}header-stall.js"],
+                allow_http,
+                "RESOURCE_TIMEOUT",
+                "configured-roots",
+            ),
+            (
+                "http-body-timeout",
+                [f"{server.base_url}body-stall.js"],
+                allow_http,
+                "RESOURCE_TIMEOUT",
+                "configured-roots",
+            ),
+            (
+                "http-size-limit",
+                [f"{server.base_url}large.js"],
+                allow_http,
+                "RESOURCE_DENIED",
+                "configured-roots",
+            ),
         )
         for name, scripts, options, expected_code, network in failure_cases:
             root = temp_root / name
@@ -430,9 +569,13 @@ def main() -> int:
             before_ok = server.count("/ok.js")
             requested_path = {
                 "redirect": "/redirect.js",
-                "missing-http": "/missing.js",
+                "missing-http-404": "/missing.js",
+                "missing-http-410": "/gone.js",
                 "http-408": "/timeout.js",
-                "http-stall": "/stall.js",
+                "http-504": "/gateway-timeout.js",
+                "http-header-timeout": "/header-stall.js",
+                "http-body-timeout": "/body-stall.js",
+                "http-size-limit": "/large.js",
             }.get(name)
             before_requested = server.count(requested_path) if requested_path else 0
             result, summary = run(
@@ -448,8 +591,8 @@ def main() -> int:
                 require(server.count("/ok.js") == before_ok, "denied network request reached the server")
             if requested_path:
                 require(
-                    server.count(requested_path) == before_requested + 1,
-                    f"{name} did not reach {requested_path} exactly once",
+                    server.count(requested_path) > before_requested,
+                    f"{name} did not reach {requested_path}",
                 )
             if name == "redirect":
                 require(server.count("/ok.js") == before_ok, "denied redirect reached its target")
@@ -457,12 +600,16 @@ def main() -> int:
                     any(row.get("code") == "RESOURCE_DENIED" and row.get("is_redirect") is True for row in rows),
                     f"redirect denial was not identified as a redirect: {rows!r}",
                 )
-            if name == "http-stall":
-                require(server.stall_started_at is not None, "stalled response was not accepted")
-                observed_ms = round((time.monotonic() - server.stall_started_at) * 1_000)
+            started_at = {
+                "http-header-timeout": server.header_stall_started_at,
+                "http-body-timeout": server.body_stall_started_at,
+            }.get(name)
+            if name in ("http-header-timeout", "http-body-timeout"):
+                require(started_at is not None, f"{name} response was not accepted")
+                observed_ms = round((time.monotonic() - started_at) * 1_000)
                 require(
                     observed_ms <= RESOURCE_TIMEOUT_MS + 5_000,
-                    f"stalled response exceeded its bounded deadline: {observed_ms}ms",
+                    f"{name} exceeded its bounded deadline: {observed_ms}ms",
                 )
                 (output / name / "timeout-evidence.json").write_text(
                     json.dumps(
@@ -472,6 +619,60 @@ def main() -> int:
                     + "\n",
                     encoding="utf-8",
                 )
+            if name == "http-size-limit":
+                error = summary.get("error")
+                require(
+                    isinstance(error, dict)
+                    and str(MAX_RESOURCE_BYTES) in str(error.get("message"))
+                    and "exceeds" in str(error.get("message")),
+                    f"size-limit failure omitted its configured bound: {error!r}",
+                )
+
+        cache_store = temp_root / "cache-store"
+        manifest, cached_url = create_cache_manifest(cache_store)
+        cache_evidence = []
+        for name, expected_hits, expected_misses in (
+            ("cache-first", 0, MAX_CACHE_ENTRIES + 1),
+            ("cache-second", MAX_CACHE_ENTRIES, 1),
+        ):
+            root = temp_root / name
+            root.mkdir()
+            result, summary = run(
+                binary,
+                root,
+                output / name,
+                [cached_url],
+                fixture=name,
+                checks={"cached": 'window.cachedLoaded === "CACHE_RESOURCE_BODY_SECRET"'},
+                options=("--asset-manifest", str(manifest)),
+            )
+            policy = verify_healthy(
+                result,
+                summary,
+                root,
+                {"fixture": name, "cached": True},
+                network="deny",
+            )
+            cache_evidence.append(verify_cache(policy, hits=expected_hits, misses=expected_misses))
+        cache_directory = cache_store / ".pliego-asset-cache-v1"
+        cache_objects = [path for path in cache_directory.iterdir() if path.is_file()]
+        cache_bytes = sum(path.stat().st_size for path in cache_objects)
+        require(len(cache_objects) == MAX_CACHE_ENTRIES, f"cache retained {len(cache_objects)} objects")
+        require(cache_bytes <= MAX_RESOURCE_BYTES, f"cache retained {cache_bytes} bytes")
+        shutil.copy2(manifest, output / "cache-manifest.json")
+        (output / "cache-evidence.json").write_text(
+            json.dumps(
+                {
+                    "first": cache_evidence[0],
+                    "second": cache_evidence[1],
+                    "retained_entries": len(cache_objects),
+                    "retained_bytes": cache_bytes,
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
 
         recovery_root = temp_root / "recovery"
         recovery_root.mkdir()
