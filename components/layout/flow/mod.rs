@@ -32,7 +32,7 @@ use crate::flow::same_formatting_context_block::SameFormattingContextBlock;
 use crate::formatting_contexts::{Baselines, IndependentFormattingContext};
 use crate::fragment_tree::{
     BaseFragmentInfo, BlockLevelLayoutInfo, BoxFragment, CollapsedBlockMargins, CollapsedMargin,
-    Fragment, FragmentFlags, TextFragmentSource,
+    Fragment, FragmentFlags, SpecificLayoutInfo, TextFragmentSource,
 };
 use crate::geom::{
     AuOrAuto, LogicalRect, LogicalSides, LogicalSides1D, LogicalVec2, PhysicalPoint, PhysicalRect,
@@ -41,6 +41,7 @@ use crate::geom::{
 use crate::layout_box_base::{IndependentFormattingContextLayoutResult, LayoutBoxBase};
 use crate::pages::{
     BlockBoundaryPlacement, BlockPageBuilder, ChildPageBreaks, InlineLine, InlineResumePoint,
+    TableChildPlacement, TableRow,
 };
 use crate::positioned::{AbsolutelyPositionedBox, PositioningContext, PositioningContextLength};
 use crate::sizing::{
@@ -978,6 +979,21 @@ fn prepare_fragmentainer_boundary(
             ),
         }
     });
+    if let Some(table) = retained_table_rows(fragment, placement_state)
+        && let Some(placement) = page_builder.place_table_child(
+            child_index,
+            node,
+            placement_state.current_block_direction_position,
+            &table.rows,
+            breaks,
+        )
+    {
+        table.apply(
+            placement,
+            placement_state.containing_block.style.writing_mode,
+        );
+        return;
+    }
     if let Some((lines, line_fragments, box_fragment)) =
         retained_inline_lines(fragment, placement_state)
         && let Some(placement) = page_builder.place_inline_child(
@@ -1031,6 +1047,167 @@ fn prepare_fragmentainer_boundary(
 
 fn forces_page_break(value: BreakBetween) -> bool {
     matches!(value, BreakBetween::Always | BreakBetween::Page)
+}
+
+struct RetainedTableFragments<'a> {
+    rows: Vec<TableRow>,
+    row_fragments: Vec<&'a BoxFragment>,
+    row_groups: Vec<(usize, &'a BoxFragment)>,
+    grid: &'a BoxFragment,
+    wrapper: &'a BoxFragment,
+}
+
+impl RetainedTableFragments<'_> {
+    fn apply(&self, placement: TableChildPlacement, writing_mode: crate::WritingMode) {
+        for (row, translation) in self.row_fragments.iter().zip(&placement.row_translations) {
+            if translation.is_zero() {
+                continue;
+            }
+            row.base.translate_rect(
+                LogicalVec2 {
+                    inline: Au::zero(),
+                    block: *translation,
+                }
+                .to_physical_size(writing_mode),
+            );
+            row.clear_scrollable_overflow();
+        }
+
+        for (group_index, group) in &self.row_groups {
+            let added = self
+                .rows
+                .iter()
+                .zip(&placement.row_translations)
+                .filter_map(|(row, translation)| {
+                    (row.row_group_index == Some(*group_index)).then_some(*translation)
+                })
+                .max()
+                .unwrap_or_default();
+            grow_horizontal_box(group, added);
+        }
+        grow_horizontal_box(self.grid, placement.added_block_size);
+        grow_horizontal_box(self.wrapper, placement.added_block_size);
+    }
+}
+
+fn grow_horizontal_box(fragment: &BoxFragment, added_block_size: Au) {
+    if added_block_size.is_zero() {
+        return;
+    }
+    let mut rect = fragment.base.rect();
+    rect.size.height += added_block_size;
+    fragment.base.set_rect(rect);
+    fragment.clear_scrollable_overflow();
+}
+
+fn retained_table_rows<'a>(
+    fragment: &'a Fragment,
+    placement_state: &PlacementState,
+) -> Option<RetainedTableFragments<'a>> {
+    if !placement_state
+        .containing_block
+        .style
+        .writing_mode
+        .is_horizontal()
+    {
+        return None;
+    }
+    let Fragment::Box(wrapper) = fragment else {
+        return None;
+    };
+    let wrapper_writing_mode = wrapper.style().writing_mode;
+    if !wrapper.is_table_wrapper()
+        || !wrapper_writing_mode.is_horizontal()
+        || !wrapper_writing_mode.is_bidi_ltr()
+        || wrapper.children.len() != 1
+    {
+        return None;
+    }
+    let Fragment::Box(grid) = &wrapper.children[0] else {
+        return None;
+    };
+    if !grid.is_table_grid() {
+        return None;
+    }
+
+    let wrapper_block_start = placement_state.unplaced_content_block_start(wrapper)?;
+    let grid_block_start = wrapper_block_start + grid.base.rect().origin.y;
+    let mut rows = Vec::new();
+    let mut row_fragments = Vec::new();
+    let mut row_groups = Vec::new();
+
+    for child in &grid.children {
+        let Fragment::Box(child) = child else {
+            return None;
+        };
+        let info = child.specific_layout_info()?;
+        match *info {
+            SpecificLayoutInfo::TableRow {
+                row_index,
+                row_group_index: None,
+                has_rowspan: false,
+            } => {
+                let rect = child.base.rect();
+                rows.push(TableRow {
+                    row_index,
+                    row_group_index: None,
+                    block_start: grid_block_start + rect.origin.y,
+                    block_size: rect.size.height,
+                });
+                row_fragments.push(child.as_ref());
+            },
+            SpecificLayoutInfo::TableRowGroup {
+                row_group_index,
+                repeated: false,
+            } => {
+                drop(info);
+                let group_block_start = grid_block_start + child.base.rect().origin.y;
+                for row in &child.children {
+                    let Fragment::Box(row) = row else {
+                        return None;
+                    };
+                    let row_info = row.specific_layout_info()?;
+                    let SpecificLayoutInfo::TableRow {
+                        row_index,
+                        row_group_index: Some(actual_group_index),
+                        has_rowspan: false,
+                    } = *row_info
+                    else {
+                        return None;
+                    };
+                    if actual_group_index != row_group_index {
+                        return None;
+                    }
+                    let rect = row.base.rect();
+                    rows.push(TableRow {
+                        row_index,
+                        row_group_index: Some(row_group_index),
+                        block_start: group_block_start + rect.origin.y,
+                        block_size: rect.size.height,
+                    });
+                    row_fragments.push(row.as_ref());
+                }
+                row_groups.push((row_group_index, child.as_ref()));
+            },
+            _ => return None,
+        }
+    }
+    if rows.len() < 2
+        || rows
+            .iter()
+            .enumerate()
+            .any(|(expected, row)| row.row_index != expected)
+    {
+        return None;
+    }
+
+    Some(RetainedTableFragments {
+        rows,
+        row_fragments,
+        row_groups,
+        grid,
+        wrapper,
+    })
 }
 
 struct RetainedLineSource {

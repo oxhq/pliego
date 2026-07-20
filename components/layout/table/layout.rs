@@ -30,6 +30,7 @@ use style::values::generics::box_::BaselineShiftKeyword;
 use super::{
     ArcRefCell, CollapsedBorder, CollapsedBorderLine, SpecificTableGridInfo, Table, TableCaption,
     TableLayoutStyle, TableSlot, TableSlotCell, TableSlotCoordinates, TableTrack, TableTrackGroup,
+    TableTrackGroupType,
 };
 use crate::context::LayoutContext;
 use crate::dom::WeakLayoutBox;
@@ -1815,10 +1816,16 @@ impl<'a> TableLayout<'a> {
             }
 
             let row_is_collapsed = self.is_row_collapsed(row_index);
+            let row_has_rowspan = self.table.slots[row_index].iter().any(|slot| match slot {
+                TableSlot::Cell(cell) => cell.borrow().rowspan != 1,
+                TableSlot::Spanned(offsets) => offsets.iter().any(|offset| offset.y > 0),
+                TableSlot::Empty => false,
+            });
             let table_row = self.table.rows[row_index].borrow();
             let mut row_fragment_layout = RowFragmentLayout::new(
                 &table_row,
                 row_index,
+                row_has_rowspan,
                 &table_and_track_dimensions,
                 &self.table.style,
             );
@@ -1907,32 +1914,35 @@ impl<'a> TableLayout<'a> {
     }
 
     fn specific_layout_info_for_grid(&mut self) -> Option<SpecificLayoutInfo> {
-        mem::take(&mut self.collapsed_borders).map(|mut collapsed_borders| {
-            // TODO: It would probably be better to use `TableAndTrackDimensions`, since that
-            // has already taken care of collapsed tracks and knows the final track positions.
-            let mut track_sizes = LogicalVec2 {
-                inline: mem::take(&mut self.distributed_column_widths),
-                block: mem::take(&mut self.row_sizes),
-            };
-            for (column_index, column_size) in track_sizes.inline.iter_mut().enumerate() {
-                if self.is_column_collapsed(column_index) {
-                    mem::take(column_size);
-                }
+        let Some(mut collapsed_borders) = mem::take(&mut self.collapsed_borders) else {
+            return Some(SpecificLayoutInfo::TableGrid);
+        };
+        // TODO: It would probably be better to use `TableAndTrackDimensions`, since that
+        // has already taken care of collapsed tracks and knows the final track positions.
+        let mut track_sizes = LogicalVec2 {
+            inline: mem::take(&mut self.distributed_column_widths),
+            block: mem::take(&mut self.row_sizes),
+        };
+        for (column_index, column_size) in track_sizes.inline.iter_mut().enumerate() {
+            if self.is_column_collapsed(column_index) {
+                mem::take(column_size);
             }
-            for (row_index, row_size) in track_sizes.block.iter_mut().enumerate() {
-                if self.is_row_collapsed(row_index) {
-                    mem::take(row_size);
-                }
+        }
+        for (row_index, row_size) in track_sizes.block.iter_mut().enumerate() {
+            if self.is_row_collapsed(row_index) {
+                mem::take(row_size);
             }
-            let writing_mode = self.table.style.writing_mode;
-            if !writing_mode.is_bidi_ltr() {
-                track_sizes.inline.reverse();
-                collapsed_borders.inline.reverse();
-                for border_line in &mut collapsed_borders.block {
-                    border_line.reverse();
-                }
+        }
+        let writing_mode = self.table.style.writing_mode;
+        if !writing_mode.is_bidi_ltr() {
+            track_sizes.inline.reverse();
+            collapsed_borders.inline.reverse();
+            for border_line in &mut collapsed_borders.block {
+                border_line.reverse();
             }
-            SpecificLayoutInfo::TableGridWithCollapsedBorders(Box::new(SpecificTableGridInfo {
+        }
+        Some(SpecificLayoutInfo::TableGridWithCollapsedBorders(Box::new(
+            SpecificTableGridInfo {
                 collapsed_borders: if writing_mode.is_horizontal() {
                     PhysicalVec::new(collapsed_borders.inline, collapsed_borders.block)
                 } else {
@@ -1943,8 +1953,8 @@ impl<'a> TableLayout<'a> {
                 } else {
                     PhysicalVec::new(track_sizes.block, track_sizes.inline)
                 },
-            }))
-        })
+            },
+        )))
     }
 
     fn is_row_collapsed(&self, row_index: usize) -> bool {
@@ -2277,6 +2287,8 @@ impl<'a> TableLayout<'a> {
 
 struct RowFragmentLayout<'a> {
     row: &'a TableTrack,
+    row_index: usize,
+    has_rowspan: bool,
     rect: LogicalRect<Au>,
     containing_block: ContainingBlock<'a>,
     positioning_context: Option<PositioningContext>,
@@ -2287,6 +2299,7 @@ impl<'a> RowFragmentLayout<'a> {
     fn new(
         table_row: &'a TableTrack,
         index: usize,
+        has_rowspan: bool,
         dimensions: &TableAndTrackDimensions,
         table_style: &'a ComputedValues,
     ) -> Self {
@@ -2300,6 +2313,8 @@ impl<'a> RowFragmentLayout<'a> {
         };
         Self {
             row: table_row,
+            row_index: index,
+            has_rowspan,
             rect,
             positioning_context: PositioningContext::new_for_layout_box_base(&table_row.base),
             containing_block,
@@ -2348,7 +2363,11 @@ impl<'a> RowFragmentLayout<'a> {
             PhysicalSides::zero(), /* padding */
             PhysicalSides::zero(), /* border */
             PhysicalSides::zero(), /* margin */
-            None,                  /* specific_layout_info */
+            Some(SpecificLayoutInfo::TableRow {
+                row_index: self.row_index,
+                row_group_index: self.row.group_index,
+                has_rowspan: self.has_rowspan,
+            }),
         );
         row_fragment.set_does_not_paint_background();
 
@@ -2420,7 +2439,13 @@ impl RowGroupFragmentLayout {
             PhysicalSides::zero(), /* padding */
             PhysicalSides::zero(), /* border */
             PhysicalSides::zero(), /* margin */
-            None,                  /* specific_layout_info */
+            Some(SpecificLayoutInfo::TableRowGroup {
+                row_group_index: self.index,
+                repeated: matches!(
+                    row_group.group_type,
+                    TableTrackGroupType::HeaderGroup | TableTrackGroupType::FooterGroup
+                ),
+            }),
         );
         row_group_fragment.set_does_not_paint_background();
 

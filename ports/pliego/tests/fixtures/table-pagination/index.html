@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>Pliego table row pagination fixture</title>
+    <style>
+      body { margin: 0; font: 14px/20px sans-serif; }
+      #lead { height: 30px; }
+      table { border-spacing: 0; table-layout: fixed; width: 200px; }
+      tr { height: 36px; }
+      td { padding: 0; }
+      td:first-child { width: 60px; }
+    </style>
+  </head>
+  <body>
+    <div id="lead">Lead.</div>
+    <table id="ledger">
+      <tbody>
+        <tr><td>R0A</td><td>R0B</td></tr>
+        <tr><td>R1A</td><td>R1B</td></tr>
+        <tr><td>R2A</td><td>R2B</td></tr>
+        <tr><td>R3A</td><td>R3B</td></tr>
+        <tr><td>R4A</td><td>R4B</td></tr>
+        <tr><td>R5A</td><td>R5B</td></tr>
+        <tr><td>R6A</td><td>R6B</td></tr>
+        <tr><td>R7A</td><td>R7B</td></tr>
+      </tbody>
+    </table>
+    <script>
+      queueMicrotask(() => window.pliego?.ready({ fixture: 'table-pagination' }));
+    </script>
+  </body>
+</html>

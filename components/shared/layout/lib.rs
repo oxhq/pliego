@@ -305,6 +305,9 @@ pub struct LayoutDebugPageSequence {
     /// Continuation tokens recorded at page boundaries, in page order.
     #[serde(default)]
     pub continuations: Vec<LayoutDebugPageContinuation>,
+    /// Row-boundary break opportunities considered while retaining a laid-out table grid.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub table_breaks: Vec<LayoutDebugTableBreak>,
     /// Pagination warnings retained for document diagnostics.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<LayoutDebugPageWarning>,
@@ -339,6 +342,23 @@ pub enum LayoutDebugContinuation {
         shaping_result_index: usize,
         resume_page_index: usize,
     },
+    Table {
+        child_index: usize,
+        table_node: Option<u64>,
+        row_group_index: Option<usize>,
+        next_row_index: usize,
+        resume_page_index: usize,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LayoutDebugTableBreak {
+    pub page_index: usize,
+    pub table_node: Option<u64>,
+    pub row_group_index: Option<usize>,
+    pub next_row_index: usize,
+    pub selected: bool,
+    pub resume_page_index: Option<usize>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]

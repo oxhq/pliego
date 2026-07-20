@@ -59,7 +59,17 @@ pub(crate) struct ExtraBackground {
 pub(crate) enum SpecificLayoutInfo {
     Grid(Box<SpecificTaffyGridInfo>),
     TableCellWithCollapsedBorders,
+    TableGrid,
     TableGridWithCollapsedBorders(Box<SpecificTableGridInfo>),
+    TableRow {
+        row_index: usize,
+        row_group_index: Option<usize>,
+        has_rowspan: bool,
+    },
+    TableRowGroup {
+        row_group_index: usize,
+        repeated: bool,
+    },
     TableWrapper,
 }
 
@@ -529,6 +539,14 @@ impl BoxFragment {
         matches!(
             self.specific_layout_info().as_deref(),
             Some(SpecificLayoutInfo::TableGridWithCollapsedBorders(_))
+        )
+    }
+
+    /// Whether this is a separate-border table grid that can retain row fragments directly.
+    pub(crate) fn is_table_grid(&self) -> bool {
+        matches!(
+            self.specific_layout_info().as_deref(),
+            Some(SpecificLayoutInfo::TableGrid)
         )
     }
 

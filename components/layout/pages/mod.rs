@@ -16,7 +16,7 @@ use euclid::default::Size2D as UntypedSize2D;
 use euclid::{Point2D, Rect, Size2D};
 use layout_api::{
     LayoutDebugContinuation, LayoutDebugPage, LayoutDebugPageContinuation, LayoutDebugPageSequence,
-    LayoutDebugPageWarning,
+    LayoutDebugPageWarning, LayoutDebugTableBreak,
 };
 use log::warn;
 use parking_lot::Mutex;
@@ -187,6 +187,7 @@ impl PageSequenceContext {
             .collect();
         PageSequence {
             pages,
+            table_breaks: outcome.table_breaks,
             warnings: outcome.warnings,
         }
     }
@@ -213,9 +214,19 @@ pub(crate) struct InlineContinuationToken {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct TableContinuationToken {
+    pub child_index: usize,
+    pub table_node: Option<u64>,
+    pub row_group_index: Option<usize>,
+    pub next_row_index: usize,
+    pub resume_page_index: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum FragmentainerContinuation {
     Block(BlockContinuationToken),
     Inline(InlineContinuationToken),
+    Table(TableContinuationToken),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -238,6 +249,21 @@ pub(crate) struct InlineLine {
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) struct InlineChildPlacement {
     pub line_translations: Vec<Au>,
+    pub added_block_size: Au,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct TableRow {
+    pub row_index: usize,
+    pub row_group_index: Option<usize>,
+    /// Unpaginated block start in the root fragmentainer coordinate space.
+    pub block_start: Au,
+    pub block_size: Au,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct TableChildPlacement {
+    pub row_translations: Vec<Au>,
     pub added_block_size: Au,
 }
 
@@ -336,10 +362,21 @@ struct PageContinuation {
     token: FragmentainerContinuation,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct TableBreakDecision {
+    page_index: usize,
+    table_node: Option<u64>,
+    row_group_index: Option<usize>,
+    next_row_index: usize,
+    selected: bool,
+    resume_page_index: Option<usize>,
+}
+
 #[derive(Default)]
 pub(crate) struct BlockPaginationOutcome {
     page_count: usize,
     continuations: Vec<PageContinuation>,
+    table_breaks: Vec<TableBreakDecision>,
     warnings: Vec<BlockPaginationWarning>,
 }
 
@@ -510,6 +547,80 @@ impl BlockPageBuilder {
         })
     }
 
+    /// Place retained table rows at legal row boundaries without recomputing the table grid.
+    pub(crate) fn place_table_child(
+        &mut self,
+        child_index: usize,
+        table_node: Option<u64>,
+        current_block_position: Au,
+        rows: &[TableRow],
+        breaks: ChildPageBreaks,
+    ) -> Option<TableChildPlacement> {
+        assert_eq!(child_index, self.next_child_index);
+        if breaks.inside_avoid || !self.supports_table_rows(rows) {
+            return None;
+        }
+        self.next_child_index += 1;
+
+        let forced_origin =
+            self.forced_break_before(child_index, table_node, current_block_position, breaks);
+        let mut translation = forced_origin
+            .map_or_else(Au::zero, |block_origin| block_origin - current_block_position);
+        let mut row_translations = Vec::with_capacity(rows.len());
+
+        for (position, row) in rows.iter().enumerate() {
+            let mut block_start = row.block_start + translation;
+            let page_end = self.current_page_origin + self.request.available_block_size;
+            let selected = block_start + row.block_size > page_end && self.page_has_content;
+            let considered_page_index = self.current_page_index;
+            let mut resume_page_index = None;
+
+            if selected {
+                let previous_page_index = self.current_page_index;
+                let mut next_page_index = self.current_page_index + 1;
+                let mut next_page_origin = self.current_page_origin + self.request.page_stride;
+                while next_page_origin < block_start {
+                    next_page_index += 1;
+                    next_page_origin += self.request.page_stride;
+                }
+                translation += next_page_origin - block_start;
+                block_start = next_page_origin;
+                self.current_page_index = next_page_index;
+                self.current_page_origin = next_page_origin;
+                resume_page_index = Some(next_page_index);
+                self.outcome.continuations.push(PageContinuation {
+                    page_index: previous_page_index,
+                    token: FragmentainerContinuation::Table(TableContinuationToken {
+                        child_index,
+                        table_node,
+                        row_group_index: row.row_group_index,
+                        next_row_index: row.row_index,
+                        resume_page_index: next_page_index,
+                    }),
+                });
+            }
+            if position > 0 {
+                self.outcome.table_breaks.push(TableBreakDecision {
+                    page_index: considered_page_index,
+                    table_node,
+                    row_group_index: row.row_group_index,
+                    next_row_index: row.row_index,
+                    selected,
+                    resume_page_index,
+                });
+            }
+
+            row_translations.push(translation);
+            self.page_has_content = true;
+            self.include_content_through(block_start + row.block_size);
+        }
+
+        Some(TableChildPlacement {
+            added_block_size: *row_translations.last().expect("table rows are non-empty"),
+            row_translations,
+        })
+    }
+
     fn forced_break_before(
         &mut self,
         child_index: usize,
@@ -599,6 +710,18 @@ impl BlockPageBuilder {
             previous = Some(line);
         }
         true
+    }
+
+    fn supports_table_rows(&self, rows: &[TableRow]) -> bool {
+        rows.len() >= 2
+            && rows.iter().enumerate().all(|(position, row)| {
+                row.row_index == position
+                    && row.block_size > Au::zero()
+                    && row.block_size <= self.request.available_block_size
+                    && (position == 0
+                        || row.block_start
+                            >= rows[position - 1].block_start + rows[position - 1].block_size)
+            })
     }
 
     fn warn_if_oversized(
@@ -693,6 +816,7 @@ pub(crate) struct Page {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct PageSequence {
     pub pages: Vec<Page>,
+    table_breaks: Vec<TableBreakDecision>,
     pub warnings: Vec<BlockPaginationWarning>,
 }
 
@@ -746,8 +870,29 @@ impl PageSequence {
                                         resume_page_index: token.resume_page_index,
                                     }
                                 },
+                                FragmentainerContinuation::Table(token) => {
+                                    LayoutDebugContinuation::Table {
+                                        child_index: token.child_index,
+                                        table_node: token.table_node,
+                                        row_group_index: token.row_group_index,
+                                        next_row_index: token.next_row_index,
+                                        resume_page_index: token.resume_page_index,
+                                    }
+                                },
                             },
                         })
+                })
+                .collect(),
+            table_breaks: self
+                .table_breaks
+                .iter()
+                .map(|decision| LayoutDebugTableBreak {
+                    page_index: decision.page_index,
+                    table_node: decision.table_node,
+                    row_group_index: decision.row_group_index,
+                    next_row_index: decision.next_row_index,
+                    selected: decision.selected,
+                    resume_page_index: decision.resume_page_index,
                 })
                 .collect(),
             warnings: self
@@ -925,6 +1070,7 @@ mod tests {
                     available_block_size: 684.0,
                 }],
                 continuations: vec![],
+                table_breaks: vec![],
                 warnings: vec![],
             }
         );
@@ -1458,6 +1604,129 @@ mod tests {
                     },
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn table_rows_continue_once_at_stable_row_boundaries() {
+        let rows = (0..5)
+            .map(|row_index| TableRow {
+                row_index,
+                row_group_index: Some(0),
+                block_start: Au::from_px(row_index as i32 * 40),
+                block_size: Au::from_px(40),
+            })
+            .collect::<Vec<_>>();
+        let mut builder = BlockPageBuilder::new(BlockPaginationRequest {
+            available_block_size: Au::from_px(100),
+            page_stride: Au::from_px(120),
+        });
+
+        let placement = builder
+            .place_table_child(0, Some(10), Au::zero(), &rows, ChildPageBreaks::default())
+            .expect("basic retained rows should paginate");
+        assert_eq!(
+            placement.row_translations,
+            vec![
+                Au::zero(),
+                Au::zero(),
+                Au::from_px(40),
+                Au::from_px(40),
+                Au::from_px(80),
+            ]
+        );
+        assert_eq!(placement.added_block_size, Au::from_px(80));
+
+        let outcome = builder.finish();
+        assert_eq!(outcome.page_count, 3);
+        assert_eq!(
+            outcome.continuations,
+            vec![
+                PageContinuation {
+                    page_index: 0,
+                    token: FragmentainerContinuation::Table(TableContinuationToken {
+                        child_index: 0,
+                        table_node: Some(10),
+                        row_group_index: Some(0),
+                        next_row_index: 2,
+                        resume_page_index: 1,
+                    }),
+                },
+                PageContinuation {
+                    page_index: 1,
+                    token: FragmentainerContinuation::Table(TableContinuationToken {
+                        child_index: 0,
+                        table_node: Some(10),
+                        row_group_index: Some(0),
+                        next_row_index: 4,
+                        resume_page_index: 2,
+                    }),
+                },
+            ]
+        );
+        assert_eq!(
+            outcome
+                .table_breaks
+                .iter()
+                .map(|decision| (decision.next_row_index, decision.selected))
+                .collect::<Vec<_>>(),
+            vec![(1, false), (2, true), (3, false), (4, true)]
+        );
+        let snapshot = PageSequenceContext { definition: page() }
+            .page_sequence(outcome)
+            .debug_snapshot();
+        assert_eq!(
+            snapshot
+                .table_breaks
+                .iter()
+                .filter(|decision| decision.selected)
+                .map(|decision| decision.next_row_index)
+                .collect::<Vec<_>>(),
+            vec![2, 4]
+        );
+    }
+
+    #[test]
+    fn unsupported_table_rows_leave_the_child_boundary_unclaimed() {
+        let mut builder = BlockPageBuilder::new(BlockPaginationRequest {
+            available_block_size: Au::from_px(100),
+            page_stride: Au::from_px(120),
+        });
+        let invalid_rows = [
+            TableRow {
+                row_index: 0,
+                row_group_index: None,
+                block_start: Au::zero(),
+                block_size: Au::from_px(40),
+            },
+            TableRow {
+                row_index: 2,
+                row_group_index: None,
+                block_start: Au::from_px(40),
+                block_size: Au::from_px(40),
+            },
+        ];
+        assert!(
+            builder
+                .place_table_child(
+                    0,
+                    Some(10),
+                    Au::zero(),
+                    &invalid_rows,
+                    ChildPageBreaks::default(),
+                )
+                .is_none()
+        );
+        assert_eq!(
+            builder.place_child(
+                0,
+                Some(10),
+                Au::zero(),
+                Au::from_px(80),
+                Au::from_px(80),
+                ChildPageBreaks::default(),
+            ),
+            BlockBoundaryPlacement::CurrentPage
         );
     }
 
