@@ -275,7 +275,11 @@ jobs:
             xvfb-run python ports/pliego/tests/check_break_inside.py "$binary" &&
             python ports/pliego/tests/check_paged_ci.py --self-test &&
             xvfb-run python ports/pliego/tests/check_paged_ci.py "$binary" "$output/paged-ci" &&
+            python ports/pliego/tests/check_table_pagination.py --self-test &&
+            xvfb-run python ports/pliego/tests/check_table_pagination.py "$binary" &&
             xvfb-run python ports/pliego/tests/check_deterministic_environment.py "$binary" &&
+            python ports/pliego/tests/check_resource_policy.py --self-test &&
+            xvfb-run python ports/pliego/tests/check_resource_policy.py "$binary" "$output/resource-policy" &&
             python ports/pliego/tests/check_asset_cache.py --self-test &&
             xvfb-run python ports/pliego/tests/check_asset_cache.py "$binary" "$output/asset-cache" &&
             python ports/pliego/tests/check_hybrid_canvas_live.py --self-test &&
