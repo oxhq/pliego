@@ -1610,6 +1610,10 @@ struct CapturePageSequence {
     pages: Vec<CapturePage>,
     #[serde(default, rename = "continuations")]
     _continuations: Vec<serde_json::Value>,
+    #[serde(default, rename = "table_breaks")]
+    _table_breaks: Vec<serde_json::Value>,
+    #[serde(default, rename = "table_cell_continuations")]
+    _table_cell_continuations: Vec<serde_json::Value>,
     #[serde(default, rename = "warnings")]
     _warnings: Vec<serde_json::Value>,
 }
@@ -1872,6 +1876,25 @@ struct CaptureFontVariation {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn accepts_pagination_diagnostics_without_relaxing_the_capture_schema() {
+        let sequence = serde_json::json!({
+            "pages": [],
+            "continuations": [{"token": {"kind": "table"}}],
+            "table_breaks": [{"next_row_index": 1}],
+            "table_cell_continuations": [{"next_fragment_index": 2}],
+            "warnings": [{"kind": "oversized-table-cell"}],
+        });
+        assert!(serde_json::from_value::<CapturePageSequence>(sequence).is_ok());
+        assert!(
+            serde_json::from_value::<CapturePageSequence>(serde_json::json!({
+                "pages": [],
+                "unknown": [],
+            }))
+            .is_err()
+        );
+    }
 
     #[test]
     fn rejects_later_page_paths_without_rewriting_path_data() {
