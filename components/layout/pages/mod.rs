@@ -295,6 +295,10 @@ pub(crate) enum BlockPaginationWarning {
         available_block_size: Au,
         retry_count: u8,
     },
+    UnsupportedTableCaptionPagination {
+        child_index: usize,
+        node: Option<u64>,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -768,6 +772,20 @@ impl BlockPageBuilder {
             });
     }
 
+    pub(crate) fn warn_unsupported_table_caption_pagination(
+        &mut self,
+        child_index: usize,
+        node: Option<u64>,
+    ) {
+        warn!(
+            "paged layout retained table captions without row pagination for child {child_index} \
+             (node {node:?})"
+        );
+        self.outcome
+            .warnings
+            .push(BlockPaginationWarning::UnsupportedTableCaptionPagination { child_index, node });
+    }
+
     fn include_content_through(&mut self, block_end: Au) {
         let mut page_origin = self.current_page_origin;
         let mut page_index = self.current_page_index;
@@ -922,6 +940,13 @@ impl PageSequence {
                         block_size: block_size.to_f32_px(),
                         available_block_size: available_block_size.to_f32_px(),
                         retry_count,
+                    },
+                    BlockPaginationWarning::UnsupportedTableCaptionPagination {
+                        child_index,
+                        node,
+                    } => LayoutDebugPageWarning::UnsupportedTableCaptionPagination {
+                        child_index,
+                        node,
                     },
                 })
                 .collect(),
@@ -1727,6 +1752,37 @@ mod tests {
                 ChildPageBreaks::default(),
             ),
             BlockBoundaryPlacement::CurrentPage
+        );
+    }
+
+    #[test]
+    fn unsupported_table_caption_pagination_is_a_typed_warning() {
+        let mut builder = BlockPageBuilder::new(BlockPaginationRequest {
+            available_block_size: Au::from_px(100),
+            page_stride: Au::from_px(120),
+        });
+        builder.warn_unsupported_table_caption_pagination(1, Some(20));
+        assert_eq!(
+            builder.place_child(
+                1,
+                Some(20),
+                Au::zero(),
+                Au::from_px(80),
+                Au::from_px(80),
+                ChildPageBreaks::default(),
+            ),
+            BlockBoundaryPlacement::CurrentPage
+        );
+
+        let snapshot = PageSequenceContext { definition: page() }
+            .page_sequence(builder.finish())
+            .debug_snapshot();
+        assert_eq!(
+            snapshot.warnings,
+            vec![LayoutDebugPageWarning::UnsupportedTableCaptionPagination {
+                child_index: 1,
+                node: Some(20),
+            }]
         );
     }
 

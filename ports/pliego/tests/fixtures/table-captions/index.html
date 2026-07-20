@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>Pliego paged table caption fixture</title>
+    <style>
+      body { margin: 0; font: 14px/18px sans-serif; }
+      table { border-spacing: 0; table-layout: fixed; width: 200px; }
+      caption { height: 20px; padding: 0; text-align: left; }
+      tr { height: 30px; }
+      td { padding: 0; }
+      td:first-child { width: 60px; }
+      #bottom caption { caption-side: bottom; }
+    </style>
+  </head>
+  <body>
+    <table id="top">
+      <caption>TOP_CAPTION</caption>
+      <tbody>
+        <tr><td>T0A</td><td>T0B</td></tr>
+        <tr><td>T1A</td><td>T1B</td></tr>
+        <tr><td>T2A</td><td>T2B</td></tr>
+        <tr><td>T3A</td><td>T3B</td></tr>
+        <tr><td>T4A</td><td>T4B</td></tr>
+        <tr><td>T5A</td><td>T5B</td></tr>
+      </tbody>
+    </table>
+    <table id="bottom">
+      <caption>BOTTOM_CAPTION</caption>
+      <tbody>
+        <tr><td>B0A</td><td>B0B</td></tr>
+        <tr><td>B1A</td><td>B1B</td></tr>
+        <tr><td>B2A</td><td>B2B</td></tr>
+        <tr><td>B3A</td><td>B3B</td></tr>
+        <tr><td>B4A</td><td>B4B</td></tr>
+        <tr><td>B5A</td><td>B5B</td></tr>
+      </tbody>
+    </table>
+    <script>
+      queueMicrotask(() => window.pliego?.ready({ fixture: 'table-captions' }));
+    </script>
+  </body>
+</html>

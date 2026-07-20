@@ -15,6 +15,7 @@ use rayon::iter::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIter
 use script::layout_dom::ServoLayoutNode;
 use servo_arc::Arc as ServoArc;
 use style::Zero;
+use style::computed_values::caption_side::T as CaptionSide;
 use style::computed_values::clear::T as StyleClear;
 use style::context::SharedStyleContext;
 use style::logical_geometry::Direction;
@@ -979,20 +980,27 @@ fn prepare_fragmentainer_boundary(
             ),
         }
     });
-    if let Some(table) = retained_table_rows(fragment, placement_state)
-        && let Some(placement) = page_builder.place_table_child(
+    let retained_table = retained_table_rows(fragment, placement_state);
+    let has_table_captions = retained_table
+        .as_ref()
+        .map_or_else(|| table_has_captions(fragment), |table| table.has_captions());
+    if let Some(table) = retained_table.as_ref() {
+        if let Some(placement) = page_builder.place_table_child(
             child_index,
             node,
             placement_state.current_block_direction_position,
             &table.rows,
             breaks,
-        )
-    {
-        table.apply(
-            placement,
-            placement_state.containing_block.style.writing_mode,
-        );
-        return;
+        ) {
+            table.apply(
+                placement,
+                placement_state.containing_block.style.writing_mode,
+            );
+            return;
+        }
+    }
+    if has_table_captions {
+        page_builder.warn_unsupported_table_caption_pagination(child_index, node);
     }
     if let Some((lines, line_fragments, box_fragment)) =
         retained_inline_lines(fragment, placement_state)
@@ -1053,11 +1061,16 @@ struct RetainedTableFragments<'a> {
     rows: Vec<TableRow>,
     row_fragments: Vec<&'a BoxFragment>,
     row_groups: Vec<(usize, &'a BoxFragment)>,
+    bottom_captions: Vec<&'a BoxFragment>,
     grid: &'a BoxFragment,
     wrapper: &'a BoxFragment,
 }
 
 impl RetainedTableFragments<'_> {
+    fn has_captions(&self) -> bool {
+        self.wrapper.children.len() > 1
+    }
+
     fn apply(&self, placement: TableChildPlacement, writing_mode: crate::WritingMode) {
         for (row, translation) in self.row_fragments.iter().zip(&placement.row_translations) {
             if translation.is_zero() {
@@ -1071,6 +1084,21 @@ impl RetainedTableFragments<'_> {
                 .to_physical_size(writing_mode),
             );
             row.clear_scrollable_overflow();
+        }
+
+        // Top captions keep their first-fragment position; bottom captions follow the last row.
+        for caption in &self.bottom_captions {
+            if placement.added_block_size.is_zero() {
+                break;
+            }
+            caption.base.translate_rect(
+                LogicalVec2 {
+                    inline: Au::zero(),
+                    block: placement.added_block_size,
+                }
+                .to_physical_size(writing_mode),
+            );
+            caption.clear_scrollable_overflow();
         }
 
         for (group_index, group) in &self.row_groups {
@@ -1119,16 +1147,29 @@ fn retained_table_rows<'a>(
     if !wrapper.is_table_wrapper()
         || !wrapper_writing_mode.is_horizontal()
         || !wrapper_writing_mode.is_bidi_ltr()
-        || wrapper.children.len() != 1
     {
         return None;
     }
-    let Fragment::Box(grid) = &wrapper.children[0] else {
-        return None;
-    };
-    if !grid.is_table_grid() {
-        return None;
+
+    let mut grid = None;
+    let mut bottom_captions = Vec::new();
+    for child in &wrapper.children {
+        let Fragment::Box(child) = child else {
+            return None;
+        };
+        if child.is_table_grid() {
+            if grid.replace(child.as_ref()).is_some() {
+                return None;
+            }
+            continue;
+        }
+        match child.style().clone_caption_side() {
+            CaptionSide::Top if grid.is_none() => {},
+            CaptionSide::Bottom if grid.is_some() => bottom_captions.push(child.as_ref()),
+            _ => return None,
+        }
     }
+    let grid = grid?;
 
     let wrapper_block_start = placement_state.unplaced_content_block_start(wrapper)?;
     let grid_block_start = wrapper_block_start + grid.base.rect().origin.y;
@@ -1205,9 +1246,23 @@ fn retained_table_rows<'a>(
         rows,
         row_fragments,
         row_groups,
+        bottom_captions,
         grid,
         wrapper,
     })
+}
+
+fn table_has_captions(fragment: &Fragment) -> bool {
+    let Fragment::Box(wrapper) = fragment else {
+        return false;
+    };
+    wrapper.is_table_wrapper()
+        && wrapper.children.iter().any(|child| {
+            let Fragment::Box(child) = child else {
+                return false;
+            };
+            !child.is_table_grid() && !child.is_table_grid_with_collapsed_borders()
+        })
 }
 
 struct RetainedLineSource {

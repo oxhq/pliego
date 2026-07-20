@@ -377,6 +377,10 @@ pub enum LayoutDebugPageWarning {
         available_block_size: f32,
         retry_count: u8,
     },
+    UnsupportedTableCaptionPagination {
+        child_index: usize,
+        node: Option<u64>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]

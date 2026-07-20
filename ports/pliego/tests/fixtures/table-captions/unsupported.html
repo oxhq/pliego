@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>Pliego unsupported table caption fixture</title>
+    <style>
+      body { margin: 0; direction: rtl; font: 14px/18px sans-serif; }
+      #lead { height: 20px; }
+      table { border-spacing: 0; }
+      caption, td { padding: 0; }
+    </style>
+  </head>
+  <body>
+    <div id="lead">Lead.</div>
+    <table id="unsupported">
+      <caption>UNSUPPORTED CAPTION</caption>
+      <tbody>
+        <tr><td>U0</td></tr>
+        <tr><td>U1</td></tr>
+      </tbody>
+    </table>
+    <script>
+      queueMicrotask(() => window.pliego?.ready({ fixture: 'table-captions-unsupported' }));
+    </script>
+  </body>
+</html>
