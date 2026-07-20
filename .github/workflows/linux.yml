@@ -277,6 +277,8 @@ jobs:
             xvfb-run python ports/pliego/tests/check_paged_ci.py "$binary" "$output/paged-ci" &&
             python ports/pliego/tests/check_table_pagination.py --self-test &&
             xvfb-run python ports/pliego/tests/check_table_pagination.py "$binary" &&
+            python ports/pliego/tests/check_table_captions.py --self-test &&
+            xvfb-run python ports/pliego/tests/check_table_captions.py "$binary" &&
             xvfb-run python ports/pliego/tests/check_deterministic_environment.py "$binary" &&
             python ports/pliego/tests/check_resource_policy.py --self-test &&
             xvfb-run python ports/pliego/tests/check_resource_policy.py "$binary" "$output/resource-policy" &&
