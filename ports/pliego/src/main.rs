@@ -335,7 +335,7 @@ fn fetch_controlled_http(
     *outbound.headers_mut() = request.headers.clone();
 
     let client = client.clone();
-    let fetched = net::async_runtime::spawn_blocking_task(async move {
+    let fetched = net::async_runtime::spawn_blocking_task::<_, ()>(async move {
         tokio::time::timeout(Duration::from_millis(timeout_ms), async move {
             let mut response = client
                 .request(outbound)
