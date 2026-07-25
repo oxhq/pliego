@@ -27,12 +27,11 @@
         text-align: left;
       }
       thead tr { height: 40px; }
-      tbody tr { height: 40px; }
+      tbody tr { height: 40.25px; }
       th:nth-child(1), td:nth-child(1) { width: 120px; }
       th:nth-child(2), td:nth-child(2) { width: 96px; }
       th:nth-child(3), td:nth-child(3) { width: 228px; }
       th:nth-child(4), td:nth-child(4) { width: 96px; }
-      .page-end { break-after: page; }
     </style>
   </head>
   <body>
@@ -47,7 +46,6 @@
       const body = document.querySelector("#entries");
       for (let row = 1; row <= 1600; row++) {
         const entry = document.createElement("tr");
-        if (row % 16 === 0 && row !== 1600) entry.className = "page-end";
         const id = `STMT-${String(row).padStart(4, "0")}`;
         for (const value of [id, `D${String(row).padStart(4, "0")}`, `ENTRY-${String(row).padStart(4, "0")}`, `${row}.00`]) {
           const cell = document.createElement("td");

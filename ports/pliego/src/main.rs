@@ -15,7 +15,7 @@ use std::path::PathBuf;
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
 use std::rc::Rc;
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
 use base64::Engine as _;
@@ -1146,6 +1146,7 @@ fn render(request: RenderRequest) {
     let active_resource_policy = resource_policy.clone();
     let controlled_http_client = Rc::new(OnceCell::new());
     let _canvas_retention = servo_canvas::retained_canvas::start_retaining_canvas_commands();
+    let controlled_runtime_started = Instant::now();
     let result = servoshell::run_with_stable_javascript_and_console_and_web_resource_policy(
         &servo_args,
         readiness::HOST_EVALUATION_EXPRESSION,
@@ -1193,6 +1194,7 @@ fn render(request: RenderRequest) {
             },
         },
     );
+    let controlled_runtime_ms = elapsed_milliseconds(controlled_runtime_started);
     let policy_failures = std::mem::take(&mut *policy_failures.borrow_mut());
     for failure in &policy_failures {
         record_artifact(artifacts.record_resource_failure(
@@ -1327,6 +1329,7 @@ fn render(request: RenderRequest) {
         });
     let layout_debug_path = artifacts.directory().join("layout-debug.json");
     let mut resource_resolution_error = None;
+    let scene_capture_started = Instant::now();
     let scene_capture = capture_document_scene_with_canvas(
         layout_debug_json.as_bytes(),
         |url| {
@@ -1365,6 +1368,7 @@ fn render(request: RenderRequest) {
             &error.to_string(),
         )
     });
+    let scene_capture_ms = elapsed_milliseconds(scene_capture_started);
     if !request.allow_host_fonts
         && let Some(selection) = scene_capture
             .font_selections
@@ -1518,6 +1522,13 @@ fn render(request: RenderRequest) {
             "document_pdf_status": scene_artifacts.pdf_status,
             "pdf_structure": scene_artifacts.pdf_structure_path.to_string_lossy(),
             "pdf_structure_status": scene_artifacts.pdf_structure_status,
+            "phase_timings_ms": {
+                "controlled_runtime": controlled_runtime_ms,
+                "scene_capture": scene_capture_ms,
+                "scene_setup": scene_artifacts.scene_setup_ms,
+                "preview_raster": scene_artifacts.preview_ms,
+                "pdf_serialize": scene_artifacts.pdf_ms,
+            },
             "servo_base_sha": SERVO_BASE_SHA,
             "servo_build": servoshell::VERSION,
             "rendered_bytes": rendered_bytes,
@@ -2031,6 +2042,14 @@ struct SceneArtifactSummary {
     capture_status: &'static str,
     capture_code: Option<&'static str>,
     preview_status: &'static str,
+    scene_setup_ms: f64,
+    preview_ms: f64,
+    pdf_ms: f64,
+}
+
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+fn elapsed_milliseconds(started: Instant) -> f64 {
+    started.elapsed().as_secs_f64() * 1000.0
 }
 
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
@@ -2050,6 +2069,7 @@ fn persist_scene_capture(
     capture: &SceneCapture,
     allow_host_fonts: bool,
 ) -> Result<SceneArtifactSummary, SceneArtifactError> {
+    let scene_setup_started = Instant::now();
     let scene_bytes = capture.scene.normalized_json().map_err(|message| {
         SceneArtifactError::new("SCENE_CAPTURE_NORMALIZATION_FAILED", message)
     })?;
@@ -2204,6 +2224,8 @@ fn persist_scene_capture(
             })?;
     }
 
+    let scene_setup_ms = elapsed_milliseconds(scene_setup_started);
+    let preview_started = Instant::now();
     let preview_paths = if unsupported.is_empty() {
         let variations_by_instance = capture
             .font_instances
@@ -2275,11 +2297,13 @@ fn persist_scene_capture(
     artifacts.write_pages(&pages).map_err(|error| {
         SceneArtifactError::new("SCENE_CAPTURE_PAGES_WRITE_FAILED", error.to_string())
     })?;
+    let preview_ms = elapsed_milliseconds(preview_started);
 
     let pdf_path = artifacts.directory().join("document.pdf");
     let pdf_structure_path = artifacts.directory().join("pdf-structure.json");
     let mut pdf_written = false;
     let mut pdf_structure_written = false;
+    let pdf_started = Instant::now();
     let pdf_result = (|| -> Result<(), SceneArtifactError> {
         let variations_by_instance = capture
             .font_instances
@@ -2343,6 +2367,7 @@ fn persist_scene_capture(
         pdf_structure_written = true;
         Ok(())
     })();
+    let pdf_ms = elapsed_milliseconds(pdf_started);
     let pdf_error = pdf_result.err();
     let pdf_status = if pdf_written { "rendered" } else { "failed" };
     let pdf_structure_status = if pdf_structure_written {
@@ -2438,6 +2463,9 @@ fn persist_scene_capture(
         capture_status,
         capture_code,
         preview_status,
+        scene_setup_ms,
+        preview_ms,
+        pdf_ms,
     })
 }
 
@@ -3291,6 +3319,9 @@ mod tests {
         };
 
         let summary = persist_scene_capture(&artifacts, &capture, false).unwrap();
+        assert!(summary.scene_setup_ms.is_finite() && summary.scene_setup_ms >= 0.0);
+        assert!(summary.preview_ms.is_finite() && summary.preview_ms >= 0.0);
+        assert!(summary.pdf_ms.is_finite() && summary.pdf_ms >= 0.0);
         assert!(!directory.join("scene-preview.png").exists());
         assert_eq!(summary.preview_paths.len(), 2);
         assert_eq!(

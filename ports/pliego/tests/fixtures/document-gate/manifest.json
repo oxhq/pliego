@@ -5,7 +5,8 @@
   "font": {
     "path": "../text-scene/Ahem.ttf",
     "source": "Existing vendored WPT Ahem test fixture",
-    "sha256": "b719ecb31c5b21fc573c03f6421c74ac63c271a5a3ff841e34f9705fb94b8448"
+    "sha256": "b719ecb31c5b21fc573c03f6421c74ac63c271a5a3ff841e34f9705fb94b8448",
+    "sanitized_sha256": "649a76135ca32e68e36c7880075cf897ec1a1fdfe011308bdcf8ada12a539869"
   },
   "fixtures": [
     {
@@ -19,12 +20,20 @@
       "rows_per_page": 16,
       "id_prefix": "INV-",
       "id_width": 3,
-      "headers": ["ITEM", "QTY", "DESCRIPTION", "AMOUNT"]
+      "caption": "INVOICE PLG-2026-001",
+      "caption_x": 36,
+      "headers": ["ITEM", "QTY", "DESCRIPTION", "AMOUNT"],
+      "footer": ["TOTAL", "32", "MXN", "5280.00"],
+      "text_x": [40, 136, 208, 484],
+      "column_boundaries": [36, 132, 204, 480, 576],
+      "header_height": 32,
+      "natural_overflow": false,
+      "break_constraint": "forced-after"
     },
     {
       "name": "statement-100-page",
       "path": "statement.html",
-      "sha256": "74de76544d223951589c43815ef483215b2c8a9e933ac0a4149b9f3f4de73182",
+      "sha256": "3c34aebae2807910165c3634696bd1e54082f535b98f8368d221bd168030ad18",
       "page_size": [612, 792],
       "page_margins": [36, 36, 36, 36],
       "expected_pages": 100,
@@ -32,7 +41,15 @@
       "rows_per_page": 16,
       "id_prefix": "STMT-",
       "id_width": 4,
-      "headers": ["ROW", "DATE", "DETAIL", "BALANCE"]
+      "caption": "STATEMENT PLG-100",
+      "caption_x": 36,
+      "headers": ["ROW", "DATE", "DETAIL", "BALANCE"],
+      "footer": [],
+      "text_x": [40, 160, 256, 484],
+      "column_boundaries": [36, 156, 252, 480, 576],
+      "header_height": 40,
+      "natural_overflow": true,
+      "break_constraint": "auto"
     }
   ]
 }
