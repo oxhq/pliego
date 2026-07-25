@@ -17,7 +17,6 @@
         await new Promise(requestAnimationFrame);
       }
       if (!window.pliego) throw new Error("Pliego bridge was not installed");
-      await document.fonts.load('12px "Ahem"', "SVG");
       await document.fonts.ready;
       const image = document.querySelector("#vector");
       for (let attempt = 0; !image.complete && attempt < 200; attempt += 1) {

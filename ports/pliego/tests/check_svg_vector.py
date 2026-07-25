@@ -19,6 +19,8 @@ INLINE_PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
     validate=True,
 )
+SOURCE_AHEM_SHA256 = "b719ecb31c5b21fc573c03f6421c74ac63c271a5a3ff841e34f9705fb94b8448"
+SANITIZED_AHEM_SHA256 = "649a7613cfa59d415188415e1488eb40fc9953742338a793538380234a539869"
 
 
 def fail(message: str, code: int = 1) -> None:
@@ -81,6 +83,17 @@ def mapped_rect(fragment: dict[str, Any], item: dict[str, Any]) -> dict[str, flo
 def run(binary: Path, fixture: Path, root: Path) -> tuple[bytes, bytes, bytes, bytes]:
     artifacts = root / "artifacts"
     output = root / "document.pdf"
+    font = fixture.parent.parent / "text-scene" / "Ahem.ttf"
+    encoded_font = base64.b64encode(font.read_bytes()).decode("ascii")
+    materialized = root / fixture.name
+    materialized.write_text(
+        fixture.read_text(encoding="utf-8").replace(
+            'url("../text-scene/Ahem.ttf")',
+            f'url("data:font/ttf;base64,{encoded_font}")',
+        ),
+        encoding="utf-8",
+    )
+    shutil.copy2(fixture.with_name("graphic.svg"), root / "graphic.svg")
     environment = os.environ.copy()
     environment.update({"TMPDIR": str(root), "TMP": str(root), "TEMP": str(root)})
     result = subprocess.run(
@@ -89,7 +102,7 @@ def run(binary: Path, fixture: Path, root: Path) -> tuple[bytes, bytes, bytes, b
             "--artifacts", str(artifacts), "--page-size", "200x120",
             "--page-margins", "0,0,0,0",
         ],
-        cwd=fixture.parent,
+        cwd=root,
         env=environment,
         capture_output=True,
         text=True,
@@ -146,7 +159,9 @@ def run(binary: Path, fixture: Path, root: Path) -> tuple[bytes, bytes, bytes, b
             "embedded SVG PNG sidecar differs")
 
     font_path = fixture.parent.parent / "text-scene" / "Ahem.ttf"
-    expected_font = f"sha256:{hashlib.sha256(font_path.read_bytes()).hexdigest()}"
+    require(hashlib.sha256(font_path.read_bytes()).hexdigest() == SOURCE_AHEM_SHA256,
+            "bundled Ahem source changed")
+    expected_font = f"sha256:{SANITIZED_AHEM_SHA256}"
     fonts_bytes = artifact(summary, "fonts_artifact").read_bytes()
     fonts = json.loads(fonts_bytes)
     require(any(resource.get("resource") == expected_font for resource in fonts["font_resources"]),
