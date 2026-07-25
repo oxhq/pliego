@@ -66,9 +66,10 @@ def text_pages(scene: dict[str, Any]) -> list[list[dict[str, Any]]]:
 
 def text_tokens(pages: list[list[dict[str, Any]]]) -> list[str]:
     return [
-        canonical_text(str(operation.get("text", "")))
+        text
         for operations in pages
         for operation in operations
+        if (text := canonical_text(str(operation.get("text", ""))))
     ]
 
 
@@ -79,6 +80,8 @@ def token_geometry(
     for page_index, operations in enumerate(pages):
         for operation in operations:
             token = canonical_text(str(operation.get("text", "")))
+            if not token:
+                continue
             glyphs = operation.get("glyphs")
             require(isinstance(glyphs, list) and glyphs, f"{token} has no glyph geometry")
             x = glyphs[0].get("x")
