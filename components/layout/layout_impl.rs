@@ -251,6 +251,24 @@ fn lowercase_hex(bytes: &[u8]) -> String {
     encoded
 }
 
+fn restore_continuation_prefix(glyphs: &mut [LayoutDebugGlyph], prefix_len: usize) {
+    let first_source_range = glyphs
+        .iter()
+        .filter_map(|glyph| glyph.text_range)
+        .min_by_key(|range| range.start);
+    for glyph in glyphs {
+        let Some(range) = glyph.text_range.as_mut() else {
+            continue;
+        };
+        let first_cluster = Some(*range) == first_source_range;
+        range.start += prefix_len;
+        range.end += prefix_len;
+        if first_cluster {
+            range.start = 0;
+        }
+    }
+}
+
 /// Information needed by layout.
 pub struct LayoutThread {
     /// The ID of the pipeline that we belong to.
@@ -482,21 +500,9 @@ impl Layout for LayoutThread {
                                 })
                                 .collect::<Vec<_>>();
                             if prefix_len > 0 {
-                                let first_range = glyphs.iter().find_map(|glyph| glyph.text_range);
-                                for glyph in &mut glyphs {
-                                    let Some(range) = glyph.text_range.as_mut() else {
-                                        continue;
-                                    };
-                                    let first_cluster = Some(*range) == first_range;
-                                    // Krilla maps source text through glyph ranges, so the first
-                                    // shaping cluster owns the restored prefix as ActualText.
-                                    range.start = if first_cluster {
-                                        0
-                                    } else {
-                                        range.start + prefix_len
-                                    };
-                                    range.end += prefix_len;
-                                }
+                                // Krilla maps source text through glyph ranges, so the logical
+                                // first shaping cluster owns the restored prefix as ActualText.
+                                restore_continuation_prefix(&mut glyphs, prefix_len);
                             }
                             Some(LayoutDebugTextRun {
                                 text: format!(
@@ -2243,8 +2249,35 @@ impl ReflowPhases {
 }
 
 #[cfg(test)]
-mod font_capture_tests {
+mod tests {
     use super::*;
+
+    #[test]
+    fn continuation_prefix_preserves_decreasing_rtl_ranges() {
+        let mut glyphs = [(16, 20), (12, 16), (8, 12), (4, 8), (0, 4)]
+            .into_iter()
+            .map(|(start, end)| LayoutDebugGlyph {
+                id: 0,
+                x: 0.0,
+                y: 0.0,
+                advance: 0.0,
+                text_range: Some(LayoutDebugUtf8Range { start, end }),
+            })
+            .collect::<Vec<_>>();
+
+        restore_continuation_prefix(&mut glyphs, 1);
+
+        assert_eq!(
+            glyphs
+                .into_iter()
+                .map(|glyph| {
+                    let range = glyph.text_range.unwrap();
+                    (range.start, range.end)
+                })
+                .collect::<Vec<_>>(),
+            [(17, 21), (13, 17), (9, 13), (5, 9), (0, 5)]
+        );
+    }
 
     #[test]
     fn font_capture_ids_are_content_derived_canonical_and_deduplicated() {
