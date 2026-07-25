@@ -6,6 +6,7 @@
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -72,7 +73,12 @@ def continuation_trace(page_sequence: dict[str, Any]) -> list[tuple[Any, ...]]:
     ]
 
 
-def check_case(binary: Path, fixture_name: str, expected_text: list[str]) -> None:
+def check_case(
+    binary: Path,
+    fixture_name: str,
+    expected_text: list[str],
+    output_root: Path | None,
+) -> None:
     fixture = Path(__file__).resolve().parent / f"fixtures/{fixture_name}"
     with tempfile.TemporaryDirectory(prefix=f"pliego-{fixture_name}-") as temp:
         environment = os.environ.copy()
@@ -130,6 +136,11 @@ def check_case(binary: Path, fixture_name: str, expected_text: list[str]) -> Non
         ]
         if pdf_text != expected_text:
             fail(f"{fixture_name} PDF page/source order differs: {pdf_text!r}")
+        if output_root is not None:
+            artifacts = summary.get("artifacts")
+            if not isinstance(artifacts, str) or not Path(artifacts).is_dir():
+                fail(f"{fixture_name} has no artifact bundle to retain")
+            shutil.copytree(artifacts, output_root / fixture_name)
 
 
 def self_test() -> None:
@@ -162,15 +173,24 @@ def main() -> int:
         self_test()
         print("forced break self-test: ok")
         return 0
-    if len(arguments) != 1:
-        fail(f"usage: {Path(sys.argv[0]).name} <pliego-binary> | --self-test", 2)
+    if len(arguments) not in (1, 2):
+        fail(
+            f"usage: {Path(sys.argv[0]).name} <pliego-binary> [output-directory] | --self-test",
+            2,
+        )
     binary = Path(arguments[0]).expanduser().resolve()
     if not binary.is_file():
         fail(f"Pliego binary does not exist: {binary}", 2)
-    check_case(binary, "forced-break-before", ["Alpha.", "Beta."])
-    check_case(binary, "forced-break-after", ["Alpha.", "Beta."])
-    check_case(binary, "forced-breaks", ["Alpha.", "Beta.", "Gamma.", "Delta."])
-    print("forced break check: ok")
+    output = Path(arguments[1]).expanduser().resolve() if len(arguments) == 2 else None
+    if output is not None:
+        if output.exists():
+            fail(f"output already exists: {output}", 2)
+        output.mkdir(parents=True)
+    check_case(binary, "forced-break-before", ["Alpha.", "Beta."], output)
+    check_case(binary, "forced-break-after", ["Alpha.", "Beta."], output)
+    check_case(binary, "forced-breaks", ["Alpha.", "Beta.", "Gamma.", "Delta."], output)
+    suffix = f" (artifacts: {output})" if output is not None else ""
+    print(f"forced break check: ok{suffix}")
     return 0
 
 

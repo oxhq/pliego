@@ -6,6 +6,7 @@
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -13,6 +14,8 @@ from pathlib import Path
 from typing import Any
 
 TIMEOUT_SECONDS = 60
+FITTING_TEXT = "ALPHAONE BETATWOO"
+FITTING_SOURCE = f"Lead.{FITTING_TEXT}"
 OVERSIZED_SOURCE = (
     "Café niño jalapeño déjà vu coöperate façade résumé naïve voilà über großstraße. "
     "Página siguiente conserva cada carácter sin perder ni duplicar texto."
@@ -84,11 +87,66 @@ def retry_counts(page_sequence: dict[str, Any]) -> list[int]:
     return counts
 
 
+def continuation_tokens(page_sequence: dict[str, Any]) -> list[dict[str, Any]]:
+    continuations = page_sequence.get("continuations")
+    if not isinstance(continuations, list):
+        return []
+    return [
+        item["token"]
+        for item in continuations
+        if isinstance(item, dict) and isinstance(item.get("token"), dict)
+    ]
+
+
+def proves_fitting_avoidance(
+    avoided_text: list[str],
+    avoided_sequence: dict[str, Any],
+    control_text: list[str],
+    control_sequence: dict[str, Any],
+) -> bool:
+    if (
+        len(avoided_text) != 2
+        or len(control_text) != 2
+        or "".join(avoided_text) != FITTING_SOURCE
+        or "".join(control_text) != FITTING_SOURCE
+        or avoided_text[0] != "Lead."
+        or "ALPHAONE" not in avoided_text[1]
+        or "BETATWOO" not in avoided_text[1]
+        or "ALPHAONE" not in control_text[0]
+        or "BETATWOO" in control_text[0]
+        or "ALPHAONE" in control_text[1]
+        or "BETATWOO" not in control_text[1]
+        or avoided_text == control_text
+        or len(avoided_sequence.get("pages", [])) != 2
+        or len(control_sequence.get("pages", [])) != 2
+    ):
+        return False
+    avoided = continuation_tokens(avoided_sequence)
+    control = continuation_tokens(control_sequence)
+    if len(avoided) != 1 or len(control) != 1:
+        return False
+    avoided_token = avoided[0]
+    control_token = control[0]
+    return (
+        avoided_token.get("kind") == "block"
+        and avoided_token.get("next_child_index") == 1
+        and avoided_token.get("forced") is False
+        and avoided_token.get("break_inside_avoid") is True
+        and avoided_token.get("retry_count") == 1
+        and avoided_token.get("resume_page_index") == 1
+        and control_token.get("kind") == "inline"
+        and control_token.get("child_index") == 1
+        and control_token.get("next_line_index") == 1
+        and control_token.get("resume_page_index") == 1
+    )
+
+
 def run_fixture(
     binary: Path,
     fixture_name: str,
     page_size: str,
     page_margins: str,
+    output_root: Path | None,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     fixture = Path(__file__).resolve().parent / f"fixtures/{fixture_name}"
     with tempfile.TemporaryDirectory(prefix=f"pliego-{fixture_name}-") as temp:
@@ -120,50 +178,69 @@ def run_fixture(
         summary = final_summary(result)
         if summary.get("status") != "rendered":
             fail(f"{fixture_name} did not render: {summary!r}")
-        return (
-            read_json(summary.get("scene_artifact"), "scene artifact"),
-            read_json(summary.get("layout_debug"), "layout debug artifact"),
-            read_json(summary.get("pdf_structure"), "PDF structure artifact"),
-        )
+        scene = read_json(summary.get("scene_artifact"), "scene artifact")
+        layout = read_json(summary.get("layout_debug"), "layout debug artifact")
+        structure = read_json(summary.get("pdf_structure"), "PDF structure artifact")
+        if output_root is not None:
+            artifacts = summary.get("artifacts")
+            if not isinstance(artifacts, str) or not Path(artifacts).is_dir():
+                fail(f"{fixture_name} has no artifact bundle to retain")
+            shutil.copytree(artifacts, output_root / fixture_name)
+        return scene, layout, structure
 
 
-def check_fitting(binary: Path) -> None:
-    scene, layout, structure = run_fixture(
+def check_fitting(binary: Path, output_root: Path | None) -> None:
+    avoided_scene, avoided_layout, avoided_structure = run_fixture(
         binary,
         "break-inside-fit",
         "200x120",
         "10,10,10,10",
+        output_root,
     )
-    expected = ["Lead.", "Kept together."]
-    if scene_page_text(scene) != expected or pdf_page_text(structure) != expected:
-        fail("fitting avoided child did not remain intact on the next page")
-    page_sequence = layout.get("page_sequence")
-    if not isinstance(page_sequence, dict) or len(page_sequence.get("pages", [])) != 2:
-        fail(f"fitting avoided child did not produce two pages: {page_sequence!r}")
-    continuations = page_sequence.get("continuations")
-    token = continuations[0].get("token", {}) if isinstance(continuations, list) and len(continuations) == 1 else {}
+    control_scene, control_layout, control_structure = run_fixture(
+        binary,
+        "break-inside-control",
+        "200x120",
+        "10,10,10,10",
+        output_root,
+    )
+    avoided_text = scene_page_text(avoided_scene)
+    control_text = scene_page_text(control_scene)
+    avoided_sequence = avoided_layout.get("page_sequence")
+    control_sequence = control_layout.get("page_sequence")
     # https://drafts.csswg.org/css-break/#break-within
     if (
-        token.get("kind") != "block"
-        or token.get("next_child_index") != 1
-        or token.get("forced") is not False
-        or token.get("break_inside_avoid") is not True
-        or token.get("retry_count") != 1
-        or token.get("resume_page_index") != 1
+        not isinstance(avoided_sequence, dict)
+        or not isinstance(control_sequence, dict)
+        or not proves_fitting_avoidance(
+            avoided_text,
+            avoided_sequence,
+            control_text,
+            control_sequence,
+        )
     ):
-        fail(f"fitting avoidance decision differs: {continuations!r}")
-    if page_sequence.get("warnings"):
-        fail(f"fitting avoidance unexpectedly warned: {page_sequence['warnings']!r}")
-    if any(retry > 1 for retry in retry_counts(page_sequence)):
+        fail(
+            "fitting avoid/control pair did not exercise distinct block-vs-inline pagination: "
+            f"{avoided_text!r}, {control_text!r}, "
+            f"{avoided_sequence!r}, {control_sequence!r}"
+        )
+    if pdf_page_text(avoided_structure) != avoided_text:
+        fail("fitting avoided child PDF/source order differs")
+    if pdf_page_text(control_structure) != control_text:
+        fail("fitting control child PDF/source order differs")
+    if avoided_sequence.get("warnings") or control_sequence.get("warnings"):
+        fail("fitting avoid/control pair unexpectedly warned")
+    if any(retry > 1 for retry in retry_counts(avoided_sequence)):
         fail("fitting avoidance retried more than once")
 
 
-def check_oversized(binary: Path) -> None:
+def check_oversized(binary: Path, output_root: Path | None) -> None:
     scene, layout, structure = run_fixture(
         binary,
         "break-inside-oversized",
         "180x80",
         "10,10,10,10",
+        output_root,
     )
     scene_text = scene_page_text(scene)
     pdf_text = pdf_page_text(structure)
@@ -206,6 +283,65 @@ def self_test() -> None:
     }
     if retry_counts(page_sequence) != [1, 0]:
         fail("self-test did not retain bounded retry diagnostics")
+    avoided_text = ["Lead.", FITTING_TEXT]
+    avoided_sequence = {
+        "pages": [{}, {}],
+        "continuations": [
+            {
+                "token": {
+                    "kind": "block",
+                    "next_child_index": 1,
+                    "forced": False,
+                    "break_inside_avoid": True,
+                    "retry_count": 1,
+                    "resume_page_index": 1,
+                }
+            }
+        ],
+    }
+    control_text = ["Lead.ALPHAONE ", "BETATWOO"]
+    control_sequence = {
+        "pages": [{}, {}],
+        "continuations": [
+            {
+                "token": {
+                    "kind": "inline",
+                    "child_index": 1,
+                    "next_line_index": 1,
+                    "resume_page_index": 1,
+                }
+            }
+        ],
+    }
+    if not proves_fitting_avoidance(
+        avoided_text,
+        avoided_sequence,
+        control_text,
+        control_sequence,
+    ):
+        fail("self-test did not recognize a discriminating avoid/control pair")
+    old_false_green = {
+        "pages": [{}, {}],
+        "continuations": [
+            {
+                "token": {
+                    "kind": "block",
+                    "next_child_index": 1,
+                    "forced": False,
+                    "break_inside_avoid": False,
+                    "retry_count": 0,
+                    "resume_page_index": 1,
+                }
+            }
+        ],
+    }
+    if proves_fitting_avoidance(
+        avoided_text,
+        avoided_sequence,
+        avoided_text,
+        old_false_green,
+    ):
+        fail("self-test accepted the prior one-line generic-move false green")
 
 
 def main() -> int:
@@ -214,14 +350,23 @@ def main() -> int:
         self_test()
         print("break-inside self-test: ok")
         return 0
-    if len(arguments) != 1:
-        fail(f"usage: {Path(sys.argv[0]).name} <pliego-binary> | --self-test", 2)
+    if len(arguments) not in (1, 2):
+        fail(
+            f"usage: {Path(sys.argv[0]).name} <pliego-binary> [output-directory] | --self-test",
+            2,
+        )
     binary = Path(arguments[0]).expanduser().resolve()
     if not binary.is_file():
         fail(f"Pliego binary does not exist: {binary}", 2)
-    check_fitting(binary)
-    check_oversized(binary)
-    print("break-inside check: ok")
+    output = Path(arguments[1]).expanduser().resolve() if len(arguments) == 2 else None
+    if output is not None:
+        if output.exists():
+            fail(f"output already exists: {output}", 2)
+        output.mkdir(parents=True)
+    check_fitting(binary, output)
+    check_oversized(binary, output)
+    suffix = f" (artifacts: {output})" if output is not None else ""
+    print(f"break-inside check: ok{suffix}")
     return 0
 
 

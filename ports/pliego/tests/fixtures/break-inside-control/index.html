@@ -2,7 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="utf-8">
-    <title>Pliego fitting break-inside fixture</title>
+    <title>Pliego break-inside control fixture</title>
     <style>
       body {
         margin: 0;
@@ -13,17 +13,16 @@
         height: 80px;
       }
 
-      #kept {
+      #control {
         width: 100px;
-        break-inside: avoid;
       }
     </style>
   </head>
   <body>
     <div id="lead">Lead.</div>
-    <div id="kept">ALPHAONE BETATWOO</div>
+    <div id="control">ALPHAONE BETATWOO</div>
     <script>
-      queueMicrotask(() => window.pliego?.ready({ fixture: 'break-inside-fit' }));
+      queueMicrotask(() => window.pliego?.ready({ fixture: 'break-inside-control' }));
     </script>
   </body>
 </html>

@@ -270,9 +270,11 @@ jobs:
           set -o pipefail
           {
             python ports/pliego/tests/check_forced_breaks.py --self-test &&
-            xvfb-run python ports/pliego/tests/check_forced_breaks.py "$binary" &&
+            xvfb-run python ports/pliego/tests/check_forced_breaks.py \
+              "$binary" "$output/forced-breaks" &&
             python ports/pliego/tests/check_break_inside.py --self-test &&
-            xvfb-run python ports/pliego/tests/check_break_inside.py "$binary" &&
+            xvfb-run python ports/pliego/tests/check_break_inside.py \
+              "$binary" "$output/break-inside" &&
             python ports/pliego/tests/check_paged_ci.py --self-test &&
             xvfb-run python ports/pliego/tests/check_paged_ci.py "$binary" "$output/paged-ci" &&
             python ports/pliego/tests/check_table_pagination.py --self-test &&
