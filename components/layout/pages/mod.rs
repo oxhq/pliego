@@ -761,10 +761,19 @@ impl BlockPageBuilder {
                     .iter()
                     .filter(|row| row.block_size > body_page_capacity)
                     .any(|row| {
-                        cell_fragments.iter().any(|fragment| {
-                            fragment.row_index == row.row_index
-                                && fragment.block_size > body_page_capacity
-                        })
+                        let mut has_fragment = false;
+                        let mut crosses_body_capacity = false;
+                        let mut fragments_fit = true;
+                        for fragment in cell_fragments
+                            .iter()
+                            .filter(|fragment| fragment.row_index == row.row_index)
+                        {
+                            has_fragment = true;
+                            crosses_body_capacity |= fragment.block_start + fragment.block_size
+                                > row.block_start + body_page_capacity;
+                            fragments_fit &= fragment.block_size <= body_page_capacity;
+                        }
+                        !has_fragment || !crosses_body_capacity || !fragments_fit
                     }))
         {
             self.warn_unsupported_table_group_pagination(
@@ -818,10 +827,17 @@ impl BlockPageBuilder {
             }
         }
         if breaks.inside_avoid {
-            if fresh_block_size <= self.request.available_block_size {
+            let has_forced_internal_break =
+                rows.iter().any(|row| row.breaks.before || row.breaks.after)
+                    || groups
+                        .iter()
+                        .any(|group| group.breaks.before || group.breaks.after);
+            if fresh_block_size <= self.request.available_block_size && !has_forced_internal_break {
                 return None;
             }
-            self.warn_if_oversized(child_index, table_node, fresh_block_size, true);
+            if fresh_block_size > self.request.available_block_size {
+                self.warn_if_oversized(child_index, table_node, fresh_block_size, true);
+            }
         }
         self.next_child_index += 1;
 
@@ -1081,6 +1097,8 @@ impl BlockPageBuilder {
                         while fragment_start >= cell_page_origin + self.request.page_stride {
                             cell_page_index += 1;
                             cell_page_origin += self.request.page_stride;
+                            cell_translation += header_block_size;
+                            fragment_start += header_block_size;
                         }
                         if fragment_start + fragment.block_size
                             > cell_page_origin + self.request.available_block_size
@@ -2116,6 +2134,60 @@ mod tests {
             .expect("test page geometry should be valid")
     }
 
+    fn short_table_page_builder() -> BlockPageBuilder {
+        BlockPageBuilder::new(BlockPaginationRequest {
+            available_block_size: Au::from_px(100),
+            page_stride: Au::from_px(120),
+        })
+    }
+
+    fn header_body_table(body_block_size: i32) -> ([TableRow; 2], [TableRowGroup; 2]) {
+        (
+            [
+                TableRow {
+                    row_index: 0,
+                    row_group_index: Some(0),
+                    cell_count: 1,
+                    has_rowspan: false,
+                    block_start: Au::zero(),
+                    block_size: Au::from_px(20),
+                    breaks: ChildPageBreaks::default(),
+                },
+                TableRow {
+                    row_index: 1,
+                    row_group_index: Some(1),
+                    cell_count: 1,
+                    has_rowspan: false,
+                    block_start: Au::from_px(20),
+                    block_size: Au::from_px(body_block_size),
+                    breaks: ChildPageBreaks::default(),
+                },
+            ],
+            [
+                TableRowGroup {
+                    tag_id: Some(11),
+                    row_group_index: 0,
+                    first_row_index: 0,
+                    end_row_index: 1,
+                    block_start: Au::zero(),
+                    block_size: Au::from_px(20),
+                    kind: TableRowGroupKind::Header,
+                    breaks: ChildPageBreaks::default(),
+                },
+                TableRowGroup {
+                    tag_id: None,
+                    row_group_index: 1,
+                    first_row_index: 1,
+                    end_row_index: 2,
+                    block_start: Au::from_px(20),
+                    block_size: Au::from_px(body_block_size),
+                    kind: TableRowGroupKind::Body,
+                    breaks: ChildPageBreaks::default(),
+                },
+            ],
+        )
+    }
+
     #[test]
     fn page_geometry_resolves_explicit_size_and_margins() {
         let page = page();
@@ -3129,6 +3201,185 @@ mod tests {
                 available_block_size: Au::from_px(100),
             }
         );
+    }
+
+    #[test]
+    fn fitting_wrapper_avoid_yields_to_forced_row_boundaries() {
+        let rows = [
+            TableRow {
+                row_index: 0,
+                row_group_index: Some(0),
+                cell_count: 1,
+                has_rowspan: false,
+                block_start: Au::zero(),
+                block_size: Au::from_px(40),
+                breaks: ChildPageBreaks::default(),
+            },
+            TableRow {
+                row_index: 1,
+                row_group_index: Some(0),
+                cell_count: 1,
+                has_rowspan: false,
+                block_start: Au::from_px(40),
+                block_size: Au::from_px(40),
+                breaks: ChildPageBreaks {
+                    before: true,
+                    after: true,
+                    inside_avoid: false,
+                },
+            },
+        ];
+        let row_groups = [TableRowGroup {
+            tag_id: None,
+            row_group_index: 0,
+            first_row_index: 0,
+            end_row_index: rows.len(),
+            block_start: Au::zero(),
+            block_size: Au::from_px(80),
+            kind: TableRowGroupKind::Body,
+            breaks: ChildPageBreaks::default(),
+        }];
+        let mut builder = short_table_page_builder();
+
+        let placement = builder
+            .place_table_child(
+                0,
+                Some(10),
+                Au::zero(),
+                Au::from_px(80),
+                &rows,
+                &row_groups,
+                &[],
+                ChildPageBreaks {
+                    inside_avoid: true,
+                    ..Default::default()
+                },
+            )
+            .expect("forced row breaks must outrank a fitting wrapper avoid");
+        assert_eq!(
+            placement.row_translations,
+            vec![Au::zero(), Au::from_px(80)]
+        );
+        assert_eq!(
+            builder.place_child(
+                1,
+                Some(20),
+                Au::from_px(160),
+                Au::from_px(20),
+                Au::from_px(20),
+                ChildPageBreaks::default(),
+            ),
+            BlockBoundaryPlacement::NewPage {
+                block_origin: Au::from_px(240),
+            }
+        );
+
+        let outcome = builder.finish();
+        assert_eq!(
+            outcome
+                .table_breaks
+                .iter()
+                .map(|decision| (decision.constraint, decision.selected))
+                .collect::<Vec<_>>(),
+            vec![(LayoutDebugTableConstraint::ForcedBefore, true)]
+        );
+        assert!(outcome.warnings.is_empty());
+    }
+
+    #[test]
+    fn header_reduced_oversized_row_without_fragment_progress_is_unsupported() {
+        let (rows, row_groups) = header_body_table(90);
+        let fragments = [TableCellFragment {
+            row_index: 1,
+            cell_index: 0,
+            fragment_index: 0,
+            block_start: Au::from_px(20),
+            block_size: Au::from_px(10),
+        }];
+        let mut builder = short_table_page_builder();
+
+        assert!(
+            builder
+                .place_table_child(
+                    0,
+                    Some(10),
+                    Au::zero(),
+                    Au::from_px(110),
+                    &rows,
+                    &row_groups,
+                    &fragments,
+                    ChildPageBreaks::default(),
+                )
+                .is_none()
+        );
+        assert_eq!(
+            builder.finish().warnings,
+            vec![
+                BlockPaginationWarning::UnsupportedTableGroupPagination {
+                    child_index: 0,
+                    table_node: Some(10),
+                    reason: TableGroupUnsupportedReason::UnsupportedLayout,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn natural_cell_page_advance_reserves_the_repeated_header() {
+        let (rows, row_groups) = header_body_table(140);
+        let fragments = [
+            TableCellFragment {
+                row_index: 1,
+                cell_index: 0,
+                fragment_index: 0,
+                block_start: Au::from_px(20),
+                block_size: Au::from_px(20),
+            },
+            TableCellFragment {
+                row_index: 1,
+                cell_index: 0,
+                fragment_index: 1,
+                block_start: Au::from_px(120),
+                block_size: Au::from_px(20),
+            },
+        ];
+        let mut builder = short_table_page_builder();
+
+        let placement = builder
+            .place_table_child(
+                0,
+                Some(10),
+                Au::zero(),
+                Au::from_px(160),
+                &rows,
+                &row_groups,
+                &fragments,
+                ChildPageBreaks::default(),
+            )
+            .expect("retained fragments cross the header-reduced body capacity");
+        assert_eq!(
+            placement.cell_fragment_translations,
+            vec![Au::zero(), Au::from_px(20)]
+        );
+        assert_eq!(
+            placement.row_block_extensions,
+            vec![Au::zero(), Au::from_px(20)]
+        );
+
+        let outcome = builder.finish();
+        assert_eq!(
+            outcome.table_group_repeats,
+            vec![TableGroupRepeatDecision {
+                page_index: 1,
+                table_node: Some(10),
+                header_tag_id: 11,
+                row_group_index: 0,
+                source_block_start: Au::zero(),
+                target_block_start: Au::from_px(120),
+                block_size: Au::from_px(20),
+            }]
+        );
+        assert!(outcome.warnings.is_empty());
     }
 
     #[test]
