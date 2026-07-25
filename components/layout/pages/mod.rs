@@ -3014,10 +3014,10 @@ mod tests {
             available_block_size: Au::from_px(100),
             page_stride: Au::from_px(120),
         });
-        builder.warn_unsupported_table_caption_pagination(1, Some(20));
+        builder.warn_unsupported_table_caption_pagination(0, Some(20));
         assert_eq!(
             builder.place_child(
-                1,
+                0,
                 Some(20),
                 Au::zero(),
                 Au::from_px(80),
@@ -3033,7 +3033,7 @@ mod tests {
         assert_eq!(
             snapshot.warnings,
             vec![LayoutDebugPageWarning::UnsupportedTableCaptionPagination {
-                child_index: 1,
+                child_index: 0,
                 node: Some(20),
             }]
         );
