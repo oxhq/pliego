@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>Pliego paged table border fixture</title>
+    <style>
+      body { margin: 0; font: 10px/14px sans-serif; }
+      #lead { height: 20px; }
+      table { table-layout: fixed; width: 200px; }
+      th, td { box-sizing: border-box; padding: 0; text-align: left; }
+      thead tr { height: 24px; }
+      tbody tr { height: 32px; }
+      th:first-child, td:first-child { width: 110px; }
+
+      #collapsed { border-collapse: collapse; }
+      #collapsed th, #collapsed td { border: 2px solid #b00020; }
+
+      #separate {
+        border-collapse: separate;
+        border-spacing: 0;
+        border-top: 2px solid #0057b8;
+        border-left: 2px solid #0057b8;
+        break-before: page;
+      }
+      #separate th, #separate td {
+        border-right: 2px solid #0057b8;
+        border-bottom: 2px solid #0057b8;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="lead">LEAD</div>
+    <table id="collapsed">
+      <thead><tr><th>C-H-A</th><th>C-H-B</th></tr></thead>
+      <tbody>
+        <tr><td>C-R0-A</td><td>C-R0-B</td></tr>
+        <tr><td>C-R1-A</td><td>C-R1-B</td></tr>
+        <tr><td>C-R2-A</td><td>C-R2-B</td></tr>
+        <tr><td>C-R3-A</td><td>C-R3-B</td></tr>
+        <tr><td>C-R4-A</td><td>C-R4-B</td></tr>
+        <tr><td>C-R5-A</td><td>C-R5-B</td></tr>
+        <tr><td>C-R6-A</td><td>C-R6-B</td></tr>
+      </tbody>
+    </table>
+    <table id="separate">
+      <thead><tr><th>S-H-A</th><th>S-H-B</th></tr></thead>
+      <tbody>
+        <tr><td>S-R0-A</td><td>S-R0-B</td></tr>
+        <tr><td>S-R1-A</td><td>S-R1-B</td></tr>
+        <tr><td>S-R2-A</td><td>S-R2-B</td></tr>
+        <tr><td>S-R3-A</td><td>S-R3-B</td></tr>
+        <tr><td>S-R4-A</td><td>S-R4-B</td></tr>
+        <tr><td>S-R5-A</td><td>S-R5-B</td></tr>
+        <tr><td>S-R6-A</td><td>S-R6-B</td></tr>
+      </tbody>
+    </table>
+    <script>
+      queueMicrotask(() => window.pliego?.ready({ fixture: 'table-borders' }));
+    </script>
+  </body>
+</html>
