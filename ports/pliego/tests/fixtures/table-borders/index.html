@@ -18,13 +18,15 @@
       #separate {
         border-collapse: separate;
         border-spacing: 0;
-        border-top: 2px solid #0057b8;
-        border-left: 2px solid #0057b8;
         break-before: page;
       }
       #separate th, #separate td {
         border-right: 2px solid #0057b8;
         border-bottom: 2px solid #0057b8;
+      }
+      #separate th { border-top: 2px solid #0057b8; }
+      #separate th:first-child, #separate td:first-child {
+        border-left: 2px solid #0057b8;
       }
     </style>
   </head>

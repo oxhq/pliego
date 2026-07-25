@@ -21,7 +21,7 @@ use style::context::SharedStyleContext;
 use style::logical_geometry::Direction;
 use style::properties::ComputedValues;
 use style::servo::selector_parser::PseudoElement;
-use style::values::computed::{BreakBetween, BreakWithin};
+use style::values::computed::{BorderStyle, BreakBetween, BreakWithin};
 use style::values::specified::align::AlignFlags;
 use style::values::specified::{Display, TextAlignKeyword};
 
@@ -1263,10 +1263,12 @@ fn retained_table_rows<'a>(
         let Fragment::Box(child) = child else {
             return Err(TableGroupUnsupportedReason::UnsupportedLayout);
         };
-        if child.is_table_grid_with_collapsed_borders() {
+        if child.is_table_grid_with_collapsed_borders() &&
+            !has_solid_visible_collapsed_borders(child)
+        {
             return Err(TableGroupUnsupportedReason::CollapsedBorders);
         }
-        if child.is_table_grid() {
+        if child.is_table_grid() || child.is_table_grid_with_collapsed_borders() {
             if grid.replace(child.as_ref()).is_some() {
                 return Err(TableGroupUnsupportedReason::UnsupportedLayout);
             }
@@ -1456,6 +1458,30 @@ fn retained_table_rows<'a>(
         grid,
         wrapper,
     }))
+}
+
+fn has_solid_visible_collapsed_borders(fragment: &BoxFragment) -> bool {
+    let layout_info = fragment.specific_layout_info();
+    let Some(SpecificLayoutInfo::TableGridWithCollapsedBorders(table_info)) =
+        layout_info.as_deref()
+    else {
+        return false;
+    };
+    let mut borders = table_info
+        .collapsed_borders
+        .x
+        .iter()
+        .chain(&table_info.collapsed_borders.y)
+        .flat_map(|line| line.iter());
+    borders.next().is_some_and(|border| {
+        border.width > Au::zero() &&
+            border.style_color.style == BorderStyle::Solid &&
+            border.style_color.color.alpha > 0.0
+    }) && borders.all(|border| {
+        border.width > Au::zero() &&
+            border.style_color.style == BorderStyle::Solid &&
+            border.style_color.color.alpha > 0.0
+    })
 }
 
 fn table_has_captions(fragment: &Fragment) -> bool {

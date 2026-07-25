@@ -750,6 +750,34 @@ pub fn capture_document_scene_with_canvas(
                     event.sequence,
                 )?;
             },
+            "table-border" => {
+                for border in &event.table_borders {
+                    let bounds = border.rect.into_scene_rect();
+                    operations.push(PositionedOperation {
+                        sequence: event.sequence,
+                        bounds: bounds.clone(),
+                        operation: Operation::Path {
+                            data: rectangle_path_data(&bounds),
+                            bounds,
+                            fill: Some(Color {
+                                r: f64::from(border.color.r),
+                                g: f64::from(border.color.g),
+                                b: f64::from(border.color.b),
+                                a: f64::from(border.color.a),
+                            }),
+                            fill_rule: FillRule::NonZero,
+                            stroke: None,
+                            meta: OperationMeta {
+                                semantics: Some(Semantics {
+                                    role: "artifact".into(),
+                                    label: Some("table-border".into()),
+                                }),
+                                source: None,
+                            },
+                        },
+                    });
+                }
+            },
             kind @ ("box"
             | "root-background"
             | "outline"
@@ -1065,7 +1093,9 @@ fn distribute_operations(
                 .and_then(|event| event.fragment_id)
                 .is_some_and(|fragment_id| fragments.contains(&fragment_id))
         }) {
-            if matches!(&operation.operation, Operation::Path { .. }) {
+            if matches!(&operation.operation, Operation::Path { .. }) &&
+                !is_table_border_path(&operation.operation)
+            {
                 return Err(CaptureError::RepeatedTableHeaderPathUnsupported {
                     sequence: operation.sequence,
                     tag_id: repeat.header_tag_id,
@@ -1109,8 +1139,8 @@ fn mark_repeated_table_header(operation: &mut Operation) {
     let meta = match operation {
         Operation::Text { meta, .. }
         | Operation::Image { meta, .. }
-        | Operation::Link { meta, .. } => meta,
-        Operation::Path { .. } => unreachable!("repeated header paths are rejected"),
+        | Operation::Link { meta, .. }
+        | Operation::Path { meta, .. } => meta,
     };
     meta.semantics = Some(Semantics {
         role: "artifact".into(),
@@ -1155,6 +1185,12 @@ fn translate_operation_y(
                 glyph.y -= page_origin;
             }
         },
+        Operation::Path {
+            bounds, data, meta, ..
+        } if is_table_border_meta(meta) => {
+            bounds.y -= page_origin;
+            *data = rectangle_path_data(bounds);
+        },
         Operation::Path { .. } if page_origin != 0.0 => {
             return Err(CaptureError::PageLocalPathUnsupported { sequence });
         },
@@ -1164,6 +1200,26 @@ fn translate_operation_y(
         },
     }
     Ok(())
+}
+
+fn is_table_border_path(operation: &Operation) -> bool {
+    matches!(
+        operation,
+        Operation::Path { meta, .. } if is_table_border_meta(meta)
+    )
+}
+
+fn is_table_border_meta(meta: &OperationMeta) -> bool {
+    meta.semantics.as_ref().is_some_and(|semantics| {
+        semantics.role == "artifact" && semantics.label.as_deref() == Some("table-border")
+    })
+}
+
+fn rectangle_path_data(bounds: &Rect) -> String {
+    format!(
+        "M{} {}h{}v{}h-{}z",
+        bounds.x, bounds.y, bounds.width, bounds.height, bounds.width
+    )
 }
 
 fn positive_finite(value: f32) -> bool {
@@ -1966,6 +2022,24 @@ struct CapturePaintEvent {
     _spatial_node_id: usize,
     #[serde(rename = "clip_id")]
     _clip_id: Option<usize>,
+    #[serde(default)]
+    table_borders: Vec<CaptureTableBorder>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CaptureTableBorder {
+    rect: CaptureRect,
+    color: CaptureColor,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CaptureColor {
+    r: f32,
+    g: f32,
+    b: f32,
+    a: f32,
 }
 
 #[derive(Deserialize)]
@@ -2109,5 +2183,40 @@ mod tests {
             Err(CaptureError::PageLocalPathUnsupported { sequence: 7 })
         );
         assert_eq!(operation, original);
+    }
+
+    #[test]
+    fn translates_marked_table_border_rectangle_paths() {
+        let mut operation = Operation::Path {
+            bounds: Rect {
+                x: 10.0,
+                y: 812.0,
+                width: 20.0,
+                height: 2.0,
+            },
+            data: "M10 812h20v2h-20z".into(),
+            fill: Some(crate::Color {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            }),
+            fill_rule: crate::FillRule::NonZero,
+            stroke: None,
+            meta: OperationMeta {
+                semantics: Some(Semantics {
+                    role: "artifact".into(),
+                    label: Some("table-border".into()),
+                }),
+                source: None,
+            },
+        };
+
+        assert_eq!(translate_operation_y(&mut operation, 792.0, 7), Ok(()));
+        let Operation::Path { bounds, data, .. } = operation else {
+            unreachable!();
+        };
+        assert_eq!(bounds.y, 20.0);
+        assert_eq!(data, "M10 20h20v2h-20z");
     }
 }

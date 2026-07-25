@@ -287,6 +287,8 @@ jobs:
             xvfb-run python ports/pliego/tests/check_table_header_footer.py "$binary" &&
             python ports/pliego/tests/check_table_rowspans.py --self-test &&
             xvfb-run python ports/pliego/tests/check_table_rowspans.py "$binary" &&
+            python ports/pliego/tests/check_table_borders.py --self-test &&
+            xvfb-run python ports/pliego/tests/check_table_borders.py "$binary" &&
             xvfb-run python ports/pliego/tests/check_deterministic_environment.py "$binary" &&
             python ports/pliego/tests/check_resource_policy.py --self-test &&
             xvfb-run python ports/pliego/tests/check_resource_policy.py "$binary" "$output/resource-policy" &&

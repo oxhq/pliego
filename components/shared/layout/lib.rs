@@ -556,6 +556,23 @@ pub struct LayoutDebugPaintEvent {
     pub spatial_node_id: usize,
     /// The Servo clip-store entry active for this event; `None` means no clip.
     pub clip_id: Option<usize>,
+    /// Solid table-border rectangles owned by this event's fragment.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub table_borders: Vec<LayoutDebugTableBorder>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+pub struct LayoutDebugTableBorder {
+    pub rect: LayoutDebugRect,
+    pub color: LayoutDebugColor,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+pub struct LayoutDebugColor {
+    pub r: f32,
+    pub g: f32,
+    pub b: f32,
+    pub a: f32,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]

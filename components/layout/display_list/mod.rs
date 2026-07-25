@@ -11,7 +11,10 @@ use clip::Clip;
 pub(crate) use clip::ClipId;
 use euclid::{Box2D, Point2D, Rect, Scale, SideOffsets2D, Size2D, UnknownUnit, Vector2D};
 use gradient::WebRenderGradient;
-use layout_api::{LayoutDebugPaintEvent, ReflowStatistics};
+use layout_api::{
+    LayoutDebugColor, LayoutDebugPaintEvent, LayoutDebugRect, LayoutDebugTableBorder,
+    ReflowStatistics,
+};
 use net_traits::image_cache::Image as CachedImage;
 use paint_api::display_list::{PaintDisplayListInfo, SpatialTreeNodeInfo};
 use servo_arc::Arc as ServoArc;
@@ -33,6 +36,7 @@ use style::properties::ComputedValues;
 use style::properties::longhands::visibility::computed_value::T as Visibility;
 use style::properties::style_structs::Border;
 use style::values::computed::basic_shape::ClipPath;
+use style::values::computed::image::Image;
 use style::values::computed::{
     BorderImageSideWidth, BorderImageWidth, BorderStyle, LengthPercentage,
     NonNegativeLengthOrNumber, NumberOrPercentage, OutlineStyle,
@@ -68,7 +72,10 @@ use crate::geom::{
     LengthPercentageOrAuto, PhysicalPoint, PhysicalRect, PhysicalSides, PhysicalSize,
 };
 use crate::replaced::NaturalSizes;
-use crate::style_ext::{BorderStyleColor, ComputedValuesExt};
+use crate::style_ext::{
+    BorderStyleColor, ComputedValuesExt, Display as LayoutDisplay, DisplayGeneratingBox,
+    DisplayLayoutInternal,
+};
 
 mod background;
 mod clip;
@@ -179,6 +186,7 @@ impl DisplayListDebugCapture {
             tag_id: fragment.and_then(|fragment| fragment.tag_id),
             spatial_node_id: spatial_node_id.index,
             clip_id: (clip_id != ClipId::INVALID).then_some(clip_id.0),
+            table_borders: Vec::new(),
         });
     }
 
@@ -191,6 +199,28 @@ impl DisplayListDebugCapture {
     ) {
         let fragment = self.fragment_attribution(fragment, tag);
         self.record(kind, Some(fragment), state.spatial_id, state.clip_id);
+    }
+
+    fn record_table_borders<T>(
+        &mut self,
+        fragment: &Arc<T>,
+        tag: Option<Tag>,
+        state: &TraversalState,
+        table_borders: Vec<LayoutDebugTableBorder>,
+    ) {
+        if table_borders.is_empty() {
+            return;
+        }
+        let fragment = self.fragment_attribution(fragment, tag);
+        self.events.push(LayoutDebugPaintEvent {
+            sequence: self.events.len(),
+            kind: "table-border".into(),
+            fragment_id: Some(fragment.id),
+            tag_id: fragment.tag_id,
+            spatial_node_id: state.spatial_id.index,
+            clip_id: (state.clip_id != ClipId::INVALID).then_some(state.clip_id.0),
+            table_borders,
+        });
     }
 
     pub(crate) fn events(&self) -> &[LayoutDebugPaintEvent] {
@@ -839,6 +869,12 @@ impl PaintTraversalHandler for DisplayListBuilder<'_> {
             fragment.base.tag,
             state,
         );
+        self.debug_capture.record_table_borders(
+            fragment.box_fragment,
+            fragment.base.tag,
+            state,
+            separate_table_cell_borders(fragment, state.origin),
+        );
         BuilderForBoxFragment::new(fragment, state.origin).build(self, state)
     }
 
@@ -1078,12 +1114,23 @@ impl PaintTraversalHandler for DisplayListBuilder<'_> {
         if fragment.style().get_inherited_box().visibility != Visibility::Visible {
             return;
         };
-        self.debug_capture.record_fragment(
-            "collapsed-table-borders",
-            fragment.box_fragment,
-            fragment.base.tag,
-            state,
-        );
+        if let Some(rows) = collapsed_table_border_rows(fragment.box_fragment, state.origin) {
+            for (row, borders) in rows {
+                self.debug_capture.record_table_borders(
+                    row,
+                    row.base.tag,
+                    state,
+                    borders,
+                );
+            }
+        } else {
+            self.debug_capture.record_fragment(
+                "collapsed-table-borders",
+                fragment.box_fragment,
+                fragment.base.tag,
+                state,
+            );
+        }
         BuilderForBoxFragment::new(fragment, state.origin)
             .build_collapsed_table_borders(self, state)
     }
@@ -2363,6 +2410,275 @@ impl<'a> BuilderForBoxFragment<'a> {
             );
         }
     }
+}
+
+fn separate_table_cell_borders(
+    fragment: &BoxFragmentWithStyle<'_>,
+    containing_block_origin: PhysicalPoint<Au>,
+) -> Vec<LayoutDebugTableBorder> {
+    if fragment.has_collapsed_borders() ||
+        !matches!(
+            LayoutDisplay::from(fragment.style().get_box().display),
+            LayoutDisplay::GeneratingBox(DisplayGeneratingBox::LayoutInternal(
+                DisplayLayoutInternal::TableCell
+            ))
+        )
+    {
+        return Vec::new();
+    }
+
+    let style = fragment.style();
+    let border = style.get_border();
+    if !matches!(&border.border_image_source, Image::None) ||
+        !border.border_top_left_radius.0.is_zero() ||
+        !border.border_top_right_radius.0.is_zero() ||
+        !border.border_bottom_right_radius.0.is_zero() ||
+        !border.border_bottom_left_radius.0.is_zero()
+    {
+        return Vec::new();
+    }
+
+    let rect = fragment
+        .border_rect()
+        .translate(containing_block_origin.to_vector());
+    let widths = fragment.border;
+    let current_color = style.get_inherited_text().clone_color();
+    let colors = BorderStyleColor::from_border(border, &current_color);
+    let mut borders = Vec::with_capacity(4);
+    append_solid_table_border(
+        &mut borders,
+        PhysicalRect::new(
+            rect.origin,
+            PhysicalSize::new(rect.size.width, widths.top),
+        ),
+        &colors.top,
+    );
+    append_solid_table_border(
+        &mut borders,
+        PhysicalRect::new(
+            PhysicalPoint::new(rect.max_x() - widths.right, rect.origin.y),
+            PhysicalSize::new(widths.right, rect.size.height),
+        ),
+        &colors.right,
+    );
+    append_solid_table_border(
+        &mut borders,
+        PhysicalRect::new(
+            PhysicalPoint::new(rect.origin.x, rect.max_y() - widths.bottom),
+            PhysicalSize::new(rect.size.width, widths.bottom),
+        ),
+        &colors.bottom,
+    );
+    append_solid_table_border(
+        &mut borders,
+        PhysicalRect::new(
+            rect.origin,
+            PhysicalSize::new(widths.left, rect.size.height),
+        ),
+        &colors.left,
+    );
+    borders
+}
+
+fn collapsed_table_border_rows<'a>(
+    grid: &'a Arc<BoxFragment>,
+    containing_block_origin: PhysicalPoint<Au>,
+) -> Option<Vec<(&'a Arc<BoxFragment>, Vec<LayoutDebugTableBorder>)>> {
+    let layout_info = grid.specific_layout_info();
+    let Some(SpecificLayoutInfo::TableGridWithCollapsedBorders(table_info)) =
+        layout_info.as_deref()
+    else {
+        return None;
+    };
+    let column_count = table_info.track_sizes.x.len();
+    let row_count = table_info.track_sizes.y.len();
+    if column_count == 0 ||
+        row_count == 0 ||
+        table_info
+            .track_sizes
+            .x
+            .iter()
+            .chain(&table_info.track_sizes.y)
+            .any(|size| *size <= Au::zero()) ||
+        table_info.collapsed_borders.x.len() != column_count + 1 ||
+        table_info.collapsed_borders.y.len() != row_count + 1 ||
+        table_info
+            .collapsed_borders
+            .x
+            .iter()
+            .any(|line| line.len() != row_count || line.iter().any(|border| !solid_visible(border))) ||
+        table_info
+            .collapsed_borders
+            .y
+            .iter()
+            .any(|line| line.len() != column_count || line.iter().any(|border| !solid_visible(border)))
+    {
+        return None;
+    }
+
+    let grid_origin = containing_block_origin + grid.content_rect().origin.to_vector();
+    let mut rows = Vec::with_capacity(row_count);
+    let mut seen = vec![false; row_count];
+    for child in &grid.children {
+        let Fragment::Box(child) = child else {
+            return None;
+        };
+        match child.specific_layout_info().as_deref() {
+            Some(SpecificLayoutInfo::TableRow {
+                row_index,
+                has_rowspan: false,
+                ..
+            }) => {
+                append_collapsed_table_row(
+                    &mut rows,
+                    &mut seen,
+                    child,
+                    *row_index,
+                    grid_origin,
+                    grid_origin.x,
+                    table_info,
+                )?;
+            },
+            Some(SpecificLayoutInfo::TableRowGroup { .. }) => {
+                let group_origin = grid_origin + child.content_rect().origin.to_vector();
+                for row in &child.children {
+                    let Fragment::Box(row) = row else {
+                        return None;
+                    };
+                    let row_index = match row.specific_layout_info().as_deref() {
+                        Some(SpecificLayoutInfo::TableRow {
+                            row_index,
+                            has_rowspan: false,
+                            ..
+                        }) => *row_index,
+                        _ => return None,
+                    };
+                    append_collapsed_table_row(
+                        &mut rows,
+                        &mut seen,
+                        row,
+                        row_index,
+                        group_origin,
+                        grid_origin.x,
+                        table_info,
+                    )?;
+                }
+            },
+            _ => return None,
+        }
+    }
+    seen.iter().all(|seen| *seen).then_some(rows)
+}
+
+fn append_collapsed_table_row<'a>(
+    rows: &mut Vec<(&'a Arc<BoxFragment>, Vec<LayoutDebugTableBorder>)>,
+    seen: &mut [bool],
+    row: &'a Arc<BoxFragment>,
+    row_index: usize,
+    containing_block_origin: PhysicalPoint<Au>,
+    grid_inline_start: Au,
+    table_info: &crate::table::SpecificTableGridInfo,
+) -> Option<()> {
+    let seen = seen.get_mut(row_index)?;
+    if std::mem::replace(seen, true) {
+        return None;
+    }
+    let row_rect = row
+        .content_rect()
+        .translate(containing_block_origin.to_vector());
+    if row_rect.size.height <= Au::zero() ||
+        row_rect.size.height != *table_info.track_sizes.y.get(row_index)?
+    {
+        return None;
+    }
+
+    let mut borders = Vec::with_capacity(table_info.track_sizes.x.len() * 2 + 2);
+    let mut boundary_x = grid_inline_start;
+    for boundary in 0..=table_info.track_sizes.x.len() {
+        let border = &table_info.collapsed_borders.x[boundary][row_index];
+        let x = if boundary == 0 {
+            boundary_x
+        } else if boundary == table_info.track_sizes.x.len() {
+            boundary_x - border.width
+        } else {
+            boundary_x - border.width / 2
+        };
+        append_solid_table_border(
+            &mut borders,
+            PhysicalRect::new(
+                PhysicalPoint::new(x, row_rect.origin.y),
+                PhysicalSize::new(border.width, row_rect.size.height),
+            ),
+            &border.style_color,
+        );
+        if let Some(column_size) = table_info.track_sizes.x.get(boundary) {
+            boundary_x += *column_size;
+        }
+    }
+
+    let mut column_x = grid_inline_start;
+    for (column, column_size) in table_info.track_sizes.x.iter().enumerate() {
+        if row_index == 0 {
+            let border = &table_info.collapsed_borders.y[0][column];
+            append_solid_table_border(
+                &mut borders,
+                PhysicalRect::new(
+                    PhysicalPoint::new(column_x, row_rect.origin.y),
+                    PhysicalSize::new(*column_size, border.width),
+                ),
+                &border.style_color,
+            );
+        }
+        let border = &table_info.collapsed_borders.y[row_index + 1][column];
+        append_solid_table_border(
+            &mut borders,
+            PhysicalRect::new(
+                PhysicalPoint::new(column_x, row_rect.max_y() - border.width),
+                PhysicalSize::new(*column_size, border.width),
+            ),
+            &border.style_color,
+        );
+        column_x += *column_size;
+    }
+    rows.push((row, borders));
+    Some(())
+}
+
+fn solid_visible(border: &crate::table::CollapsedBorder) -> bool {
+    border.width > Au::zero() &&
+        border.style_color.style == BorderStyle::Solid &&
+        rgba(border.style_color.color.clone()).a > 0.0
+}
+
+fn append_solid_table_border(
+    borders: &mut Vec<LayoutDebugTableBorder>,
+    rect: PhysicalRect<Au>,
+    style_color: &BorderStyleColor,
+) {
+    if rect.size.width <= Au::zero() ||
+        rect.size.height <= Au::zero() ||
+        style_color.style != BorderStyle::Solid
+    {
+        return;
+    }
+    let color = rgba(style_color.color.clone());
+    if color.a <= 0.0 {
+        return;
+    }
+    borders.push(LayoutDebugTableBorder {
+        rect: LayoutDebugRect {
+            x: rect.origin.x.to_f32_px(),
+            y: rect.origin.y.to_f32_px(),
+            width: rect.size.width.to_f32_px(),
+            height: rect.size.height.to_f32_px(),
+        },
+        color: LayoutDebugColor {
+            r: color.r,
+            g: color.g,
+            b: color.b,
+            a: color.a,
+        },
+    });
 }
 
 fn rgba(color: AbsoluteColor) -> wr::ColorF {

@@ -43,8 +43,8 @@ unsupported paint state instead of being silently approximated as solid borders.
 - The first and last visible rows on a fragment own the fragment's outer block
   edges. No additional synthetic border is painted over them.
 - In separate mode, authored edges remain separate. The supported fixture authors
-  each shared edge once (table top/left, cell right/bottom), so pagination must not
-  add a second edge.
+  each shared edge once (header top, first-column left, cell right/bottom), so
+  pagination must not add a second edge.
 - Repeated-header borders use the same inline coordinates, widths, and colors as
   the source header. Only their page-local block coordinates change.
 
