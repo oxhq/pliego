@@ -1,0 +1,38 @@
+{
+  "schema": "pliego.document-gate-fixtures",
+  "version": 1,
+  "rights": "Locally authored synthetic business data; MPL-2.0",
+  "font": {
+    "path": "../text-scene/Ahem.ttf",
+    "source": "Existing vendored WPT Ahem test fixture",
+    "sha256": "b719ecb31c5b21fc573c03f6421c74ac63c271a5a3ff841e34f9705fb94b8448"
+  },
+  "fixtures": [
+    {
+      "name": "invoice",
+      "path": "invoice.html",
+      "sha256": "d3dbd4b71b05c8c5645b062cd46583df61ed45fa8919bf15df60a61f1a4f4218",
+      "page_size": [612, 792],
+      "page_margins": [36, 36, 36, 36],
+      "expected_pages": 2,
+      "rows": 32,
+      "rows_per_page": 16,
+      "id_prefix": "INV-",
+      "id_width": 3,
+      "headers": ["ITEM", "QTY", "DESCRIPTION", "AMOUNT"]
+    },
+    {
+      "name": "statement-100-page",
+      "path": "statement.html",
+      "sha256": "74de76544d223951589c43815ef483215b2c8a9e933ac0a4149b9f3f4de73182",
+      "page_size": [612, 792],
+      "page_margins": [36, 36, 36, 36],
+      "expected_pages": 100,
+      "rows": 1600,
+      "rows_per_page": 16,
+      "id_prefix": "STMT-",
+      "id_width": 4,
+      "headers": ["ROW", "DATE", "DETAIL", "BALANCE"]
+    }
+  ]
+}

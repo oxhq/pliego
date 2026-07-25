@@ -1,0 +1,66 @@
+<!doctype html>
+<!--
+  This synthetic fixture is released under the Mozilla Public License 2.0.
+  It contains no customer, bank, or third-party financial data.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>Pliego synthetic 100-page statement gate</title>
+    <style>
+      @font-face {
+        font-family: Ahem;
+        src: url("../text-scene/Ahem.ttf");
+      }
+      html, body { margin: 0; }
+      body { font: 12px/16px Ahem; }
+      table {
+        border-collapse: collapse;
+        table-layout: fixed;
+        width: 540px;
+      }
+      caption { height: 32px; text-align: left; }
+      th, td {
+        border: 1px solid #1e4d3a;
+        box-sizing: border-box;
+        padding: 4px;
+        text-align: left;
+      }
+      thead tr { height: 40px; }
+      tbody tr { height: 40px; }
+      th:nth-child(1), td:nth-child(1) { width: 120px; }
+      th:nth-child(2), td:nth-child(2) { width: 96px; }
+      th:nth-child(3), td:nth-child(3) { width: 228px; }
+      th:nth-child(4), td:nth-child(4) { width: 96px; }
+      .page-end { break-after: page; }
+    </style>
+  </head>
+  <body>
+    <table id="statement">
+      <caption>STATEMENT PLG-100</caption>
+      <thead>
+        <tr><th>ROW</th><th>DATE</th><th>DETAIL</th><th>BALANCE</th></tr>
+      </thead>
+      <tbody id="entries"></tbody>
+    </table>
+    <script>
+      const body = document.querySelector("#entries");
+      for (let row = 1; row <= 1600; row++) {
+        const entry = document.createElement("tr");
+        if (row % 16 === 0 && row !== 1600) entry.className = "page-end";
+        const id = `STMT-${String(row).padStart(4, "0")}`;
+        for (const value of [id, `D${String(row).padStart(4, "0")}`, `ENTRY-${String(row).padStart(4, "0")}`, `${row}.00`]) {
+          const cell = document.createElement("td");
+          cell.textContent = value;
+          entry.append(cell);
+        }
+        body.append(entry);
+      }
+      queueMicrotask(() => window.pliego?.ready({
+        fixture: "statement-100-page",
+        rows: 1600,
+        expected_pages: 100
+      }));
+    </script>
+  </body>
+</html>
