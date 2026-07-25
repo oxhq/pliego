@@ -11,7 +11,7 @@ use net_traits::image_cache::{
     FontResolver, ImageCache, ImageCacheFactory, ImageCacheResponseMessage, ImageCacheResult,
     ImageLoadListener, ImageOrMetadataAvailable, ImageResponse, PendingImageId,
     PendingImageResponse, VectorImageColor, VectorImageFillRule, VectorImagePathSegment,
-    VectorImageSnapshotItem,
+    VectorImageSnapshotItem, VectorImageUnsupportedReason,
 };
 use net_traits::request::RequestId;
 use net_traits::{
@@ -83,6 +83,13 @@ fn jpeg_image_bytes() -> Vec<u8> {
 fn svg_image_bytes() -> Vec<u8> {
     br#"<svg aria-hidden="true" height="16" viewBox="0 0 16 16" width="16" xmlns="http://www.w3.org/2000/svg">
     <path d="M1 1h14v14H1z" fill="black"/>
+</svg>"#
+        .to_vec()
+}
+
+fn smil_svg_image_bytes() -> Vec<u8> {
+    br#"<svg height="16" width="16" xmlns="http://www.w3.org/2000/svg">
+    <path d="M1 1h14v14H1z"><animate attributeName="opacity" dur="1s" values="1;0"/></path>
 </svg>"#
         .to_vec()
 }
@@ -548,7 +555,7 @@ fn test_svg_rasterization() {
         ),
     );
 
-    let svg_bytes = svg_image_bytes();
+    let svg_bytes = smil_svg_image_bytes();
     cache.notify_pending_response(
         id,
         FetchResponseMsg::ProcessResponseChunk(create_request_id(), DebugVec(svg_bytes)),
@@ -580,13 +587,19 @@ fn test_svg_rasterization() {
         (snapshot.viewport_width, snapshot.viewport_height),
         (16.0, 16.0)
     );
-    assert_eq!(snapshot.items.len(), 1);
+    assert_eq!(snapshot.items.len(), 2);
+    assert_eq!(
+        snapshot.items[0],
+        VectorImageSnapshotItem::Unsupported {
+            reason: VectorImageUnsupportedReason::Animation,
+        }
+    );
     let VectorImageSnapshotItem::Path {
         segments,
         fill,
         fill_rule,
         stroke,
-    } = &snapshot.items[0]
+    } = &snapshot.items[1]
     else {
         panic!("Expected retained SVG path");
     };

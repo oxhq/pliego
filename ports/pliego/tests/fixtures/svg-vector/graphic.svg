@@ -4,7 +4,9 @@
       <feGaussianBlur stdDeviation="2"/>
     </filter>
   </defs>
-  <path d="M10 10h40v30H10z" transform="translate(4 3)" fill="#1a66cc" stroke="#cc1a33" stroke-width="2"/>
+  <path d="M10 10h40v30H10z" transform="translate(4 3)" fill="#1a66cc" stroke="#cc1a33" stroke-width="2">
+    <animate attributeName="opacity" dur="1s" values="1;0.5;1" repeatCount="indefinite"/>
+  </path>
   <image x="70" y="10" width="16" height="8" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="/>
   <text x="10" y="65" font-family="Ahem" font-size="12" fill="#000">SVG</text>
   <g filter="url(#unsupported-blur)">

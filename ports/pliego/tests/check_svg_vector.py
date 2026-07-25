@@ -130,6 +130,10 @@ def run(binary: Path, fixture: Path, root: Path) -> tuple[bytes, bytes, bytes, b
         any(item.get("kind") == "unsupported" and item.get("reason") == "compositing" for item in items),
         f"filtered SVG group was not diagnosed: {items!r}",
     )
+    require(
+        any(item.get("kind") == "unsupported" and item.get("reason") == "animation" for item in items),
+        f"SMIL animation was not diagnosed: {items!r}",
+    )
 
     scene_bytes = artifact(summary, "scene_artifact").read_bytes()
     scene = json.loads(scene_bytes)
@@ -174,6 +178,8 @@ def run(binary: Path, fixture: Path, root: Path) -> tuple[bytes, bytes, bytes, b
     require(capture.get("status") == "partial", repr(capture))
     require(any(event.get("kind") == "svg-compositing" for event in capture.get("unsupported_events", [])),
             f"typed SVG diagnostic is absent: {capture!r}")
+    require(any(event.get("kind") == "svg-animation" for event in capture.get("unsupported_events", [])),
+            f"typed SVG animation diagnostic is absent: {capture!r}")
     preview = artifact(summary, "scene_preview").read_bytes()
     require(preview.startswith(b"\x89PNG\r\n\x1a\n"), "preview is not PNG")
     preview_size = (int.from_bytes(preview[16:20], "big"), int.from_bytes(preview[20:24], "big"))
@@ -197,7 +203,9 @@ def run(binary: Path, fixture: Path, root: Path) -> tuple[bytes, bytes, bytes, b
 
 def self_test() -> None:
     fixture_root = Path(__file__).resolve().parent / "fixtures"
-    require((fixture_root / "svg-vector/graphic.svg").is_file(), "SVG fixture is missing")
+    graphic = fixture_root / "svg-vector/graphic.svg"
+    require(graphic.is_file(), "SVG fixture is missing")
+    require("<animate " in graphic.read_text(encoding="utf-8"), "SVG animation fixture is missing")
     require((fixture_root / "text-scene/Ahem.ttf").is_file(), "bundled Ahem fixture is missing")
     require(close(10.0, 10.01) and not close(10.0, 10.03), "geometry tolerance is broken")
     require(INLINE_PNG.startswith(b"\x89PNG\r\n\x1a\n"), "inline PNG fixture is invalid")

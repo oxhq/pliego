@@ -2,6 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::borrow::Cow;
 use std::cell::{Cell, OnceCell};
 use std::cmp::min;
 use std::collections::hash_map::Entry::{Occupied, Vacant};
@@ -88,7 +89,7 @@ fn parse_svg_document_in_memory(
     bytes: &[u8],
     fontdb: Arc<fontdb::Database>,
     font_resolver: Arc<dyn FontResolver>,
-) -> Result<usvg::Tree, &'static str> {
+) -> Result<(usvg::Tree, bool), &'static str> {
     let image_string_href_resolver = Box::new(move |_: &str, _: &usvg::Options| {
         // Do not try to load `href` in <image> as local file path.
         None
@@ -109,7 +110,41 @@ fn parse_svg_document_in_memory(
         ..usvg::Options::default()
     };
 
-    usvg::Tree::from_data(bytes, &opt)
+    let parsed: Result<_, usvg::Error> = (|| {
+        let bytes = if bytes.starts_with(&[0x1f, 0x8b]) {
+            Cow::Owned(usvg::decompress_svgz(bytes)?)
+        } else {
+            Cow::Borrowed(bytes)
+        };
+        let text = std::str::from_utf8(&bytes).map_err(|_| usvg::Error::NotAnUtf8Str)?;
+        let xml_opt = usvg::roxmltree::ParsingOptions {
+            allow_dtd: true,
+            ..Default::default()
+        };
+        let document = usvg::roxmltree::Document::parse_with_options(text, xml_opt)?;
+        let has_smil_animation = document.descendants().any(|node| {
+            if !node.is_element() {
+                return false;
+            }
+            let tag = node.tag_name();
+            tag.namespace() == Some("http://www.w3.org/2000/svg")
+                && matches!(
+                    tag.name(),
+                    "animate"
+                        | "animateColor"
+                        | "animateMotion"
+                        | "animateTransform"
+                        | "discard"
+                        | "set"
+                )
+        });
+        Ok((
+            usvg::Tree::from_xmltree(&document, &opt)?,
+            has_smil_animation,
+        ))
+    })();
+
+    parsed
         .inspect_err(|error| {
             warn!("Error when parsing SVG data: {error}");
         })
@@ -135,9 +170,10 @@ fn decode_bytes_sync(
     let image = if is_svg_document {
         parse_svg_document_in_memory(bytes, fontdb, font_resolver.clone())
             .ok()
-            .map(|svg_tree| {
+            .map(|(svg_tree, has_smil_animation)| {
                 DecodedImage::Vector(VectorImageData {
                     svg_tree: Arc::new(svg_tree),
+                    has_smil_animation,
                     cors_status: cors,
                 })
             })
@@ -273,12 +309,19 @@ impl CompletedLoad {
 struct VectorImageData {
     #[conditional_malloc_size_of]
     svg_tree: Arc<usvg::Tree>,
+    has_smil_animation: bool,
     cors_status: CorsStatus,
 }
 
-fn snapshot_vector_image(tree: &usvg::Tree) -> VectorImageSnapshot {
+fn snapshot_vector_image(image: &VectorImageData) -> VectorImageSnapshot {
+    let tree = &image.svg_tree;
     let size = tree.size();
     let mut items = Vec::new();
+    if image.has_smil_animation {
+        items.push(VectorImageSnapshotItem::Unsupported {
+            reason: VectorImageUnsupportedReason::Animation,
+        });
+    }
     snapshot_vector_group(tree, tree.root(), &mut items);
     VectorImageSnapshot {
         viewport_width: size.width(),
@@ -1464,7 +1507,7 @@ impl ImageCache for ImageCacheImpl {
             .lock()
             .vector_images
             .get(&image_id)
-            .map(|image| snapshot_vector_image(&image.svg_tree))
+            .map(snapshot_vector_image)
     }
 
     /// Add a new listener for the given pending image id. If the image is already present,

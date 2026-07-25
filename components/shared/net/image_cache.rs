@@ -144,6 +144,7 @@ pub enum VectorImageFillRule {
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum VectorImageUnsupportedReason {
+    Animation,
     Compositing,
     Stroke,
     Paint,

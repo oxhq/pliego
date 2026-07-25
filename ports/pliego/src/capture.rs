@@ -125,6 +125,7 @@ pub enum UnsupportedPaintKind {
     Outline,
     CollapsedTableBorders,
     Iframe,
+    SvgAnimation,
     SvgCompositing,
     SvgStroke,
     SvgPaint,
@@ -1637,6 +1638,9 @@ fn append_vector_image(
                 unsupported_events.push(UnsupportedPaintEvent {
                     sequence,
                     kind: match reason {
+                        CaptureVectorUnsupportedReason::Animation => {
+                            UnsupportedPaintKind::SvgAnimation
+                        },
                         CaptureVectorUnsupportedReason::Compositing => {
                             UnsupportedPaintKind::SvgCompositing
                         },
@@ -2003,6 +2007,7 @@ enum CaptureVectorFillRule {
 #[derive(Clone, Copy, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 enum CaptureVectorUnsupportedReason {
+    Animation,
     Compositing,
     Stroke,
     Paint,
