@@ -89,13 +89,13 @@ def verify_render(
     operations = text_operations(scene)
     pages = scene.get("pages", [])
     require(len(pages) >= 3, "oversized row did not make multi-page progress")
-    tokens = [str(operation.get("text", "")) for _, operation in operations]
+    tokens = [canonical_text(str(operation.get("text", ""))) for _, operation in operations]
     require(Counter(tokens) == Counter(EXPECTED_TOKENS), "text was lost or duplicated")
 
     geometry: dict[str, tuple[int, float, float]] = {}
     column_x: dict[str, set[float]] = {"A": set(), "B": set()}
     for page_index, operation in operations:
-        text = str(operation.get("text", ""))
+        text = canonical_text(str(operation.get("text", "")))
         match = re.fullmatch(r"([AB])(\d+)", text)
         if not match:
             continue
