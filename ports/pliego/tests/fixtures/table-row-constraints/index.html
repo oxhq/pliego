@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>Pliego table row constraints fixture</title>
+    <style>
+      body { margin: 0; font: 14px/20px sans-serif; }
+      #lead { height: 20px; }
+      table { border-spacing: 0; table-layout: fixed; width: 200px; }
+      tr { height: 32px; }
+      td { padding: 0; }
+      td:first-child { width: 70px; }
+      #forced-group { break-before: page; }
+      #kept-group { break-inside: avoid; }
+      #kept-row { break-inside: avoid; }
+      #forced-after { break-after: page; }
+    </style>
+  </head>
+  <body>
+    <div id="lead">Lead.</div>
+    <table id="ledger">
+      <tbody>
+        <tr><td>R0A</td><td>R0B</td></tr>
+      </tbody>
+      <tbody id="forced-group">
+        <tr><td>R1A</td><td>R1B</td></tr>
+        <tr><td>R2A</td><td>R2B</td></tr>
+      </tbody>
+      <tbody id="kept-group">
+        <tr><td>R3A</td><td>R3B</td></tr>
+        <tr><td>R4A</td><td>R4B</td></tr>
+      </tbody>
+      <tbody>
+        <tr><td>R5A</td><td>R5B</td></tr>
+        <tr id="kept-row"><td>R6A</td><td>R6B</td></tr>
+        <tr id="forced-after"><td>R7A</td><td>R7B</td></tr>
+        <tr><td>R8A</td><td>R8B</td></tr>
+      </tbody>
+    </table>
+    <script>
+      queueMicrotask(() => window.pliego?.ready({ fixture: 'table-row-constraints' }));
+    </script>
+  </body>
+</html>

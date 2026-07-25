@@ -17,6 +17,7 @@ use euclid::{Point2D, Rect, Size2D};
 use layout_api::{
     LayoutDebugContinuation, LayoutDebugPage, LayoutDebugPageContinuation, LayoutDebugPageSequence,
     LayoutDebugPageWarning, LayoutDebugTableBreak, LayoutDebugTableCellContinuation,
+    LayoutDebugTableConstraint,
 };
 use log::warn;
 use parking_lot::Mutex;
@@ -29,6 +30,7 @@ use crate::fragment_tree::FragmentTree;
 use crate::geom::PhysicalSides;
 
 static PROCESS_PAGE_DEFINITION: OnceLock<PageDefinition> = OnceLock::new();
+const TABLE_ROW_RETRY_LIMIT: u8 = 1;
 
 /// Physical page margins in CSS pixels.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -261,6 +263,15 @@ pub(crate) struct TableRow {
     /// Unpaginated block start in the root fragmentainer coordinate space.
     pub block_start: Au,
     pub block_size: Au,
+    pub breaks: ChildPageBreaks,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct TableRowGroup {
+    pub row_group_index: usize,
+    pub first_row_index: usize,
+    pub end_row_index: usize,
+    pub breaks: ChildPageBreaks,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -321,6 +332,16 @@ pub(crate) enum BlockPaginationWarning {
         fragment_index: usize,
         block_size: Au,
         available_block_size: Au,
+    },
+    OversizedTableRowBreakInsideAvoid {
+        child_index: usize,
+        table_node: Option<u64>,
+        row_group_index: Option<usize>,
+        row_index: usize,
+        block_size: Au,
+        available_block_size: Au,
+        retry_count: u8,
+        retry_limit: u8,
     },
 }
 
@@ -395,6 +416,9 @@ struct TableBreakDecision {
     table_node: Option<u64>,
     row_group_index: Option<usize>,
     next_row_index: usize,
+    constraint: LayoutDebugTableConstraint,
+    retry_count: u8,
+    retry_limit: u8,
     selected: bool,
     resume_page_index: Option<usize>,
 }
@@ -599,11 +623,12 @@ impl BlockPageBuilder {
         table_node: Option<u64>,
         current_block_position: Au,
         rows: &[TableRow],
+        row_groups: &[TableRowGroup],
         cell_fragments: &[TableCellFragment],
         breaks: ChildPageBreaks,
     ) -> Option<TableChildPlacement> {
         assert_eq!(child_index, self.next_child_index);
-        let support = self.table_rows_support(rows, cell_fragments);
+        let support = self.table_rows_support(rows, row_groups, cell_fragments);
         if breaks.inside_avoid || support == TableRowsSupport::Unsupported {
             return None;
         }
@@ -616,15 +641,67 @@ impl BlockPageBuilder {
         let mut row_translations = Vec::with_capacity(rows.len());
         let mut row_block_extensions = Vec::with_capacity(rows.len());
         let mut cell_fragment_translations = vec![Au::zero(); cell_fragments.len()];
+        let mut group_position = 0;
+        let mut table_page_has_content = self.page_has_content && forced_origin.is_none();
 
         for (position, row) in rows.iter().enumerate() {
+            let mut group_break_after = false;
+            while row_groups
+                .get(group_position)
+                .is_some_and(|group| group.end_row_index <= position)
+            {
+                group_break_after =
+                    row_groups[group_position].end_row_index == position
+                        && row_groups[group_position].breaks.after;
+                group_position += 1;
+            }
+            let starting_group = row_groups
+                .get(group_position)
+                .filter(|group| group.first_row_index == position);
             let mut block_start = row.block_start + translation;
             let page_end = self.current_page_origin + self.request.available_block_size;
             let considered_page_index = self.current_page_index;
             let oversized = row.block_size > self.request.available_block_size;
-            let selected = !oversized
-                && block_start + row.block_size > page_end
-                && self.page_has_content;
+            let forced_before =
+                row.breaks.before || starting_group.is_some_and(|group| group.breaks.before);
+            let forced_after = position > 0
+                && (rows[position - 1].breaks.after || group_break_after);
+            let constraint = if forced_before {
+                LayoutDebugTableConstraint::ForcedBefore
+            } else if forced_after {
+                LayoutDebugTableConstraint::ForcedAfter
+            } else if starting_group.is_some_and(|group| group.breaks.inside_avoid) {
+                LayoutDebugTableConstraint::AvoidGroup
+            } else if row.breaks.inside_avoid {
+                LayoutDebugTableConstraint::AvoidRow
+            } else {
+                LayoutDebugTableConstraint::Auto
+            };
+            let selected = table_page_has_content
+                && match constraint {
+                    LayoutDebugTableConstraint::ForcedBefore |
+                    LayoutDebugTableConstraint::ForcedAfter => true,
+                    LayoutDebugTableConstraint::AvoidGroup => {
+                        let group = starting_group.expect("avoid-group starts at this row");
+                        let last_row = &rows[group.end_row_index - 1];
+                        let group_block_size =
+                            last_row.block_start + last_row.block_size - row.block_start;
+                        group_block_size <= self.request.available_block_size
+                            && block_start + group_block_size > page_end
+                    },
+                    LayoutDebugTableConstraint::Auto |
+                    LayoutDebugTableConstraint::AvoidRow => {
+                        !oversized && block_start + row.block_size > page_end
+                    },
+                };
+            let retry_count = u8::from(
+                selected
+                    && matches!(
+                        constraint,
+                        LayoutDebugTableConstraint::AvoidRow |
+                            LayoutDebugTableConstraint::AvoidGroup
+                    ),
+            );
             let mut resume_page_index = None;
 
             if selected {
@@ -652,6 +729,9 @@ impl BlockPageBuilder {
                 });
             }
 
+            if oversized && row.breaks.inside_avoid {
+                self.warn_oversized_table_row_avoid(child_index, table_node, *row);
+            }
             let oversized_fragment = oversized.then(|| {
                 cell_fragments
                     .iter()
@@ -779,12 +859,15 @@ impl BlockPageBuilder {
                     self.current_page_origin += self.request.page_stride;
                 }
             }
-            if position > 0 {
+            if position > 0 || constraint != LayoutDebugTableConstraint::Auto {
                 self.outcome.table_breaks.push(TableBreakDecision {
                     page_index: considered_page_index,
                     table_node,
                     row_group_index: row.row_group_index,
                     next_row_index: row.row_index,
+                    constraint,
+                    retry_count,
+                    retry_limit: TABLE_ROW_RETRY_LIMIT,
                     selected,
                     resume_page_index,
                 });
@@ -792,6 +875,7 @@ impl BlockPageBuilder {
 
             row_block_extensions.push(row_block_extension);
             self.page_has_content = true;
+            table_page_has_content = true;
             self.include_content_through(block_start + row.block_size);
         }
 
@@ -897,6 +981,7 @@ impl BlockPageBuilder {
     fn table_rows_support(
         &self,
         rows: &[TableRow],
+        row_groups: &[TableRowGroup],
         cell_fragments: &[TableCellFragment],
     ) -> TableRowsSupport {
         if rows.is_empty()
@@ -910,6 +995,30 @@ impl BlockPageBuilder {
             })
         {
             return TableRowsSupport::Unsupported;
+        }
+
+        if row_groups.iter().enumerate().any(|(position, group)| {
+            group.first_row_index >= group.end_row_index
+                || group.end_row_index > rows.len()
+                || (position > 0
+                    && group.first_row_index < row_groups[position - 1].end_row_index)
+        }) {
+            return TableRowsSupport::Unsupported;
+        }
+        let mut group_position = 0;
+        for (position, row) in rows.iter().enumerate() {
+            while row_groups
+                .get(group_position)
+                .is_some_and(|group| group.end_row_index <= position)
+            {
+                group_position += 1;
+            }
+            let retained_group = row_groups.get(group_position).filter(|group| {
+                group.first_row_index <= position && position < group.end_row_index
+            });
+            if retained_group.map(|group| group.row_group_index) != row.row_group_index {
+                return TableRowsSupport::Unsupported;
+            }
         }
 
         let mut previous: Option<&TableCellFragment> = None;
@@ -997,6 +1106,33 @@ impl BlockPageBuilder {
                 block_size: fragment.block_size,
                 available_block_size: self.request.available_block_size,
             });
+    }
+
+    fn warn_oversized_table_row_avoid(
+        &mut self,
+        child_index: usize,
+        table_node: Option<u64>,
+        row: TableRow,
+    ) {
+        warn!(
+            "paged layout fragmented table child {child_index} row {} despite break-inside: avoid \
+             (node {table_node:?}, {:.2}px > {:.2}px); split or shorten the row",
+            row.row_index,
+            row.block_size.to_f32_px(),
+            self.request.available_block_size.to_f32_px(),
+        );
+        self.outcome.warnings.push(
+            BlockPaginationWarning::OversizedTableRowBreakInsideAvoid {
+                child_index,
+                table_node,
+                row_group_index: row.row_group_index,
+                row_index: row.row_index,
+                block_size: row.block_size,
+                available_block_size: self.request.available_block_size,
+                retry_count: 0,
+                retry_limit: TABLE_ROW_RETRY_LIMIT,
+            },
+        );
     }
 
     fn warn_if_oversized(
@@ -1181,6 +1317,9 @@ impl PageSequence {
                     table_node: decision.table_node,
                     row_group_index: decision.row_group_index,
                     next_row_index: decision.next_row_index,
+                    constraint: decision.constraint,
+                    retry_count: decision.retry_count,
+                    retry_limit: decision.retry_limit,
                     selected: decision.selected,
                     resume_page_index: decision.resume_page_index,
                 })
@@ -1249,6 +1388,25 @@ impl PageSequence {
                         fragment_index,
                         block_size: block_size.to_f32_px(),
                         available_block_size: available_block_size.to_f32_px(),
+                    },
+                    BlockPaginationWarning::OversizedTableRowBreakInsideAvoid {
+                        child_index,
+                        table_node,
+                        row_group_index,
+                        row_index,
+                        block_size,
+                        available_block_size,
+                        retry_count,
+                        retry_limit,
+                    } => LayoutDebugPageWarning::OversizedTableRowBreakInsideAvoid {
+                        child_index,
+                        table_node,
+                        row_group_index,
+                        row_index,
+                        block_size: block_size.to_f32_px(),
+                        available_block_size: available_block_size.to_f32_px(),
+                        retry_count,
+                        retry_limit,
                     },
                 })
                 .collect(),
@@ -1944,8 +2102,15 @@ mod tests {
                 cell_count: 2,
                 block_start: Au::from_px(row_index as i32 * 40),
                 block_size: Au::from_px(40),
+                breaks: ChildPageBreaks::default(),
             })
             .collect::<Vec<_>>();
+        let row_groups = [TableRowGroup {
+            row_group_index: 0,
+            first_row_index: 0,
+            end_row_index: rows.len(),
+            breaks: ChildPageBreaks::default(),
+        }];
         let mut builder = BlockPageBuilder::new(BlockPaginationRequest {
             available_block_size: Au::from_px(100),
             page_stride: Au::from_px(120),
@@ -1957,6 +2122,7 @@ mod tests {
                 Some(10),
                 Au::zero(),
                 &rows,
+                &row_groups,
                 &[],
                 ChildPageBreaks::default(),
             )
@@ -2035,6 +2201,7 @@ mod tests {
                 cell_count: 2,
                 block_start: Au::zero(),
                 block_size: Au::from_px(40),
+                breaks: ChildPageBreaks::default(),
             },
             TableRow {
                 row_index: 2,
@@ -2042,6 +2209,7 @@ mod tests {
                 cell_count: 2,
                 block_start: Au::from_px(40),
                 block_size: Au::from_px(40),
+                breaks: ChildPageBreaks::default(),
             },
         ];
         assert!(
@@ -2051,6 +2219,7 @@ mod tests {
                     Some(10),
                     Au::zero(),
                     &invalid_rows,
+                    &[],
                     &[],
                     ChildPageBreaks::default(),
                 )
@@ -2108,6 +2277,13 @@ mod tests {
             cell_count: 2,
             block_start: Au::from_px(30),
             block_size: Au::from_px(120),
+            breaks: ChildPageBreaks::default(),
+        }];
+        let row_groups = [TableRowGroup {
+            row_group_index: 0,
+            first_row_index: 0,
+            end_row_index: 1,
+            breaks: ChildPageBreaks::default(),
         }];
         let fragments = [
             TableCellFragment {
@@ -2164,6 +2340,7 @@ mod tests {
                 Some(10),
                 Au::from_px(30),
                 &rows,
+                &row_groups,
                 &fragments,
                 ChildPageBreaks::default(),
             )
@@ -2206,6 +2383,7 @@ mod tests {
             cell_count: 1,
             block_start: Au::zero(),
             block_size: Au::from_px(140),
+            breaks: ChildPageBreaks::default(),
         }];
         let fragments = [TableCellFragment {
             row_index: 0,
@@ -2225,6 +2403,7 @@ mod tests {
                 Some(10),
                 Au::zero(),
                 &rows,
+                &[],
                 &fragments,
                 ChildPageBreaks::default(),
             )

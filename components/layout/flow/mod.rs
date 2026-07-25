@@ -42,7 +42,7 @@ use crate::geom::{
 use crate::layout_box_base::{IndependentFormattingContextLayoutResult, LayoutBoxBase};
 use crate::pages::{
     BlockBoundaryPlacement, BlockPageBuilder, ChildPageBreaks, InlineLine, InlineResumePoint,
-    TableCellFragment, TableChildPlacement, TableRow,
+    TableCellFragment, TableChildPlacement, TableRow, TableRowGroup,
 };
 use crate::positioned::{AbsolutelyPositionedBox, PositioningContext, PositioningContextLength};
 use crate::sizing::{
@@ -993,6 +993,7 @@ fn prepare_fragmentainer_boundary(
             node,
             placement_state.current_block_direction_position,
             &table.rows,
+            &table.page_row_groups,
             &table.cell_fragments,
             breaks,
         ) {
@@ -1061,8 +1062,22 @@ fn forces_page_break(value: BreakBetween) -> bool {
     matches!(value, BreakBetween::Always | BreakBetween::Page)
 }
 
+fn fragment_page_breaks(fragment: &BoxFragment) -> ChildPageBreaks {
+    let style = fragment.style();
+    let box_style = style.get_box();
+    ChildPageBreaks {
+        before: forces_page_break(box_style.break_before),
+        after: forces_page_break(box_style.break_after),
+        inside_avoid: matches!(
+            box_style.break_inside,
+            BreakWithin::Avoid | BreakWithin::AvoidPage
+        ),
+    }
+}
+
 struct RetainedTableFragments<'a> {
     rows: Vec<TableRow>,
+    page_row_groups: Vec<TableRowGroup>,
     row_fragments: Vec<&'a BoxFragment>,
     row_cells: Vec<Vec<RetainedTableCell<'a>>>,
     cell_fragments: Vec<TableCellFragment>,
@@ -1258,6 +1273,7 @@ fn retained_table_rows<'a>(
     let wrapper_block_start = placement_state.unplaced_content_block_start(wrapper)?;
     let grid_block_start = wrapper_block_start + grid.base.rect().origin.y;
     let mut rows = Vec::new();
+    let mut page_row_groups = Vec::new();
     let mut row_fragments = Vec::new();
     let mut row_cells = Vec::new();
     let mut cell_fragments = Vec::new();
@@ -1292,6 +1308,7 @@ fn retained_table_rows<'a>(
                     cell_count: cells.len(),
                     block_start,
                     block_size: rect.size.height,
+                    breaks: fragment_page_breaks(child),
                 });
                 row_fragments.push(child.as_ref());
                 row_cells.push(cells);
@@ -1301,6 +1318,8 @@ fn retained_table_rows<'a>(
                 repeated: false,
             } => {
                 drop(info);
+                let first_row_index = rows.len();
+                let group_breaks = fragment_page_breaks(child);
                 let group_block_start = grid_block_start + child.base.rect().origin.y;
                 for row in &child.children {
                     let Fragment::Box(row) = row else {
@@ -1334,9 +1353,18 @@ fn retained_table_rows<'a>(
                         cell_count: cells.len(),
                         block_start,
                         block_size: rect.size.height,
+                        breaks: fragment_page_breaks(row),
                     });
                     row_fragments.push(row.as_ref());
                     row_cells.push(cells);
+                }
+                if first_row_index < rows.len() {
+                    page_row_groups.push(TableRowGroup {
+                        row_group_index,
+                        first_row_index,
+                        end_row_index: rows.len(),
+                        breaks: group_breaks,
+                    });
                 }
                 row_groups.push((row_group_index, child.as_ref()));
             },
@@ -1354,6 +1382,7 @@ fn retained_table_rows<'a>(
 
     Some(RetainedTableFragments {
         rows,
+        page_row_groups,
         row_fragments,
         row_cells,
         cell_fragments,

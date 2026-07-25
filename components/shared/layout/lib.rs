@@ -360,8 +360,22 @@ pub struct LayoutDebugTableBreak {
     pub table_node: Option<u64>,
     pub row_group_index: Option<usize>,
     pub next_row_index: usize,
+    pub constraint: LayoutDebugTableConstraint,
+    pub retry_count: u8,
+    pub retry_limit: u8,
     pub selected: bool,
     pub resume_page_index: Option<usize>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LayoutDebugTableConstraint {
+    #[default]
+    Auto,
+    ForcedBefore,
+    ForcedAfter,
+    AvoidRow,
+    AvoidGroup,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -403,6 +417,16 @@ pub enum LayoutDebugPageWarning {
         fragment_index: usize,
         block_size: f32,
         available_block_size: f32,
+    },
+    OversizedTableRowBreakInsideAvoid {
+        child_index: usize,
+        table_node: Option<u64>,
+        row_group_index: Option<usize>,
+        row_index: usize,
+        block_size: f32,
+        available_block_size: f32,
+        retry_count: u8,
+        retry_limit: u8,
     },
 }
 

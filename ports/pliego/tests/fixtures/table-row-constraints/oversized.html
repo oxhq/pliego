@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>Pliego oversized avoided table row fixture</title>
+    <style>
+      body { margin: 0; font: 14px/24px sans-serif; }
+      #lead { height: 20px; }
+      table { border-spacing: 0; table-layout: fixed; width: 200px; }
+      td { padding: 0; vertical-align: top; }
+      td:first-child { width: 70px; }
+      #oversized { break-inside: avoid; }
+      #tail { height: 24px; }
+    </style>
+  </head>
+  <body>
+    <div id="lead">Lead.</div>
+    <table id="ledger">
+      <tbody>
+        <tr id="oversized">
+          <td>A0<br>A1<br>A2<br>A3<br>A4<br>A5<br>A6<br>A7<br>A8<br>A9<br>A10<br>A11</td>
+          <td>
+            <div>B0</div><div>B1</div><div>B2</div><div>B3</div>
+            <div>B4</div><div>B5</div><div>B6</div><div>B7</div>
+            <div>B8</div><div>B9</div><div>B10</div><div>B11</div>
+          </td>
+        </tr>
+        <tr id="tail"><td>TailA</td><td>TailB</td></tr>
+      </tbody>
+    </table>
+    <script>
+      queueMicrotask(() => window.pliego?.ready({ fixture: 'table-row-constraints-oversized' }));
+    </script>
+  </body>
+</html>
