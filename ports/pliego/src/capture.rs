@@ -15,7 +15,8 @@ use crate::hybrid_canvas::{
     CanvasDiagnostics, CanvasResource, CanvasTranscript, HybridCanvasCapture, adapt_canvas,
 };
 use crate::{
-    Color, DocumentScene, FillRule, Glyph, Operation, OperationMeta, Page, Rect, Size, Stroke,
+    Color, DocumentScene, FillRule, Glyph, Operation, OperationMeta, Page, Rect, Semantics, Size,
+    Stroke,
 };
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -156,6 +157,20 @@ pub enum CaptureError {
     PageLocalPathUnsupported {
         sequence: usize,
     },
+    InvalidTableGroupRepeat {
+        page_index: usize,
+    },
+    MissingRepeatedTableHeader {
+        tag_id: u64,
+    },
+    DuplicateRepeatedTableHeader {
+        tag_id: u64,
+    },
+    RepeatedTableHeaderPathUnsupported {
+        sequence: usize,
+        tag_id: u64,
+        page_index: usize,
+    },
     NonDensePaintEvents {
         expected: usize,
         actual: usize,
@@ -283,6 +298,27 @@ impl fmt::Display for CaptureError {
             Self::PageLocalPathUnsupported { sequence } => write!(
                 formatter,
                 "path paint event {sequence} cannot be translated to a later page"
+            ),
+            Self::InvalidTableGroupRepeat { page_index } => write!(
+                formatter,
+                "table header repeat for page {page_index} has invalid geometry"
+            ),
+            Self::MissingRepeatedTableHeader { tag_id } => write!(
+                formatter,
+                "table header repeat has no fragment subtree for tag {tag_id}"
+            ),
+            Self::DuplicateRepeatedTableHeader { tag_id } => write!(
+                formatter,
+                "table header repeat tag {tag_id} does not identify one fragment subtree"
+            ),
+            Self::RepeatedTableHeaderPathUnsupported {
+                sequence,
+                tag_id,
+                page_index,
+            } => write!(
+                formatter,
+                "table header {tag_id} path paint event {sequence} cannot be repeated on page \
+                 {page_index}"
             ),
             Self::NonDensePaintEvents { expected, actual } => write!(
                 formatter,
@@ -460,6 +496,13 @@ pub fn capture_document_scene_with_canvas(
     let capture: LayoutCapture = serde_json::from_slice(snapshot_json)
         .map_err(|error| CaptureError::InvalidJson(error.to_string()))?;
     let pages = capture_pages(&capture)?;
+    let table_group_repeats = capture
+        .page_sequence
+        .as_ref()
+        .map(|sequence| sequence.table_group_repeats.clone())
+        .unwrap_or_default();
+    let repeated_header_fragments =
+        repeated_table_header_fragments(&capture.fragments, &table_group_repeats)?;
 
     let mut font_resources = collect_font_resources(capture.font_resources)?;
     let mut font_instances = collect_font_instances(capture.font_instances, &font_resources)?;
@@ -754,7 +797,13 @@ pub fn capture_document_scene_with_canvas(
     let scene = DocumentScene {
         schema: crate::SCHEMA.into(),
         version: crate::SCHEMA_VERSION,
-        pages: distribute_operations(&pages, operations)?,
+        pages: distribute_operations(
+            &pages,
+            operations,
+            &capture.paint_events,
+            &table_group_repeats,
+            &repeated_header_fragments,
+        )?,
     };
     scene.validate().map_err(CaptureError::InvalidScene)?;
 
@@ -892,6 +941,47 @@ fn captured_font_source(identifier: &serde_json::Value) -> CapturedFontSource {
     }
 }
 
+fn repeated_table_header_fragments(
+    fragments: &[CaptureFragment],
+    repeats: &[CaptureTableGroupRepeat],
+) -> Result<HashMap<u64, HashSet<usize>>, CaptureError> {
+    let mut tags = repeats
+        .iter()
+        .map(|repeat| repeat.header_tag_id)
+        .collect::<Vec<_>>();
+    tags.sort_unstable();
+    tags.dedup();
+
+    let mut subtrees = HashMap::new();
+    for tag_id in tags {
+        let matches = fragments
+            .iter()
+            .enumerate()
+            .filter(|(_, fragment)| fragment.kind == "box" && fragment.tag_id == Some(tag_id))
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        let [root_index] = matches.as_slice() else {
+            return Err(if matches.is_empty() {
+                CaptureError::MissingRepeatedTableHeader { tag_id }
+            } else {
+                CaptureError::DuplicateRepeatedTableHeader { tag_id }
+            });
+        };
+        let root_depth = fragments[*root_index].depth;
+        let subtree = fragments[*root_index..]
+            .iter()
+            .enumerate()
+            .take_while(|(offset, fragment)| *offset == 0 || fragment.depth > root_depth)
+            .filter_map(|(_, fragment)| fragment.paint_fragment_id)
+            .collect::<HashSet<_>>();
+        if subtree.is_empty() {
+            return Err(CaptureError::MissingRepeatedTableHeader { tag_id });
+        }
+        subtrees.insert(tag_id, subtree);
+    }
+    Ok(subtrees)
+}
+
 fn capture_pages(capture: &LayoutCapture) -> Result<Vec<CapturePage>, CaptureError> {
     let sequence = capture
         .page_sequence
@@ -925,6 +1015,7 @@ fn capture_pages(capture: &LayoutCapture) -> Result<Vec<CapturePage>, CaptureErr
     Ok(sequence.pages.clone())
 }
 
+#[derive(Clone)]
 struct PositionedOperation {
     sequence: usize,
     bounds: Rect,
@@ -934,6 +1025,9 @@ struct PositionedOperation {
 fn distribute_operations(
     pages: &[CapturePage],
     operations: Vec<PositionedOperation>,
+    paint_events: &[CapturePaintEvent],
+    repeats: &[CaptureTableGroupRepeat],
+    repeated_header_fragments: &HashMap<u64, HashSet<usize>>,
 ) -> Result<Vec<Page>, CaptureError> {
     let mut scene_pages = pages
         .iter()
@@ -945,6 +1039,57 @@ fn distribute_operations(
             operations: Vec::new(),
         })
         .collect::<Vec<_>>();
+    let mut repeated_operations = vec![Vec::new(); pages.len()];
+
+    for repeat in repeats {
+        if repeat.page_index == 0
+            || repeat.page_index >= pages.len()
+            || !nonnegative_finite(repeat.source_block_start)
+            || !nonnegative_finite(repeat.target_block_start)
+            || !positive_finite(repeat.block_size)
+        {
+            return Err(CaptureError::InvalidTableGroupRepeat {
+                page_index: repeat.page_index,
+            });
+        }
+        let fragments = repeated_header_fragments
+            .get(&repeat.header_tag_id)
+            .ok_or(CaptureError::MissingRepeatedTableHeader {
+                tag_id: repeat.header_tag_id,
+            })?;
+        let translation =
+            f64::from(repeat.target_block_start) - f64::from(repeat.source_block_start);
+        for operation in operations.iter().filter(|operation| {
+            paint_events
+                .get(operation.sequence)
+                .and_then(|event| event.fragment_id)
+                .is_some_and(|fragment_id| fragments.contains(&fragment_id))
+        }) {
+            if matches!(&operation.operation, Operation::Path { .. }) {
+                return Err(CaptureError::RepeatedTableHeaderPathUnsupported {
+                    sequence: operation.sequence,
+                    tag_id: repeat.header_tag_id,
+                    page_index: repeat.page_index,
+                });
+            }
+            let mut repeated = operation.clone();
+            repeated.bounds.y += translation;
+            translate_operation_y(
+                &mut repeated.operation,
+                -translation,
+                repeated.sequence,
+            )?;
+            let (page_index, page_origin) = operation_page(pages, &repeated)?;
+            if page_index != repeat.page_index {
+                return Err(CaptureError::InvalidTableGroupRepeat {
+                    page_index: repeat.page_index,
+                });
+            }
+            translate_operation_y(&mut repeated.operation, page_origin, repeated.sequence)?;
+            mark_repeated_table_header(&mut repeated.operation);
+            repeated_operations[page_index].push(repeated.operation);
+        }
+    }
 
     for mut positioned in operations {
         let (page_index, page_origin) = operation_page(pages, &positioned)?;
@@ -953,7 +1098,24 @@ fn distribute_operations(
             .operations
             .push(positioned.operation);
     }
+    for (page, mut repeated) in scene_pages.iter_mut().zip(repeated_operations) {
+        repeated.append(&mut page.operations);
+        page.operations = repeated;
+    }
     Ok(scene_pages)
+}
+
+fn mark_repeated_table_header(operation: &mut Operation) {
+    let meta = match operation {
+        Operation::Text { meta, .. }
+        | Operation::Image { meta, .. }
+        | Operation::Link { meta, .. } => meta,
+        Operation::Path { .. } => unreachable!("repeated header paths are rejected"),
+    };
+    meta.semantics = Some(Semantics {
+        role: "artifact".into(),
+        label: Some("repeated-table-header".into()),
+    });
 }
 
 fn operation_page(
@@ -1614,8 +1776,24 @@ struct CapturePageSequence {
     _table_breaks: Vec<serde_json::Value>,
     #[serde(default, rename = "table_cell_continuations")]
     _table_cell_continuations: Vec<serde_json::Value>,
+    #[serde(default)]
+    table_group_repeats: Vec<CaptureTableGroupRepeat>,
     #[serde(default, rename = "warnings")]
     _warnings: Vec<serde_json::Value>,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CaptureTableGroupRepeat {
+    page_index: usize,
+    #[serde(rename = "table_node")]
+    _table_node: Option<u64>,
+    header_tag_id: u64,
+    #[serde(rename = "row_group_index")]
+    _row_group_index: usize,
+    source_block_start: f32,
+    target_block_start: f32,
+    block_size: f32,
 }
 
 #[derive(Clone, Copy, Deserialize)]
@@ -1646,8 +1824,7 @@ struct CaptureBox {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CaptureFragment {
-    #[serde(rename = "depth")]
-    _depth: usize,
+    depth: usize,
     kind: String,
     rect: Option<CaptureRect>,
     tag_id: Option<u64>,
@@ -1884,6 +2061,15 @@ mod tests {
             "continuations": [{"token": {"kind": "table"}}],
             "table_breaks": [{"next_row_index": 1}],
             "table_cell_continuations": [{"next_fragment_index": 2}],
+            "table_group_repeats": [{
+                "page_index": 1,
+                "table_node": 10,
+                "header_tag_id": 20,
+                "row_group_index": 0,
+                "source_block_start": 30.0,
+                "target_block_start": 120.0,
+                "block_size": 20.0
+            }],
             "warnings": [{"kind": "oversized-table-cell"}],
         });
         assert!(serde_json::from_value::<CapturePageSequence>(sequence).is_ok());

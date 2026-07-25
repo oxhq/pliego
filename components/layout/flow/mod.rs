@@ -42,7 +42,8 @@ use crate::geom::{
 use crate::layout_box_base::{IndependentFormattingContextLayoutResult, LayoutBoxBase};
 use crate::pages::{
     BlockBoundaryPlacement, BlockPageBuilder, ChildPageBreaks, InlineLine, InlineResumePoint,
-    TableCellFragment, TableChildPlacement, TableRow, TableRowGroup,
+    TableCellFragment, TableChildPlacement, TableGroupUnsupportedReason, TableRow, TableRowGroup,
+    TableRowGroupKind,
 };
 use crate::positioned::{AbsolutelyPositionedBox, PositioningContext, PositioningContextLength};
 use crate::sizing::{
@@ -51,7 +52,7 @@ use crate::sizing::{
 };
 use crate::style_ext::{
     AspectRatio, ContentBoxSizesAndPBM, Display as LayoutDisplay, DisplayGeneratingBox,
-    DisplayInside, LayoutStyle, PaddingBorderMargin,
+    DisplayInside, DisplayLayoutInternal, LayoutStyle, PaddingBorderMargin,
 };
 use crate::{ConstraintSpace, ContainingBlock, ContainingBlockSize, IndefiniteContainingBlock};
 
@@ -983,7 +984,13 @@ fn prepare_fragmentainer_boundary(
             ),
         }
     });
-    let retained_table = retained_table_rows(fragment, placement_state);
+    let retained_table = match retained_table_rows(fragment, placement_state) {
+        Ok(table) => table,
+        Err(reason) => {
+            page_builder.warn_unsupported_table_group_pagination(child_index, node, reason);
+            None
+        },
+    };
     let has_table_captions = retained_table
         .as_ref()
         .map_or_else(|| table_has_captions(fragment), |table| table.has_captions());
@@ -992,8 +999,9 @@ fn prepare_fragmentainer_boundary(
             child_index,
             node,
             placement_state.current_block_direction_position,
+            metrics.fresh_page_contribution,
             &table.rows,
-            &table.page_row_groups,
+            &table.groups,
             &table.cell_fragments,
             breaks,
         ) {
@@ -1077,13 +1085,13 @@ fn fragment_page_breaks(fragment: &BoxFragment) -> ChildPageBreaks {
 
 struct RetainedTableFragments<'a> {
     rows: Vec<TableRow>,
-    page_row_groups: Vec<TableRowGroup>,
     row_fragments: Vec<&'a BoxFragment>,
     row_cells: Vec<Vec<RetainedTableCell<'a>>>,
     cell_fragments: Vec<TableCellFragment>,
     retained_cell_fragments: Vec<RetainedTableCellFragment<'a>>,
     split_containers: Vec<&'a BoxFragment>,
-    row_groups: Vec<(usize, &'a BoxFragment)>,
+    groups: Vec<TableRowGroup>,
+    group_fragments: Vec<&'a BoxFragment>,
     bottom_captions: Vec<&'a BoxFragment>,
     grid: &'a BoxFragment,
     wrapper: &'a BoxFragment,
@@ -1184,7 +1192,7 @@ impl RetainedTableFragments<'_> {
             caption.clear_scrollable_overflow();
         }
 
-        for (group_index, group) in &self.row_groups {
+        for (group, fragment) in self.groups.iter().zip(&self.group_fragments) {
             let added = self
                 .rows
                 .iter()
@@ -1195,12 +1203,12 @@ impl RetainedTableFragments<'_> {
                         .zip(&placement.row_block_extensions),
                 )
                 .filter_map(|(row, (translation, extension))| {
-                    (row.row_group_index == Some(*group_index))
+                    (row.row_group_index == Some(group.row_group_index))
                         .then_some(*translation + *extension)
                 })
                 .max()
                 .unwrap_or_default();
-            grow_horizontal_box(group, added);
+            grow_horizontal_box(fragment, added);
         }
         grow_horizontal_box(self.grid, placement.added_block_size);
         grow_horizontal_box(self.wrapper, placement.added_block_size);
@@ -1230,68 +1238,77 @@ fn grow_horizontal_positioning(fragment: &PositioningFragment, added_block_size:
 fn retained_table_rows<'a>(
     fragment: &'a Fragment,
     placement_state: &PlacementState,
-) -> Option<RetainedTableFragments<'a>> {
+) -> Result<Option<RetainedTableFragments<'a>>, TableGroupUnsupportedReason> {
+    let Fragment::Box(wrapper) = fragment else {
+        return Ok(None);
+    };
+    if !wrapper.is_table_wrapper() {
+        return Ok(None);
+    }
+    let wrapper_writing_mode = wrapper.style().writing_mode;
     if !placement_state
         .containing_block
         .style
         .writing_mode
         .is_horizontal()
-    {
-        return None;
-    }
-    let Fragment::Box(wrapper) = fragment else {
-        return None;
-    };
-    let wrapper_writing_mode = wrapper.style().writing_mode;
-    if !wrapper.is_table_wrapper()
         || !wrapper_writing_mode.is_horizontal()
         || !wrapper_writing_mode.is_bidi_ltr()
     {
-        return None;
+        return Err(TableGroupUnsupportedReason::UnsupportedLayout);
     }
 
     let mut grid = None;
     let mut bottom_captions = Vec::new();
     for child in &wrapper.children {
         let Fragment::Box(child) = child else {
-            return None;
+            return Err(TableGroupUnsupportedReason::UnsupportedLayout);
         };
+        if child.is_table_grid_with_collapsed_borders() {
+            return Err(TableGroupUnsupportedReason::CollapsedBorders);
+        }
         if child.is_table_grid() {
             if grid.replace(child.as_ref()).is_some() {
-                return None;
+                return Err(TableGroupUnsupportedReason::UnsupportedLayout);
             }
             continue;
         }
         match child.style().clone_caption_side() {
             CaptionSide::Top if grid.is_none() => {},
             CaptionSide::Bottom if grid.is_some() => bottom_captions.push(child.as_ref()),
-            _ => return None,
+            _ => return Err(TableGroupUnsupportedReason::UnsupportedLayout),
         }
     }
-    let grid = grid?;
+    let grid = grid.ok_or(TableGroupUnsupportedReason::UnsupportedLayout)?;
 
-    let wrapper_block_start = placement_state.unplaced_content_block_start(wrapper)?;
+    let wrapper_block_start = placement_state
+        .unplaced_content_block_start(wrapper)
+        .ok_or(TableGroupUnsupportedReason::UnsupportedLayout)?;
     let grid_block_start = wrapper_block_start + grid.base.rect().origin.y;
     let mut rows = Vec::new();
-    let mut page_row_groups = Vec::new();
     let mut row_fragments = Vec::new();
     let mut row_cells = Vec::new();
     let mut cell_fragments = Vec::new();
     let mut retained_cell_fragments = Vec::new();
     let mut split_containers = Vec::new();
-    let mut row_groups = Vec::new();
+    let mut groups = Vec::new();
+    let mut group_fragments = Vec::new();
 
     for child in &grid.children {
         let Fragment::Box(child) = child else {
-            return None;
+            return Err(TableGroupUnsupportedReason::UnsupportedLayout);
         };
-        let info = child.specific_layout_info()?;
+        let info = child
+            .specific_layout_info()
+            .ok_or(TableGroupUnsupportedReason::UnsupportedLayout)?;
         match *info {
             SpecificLayoutInfo::TableRow {
                 row_index,
                 row_group_index: None,
-                has_rowspan: false,
+                has_rowspan,
             } => {
+                if has_rowspan {
+                    return Err(TableGroupUnsupportedReason::Rowspan);
+                }
                 let rect = child.base.rect();
                 let block_start = grid_block_start + rect.origin.y;
                 let cells = retained_table_cells(
@@ -1301,7 +1318,8 @@ fn retained_table_rows<'a>(
                     &mut cell_fragments,
                     &mut retained_cell_fragments,
                     &mut split_containers,
-                )?;
+                )
+                .ok_or(TableGroupUnsupportedReason::UnsupportedLayout)?;
                 rows.push(TableRow {
                     row_index,
                     row_group_index: None,
@@ -1315,27 +1333,47 @@ fn retained_table_rows<'a>(
             },
             SpecificLayoutInfo::TableRowGroup {
                 row_group_index,
-                repeated: false,
+                repeated,
             } => {
                 drop(info);
                 let first_row_index = rows.len();
                 let group_breaks = fragment_page_breaks(child);
+                let kind = match LayoutDisplay::from(child.style().get_box().display) {
+                    LayoutDisplay::GeneratingBox(DisplayGeneratingBox::LayoutInternal(
+                        DisplayLayoutInternal::TableHeaderGroup,
+                    )) => TableRowGroupKind::Header,
+                    LayoutDisplay::GeneratingBox(DisplayGeneratingBox::LayoutInternal(
+                        DisplayLayoutInternal::TableFooterGroup,
+                    )) => TableRowGroupKind::Footer,
+                    LayoutDisplay::GeneratingBox(DisplayGeneratingBox::LayoutInternal(
+                        DisplayLayoutInternal::TableRowGroup,
+                    )) => TableRowGroupKind::Body,
+                    _ => return Err(TableGroupUnsupportedReason::UnsupportedLayout),
+                };
+                if repeated != (kind != TableRowGroupKind::Body) {
+                    return Err(TableGroupUnsupportedReason::UnsupportedLayout);
+                }
                 let group_block_start = grid_block_start + child.base.rect().origin.y;
                 for row in &child.children {
                     let Fragment::Box(row) = row else {
-                        return None;
+                        return Err(TableGroupUnsupportedReason::UnsupportedLayout);
                     };
-                    let row_info = row.specific_layout_info()?;
+                    let row_info = row
+                        .specific_layout_info()
+                        .ok_or(TableGroupUnsupportedReason::UnsupportedLayout)?;
                     let SpecificLayoutInfo::TableRow {
                         row_index,
                         row_group_index: Some(actual_group_index),
-                        has_rowspan: false,
+                        has_rowspan,
                     } = *row_info
                     else {
-                        return None;
+                        return Err(TableGroupUnsupportedReason::UnsupportedLayout);
                     };
                     if actual_group_index != row_group_index {
-                        return None;
+                        return Err(TableGroupUnsupportedReason::UnsupportedLayout);
+                    }
+                    if has_rowspan {
+                        return Err(TableGroupUnsupportedReason::Rowspan);
                     }
                     let rect = row.base.rect();
                     let block_start = group_block_start + rect.origin.y;
@@ -1346,7 +1384,8 @@ fn retained_table_rows<'a>(
                         &mut cell_fragments,
                         &mut retained_cell_fragments,
                         &mut split_containers,
-                    )?;
+                    )
+                    .ok_or(TableGroupUnsupportedReason::UnsupportedLayout)?;
                     rows.push(TableRow {
                         row_index,
                         row_group_index: Some(row_group_index),
@@ -1359,16 +1398,23 @@ fn retained_table_rows<'a>(
                     row_cells.push(cells);
                 }
                 if first_row_index < rows.len() {
-                    page_row_groups.push(TableRowGroup {
+                    groups.push(TableRowGroup {
+                        tag_id: child
+                            .base
+                            .tag
+                            .map(|tag| tag.to_display_list_fragment_id()),
                         row_group_index,
                         first_row_index,
                         end_row_index: rows.len(),
+                        block_start: group_block_start,
+                        block_size: child.base.rect().size.height,
+                        kind,
                         breaks: group_breaks,
                     });
+                    group_fragments.push(child.as_ref());
                 }
-                row_groups.push((row_group_index, child.as_ref()));
             },
-            _ => return None,
+            _ => return Err(TableGroupUnsupportedReason::UnsupportedLayout),
         }
     }
     if rows.is_empty()
@@ -1377,22 +1423,43 @@ fn retained_table_rows<'a>(
             .enumerate()
             .any(|(expected, row)| row.row_index != expected)
     {
-        return None;
+        return Err(TableGroupUnsupportedReason::UnsupportedLayout);
+    }
+    let headers = groups
+        .iter()
+        .filter(|group| group.kind == TableRowGroupKind::Header)
+        .collect::<Vec<_>>();
+    let footers = groups
+        .iter()
+        .filter(|group| group.kind == TableRowGroupKind::Footer)
+        .collect::<Vec<_>>();
+    if footers.len() > 1 {
+        return Err(TableGroupUnsupportedReason::MultipleFooters);
+    }
+    if headers.len() > 1
+        || headers
+            .first()
+            .is_some_and(|group| group.first_row_index != 0)
+        || footers
+            .first()
+            .is_some_and(|group| group.end_row_index != rows.len())
+    {
+        return Err(TableGroupUnsupportedReason::UnsupportedLayout);
     }
 
-    Some(RetainedTableFragments {
+    Ok(Some(RetainedTableFragments {
         rows,
-        page_row_groups,
         row_fragments,
         row_cells,
         cell_fragments,
         retained_cell_fragments,
         split_containers,
-        row_groups,
+        groups,
+        group_fragments,
         bottom_captions,
         grid,
         wrapper,
-    })
+    }))
 }
 
 fn table_has_captions(fragment: &Fragment) -> bool {

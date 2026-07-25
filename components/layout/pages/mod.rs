@@ -17,7 +17,8 @@ use euclid::{Point2D, Rect, Size2D};
 use layout_api::{
     LayoutDebugContinuation, LayoutDebugPage, LayoutDebugPageContinuation, LayoutDebugPageSequence,
     LayoutDebugPageWarning, LayoutDebugTableBreak, LayoutDebugTableCellContinuation,
-    LayoutDebugTableConstraint,
+    LayoutDebugTableConstraint, LayoutDebugTableGroupRepeat,
+    LayoutDebugTableGroupUnsupportedReason,
 };
 use log::warn;
 use parking_lot::Mutex;
@@ -191,6 +192,7 @@ impl PageSequenceContext {
             pages,
             table_breaks: outcome.table_breaks,
             table_cell_continuations: outcome.table_cell_continuations,
+            table_group_repeats: outcome.table_group_repeats,
             warnings: outcome.warnings,
         }
     }
@@ -268,10 +270,21 @@ pub(crate) struct TableRow {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct TableRowGroup {
+    pub tag_id: Option<u64>,
     pub row_group_index: usize,
     pub first_row_index: usize,
     pub end_row_index: usize,
+    pub block_start: Au,
+    pub block_size: Au,
+    pub kind: TableRowGroupKind,
     pub breaks: ChildPageBreaks,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TableRowGroupKind {
+    Header,
+    Body,
+    Footer,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -323,6 +336,11 @@ pub(crate) enum BlockPaginationWarning {
     UnsupportedTableCaptionPagination {
         child_index: usize,
         node: Option<u64>,
+    },
+    UnsupportedTableGroupPagination {
+        child_index: usize,
+        table_node: Option<u64>,
+        reason: TableGroupUnsupportedReason,
     },
     OversizedTableCell {
         child_index: usize,
@@ -444,6 +462,26 @@ struct TableCellContinuationDecision {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct TableGroupRepeatDecision {
+    page_index: usize,
+    table_node: Option<u64>,
+    header_tag_id: u64,
+    row_group_index: usize,
+    source_block_start: Au,
+    target_block_start: Au,
+    block_size: Au,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TableGroupUnsupportedReason {
+    MultipleFooters,
+    FooterTooTallAfterHeader,
+    Rowspan,
+    CollapsedBorders,
+    UnsupportedLayout,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TableRowsSupport {
     Supported,
     Unsupported,
@@ -455,6 +493,7 @@ pub(crate) struct BlockPaginationOutcome {
     continuations: Vec<PageContinuation>,
     table_breaks: Vec<TableBreakDecision>,
     table_cell_continuations: Vec<TableCellContinuationDecision>,
+    table_group_repeats: Vec<TableGroupRepeatDecision>,
     warnings: Vec<BlockPaginationWarning>,
 }
 
@@ -631,15 +670,85 @@ impl BlockPageBuilder {
         child_index: usize,
         table_node: Option<u64>,
         current_block_position: Au,
+        fresh_block_size: Au,
         rows: &[TableRow],
-        row_groups: &[TableRowGroup],
+        groups: &[TableRowGroup],
         cell_fragments: &[TableCellFragment],
         breaks: ChildPageBreaks,
     ) -> Option<TableChildPlacement> {
         assert_eq!(child_index, self.next_child_index);
-        let support = self.table_rows_support(rows, row_groups, cell_fragments);
-        if breaks.inside_avoid || support == TableRowsSupport::Unsupported {
+        let support = self.table_rows_support(rows, groups, cell_fragments);
+        let header = groups
+            .iter()
+            .find(|group| group.kind == TableRowGroupKind::Header)
+            .copied();
+        let footer = groups
+            .iter()
+            .find(|group| group.kind == TableRowGroupKind::Footer)
+            .copied();
+        if support == TableRowsSupport::Unsupported {
+            if header.is_some() || footer.is_some() {
+                self.warn_unsupported_table_group_pagination(
+                    child_index,
+                    table_node,
+                    TableGroupUnsupportedReason::UnsupportedLayout,
+                );
+            }
             return None;
+        }
+        let header_block_size = header.map_or_else(Au::zero, |group| group.block_size);
+        let body_page_capacity = self.request.available_block_size - header_block_size;
+        if header.is_some_and(|group| {
+            group.tag_id.is_none()
+                || group.block_size <= Au::zero()
+                || group.block_size >= self.request.available_block_size
+        }) {
+            self.warn_unsupported_table_group_pagination(
+                child_index,
+                table_node,
+                TableGroupUnsupportedReason::UnsupportedLayout,
+            );
+            return None;
+        }
+        if footer.is_some_and(|group| {
+            group.block_size <= Au::zero() || group.block_size > body_page_capacity
+        }) {
+            self.warn_unsupported_table_group_pagination(
+                child_index,
+                table_node,
+                TableGroupUnsupportedReason::FooterTooTallAfterHeader,
+            );
+            return None;
+        }
+        let body_start = header.map_or(0, |group| group.end_row_index);
+        let body_end = footer.map_or(rows.len(), |group| group.first_row_index);
+        if body_start > body_end
+            || body_end > rows.len()
+            || header.is_some_and(|group| group.first_row_index != 0)
+            || footer.is_some_and(|group| group.end_row_index != rows.len())
+            || (header.is_some()
+                && rows[body_start..body_end]
+                    .iter()
+                    .filter(|row| row.block_size > body_page_capacity)
+                    .any(|row| {
+                        cell_fragments.iter().any(|fragment| {
+                            fragment.row_index == row.row_index
+                                && fragment.block_size > body_page_capacity
+                        })
+                    }))
+        {
+            self.warn_unsupported_table_group_pagination(
+                child_index,
+                table_node,
+                TableGroupUnsupportedReason::UnsupportedLayout,
+            );
+            return None;
+        }
+        if breaks.inside_avoid {
+            if fresh_block_size <= self.request.available_block_size {
+                return None;
+            }
+            self.warn_if_oversized(child_index, table_node, fresh_block_size, true);
         }
         self.next_child_index += 1;
 
@@ -647,24 +756,99 @@ impl BlockPageBuilder {
             self.forced_break_before(child_index, table_node, current_block_position, breaks);
         let mut translation = forced_origin
             .map_or_else(Au::zero, |block_origin| block_origin - current_block_position);
-        let mut row_translations = Vec::with_capacity(rows.len());
-        let mut row_block_extensions = Vec::with_capacity(rows.len());
+        let mut row_translations = vec![translation; rows.len()];
+        let mut row_block_extensions = vec![Au::zero(); rows.len()];
         let mut cell_fragment_translations = vec![Au::zero(); cell_fragments.len()];
-        let mut group_position = 0;
         let mut table_page_has_content = self.page_has_content && forced_origin.is_none();
 
-        for (position, row) in rows.iter().enumerate() {
+        if let Some(header) = header {
+            let first_row = &rows[header.first_row_index];
+            let constraint = if first_row.breaks.before || header.breaks.before {
+                LayoutDebugTableConstraint::ForcedBefore
+            } else if header.breaks.inside_avoid {
+                LayoutDebugTableConstraint::AvoidGroup
+            } else if first_row.breaks.inside_avoid {
+                LayoutDebugTableConstraint::AvoidRow
+            } else {
+                LayoutDebugTableConstraint::Auto
+            };
+            let mut block_start = header.block_start + translation;
+            let page_end = self.current_page_origin + self.request.available_block_size;
+            let considered_page_index = self.current_page_index;
+            let selected = table_page_has_content
+                && (constraint == LayoutDebugTableConstraint::ForcedBefore
+                    || block_start + header.block_size > page_end);
+            let retry_count = u8::from(
+                selected
+                    && matches!(
+                        constraint,
+                        LayoutDebugTableConstraint::AvoidRow |
+                            LayoutDebugTableConstraint::AvoidGroup
+                    ),
+            );
+            let mut resume_page_index = None;
+            if selected {
+                let previous_page_index = self.current_page_index;
+                let mut next_page_index = self.current_page_index + 1;
+                let mut next_page_origin = self.current_page_origin + self.request.page_stride;
+                while next_page_origin < block_start {
+                    next_page_index += 1;
+                    next_page_origin += self.request.page_stride;
+                }
+                translation += next_page_origin - block_start;
+                block_start = next_page_origin;
+                self.current_page_index = next_page_index;
+                self.current_page_origin = next_page_origin;
+                resume_page_index = Some(next_page_index);
+                self.outcome.continuations.push(PageContinuation {
+                    page_index: previous_page_index,
+                    token: FragmentainerContinuation::Table(TableContinuationToken {
+                        child_index,
+                        table_node,
+                        row_group_index: Some(header.row_group_index),
+                        next_row_index: header.first_row_index,
+                        resume_page_index: next_page_index,
+                    }),
+                });
+                for row_translation in
+                    &mut row_translations[header.first_row_index..header.end_row_index]
+                {
+                    *row_translation = translation;
+                }
+            }
+            if constraint != LayoutDebugTableConstraint::Auto {
+                self.outcome.table_breaks.push(TableBreakDecision {
+                    page_index: considered_page_index,
+                    table_node,
+                    row_group_index: Some(header.row_group_index),
+                    next_row_index: header.first_row_index,
+                    constraint,
+                    retry_count,
+                    retry_limit: TABLE_ROW_RETRY_LIMIT,
+                    selected,
+                    resume_page_index,
+                });
+            }
+            self.page_has_content = true;
+            table_page_has_content = true;
+            self.include_content_through(block_start + header.block_size);
+        }
+        let header_source_block_start = header.map(|group| group.block_start + translation);
+
+        let mut group_position = 0;
+        for position in body_start..body_end {
+            let row = &rows[position];
             let mut group_break_after = false;
-            while row_groups
+            while groups
                 .get(group_position)
                 .is_some_and(|group| group.end_row_index <= position)
             {
                 group_break_after =
-                    row_groups[group_position].end_row_index == position
-                        && row_groups[group_position].breaks.after;
+                    groups[group_position].end_row_index == position
+                        && groups[group_position].breaks.after;
                 group_position += 1;
             }
-            let starting_group = row_groups
+            let starting_group = groups
                 .get(group_position)
                 .filter(|group| group.first_row_index == position);
             let avoided_group = starting_group.filter(|group| group.breaks.inside_avoid);
@@ -675,7 +859,7 @@ impl BlockPageBuilder {
             let mut block_start = row.block_start + translation;
             let page_end = self.current_page_origin + self.request.available_block_size;
             let considered_page_index = self.current_page_index;
-            let oversized = row.block_size > self.request.available_block_size;
+            let oversized = row.block_size > body_page_capacity;
             let forced_before =
                 row.breaks.before || starting_group.is_some_and(|group| group.breaks.before);
             let forced_after = position > 0
@@ -698,7 +882,7 @@ impl BlockPageBuilder {
                     LayoutDebugTableConstraint::AvoidGroup => {
                         let group_block_size =
                             avoided_group_block_size.expect("avoid-group starts at this row");
-                        group_block_size <= self.request.available_block_size
+                        group_block_size <= body_page_capacity
                             && block_start + group_block_size > page_end
                     },
                     LayoutDebugTableConstraint::Auto |
@@ -720,12 +904,12 @@ impl BlockPageBuilder {
                 let previous_page_index = self.current_page_index;
                 let mut next_page_index = self.current_page_index + 1;
                 let mut next_page_origin = self.current_page_origin + self.request.page_stride;
-                while next_page_origin < block_start {
+                while next_page_origin + header_block_size < block_start {
                     next_page_index += 1;
                     next_page_origin += self.request.page_stride;
                 }
-                translation += next_page_origin - block_start;
-                block_start = next_page_origin;
+                translation += next_page_origin + header_block_size - block_start;
+                block_start = next_page_origin + header_block_size;
                 self.current_page_index = next_page_index;
                 self.current_page_origin = next_page_origin;
                 resume_page_index = Some(next_page_index);
@@ -739,20 +923,33 @@ impl BlockPageBuilder {
                         resume_page_index: next_page_index,
                     }),
                 });
+                self.push_table_header_repeat(
+                    table_node,
+                    header,
+                    header_source_block_start,
+                    next_page_index,
+                    next_page_origin,
+                );
             }
 
             if oversized && row.breaks.inside_avoid {
-                self.warn_oversized_table_row_avoid(child_index, table_node, *row);
+                self.warn_oversized_table_row_avoid(
+                    child_index,
+                    table_node,
+                    *row,
+                    body_page_capacity,
+                );
             }
             if let (Some(group), Some(group_block_size)) =
                 (avoided_group, avoided_group_block_size)
             {
-                if group_block_size > self.request.available_block_size {
+                if group_block_size > body_page_capacity {
                     self.warn_oversized_table_row_group_avoid(
                         child_index,
                         table_node,
                         *group,
                         group_block_size,
+                        body_page_capacity,
                     );
                 }
             }
@@ -761,7 +958,7 @@ impl BlockPageBuilder {
                     .iter()
                     .find(|fragment| {
                         fragment.row_index == row.row_index
-                            && fragment.block_size > self.request.available_block_size
+                            && fragment.block_size > body_page_capacity
                     })
                     .copied()
             }).flatten();
@@ -769,7 +966,7 @@ impl BlockPageBuilder {
                 self.warn_oversized_table_cell(child_index, table_node, fragment);
             }
 
-            row_translations.push(translation);
+            row_translations[position] = translation;
             let mut row_block_extension = Au::zero();
             if oversized && oversized_fragment.is_none() {
                 let start_page_index = self.current_page_index;
@@ -795,8 +992,9 @@ impl BlockPageBuilder {
                         {
                             cell_page_index += 1;
                             cell_page_origin += self.request.page_stride;
-                            cell_translation += cell_page_origin - fragment_start;
-                            fragment_start = cell_page_origin;
+                            cell_translation +=
+                                cell_page_origin + header_block_size - fragment_start;
+                            fragment_start = cell_page_origin + header_block_size;
                         }
                         debug_assert!(
                             fragment_start + fragment.block_size
@@ -829,6 +1027,10 @@ impl BlockPageBuilder {
                 }
 
                 for resume_page_index in start_page_index + 1..=last_page_index {
+                    let target_block_start = start_page_origin
+                        + self.request.page_stride
+                            * i32::try_from(resume_page_index - start_page_index)
+                                .expect("page counts fit app units");
                     self.outcome.continuations.push(PageContinuation {
                         page_index: resume_page_index - 1,
                         token: FragmentainerContinuation::Table(TableContinuationToken {
@@ -839,6 +1041,13 @@ impl BlockPageBuilder {
                             resume_page_index,
                         }),
                     });
+                    self.push_table_header_repeat(
+                        table_node,
+                        header,
+                        header_source_block_start,
+                        resume_page_index,
+                        target_block_start,
+                    );
                     for cell_index in 0..row.cell_count {
                         let next_fragment_index = cell_fragments
                             .iter()
@@ -897,14 +1106,102 @@ impl BlockPageBuilder {
                 });
             }
 
-            row_block_extensions.push(row_block_extension);
+            row_block_extensions[position] = row_block_extension;
             self.page_has_content = true;
             table_page_has_content = true;
             self.include_content_through(block_start + row.block_size);
         }
 
+        if let Some(footer) = footer {
+            let first_row = &rows[footer.first_row_index];
+            let group_break_after = groups.iter().any(|group| {
+                group.end_row_index == footer.first_row_index && group.breaks.after
+            });
+            let forced_before = first_row.breaks.before || footer.breaks.before;
+            let forced_after = footer.first_row_index > 0
+                && (rows[footer.first_row_index - 1].breaks.after || group_break_after);
+            let constraint = if forced_before {
+                LayoutDebugTableConstraint::ForcedBefore
+            } else if forced_after {
+                LayoutDebugTableConstraint::ForcedAfter
+            } else if footer.breaks.inside_avoid {
+                LayoutDebugTableConstraint::AvoidGroup
+            } else if first_row.breaks.inside_avoid {
+                LayoutDebugTableConstraint::AvoidRow
+            } else {
+                LayoutDebugTableConstraint::Auto
+            };
+            let mut block_start = footer.block_start + translation;
+            let page_end = self.current_page_origin + self.request.available_block_size;
+            let considered_page_index = self.current_page_index;
+            let selected = table_page_has_content
+                && (matches!(
+                    constraint,
+                    LayoutDebugTableConstraint::ForcedBefore |
+                        LayoutDebugTableConstraint::ForcedAfter
+                ) || block_start + footer.block_size > page_end);
+            let retry_count = u8::from(
+                selected
+                    && matches!(
+                        constraint,
+                        LayoutDebugTableConstraint::AvoidRow |
+                            LayoutDebugTableConstraint::AvoidGroup
+                    ),
+            );
+            let mut resume_page_index = None;
+            if selected {
+                let previous_page_index = self.current_page_index;
+                let mut next_page_index = self.current_page_index + 1;
+                let mut next_page_origin = self.current_page_origin + self.request.page_stride;
+                while next_page_origin + header_block_size < block_start {
+                    next_page_index += 1;
+                    next_page_origin += self.request.page_stride;
+                }
+                translation += next_page_origin + header_block_size - block_start;
+                block_start = next_page_origin + header_block_size;
+                self.current_page_index = next_page_index;
+                self.current_page_origin = next_page_origin;
+                resume_page_index = Some(next_page_index);
+                self.outcome.continuations.push(PageContinuation {
+                    page_index: previous_page_index,
+                    token: FragmentainerContinuation::Table(TableContinuationToken {
+                        child_index,
+                        table_node,
+                        row_group_index: Some(footer.row_group_index),
+                        next_row_index: footer.first_row_index,
+                        resume_page_index: next_page_index,
+                    }),
+                });
+                self.push_table_header_repeat(
+                    table_node,
+                    header,
+                    header_source_block_start,
+                    next_page_index,
+                    next_page_origin,
+                );
+            }
+            self.outcome.table_breaks.push(TableBreakDecision {
+                page_index: considered_page_index,
+                table_node,
+                row_group_index: Some(footer.row_group_index),
+                next_row_index: footer.first_row_index,
+                constraint,
+                retry_count,
+                retry_limit: TABLE_ROW_RETRY_LIMIT,
+                selected,
+                resume_page_index,
+            });
+            for row_translation in
+                &mut row_translations[footer.first_row_index..footer.end_row_index]
+            {
+                *row_translation = translation;
+            }
+            self.page_has_content = true;
+            self.include_content_through(block_start + footer.block_size);
+        }
+
         self.previous_break_after |= rows.last().is_some_and(|row| row.breaks.after)
-            || row_groups
+            || groups
                 .last()
                 .is_some_and(|group| group.end_row_index == rows.len() && group.breaks.after);
 
@@ -914,6 +1211,32 @@ impl BlockPageBuilder {
             cell_fragment_translations,
             added_block_size: translation,
         })
+    }
+
+    fn push_table_header_repeat(
+        &mut self,
+        table_node: Option<u64>,
+        header: Option<TableRowGroup>,
+        source_block_start: Option<Au>,
+        page_index: usize,
+        target_block_start: Au,
+    ) {
+        let (Some(header), Some(source_block_start), Some(header_tag_id)) =
+            (header, source_block_start, header.and_then(|group| group.tag_id))
+        else {
+            return;
+        };
+        self.outcome
+            .table_group_repeats
+            .push(TableGroupRepeatDecision {
+                page_index,
+                table_node,
+                header_tag_id,
+                row_group_index: header.row_group_index,
+                source_block_start,
+                target_block_start,
+                block_size: header.block_size,
+            });
     }
 
     fn forced_break_before(
@@ -1142,13 +1465,14 @@ impl BlockPageBuilder {
         child_index: usize,
         table_node: Option<u64>,
         row: TableRow,
+        available_block_size: Au,
     ) {
         warn!(
             "paged layout fragmented table child {child_index} row {} despite break-inside: avoid \
              (node {table_node:?}, {:.2}px > {:.2}px); split or shorten the row",
             row.row_index,
             row.block_size.to_f32_px(),
-            self.request.available_block_size.to_f32_px(),
+            available_block_size.to_f32_px(),
         );
         self.outcome.warnings.push(
             BlockPaginationWarning::OversizedTableRowBreakInsideAvoid {
@@ -1157,7 +1481,7 @@ impl BlockPageBuilder {
                 row_group_index: row.row_group_index,
                 row_index: row.row_index,
                 block_size: row.block_size,
-                available_block_size: self.request.available_block_size,
+                available_block_size,
                 retry_count: 0,
                 retry_limit: TABLE_ROW_RETRY_LIMIT,
             },
@@ -1170,13 +1494,14 @@ impl BlockPageBuilder {
         table_node: Option<u64>,
         group: TableRowGroup,
         block_size: Au,
+        available_block_size: Au,
     ) {
         warn!(
             "paged layout fragmented table child {child_index} row group {} despite break-inside: \
              avoid (node {table_node:?}, {:.2}px > {:.2}px); split or shorten the row group",
             group.row_group_index,
             block_size.to_f32_px(),
-            self.request.available_block_size.to_f32_px(),
+            available_block_size.to_f32_px(),
         );
         self.outcome.warnings.push(
             BlockPaginationWarning::OversizedTableRowGroupBreakInsideAvoid {
@@ -1184,7 +1509,7 @@ impl BlockPageBuilder {
                 table_node,
                 row_group_index: group.row_group_index,
                 block_size,
-                available_block_size: self.request.available_block_size,
+                available_block_size,
                 retry_count: 0,
                 retry_limit: TABLE_ROW_RETRY_LIMIT,
             },
@@ -1249,6 +1574,25 @@ impl BlockPageBuilder {
             .push(BlockPaginationWarning::UnsupportedTableCaptionPagination { child_index, node });
     }
 
+    pub(crate) fn warn_unsupported_table_group_pagination(
+        &mut self,
+        child_index: usize,
+        table_node: Option<u64>,
+        reason: TableGroupUnsupportedReason,
+    ) {
+        warn!(
+            "paged layout retained unsupported table groups for child {child_index} (node \
+             {table_node:?}, reason {reason:?})"
+        );
+        self.outcome
+            .warnings
+            .push(BlockPaginationWarning::UnsupportedTableGroupPagination {
+                child_index,
+                table_node,
+                reason,
+            });
+    }
+
     fn include_content_through(&mut self, block_end: Au) {
         let mut page_origin = self.current_page_origin;
         let mut page_index = self.current_page_index;
@@ -1299,6 +1643,7 @@ pub(crate) struct PageSequence {
     pub pages: Vec<Page>,
     table_breaks: Vec<TableBreakDecision>,
     table_cell_continuations: Vec<TableCellContinuationDecision>,
+    table_group_repeats: Vec<TableGroupRepeatDecision>,
     pub warnings: Vec<BlockPaginationWarning>,
 }
 
@@ -1393,6 +1738,19 @@ impl PageSequence {
                     resume_page_index: continuation.resume_page_index,
                 })
                 .collect(),
+            table_group_repeats: self
+                .table_group_repeats
+                .iter()
+                .map(|repeat| LayoutDebugTableGroupRepeat {
+                    page_index: repeat.page_index,
+                    table_node: repeat.table_node,
+                    header_tag_id: repeat.header_tag_id,
+                    row_group_index: repeat.row_group_index,
+                    source_block_start: repeat.source_block_start.to_f32_px(),
+                    target_block_start: repeat.target_block_start.to_f32_px(),
+                    block_size: repeat.block_size.to_f32_px(),
+                })
+                .collect(),
             warnings: self
                 .warnings
                 .iter()
@@ -1427,6 +1785,31 @@ impl PageSequence {
                     } => LayoutDebugPageWarning::UnsupportedTableCaptionPagination {
                         child_index,
                         node,
+                    },
+                    BlockPaginationWarning::UnsupportedTableGroupPagination {
+                        child_index,
+                        table_node,
+                        reason,
+                    } => LayoutDebugPageWarning::UnsupportedTableGroupPagination {
+                        child_index,
+                        table_node,
+                        reason: match reason {
+                            TableGroupUnsupportedReason::MultipleFooters => {
+                                LayoutDebugTableGroupUnsupportedReason::MultipleFooters
+                            },
+                            TableGroupUnsupportedReason::FooterTooTallAfterHeader => {
+                                LayoutDebugTableGroupUnsupportedReason::FooterTooTallAfterHeader
+                            },
+                            TableGroupUnsupportedReason::Rowspan => {
+                                LayoutDebugTableGroupUnsupportedReason::Rowspan
+                            },
+                            TableGroupUnsupportedReason::CollapsedBorders => {
+                                LayoutDebugTableGroupUnsupportedReason::CollapsedBorders
+                            },
+                            TableGroupUnsupportedReason::UnsupportedLayout => {
+                                LayoutDebugTableGroupUnsupportedReason::UnsupportedLayout
+                            },
+                        },
                     },
                     BlockPaginationWarning::OversizedTableCell {
                         child_index,
@@ -1630,6 +2013,7 @@ mod tests {
                 continuations: vec![],
                 table_breaks: vec![],
                 table_cell_continuations: vec![],
+                table_group_repeats: vec![],
                 warnings: vec![],
             }
         );
@@ -2179,9 +2563,13 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let row_groups = [TableRowGroup {
+            tag_id: None,
             row_group_index: 0,
             first_row_index: 0,
             end_row_index: rows.len(),
+            block_start: Au::zero(),
+            block_size: Au::from_px(200),
+            kind: TableRowGroupKind::Body,
             breaks: ChildPageBreaks::default(),
         }];
         let mut builder = BlockPageBuilder::new(BlockPaginationRequest {
@@ -2194,6 +2582,7 @@ mod tests {
                 0,
                 Some(10),
                 Au::zero(),
+                Au::from_px(200),
                 &rows,
                 &row_groups,
                 &[],
@@ -2274,9 +2663,13 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let row_groups = [TableRowGroup {
+            tag_id: None,
             row_group_index: 0,
             first_row_index: 0,
             end_row_index: rows.len(),
+            block_start: Au::zero(),
+            block_size: Au::from_px(120),
+            kind: TableRowGroupKind::Body,
             breaks: ChildPageBreaks {
                 after: true,
                 inside_avoid: true,
@@ -2293,6 +2686,7 @@ mod tests {
                 0,
                 Some(10),
                 Au::zero(),
+                Au::from_px(120),
                 &rows,
                 &row_groups,
                 &[],
@@ -2363,6 +2757,7 @@ mod tests {
                     0,
                     Some(10),
                     Au::zero(),
+                    Au::from_px(80),
                     &invalid_rows,
                     &[],
                     &[],
@@ -2425,9 +2820,13 @@ mod tests {
             breaks: ChildPageBreaks::default(),
         }];
         let row_groups = [TableRowGroup {
+            tag_id: None,
             row_group_index: 0,
             first_row_index: 0,
             end_row_index: 1,
+            block_start: Au::from_px(30),
+            block_size: Au::from_px(120),
+            kind: TableRowGroupKind::Body,
             breaks: ChildPageBreaks::default(),
         }];
         let fragments = [
@@ -2484,6 +2883,7 @@ mod tests {
                 0,
                 Some(10),
                 Au::from_px(30),
+                Au::from_px(120),
                 &rows,
                 &row_groups,
                 &fragments,
@@ -2547,6 +2947,7 @@ mod tests {
                 0,
                 Some(10),
                 Au::zero(),
+                Au::from_px(140),
                 &rows,
                 &[],
                 &fragments,

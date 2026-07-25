@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>Pliego unsupported table group fixtures</title>
+    <style>
+      body { margin: 0; font: 10px/14px sans-serif; }
+      table { border-spacing: 0; table-layout: fixed; width: 200px; }
+      th, td { padding: 0; text-align: left; }
+      tr { height: 18px; }
+      .footer { display: table-footer-group; }
+      #too-tall tfoot tr { height: 110px; }
+      #collapsed { border-collapse: collapse; }
+      .flex { display: flex; }
+    </style>
+  </head>
+  <body>
+    <table id="multiple-footers">
+      <thead><tr><th>MF-H</th></tr></thead>
+      <tbody><tr><td>MF-B</td></tr></tbody>
+      <tbody class="footer"><tr><td>MF-F1</td></tr></tbody>
+      <tbody class="footer"><tr><td>MF-F2</td></tr></tbody>
+    </table>
+    <table id="too-tall">
+      <thead><tr><th>TT-H</th></tr></thead>
+      <tbody><tr><td>TT-B</td></tr></tbody>
+      <tfoot><tr><td>TT-F</td></tr></tfoot>
+    </table>
+    <table id="rowspan">
+      <thead><tr><th>RS-H</th><th>RS-H2</th></tr></thead>
+      <tbody>
+        <tr><td rowspan="2">RS-SPAN</td><td>RS-0</td></tr>
+        <tr><td>RS-1</td></tr>
+      </tbody>
+    </table>
+    <table id="collapsed">
+      <thead><tr><th>CB-H</th></tr></thead>
+      <tbody><tr><td>CB-B</td></tr></tbody>
+    </table>
+    <table id="unsupported-layout">
+      <thead><tr><th>UL-H</th></tr></thead>
+      <tbody><tr><td><div class="flex">UL-B</div></td></tr></tbody>
+    </table>
+    <script>
+      queueMicrotask(() => window.pliego?.ready({ fixture: 'table-header-footer-unsupported' }));
+    </script>
+  </body>
+</html>

@@ -311,6 +311,9 @@ pub struct LayoutDebugPageSequence {
     /// Per-cell resume points retained when an oversized row continues across pages.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub table_cell_continuations: Vec<LayoutDebugTableCellContinuation>,
+    /// Synthetic header copies requested for continued table fragments.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub table_group_repeats: Vec<LayoutDebugTableGroupRepeat>,
     /// Pagination warnings retained for document diagnostics.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<LayoutDebugPageWarning>,
@@ -390,6 +393,27 @@ pub struct LayoutDebugTableCellContinuation {
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+pub struct LayoutDebugTableGroupRepeat {
+    pub page_index: usize,
+    pub table_node: Option<u64>,
+    pub header_tag_id: u64,
+    pub row_group_index: usize,
+    pub source_block_start: f32,
+    pub target_block_start: f32,
+    pub block_size: f32,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LayoutDebugTableGroupUnsupportedReason {
+    MultipleFooters,
+    FooterTooTallAfterHeader,
+    Rowspan,
+    CollapsedBorders,
+    UnsupportedLayout,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum LayoutDebugPageWarning {
     OversizedUnbreakable {
@@ -408,6 +432,11 @@ pub enum LayoutDebugPageWarning {
     UnsupportedTableCaptionPagination {
         child_index: usize,
         node: Option<u64>,
+    },
+    UnsupportedTableGroupPagination {
+        child_index: usize,
+        table_node: Option<u64>,
+        reason: LayoutDebugTableGroupUnsupportedReason,
     },
     OversizedTableCell {
         child_index: usize,

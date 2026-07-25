@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>Pliego repeated table header and terminal footer fixture</title>
+    <style>
+      body { margin: 0; font: 12px/18px sans-serif; }
+      #lead { height: 20px; }
+      table { border-spacing: 0; break-inside: avoid; table-layout: fixed; width: 220px; }
+      th, td { padding: 0; text-align: left; }
+      thead tr, tfoot tr { height: 24px; }
+      tbody tr { height: 32px; }
+      th:first-child, td:first-child { width: 120px; }
+      img { height: 8px; width: 8px; }
+    </style>
+  </head>
+  <body>
+    <div id="lead">LEAD</div>
+    <table id="ledger">
+      <thead id="ledger-header">
+        <tr>
+          <th>
+            <a href="#ledger"><img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=" alt="">ITEM</a>
+          </th>
+          <th>AMOUNT</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td>R0</td><td>$10</td></tr>
+        <tr><td>R1</td><td>$20</td></tr>
+        <tr><td>R2</td><td>$30</td></tr>
+        <tr><td>R3</td><td>$40</td></tr>
+        <tr><td>R4</td><td>$50</td></tr>
+        <tr><td>R5</td><td>$60</td></tr>
+        <tr><td>R6</td><td>$70</td></tr>
+        <tr><td>R7</td><td>$80</td></tr>
+      </tbody>
+      <tfoot>
+        <tr><td>TOTAL</td><td>$360</td></tr>
+      </tfoot>
+    </table>
+    <script>
+      queueMicrotask(() => window.pliego?.ready({ fixture: 'table-header-footer' }));
+    </script>
+  </body>
+</html>
