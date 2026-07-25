@@ -139,7 +139,7 @@ def render(binary: Path, repo: Path, case: Case, fixture: Path, destination: Pat
         [
             str(binary),
             "render",
-            str(fixture),
+            fixture.name,
             "--output",
             str(output),
             "--artifacts",
@@ -149,7 +149,7 @@ def render(binary: Path, repo: Path, case: Case, fixture: Path, destination: Pat
             "--page-margins",
             PAGE_MARGINS,
         ],
-        cwd=repo,
+        cwd=fixture.parent,
         env=environment,
         capture_output=True,
         text=True,
@@ -279,7 +279,7 @@ def extract_pdf_text(pdf: Path) -> str:
     tool = shutil.which("pdftotext")
     require(tool is not None, "pdftotext is required for the typography extraction gate")
     result = subprocess.run(
-        [tool, "-enc", "UTF-8", "-nopgbrk", str(pdf), "-"],
+        [tool, "-enc", "UTF-8", "-raw", "-nopgbrk", str(pdf), "-"],
         capture_output=True,
         timeout=20,
         check=False,
