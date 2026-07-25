@@ -279,6 +279,8 @@ jobs:
             xvfb-run python ports/pliego/tests/check_table_pagination.py "$binary" &&
             python ports/pliego/tests/check_table_captions.py --self-test &&
             xvfb-run python ports/pliego/tests/check_table_captions.py "$binary" &&
+            python ports/pliego/tests/check_table_oversized_row.py --self-test &&
+            xvfb-run python ports/pliego/tests/check_table_oversized_row.py "$binary" &&
             xvfb-run python ports/pliego/tests/check_deterministic_environment.py "$binary" &&
             python ports/pliego/tests/check_resource_policy.py --self-test &&
             xvfb-run python ports/pliego/tests/check_resource_policy.py "$binary" "$output/resource-policy" &&
@@ -310,21 +312,6 @@ jobs:
         with:
           name: pliego-image-limits-${{ inputs.profile }}-${{ needs.runner-select.outputs.unique-id }}
           path: target/pliego-image-limits/${{ github.run_id }}-${{ github.run_attempt }}
-          if-no-files-found: warn
-          retention-days: 7
-      - name: Pliego controlled resource policy
-        run: |
-          output=target/pliego-resource-policy/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}
-          mkdir -p "$(dirname "$output")"
-          python ports/pliego/tests/check_resource_policy.py --self-test
-          xvfb-run python ports/pliego/tests/check_resource_policy.py \
-            target/${{ inputs.profile }}/pliego "$output"
-      - name: Retain Pliego controlled resource proof
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: pliego-resource-policy-${{ inputs.profile }}-${{ needs.runner-select.outputs.unique-id }}
-          path: target/pliego-resource-policy/${{ github.run_id }}-${{ github.run_attempt }}
           if-no-files-found: warn
           retention-days: 7
       - name: Script tests
