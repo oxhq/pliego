@@ -308,6 +308,9 @@ pub struct LayoutDebugPageSequence {
     /// Row-boundary break opportunities considered while retaining a laid-out table grid.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub table_breaks: Vec<LayoutDebugTableBreak>,
+    /// Per-cell resume points retained when an oversized row continues across pages.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub table_cell_continuations: Vec<LayoutDebugTableCellContinuation>,
     /// Pagination warnings retained for document diagnostics.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<LayoutDebugPageWarning>,
@@ -361,6 +364,17 @@ pub struct LayoutDebugTableBreak {
     pub resume_page_index: Option<usize>,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LayoutDebugTableCellContinuation {
+    pub page_index: usize,
+    pub table_node: Option<u64>,
+    pub row_group_index: Option<usize>,
+    pub row_index: usize,
+    pub cell_index: usize,
+    pub next_fragment_index: Option<usize>,
+    pub resume_page_index: usize,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum LayoutDebugPageWarning {
@@ -380,6 +394,15 @@ pub enum LayoutDebugPageWarning {
     UnsupportedTableCaptionPagination {
         child_index: usize,
         node: Option<u64>,
+    },
+    OversizedTableCell {
+        child_index: usize,
+        table_node: Option<u64>,
+        row_index: usize,
+        cell_index: usize,
+        fragment_index: usize,
+        block_size: f32,
+        available_block_size: f32,
     },
 }
 

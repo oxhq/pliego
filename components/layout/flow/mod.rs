@@ -33,7 +33,7 @@ use crate::flow::same_formatting_context_block::SameFormattingContextBlock;
 use crate::formatting_contexts::{Baselines, IndependentFormattingContext};
 use crate::fragment_tree::{
     BaseFragmentInfo, BlockLevelLayoutInfo, BoxFragment, CollapsedBlockMargins, CollapsedMargin,
-    Fragment, FragmentFlags, SpecificLayoutInfo, TextFragmentSource,
+    Fragment, FragmentFlags, PositioningFragment, SpecificLayoutInfo, TextFragmentSource,
 };
 use crate::geom::{
     AuOrAuto, LogicalRect, LogicalSides, LogicalSides1D, LogicalVec2, PhysicalPoint, PhysicalRect,
@@ -42,14 +42,17 @@ use crate::geom::{
 use crate::layout_box_base::{IndependentFormattingContextLayoutResult, LayoutBoxBase};
 use crate::pages::{
     BlockBoundaryPlacement, BlockPageBuilder, ChildPageBreaks, InlineLine, InlineResumePoint,
-    TableChildPlacement, TableRow,
+    TableCellFragment, TableChildPlacement, TableRow,
 };
 use crate::positioned::{AbsolutelyPositionedBox, PositioningContext, PositioningContextLength};
 use crate::sizing::{
     self, ComputeInlineContentSizes, ContentSizes, InlineContentSizesResult, LazySize, Size,
     SizeConstraint, Sizes,
 };
-use crate::style_ext::{AspectRatio, ContentBoxSizesAndPBM, LayoutStyle, PaddingBorderMargin};
+use crate::style_ext::{
+    AspectRatio, ContentBoxSizesAndPBM, Display as LayoutDisplay, DisplayGeneratingBox,
+    DisplayInside, LayoutStyle, PaddingBorderMargin,
+};
 use crate::{ConstraintSpace, ContainingBlock, ContainingBlockSize, IndefiniteContainingBlock};
 
 mod construct;
@@ -990,6 +993,7 @@ fn prepare_fragmentainer_boundary(
             node,
             placement_state.current_block_direction_position,
             &table.rows,
+            &table.cell_fragments,
             breaks,
         ) {
             table.apply(
@@ -1060,10 +1064,24 @@ fn forces_page_break(value: BreakBetween) -> bool {
 struct RetainedTableFragments<'a> {
     rows: Vec<TableRow>,
     row_fragments: Vec<&'a BoxFragment>,
+    row_cells: Vec<Vec<RetainedTableCell<'a>>>,
+    cell_fragments: Vec<TableCellFragment>,
+    retained_cell_fragments: Vec<RetainedTableCellFragment<'a>>,
+    split_containers: Vec<&'a BoxFragment>,
     row_groups: Vec<(usize, &'a BoxFragment)>,
     bottom_captions: Vec<&'a BoxFragment>,
     grid: &'a BoxFragment,
     wrapper: &'a BoxFragment,
+}
+
+struct RetainedTableCell<'a> {
+    fragment: &'a BoxFragment,
+    alignment: &'a PositioningFragment,
+}
+
+struct RetainedTableCellFragment<'a> {
+    fragment: &'a Fragment,
+    split_container_index: Option<usize>,
 }
 
 impl RetainedTableFragments<'_> {
@@ -1072,18 +1090,68 @@ impl RetainedTableFragments<'_> {
     }
 
     fn apply(&self, placement: TableChildPlacement, writing_mode: crate::WritingMode) {
-        for (row, translation) in self.row_fragments.iter().zip(&placement.row_translations) {
-            if translation.is_zero() {
-                continue;
+        for (retained, translation) in self
+            .retained_cell_fragments
+            .iter()
+            .zip(&placement.cell_fragment_translations)
+        {
+            if !translation.is_zero() {
+                let base = retained
+                    .fragment
+                    .base()
+                    .expect("retained cell fragments have geometry");
+                base.translate_rect(
+                    LogicalVec2 {
+                        inline: Au::zero(),
+                        block: *translation,
+                    }
+                    .to_physical_size(writing_mode),
+                );
+                retained.fragment.clear_scrollable_overflow();
             }
-            row.base.translate_rect(
-                LogicalVec2 {
-                    inline: Au::zero(),
-                    block: *translation,
-                }
-                .to_physical_size(writing_mode),
-            );
-            row.clear_scrollable_overflow();
+        }
+
+        let mut split_container_extensions = vec![Au::zero(); self.split_containers.len()];
+        for (retained, translation) in self
+            .retained_cell_fragments
+            .iter()
+            .zip(&placement.cell_fragment_translations)
+        {
+            if let Some(index) = retained.split_container_index {
+                split_container_extensions[index] =
+                    split_container_extensions[index].max(*translation);
+            }
+        }
+        for (container, extension) in self
+            .split_containers
+            .iter()
+            .zip(split_container_extensions)
+        {
+            grow_horizontal_box(container, extension);
+        }
+
+        for (row_index, ((row, translation), extension)) in self
+            .row_fragments
+            .iter()
+            .zip(&placement.row_translations)
+            .zip(&placement.row_block_extensions)
+            .enumerate()
+        {
+            if !translation.is_zero() {
+                row.base.translate_rect(
+                    LogicalVec2 {
+                        inline: Au::zero(),
+                        block: *translation,
+                    }
+                    .to_physical_size(writing_mode),
+                );
+                row.clear_scrollable_overflow();
+            }
+            grow_horizontal_box(row, *extension);
+            for cell in &self.row_cells[row_index] {
+                grow_horizontal_box(cell.fragment, *extension);
+                grow_horizontal_positioning(cell.alignment, *extension);
+            }
         }
 
         // Top captions keep their first-fragment position; bottom captions follow the last row.
@@ -1105,9 +1173,15 @@ impl RetainedTableFragments<'_> {
             let added = self
                 .rows
                 .iter()
-                .zip(&placement.row_translations)
-                .filter_map(|(row, translation)| {
-                    (row.row_group_index == Some(*group_index)).then_some(*translation)
+                .zip(
+                    placement
+                        .row_translations
+                        .iter()
+                        .zip(&placement.row_block_extensions),
+                )
+                .filter_map(|(row, (translation, extension))| {
+                    (row.row_group_index == Some(*group_index))
+                        .then_some(*translation + *extension)
                 })
                 .max()
                 .unwrap_or_default();
@@ -1119,6 +1193,16 @@ impl RetainedTableFragments<'_> {
 }
 
 fn grow_horizontal_box(fragment: &BoxFragment, added_block_size: Au) {
+    if added_block_size.is_zero() {
+        return;
+    }
+    let mut rect = fragment.base.rect();
+    rect.size.height += added_block_size;
+    fragment.base.set_rect(rect);
+    fragment.clear_scrollable_overflow();
+}
+
+fn grow_horizontal_positioning(fragment: &PositioningFragment, added_block_size: Au) {
     if added_block_size.is_zero() {
         return;
     }
@@ -1175,6 +1259,10 @@ fn retained_table_rows<'a>(
     let grid_block_start = wrapper_block_start + grid.base.rect().origin.y;
     let mut rows = Vec::new();
     let mut row_fragments = Vec::new();
+    let mut row_cells = Vec::new();
+    let mut cell_fragments = Vec::new();
+    let mut retained_cell_fragments = Vec::new();
+    let mut split_containers = Vec::new();
     let mut row_groups = Vec::new();
 
     for child in &grid.children {
@@ -1189,13 +1277,24 @@ fn retained_table_rows<'a>(
                 has_rowspan: false,
             } => {
                 let rect = child.base.rect();
+                let block_start = grid_block_start + rect.origin.y;
+                let cells = retained_table_cells(
+                    child,
+                    row_index,
+                    block_start,
+                    &mut cell_fragments,
+                    &mut retained_cell_fragments,
+                    &mut split_containers,
+                )?;
                 rows.push(TableRow {
                     row_index,
                     row_group_index: None,
-                    block_start: grid_block_start + rect.origin.y,
+                    cell_count: cells.len(),
+                    block_start,
                     block_size: rect.size.height,
                 });
                 row_fragments.push(child.as_ref());
+                row_cells.push(cells);
             },
             SpecificLayoutInfo::TableRowGroup {
                 row_group_index,
@@ -1220,20 +1319,31 @@ fn retained_table_rows<'a>(
                         return None;
                     }
                     let rect = row.base.rect();
+                    let block_start = group_block_start + rect.origin.y;
+                    let cells = retained_table_cells(
+                        row,
+                        row_index,
+                        block_start,
+                        &mut cell_fragments,
+                        &mut retained_cell_fragments,
+                        &mut split_containers,
+                    )?;
                     rows.push(TableRow {
                         row_index,
                         row_group_index: Some(row_group_index),
-                        block_start: group_block_start + rect.origin.y,
+                        cell_count: cells.len(),
+                        block_start,
                         block_size: rect.size.height,
                     });
                     row_fragments.push(row.as_ref());
+                    row_cells.push(cells);
                 }
                 row_groups.push((row_group_index, child.as_ref()));
             },
             _ => return None,
         }
     }
-    if rows.len() < 2
+    if rows.is_empty()
         || rows
             .iter()
             .enumerate()
@@ -1245,6 +1355,10 @@ fn retained_table_rows<'a>(
     Some(RetainedTableFragments {
         rows,
         row_fragments,
+        row_cells,
+        cell_fragments,
+        retained_cell_fragments,
+        split_containers,
         row_groups,
         bottom_captions,
         grid,
@@ -1263,6 +1377,163 @@ fn table_has_captions(fragment: &Fragment) -> bool {
             };
             !child.is_table_grid() && !child.is_table_grid_with_collapsed_borders()
         })
+}
+
+fn retained_table_cells<'a>(
+    row: &'a BoxFragment,
+    row_index: usize,
+    row_block_start: Au,
+    cell_fragments: &mut Vec<TableCellFragment>,
+    retained_fragments: &mut Vec<RetainedTableCellFragment<'a>>,
+    split_containers: &mut Vec<&'a BoxFragment>,
+) -> Option<Vec<RetainedTableCell<'a>>> {
+    let mut cells = Vec::with_capacity(row.children.len());
+    for (cell_index, child) in row.children.iter().enumerate() {
+        let Fragment::Box(cell) = child else {
+            return None;
+        };
+        let [Fragment::Positioning(alignment)] = cell.children.as_slice() else {
+            return None;
+        };
+        if alignment.is_line_box() {
+            return None;
+        }
+        let cell_block_start = row_block_start + cell.base.rect().origin.y;
+        let alignment_block_start = cell_block_start + alignment.base.rect().origin.y;
+        let mut fragment_index = 0;
+        for fragment in &alignment.children {
+            retain_table_cell_fragment(
+                fragment,
+                row_index,
+                cell_index,
+                &mut fragment_index,
+                alignment_block_start,
+                None,
+                cell_fragments,
+                retained_fragments,
+                split_containers,
+            )?;
+        }
+        cells.push(RetainedTableCell {
+            fragment: cell,
+            alignment,
+        });
+    }
+    Some(cells)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn retain_table_cell_fragment<'a>(
+    fragment: &'a Fragment,
+    row_index: usize,
+    cell_index: usize,
+    fragment_index: &mut usize,
+    parent_block_start: Au,
+    split_container_index: Option<usize>,
+    cell_fragments: &mut Vec<TableCellFragment>,
+    retained_fragments: &mut Vec<RetainedTableCellFragment<'a>>,
+    split_containers: &mut Vec<&'a BoxFragment>,
+) -> Option<()> {
+    if table_cell_fragment_has_excluded_layout(fragment) {
+        return None;
+    }
+    match fragment {
+        Fragment::Positioning(positioning) if !positioning.is_line_box() => {
+            let block_start = parent_block_start + positioning.base.rect().origin.y;
+            for child in &positioning.children {
+                retain_table_cell_fragment(
+                    child,
+                    row_index,
+                    cell_index,
+                    fragment_index,
+                    block_start,
+                    split_container_index,
+                    cell_fragments,
+                    retained_fragments,
+                    split_containers,
+                )?;
+            }
+            Some(())
+        },
+        Fragment::Box(box_fragment)
+            if box_fragment.children.len() >= 2
+                && box_fragment.children.iter().all(|child| {
+                    matches!(child, Fragment::Positioning(line) if line.is_line_box())
+                }) =>
+        {
+            let block_start = parent_block_start + box_fragment.base.rect().origin.y;
+            let container_index = split_containers.len();
+            split_containers.push(box_fragment);
+            for child in &box_fragment.children {
+                retain_table_cell_fragment(
+                    child,
+                    row_index,
+                    cell_index,
+                    fragment_index,
+                    block_start,
+                    Some(container_index),
+                    cell_fragments,
+                    retained_fragments,
+                    split_containers,
+                )?;
+            }
+            Some(())
+        },
+        Fragment::Box(_)
+        | Fragment::Positioning(_)
+        | Fragment::Text(_)
+        | Fragment::Image(_)
+        | Fragment::IFrame(_) => {
+            let base = fragment.base().expect("retained cell fragments have geometry");
+            let rect = base.rect();
+            if rect.size.height <= Au::zero() {
+                return Some(());
+            }
+            cell_fragments.push(TableCellFragment {
+                row_index,
+                cell_index,
+                fragment_index: *fragment_index,
+                block_start: parent_block_start + rect.origin.y,
+                block_size: rect.size.height,
+            });
+            retained_fragments.push(RetainedTableCellFragment {
+                fragment,
+                split_container_index,
+            });
+            *fragment_index += 1;
+            Some(())
+        },
+        Fragment::LayoutRoot(_)
+        | Fragment::Float(_)
+        | Fragment::AbsoluteOrFixedPositionedPlaceholder(_) => None,
+    }
+}
+
+fn table_cell_fragment_has_excluded_layout(fragment: &Fragment) -> bool {
+    match fragment {
+        Fragment::Box(box_fragment) | Fragment::Float(box_fragment) => {
+            let display = LayoutDisplay::from(box_fragment.style().get_box().display);
+            matches!(
+                display,
+                LayoutDisplay::GeneratingBox(DisplayGeneratingBox::OutsideInside {
+                    inside: DisplayInside::Flex | DisplayInside::Grid | DisplayInside::Table,
+                    ..
+                })
+            ) || box_fragment
+                .children
+                .iter()
+                .any(table_cell_fragment_has_excluded_layout)
+        },
+        Fragment::Positioning(positioning) => positioning
+            .children
+            .iter()
+            .any(table_cell_fragment_has_excluded_layout),
+        Fragment::LayoutRoot(_)
+        | Fragment::AbsoluteOrFixedPositionedPlaceholder(_)
+        | Fragment::Text(_)
+        | Fragment::Image(_)
+        | Fragment::IFrame(_) => false,
+    }
 }
 
 struct RetainedLineSource {

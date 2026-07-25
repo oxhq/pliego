@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>Pliego unbreakable table cell fixture</title>
+    <style>
+      body { margin: 0; }
+      table { border-spacing: 0; table-layout: fixed; width: 200px; }
+      td { padding: 0; vertical-align: top; }
+      img { display: block; width: 20px; height: 180px; }
+    </style>
+  </head>
+  <body>
+    <table>
+      <tbody>
+        <tr><td><img alt="" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='180'/%3E"></td></tr>
+      </tbody>
+    </table>
+    <script>
+      queueMicrotask(() => window.pliego?.ready({ fixture: 'table-oversized-row-unbreakable' }));
+    </script>
+  </body>
+</html>

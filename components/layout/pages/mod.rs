@@ -16,7 +16,7 @@ use euclid::default::Size2D as UntypedSize2D;
 use euclid::{Point2D, Rect, Size2D};
 use layout_api::{
     LayoutDebugContinuation, LayoutDebugPage, LayoutDebugPageContinuation, LayoutDebugPageSequence,
-    LayoutDebugPageWarning, LayoutDebugTableBreak,
+    LayoutDebugPageWarning, LayoutDebugTableBreak, LayoutDebugTableCellContinuation,
 };
 use log::warn;
 use parking_lot::Mutex;
@@ -188,6 +188,7 @@ impl PageSequenceContext {
         PageSequence {
             pages,
             table_breaks: outcome.table_breaks,
+            table_cell_continuations: outcome.table_cell_continuations,
             warnings: outcome.warnings,
         }
     }
@@ -256,6 +257,17 @@ pub(crate) struct InlineChildPlacement {
 pub(crate) struct TableRow {
     pub row_index: usize,
     pub row_group_index: Option<usize>,
+    pub cell_count: usize,
+    /// Unpaginated block start in the root fragmentainer coordinate space.
+    pub block_start: Au,
+    pub block_size: Au,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct TableCellFragment {
+    pub row_index: usize,
+    pub cell_index: usize,
+    pub fragment_index: usize,
     /// Unpaginated block start in the root fragmentainer coordinate space.
     pub block_start: Au,
     pub block_size: Au,
@@ -264,6 +276,8 @@ pub(crate) struct TableRow {
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) struct TableChildPlacement {
     pub row_translations: Vec<Au>,
+    pub row_block_extensions: Vec<Au>,
+    pub cell_fragment_translations: Vec<Au>,
     pub added_block_size: Au,
 }
 
@@ -298,6 +312,15 @@ pub(crate) enum BlockPaginationWarning {
     UnsupportedTableCaptionPagination {
         child_index: usize,
         node: Option<u64>,
+    },
+    OversizedTableCell {
+        child_index: usize,
+        table_node: Option<u64>,
+        row_index: usize,
+        cell_index: usize,
+        fragment_index: usize,
+        block_size: Au,
+        available_block_size: Au,
     },
 }
 
@@ -376,11 +399,29 @@ struct TableBreakDecision {
     resume_page_index: Option<usize>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct TableCellContinuationDecision {
+    page_index: usize,
+    table_node: Option<u64>,
+    row_group_index: Option<usize>,
+    row_index: usize,
+    cell_index: usize,
+    next_fragment_index: Option<usize>,
+    resume_page_index: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TableRowsSupport {
+    Supported,
+    Unsupported,
+}
+
 #[derive(Default)]
 pub(crate) struct BlockPaginationOutcome {
     page_count: usize,
     continuations: Vec<PageContinuation>,
     table_breaks: Vec<TableBreakDecision>,
+    table_cell_continuations: Vec<TableCellContinuationDecision>,
     warnings: Vec<BlockPaginationWarning>,
 }
 
@@ -558,10 +599,12 @@ impl BlockPageBuilder {
         table_node: Option<u64>,
         current_block_position: Au,
         rows: &[TableRow],
+        cell_fragments: &[TableCellFragment],
         breaks: ChildPageBreaks,
     ) -> Option<TableChildPlacement> {
         assert_eq!(child_index, self.next_child_index);
-        if breaks.inside_avoid || !self.supports_table_rows(rows) {
+        let support = self.table_rows_support(rows, cell_fragments);
+        if breaks.inside_avoid || support == TableRowsSupport::Unsupported {
             return None;
         }
         self.next_child_index += 1;
@@ -571,12 +614,17 @@ impl BlockPageBuilder {
         let mut translation = forced_origin
             .map_or_else(Au::zero, |block_origin| block_origin - current_block_position);
         let mut row_translations = Vec::with_capacity(rows.len());
+        let mut row_block_extensions = Vec::with_capacity(rows.len());
+        let mut cell_fragment_translations = vec![Au::zero(); cell_fragments.len()];
 
         for (position, row) in rows.iter().enumerate() {
             let mut block_start = row.block_start + translation;
             let page_end = self.current_page_origin + self.request.available_block_size;
-            let selected = block_start + row.block_size > page_end && self.page_has_content;
             let considered_page_index = self.current_page_index;
+            let oversized = row.block_size > self.request.available_block_size;
+            let selected = !oversized
+                && block_start + row.block_size > page_end
+                && self.page_has_content;
             let mut resume_page_index = None;
 
             if selected {
@@ -603,6 +651,134 @@ impl BlockPageBuilder {
                     }),
                 });
             }
+
+            let oversized_fragment = oversized.then(|| {
+                cell_fragments
+                    .iter()
+                    .find(|fragment| {
+                        fragment.row_index == row.row_index
+                            && fragment.block_size > self.request.available_block_size
+                    })
+                    .copied()
+            }).flatten();
+            if let Some(fragment) = oversized_fragment {
+                self.warn_oversized_table_cell(child_index, table_node, fragment);
+            }
+
+            row_translations.push(translation);
+            let mut row_block_extension = Au::zero();
+            if oversized && oversized_fragment.is_none() {
+                let start_page_index = self.current_page_index;
+                let start_page_origin = self.current_page_origin;
+                let mut assigned_pages = vec![None; cell_fragments.len()];
+                let mut last_page_index = start_page_index;
+
+                for cell_index in 0..row.cell_count {
+                    let mut cell_page_index = start_page_index;
+                    let mut cell_page_origin = start_page_origin;
+                    let mut cell_translation = Au::zero();
+                    for (index, fragment) in cell_fragments.iter().enumerate().filter(|(_, item)| {
+                        item.row_index == row.row_index && item.cell_index == cell_index
+                    }) {
+                        let mut fragment_start =
+                            fragment.block_start + translation + cell_translation;
+                        while fragment_start >= cell_page_origin + self.request.page_stride {
+                            cell_page_index += 1;
+                            cell_page_origin += self.request.page_stride;
+                        }
+                        if fragment_start + fragment.block_size
+                            > cell_page_origin + self.request.available_block_size
+                        {
+                            cell_page_index += 1;
+                            cell_page_origin += self.request.page_stride;
+                            cell_translation += cell_page_origin - fragment_start;
+                            fragment_start = cell_page_origin;
+                        }
+                        debug_assert!(
+                            fragment_start + fragment.block_size
+                                <= cell_page_origin + self.request.available_block_size
+                        );
+                        cell_fragment_translations[index] = cell_translation;
+                        assigned_pages[index] = Some(cell_page_index);
+                        row_block_extension = row_block_extension.max(cell_translation);
+                        last_page_index = last_page_index.max(cell_page_index);
+                    }
+                }
+
+                if last_page_index == start_page_index {
+                    let last = cell_fragments
+                        .iter()
+                        .rev()
+                        .find(|fragment| fragment.row_index == row.row_index)
+                        .expect("validated oversized rows retain cell fragments");
+                    self.warn_oversized_table_cell(
+                        child_index,
+                        table_node,
+                        TableCellFragment {
+                            row_index: row.row_index,
+                            cell_index: last.cell_index,
+                            fragment_index: last.fragment_index + 1,
+                            block_start: row.block_start,
+                            block_size: row.block_size,
+                        },
+                    );
+                }
+
+                for resume_page_index in start_page_index + 1..=last_page_index {
+                    self.outcome.continuations.push(PageContinuation {
+                        page_index: resume_page_index - 1,
+                        token: FragmentainerContinuation::Table(TableContinuationToken {
+                            child_index,
+                            table_node,
+                            row_group_index: row.row_group_index,
+                            next_row_index: row.row_index,
+                            resume_page_index,
+                        }),
+                    });
+                    for cell_index in 0..row.cell_count {
+                        let next_fragment_index = cell_fragments
+                            .iter()
+                            .enumerate()
+                            .find_map(|(index, fragment)| {
+                                (fragment.row_index == row.row_index
+                                    && fragment.cell_index == cell_index
+                                    && assigned_pages[index]
+                                        .is_some_and(|page_index| page_index >= resume_page_index))
+                                .then_some(fragment.fragment_index)
+                            });
+                        self.outcome.table_cell_continuations.push(
+                            TableCellContinuationDecision {
+                                page_index: resume_page_index - 1,
+                                table_node,
+                                row_group_index: row.row_group_index,
+                                row_index: row.row_index,
+                                cell_index,
+                                next_fragment_index,
+                                resume_page_index,
+                            },
+                        );
+                    }
+                }
+
+                self.current_page_index = start_page_index;
+                self.current_page_origin = start_page_origin;
+                while self.current_page_index < last_page_index {
+                    self.current_page_index += 1;
+                    self.current_page_origin += self.request.page_stride;
+                }
+                translation += row_block_extension;
+                block_start = row.block_start + translation;
+            }
+            if oversized
+                && (oversized_fragment.is_some()
+                    || self.current_page_index == considered_page_index)
+            {
+                let row_end = block_start + row.block_size;
+                while self.current_page_origin + self.request.page_stride < row_end {
+                    self.current_page_index += 1;
+                    self.current_page_origin += self.request.page_stride;
+                }
+            }
             if position > 0 {
                 self.outcome.table_breaks.push(TableBreakDecision {
                     page_index: considered_page_index,
@@ -614,14 +790,16 @@ impl BlockPageBuilder {
                 });
             }
 
-            row_translations.push(translation);
+            row_block_extensions.push(row_block_extension);
             self.page_has_content = true;
             self.include_content_through(block_start + row.block_size);
         }
 
         Some(TableChildPlacement {
-            added_block_size: *row_translations.last().expect("table rows are non-empty"),
             row_translations,
+            row_block_extensions,
+            cell_fragment_translations,
+            added_block_size: translation,
         })
     }
 
@@ -716,16 +894,109 @@ impl BlockPageBuilder {
         true
     }
 
-    fn supports_table_rows(&self, rows: &[TableRow]) -> bool {
-        rows.len() >= 2
-            && rows.iter().enumerate().all(|(position, row)| {
-                row.row_index == position
-                    && row.block_size > Au::zero()
-                    && row.block_size <= self.request.available_block_size
-                    && (position == 0
-                        || row.block_start
-                            >= rows[position - 1].block_start + rows[position - 1].block_size)
+    fn table_rows_support(
+        &self,
+        rows: &[TableRow],
+        cell_fragments: &[TableCellFragment],
+    ) -> TableRowsSupport {
+        if rows.is_empty()
+            || rows.iter().enumerate().any(|(position, row)| {
+                row.row_index != position
+                    || row.cell_count == 0
+                    || row.block_size <= Au::zero()
+                    || (position > 0
+                        && row.block_start
+                            < rows[position - 1].block_start + rows[position - 1].block_size)
             })
+        {
+            return TableRowsSupport::Unsupported;
+        }
+
+        let mut previous: Option<&TableCellFragment> = None;
+        for fragment in cell_fragments {
+            let Some(row) = rows.get(fragment.row_index) else {
+                return TableRowsSupport::Unsupported;
+            };
+            if fragment.cell_index >= row.cell_count
+                || fragment.block_size <= Au::zero()
+                || fragment.block_start < row.block_start
+                || fragment.block_start + fragment.block_size > row.block_start + row.block_size
+            {
+                return TableRowsSupport::Unsupported;
+            }
+            if let Some(previous) = previous {
+                let previous_key = (
+                    previous.row_index,
+                    previous.cell_index,
+                    previous.fragment_index,
+                );
+                let key = (
+                    fragment.row_index,
+                    fragment.cell_index,
+                    fragment.fragment_index,
+                );
+                if key <= previous_key
+                    || (fragment.row_index == previous.row_index
+                        && fragment.cell_index == previous.cell_index
+                        && (fragment.fragment_index != previous.fragment_index + 1
+                            || fragment.block_start
+                                < previous.block_start + previous.block_size))
+                {
+                    return TableRowsSupport::Unsupported;
+                }
+            } else if fragment.fragment_index != 0 {
+                return TableRowsSupport::Unsupported;
+            }
+            if previous.map_or(true, |previous| {
+                previous.row_index != fragment.row_index
+                    || previous.cell_index != fragment.cell_index
+            }) && fragment.fragment_index != 0
+            {
+                return TableRowsSupport::Unsupported;
+            }
+            previous = Some(fragment);
+        }
+
+        for row in rows
+            .iter()
+            .filter(|row| row.block_size > self.request.available_block_size)
+        {
+            if !cell_fragments
+                .iter()
+                .any(|fragment| fragment.row_index == row.row_index)
+            {
+                return TableRowsSupport::Unsupported;
+            }
+        }
+        TableRowsSupport::Supported
+    }
+
+    fn warn_oversized_table_cell(
+        &mut self,
+        child_index: usize,
+        table_node: Option<u64>,
+        fragment: TableCellFragment,
+    ) {
+        warn!(
+            "paged layout cannot split table child {child_index} cell {}:{} fragment {} (node \
+             {table_node:?}, {:.2}px > {:.2}px)",
+            fragment.row_index,
+            fragment.cell_index,
+            fragment.fragment_index,
+            fragment.block_size.to_f32_px(),
+            self.request.available_block_size.to_f32_px(),
+        );
+        self.outcome
+            .warnings
+            .push(BlockPaginationWarning::OversizedTableCell {
+                child_index,
+                table_node,
+                row_index: fragment.row_index,
+                cell_index: fragment.cell_index,
+                fragment_index: fragment.fragment_index,
+                block_size: fragment.block_size,
+                available_block_size: self.request.available_block_size,
+            });
     }
 
     fn warn_if_oversized(
@@ -835,6 +1106,7 @@ pub(crate) struct Page {
 pub(crate) struct PageSequence {
     pub pages: Vec<Page>,
     table_breaks: Vec<TableBreakDecision>,
+    table_cell_continuations: Vec<TableCellContinuationDecision>,
     pub warnings: Vec<BlockPaginationWarning>,
 }
 
@@ -913,6 +1185,19 @@ impl PageSequence {
                     resume_page_index: decision.resume_page_index,
                 })
                 .collect(),
+            table_cell_continuations: self
+                .table_cell_continuations
+                .iter()
+                .map(|continuation| LayoutDebugTableCellContinuation {
+                    page_index: continuation.page_index,
+                    table_node: continuation.table_node,
+                    row_group_index: continuation.row_group_index,
+                    row_index: continuation.row_index,
+                    cell_index: continuation.cell_index,
+                    next_fragment_index: continuation.next_fragment_index,
+                    resume_page_index: continuation.resume_page_index,
+                })
+                .collect(),
             warnings: self
                 .warnings
                 .iter()
@@ -947,6 +1232,23 @@ impl PageSequence {
                     } => LayoutDebugPageWarning::UnsupportedTableCaptionPagination {
                         child_index,
                         node,
+                    },
+                    BlockPaginationWarning::OversizedTableCell {
+                        child_index,
+                        table_node,
+                        row_index,
+                        cell_index,
+                        fragment_index,
+                        block_size,
+                        available_block_size,
+                    } => LayoutDebugPageWarning::OversizedTableCell {
+                        child_index,
+                        table_node,
+                        row_index,
+                        cell_index,
+                        fragment_index,
+                        block_size: block_size.to_f32_px(),
+                        available_block_size: available_block_size.to_f32_px(),
                     },
                 })
                 .collect(),
@@ -1096,6 +1398,7 @@ mod tests {
                 }],
                 continuations: vec![],
                 table_breaks: vec![],
+                table_cell_continuations: vec![],
                 warnings: vec![],
             }
         );
@@ -1638,6 +1941,7 @@ mod tests {
             .map(|row_index| TableRow {
                 row_index,
                 row_group_index: Some(0),
+                cell_count: 2,
                 block_start: Au::from_px(row_index as i32 * 40),
                 block_size: Au::from_px(40),
             })
@@ -1648,7 +1952,14 @@ mod tests {
         });
 
         let placement = builder
-            .place_table_child(0, Some(10), Au::zero(), &rows, ChildPageBreaks::default())
+            .place_table_child(
+                0,
+                Some(10),
+                Au::zero(),
+                &rows,
+                &[],
+                ChildPageBreaks::default(),
+            )
             .expect("basic retained rows should paginate");
         assert_eq!(
             placement.row_translations,
@@ -1721,12 +2032,14 @@ mod tests {
             TableRow {
                 row_index: 0,
                 row_group_index: None,
+                cell_count: 2,
                 block_start: Au::zero(),
                 block_size: Au::from_px(40),
             },
             TableRow {
                 row_index: 2,
                 row_group_index: None,
+                cell_count: 2,
                 block_start: Au::from_px(40),
                 block_size: Au::from_px(40),
             },
@@ -1738,6 +2051,7 @@ mod tests {
                     Some(10),
                     Au::zero(),
                     &invalid_rows,
+                    &[],
                     ChildPageBreaks::default(),
                 )
                 .is_none()
@@ -1783,6 +2097,152 @@ mod tests {
                 child_index: 1,
                 node: Some(20),
             }]
+        );
+    }
+
+    #[test]
+    fn oversized_row_retains_per_cell_progress_on_the_stable_grid() {
+        let rows = [TableRow {
+            row_index: 0,
+            row_group_index: Some(0),
+            cell_count: 2,
+            block_start: Au::from_px(30),
+            block_size: Au::from_px(120),
+        }];
+        let fragments = [
+            TableCellFragment {
+                row_index: 0,
+                cell_index: 0,
+                fragment_index: 0,
+                block_start: Au::from_px(30),
+                block_size: Au::from_px(40),
+            },
+            TableCellFragment {
+                row_index: 0,
+                cell_index: 0,
+                fragment_index: 1,
+                block_start: Au::from_px(70),
+                block_size: Au::from_px(40),
+            },
+            TableCellFragment {
+                row_index: 0,
+                cell_index: 0,
+                fragment_index: 2,
+                block_start: Au::from_px(110),
+                block_size: Au::from_px(40),
+            },
+            TableCellFragment {
+                row_index: 0,
+                cell_index: 1,
+                fragment_index: 0,
+                block_start: Au::from_px(30),
+                block_size: Au::from_px(30),
+            },
+            TableCellFragment {
+                row_index: 0,
+                cell_index: 1,
+                fragment_index: 1,
+                block_start: Au::from_px(60),
+                block_size: Au::from_px(30),
+            },
+            TableCellFragment {
+                row_index: 0,
+                cell_index: 1,
+                fragment_index: 2,
+                block_start: Au::from_px(90),
+                block_size: Au::from_px(30),
+            },
+        ];
+        let mut builder = BlockPageBuilder::new(BlockPaginationRequest {
+            available_block_size: Au::from_px(100),
+            page_stride: Au::from_px(120),
+        });
+
+        let placement = builder
+            .place_table_child(
+                0,
+                Some(10),
+                Au::from_px(30),
+                &rows,
+                &fragments,
+                ChildPageBreaks::default(),
+            )
+            .expect("breakable cell fragments must make progress");
+        assert_eq!(placement.row_translations, vec![Au::zero()]);
+        assert_eq!(placement.row_block_extensions, vec![Au::from_px(50)]);
+        assert_eq!(
+            placement.cell_fragment_translations,
+            vec![
+                Au::zero(),
+                Au::from_px(50),
+                Au::from_px(50),
+                Au::zero(),
+                Au::zero(),
+                Au::from_px(30),
+            ]
+        );
+        assert_eq!(placement.added_block_size, Au::from_px(50));
+
+        let snapshot = PageSequenceContext { definition: page() }
+            .page_sequence(builder.finish())
+            .debug_snapshot();
+        assert_eq!(snapshot.pages.len(), 2);
+        assert_eq!(snapshot.table_cell_continuations.len(), 2);
+        assert_eq!(
+            snapshot
+                .table_cell_continuations
+                .iter()
+                .map(|resume| (resume.cell_index, resume.next_fragment_index))
+                .collect::<Vec<_>>(),
+            vec![(0, Some(1)), (1, Some(2))]
+        );
+    }
+
+    #[test]
+    fn oversized_atomic_cell_warns_once_and_claims_the_table() {
+        let rows = [TableRow {
+            row_index: 0,
+            row_group_index: None,
+            cell_count: 1,
+            block_start: Au::zero(),
+            block_size: Au::from_px(140),
+        }];
+        let fragments = [TableCellFragment {
+            row_index: 0,
+            cell_index: 0,
+            fragment_index: 0,
+            block_start: Au::zero(),
+            block_size: Au::from_px(140),
+        }];
+        let mut builder = BlockPageBuilder::new(BlockPaginationRequest {
+            available_block_size: Au::from_px(100),
+            page_stride: Au::from_px(120),
+        });
+
+        let placement = builder
+            .place_table_child(
+                0,
+                Some(10),
+                Au::zero(),
+                &rows,
+                &fragments,
+                ChildPageBreaks::default(),
+            )
+            .expect("an unbreakable cell is retained with a typed warning");
+        assert_eq!(placement.added_block_size, Au::zero());
+        let outcome = builder.finish();
+        assert_eq!(outcome.warnings.len(), 1);
+        assert_eq!(
+            outcome.warnings[0],
+            BlockPaginationWarning::OversizedTableCell {
+                child_index: 0,
+                table_node: Some(10),
+                row_index: 0,
+                cell_index: 0,
+                fragment_index: 0,
+                block_size: Au::from_px(140),
+                available_block_size: Au::from_px(100),
+            }
         );
     }
 
