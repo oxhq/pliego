@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>Pliego table border fallback fixture</title>
+    <style>
+      body { margin: 0; font: 10px/20px sans-serif; }
+      table {
+        border-collapse: separate;
+        border-spacing: 0;
+        table-layout: fixed;
+        width: 200px;
+        border-top: 2px solid #0057b8;
+        border-left: 2px solid #0057b8;
+      }
+      th, td {
+        box-sizing: border-box;
+        padding: 0;
+        text-align: left;
+        border-right: 2px solid #0057b8;
+        border-bottom: 2px solid #0057b8;
+      }
+      #fitting { break-inside: avoid; }
+      #fitting thead tr { height: 24px; }
+      #fitting tbody tr { height: 32px; }
+      #unsupported { break-before: page; }
+      #unsupported tr { height: 180px; }
+    </style>
+  </head>
+  <body>
+    <table id="fitting">
+      <thead><tr><th>A-H-A</th><th>A-H-B</th></tr></thead>
+      <tbody><tr><td>A-R-A</td><td>A-R-B</td></tr></tbody>
+    </table>
+    <table id="unsupported">
+      <tbody>
+        <tr>
+          <td>U</td>
+        </tr>
+      </tbody>
+    </table>
+    <script>
+      queueMicrotask(() => window.pliego?.ready({ fixture: 'table-border-fallbacks' }));
+    </script>
+  </body>
+</html>

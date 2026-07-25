@@ -96,6 +96,10 @@ pub(crate) struct BoxFragmentRareData {
     /// Information that is specific to a layout system (e.g., grid, table, etc.).
     pub specific_layout_info: Option<SpecificLayoutInfo>,
 
+    /// Paged-layout fallback can retain a table without fragmenting its rows. In that case,
+    /// debug capture must not synthesize page-crossing border rectangles for this fragment.
+    pub(crate) suppress_table_border_capture: bool,
+
     /// If the associated [`BoxFragment`] establishes a clip via CSS this holds the
     /// [`ClipId`] for the generated clip set during stacking context tree construction.
     pub generated_clip_id: Option<ClipId>,
@@ -114,6 +118,7 @@ impl BoxFragmentRareData {
                 OnceBox::with_value(Box::new(AtomicRefCell::new(BoxFragmentRareData {
                     resolved_sticky_insets: None,
                     specific_layout_info: Some(info),
+                    suppress_table_border_capture: false,
                     generated_clip_id: None,
                     generated_scroll_tree_node_id: None,
                 })))
@@ -263,6 +268,16 @@ impl BoxFragment {
         AtomicRef::filter_map(rare_data, |rare_data| {
             rare_data.specific_layout_info.as_ref()
         })
+    }
+
+    pub(crate) fn set_table_border_capture_suppressed(&self, suppressed: bool) {
+        self.ensure_rare_data().suppress_table_border_capture = suppressed;
+    }
+
+    pub(crate) fn captures_table_borders(&self) -> bool {
+        self.rare_data
+            .get()
+            .is_none_or(|rare_data| !rare_data.borrow().suppress_table_border_capture)
     }
 
     pub(crate) fn clear_stacking_context_tree_traversal_data(&self) {

@@ -78,10 +78,12 @@ use euclid::{Point2D, Size2D, UnknownUnit, Vector2D};
 use malloc_size_of_derive::MallocSizeOf;
 use script::layout_dom::{ServoDangerousStyleElement, ServoLayoutNode};
 use servo_arc::Arc;
+use style::color::ColorSpace;
 use style::context::SharedStyleContext;
 use style::properties::ComputedValues;
 use style::properties::style_structs::Font;
 use style::selector_parser::PseudoElement;
+use style::values::computed::BorderStyle;
 
 use super::flow::BlockFormattingContext;
 use crate::cell::{ArcRefCell, WeakRefCell};
@@ -397,6 +399,72 @@ pub(crate) type CollapsedBorderLine = Vec<CollapsedBorder>;
 pub(crate) struct SpecificTableGridInfo {
     pub collapsed_borders: PhysicalVec<Vec<CollapsedBorderLine>>,
     pub track_sizes: PhysicalVec<Vec<Au>>,
+}
+
+impl SpecificTableGridInfo {
+    pub(crate) fn uniform_solid_visible_border(&self) -> Option<&CollapsedBorder> {
+        let mut borders = self
+            .collapsed_borders
+            .x
+            .iter()
+            .chain(&self.collapsed_borders.y)
+            .flat_map(|line| line.iter());
+        let first = borders.next()?;
+        let color = first
+            .style_color
+            .color
+            .clone()
+            .to_color_space(ColorSpace::Srgb);
+        (first.width > Au::zero() &&
+            first.style_color.style == BorderStyle::Solid &&
+            color.alpha > 0.0 &&
+            borders.all(|border| {
+                border.width == first.width &&
+                    border.style_color.style == first.style_color.style &&
+                    border
+                        .style_color
+                        .color
+                        .clone()
+                        .to_color_space(ColorSpace::Srgb) ==
+                        color
+            }))
+        .then_some(first)
+    }
+}
+
+#[cfg(test)]
+mod collapsed_border_profile_tests {
+    use style::color::AbsoluteColor;
+
+    use super::*;
+
+    fn border(width: i32, red: f32) -> CollapsedBorder {
+        CollapsedBorder {
+            style_color: BorderStyleColor::new(
+                BorderStyle::Solid,
+                AbsoluteColor::new(ColorSpace::Srgb, red, 0.0, 0.0, 1.0),
+            ),
+            width: Au::from_px(width),
+        }
+    }
+
+    #[test]
+    fn requires_one_resolved_collapsed_border_value() {
+        let uniform = border(2, 0.5);
+        let mut info = SpecificTableGridInfo {
+            collapsed_borders: PhysicalVec::new(
+                vec![vec![uniform.clone()], vec![uniform.clone()]],
+                vec![vec![uniform.clone()], vec![uniform.clone()]],
+            ),
+            track_sizes: PhysicalVec::new(vec![Au::from_px(10)], vec![Au::from_px(10)]),
+        };
+        assert_eq!(info.uniform_solid_visible_border(), Some(&uniform));
+
+        info.collapsed_borders.y[1][0] = border(3, 0.5);
+        assert!(info.uniform_solid_visible_border().is_none());
+        info.collapsed_borders.y[1][0] = border(2, 0.75);
+        assert!(info.uniform_solid_visible_border().is_none());
+    }
 }
 
 pub(crate) struct TableLayoutStyle<'a> {

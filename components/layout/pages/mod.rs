@@ -324,6 +324,13 @@ pub(crate) struct TableChildPlacement {
     pub added_block_size: Au,
 }
 
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) enum TableChildPlacementOutcome {
+    Placed(TableChildPlacement),
+    WholeChild,
+    Unsupported,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum BlockBoundaryPlacement {
     CurrentPage,
@@ -552,6 +559,10 @@ impl BlockPageBuilder {
         }
     }
 
+    pub(crate) fn available_block_size(&self) -> Au {
+        self.request.available_block_size
+    }
+
     pub(crate) fn place_child(
         &mut self,
         child_index: usize,
@@ -703,7 +714,7 @@ impl BlockPageBuilder {
         groups: &[TableRowGroup],
         cell_fragments: &[TableCellFragment],
         breaks: ChildPageBreaks,
-    ) -> Option<TableChildPlacement> {
+    ) -> TableChildPlacementOutcome {
         assert_eq!(child_index, self.next_child_index);
         let rowspan_ranges = table_rowspan_ranges(rows);
         let support =
@@ -724,7 +735,7 @@ impl BlockPageBuilder {
                     TableGroupUnsupportedReason::UnsupportedLayout,
                 );
             }
-            return None;
+            return TableChildPlacementOutcome::Unsupported;
         }
         let header_block_size = header.map_or_else(Au::zero, |group| group.block_size);
         let body_page_capacity = self.request.available_block_size - header_block_size;
@@ -738,7 +749,7 @@ impl BlockPageBuilder {
                 table_node,
                 TableGroupUnsupportedReason::UnsupportedLayout,
             );
-            return None;
+            return TableChildPlacementOutcome::Unsupported;
         }
         if footer.is_some_and(|group| {
             group.block_size <= Au::zero() || group.block_size > body_page_capacity
@@ -748,7 +759,7 @@ impl BlockPageBuilder {
                 table_node,
                 TableGroupUnsupportedReason::FooterTooTallAfterHeader,
             );
-            return None;
+            return TableChildPlacementOutcome::Unsupported;
         }
         let body_start = header.map_or(0, |group| group.end_row_index);
         let body_end = footer.map_or(rows.len(), |group| group.first_row_index);
@@ -781,7 +792,7 @@ impl BlockPageBuilder {
                 table_node,
                 TableGroupUnsupportedReason::UnsupportedLayout,
             );
-            return None;
+            return TableChildPlacementOutcome::Unsupported;
         }
         for range in &rowspan_ranges {
             let first_row = &rows[range.start];
@@ -823,7 +834,7 @@ impl BlockPageBuilder {
                         forced_break_inside,
                     );
                 }
-                return None;
+                return TableChildPlacementOutcome::Unsupported;
             }
         }
         if breaks.inside_avoid {
@@ -833,7 +844,7 @@ impl BlockPageBuilder {
                         .iter()
                         .any(|group| group.breaks.before || group.breaks.after);
             if fresh_block_size <= self.request.available_block_size && !has_forced_internal_break {
-                return None;
+                return TableChildPlacementOutcome::WholeChild;
             }
             if fresh_block_size > self.request.available_block_size {
                 self.warn_if_oversized(child_index, table_node, fresh_block_size, true);
@@ -1321,7 +1332,7 @@ impl BlockPageBuilder {
                 .last()
                 .is_some_and(|group| group.end_row_index == rows.len() && group.breaks.after);
 
-        Some(TableChildPlacement {
+        TableChildPlacementOutcome::Placed(TableChildPlacement {
             row_translations,
             row_block_extensions,
             cell_fragment_translations,
@@ -2141,6 +2152,13 @@ mod tests {
         })
     }
 
+    fn placed(outcome: TableChildPlacementOutcome, context: &str) -> TableChildPlacement {
+        let TableChildPlacementOutcome::Placed(placement) = outcome else {
+            panic!("{context}: {outcome:?}");
+        };
+        placement
+    }
+
     fn header_body_table(body_block_size: i32) -> ([TableRow; 2], [TableRowGroup; 2]) {
         (
             [
@@ -2804,8 +2822,8 @@ mod tests {
             page_stride: Au::from_px(120),
         });
 
-        let placement = builder
-            .place_table_child(
+        let placement = placed(
+            builder.place_table_child(
                 0,
                 Some(10),
                 Au::zero(),
@@ -2814,8 +2832,9 @@ mod tests {
                 &row_groups,
                 &[],
                 ChildPageBreaks::default(),
-            )
-            .expect("basic retained rows should paginate");
+            ),
+            "basic retained rows should paginate",
+        );
         assert_eq!(
             placement.row_translations,
             vec![
@@ -2909,8 +2928,8 @@ mod tests {
             page_stride: Au::from_px(120),
         });
 
-        let placement = builder
-            .place_table_child(
+        let placement = placed(
+            builder.place_table_child(
                 0,
                 Some(10),
                 Au::zero(),
@@ -2919,8 +2938,9 @@ mod tests {
                 &row_groups,
                 &[],
                 ChildPageBreaks::default(),
-            )
-            .expect("an oversized avoided row group falls back to row pagination");
+            ),
+            "an oversized avoided row group falls back to row pagination",
+        );
         assert_eq!(
             placement.row_translations,
             vec![Au::zero(), Au::from_px(60)]
@@ -2981,19 +3001,18 @@ mod tests {
                 breaks: ChildPageBreaks::default(),
             },
         ];
-        assert!(
-            builder
-                .place_table_child(
-                    0,
-                    Some(10),
-                    Au::zero(),
-                    Au::from_px(80),
-                    &invalid_rows,
-                    &[],
-                    &[],
-                    ChildPageBreaks::default(),
-                )
-                .is_none()
+        assert_eq!(
+            builder.place_table_child(
+                0,
+                Some(10),
+                Au::zero(),
+                Au::from_px(80),
+                &invalid_rows,
+                &[],
+                &[],
+                ChildPageBreaks::default(),
+            ),
+            TableChildPlacementOutcome::Unsupported
         );
         assert_eq!(
             builder.place_child(
@@ -3109,8 +3128,8 @@ mod tests {
             page_stride: Au::from_px(120),
         });
 
-        let placement = builder
-            .place_table_child(
+        let placement = placed(
+            builder.place_table_child(
                 0,
                 Some(10),
                 Au::from_px(30),
@@ -3119,8 +3138,9 @@ mod tests {
                 &row_groups,
                 &fragments,
                 ChildPageBreaks::default(),
-            )
-            .expect("breakable cell fragments must make progress");
+            ),
+            "breakable cell fragments must make progress",
+        );
         assert_eq!(placement.row_translations, vec![Au::zero()]);
         assert_eq!(placement.row_block_extensions, vec![Au::from_px(50)]);
         assert_eq!(
@@ -3174,8 +3194,8 @@ mod tests {
             page_stride: Au::from_px(120),
         });
 
-        let placement = builder
-            .place_table_child(
+        let placement = placed(
+            builder.place_table_child(
                 0,
                 Some(10),
                 Au::zero(),
@@ -3184,8 +3204,9 @@ mod tests {
                 &[],
                 &fragments,
                 ChildPageBreaks::default(),
-            )
-            .expect("an unbreakable cell is retained with a typed warning");
+            ),
+            "an unbreakable cell is retained with a typed warning",
+        );
         assert_eq!(placement.added_block_size, Au::zero());
         let outcome = builder.finish();
         assert_eq!(outcome.warnings.len(), 1);
@@ -3241,8 +3262,8 @@ mod tests {
         }];
         let mut builder = short_table_page_builder();
 
-        let placement = builder
-            .place_table_child(
+        let placement = placed(
+            builder.place_table_child(
                 0,
                 Some(10),
                 Au::zero(),
@@ -3254,8 +3275,9 @@ mod tests {
                     inside_avoid: true,
                     ..Default::default()
                 },
-            )
-            .expect("forced row breaks must outrank a fitting wrapper avoid");
+            ),
+            "forced row breaks must outrank a fitting wrapper avoid",
+        );
         assert_eq!(
             placement.row_translations,
             vec![Au::zero(), Au::from_px(80)]
@@ -3287,6 +3309,73 @@ mod tests {
     }
 
     #[test]
+    fn fitting_wrapper_avoid_explicitly_yields_the_whole_child() {
+        let rows = [
+            TableRow {
+                row_index: 0,
+                row_group_index: Some(0),
+                cell_count: 1,
+                has_rowspan: false,
+                block_start: Au::zero(),
+                block_size: Au::from_px(40),
+                breaks: ChildPageBreaks::default(),
+            },
+            TableRow {
+                row_index: 1,
+                row_group_index: Some(0),
+                cell_count: 1,
+                has_rowspan: false,
+                block_start: Au::from_px(40),
+                block_size: Au::from_px(40),
+                breaks: ChildPageBreaks::default(),
+            },
+        ];
+        let row_groups = [TableRowGroup {
+            tag_id: None,
+            row_group_index: 0,
+            first_row_index: 0,
+            end_row_index: rows.len(),
+            block_start: Au::zero(),
+            block_size: Au::from_px(80),
+            kind: TableRowGroupKind::Body,
+            breaks: ChildPageBreaks::default(),
+        }];
+        let mut builder = short_table_page_builder();
+
+        assert_eq!(
+            builder.place_table_child(
+                0,
+                Some(10),
+                Au::zero(),
+                Au::from_px(80),
+                &rows,
+                &row_groups,
+                &[],
+                ChildPageBreaks {
+                    inside_avoid: true,
+                    ..Default::default()
+                },
+            ),
+            TableChildPlacementOutcome::WholeChild
+        );
+        assert_eq!(
+            builder.place_child(
+                0,
+                Some(10),
+                Au::zero(),
+                Au::from_px(80),
+                Au::from_px(80),
+                ChildPageBreaks {
+                    inside_avoid: true,
+                    ..Default::default()
+                },
+            ),
+            BlockBoundaryPlacement::CurrentPage
+        );
+        assert!(builder.finish().warnings.is_empty());
+    }
+
+    #[test]
     fn header_reduced_oversized_row_without_fragment_progress_is_unsupported() {
         let (rows, row_groups) = header_body_table(90);
         let fragments = [TableCellFragment {
@@ -3298,19 +3387,18 @@ mod tests {
         }];
         let mut builder = short_table_page_builder();
 
-        assert!(
-            builder
-                .place_table_child(
-                    0,
-                    Some(10),
-                    Au::zero(),
-                    Au::from_px(110),
-                    &rows,
-                    &row_groups,
-                    &fragments,
-                    ChildPageBreaks::default(),
-                )
-                .is_none()
+        assert_eq!(
+            builder.place_table_child(
+                0,
+                Some(10),
+                Au::zero(),
+                Au::from_px(110),
+                &rows,
+                &row_groups,
+                &fragments,
+                ChildPageBreaks::default(),
+            ),
+            TableChildPlacementOutcome::Unsupported
         );
         assert_eq!(
             builder.finish().warnings,
@@ -3345,8 +3433,8 @@ mod tests {
         ];
         let mut builder = short_table_page_builder();
 
-        let placement = builder
-            .place_table_child(
+        let placement = placed(
+            builder.place_table_child(
                 0,
                 Some(10),
                 Au::zero(),
@@ -3355,8 +3443,9 @@ mod tests {
                 &row_groups,
                 &fragments,
                 ChildPageBreaks::default(),
-            )
-            .expect("retained fragments cross the header-reduced body capacity");
+            ),
+            "retained fragments cross the header-reduced body capacity",
+        );
         assert_eq!(
             placement.cell_fragment_translations,
             vec![Au::zero(), Au::from_px(20)]

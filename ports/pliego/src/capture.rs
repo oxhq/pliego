@@ -1110,7 +1110,7 @@ fn distribute_operations(
                 -translation,
                 repeated.sequence,
             )?;
-            let (page_index, page_origin) = operation_page(pages, &repeated)?;
+            let (page_index, page_origin) = operation_page(pages, &mut repeated)?;
             if page_index != repeat.page_index {
                 return Err(CaptureError::InvalidTableGroupRepeat {
                     page_index: repeat.page_index,
@@ -1123,7 +1123,7 @@ fn distribute_operations(
     }
 
     for mut positioned in operations {
-        let (page_index, page_origin) = operation_page(pages, &positioned)?;
+        let (page_index, page_origin) = operation_page(pages, &mut positioned)?;
         translate_operation_y(&mut positioned.operation, page_origin, positioned.sequence)?;
         scene_pages[page_index]
             .operations
@@ -1151,7 +1151,7 @@ fn mark_repeated_table_header(operation: &mut Operation) {
 
 fn operation_page(
     pages: &[CapturePage],
-    operation: &PositionedOperation,
+    operation: &mut PositionedOperation,
 ) -> Result<(usize, f64), CaptureError> {
     let top = operation.bounds.y;
     let bottom = top + operation.bounds.height;
@@ -1161,10 +1161,32 @@ fn operation_page(
         let is_last_zero_height_edge = page_index + 1 == pages.len() && top == end && bottom == top;
         if top >= origin && (top < end || is_last_zero_height_edge) {
             if bottom > end {
-                return Err(CaptureError::OperationCrossesPageBoundary {
-                    sequence: operation.sequence,
-                    page_index,
-                });
+                let maximum_centered_edge_overrun =
+                    operation.bounds.width.min(operation.bounds.height);
+                if bottom - end > maximum_centered_edge_overrun {
+                    return Err(CaptureError::OperationCrossesPageBoundary {
+                        sequence: operation.sequence,
+                        page_index,
+                    });
+                }
+                let Operation::Path {
+                    bounds, data, meta, ..
+                } = &mut operation.operation
+                else {
+                    return Err(CaptureError::OperationCrossesPageBoundary {
+                        sequence: operation.sequence,
+                        page_index,
+                    });
+                };
+                if !is_table_border_meta(meta) {
+                    return Err(CaptureError::OperationCrossesPageBoundary {
+                        sequence: operation.sequence,
+                        page_index,
+                    });
+                }
+                operation.bounds.height = end - top;
+                bounds.height = operation.bounds.height;
+                *data = rectangle_path_data(bounds);
             }
             return Ok((page_index, origin));
         }
@@ -2223,5 +2245,88 @@ mod tests {
         };
         assert_eq!(bounds.y, 20.0);
         assert_eq!(data, "M10 20h20v2h-20z");
+    }
+
+    #[test]
+    fn clips_only_a_centered_table_edge_to_its_owning_page() {
+        let page = |index| CapturePage {
+            index,
+            width: 100.0,
+            height: 100.0,
+            margin_top: 10.0,
+            margin_right: 10.0,
+            margin_bottom: 10.0,
+            margin_left: 10.0,
+            available_inline_size: 80.0,
+            available_block_size: 80.0,
+        };
+        let bounds = Rect {
+            x: 10.0,
+            y: 199.0,
+            width: 20.0,
+            height: 2.0,
+        };
+        let mut positioned = PositionedOperation {
+            sequence: 7,
+            bounds: bounds.clone(),
+            operation: Operation::Path {
+                data: rectangle_path_data(&bounds),
+                bounds,
+                fill: Some(crate::Color {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 1.0,
+                }),
+                fill_rule: crate::FillRule::NonZero,
+                stroke: None,
+                meta: OperationMeta {
+                    semantics: Some(Semantics {
+                        role: "artifact".into(),
+                        label: Some("table-border".into()),
+                    }),
+                    source: None,
+                },
+            },
+        };
+        let mut oversized = positioned.clone();
+        oversized.bounds.y = 150.0;
+        oversized.bounds.width = 2.0;
+        oversized.bounds.height = 80.0;
+        let Operation::Path { bounds, data, .. } = &mut oversized.operation else {
+            unreachable!();
+        };
+        *bounds = oversized.bounds.clone();
+        *data = rectangle_path_data(bounds);
+
+        let (page_index, page_origin) =
+            operation_page(&[page(0), page(1)], &mut positioned).unwrap();
+        assert_eq!((page_index, page_origin), (1, 100.0));
+        translate_operation_y(
+            &mut positioned.operation,
+            page_origin,
+            positioned.sequence,
+        )
+        .unwrap();
+        let Operation::Path { bounds, data, .. } = positioned.operation else {
+            unreachable!();
+        };
+        assert_eq!(
+            bounds,
+            Rect {
+                x: 10.0,
+                y: 99.0,
+                width: 20.0,
+                height: 1.0,
+            }
+        );
+        assert_eq!(data, "M10 99h20v1h-20z");
+        assert_eq!(
+            operation_page(&[page(0), page(1)], &mut oversized),
+            Err(CaptureError::OperationCrossesPageBoundary {
+                sequence: 7,
+                page_index: 1,
+            })
+        );
     }
 }

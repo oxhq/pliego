@@ -5,6 +5,7 @@
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 import copy
+import hashlib
 import json
 import math
 import os
@@ -12,10 +13,19 @@ import re
 import subprocess
 import sys
 import tempfile
+from contextlib import redirect_stderr
+from io import StringIO
 from pathlib import Path
 from typing import Any
 
 MODE_PREFIXES = {"collapsed": "C", "separate": "S"}
+EXPECTED_BODY_TEXT = {
+    mode: {f"{prefix}-R{row}-{column}" for row in range(7) for column in "AB"}
+    for mode, prefix in MODE_PREFIXES.items()
+}
+EXPECTED_VERTICAL_X = (10.0, 120.0, 210.0)
+EXPECTED_INLINE_END = 212.0
+BORDER_WIDTH = 2.0
 ROUND_DIGITS = 6
 EPSILON = 10**-ROUND_DIGITS
 
@@ -70,6 +80,14 @@ def text_y(operation: dict[str, Any]) -> float:
     return number(glyph.get("y"), "table text y")
 
 
+def text_x(operation: dict[str, Any]) -> float:
+    glyphs = operation.get("glyphs")
+    require(isinstance(glyphs, list) and glyphs, "table text has no glyph geometry")
+    glyph = glyphs[0]
+    require(isinstance(glyph, dict), "table text glyph is not an object")
+    return number(glyph.get("x"), "table text x")
+
+
 def rectangle(operation: dict[str, Any], page_index: int) -> tuple[float, float, float, float]:
     bounds = operation.get("bounds")
     require(isinstance(bounds, dict), f"page {page_index} border has no bounds")
@@ -120,10 +138,95 @@ def require_one_seam(
         )
 
 
+def require_exact_grid(
+    rectangles: list[tuple[float, float, float, float]],
+    mode: str,
+    header_y: float,
+    body_rows: int,
+    page_index: int,
+) -> set[float]:
+    vertical = [item for item in rectangles if item[3] > item[2]]
+    horizontal = [item for item in rectangles if item[2] > item[3]]
+    require(
+        all(math.isclose(item[2], BORDER_WIDTH, abs_tol=EPSILON) for item in vertical),
+        f"page {page_index} vertical border width drifted",
+    )
+    vertical_x = {item[0] for item in vertical}
+    require(
+        sorted(vertical_x) == list(EXPECTED_VERTICAL_X),
+        f"page {page_index} vertical border x coordinates differ: {sorted(vertical_x)!r}",
+    )
+    require(
+        all(math.isclose(item[3], BORDER_WIDTH, abs_tol=EPSILON) for item in horizontal),
+        f"page {page_index} horizontal border width drifted",
+    )
+    require(
+        math.isclose(min(item[0] for item in rectangles), EXPECTED_VERTICAL_X[0], abs_tol=EPSILON)
+        and math.isclose(
+            max(item[0] + item[2] for item in rectangles),
+            EXPECTED_INLINE_END,
+            abs_tol=EPSILON,
+        ),
+        f"page {page_index} table inline extent drifted",
+    )
+
+    top = min(item[1] for item in rectangles)
+    bottom = top + 24.0 + 32.0 * body_rows + BORDER_WIDTH
+    require(
+        math.isclose(max(item[1] + item[3] for item in rectangles), bottom, abs_tol=EPSILON),
+        f"page {page_index} table block extent drifted",
+    )
+    for x in EXPECTED_VERTICAL_X:
+        intervals = sorted(
+            (item[1], item[1] + item[3]) for item in vertical if math.isclose(item[0], x)
+        )
+        expected_start = top + (BORDER_WIDTH if mode == "separate" and x != EXPECTED_VERTICAL_X[0] else 0)
+        first_height = 24.0 if mode == "separate" and x != EXPECTED_VERTICAL_X[0] else 26.0
+        expected_heights = [first_height] + [32.0] * body_rows
+        require(
+            len(intervals) == body_rows + 1
+            and math.isclose(intervals[0][0], expected_start, abs_tol=EPSILON)
+            and math.isclose(intervals[-1][1], bottom, abs_tol=EPSILON)
+            and all(
+                math.isclose(end - start, expected_height, abs_tol=EPSILON)
+                for (start, end), expected_height in zip(intervals, expected_heights)
+            ),
+            f"page {page_index} vertical edge {x:g} has incomplete extent: {intervals!r}",
+        )
+        for previous, current in zip(intervals, intervals[1:]):
+            require(
+                math.isclose(previous[1], current[0], abs_tol=EPSILON),
+                f"page {page_index} vertical edge {x:g} overlaps or has a gap: {intervals!r}",
+            )
+
+    horizontal_levels: dict[tuple[float, float], set[tuple[float, float]]] = {}
+    for x, y, width, height in horizontal:
+        horizontal_levels.setdefault((y, height), set()).add((x, width))
+    expected_levels = {top, top + 24.0}
+    expected_levels.update(top + 24.0 + 32.0 * index for index in range(1, body_rows + 1))
+    require(
+        {y for y, _ in horizontal_levels} == expected_levels,
+        f"page {page_index} horizontal border levels differ",
+    )
+    for (y, _), segments in horizontal_levels.items():
+        if mode == "collapsed":
+            expected = {(10.0, 112.0), (122.0, 90.0)}
+        elif y + BORDER_WIDTH / 2 < header_y:
+            expected = {(10.0, 202.0)}
+        else:
+            expected = {(12.0, 110.0), (122.0, 90.0)}
+        require(
+            segments == expected,
+            f"page {page_index} horizontal edge at {y:g} differs: {sorted(segments)!r}",
+        )
+    return vertical_x
+
+
 def border_geometry(scene: dict[str, Any]) -> list[tuple[Any, ...]]:
     pages = scene.get("pages")
     require(isinstance(pages, list), "scene has no pages")
     fragments: dict[str, list[tuple[int, set[float]]]] = {mode: [] for mode in MODE_PREFIXES}
+    body_text: dict[str, list[str]] = {mode: [] for mode in MODE_PREFIXES}
     geometry: list[tuple[Any, ...]] = []
 
     for page_index, page in enumerate(pages):
@@ -132,10 +235,17 @@ def border_geometry(scene: dict[str, Any]) -> list[tuple[Any, ...]]:
         require(isinstance(operations, list), f"scene page {page_index} has no operations")
         objects = [operation for operation in operations if isinstance(operation, dict)]
         paths = [operation for operation in objects if operation.get("type") == "path"]
-        if not paths:
+        text = [
+            canonical_text(str(operation.get("text", "")))
+            for operation in objects
+            if operation.get("type") == "text"
+        ]
+        if not any(token.startswith(("C-", "S-")) for token in text):
+            require(not paths, f"page {page_index} contains paths without table fixture text")
             continue
 
         mode, prefix = page_mode(objects, page_index)
+        require(bool(paths), f"page {page_index} {mode} table fragment contains no borders")
         headers = [
             operation
             for operation in objects
@@ -149,15 +259,42 @@ def border_geometry(scene: dict[str, Any]) -> list[tuple[Any, ...]]:
             and re.fullmatch(rf"{prefix}-R[0-6]-[AB]", canonical_text(str(operation.get("text", ""))))
         ]
         require(len(headers) == 2, f"page {page_index} does not contain one repeated header")
-        require(bool(body), f"page {page_index} contains no body rows")
+        require(bool(body) and len(body) % 2 == 0, f"page {page_index} contains incomplete body rows")
+        body_text[mode].extend(canonical_text(str(operation.get("text", ""))) for operation in body)
 
         rectangles = [rectangle(operation, page_index) for operation in paths]
         require(
             len(rectangles) == len(set(rectangles)),
             f"page {page_index} contains duplicate border rectangles",
         )
-        vertical_x = {item[0] for item in rectangles if item[3] > item[2]}
-        require(len(vertical_x) >= 3, f"page {page_index} has no complete column border grid")
+        vertical_x = require_exact_grid(
+            rectangles,
+            mode,
+            max(text_y(operation) for operation in headers),
+            len(body) // 2,
+            page_index,
+        )
+        require(
+            min(vertical_x) < min(text_x(operation) for operation in headers + body),
+            f"page {page_index} has no authored outer inline-start border",
+        )
+        if mode == "collapsed":
+            require(
+                all(
+                    math.isclose(min(item[2], item[3]), BORDER_WIDTH, abs_tol=EPSILON)
+                    for item in rectangles
+                ),
+                f"page {page_index} collapsed border width drifted",
+            )
+        else:
+            require(
+                any(
+                    item[2] > item[3]
+                    and item[1] + item[3] / 2 < min(text_y(operation) for operation in headers)
+                    for item in rectangles
+                ),
+                f"page {page_index} has no grid-authored table top border",
+            )
         require_one_seam(
             rectangles,
             max(text_y(operation) for operation in headers),
@@ -174,13 +311,72 @@ def border_geometry(scene: dict[str, Any]) -> list[tuple[Any, ...]]:
             all(vertical_x == expected for _, vertical_x in mode_fragments),
             f"{mode} vertical border x coordinates drifted: {mode_fragments!r}",
         )
+        require(
+            len(body_text[mode]) == len(EXPECTED_BODY_TEXT[mode])
+            and set(body_text[mode]) == EXPECTED_BODY_TEXT[mode],
+            f"{mode} table body text differs: {sorted(body_text[mode])!r}",
+        )
     return sorted(geometry)
 
 
-def verify(first_scene: dict[str, Any], second_scene: dict[str, Any]) -> None:
+def verify(
+    first_scene: dict[str, Any],
+    second_scene: dict[str, Any],
+    first_page_hashes: tuple[str, ...],
+    second_page_hashes: tuple[str, ...],
+) -> None:
     first = border_geometry(first_scene)
     second = border_geometry(second_scene)
     require(first == second, "identical runs changed paged table border geometry")
+    require(bool(first_page_hashes), "render produced no page previews")
+    require(first_page_hashes == second_page_hashes, "identical runs changed page raster output")
+
+
+def verify_fallback_capture(scene: dict[str, Any], layout: dict[str, Any]) -> None:
+    pages = scene.get("pages")
+    require(isinstance(pages, list), "fallback scene has no pages")
+    fitting_pages = 0
+    unsupported_text = set()
+    for page_index, page in enumerate(pages):
+        require(isinstance(page, dict), f"fallback page {page_index} is not an object")
+        operations = page.get("operations")
+        require(isinstance(operations, list), f"fallback page {page_index} has no operations")
+        objects = [operation for operation in operations if isinstance(operation, dict)]
+        text = {
+            canonical_text(str(operation.get("text", "")))
+            for operation in objects
+            if operation.get("type") == "text"
+        }
+        paths = [operation for operation in objects if operation.get("type") == "path"]
+        if text.intersection({"A-H-A", "A-H-B", "A-R-A", "A-R-B"}):
+            fitting_pages += 1
+            require(
+                len(paths) == 11,
+                f"fitting break-inside:avoid grid/cell border capture differs: {len(paths)}",
+            )
+        page_unsupported = {token for token in text if token == "U"}
+        if page_unsupported:
+            unsupported_text.update(page_unsupported)
+            require(
+                not paths,
+                f"fallback page {page_index} emitted borders for unsupported no-thead table",
+            )
+    require(fitting_pages == 1, f"fitting table occupied {fitting_pages} pages")
+    require(unsupported_text == {"U"}, "unsupported text differs")
+
+    page_sequence = layout.get("page_sequence")
+    require(isinstance(page_sequence, dict), "fallback layout has no page sequence")
+    warnings = page_sequence.get("warnings")
+    require(isinstance(warnings, list), "fallback layout has no typed warnings")
+    require(
+        any(
+            isinstance(warning, dict)
+            and warning.get("kind") == "unsupported-table-group-pagination"
+            and warning.get("reason") == "unsupported-layout"
+            for warning in warnings
+        ),
+        f"no-thead table has no typed unsupported fallback: {warnings!r}",
+    )
 
 
 def self_test() -> None:
@@ -195,35 +391,132 @@ def self_test() -> None:
             "fill": {"r": 0.1, "g": 0.2, "b": 0.3, "a": 1.0},
         }
 
-    def fragment(prefix: str, top: float) -> dict[str, Any]:
+    def fragment(prefix: str, top: float, rows: list[int]) -> dict[str, Any]:
+        mode = "collapsed" if prefix == "C" else "separate"
+        operations = [
+            text(f"{prefix}-H-A", top + 12.0),
+            text(f"{prefix}-H-B", top + 12.0),
+        ]
+        for position, row in enumerate(rows):
+            y = top + 38.0 + 32.0 * position
+            operations.extend([text(f"{prefix}-R{row}-A", y), text(f"{prefix}-R{row}-B", y)])
+        if mode == "collapsed":
+            for x in EXPECTED_VERTICAL_X:
+                operations.append(path(x, top, 2.0, 26.0))
+                for index in range(len(rows)):
+                    operations.append(path(x, top + 26.0 + 32.0 * index, 2.0, 32.0))
+            for y in [top, top + 24.0] + [top + 24.0 + 32.0 * index for index in range(1, len(rows) + 1)]:
+                operations.extend([path(10.0, y, 112.0, 2.0), path(122.0, y, 90.0, 2.0)])
+        else:
+            operations.extend([path(10.0, top, 2.0, 26.0), path(10.0, top, 202.0, 2.0)])
+            for x in EXPECTED_VERTICAL_X[1:]:
+                operations.append(path(x, top + 2.0, 2.0, 24.0))
+            for index in range(len(rows)):
+                y = top + 26.0 + 32.0 * index
+                for x in EXPECTED_VERTICAL_X:
+                    operations.append(path(x, y, 2.0, 32.0))
+            for y in [top + 24.0] + [top + 24.0 + 32.0 * index for index in range(1, len(rows) + 1)]:
+                operations.extend([path(12.0, y, 110.0, 2.0), path(122.0, y, 90.0, 2.0)])
         return {
-            "operations": [
-                text(f"{prefix}-H-A", top + 12.0),
-                text(f"{prefix}-H-B", top + 12.0),
-                text(f"{prefix}-R0-A", top + 38.0),
-                text(f"{prefix}-R0-B", top + 38.0),
-                path(10.0, top, 2.0, 80.0),
-                path(110.0, top, 2.0, 80.0),
-                path(210.0, top, 2.0, 80.0),
-                path(10.0, top, 202.0, 2.0),
-                path(10.0, top + 24.0, 202.0, 2.0),
-                path(10.0, top + 78.0, 202.0, 2.0),
-            ]
+            "operations": operations
         }
 
     first = {
         "pages": [
-            fragment("C", 20.0),
-            fragment("C", 0.0),
-            fragment("S", 0.0),
-            fragment("S", 0.0),
+            fragment("C", 20.0, [0, 1]),
+            fragment("C", 0.0, [2, 3, 4]),
+            fragment("C", 0.0, [5, 6]),
+            fragment("S", 0.0, [0, 1, 2]),
+            fragment("S", 0.0, [3, 4, 5]),
+            fragment("S", 0.0, [6]),
         ]
     }
-    verify(first, copy.deepcopy(first))
+    verify(first, copy.deepcopy(first), ("same",), ("same",))
+
+    zero_path = copy.deepcopy(first)
+    zero_path["pages"][1]["operations"] = [
+        operation
+        for operation in zero_path["pages"][1]["operations"]
+        if operation.get("type") != "path"
+    ]
+    shifted = copy.deepcopy(first)
+    for page in shifted["pages"][:3]:
+        for operation in page["operations"]:
+            bounds = operation.get("bounds", {})
+            if operation.get("type") == "path" and bounds.get("x") == 210.0:
+                bounds["x"] -= 60.0
+                bounds["height"] -= 60.0
+
+    for broken, description in [
+        (zero_path, "zero-path table continuation"),
+        (shifted, "shifted and shortened right edge"),
+    ]:
+        with redirect_stderr(StringIO()):
+            try:
+                border_geometry(broken)
+            except SystemExit:
+                continue
+        fail(f"self-test accepted {description}")
+
+    fallback_scene = {
+        "pages": [
+            {
+                "operations": [
+                    text("A-H-A", 12.0),
+                    text("A-H-B", 12.0),
+                    text("A-R-A", 38.0),
+                    text("A-R-B", 38.0),
+                    *[path(10.0 + index, 0.0, 202.0, 2.0) for index in range(11)],
+                ]
+            },
+            {
+                "operations": [text("U", 10.0)]
+            },
+        ]
+    }
+    fallback_layout = {
+        "page_sequence": {
+            "warnings": [
+                {
+                    "kind": "unsupported-table-group-pagination",
+                    "reason": "unsupported-layout",
+                }
+            ]
+        }
+    }
+    verify_fallback_capture(fallback_scene, fallback_layout)
+    leaked_fallback = copy.deepcopy(fallback_scene)
+    leaked_fallback["pages"][1]["operations"].append(path(10.0, 0.0, 2.0, 140.0))
+    with redirect_stderr(StringIO()):
+        try:
+            verify_fallback_capture(leaked_fallback, fallback_layout)
+        except SystemExit:
+            pass
+        else:
+            fail("self-test accepted unsupported fallback borders")
 
 
-def run(binary: Path, temp: Path) -> dict[str, Any]:
-    fixture = Path(__file__).resolve().parent / "fixtures/table-borders"
+def page_raster_hashes(summary: dict[str, Any]) -> tuple[str, ...]:
+    manifest = read_json(summary.get("pages_artifact"), "pages artifact")
+    pages = manifest.get("pages")
+    require(isinstance(pages, list) and pages, "pages artifact contains no previews")
+    artifact_root = summary.get("artifacts")
+    require(isinstance(artifact_root, str), "terminal result has no artifacts path")
+    artifacts = Path(artifact_root)
+    hashes = []
+    for expected_index, page in enumerate(pages):
+        require(isinstance(page, dict), f"preview {expected_index} is not an object")
+        require(page.get("index") == expected_index, f"preview index differs: {page!r}")
+        artifact = page.get("artifact")
+        require(isinstance(artifact, str), f"preview {expected_index} has no artifact")
+        contents = (artifacts / artifact).read_bytes()
+        require(contents.startswith(b"\x89PNG\r\n\x1a\n"), f"preview {expected_index} is not PNG")
+        hashes.append(hashlib.sha256(contents).hexdigest())
+    return tuple(hashes)
+
+
+def render(binary: Path, temp: Path, fixture_name: str) -> dict[str, Any]:
+    fixture = Path(__file__).resolve().parent / f"fixtures/{fixture_name}"
     environment = os.environ.copy()
     environment.update({"TMPDIR": str(temp), "TMP": str(temp), "TEMP": str(temp)})
     result = subprocess.run(
@@ -246,7 +539,15 @@ def run(binary: Path, temp: Path) -> dict[str, Any]:
     require(result.returncode == 0, f"Pliego exited with {result.returncode}: {result.stderr[-4000:]}")
     summary = final_summary(result)
     require(summary.get("status") == "rendered", f"Pliego did not render: {summary!r}")
-    return read_json(summary.get("scene_artifact"), "scene artifact")
+    return summary
+
+
+def run(binary: Path, temp: Path) -> tuple[dict[str, Any], tuple[str, ...]]:
+    summary = render(binary, temp, "table-borders")
+    return (
+        read_json(summary.get("scene_artifact"), "scene artifact"),
+        page_raster_hashes(summary),
+    )
 
 
 def main() -> int:
@@ -260,10 +561,16 @@ def main() -> int:
     binary = Path(arguments[0]).expanduser().resolve()
     require(binary.is_file(), f"Pliego binary does not exist: {binary}")
     with tempfile.TemporaryDirectory(prefix="pliego-table-borders-first-") as first:
-        first_scene = run(binary, Path(first))
+        first_scene, first_hashes = run(binary, Path(first))
     with tempfile.TemporaryDirectory(prefix="pliego-table-borders-second-") as second:
-        second_scene = run(binary, Path(second))
-    verify(first_scene, second_scene)
+        second_scene, second_hashes = run(binary, Path(second))
+    verify(first_scene, second_scene, first_hashes, second_hashes)
+    with tempfile.TemporaryDirectory(prefix="pliego-table-border-fallbacks-") as fallback:
+        summary = render(binary, Path(fallback), "table-border-fallbacks")
+        verify_fallback_capture(
+            read_json(summary.get("scene_artifact"), "fallback scene artifact"),
+            read_json(summary.get("layout_debug"), "fallback layout debug"),
+        )
     print("table border check: ok")
     return 0
 

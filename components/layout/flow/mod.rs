@@ -15,12 +15,14 @@ use rayon::iter::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIter
 use script::layout_dom::ServoLayoutNode;
 use servo_arc::Arc as ServoArc;
 use style::Zero;
+use style::color::ColorSpace;
 use style::computed_values::caption_side::T as CaptionSide;
 use style::computed_values::clear::T as StyleClear;
 use style::context::SharedStyleContext;
 use style::logical_geometry::Direction;
 use style::properties::ComputedValues;
 use style::servo::selector_parser::PseudoElement;
+use style::values::computed::image::Image;
 use style::values::computed::{BorderStyle, BreakBetween, BreakWithin};
 use style::values::specified::align::AlignFlags;
 use style::values::specified::{Display, TextAlignKeyword};
@@ -42,8 +44,8 @@ use crate::geom::{
 use crate::layout_box_base::{IndependentFormattingContextLayoutResult, LayoutBoxBase};
 use crate::pages::{
     BlockBoundaryPlacement, BlockPageBuilder, ChildPageBreaks, InlineLine, InlineResumePoint,
-    TableCellFragment, TableChildPlacement, TableGroupUnsupportedReason, TableRow, TableRowGroup,
-    TableRowGroupKind,
+    TableCellFragment, TableChildPlacement, TableChildPlacementOutcome,
+    TableGroupUnsupportedReason, TableRow, TableRowGroup, TableRowGroupKind,
 };
 use crate::positioned::{AbsolutelyPositionedBox, PositioningContext, PositioningContextLength};
 use crate::sizing::{
@@ -984,10 +986,12 @@ fn prepare_fragmentainer_boundary(
             ),
         }
     });
+    set_table_border_capture_suppressed(fragment, false);
     let retained_table = match retained_table_rows(fragment, placement_state) {
         Ok(table) => table,
         Err(reason) => {
             page_builder.warn_unsupported_table_group_pagination(child_index, node, reason);
+            set_table_border_capture_suppressed(fragment, true);
             None
         },
     };
@@ -995,21 +999,36 @@ fn prepare_fragmentainer_boundary(
         .as_ref()
         .map_or_else(|| table_has_captions(fragment), |table| table.has_captions());
     if let Some(table) = retained_table.as_ref() {
-        if let Some(placement) = page_builder.place_table_child(
-            child_index,
-            node,
-            placement_state.current_block_direction_position,
-            metrics.fresh_page_contribution,
-            &table.rows,
-            &table.groups,
-            &table.cell_fragments,
-            breaks,
-        ) {
-            table.apply(
-                placement,
-                placement_state.containing_block.style.writing_mode,
+        if !table.bordered_rows_fit(page_builder.available_block_size()) {
+            page_builder.warn_unsupported_table_group_pagination(
+                child_index,
+                node,
+                TableGroupUnsupportedReason::UnsupportedLayout,
             );
-            return;
+            set_table_border_capture_suppressed(fragment, true);
+        } else {
+            match page_builder.place_table_child(
+                child_index,
+                node,
+                placement_state.current_block_direction_position,
+                metrics.fresh_page_contribution,
+                &table.rows,
+                &table.groups,
+                &table.cell_fragments,
+                breaks,
+            ) {
+                TableChildPlacementOutcome::Placed(placement) => {
+                    table.apply(
+                        placement,
+                        placement_state.containing_block.style.writing_mode,
+                    );
+                    return;
+                },
+                TableChildPlacementOutcome::WholeChild => {},
+                TableChildPlacementOutcome::Unsupported => {
+                    set_table_border_capture_suppressed(fragment, true);
+                },
+            }
         }
     }
     if has_table_captions {
@@ -1070,6 +1089,44 @@ fn forces_page_break(value: BreakBetween) -> bool {
     matches!(value, BreakBetween::Always | BreakBetween::Page)
 }
 
+fn set_table_border_capture_suppressed(fragment: &Fragment, suppressed: bool) {
+    let visit_box = |fragment: &BoxFragment| {
+        let is_cell = matches!(
+            LayoutDisplay::from(fragment.style().get_box().display),
+            LayoutDisplay::GeneratingBox(DisplayGeneratingBox::LayoutInternal(
+                DisplayLayoutInternal::TableCell
+            ))
+        );
+        if is_cell || fragment.is_table_grid() || fragment.is_table_grid_with_collapsed_borders() {
+            fragment.set_table_border_capture_suppressed(suppressed);
+        }
+    };
+    match fragment {
+        Fragment::LayoutRoot(root) => {
+            let root = root.inner_box_fragment();
+            visit_box(&root);
+            for child in &root.children {
+                set_table_border_capture_suppressed(child, suppressed);
+            }
+        },
+        Fragment::Box(fragment) | Fragment::Float(fragment) => {
+            visit_box(fragment);
+            for child in &fragment.children {
+                set_table_border_capture_suppressed(child, suppressed);
+            }
+        },
+        Fragment::Positioning(fragment) => {
+            for child in &fragment.children {
+                set_table_border_capture_suppressed(child, suppressed);
+            }
+        },
+        Fragment::AbsoluteOrFixedPositionedPlaceholder(_) |
+        Fragment::Text(_) |
+        Fragment::Image(_) |
+        Fragment::IFrame(_) => {},
+    }
+}
+
 fn fragment_page_breaks(fragment: &BoxFragment) -> ChildPageBreaks {
     let style = fragment.style();
     let box_style = style.get_box();
@@ -1095,6 +1152,7 @@ struct RetainedTableFragments<'a> {
     bottom_captions: Vec<&'a BoxFragment>,
     grid: &'a BoxFragment,
     wrapper: &'a BoxFragment,
+    has_borders: bool,
 }
 
 struct RetainedTableCell<'a> {
@@ -1110,6 +1168,31 @@ struct RetainedTableCellFragment<'a> {
 impl RetainedTableFragments<'_> {
     fn has_captions(&self) -> bool {
         self.wrapper.children.len() > 1
+    }
+
+    fn bordered_rows_fit(&self, available_block_size: Au) -> bool {
+        if !self.has_borders {
+            return true;
+        }
+        let header = self
+            .groups
+            .iter()
+            .find(|group| group.kind == TableRowGroupKind::Header);
+        let body_capacity =
+            available_block_size - header.map_or(Au::zero(), |group| group.block_size);
+        header.is_none_or(|group| {
+            group.block_size > Au::zero() && group.block_size < available_block_size
+        }) && body_capacity > Au::zero() &&
+            self.rows.iter().enumerate().all(|(position, row)| {
+                row.block_size > Au::zero() &&
+                    row.block_size <= if header.is_some_and(|group| {
+                        position >= group.first_row_index && position < group.end_row_index
+                    }) {
+                        available_block_size
+                    } else {
+                        body_capacity
+                    }
+            })
     }
 
     fn apply(&self, placement: TableChildPlacement, writing_mode: crate::WritingMode) {
@@ -1258,15 +1341,28 @@ fn retained_table_rows<'a>(
     }
 
     let mut grid = None;
+    let mut collapsed_grid = false;
+    let mut has_borders = false;
     let mut bottom_captions = Vec::new();
     for child in &wrapper.children {
         let Fragment::Box(child) = child else {
             return Err(TableGroupUnsupportedReason::UnsupportedLayout);
         };
-        if child.is_table_grid_with_collapsed_borders() &&
-            !has_solid_visible_collapsed_borders(child)
-        {
-            return Err(TableGroupUnsupportedReason::CollapsedBorders);
+        if child.is_table_grid_with_collapsed_borders() {
+            let layout_info = child.specific_layout_info();
+            let Some(SpecificLayoutInfo::TableGridWithCollapsedBorders(table_info)) =
+                layout_info.as_deref()
+            else {
+                unreachable!();
+            };
+            if table_info.uniform_solid_visible_border().is_none() {
+                return Err(TableGroupUnsupportedReason::CollapsedBorders);
+            }
+            collapsed_grid = true;
+            has_borders = true;
+        } else if child.is_table_grid() {
+            has_borders |= separate_table_border_profile(child)
+                .ok_or(TableGroupUnsupportedReason::UnsupportedLayout)?;
         }
         if child.is_table_grid() || child.is_table_grid_with_collapsed_borders() {
             if grid.replace(child.as_ref()).is_some() {
@@ -1319,6 +1415,12 @@ fn retained_table_rows<'a>(
                     &mut split_containers,
                 )
                 .ok_or(TableGroupUnsupportedReason::UnsupportedLayout)?;
+                if !collapsed_grid {
+                    for cell in &cells {
+                        has_borders |= separate_table_border_profile(cell.fragment)
+                            .ok_or(TableGroupUnsupportedReason::UnsupportedLayout)?;
+                    }
+                }
                 rows.push(TableRow {
                     row_index,
                     row_group_index: None,
@@ -1383,6 +1485,12 @@ fn retained_table_rows<'a>(
                         &mut split_containers,
                     )
                     .ok_or(TableGroupUnsupportedReason::UnsupportedLayout)?;
+                    if !collapsed_grid {
+                        for cell in &cells {
+                            has_borders |= separate_table_border_profile(cell.fragment)
+                                .ok_or(TableGroupUnsupportedReason::UnsupportedLayout)?;
+                        }
+                    }
                     rows.push(TableRow {
                         row_index,
                         row_group_index: Some(row_group_index),
@@ -1444,6 +1552,21 @@ fn retained_table_rows<'a>(
     {
         return Err(TableGroupUnsupportedReason::UnsupportedLayout);
     }
+    if collapsed_grid &&
+        (headers.len() != 1 || rows.iter().any(|row| row.has_rowspan))
+    {
+        return Err(TableGroupUnsupportedReason::CollapsedBorders);
+    }
+    if has_borders && !collapsed_grid {
+        let spacing = grid.style().clone_border_spacing();
+        if headers.len() != 1 ||
+            rows.iter().any(|row| row.has_rowspan) ||
+            !spacing.horizontal().is_zero() ||
+            !spacing.vertical().is_zero()
+        {
+            return Err(TableGroupUnsupportedReason::UnsupportedLayout);
+        }
+    }
 
     Ok(Some(RetainedTableFragments {
         rows,
@@ -1457,31 +1580,45 @@ fn retained_table_rows<'a>(
         bottom_captions,
         grid,
         wrapper,
+        has_borders,
     }))
 }
 
-fn has_solid_visible_collapsed_borders(fragment: &BoxFragment) -> bool {
-    let layout_info = fragment.specific_layout_info();
-    let Some(SpecificLayoutInfo::TableGridWithCollapsedBorders(table_info)) =
-        layout_info.as_deref()
-    else {
-        return false;
-    };
-    let mut borders = table_info
-        .collapsed_borders
-        .x
-        .iter()
-        .chain(&table_info.collapsed_borders.y)
-        .flat_map(|line| line.iter());
-    borders.next().is_some_and(|border| {
-        border.width > Au::zero() &&
-            border.style_color.style == BorderStyle::Solid &&
-            border.style_color.color.alpha > 0.0
-    }) && borders.all(|border| {
-        border.width > Au::zero() &&
-            border.style_color.style == BorderStyle::Solid &&
-            border.style_color.color.alpha > 0.0
-    })
+pub(crate) fn separate_table_border_profile(fragment: &BoxFragment) -> Option<bool> {
+    let style = fragment.style();
+    let border = style.get_border();
+    if !matches!(&border.border_image_source, Image::None) ||
+        !border.border_top_left_radius.0.is_zero() ||
+        !border.border_top_right_radius.0.is_zero() ||
+        !border.border_bottom_right_radius.0.is_zero() ||
+        !border.border_bottom_left_radius.0.is_zero()
+    {
+        return None;
+    }
+
+    let current_color = style.get_inherited_text().clone_color();
+    let colors = crate::style_ext::BorderStyleColor::from_border(border, &current_color);
+    let mut expected = None;
+    for (width, side) in [
+        (fragment.border.top, &colors.top),
+        (fragment.border.right, &colors.right),
+        (fragment.border.bottom, &colors.bottom),
+        (fragment.border.left, &colors.left),
+    ] {
+        let color = side.color.clone().to_color_space(ColorSpace::Srgb);
+        if width <= Au::zero() || color.alpha <= 0.0 {
+            continue;
+        }
+        if side.style != BorderStyle::Solid {
+            return None;
+        }
+        let value = (width, color);
+        if expected.as_ref().is_some_and(|expected| *expected != value) {
+            return None;
+        }
+        expected = Some(value);
+    }
+    Some(expected.is_some())
 }
 
 fn table_has_captions(fragment: &Fragment) -> bool {

@@ -21,17 +21,21 @@ The first support state is `solid-visible`:
 - horizontal left-to-right tables using `border-collapse: collapse` or
   `border-collapse: separate`;
 - finite, positive-width, opaque or translucent `solid` borders;
+- one resolved width and sRGBA color for every collapsed edge, and for every
+  painted side of an individual separate-mode box (absent sides are allowed);
 - stable table-grid column widths;
-- a repeated `thead` followed by ordinary body rows;
+- a repeated `thead` followed by ordinary, fitting, non-rowspanning body rows;
 - zero border spacing for the deterministic separate-border fixture.
 
 Each supported border is a filled `path` operation with positive rectangle bounds
 and no stroke. The table-border fixture contains no other path-producing content,
 so every path in that fixture is part of the border contract.
 
-`border-image`, non-solid styles, border radii, nonzero border spacing, and painting
-effects outside this profile remain unsupported. They must stay observable as an
-unsupported paint state instead of being silently approximated as solid borders.
+`border-image`, mixed resolved widths or colors, non-solid styles, border radii,
+nonzero border spacing, bordered oversized rows, collapsed tables without a
+repeated header, rowspans, and painting effects outside this profile remain
+unsupported. They must stay observable as a typed table fallback instead of being
+silently approximated as solid borders.
 
 ## Fragment-edge ownership
 
@@ -43,8 +47,11 @@ unsupported paint state instead of being silently approximated as solid borders.
 - The first and last visible rows on a fragment own the fragment's outer block
   edges. No additional synthetic border is painted over them.
 - In separate mode, authored edges remain separate. The supported fixture authors
-  each shared edge once (header top, first-column left, cell right/bottom), so
+  each shared edge once (table top/left, cell right/bottom). Table sides are emitted
+  as row-owned segments so page gaps are never painted, and
   pagination must not add a second edge.
+- A centered rectangle that barely crosses its owning physical page is clipped to
+  that page; no remainder is carried through margins or repeated-header bands.
 - Repeated-header borders use the same inline coordinates, widths, and colors as
   the source header. Only their page-local block coordinates change.
 
@@ -63,5 +70,7 @@ one separate table. Both span pages and repeat their headers.
 - every border rectangle is positive, visible, filled, and unique;
 - vertical border x coordinates do not drift between fragments;
 - exactly one continuous horizontal seam separates each header from its body;
+- the separate table's grid-authored top and left sides remain present;
 - collapsed and separate tables each span at least two fragments;
-- two identical renders have identical normalized border geometry.
+- two identical renders have identical normalized border geometry and page-raster
+  hashes.
