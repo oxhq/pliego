@@ -302,6 +302,21 @@ fn preserves_shared_text_clusters_with_actual_text() {
 }
 
 #[test]
+fn emits_descending_rtl_ranges_as_one_logical_actual_text_span() {
+    let mut rtl = scene();
+    let Operation::Text { glyphs, .. } = &mut rtl.pages[0].operations[0] else {
+        unreachable!()
+    };
+    glyphs[0].text_range = Some(Utf8Range { start: 1, end: 2 });
+    glyphs[1].text_range = Some(Utf8Range { start: 0, end: 1 });
+
+    let pdf = render_document_pdf(&rtl, fixture_font, fixture_image).unwrap();
+    assert!(decoded_streams(&pdf).iter().any(|stream| {
+        contains(stream, b"/ActualText") && contains(stream, b"(Hi)")
+    }));
+}
+
+#[test]
 fn emits_positioned_devanagari_marks_as_one_actual_text_span() {
     let scene = DocumentScene::new(Page {
         size: Size {

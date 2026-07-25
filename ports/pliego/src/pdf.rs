@@ -418,6 +418,15 @@ fn pdf_text_ranges(text: &str, glyphs: &[crate::Glyph]) -> Vec<std::ops::Range<u
             start..end
         })
         .collect::<Vec<_>>();
+    // Poppler ignores ReversedChars, so a visual-order RTL run needs one logical ActualText span.
+    if expanded.len() > 1
+        && expanded
+            .windows(2)
+            .all(|ranges| ranges[0].start >= ranges[1].start)
+        && expanded.first().unwrap().start > expanded.last().unwrap().start
+    {
+        return vec![0..text.len(); expanded.len()];
+    }
 
     let mut sorted = expanded.clone();
     sorted.sort_by_key(|range| range.start);
