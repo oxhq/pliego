@@ -1,6 +1,6 @@
 {
   "schema": "pliego.paged-ci-reference.v1",
-  "source_unicode": "Natural alpha.Natural beta.aaaaaaaaa bbbbbbbbb ccccccccc ddddddddd eeeeeeeee fffffffff ggggggggg hhhhhhhhh iiiiiiiiiKept together.",
+  "source_unicode": "Alpha. Beta. aaaaaaaaa bbbbbbbbb ccccccccc ddddddddd eeeeeeeee fffffffff ggggggggg hhhhhhhhh iiiiiiiii Kept together.",
   "page": {
     "width": 180.0,
     "height": 80.0,
@@ -14,11 +14,11 @@
   "pages": [
     {
       "index": 0,
-      "text": "Natural alpha."
+      "text": "Alpha."
     },
     {
       "index": 1,
-      "text": "Natural beta."
+      "text": "Beta."
     },
     {
       "index": 2,

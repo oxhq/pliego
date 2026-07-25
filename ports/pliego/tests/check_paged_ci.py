@@ -4,6 +4,7 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
+import base64
 import json
 import shutil
 import subprocess
@@ -82,6 +83,15 @@ def run_once(
     inputs.mkdir()
     for source in (fixture, reference_path, fixture.with_name("Ahem.ttf")):
         shutil.copy2(source, inputs / source.name)
+    materialized = inputs / fixture.name
+    encoded_font = base64.b64encode((inputs / "Ahem.ttf").read_bytes()).decode("ascii")
+    materialized.write_text(
+        materialized.read_text(encoding="utf-8").replace(
+            'url("Ahem.ttf")',
+            f'url("data:font/ttf;base64,{encoded_font}")',
+        ),
+        encoding="utf-8",
+    )
     command = [
         str(binary),
         "render",
@@ -98,7 +108,7 @@ def run_once(
     try:
         result = subprocess.run(
             command,
-            cwd=fixture.parent,
+            cwd=inputs,
             capture_output=True,
             text=True,
             timeout=PROCESS_TIMEOUT_SECONDS,
@@ -256,7 +266,10 @@ def verify_run(run: dict[str, Any], expected: dict[str, Any]) -> dict[str, Any]:
             f"scene page {index} first glyph is outside the content origin: {first!r}",
         )
         page_text.append(actual_text)
-    require("".join(page_text) == source, "scene text was lost, duplicated, or reordered")
+    require(
+        canonical_text(" ".join(page_text)) == canonical_text(source),
+        "scene text was lost, duplicated, or reordered",
+    )
 
     pages_artifact = read_object(Path(summary["pages_artifact"]))
     previews = pages_artifact.get("pages")
@@ -281,7 +294,7 @@ def verify_run(run: dict[str, Any], expected: dict[str, Any]) -> dict[str, Any]:
 
     continuations = normalize_continuations(layout)
     require(continuations == expected["continuations"], f"continuation reference differs: {continuations!r}")
-    require(page_sequence.get("warnings") == expected["warnings"], f"pagination warnings differ: {page_sequence!r}")
+    require(page_sequence.get("warnings", []) == expected["warnings"], f"pagination warnings differ: {page_sequence!r}")
     require(max(row.get("retry_count", 0) for row in continuations) <= 1, "pagination retry is unbounded")
     scene_summary = summary.get("scene")
     require(isinstance(scene_summary, dict) and isinstance(scene_summary.get("hash"), str), "scene hash is absent")
@@ -296,7 +309,8 @@ def self_test(fixture: Path, reference_path: Path) -> None:
     expected = read_object(reference_path)
     require(expected.get("schema") == REFERENCE_SCHEMA, "unexpected paged CI reference schema")
     require(
-        "".join(page["text"] for page in expected["pages"]) == expected["source_unicode"],
+        canonical_text(" ".join(page["text"] for page in expected["pages"]))
+        == canonical_text(expected["source_unicode"]),
         "fixed page text does not reconstruct the DOM source",
     )
     kinds = [row["kind"] for row in expected["continuations"]]

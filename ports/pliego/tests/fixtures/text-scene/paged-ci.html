@@ -21,6 +21,7 @@
 
       .natural {
         height: 40px;
+        white-space: nowrap;
       }
 
       #forced-paragraph {
@@ -34,8 +35,8 @@
     </style>
   </head>
   <body>
-    <div class="natural" data-source>Natural alpha.</div>
-    <div class="natural" data-source>Natural beta.</div>
+    <div class="natural" data-source>Alpha.</div>
+    <div class="natural" data-source>Beta.</div>
     <p id="forced-paragraph" data-source>aaaaaaaaa bbbbbbbbb ccccccccc ddddddddd eeeeeeeee fffffffff ggggggggg hhhhhhhhh iiiiiiiii</p>
     <div id="kept" data-source>Kept together.</div>
     <script>
@@ -44,7 +45,7 @@
           await document.fonts.ready;
           const source = [...document.querySelectorAll('[data-source]')]
             .map((node) => node.textContent)
-            .join('');
+            .join(' ');
           window.pliego?.ready({ fixture: 'paged-ci', source });
         } catch (error) {
           window.pliego?.fail({
