@@ -1306,9 +1306,6 @@ fn retained_table_rows<'a>(
                 row_group_index: None,
                 has_rowspan,
             } => {
-                if has_rowspan {
-                    return Err(TableGroupUnsupportedReason::Rowspan);
-                }
                 let rect = child.base.rect();
                 let block_start = grid_block_start + rect.origin.y;
                 let cells = retained_table_cells(
@@ -1324,6 +1321,7 @@ fn retained_table_rows<'a>(
                     row_index,
                     row_group_index: None,
                     cell_count: cells.len(),
+                    has_rowspan,
                     block_start,
                     block_size: rect.size.height,
                     breaks: fragment_page_breaks(child),
@@ -1372,9 +1370,6 @@ fn retained_table_rows<'a>(
                     if actual_group_index != row_group_index {
                         return Err(TableGroupUnsupportedReason::UnsupportedLayout);
                     }
-                    if has_rowspan {
-                        return Err(TableGroupUnsupportedReason::Rowspan);
-                    }
                     let rect = row.base.rect();
                     let block_start = group_block_start + rect.origin.y;
                     let cells = retained_table_cells(
@@ -1390,6 +1385,7 @@ fn retained_table_rows<'a>(
                         row_index,
                         row_group_index: Some(row_group_index),
                         cell_count: cells.len(),
+                        has_rowspan,
                         block_start,
                         block_size: rect.size.height,
                         breaks: fragment_page_breaks(row),

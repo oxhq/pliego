@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>Pliego forced cross-page table rowspan fixture</title>
+    <style>
+      body { margin: 0; font: 14px/20px sans-serif; }
+      #lead { height: 20px; }
+      table { border-collapse: separate; border-spacing: 0; table-layout: fixed; width: 200px; }
+      tr { height: 32px; }
+      td { padding: 0; vertical-align: top; }
+      td:first-child { width: 70px; }
+      #forced { break-before: page; }
+    </style>
+  </head>
+  <body>
+    <div id="lead">Lead.</div>
+    <table id="ledger">
+      <tbody>
+        <tr><td rowspan="2">SPAN</td><td>R0B</td></tr>
+        <tr id="forced"><td>R1B</td></tr>
+        <tr><td>TAILA</td><td>TAILB</td></tr>
+      </tbody>
+    </table>
+    <script>
+      queueMicrotask(() => window.pliego?.ready({ fixture: 'table-rowspans-forced-cross-page' }));
+    </script>
+  </body>
+</html>

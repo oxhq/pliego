@@ -9,6 +9,7 @@
 //! here clips rendered output or reshapes text.
 
 use std::fmt;
+use std::ops::Range;
 use std::sync::OnceLock;
 
 use app_units::Au;
@@ -262,10 +263,28 @@ pub(crate) struct TableRow {
     pub row_index: usize,
     pub row_group_index: Option<usize>,
     pub cell_count: usize,
+    pub has_rowspan: bool,
     /// Unpaginated block start in the root fragmentainer coordinate space.
     pub block_start: Au,
     pub block_size: Au,
     pub breaks: ChildPageBreaks,
+}
+
+fn table_rowspan_ranges(rows: &[TableRow]) -> Vec<Range<usize>> {
+    let mut ranges = Vec::new();
+    let mut position = 0;
+    while position < rows.len() {
+        if !rows[position].has_rowspan {
+            position += 1;
+            continue;
+        }
+        let start = position;
+        while position < rows.len() && rows[position].has_rowspan {
+            position += 1;
+        }
+        ranges.push(start..position);
+    }
+    ranges
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -341,6 +360,15 @@ pub(crate) enum BlockPaginationWarning {
         child_index: usize,
         table_node: Option<u64>,
         reason: TableGroupUnsupportedReason,
+    },
+    UnsupportedTableRowspanPagination {
+        child_index: usize,
+        table_node: Option<u64>,
+        first_row_index: usize,
+        end_row_index: usize,
+        block_size: Au,
+        available_block_size: Au,
+        forced_break_inside: bool,
     },
     OversizedTableCell {
         child_index: usize,
@@ -677,7 +705,9 @@ impl BlockPageBuilder {
         breaks: ChildPageBreaks,
     ) -> Option<TableChildPlacement> {
         assert_eq!(child_index, self.next_child_index);
-        let support = self.table_rows_support(rows, groups, cell_fragments);
+        let rowspan_ranges = table_rowspan_ranges(rows);
+        let support =
+            self.table_rows_support(rows, groups, cell_fragments, &rowspan_ranges);
         let header = groups
             .iter()
             .find(|group| group.kind == TableRowGroupKind::Header)
@@ -743,6 +773,49 @@ impl BlockPageBuilder {
                 TableGroupUnsupportedReason::UnsupportedLayout,
             );
             return None;
+        }
+        for range in &rowspan_ranges {
+            let first_row = &rows[range.start];
+            let last_row = &rows[range.end - 1];
+            let block_size =
+                last_row.block_start + last_row.block_size - first_row.block_start;
+            let crosses_group_segment = (range.start < body_start && range.end > body_start) ||
+                (range.start < body_end && range.end > body_end);
+            let available_block_size = if range.end <= body_start {
+                self.request.available_block_size
+            } else {
+                body_page_capacity
+            };
+            let forced_break_inside = (range.start + 1..range.end).any(|position| {
+                rows[position].breaks.before ||
+                    rows[position - 1].breaks.after ||
+                    groups.iter().any(|group| {
+                        (group.first_row_index == position && group.breaks.before) ||
+                            (group.end_row_index == position && group.breaks.after)
+                    })
+            });
+            if crosses_group_segment ||
+                block_size > available_block_size ||
+                forced_break_inside
+            {
+                if header.is_some() || footer.is_some() {
+                    self.warn_unsupported_table_group_pagination(
+                        child_index,
+                        table_node,
+                        TableGroupUnsupportedReason::Rowspan,
+                    );
+                } else {
+                    self.warn_unsupported_table_rowspan_pagination(
+                        child_index,
+                        table_node,
+                        range,
+                        block_size,
+                        available_block_size,
+                        forced_break_inside,
+                    );
+                }
+                return None;
+            }
         }
         if breaks.inside_avoid {
             if fresh_block_size <= self.request.available_block_size {
@@ -836,8 +909,24 @@ impl BlockPageBuilder {
         let header_source_block_start = header.map(|group| group.block_start + translation);
 
         let mut group_position = 0;
+        let mut rowspan_position = 0;
         for position in body_start..body_end {
             let row = &rows[position];
+            while rowspan_ranges
+                .get(rowspan_position)
+                .is_some_and(|range| range.end <= position)
+            {
+                rowspan_position += 1;
+            }
+            let rowspan_range = rowspan_ranges
+                .get(rowspan_position)
+                .filter(|range| range.start <= position && position < range.end);
+            let rowspan_block_size = rowspan_range
+                .filter(|range| range.start == position)
+                .map(|range| {
+                    let last_row = &rows[range.end - 1];
+                    last_row.block_start + last_row.block_size - row.block_start
+                });
             let mut group_break_after = false;
             while groups
                 .get(group_position)
@@ -875,7 +964,8 @@ impl BlockPageBuilder {
             } else {
                 LayoutDebugTableConstraint::Auto
             };
-            let selected = table_page_has_content
+            let constraint_selected = table_page_has_content
+                && rowspan_range.is_none_or(|range| range.start == position)
                 && match constraint {
                     LayoutDebugTableConstraint::ForcedBefore |
                     LayoutDebugTableConstraint::ForcedAfter => true,
@@ -890,8 +980,13 @@ impl BlockPageBuilder {
                         !oversized && block_start + row.block_size > page_end
                     },
                 };
+            let rowspan_selected = table_page_has_content
+                && !constraint_selected
+                && rowspan_block_size
+                    .is_some_and(|block_size| block_start + block_size > page_end);
+            let selected = constraint_selected || rowspan_selected;
             let retry_count = u8::from(
-                selected
+                constraint_selected
                     && matches!(
                         constraint,
                         LayoutDebugTableConstraint::AvoidRow |
@@ -1092,7 +1187,10 @@ impl BlockPageBuilder {
                     self.current_page_origin += self.request.page_stride;
                 }
             }
-            if position > 0 || constraint != LayoutDebugTableConstraint::Auto {
+            if position > 0 ||
+                constraint != LayoutDebugTableConstraint::Auto ||
+                rowspan_selected
+            {
                 self.outcome.table_breaks.push(TableBreakDecision {
                     page_index: considered_page_index,
                     table_node,
@@ -1335,6 +1433,7 @@ impl BlockPageBuilder {
         rows: &[TableRow],
         row_groups: &[TableRowGroup],
         cell_fragments: &[TableCellFragment],
+        rowspan_ranges: &[Range<usize>],
     ) -> TableRowsSupport {
         if rows.is_empty()
             || rows.iter().enumerate().any(|(position, row)| {
@@ -1378,10 +1477,17 @@ impl BlockPageBuilder {
             let Some(row) = rows.get(fragment.row_index) else {
                 return TableRowsSupport::Unsupported;
             };
+            let row_block_end = rowspan_ranges
+                .iter()
+                .find(|range| range.contains(&fragment.row_index))
+                .map_or(row.block_start + row.block_size, |range| {
+                    let last_row = &rows[range.end - 1];
+                    last_row.block_start + last_row.block_size
+                });
             if fragment.cell_index >= row.cell_count
                 || fragment.block_size <= Au::zero()
                 || fragment.block_start < row.block_start
-                || fragment.block_start + fragment.block_size > row.block_start + row.block_size
+                || fragment.block_start + fragment.block_size > row_block_end
             {
                 return TableRowsSupport::Unsupported;
             }
@@ -1591,6 +1697,37 @@ impl BlockPageBuilder {
                 table_node,
                 reason,
             });
+    }
+
+    fn warn_unsupported_table_rowspan_pagination(
+        &mut self,
+        child_index: usize,
+        table_node: Option<u64>,
+        range: &Range<usize>,
+        block_size: Au,
+        available_block_size: Au,
+        forced_break_inside: bool,
+    ) {
+        warn!(
+            "paged layout cannot retain table child {child_index} rowspan rows {}..{} on one page \
+             (node {table_node:?}, {:.2}px / {:.2}px, forced break inside: \
+             {forced_break_inside}); remove the internal forced break or shorten the rowspan",
+            range.start,
+            range.end,
+            block_size.to_f32_px(),
+            available_block_size.to_f32_px(),
+        );
+        self.outcome.warnings.push(
+            BlockPaginationWarning::UnsupportedTableRowspanPagination {
+                child_index,
+                table_node,
+                first_row_index: range.start,
+                end_row_index: range.end,
+                block_size,
+                available_block_size,
+                forced_break_inside,
+            },
+        );
     }
 
     fn include_content_through(&mut self, block_end: Au) {
@@ -1810,6 +1947,23 @@ impl PageSequence {
                                 LayoutDebugTableGroupUnsupportedReason::UnsupportedLayout
                             },
                         },
+                    },
+                    BlockPaginationWarning::UnsupportedTableRowspanPagination {
+                        child_index,
+                        table_node,
+                        first_row_index,
+                        end_row_index,
+                        block_size,
+                        available_block_size,
+                        forced_break_inside,
+                    } => LayoutDebugPageWarning::UnsupportedTableRowspanPagination {
+                        child_index,
+                        table_node,
+                        first_row_index,
+                        end_row_index,
+                        block_size: block_size.to_f32_px(),
+                        available_block_size: available_block_size.to_f32_px(),
+                        forced_break_inside,
                     },
                     BlockPaginationWarning::OversizedTableCell {
                         child_index,
@@ -2557,6 +2711,7 @@ mod tests {
                 row_index,
                 row_group_index: Some(0),
                 cell_count: 2,
+                has_rowspan: false,
                 block_start: Au::from_px(row_index as i32 * 40),
                 block_size: Au::from_px(40),
                 breaks: ChildPageBreaks::default(),
@@ -2657,6 +2812,7 @@ mod tests {
                 row_index,
                 row_group_index: Some(0),
                 cell_count: 1,
+                has_rowspan: false,
                 block_start: Au::from_px(row_index as i32 * 60),
                 block_size: Au::from_px(60),
                 breaks: ChildPageBreaks::default(),
@@ -2738,6 +2894,7 @@ mod tests {
                 row_index: 0,
                 row_group_index: None,
                 cell_count: 2,
+                has_rowspan: false,
                 block_start: Au::zero(),
                 block_size: Au::from_px(40),
                 breaks: ChildPageBreaks::default(),
@@ -2746,6 +2903,7 @@ mod tests {
                 row_index: 2,
                 row_group_index: None,
                 cell_count: 2,
+                has_rowspan: false,
                 block_start: Au::from_px(40),
                 block_size: Au::from_px(40),
                 breaks: ChildPageBreaks::default(),
@@ -2815,6 +2973,7 @@ mod tests {
             row_index: 0,
             row_group_index: Some(0),
             cell_count: 2,
+            has_rowspan: false,
             block_start: Au::from_px(30),
             block_size: Au::from_px(120),
             breaks: ChildPageBreaks::default(),
@@ -2926,6 +3085,7 @@ mod tests {
             row_index: 0,
             row_group_index: None,
             cell_count: 1,
+            has_rowspan: false,
             block_start: Au::zero(),
             block_size: Au::from_px(140),
             breaks: ChildPageBreaks::default(),

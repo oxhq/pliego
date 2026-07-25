@@ -438,6 +438,15 @@ pub enum LayoutDebugPageWarning {
         table_node: Option<u64>,
         reason: LayoutDebugTableGroupUnsupportedReason,
     },
+    UnsupportedTableRowspanPagination {
+        child_index: usize,
+        table_node: Option<u64>,
+        first_row_index: usize,
+        end_row_index: usize,
+        block_size: f32,
+        available_block_size: f32,
+        forced_break_inside: bool,
+    },
     OversizedTableCell {
         child_index: usize,
         table_node: Option<u64>,
