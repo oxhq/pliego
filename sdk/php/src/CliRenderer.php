@@ -1,0 +1,224 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Pliego\Php\Experimental;
+
+use InvalidArgumentException;
+use JsonException;
+use Pliego\Php\Experimental\Exception\EngineRenderException;
+use Pliego\Php\Experimental\Exception\InvalidRequestException;
+use RuntimeException;
+
+/**
+ * Experimental one-render-per-process bridge. It deliberately does not model
+ * the planned daemon protocol.
+ */
+final readonly class CliRenderer
+{
+    /**
+     * @param non-empty-list<string> $command Production uses ["/path/to/pliego"].
+     */
+    public function __construct(private array $command)
+    {
+        if ($command === []) {
+            throw new InvalidArgumentException('command must contain non-empty strings');
+        }
+        foreach ($command as $part) {
+            if (!is_string($part) || $part === '' || str_contains($part, "\0")) {
+                throw new InvalidArgumentException('command must contain non-empty strings');
+            }
+        }
+    }
+
+    /**
+     * @param array<string, string> $assets Bundle-relative path => source file.
+     */
+    public function render(
+        string $html,
+        string $inputBundle,
+        string $output,
+        string $artifacts,
+        ?RenderOptions $options = null,
+        array $assets = [],
+    ): RenderResult {
+        $options ??= new RenderOptions();
+        foreach ([$inputBundle, $output, $artifacts] as $path) {
+            if (!$this->isAbsolutePath($path) || str_contains($path, "\0")) {
+                throw new InvalidArgumentException("render paths must be absolute: {$path}");
+            }
+        }
+
+        $this->writeInputBundle($inputBundle, $html, $options, $assets);
+        $arguments = [
+            ...$this->command,
+            'render',
+            'document.html',
+            '--output',
+            $output,
+            '--artifacts',
+            $artifacts,
+            '--locale',
+            $options->locale,
+            '--timezone',
+            $options->timezone,
+            '--page-size',
+            $options->pageSize,
+            '--page-margins',
+            $options->pageMargins,
+        ];
+        foreach ($options->allowedHttpRoots as $root) {
+            $arguments[] = '--allow-http-root';
+            $arguments[] = $root;
+        }
+
+        $pipes = [];
+        $process = proc_open(
+            $arguments,
+            [
+                0 => ['pipe', 'r'],
+                1 => ['pipe', 'w'],
+                2 => ['pipe', 'w'],
+            ],
+            $pipes,
+            $inputBundle,
+        );
+        if (!is_resource($process)) {
+            throw new RuntimeException('cannot start the Pliego process');
+        }
+
+        fclose($pipes[0]);
+        $stdout = stream_get_contents($pipes[1]);
+        $stderr = stream_get_contents($pipes[2]);
+        fclose($pipes[1]);
+        fclose($pipes[2]);
+        $exitCode = proc_close($process);
+        $metadata = $this->lastJsonObject($stdout === false ? '' : $stdout);
+
+        if ($exitCode !== 0 || ($metadata['status'] ?? null) !== 'rendered') {
+            $code = is_string($metadata['error']['code'] ?? null)
+                ? $metadata['error']['code']
+                : 'PLIEGO_PROCESS_FAILED';
+            $message = is_string($metadata['error']['message'] ?? null)
+                ? $metadata['error']['message']
+                : 'Pliego did not return a rendered result';
+            $exception = $exitCode === 2 || $code === 'INVALID_REQUEST'
+                ? InvalidRequestException::class
+                : EngineRenderException::class;
+            throw new $exception($code, $exitCode, $stderr === false ? '' : $stderr, $message);
+        }
+        if (!is_file($output)) {
+            throw new EngineRenderException(
+                'OUTPUT_MISSING',
+                $exitCode,
+                $stderr === false ? '' : $stderr,
+                "Pliego reported success without publishing {$output}",
+            );
+        }
+
+        return new RenderResult($output, $artifacts, $inputBundle, $metadata);
+    }
+
+    /**
+     * @param array<string, string> $assets
+     */
+    private function writeInputBundle(
+        string $directory,
+        string $html,
+        RenderOptions $options,
+        array $assets,
+    ): void {
+        if (!@mkdir($directory, 0700, false)) {
+            throw new RuntimeException("cannot create exclusive input bundle {$directory}");
+        }
+        if (file_put_contents("{$directory}/document.html", $html, LOCK_EX) === false) {
+            throw new RuntimeException("cannot write {$directory}/document.html");
+        }
+
+        $manifestAssets = [];
+        ksort($assets, SORT_STRING);
+        foreach ($assets as $relative => $source) {
+            $relative = str_replace('\\', '/', $relative);
+            $parts = explode('/', $relative);
+            if (
+                $relative === ''
+                || str_starts_with($relative, '/')
+                || preg_match('/^[A-Za-z]:/', $relative) === 1
+                || array_intersect($parts, ['', '.', '..']) !== []
+            ) {
+                throw new InvalidArgumentException("unsafe bundle asset path: {$relative}");
+            }
+            if (!is_file($source)) {
+                throw new InvalidArgumentException("bundle asset is not a file: {$source}");
+            }
+
+            $destination = "{$directory}/{$relative}";
+            $parent = dirname($destination);
+            if (!is_dir($parent) && !mkdir($parent, 0700, true)) {
+                throw new RuntimeException("cannot create bundle directory {$parent}");
+            }
+            if (!copy($source, $destination)) {
+                throw new RuntimeException("cannot copy bundle asset {$source}");
+            }
+            $manifestAssets[$relative] = [
+                'bytes' => filesize($destination),
+                'sha256' => 'sha256:'.hash_file('sha256', $destination),
+            ];
+        }
+
+        $manifest = [
+            'schema' => 'pliego.php-input-bundle',
+            'version' => 1,
+            'document' => 'document.html',
+            'document_sha256' => 'sha256:'.hash('sha256', $html),
+            'assets' => $manifestAssets,
+            'environment' => [
+                'locale' => $options->locale,
+                'timezone' => $options->timezone,
+                'page_size' => $options->pageSize,
+                'page_margins' => $options->pageMargins,
+                'network' => $options->allowedHttpRoots === []
+                    ? ['policy' => 'deny']
+                    : ['policy' => 'allow-roots', 'roots' => $options->allowedHttpRoots],
+            ],
+        ];
+        try {
+            $json = json_encode(
+                $manifest,
+                JSON_THROW_ON_ERROR | JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES,
+            )."\n";
+        } catch (JsonException $error) {
+            throw new RuntimeException('cannot encode input bundle manifest', previous: $error);
+        }
+        if (file_put_contents("{$directory}/input-bundle.json", $json, LOCK_EX) === false) {
+            throw new RuntimeException("cannot write {$directory}/input-bundle.json");
+        }
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function lastJsonObject(string $stdout): array
+    {
+        $lines = array_reverse(preg_split('/\R/', trim($stdout)) ?: []);
+        foreach ($lines as $line) {
+            try {
+                $value = json_decode($line, true, flags: JSON_THROW_ON_ERROR);
+                if (is_array($value)) {
+                    return $value;
+                }
+            } catch (JsonException) {
+                continue;
+            }
+        }
+
+        return [];
+    }
+
+    private function isAbsolutePath(string $path): bool
+    {
+        return str_starts_with($path, '/')
+            || str_starts_with($path, '\\\\')
+            || preg_match('/^[A-Za-z]:[\\\\\/]/', $path) === 1;
+    }
+}

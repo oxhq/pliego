@@ -1,0 +1,4 @@
+/.env
+/vendor/
+/storage/app/pliego/*
+!/storage/app/pliego/.gitignore

@@ -1,0 +1,17 @@
+{
+    "name": "oxhq/pliego-php",
+    "description": "Experimental one-shot PHP bridge for the Pliego document engine",
+    "type": "library",
+    "license": "MIT",
+    "require": {
+        "php": "^8.3"
+    },
+    "autoload": {
+        "psr-4": {
+            "Pliego\\Php\\Experimental\\": "src/"
+        }
+    },
+    "scripts": {
+        "test": "@php tests/self_test.php"
+    }
+}

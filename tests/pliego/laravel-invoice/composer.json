@@ -1,0 +1,53 @@
+{
+    "$schema": "https://getcomposer.org/schema.json",
+    "name": "oxhq/pliego-laravel-invoice-fixture",
+    "description": "Pinned Laravel 13 invoice fixture for the experimental Pliego CLI bridge",
+    "type": "project",
+    "license": "MIT",
+    "repositories": [
+        {
+            "type": "path",
+            "url": "../../../sdk/php",
+            "options": {
+                "symlink": true,
+                "versions": {
+                    "oxhq/pliego-php": "0.1.0-alpha"
+                }
+            }
+        },
+        {
+            "type": "path",
+            "url": "../../../sdk/laravel",
+            "options": {
+                "symlink": true,
+                "versions": {
+                    "oxhq/pliego-laravel": "0.1.0-alpha"
+                }
+            }
+        }
+    ],
+    "require": {
+        "php": "^8.3",
+        "laravel/framework": "13.22.0",
+        "oxhq/pliego-laravel": "0.1.0-alpha"
+    },
+    "scripts": {
+        "post-autoload-dump": [
+            "Illuminate\\Foundation\\ComposerScripts::postAutoloadDump",
+            "@php artisan package:discover --ansi"
+        ],
+        "render": "@php artisan pliego:invoice",
+        "verify": "@php verify.php"
+    },
+    "config": {
+        "allow-plugins": {},
+        "optimize-autoloader": true,
+        "platform": {
+            "php": "8.3.0"
+        },
+        "preferred-install": "dist",
+        "sort-packages": true
+    },
+    "minimum-stability": "alpha",
+    "prefer-stable": true
+}

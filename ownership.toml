@@ -57,6 +57,10 @@ pattern = "ports/pliego/**"
 ownership = "pliego"
 
 [[path]]
+pattern = "sdk/**"
+ownership = "pliego"
+
+[[path]]
 pattern = "tests/pliego/**"
 ownership = "pliego"
 
