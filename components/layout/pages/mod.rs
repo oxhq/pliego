@@ -343,6 +343,15 @@ pub(crate) enum BlockPaginationWarning {
         retry_count: u8,
         retry_limit: u8,
     },
+    OversizedTableRowGroupBreakInsideAvoid {
+        child_index: usize,
+        table_node: Option<u64>,
+        row_group_index: usize,
+        block_size: Au,
+        available_block_size: Au,
+        retry_count: u8,
+        retry_limit: u8,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -658,6 +667,11 @@ impl BlockPageBuilder {
             let starting_group = row_groups
                 .get(group_position)
                 .filter(|group| group.first_row_index == position);
+            let avoided_group = starting_group.filter(|group| group.breaks.inside_avoid);
+            let avoided_group_block_size = avoided_group.map(|group| {
+                let last_row = &rows[group.end_row_index - 1];
+                last_row.block_start + last_row.block_size - row.block_start
+            });
             let mut block_start = row.block_start + translation;
             let page_end = self.current_page_origin + self.request.available_block_size;
             let considered_page_index = self.current_page_index;
@@ -670,7 +684,7 @@ impl BlockPageBuilder {
                 LayoutDebugTableConstraint::ForcedBefore
             } else if forced_after {
                 LayoutDebugTableConstraint::ForcedAfter
-            } else if starting_group.is_some_and(|group| group.breaks.inside_avoid) {
+            } else if avoided_group.is_some() {
                 LayoutDebugTableConstraint::AvoidGroup
             } else if row.breaks.inside_avoid {
                 LayoutDebugTableConstraint::AvoidRow
@@ -682,10 +696,8 @@ impl BlockPageBuilder {
                     LayoutDebugTableConstraint::ForcedBefore |
                     LayoutDebugTableConstraint::ForcedAfter => true,
                     LayoutDebugTableConstraint::AvoidGroup => {
-                        let group = starting_group.expect("avoid-group starts at this row");
-                        let last_row = &rows[group.end_row_index - 1];
                         let group_block_size =
-                            last_row.block_start + last_row.block_size - row.block_start;
+                            avoided_group_block_size.expect("avoid-group starts at this row");
                         group_block_size <= self.request.available_block_size
                             && block_start + group_block_size > page_end
                     },
@@ -731,6 +743,18 @@ impl BlockPageBuilder {
 
             if oversized && row.breaks.inside_avoid {
                 self.warn_oversized_table_row_avoid(child_index, table_node, *row);
+            }
+            if let (Some(group), Some(group_block_size)) =
+                (avoided_group, avoided_group_block_size)
+            {
+                if group_block_size > self.request.available_block_size {
+                    self.warn_oversized_table_row_group_avoid(
+                        child_index,
+                        table_node,
+                        *group,
+                        group_block_size,
+                    );
+                }
             }
             let oversized_fragment = oversized.then(|| {
                 cell_fragments
@@ -878,6 +902,11 @@ impl BlockPageBuilder {
             table_page_has_content = true;
             self.include_content_through(block_start + row.block_size);
         }
+
+        self.previous_break_after |= rows.last().is_some_and(|row| row.breaks.after)
+            || row_groups
+                .last()
+                .is_some_and(|group| group.end_row_index == rows.len() && group.breaks.after);
 
         Some(TableChildPlacement {
             row_translations,
@@ -1128,6 +1157,33 @@ impl BlockPageBuilder {
                 row_group_index: row.row_group_index,
                 row_index: row.row_index,
                 block_size: row.block_size,
+                available_block_size: self.request.available_block_size,
+                retry_count: 0,
+                retry_limit: TABLE_ROW_RETRY_LIMIT,
+            },
+        );
+    }
+
+    fn warn_oversized_table_row_group_avoid(
+        &mut self,
+        child_index: usize,
+        table_node: Option<u64>,
+        group: TableRowGroup,
+        block_size: Au,
+    ) {
+        warn!(
+            "paged layout fragmented table child {child_index} row group {} despite break-inside: \
+             avoid (node {table_node:?}, {:.2}px > {:.2}px); split or shorten the row group",
+            group.row_group_index,
+            block_size.to_f32_px(),
+            self.request.available_block_size.to_f32_px(),
+        );
+        self.outcome.warnings.push(
+            BlockPaginationWarning::OversizedTableRowGroupBreakInsideAvoid {
+                child_index,
+                table_node,
+                row_group_index: group.row_group_index,
+                block_size,
                 available_block_size: self.request.available_block_size,
                 retry_count: 0,
                 retry_limit: TABLE_ROW_RETRY_LIMIT,
@@ -1403,6 +1459,23 @@ impl PageSequence {
                         table_node,
                         row_group_index,
                         row_index,
+                        block_size: block_size.to_f32_px(),
+                        available_block_size: available_block_size.to_f32_px(),
+                        retry_count,
+                        retry_limit,
+                    },
+                    BlockPaginationWarning::OversizedTableRowGroupBreakInsideAvoid {
+                        child_index,
+                        table_node,
+                        row_group_index,
+                        block_size,
+                        available_block_size,
+                        retry_count,
+                        retry_limit,
+                    } => LayoutDebugPageWarning::OversizedTableRowGroupBreakInsideAvoid {
+                        child_index,
+                        table_node,
+                        row_group_index,
                         block_size: block_size.to_f32_px(),
                         available_block_size: available_block_size.to_f32_px(),
                         retry_count,
@@ -2185,6 +2258,78 @@ mod tests {
                 .map(|decision| decision.next_row_index)
                 .collect::<Vec<_>>(),
             vec![2, 4]
+        );
+    }
+
+    #[test]
+    fn oversized_avoided_row_group_warns_once_and_propagates_break_after() {
+        let rows = (0..2)
+            .map(|row_index| TableRow {
+                row_index,
+                row_group_index: Some(0),
+                cell_count: 1,
+                block_start: Au::from_px(row_index as i32 * 60),
+                block_size: Au::from_px(60),
+                breaks: ChildPageBreaks::default(),
+            })
+            .collect::<Vec<_>>();
+        let row_groups = [TableRowGroup {
+            row_group_index: 0,
+            first_row_index: 0,
+            end_row_index: rows.len(),
+            breaks: ChildPageBreaks {
+                after: true,
+                inside_avoid: true,
+                ..Default::default()
+            },
+        }];
+        let mut builder = BlockPageBuilder::new(BlockPaginationRequest {
+            available_block_size: Au::from_px(100),
+            page_stride: Au::from_px(120),
+        });
+
+        let placement = builder
+            .place_table_child(
+                0,
+                Some(10),
+                Au::zero(),
+                &rows,
+                &row_groups,
+                &[],
+                ChildPageBreaks::default(),
+            )
+            .expect("an oversized avoided row group falls back to row pagination");
+        assert_eq!(
+            placement.row_translations,
+            vec![Au::zero(), Au::from_px(60)]
+        );
+        assert_eq!(
+            builder.place_child(
+                1,
+                Some(20),
+                Au::from_px(180),
+                Au::from_px(20),
+                Au::from_px(20),
+                ChildPageBreaks::default(),
+            ),
+            BlockBoundaryPlacement::NewPage {
+                block_origin: Au::from_px(240),
+            }
+        );
+
+        assert_eq!(
+            builder.finish().warnings,
+            vec![
+                BlockPaginationWarning::OversizedTableRowGroupBreakInsideAvoid {
+                    child_index: 0,
+                    table_node: Some(10),
+                    row_group_index: 0,
+                    block_size: Au::from_px(120),
+                    available_block_size: Au::from_px(100),
+                    retry_count: 0,
+                    retry_limit: TABLE_ROW_RETRY_LIMIT,
+                },
+            ]
         );
     }
 

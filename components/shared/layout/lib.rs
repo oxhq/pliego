@@ -428,6 +428,15 @@ pub enum LayoutDebugPageWarning {
         retry_count: u8,
         retry_limit: u8,
     },
+    OversizedTableRowGroupBreakInsideAvoid {
+        child_index: usize,
+        table_node: Option<u64>,
+        row_group_index: usize,
+        block_size: f32,
+        available_block_size: f32,
+        retry_count: u8,
+        retry_limit: u8,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]

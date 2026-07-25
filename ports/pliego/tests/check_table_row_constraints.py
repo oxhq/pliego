@@ -53,15 +53,20 @@ def final_summary(result: subprocess.CompletedProcess[str]) -> dict[str, Any]:
     return value
 
 
+def canonical_text(value: str) -> str:
+    return " ".join(value.replace("\f", " ").split())
+
+
 def scene_tokens(scene: dict[str, Any]) -> list[str]:
     pages = scene.get("pages")
     require(isinstance(pages, list), "scene has no pages")
     return [
-        str(operation.get("text", ""))
+        text
         for page in pages
         if isinstance(page, dict)
         for operation in page.get("operations", [])
         if isinstance(operation, dict) and operation.get("type") == "text"
+        if (text := canonical_text(str(operation.get("text", ""))))
     ]
 
 
