@@ -121,18 +121,13 @@ def check_case(
             fail(f"{fixture_name} did not produce {page_count} non-empty pages: {page_sequence!r}")
         normalized = continuation_trace(page_sequence)
         # https://drafts.csswg.org/css-break/#forced-breaks
-        expected_continuations = [
-            (page, "block", page + 1, True, page + 1)
-            for page in range(page_count - 1)
-        ]
+        expected_continuations = [(page, "block", page + 1, True, page + 1) for page in range(page_count - 1)]
         if normalized != expected_continuations:
             fail(f"{fixture_name} forced boundary trace differs: {normalized!r}")
         if structure.get("page_count") != page_count:
             fail(f"{fixture_name} PDF page count differs: {structure!r}")
         pdf_text = [
-            page.get("expected_extracted_unicode")
-            for page in structure.get("pages", [])
-            if isinstance(page, dict)
+            page.get("expected_extracted_unicode") for page in structure.get("pages", []) if isinstance(page, dict)
         ]
         if pdf_text != expected_text:
             fail(f"{fixture_name} PDF page/source order differs: {pdf_text!r}")
@@ -151,19 +146,19 @@ def self_test() -> None:
         ]
     }
     page_sequence = {
-        "continuations": [{
-            "page_index": 0,
-            "token": {
-                "kind": "block",
-                "next_child_index": 1,
-                "forced": True,
-                "resume_page_index": 1,
-            },
-        }]
+        "continuations": [
+            {
+                "page_index": 0,
+                "token": {
+                    "kind": "block",
+                    "next_child_index": 1,
+                    "forced": True,
+                    "resume_page_index": 1,
+                },
+            }
+        ]
     }
-    if scene_page_text(scene) != ["Alpha.", "Beta."] or continuation_trace(page_sequence) != [
-        (0, "block", 1, True, 1)
-    ]:
+    if scene_page_text(scene) != ["Alpha.", "Beta."] or continuation_trace(page_sequence) != [(0, "block", 1, True, 1)]:
         fail("self-test did not retain source order and the forced marker")
 
 

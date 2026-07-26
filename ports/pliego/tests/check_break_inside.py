@@ -68,11 +68,7 @@ def pdf_page_text(structure: dict[str, Any]) -> list[str]:
     pages = structure.get("pages")
     if not isinstance(pages, list):
         fail("PDF structure has no pages array")
-    return [
-        page.get("expected_extracted_unicode", "")
-        for page in pages
-        if isinstance(page, dict)
-    ]
+    return [page.get("expected_extracted_unicode", "") for page in pages if isinstance(page, dict)]
 
 
 def retry_counts(page_sequence: dict[str, Any]) -> list[int]:
@@ -91,11 +87,7 @@ def continuation_tokens(page_sequence: dict[str, Any]) -> list[dict[str, Any]]:
     continuations = page_sequence.get("continuations")
     if not isinstance(continuations, list):
         return []
-    return [
-        item["token"]
-        for item in continuations
-        if isinstance(item, dict) and isinstance(item.get("token"), dict)
-    ]
+    return [item["token"] for item in continuations if isinstance(item, dict) and isinstance(item.get("token"), dict)]
 
 
 def proves_fitting_avoidance(
@@ -254,10 +246,14 @@ def check_oversized(binary: Path, output_root: Path | None) -> None:
     if not isinstance(page_sequence, dict) or len(page_sequence.get("pages", [])) != len(scene_text):
         fail(f"oversized layout/scene page count differs: {page_sequence!r}")
     continuations = page_sequence.get("continuations")
-    if not isinstance(continuations, list) or not continuations or any(
-        continuation.get("token", {}).get("kind") != "inline"
-        for continuation in continuations
-        if isinstance(continuation, dict)
+    if (
+        not isinstance(continuations, list)
+        or not continuations
+        or any(
+            continuation.get("token", {}).get("kind") != "inline"
+            for continuation in continuations
+            if isinstance(continuation, dict)
+        )
     ):
         fail(f"oversized avoided child did not use inline continuation: {continuations!r}")
     warnings = page_sequence.get("warnings")
