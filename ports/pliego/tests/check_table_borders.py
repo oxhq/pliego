@@ -13,6 +13,7 @@ import re
 import subprocess
 import sys
 import tempfile
+from collections import Counter
 from contextlib import redirect_stderr
 from io import StringIO
 from pathlib import Path
@@ -28,6 +29,34 @@ EXPECTED_INLINE_END = 212.0
 BORDER_WIDTH = 2.0
 ROUND_DIGITS = 6
 EPSILON = 10**-ROUND_DIGITS
+FALLBACK_LEAD_TOKEN = "A-LEAD"
+FALLBACK_FITTING_TOKENS = Counter(
+    {
+        "A-H-A": 1,
+        "A-H-B": 1,
+        "A-R-A": 1,
+        "A-R-B": 1,
+    }
+)
+FALLBACK_UNSUPPORTED_TOKEN = "U"
+FALLBACK_FITTING_PAGE_INDEX = 1
+FALLBACK_UNSUPPORTED_PAGE_INDEX = 2
+FALLBACK_FITTING_CHILD_INDEX = 1
+FALLBACK_UNSUPPORTED_CHILD_INDEX = 2
+FALLBACK_BORDER_COLOR = (0.0, 87.0 / 255.0, 184.0 / 255.0, 1.0)
+FALLBACK_BORDER_RECTANGLES = {
+    (10.0, 10.0, 202.0, 2.0),
+    (10.0, 10.0, 2.0, 26.0),
+    (110.0, 12.0, 2.0, 24.0),
+    (210.0, 12.0, 2.0, 24.0),
+    (12.0, 34.0, 100.0, 2.0),
+    (112.0, 34.0, 100.0, 2.0),
+    (10.0, 36.0, 2.0, 32.0),
+    (110.0, 36.0, 2.0, 32.0),
+    (210.0, 36.0, 2.0, 32.0),
+    (12.0, 66.0, 100.0, 2.0),
+    (112.0, 66.0, 100.0, 2.0),
+}
 
 
 def fail(message: str, code: int = 1) -> None:
@@ -108,9 +137,55 @@ def rectangle(operation: dict[str, Any], page_index: int) -> tuple[float, float,
     return values
 
 
+def rectangle_path_data(bounds: tuple[float, float, float, float]) -> str:
+    x, y, width, height = bounds
+    return f"M{x:g} {y:g}h{width:g}v{height:g}h-{width:g}z"
+
+
+def fallback_rectangle(
+    operation: dict[str, Any],
+    page_index: int,
+) -> tuple[float, float, float, float]:
+    bounds = rectangle(operation, page_index)
+    require(
+        operation.get("data") == rectangle_path_data(bounds),
+        f"page {page_index} fallback border path data differs",
+    )
+    require(
+        operation.get("fill_rule") == "non_zero",
+        f"page {page_index} fallback border fill rule differs",
+    )
+    require(
+        operation.get("meta")
+        == {
+            "semantics": {
+                "role": "artifact",
+                "label": "table-border",
+            }
+        },
+        f"page {page_index} fallback border semantics differ",
+    )
+    fill = operation["fill"]
+    require(
+        set(fill) == {"r", "g", "b", "a"}
+        and all(
+            math.isclose(
+                number(fill.get(channel), f"page {page_index} fallback border {channel}"),
+                expected,
+                abs_tol=EPSILON,
+            )
+            for channel, expected in zip(("r", "g", "b", "a"), FALLBACK_BORDER_COLOR)
+        ),
+        f"page {page_index} fallback border color differs: {fill!r}",
+    )
+    return bounds
+
+
 def page_mode(operations: list[dict[str, Any]], page_index: int) -> tuple[str, str]:
     text = [
-        canonical_text(str(operation.get("text", ""))) for operation in operations if operation.get("type") == "text"
+        canonical_text(str(operation.get("text", "")))
+        for operation in operations
+        if operation.get("type") == "text"
     ]
     modes = {
         (mode, prefix)
@@ -258,7 +333,12 @@ def border_geometry(scene: dict[str, Any]) -> list[tuple[Any, ...]]:
             if operation.get("type") == "text"
             and re.fullmatch(rf"{prefix}-R[0-6]-[AB]", canonical_text(str(operation.get("text", ""))))
         ]
-        require(len(headers) == 2, f"page {page_index} does not contain one repeated header")
+        header_text = Counter(token for token in text if token.startswith(f"{prefix}-H-"))
+        expected_headers = Counter({f"{prefix}-H-A": 1, f"{prefix}-H-B": 1})
+        require(
+            header_text == expected_headers,
+            f"page {page_index} repeated header identity differs: {header_text!r}",
+        )
         require(bool(body) and len(body) % 2 == 0, f"page {page_index} contains incomplete body rows")
         body_text[mode].extend(canonical_text(str(operation.get("text", ""))) for operation in body)
 
@@ -335,47 +415,150 @@ def verify(
 def verify_fallback_capture(scene: dict[str, Any], layout: dict[str, Any]) -> None:
     pages = scene.get("pages")
     require(isinstance(pages, list), "fallback scene has no pages")
-    fitting_pages = 0
-    unsupported_text = set()
+    fitting_text = Counter()
+    lead_pages = []
+    unsupported_pages = []
     for page_index, page in enumerate(pages):
         require(isinstance(page, dict), f"fallback page {page_index} is not an object")
         operations = page.get("operations")
         require(isinstance(operations, list), f"fallback page {page_index} has no operations")
         objects = [operation for operation in operations if isinstance(operation, dict)]
-        text = {
-            canonical_text(str(operation.get("text", "")))
-            for operation in objects
-            if operation.get("type") == "text"
-        }
+        text = Counter(
+            canonical_text(str(operation.get("text", ""))) for operation in objects if operation.get("type") == "text"
+        )
         paths = [operation for operation in objects if operation.get("type") == "path"]
-        if text.intersection({"A-H-A", "A-H-B", "A-R-A", "A-R-B"}):
-            fitting_pages += 1
+        page_fitting_text = Counter(
+            {
+                token: count
+                for token, count in text.items()
+                if token.startswith(("A-H-", "A-R-"))
+            }
+        )
+        if page_fitting_text:
+            fitting_text.update(page_fitting_text)
             require(
-                len(paths) == 11,
-                f"fitting break-inside:avoid grid/cell border capture differs: {len(paths)}",
+                page_index == FALLBACK_FITTING_PAGE_INDEX,
+                f"fitting break-inside:avoid table remained on page {page_index}",
             )
-        page_unsupported = {token for token in text if token == "U"}
-        if page_unsupported:
-            unsupported_text.update(page_unsupported)
             require(
-                not paths,
-                f"fallback page {page_index} emitted borders for unsupported no-thead table",
+                page_fitting_text == FALLBACK_FITTING_TOKENS,
+                f"fitting table text differs: {page_fitting_text!r}",
             )
-    require(fitting_pages == 1, f"fitting table occupied {fitting_pages} pages")
-    require(unsupported_text == {"U"}, "unsupported text differs")
+            rectangles = [fallback_rectangle(operation, page_index) for operation in paths]
+            require(
+                len(rectangles) == len(FALLBACK_BORDER_RECTANGLES) and len(rectangles) == len(set(rectangles)),
+                f"fitting table borders are duplicated or incomplete: {rectangles!r}",
+            )
+            require(
+                set(rectangles) == FALLBACK_BORDER_RECTANGLES,
+                f"fitting table border geometry differs: {sorted(rectangles)!r}",
+            )
+        else:
+            require(not paths, f"fallback page {page_index} contains unexpected paths")
+        if text[FALLBACK_LEAD_TOKEN]:
+            require(
+                text[FALLBACK_LEAD_TOKEN] == 1,
+                f"fallback page {page_index} duplicates lead text",
+            )
+            lead_pages.append(page_index)
+        if text[FALLBACK_UNSUPPORTED_TOKEN]:
+            require(
+                text[FALLBACK_UNSUPPORTED_TOKEN] == 1,
+                f"fallback page {page_index} duplicates unsupported text",
+            )
+            unsupported_pages.append(page_index)
+    require(fitting_text == FALLBACK_FITTING_TOKENS, f"fitting table text differs: {fitting_text!r}")
+    require(lead_pages == [0], f"lead content page differs: {lead_pages!r}")
+    require(
+        unsupported_pages == [FALLBACK_UNSUPPORTED_PAGE_INDEX],
+        f"unsupported text page differs: {unsupported_pages!r}",
+    )
 
     page_sequence = layout.get("page_sequence")
     require(isinstance(page_sequence, dict), "fallback layout has no page sequence")
+    continuations = page_sequence.get("continuations")
+    require(isinstance(continuations, list), "fallback layout has no typed continuations")
+    require(
+        len(continuations) == 2,
+        f"fallback layout continuation count differs: {continuations!r}",
+    )
+
+    def block_continuation(
+        source_page_index: int,
+        child_index: int,
+        resume_page_index: int,
+        *,
+        forced: bool,
+        break_inside_avoid: bool,
+        retry_count: int,
+    ) -> int:
+        matches = [
+            continuation
+            for continuation in continuations
+            if isinstance(continuation, dict) and continuation.get("page_index") == source_page_index
+        ]
+        require(
+            len(matches) == 1,
+            f"fallback page {source_page_index} continuation differs: {matches!r}",
+        )
+        token = matches[0].get("token")
+        require(isinstance(token, dict), f"fallback page {source_page_index} token is absent")
+        node = token.get("next_node")
+        require(
+            isinstance(node, int) and not isinstance(node, bool),
+            f"fallback child {child_index} has no node identity",
+        )
+        require(
+            token
+            == {
+                "kind": "block",
+                "next_child_index": child_index,
+                "next_node": node,
+                "forced": forced,
+                "break_inside_avoid": break_inside_avoid,
+                "retry_count": retry_count,
+                "resume_page_index": resume_page_index,
+            },
+            f"fallback child {child_index} continuation differs: {token!r}",
+        )
+        return node
+
+    fitting_node = block_continuation(
+        0,
+        FALLBACK_FITTING_CHILD_INDEX,
+        FALLBACK_FITTING_PAGE_INDEX,
+        forced=False,
+        break_inside_avoid=True,
+        retry_count=1,
+    )
+    unsupported_node = block_continuation(
+        FALLBACK_FITTING_PAGE_INDEX,
+        FALLBACK_UNSUPPORTED_CHILD_INDEX,
+        FALLBACK_UNSUPPORTED_PAGE_INDEX,
+        forced=True,
+        break_inside_avoid=False,
+        retry_count=0,
+    )
+    require(fitting_node != unsupported_node, "fallback tables share one node identity")
+
     warnings = page_sequence.get("warnings")
     require(isinstance(warnings, list), "fallback layout has no typed warnings")
+    unsupported_warnings = [
+        warning
+        for warning in warnings
+        if isinstance(warning, dict) and warning.get("kind") == "unsupported-table-group-pagination"
+    ]
     require(
-        any(
-            isinstance(warning, dict)
-            and warning.get("kind") == "unsupported-table-group-pagination"
-            and warning.get("reason") == "unsupported-layout"
-            for warning in warnings
-        ),
-        f"no-thead table has no typed unsupported fallback: {warnings!r}",
+        unsupported_warnings
+        == [
+            {
+                "kind": "unsupported-table-group-pagination",
+                "child_index": FALLBACK_UNSUPPORTED_CHILD_INDEX,
+                "table_node": unsupported_node,
+                "reason": "unsupported-layout",
+            }
+        ],
+        f"unsupported table warning is absent or targets another table: {unsupported_warnings!r}",
     )
 
 
@@ -389,6 +572,22 @@ def self_test() -> None:
             "bounds": {"x": x, "y": y, "width": width, "height": height},
             "data": f"M{x} {y}h{width}v{height}h-{width}z",
             "fill": {"r": 0.1, "g": 0.2, "b": 0.3, "a": 1.0},
+        }
+
+    def fallback_path(bounds: tuple[float, float, float, float]) -> dict[str, Any]:
+        x, y, width, height = bounds
+        return {
+            "type": "path",
+            "bounds": {"x": x, "y": y, "width": width, "height": height},
+            "data": rectangle_path_data(bounds),
+            "fill": dict(zip(("r", "g", "b", "a"), FALLBACK_BORDER_COLOR)),
+            "fill_rule": "non_zero",
+            "meta": {
+                "semantics": {
+                    "role": "artifact",
+                    "label": "table-border",
+                }
+            },
         }
 
     def fragment(prefix: str, top: float, rows: list[int]) -> dict[str, Any]:
@@ -446,10 +645,15 @@ def self_test() -> None:
             if operation.get("type") == "path" and bounds.get("x") == 210.0:
                 bounds["x"] -= 60.0
                 bounds["height"] -= 60.0
+    duplicate_header = copy.deepcopy(first)
+    for operation in duplicate_header["pages"][0]["operations"]:
+        if operation.get("type") == "text" and operation.get("text") == "C-H-B":
+            operation["text"] = "C-H-A"
 
     for broken, description in [
         (zero_path, "zero-path table continuation"),
         (shifted, "shifted and shortened right edge"),
+        (duplicate_header, "duplicate H-A and missing H-B"),
     ]:
         with redirect_stderr(StringIO()):
             try:
@@ -460,33 +664,115 @@ def self_test() -> None:
 
     fallback_scene = {
         "pages": [
+            {"operations": [text(FALLBACK_LEAD_TOKEN, 10.0)]},
             {
                 "operations": [
                     text("A-H-A", 12.0),
                     text("A-H-B", 12.0),
                     text("A-R-A", 38.0),
                     text("A-R-B", 38.0),
-                    *[path(10.0 + index, 0.0, 202.0, 2.0) for index in range(11)],
+                    *[fallback_path(bounds) for bounds in sorted(FALLBACK_BORDER_RECTANGLES)],
                 ]
             },
-            {
-                "operations": [text("U", 10.0)]
-            },
+            {"operations": [text(FALLBACK_UNSUPPORTED_TOKEN, 10.0)]},
+            {"operations": []},
         ]
     }
+    fitting_node = 101
+    unsupported_node = 102
     fallback_layout = {
         "page_sequence": {
+            "continuations": [
+                {
+                    "page_index": 0,
+                    "token": {
+                        "kind": "block",
+                        "next_child_index": FALLBACK_FITTING_CHILD_INDEX,
+                        "next_node": fitting_node,
+                        "forced": False,
+                        "break_inside_avoid": True,
+                        "retry_count": 1,
+                        "resume_page_index": FALLBACK_FITTING_PAGE_INDEX,
+                    },
+                },
+                {
+                    "page_index": FALLBACK_FITTING_PAGE_INDEX,
+                    "token": {
+                        "kind": "block",
+                        "next_child_index": FALLBACK_UNSUPPORTED_CHILD_INDEX,
+                        "next_node": unsupported_node,
+                        "forced": True,
+                        "break_inside_avoid": False,
+                        "retry_count": 0,
+                        "resume_page_index": FALLBACK_UNSUPPORTED_PAGE_INDEX,
+                    },
+                },
+            ],
             "warnings": [
                 {
                     "kind": "unsupported-table-group-pagination",
+                    "child_index": FALLBACK_UNSUPPORTED_CHILD_INDEX,
+                    "table_node": unsupported_node,
                     "reason": "unsupported-layout",
                 }
-            ]
+            ],
         }
     }
     verify_fallback_capture(fallback_scene, fallback_layout)
+
+    malformed_fallback = copy.deepcopy(fallback_scene)
+    malformed_fallback["pages"][FALLBACK_FITTING_PAGE_INDEX]["operations"] = [
+        text("A-H-A", 12.0),
+        *[{"type": "path"} for _ in range(11)],
+    ]
+    wrong_position = copy.deepcopy(fallback_scene)
+    wrong_position_path = wrong_position["pages"][FALLBACK_FITTING_PAGE_INDEX]["operations"][4]
+    wrong_position_path["bounds"]["x"] += 1.0
+    wrong_position_path["data"] = rectangle_path_data(
+        tuple(wrong_position_path["bounds"][field] for field in ("x", "y", "width", "height"))
+    )
+    wrong_thickness = copy.deepcopy(fallback_scene)
+    wrong_thickness_path = wrong_thickness["pages"][FALLBACK_FITTING_PAGE_INDEX]["operations"][4]
+    wrong_thickness_path["bounds"]["height"] = 1.0
+    wrong_thickness_path["data"] = rectangle_path_data(
+        tuple(wrong_thickness_path["bounds"][field] for field in ("x", "y", "width", "height"))
+    )
+    wrong_color = copy.deepcopy(fallback_scene)
+    wrong_color["pages"][FALLBACK_FITTING_PAGE_INDEX]["operations"][4]["fill"]["g"] = 0.0
+    wrong_semantics = copy.deepcopy(fallback_scene)
+    wrong_semantics["pages"][FALLBACK_FITTING_PAGE_INDEX]["operations"][4]["meta"]["semantics"]["label"] = (
+        "not-a-table-border"
+    )
+    duplicate_border = copy.deepcopy(fallback_scene)
+    duplicate_border["pages"][FALLBACK_FITTING_PAGE_INDEX]["operations"][4] = copy.deepcopy(
+        duplicate_border["pages"][FALLBACK_FITTING_PAGE_INDEX]["operations"][5]
+    )
+    wrong_warning = copy.deepcopy(fallback_layout)
+    wrong_warning["page_sequence"]["warnings"][0]["table_node"] = fitting_node
+    wrong_continuation = copy.deepcopy(fallback_layout)
+    wrong_continuation["page_sequence"]["continuations"][0]["token"]["break_inside_avoid"] = False
+
+    for broken_scene, broken_layout, description in [
+        (malformed_fallback, fallback_layout, "missing fitting cells plus arbitrary paths"),
+        (wrong_position, fallback_layout, "shifted fitting border"),
+        (wrong_thickness, fallback_layout, "wrong fitting border thickness"),
+        (wrong_color, fallback_layout, "wrong fitting border color"),
+        (wrong_semantics, fallback_layout, "wrong fitting border semantics"),
+        (duplicate_border, fallback_layout, "duplicate fitting border"),
+        (fallback_scene, wrong_warning, "warning for another table"),
+        (fallback_scene, wrong_continuation, "missing generic avoid placement"),
+    ]:
+        with redirect_stderr(StringIO()):
+            try:
+                verify_fallback_capture(broken_scene, broken_layout)
+            except SystemExit:
+                continue
+        fail(f"self-test accepted {description}")
+
     leaked_fallback = copy.deepcopy(fallback_scene)
-    leaked_fallback["pages"][1]["operations"].append(path(10.0, 0.0, 2.0, 140.0))
+    leaked_fallback["pages"][FALLBACK_UNSUPPORTED_PAGE_INDEX]["operations"].append(
+        fallback_path((10.0, 0.0, 2.0, 120.0))
+    )
     with redirect_stderr(StringIO()):
         try:
             verify_fallback_capture(leaked_fallback, fallback_layout)
