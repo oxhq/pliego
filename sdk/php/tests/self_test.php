@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 use Pliego\Php\Experimental\CliRenderer;
 use Pliego\Php\Experimental\Exception\EngineRenderException;
+use Pliego\Php\Experimental\Exception\InvalidRequestException;
 use Pliego\Php\Experimental\RenderOptions;
 
 require dirname(__DIR__).'/vendor/autoload.php';
@@ -56,6 +57,48 @@ expect($command['cwd'] === realpath("{$root}/input"), 'engine runs inside the in
 expect($command['options']['--timezone'] === ['PST8PDT'], 'timezone reaches the CLI');
 expect(!isset($command['options']['--allow-http-root']), 'deny mode adds no network roots');
 
+$allowed = $renderer->render(
+    '<p>FILL_STDERR</p>',
+    "{$root}/allowed-input",
+    "{$root}/allowed.pdf",
+    "{$root}/allowed-artifacts",
+    new RenderOptions(allowedHttpRoots: ['https://example.test/assets']),
+    ['assets/test.txt' => $asset],
+);
+expect(str_starts_with($allowed->bytes(), '%PDF-1.7'), 'large stderr cannot deadlock success');
+$allowedManifest = json_decode(
+    (string) file_get_contents("{$root}/allowed-input/input-bundle.json"),
+    true,
+    flags: JSON_THROW_ON_ERROR,
+);
+expect(
+    $allowedManifest['environment']['network']['roots'] === ['https://example.test/assets/'],
+    'HTTP root is normalized in retained input',
+);
+$allowedCommand = json_decode(
+    (string) file_get_contents("{$root}/allowed-artifacts/command.json"),
+    true,
+    flags: JSON_THROW_ON_ERROR,
+);
+expect(
+    $allowedCommand['options']['--allow-http-root'] === ['https://example.test/assets/'],
+    'normalized HTTP root reaches the CLI',
+);
+
+foreach ([
+    'https://user:secret@example.test/assets/',
+    'https://example.test/assets/?token=secret',
+    'https://example.test/assets/#secret',
+    'https:///missing-host/',
+] as $invalidRoot) {
+    try {
+        new RenderOptions(allowedHttpRoots: [$invalidRoot]);
+        throw new RuntimeException('expected the unsafe HTTP root to fail');
+    } catch (InvalidArgumentException $error) {
+        expect(str_contains($error->getMessage(), 'HTTP roots'), 'unsafe HTTP root is rejected');
+    }
+}
+
 try {
     $renderer->render(
         'FAIL_ENGINE',
@@ -69,6 +112,19 @@ try {
     expect($error->errorCode === 'RESOURCE_DENIED', 'engine code is mapped');
     expect($error->exitCode === 1, 'engine exit code is mapped');
     expect(str_contains($error->stderr, 'RESOURCE_DENIED'), 'engine stderr is retained');
+}
+
+try {
+    $renderer->render(
+        '<p>invalid request</p>',
+        "{$root}/invalid-input",
+        "{$root}/invalid.pdf",
+        "{$root}/invalid-artifacts",
+    );
+    throw new RuntimeException('expected the invalid request');
+} catch (InvalidRequestException $error) {
+    expect($error->errorCode === 'INVALID_REQUEST', 'invalid request code is mapped');
+    expect($error->exitCode === 2, 'invalid request exit code is mapped');
 }
 
 try {
@@ -110,6 +166,21 @@ try {
     throw new RuntimeException('expected the normalized duplicate asset path to fail');
 } catch (InvalidArgumentException $error) {
     expect(str_contains($error->getMessage(), 'duplicate'), 'portable asset collision is rejected');
+}
+
+foreach (['document.html::$DATA', 'document.html.', 'NUL', 'assets/aux.txt'] as $index => $unsafe) {
+    try {
+        $renderer->render(
+            '<p>portable path</p>',
+            "{$root}/portable-input-{$index}",
+            "{$root}/portable-{$index}.pdf",
+            "{$root}/portable-artifacts-{$index}",
+            assets: [$unsafe => $asset],
+        );
+        throw new RuntimeException('expected the nonportable asset path to fail');
+    } catch (InvalidArgumentException $error) {
+        expect(str_contains($error->getMessage(), 'unsafe'), 'nonportable bundle path is rejected');
+    }
 }
 
 echo "Pliego PHP experimental bridge self-test passed; evidence retained at {$root}\n";

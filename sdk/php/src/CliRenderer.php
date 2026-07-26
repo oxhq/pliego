@@ -72,27 +72,43 @@ final readonly class CliRenderer
             $arguments[] = $root;
         }
 
+        $stdoutFile = tmpfile();
+        $stderrFile = tmpfile();
+        if (!is_resource($stdoutFile) || !is_resource($stderrFile)) {
+            if (is_resource($stdoutFile)) {
+                fclose($stdoutFile);
+            }
+            if (is_resource($stderrFile)) {
+                fclose($stderrFile);
+            }
+            throw new RuntimeException('cannot create Pliego process output streams');
+        }
+
         $pipes = [];
         $process = proc_open(
             $arguments,
             [
                 0 => ['pipe', 'r'],
-                1 => ['pipe', 'w'],
-                2 => ['pipe', 'w'],
+                1 => $stdoutFile,
+                2 => $stderrFile,
             ],
             $pipes,
             $inputBundle,
         );
         if (!is_resource($process)) {
+            fclose($stdoutFile);
+            fclose($stderrFile);
             throw new RuntimeException('cannot start the Pliego process');
         }
 
         fclose($pipes[0]);
-        $stdout = stream_get_contents($pipes[1]);
-        $stderr = stream_get_contents($pipes[2]);
-        fclose($pipes[1]);
-        fclose($pipes[2]);
         $exitCode = proc_close($process);
+        rewind($stdoutFile);
+        rewind($stderrFile);
+        $stdout = stream_get_contents($stdoutFile);
+        $stderr = stream_get_contents($stderrFile);
+        fclose($stdoutFile);
+        fclose($stderrFile);
         $metadata = $this->lastJsonObject($stdout === false ? '' : $stdout);
 
         if ($exitCode !== 0 || ($metadata['status'] ?? null) !== 'rendered') {
@@ -146,9 +162,19 @@ final readonly class CliRenderer
             $parts = explode('/', $relative);
             if (
                 $relative === ''
+                || str_contains($relative, "\0")
+                || str_contains($relative, ':')
                 || str_starts_with($relative, '/')
                 || preg_match('/^[A-Za-z]:/', $relative) === 1
                 || array_intersect($parts, ['', '.', '..']) !== []
+                || array_filter($parts, static fn (string $part): bool => $part !== rtrim($part, ". ")) !== []
+                || array_filter(
+                    $parts,
+                    static fn (string $part): bool => preg_match(
+                        '/^(?:CON|PRN|AUX|NUL|CLOCK\\$|COM[1-9]|LPT[1-9])(?:\\.|$)/i',
+                        $part,
+                    ) === 1,
+                )
             ) {
                 throw new InvalidArgumentException("unsafe bundle asset path: {$relative}");
             }
@@ -166,8 +192,14 @@ final readonly class CliRenderer
             if (!is_dir($parent) && !mkdir($parent, 0700, true)) {
                 throw new RuntimeException("cannot create bundle directory {$parent}");
             }
+            if (file_exists($destination)) {
+                throw new InvalidArgumentException("bundle asset destination already exists: {$relative}");
+            }
             if (!copy($source, $destination)) {
                 throw new RuntimeException("cannot copy bundle asset {$source}");
+            }
+            if (!is_file($destination)) {
+                throw new RuntimeException("bundle asset did not create a regular file: {$relative}");
             }
             $manifestAssets[$relative] = [
                 'bytes' => filesize($destination),

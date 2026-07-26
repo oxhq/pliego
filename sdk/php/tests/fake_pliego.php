@@ -30,6 +30,9 @@ if (str_contains($html, 'FAIL_ENGINE')) {
     fwrite(STDERR, "pliego: RESOURCE_DENIED: synthetic denial\n");
     exit(1);
 }
+if (str_contains($html, 'FILL_STDERR')) {
+    fwrite(STDERR, str_repeat('x', 1024 * 1024));
+}
 
 $output = $options['--output'][0] ?? null;
 $artifacts = $options['--artifacts'][0] ?? null;
