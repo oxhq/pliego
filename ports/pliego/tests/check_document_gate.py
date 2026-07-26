@@ -6,6 +6,7 @@
 
 import base64
 import hashlib
+import io
 import json
 import math
 import os
@@ -15,6 +16,7 @@ import shutil
 import subprocess
 import sys
 import time
+from contextlib import redirect_stderr
 from pathlib import Path
 from typing import Any
 
@@ -316,8 +318,8 @@ def verify_horizontal_seams(
         levels.setdefault(round(y + height / 2, 3), []).append((x, x + width))
     footer_rows = 1 if page_index + 1 == int(fixture["expected_pages"]) and fixture["footer"] else 0
     require(
-        len(levels) >= int(fixture["rows_per_page"]) + 2 + footer_rows,
-        f"{fixture['name']} page {page_index} omits table row seams",
+        len(levels) == int(fixture["rows_per_page"]) + 2 + footer_rows,
+        f"{fixture['name']} page {page_index} table row seam count differs",
     )
     for level, intervals in levels.items():
         ordered = sorted(intervals)
@@ -1107,6 +1109,20 @@ def self_test(directory: Path) -> None:
             verify_scene_and_trace(scene, layout, fixture) == {"font:ahem"},
             f"{fixture['name']} self-test font identity differs",
         )
+    fixture = manifest["fixtures"][0]
+    scene, layout = synthetic_scene_and_layout(fixture)
+    boundaries = [float(value) for value in fixture["column_boundaries"]]
+    operations = scene["pages"][0]["operations"]
+    for left, right in zip(boundaries[:-1], boundaries[1:], strict=True):
+        operations.append(synthetic_path(left, 499.5, right - left, 1.0))
+    error_output = io.StringIO()
+    try:
+        with redirect_stderr(error_output):
+            verify_scene_and_trace(scene, layout, fixture)
+    except SystemExit:
+        require("table row seam count differs" in error_output.getvalue(), "extra-seam failure differs")
+    else:
+        fail("extra table row seam was accepted")
     report = benchmark_report(["self-test"], "self-test", manifest, [])
     require(
         report["schema"] == BENCHMARK_SCHEMA
