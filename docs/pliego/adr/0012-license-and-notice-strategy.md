@@ -34,8 +34,11 @@ modifies MPL-covered code remains MPL-2.0 and is not eligible for the MIT defaul
   ships a package-local copy of the MIT license.
 - Imported code records its provenance and keeps every notice required by its source license.
 
-Do not mass-rewrite inherited headers. The first SDK package will add the MIT text and the smallest
-path-scoped tidy rule needed for `sdk/**`; no SDK source exists yet.
+Do not mass-rewrite inherited headers. Two experimental SDK packages now exist:
+[`sdk/php`](../../../sdk/php) and [`sdk/laravel`](../../../sdk/laravel). Each Composer package
+declares MIT and ships a package-local MIT license. The file-level rule above remains controlling:
+independently authored SDK files use the MIT boundary, while any file that copies or modifies
+MPL-covered code remains MPL-2.0.
 
 ### Contributions
 

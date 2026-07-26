@@ -61,3 +61,8 @@ the input bundle and all Pliego artifacts under the configured work directory.
 This slice intentionally omits queues, daemon reuse, automatic binary install,
 browser fallback, stable SDK compatibility, and worker lifecycle management.
 Add those only with the M8 protocol.
+
+The fixed-scope M4 commercial validation boundary is documented in the
+[production-document design-partner offer](./design-partner-offer.md). Its
+[redacted validation ledger](./design-partner-validation-ledger.md) separates
+paid evidence from interest and does not authorize outreach.
