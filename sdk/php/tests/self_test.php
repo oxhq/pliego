@@ -84,4 +84,32 @@ try {
     expect(str_contains($error->getMessage(), 'unsafe bundle asset path'), 'path escape is rejected');
 }
 
+foreach (['document.html', 'INPUT-BUNDLE.JSON'] as $index => $reserved) {
+    try {
+        $renderer->render(
+            '<p>reserved</p>',
+            "{$root}/reserved-input-{$index}",
+            "{$root}/reserved-{$index}.pdf",
+            "{$root}/reserved-artifacts-{$index}",
+            assets: [$reserved => $asset],
+        );
+        throw new RuntimeException('expected the reserved asset path to fail');
+    } catch (InvalidArgumentException $error) {
+        expect(str_contains($error->getMessage(), 'reserved'), 'reserved bundle file is protected');
+    }
+}
+
+try {
+    $renderer->render(
+        '<p>duplicate</p>',
+        "{$root}/duplicate-input",
+        "{$root}/duplicate.pdf",
+        "{$root}/duplicate-artifacts",
+        assets: ['assets\same.txt' => $asset, 'assets/same.txt' => $asset],
+    );
+    throw new RuntimeException('expected the normalized duplicate asset path to fail');
+} catch (InvalidArgumentException $error) {
+    expect(str_contains($error->getMessage(), 'duplicate'), 'portable asset collision is rejected');
+}
+
 echo "Pliego PHP experimental bridge self-test passed; evidence retained at {$root}\n";

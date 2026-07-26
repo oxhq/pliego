@@ -136,8 +136,12 @@ final readonly class CliRenderer
         }
 
         $manifestAssets = [];
+        $bundlePaths = ['document.html' => true, 'input-bundle.json' => true];
         ksort($assets, SORT_STRING);
         foreach ($assets as $relative => $source) {
+            if (!is_string($relative) || !is_string($source)) {
+                throw new InvalidArgumentException('bundle asset paths and sources must be strings');
+            }
             $relative = str_replace('\\', '/', $relative);
             $parts = explode('/', $relative);
             if (
@@ -148,6 +152,11 @@ final readonly class CliRenderer
             ) {
                 throw new InvalidArgumentException("unsafe bundle asset path: {$relative}");
             }
+            $portablePath = strtolower($relative);
+            if (isset($bundlePaths[$portablePath])) {
+                throw new InvalidArgumentException("reserved or duplicate bundle asset path: {$relative}");
+            }
+            $bundlePaths[$portablePath] = true;
             if (!is_file($source)) {
                 throw new InvalidArgumentException("bundle asset is not a file: {$source}");
             }
