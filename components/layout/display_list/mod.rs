@@ -877,7 +877,7 @@ impl PaintTraversalHandler for DisplayListBuilder<'_> {
         if let Some(rows) = separate_table_grid_border_rows(fragment, state.origin) {
             for (row, borders) in rows {
                 self.debug_capture
-                    .record_table_borders(row, row.base.tag, state, borders);
+                    .record_table_borders(&row, row.base.tag, state, borders);
             }
         }
         BuilderForBoxFragment::new(fragment, state.origin).build(self, state)
@@ -2478,10 +2478,10 @@ fn separate_table_cell_borders(
     borders
 }
 
-fn separate_table_grid_border_rows<'a>(
-    fragment: &BoxFragmentWithStyle<'a>,
+fn separate_table_grid_border_rows(
+    fragment: &BoxFragmentWithStyle<'_>,
     containing_block_origin: PhysicalPoint<Au>,
-) -> Option<Vec<(&'a Arc<BoxFragment>, Vec<LayoutDebugTableBorder>)>> {
+) -> Option<Vec<(Arc<BoxFragment>, Vec<LayoutDebugTableBorder>)>> {
     if !fragment.box_fragment.captures_table_borders() ||
         !fragment.box_fragment.is_table_grid() ||
         crate::flow::separate_table_border_profile(fragment.box_fragment) != Some(true)
@@ -2503,7 +2503,7 @@ fn separate_table_grid_border_rows<'a>(
             Some(SpecificLayoutInfo::TableRow { row_index, .. }) => {
                 rows.push((
                     *row_index,
-                    child,
+                    Arc::clone(child),
                     child.content_rect().translate(grid_origin.to_vector()),
                 ));
             },
@@ -2513,14 +2513,13 @@ fn separate_table_grid_border_rows<'a>(
                     let Fragment::Box(row) = row else {
                         return None;
                     };
-                    let Some(SpecificLayoutInfo::TableRow { row_index, .. }) =
-                        row.specific_layout_info().as_deref()
-                    else {
-                        return None;
+                    let row_index = match row.specific_layout_info().as_deref() {
+                        Some(SpecificLayoutInfo::TableRow { row_index, .. }) => *row_index,
+                        _ => return None,
                     };
                     rows.push((
-                        *row_index,
-                        row,
+                        row_index,
+                        Arc::clone(row),
                         row.content_rect().translate(group_origin.to_vector()),
                     ));
                 }

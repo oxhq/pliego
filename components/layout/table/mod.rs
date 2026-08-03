@@ -78,6 +78,7 @@ use euclid::{Point2D, Size2D, UnknownUnit, Vector2D};
 use malloc_size_of_derive::MallocSizeOf;
 use script::layout_dom::{ServoDangerousStyleElement, ServoLayoutNode};
 use servo_arc::Arc;
+use style::Zero;
 use style::color::ColorSpace;
 use style::context::SharedStyleContext;
 use style::properties::ComputedValues;
