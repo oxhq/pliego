@@ -492,7 +492,7 @@ fn expands_retained_filled_and_stroked_svg_path_for_both_backends() {
         &data[start..start + 4]
     };
     assert_eq!(pixel(60, 30), [0, 0, 0, 255]);
-    assert_eq!(pixel(48, 18), [0, 0, 0, 0]);
+    assert_eq!(pixel(48, 18), [255, 255, 255, 255]);
 
     let pdf = render_document_pdf(&captured.scene, |_| None, |_| None).unwrap();
     assert!(pdf.starts_with(b"%PDF-"));

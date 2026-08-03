@@ -103,7 +103,7 @@ fn preserves_chart_vectors_and_bounds_one_pixel_fallback_repeatably() {
     };
     assert_eq!(rgba(6, 4), [255, 0, 0, 255]);
     assert_eq!(rgba(7, 4), [0, 255, 0, 255]);
-    assert_eq!(rgba(5, 4), [0, 0, 0, 0]);
+    assert_eq!(rgba(5, 4), [255, 255, 255, 255]);
 }
 
 #[test]

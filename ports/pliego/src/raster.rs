@@ -7,7 +7,7 @@ use std::fmt;
 use std::io::Cursor;
 use std::sync::Arc;
 
-use vello_cpu::color::palette::css::BLACK;
+use vello_cpu::color::palette::css::{BLACK, WHITE};
 use vello_cpu::color::{AlphaColor, Srgb};
 use vello_cpu::kurbo::{Affine, BezPath, Rect as KurboRect, Stroke as KurboStroke};
 use vello_cpu::peniko::{self, Blob, FontData};
@@ -219,6 +219,13 @@ fn render_page_png<'font, 'image>(
         },
     );
     let mut resources = Resources::new();
+    context.set_paint(WHITE);
+    context.fill_rect(&KurboRect::new(
+        0.0,
+        0.0,
+        f64::from(width),
+        f64::from(height),
+    ));
     context.set_paint(BLACK);
 
     for (index, operation) in page.operations.iter().enumerate() {

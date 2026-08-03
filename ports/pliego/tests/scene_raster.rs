@@ -115,40 +115,20 @@ fn render_image(image: &[u8]) -> Result<Vec<u8>, RasterError> {
 
 #[test]
 fn rasterizes_positioned_glyphs_without_dom_layout_or_shaping() {
-    let mut scene = text_scene();
-    scene.pages[0].operations.insert(
-        0,
-        Operation::Path {
-            bounds: Rect {
-                x: 2.0,
-                y: 2.0,
-                width: 12.0,
-                height: 12.0,
-            },
-            data: "M2 2h12v12H2z".into(),
-            fill: Some(Color {
-                r: 1.0,
-                g: 0.0,
-                b: 0.0,
-                a: 1.0,
-            }),
-            fill_rule: FillRule::NonZero,
-            stroke: None,
-            meta: OperationMeta::default(),
-        },
-    );
+    let scene = text_scene();
     let first = render_first_page_png(&scene, fixture_font).unwrap();
     let second = render_first_page_png(&scene, fixture_font).unwrap();
 
     assert_eq!(first, second);
     let pixmap = Pixmap::from_png(Cursor::new(first)).unwrap();
     assert_eq!((pixmap.width(), pixmap.height()), (64, 64));
+    assert_eq!(&pixmap.data_as_u8_slice()[..4], [255, 255, 255, 255]);
     assert!(
         pixmap
             .data_as_u8_slice()
             .chunks_exact(4)
-            .any(|pixel| pixel[3] != 0),
-        "the positioned glyph should paint at least one pixel"
+            .any(|pixel| pixel[3] == 255 && pixel[..3] != [255, 255, 255]),
+        "the positioned glyph should paint opaque black over the white page"
     );
 }
 
@@ -176,7 +156,7 @@ fn rasterizes_exact_png_resource_at_scene_bounds() {
     };
     assert_eq!(pixel(3, 4), [255, 0, 0, 255]);
     assert_eq!(pixel(4, 4), [0, 0, 255, 255]);
-    assert_eq!(pixel(2, 4), [0, 0, 0, 0]);
+    assert_eq!(pixel(2, 4), [255, 255, 255, 255]);
 }
 
 #[test]
