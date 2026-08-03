@@ -1,0 +1,190 @@
+name: Promote Pliego package run
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: Successful Pliego package matrix push run ID
+        required: true
+        type: string
+      tag:
+        description: Exact v-prefixed Pliego version, for example v0.1.0-alpha.1
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: pliego-promote-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    name: Create immutable draft release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: write
+    env:
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+      GH_TOKEN: ${{ github.token }}
+      RUN_ID: ${{ inputs.run_id }}
+      TAG: ${{ inputs.tag }}
+
+    steps:
+      - name: Verify selected package run
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF_TYPE" != "branch" || "$GITHUB_REF_NAME" != "$DEFAULT_BRANCH" ]]; then
+            echo "promotion must be dispatched from the default branch" >&2
+            exit 1
+          fi
+          if [[ ! "$RUN_ID" =~ ^[1-9][0-9]*$ ]]; then
+            echo "run_id must be a positive integer" >&2
+            exit 1
+          fi
+
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID" > run.json
+          head_sha=$(jq -er --arg repo "$GITHUB_REPOSITORY" '
+            select(.repository.full_name == $repo)
+            | select(.head_repository.full_name == $repo)
+            | select(.name == "Pliego package matrix")
+            | select(.path == ".github/workflows/pliego-package.yml")
+            | select(.event == "push")
+            | select(.status == "completed" and .conclusion == "success")
+            | select(.head_branch | startswith("release-proof/"))
+            | .head_sha
+          ' run.json)
+          if [[ ! "$head_sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "package run did not resolve to an exact commit SHA" >&2
+            exit 1
+          fi
+
+          gh api \
+            -H "Accept: application/vnd.github.raw+json" \
+            "repos/$GITHUB_REPOSITORY/contents/ports/pliego/Cargo.toml?ref=$head_sha" \
+            > pliego-Cargo.toml
+          version=$(python3 -c 'import pathlib, tomllib; print(tomllib.loads(pathlib.Path("pliego-Cargo.toml").read_text(encoding="utf-8"))["package"]["version"])')
+          if [[ ! "$version" =~ ^[0-9A-Za-z.+-]+$ || "$TAG" != "v$version" ]]; then
+            echo "tag $TAG must exactly match Pliego version v$version at $head_sha" >&2
+            exit 1
+          fi
+
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID/artifacts?per_page=100" > artifacts.json
+          jq -e --argjson run_id "$RUN_ID" '
+            ["pliego-linux-x86_64", "pliego-windows-x86_64", "pliego-macos-x86_64", "pliego-macos-aarch64"] as $expected
+            | .total_count == 4
+            and ([.artifacts[].name] | sort) == ($expected | sort)
+            and all(.artifacts[]; .expired == false and .workflow_run.id == $run_id)
+          ' artifacts.json > /dev/null
+
+          printf 'HEAD_SHA=%s\nPLIEGO_VERSION=%s\n' "$head_sha" "$version" >> "$GITHUB_ENV"
+          echo "eligible package run: $RUN_ID ($head_sha)"
+
+      - name: Download exact native bundles
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir release-artifacts
+          for artifact in \
+            pliego-linux-x86_64 \
+            pliego-windows-x86_64 \
+            pliego-macos-x86_64 \
+            pliego-macos-aarch64
+          do
+            gh run download "$RUN_ID" \
+              --repo "$GITHUB_REPOSITORY" \
+              --name "$artifact" \
+              --dir release-artifacts
+          done
+
+      - name: Verify exact release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          import hashlib
+          import os
+          import pathlib
+
+          version = os.environ["PLIEGO_VERSION"]
+          archives = {
+              f"pliego-{version}-linux-x86_64.tar.gz",
+              f"pliego-{version}-windows-x86_64.zip",
+              f"pliego-{version}-macos-x86_64.tar.gz",
+              f"pliego-{version}-macos-aarch64.tar.gz",
+          }
+          expected = archives | {f"{archive}.sha256" for archive in archives}
+          root = pathlib.Path("release-artifacts")
+          paths = list(root.iterdir())
+          actual = {path.name for path in paths}
+          if any(not path.is_file() for path in paths) or actual != expected:
+              raise SystemExit(
+                  f"release assets differ: missing={sorted(expected - actual)} "
+                  f"extra={sorted(actual - expected)}"
+              )
+
+          for name in sorted(archives):
+              archive = root / name
+              checksum = (root / f"{name}.sha256").read_text(encoding="ascii").split()
+              digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+              if checksum != [digest, name]:
+                  raise SystemExit(f"invalid checksum for {name}")
+          print("native release assets: ok")
+          PY
+
+      # Tags and draft releases are immutable through this workflow.
+      - name: Refuse existing release state
+        shell: bash
+        run: |
+          set -euo pipefail
+          refuse_existing() {
+            local endpoint=$1
+            local kind=$2
+            local response status
+            set +e
+            response=$(gh api "$endpoint" 2>&1)
+            status=$?
+            set -e
+            if [[ $status -eq 0 ]]; then
+              echo "$kind $TAG already exists; refusing to mutate it" >&2
+              exit 1
+            fi
+            if [[ "$response" != *"HTTP 404"* ]]; then
+              echo "$response" >&2
+              exit "$status"
+            fi
+          }
+
+          refuse_existing "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" tag
+          refuse_existing "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" release
+
+      # github.token is intentional: its tag event cannot start the legacy v* package trigger at HEAD_SHA.
+      - name: Create exact-SHA tag without rebuilding
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+            -f ref="refs/tags/$TAG" \
+            -f sha="$HEAD_SHA" \
+            > /dev/null
+          read -r tag_type tag_sha < <(
+            gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" \
+              --jq '[.object.type, .object.sha] | @tsv'
+          )
+          if [[ "$tag_type" != "commit" || "$tag_sha" != "$HEAD_SHA" ]]; then
+            echo "created tag does not resolve exactly to $HEAD_SHA" >&2
+            exit 1
+          fi
+
+      - name: Create draft release
+        shell: bash
+        run: |
+          gh release create "$TAG" release-artifacts/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --draft \
+            --verify-tag \
+            --title "Pliego $TAG" \
+            --notes "Draft native bundles and checksums from package run $RUN_ID at $HEAD_SHA. Publishing remains a separate manual gate."

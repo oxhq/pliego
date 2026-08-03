@@ -8,8 +8,6 @@ on:
   push:
     branches:
       - "release-proof/**"
-    tags:
-      - "v*"
 
 permissions:
   contents: read
@@ -76,15 +74,6 @@ jobs:
         shell: bash
         run: |
           python -c 'import json, os, subprocess; m=json.loads(subprocess.check_output(["cargo", "metadata", "--no-deps", "--format-version", "1"])); v=next(p["version"] for p in m["packages"] if p["name"] == "pliego"); open(os.environ["GITHUB_ENV"], "a", encoding="utf-8").write(f"PLIEGO_VERSION={v}\n")'
-
-      - name: Match release tag to Pliego version
-        if: github.ref_type == 'tag'
-        shell: bash
-        run: |
-          if [[ "$GITHUB_REF_NAME" != "v$PLIEGO_VERSION" ]]; then
-            echo "release tag $GITHUB_REF_NAME must equal v$PLIEGO_VERSION" >&2
-            exit 1
-          fi
 
       - name: Cache Rust compilation
         uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
@@ -157,80 +146,3 @@ jobs:
             dist/pliego-*.${{ matrix.archive_ext }}.sha256
           if-no-files-found: error
           retention-days: 7
-
-  release:
-    name: Create draft release (create only)
-    if: github.event_name == 'push' && github.ref_type == 'tag'
-    needs: package
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: write
-    env:
-      GH_TOKEN: ${{ github.token }}
-
-    steps:
-      - name: Download native bundles
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          pattern: pliego-*
-          merge-multiple: true
-          path: release-artifacts
-
-      - name: Verify exact release assets
-        run: |
-          python3 <<'PY'
-          import hashlib
-          import os
-          import pathlib
-
-          tag = os.environ["GITHUB_REF_NAME"]
-          if not tag.startswith("v"):
-              raise SystemExit(f"invalid release tag: {tag}")
-          version = tag[1:]
-          archives = {
-              f"pliego-{version}-linux-x86_64.tar.gz",
-              f"pliego-{version}-windows-x86_64.zip",
-              f"pliego-{version}-macos-x86_64.tar.gz",
-              f"pliego-{version}-macos-aarch64.tar.gz",
-          }
-          expected = archives | {f"{archive}.sha256" for archive in archives}
-          root = pathlib.Path("release-artifacts")
-          actual = {path.name for path in root.iterdir() if path.is_file()}
-          if actual != expected:
-              raise SystemExit(f"release assets differ: missing={sorted(expected - actual)} extra={sorted(actual - expected)}")
-
-          for name in sorted(archives):
-              archive = root / name
-              checksum = (root / f"{name}.sha256").read_text(encoding="ascii").split()
-              digest = hashlib.sha256(archive.read_bytes()).hexdigest()
-              if checksum != [digest, name]:
-                  raise SystemExit(f"invalid checksum for {name}")
-          print("native release assets: ok")
-          PY
-
-      # GitHub drafts are mutable, so this workflow is deliberately create-only.
-      - name: Refuse an existing release
-        shell: bash
-        run: |
-          set +e
-          response=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$GITHUB_REF_NAME" 2>&1)
-          status=$?
-          set -e
-          if [[ $status -eq 0 ]]; then
-            echo "release $GITHUB_REF_NAME already exists; refusing to mutate it" >&2
-            exit 1
-          fi
-          if [[ "$response" != *"HTTP 404"* ]]; then
-            echo "$response" >&2
-            exit "$status"
-          fi
-
-      - name: Create draft release
-        shell: bash
-        run: |
-          gh release create "$GITHUB_REF_NAME" release-artifacts/* \
-            --repo "$GITHUB_REPOSITORY" \
-            --draft \
-            --verify-tag \
-            --title "Pliego $GITHUB_REF_NAME" \
-            --notes "Draft native bundles and checksums for Pliego $GITHUB_REF_NAME. Publishing remains a separate manual gate."
