@@ -1155,8 +1155,8 @@ fn render(request: RenderRequest) {
     ];
     let policy_failures = Rc::new(RefCell::new(Vec::new()));
     let captured_policy_failures = Rc::clone(&policy_failures);
-    let controlled_http_bodies = Rc::new(RefCell::new(BTreeMap::new()));
-    let captured_http_bodies = Rc::clone(&controlled_http_bodies);
+    let controlled_resources = Rc::new(RefCell::new(BTreeMap::new()));
+    let captured_controlled_resources = Rc::clone(&controlled_resources);
     let document_root = document.root().to_owned();
     let active_resource_policy = resource_policy.clone();
     let controlled_http_client = Rc::new(OnceCell::new());
@@ -1183,8 +1183,7 @@ fn render(request: RenderRequest) {
                     .clone();
                 match fetch_controlled_http(&client, request, active_resource_policy.timeout_ms) {
                     Ok((response, body)) => {
-                        let key = (request.method.to_string(), request.url.to_string());
-                        let fetched = ControlledHttpResource {
+                        let fetched = ControlledResource {
                             status: response.status_code.as_u16(),
                             content_type: response
                                 .headers
@@ -1193,33 +1192,18 @@ fn render(request: RenderRequest) {
                                 .map(str::to_owned),
                             body: body.clone(),
                         };
-                        let changed = captured_http_bodies
-                            .borrow()
-                            .get(&key)
-                            .is_some_and(|existing| existing != &fetched);
-                        if changed {
-                            captured_policy_failures
-                                .borrow_mut()
-                                .push(ResourcePolicyFailure {
-                                code: "RESOURCE_CHANGED_DURING_RENDER",
-                                status: "changed",
-                                url: request.url.to_string(),
-                                method: request.method.to_string(),
-                                destination: format!("{:?}", request.destination),
-                                referrer_url: request
-                                    .referrer_url
-                                    .as_ref()
-                                    .map(ToString::to_string),
-                                is_for_main_frame: request.is_for_main_frame,
-                                is_redirect: request.is_redirect,
-                                reason:
-                                    "controlled HTTP URL returned different bytes during one render"
-                                        .into(),
-                            });
-                            servoshell::WebResourcePolicyDecision::Cancel
-                        } else {
-                            captured_http_bodies.borrow_mut().insert(key, fetched);
-                            servoshell::WebResourcePolicyDecision::Synthesize { response, body }
+                        match retain_controlled_resource(
+                            &mut captured_controlled_resources.borrow_mut(),
+                            request,
+                            fetched,
+                        ) {
+                            Ok(()) => {
+                                servoshell::WebResourcePolicyDecision::Synthesize { response, body }
+                            },
+                            Err(failure) => {
+                                captured_policy_failures.borrow_mut().push(failure);
+                                servoshell::WebResourcePolicyDecision::Cancel
+                            },
                         }
                     },
                     Err(failure) => {
@@ -1229,6 +1213,19 @@ fn render(request: RenderRequest) {
                 }
             },
             ResourcePolicyDecision::Synthesize { body, content_type } => {
+                let resource = ControlledResource {
+                    status: 200,
+                    content_type: Some(content_type.to_owned()),
+                    body: body.clone(),
+                };
+                if let Err(failure) = retain_controlled_resource(
+                    &mut captured_controlled_resources.borrow_mut(),
+                    request,
+                    resource,
+                ) {
+                    captured_policy_failures.borrow_mut().push(failure);
+                    return servoshell::WebResourcePolicyDecision::Cancel;
+                }
                 let mut headers = http::HeaderMap::new();
                 headers.insert(
                     http::header::CONTENT_TYPE,
@@ -1285,12 +1282,12 @@ fn render(request: RenderRequest) {
         ));
     }
     let resource_capture = {
-        let controlled_http_bodies = controlled_http_bodies.borrow();
+        let controlled_resources = controlled_resources.borrow();
         record_resources(
             &artifacts,
             result.resources,
             &resource_policy,
-            &controlled_http_bodies,
+            &controlled_resources,
         )
     }
     .unwrap_or_else(|error| {
@@ -1776,10 +1773,37 @@ struct CompletedResource {
 
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
 #[derive(Clone, Debug, PartialEq)]
-struct ControlledHttpResource {
+struct ControlledResource {
     status: u16,
     content_type: Option<String>,
     body: Vec<u8>,
+}
+
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+fn retain_controlled_resource(
+    resources: &mut BTreeMap<(String, String), ControlledResource>,
+    request: &servoshell::WebResourceRequest,
+    resource: ControlledResource,
+) -> Result<(), ResourcePolicyFailure> {
+    let key = (request.method.to_string(), request.url.to_string());
+    if resources
+        .get(&key)
+        .is_some_and(|existing| existing != &resource)
+    {
+        return Err(ResourcePolicyFailure {
+            code: "RESOURCE_CHANGED_DURING_RENDER",
+            status: "changed",
+            url: request.url.to_string(),
+            method: request.method.to_string(),
+            destination: format!("{:?}", request.destination),
+            referrer_url: request.referrer_url.as_ref().map(ToString::to_string),
+            is_for_main_frame: request.is_for_main_frame,
+            is_redirect: request.is_redirect,
+            reason: "controlled URL returned different bytes during one render".into(),
+        });
+    }
+    resources.insert(key, resource);
+    Ok(())
 }
 
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
@@ -1928,7 +1952,7 @@ fn record_resources(
     artifacts: &SessionArtifacts,
     resources: Vec<servoshell::ResourceEvent>,
     policy: &ResourcePolicy,
-    controlled_http_bodies: &BTreeMap<(String, String), ControlledHttpResource>,
+    controlled_resources: &BTreeMap<(String, String), ControlledResource>,
 ) -> Result<ResourceCapture, ResourceMapConflict> {
     let mut pending: HashMap<String, PendingResource> = HashMap::new();
     let mut capture = ResourceCapture::default();
@@ -2008,7 +2032,7 @@ fn record_resources(
                 if let Some(fetched) =
                     completed.method.as_ref().and_then(|method| {
                         completed.urls.iter().rev().find_map(|url| {
-                            controlled_http_bodies.get(&(method.clone(), url.clone()))
+                            controlled_resources.get(&(method.clone(), url.clone()))
                         })
                     })
                 {
@@ -2033,7 +2057,7 @@ fn record_resources(
         }
     }
 
-    for ((method, url), fetched) in controlled_http_bodies {
+    for ((method, url), fetched) in controlled_resources {
         if capture.url_to_resource.contains_key(url) {
             continue;
         }
@@ -2045,7 +2069,7 @@ fn record_resources(
             sha256: sha256_hex(&fetched.body),
             body: fetched.body.clone(),
         };
-        let request_id = format!("controlled-http:{}", sha256_hex(url.as_bytes()));
+        let request_id = format!("controlled-resource:{}", sha256_hex(url.as_bytes()));
         record_artifact(artifacts.record_resource_request(&request_id, url));
         record_artifact(artifacts.record_loaded_resource(
             &request_id,
@@ -2762,7 +2786,7 @@ fn render(_request: RenderRequest) {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::collections::{BTreeMap, HashMap};
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -2776,12 +2800,13 @@ mod tests {
     use pliego::{DocumentScene, Glyph, Operation, OperationMeta, Page, Rect, Size, Utf8Range};
 
     use super::{
-        Command, DEFAULT_LOCALE, DEFAULT_TIMEZONE, ExplicitRenderPaths, PageDefinition,
-        PageMargins, PendingResource, RenderEnvironment, RenderRequest, ResourceCapture,
-        ResourcePolicy, ResourcePolicyConfig, ResourcePolicyDecision,
+        Command, ControlledResource, DEFAULT_LOCALE, DEFAULT_TIMEZONE, ExplicitRenderPaths,
+        PageDefinition, PageMargins, PendingResource, RenderEnvironment, RenderRequest,
+        ResourceCapture, ResourcePolicy, ResourcePolicyConfig, ResourcePolicyDecision,
         classify_controlled_http_status, complete_resource, create_session_artifacts,
         decide_resource_policy, default_page, page_artifact, parse_args, persist_scene_capture,
-        resolve_scene_resource, set_document_pdf_environment, sha256_hex, stable_render_id,
+        resolve_scene_resource, retain_controlled_resource, set_document_pdf_environment,
+        sha256_hex, stable_render_id,
     };
     use crate::session::SessionArtifacts;
     use std::ffi::OsString;
@@ -3342,6 +3367,43 @@ mod tests {
         let error = capture.retain_completed(&conflict).unwrap_err();
         assert_eq!(error.url, "file:///theme.css");
         assert_eq!(capture.url_to_resource.len(), 2);
+    }
+
+    #[test]
+    fn retains_synthesized_resource_bytes_and_rejects_changes() {
+        let request: servoshell::WebResourceRequest = serde_json::from_value(serde_json::json!({
+            "method": "GET",
+            "headers": {},
+            "url": "file:///document/style.css",
+            "destination": "Style",
+            "referrer_url": "file:///document/index.html",
+            "is_for_main_frame": false,
+            "is_redirect": false,
+        }))
+        .unwrap();
+        let original = ControlledResource {
+            status: 200,
+            content_type: Some("text/css".into()),
+            body: b"body { color: black; }".to_vec(),
+        };
+        let key = ("GET".to_owned(), request.url.to_string());
+        let mut resources = BTreeMap::new();
+
+        retain_controlled_resource(&mut resources, &request, original.clone()).unwrap();
+        retain_controlled_resource(&mut resources, &request, original.clone()).unwrap();
+        assert_eq!(resources.get(&key), Some(&original));
+
+        let failure = retain_controlled_resource(
+            &mut resources,
+            &request,
+            ControlledResource {
+                body: b"body { color: red; }".to_vec(),
+                ..original.clone()
+            },
+        )
+        .unwrap_err();
+        assert_eq!(failure.code, "RESOURCE_CHANGED_DURING_RENDER");
+        assert_eq!(resources.get(&key), Some(&original));
     }
 
     #[test]
