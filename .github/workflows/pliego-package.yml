@@ -119,6 +119,8 @@ jobs:
           $directory = Join-Path dist $bundle
           New-Item -ItemType Directory -Force $directory | Out-Null
           Copy-Item "$env:CARGO_TARGET_DIR\checked-release\pliego.exe" "$directory\pliego.exe"
+          Copy-Item "$env:CARGO_TARGET_DIR\checked-release\libEGL.dll" "$directory\libEGL.dll"
+          Copy-Item "$env:CARGO_TARGET_DIR\checked-release\libGLESv2.dll" "$directory\libGLESv2.dll"
           Copy-Item LICENSE "$directory\LICENSE"
           @('1. Verify the adjacent SHA-256 file.', '2. Put pliego.exe on PATH or set PLIEGO_BINARY.', '3. Run pliego.exe --version.') | Set-Content "$directory\INSTALL.txt" -Encoding ascii
           & "$directory\pliego.exe" --version | Tee-Object -FilePath "$directory\VERSION.txt"
