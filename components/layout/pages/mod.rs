@@ -441,10 +441,10 @@ impl BlockPaginationController {
         &self,
         child_count: usize,
         supports_simple_block_pagination: bool,
-        supports_single_inline_child: bool,
+        supports_single_fragmentable_child: bool,
     ) -> Option<BlockPageBuilder> {
         let mut state = self.state.lock();
-        if (child_count < 2 && !supports_single_inline_child) || state.claimed {
+        if (child_count < 2 && !supports_single_fragmentable_child) || state.claimed {
             return None;
         }
         let request = state.request?;
@@ -3482,9 +3482,10 @@ mod tests {
     }
 
     #[test]
-    fn a_single_inline_child_can_claim_the_paged_root() {
+    fn a_single_wrapper_passes_the_paged_root_to_a_fragmentable_child() {
         let controller = BlockPaginationController::default();
         controller.begin(page());
+        assert!(controller.claim(1, true, false).is_none());
         assert!(controller.claim(1, true, true).is_some());
     }
 

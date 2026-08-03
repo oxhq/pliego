@@ -771,18 +771,20 @@ fn layout_block_level_children(
     let supports_simple_block_pagination = child_boxes
         .iter()
         .all(|child_box| is_simple_normal_flow_child(&child_box.borrow()));
-    let supports_single_inline_child = child_boxes.len() == 1
-        && matches!(
-            &*child_boxes[0].borrow(),
-            BlockLevelBox::SameFormattingContextBlock(block)
-                if matches!(&block.contents, BlockContainer::InlineFormattingContext(_))
-        );
+    let supports_single_fragmentable_child = child_boxes.len() == 1
+        && match &*child_boxes[0].borrow() {
+            BlockLevelBox::SameFormattingContextBlock(block) => {
+                matches!(&block.contents, BlockContainer::InlineFormattingContext(_))
+            },
+            BlockLevelBox::Independent(context) => context.is_table(),
+            _ => false,
+        };
     let mut page_builder = layout_context
         .block_pagination
         .claim(
             child_boxes.len(),
             supports_simple_block_pagination,
-            supports_single_inline_child,
+            supports_single_fragmentable_child,
         );
 
     let fragments = match sequential_layout_state {
