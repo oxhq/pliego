@@ -25,7 +25,7 @@ from PIL import Image, ImageChops
 FIXTURE_SCHEMA = "pliego.document-gate-fixtures"
 BENCHMARK_SCHEMA = "pliego.document-benchmark.v1"
 SCENE_SCHEMA = "pliego.document-scene"
-SANITIZED_AHEM_SHA256 = "649a76135ca32e68e36c7880075cf897ec1a1fdfe011308bdcf8ada12a539869"
+SANITIZED_AHEM_SHA256 = "649a7613cfa59d415188415e1488eb40fc9953742338a793538380234a539869"
 CSS_PX_TO_PDF_PT = 0.75
 PROCESS_TIMEOUT_SECONDS = 900
 ROUND_DIGITS = 6
@@ -266,6 +266,36 @@ def is_repeated_header(operation: dict[str, Any]) -> bool:
     )
 
 
+def logical_text_operations(
+    text_operations: list[dict[str, Any]],
+    fixture: dict[str, Any],
+    page_index: int,
+) -> list[dict[str, Any]]:
+    visible = [operation for operation in text_operations if canonical_text(str(operation.get("text", "")))]
+    if page_index != 0:
+        return visible
+
+    caption = canonical_text(str(fixture["caption"]))
+    parts = []
+    for index, operation in enumerate(text_operations):
+        parts.append(str(operation.get("text", "")))
+        candidate = canonical_text("".join(parts))
+        require(caption.startswith(candidate), f"{fixture['name']} page 0 caption text differs")
+        if candidate == caption:
+            merged = dict(text_operations[0])
+            merged["text"] = "".join(parts)
+            return [
+                merged,
+                *[
+                    remaining
+                    for remaining in text_operations[index + 1 :]
+                    if canonical_text(str(remaining.get("text", "")))
+                ],
+            ]
+    fail(f"{fixture['name']} page 0 caption text differs")
+    raise AssertionError("unreachable")
+
+
 def border_operation(operation: dict[str, Any]) -> bool:
     meta = operation.get("meta")
     semantics = meta.get("semantics") if isinstance(meta, dict) else None
@@ -486,18 +516,19 @@ def verify_scene_and_trace(
             object_value(operation, f"{fixture['name']} scene operation")
             for operation in list_value(page.get("operations"), f"{fixture['name']} scene operations")
         ]
-        text_operations = [
+        raw_text_operations = [
             operation
             for operation in operations
-            if operation.get("type") == "text" and canonical_text(str(operation.get("text", "")))
+            if operation.get("type") == "text"
         ]
-        actual_text = [canonical_text(str(operation.get("text", ""))) for operation in text_operations]
-        expected_text = expected_page_tokens(fixture, page_index)
-        require(actual_text == expected_text, f"{fixture['name']} page {page_index} text/cell oracle differs")
-        for operation in text_operations:
+        for operation in raw_text_operations:
             font = operation.get("font")
             require(isinstance(font, str) and bool(font), f"{fixture['name']} text has no font identity")
             font_ids.add(font)
+        text_operations = logical_text_operations(raw_text_operations, fixture, page_index)
+        actual_text = [canonical_text(str(operation.get("text", ""))) for operation in text_operations]
+        expected_text = expected_page_tokens(fixture, page_index)
+        require(actual_text == expected_text, f"{fixture['name']} page {page_index} text/cell oracle differs")
 
         headers_start = 1 if page_index == 0 else 0
         headers = text_operations[headers_start : headers_start + len(fixture["headers"])]
@@ -1110,6 +1141,18 @@ def self_test(directory: Path) -> None:
             f"{fixture['name']} self-test font identity differs",
         )
     fixture = manifest["fixtures"][0]
+    scene, layout = synthetic_scene_and_layout(fixture)
+    caption = scene["pages"][0]["operations"][0]
+    first, second = str(caption["text"]).split(" ", 1)
+    scene["pages"][0]["operations"][:1] = [
+        {**caption, "text": first},
+        {**caption, "text": " "},
+        {**caption, "text": second},
+    ]
+    require(
+        verify_scene_and_trace(scene, layout, fixture) == {"font:ahem"},
+        f"{fixture['name']} split-caption self-test differs",
+    )
     scene, layout = synthetic_scene_and_layout(fixture)
     boundaries = [float(value) for value in fixture["column_boundaries"]]
     operations = scene["pages"][0]["operations"]

@@ -6,7 +6,7 @@
     "path": "../text-scene/Ahem.ttf",
     "source": "Existing vendored WPT Ahem test fixture",
     "sha256": "b719ecb31c5b21fc573c03f6421c74ac63c271a5a3ff841e34f9705fb94b8448",
-    "sanitized_sha256": "649a76135ca32e68e36c7880075cf897ec1a1fdfe011308bdcf8ada12a539869"
+    "sanitized_sha256": "649a7613cfa59d415188415e1488eb40fc9953742338a793538380234a539869"
   },
   "fixtures": [
     {
@@ -24,8 +24,8 @@
       "caption_x": 36,
       "headers": ["ITEM", "QTY", "DESCRIPTION", "AMOUNT"],
       "footer": ["TOTAL", "32", "MXN", "5280.00"],
-      "text_x": [40, 136, 208, 484],
-      "column_boundaries": [36, 132, 204, 480, 576],
+      "text_x": [41, 137, 209, 485],
+      "column_boundaries": [36.5, 132.5, 204.5, 480.5, 576.5],
       "header_height": 32,
       "natural_overflow": false,
       "break_constraint": "forced-after"
@@ -45,8 +45,8 @@
       "caption_x": 36,
       "headers": ["ROW", "DATE", "DETAIL", "BALANCE"],
       "footer": [],
-      "text_x": [40, 160, 256, 484],
-      "column_boundaries": [36, 156, 252, 480, 576],
+      "text_x": [41, 161, 257, 485],
+      "column_boundaries": [36.5, 156.5, 252.5, 480.5, 576.5],
       "header_height": 40,
       "natural_overflow": true,
       "break_constraint": "auto"
