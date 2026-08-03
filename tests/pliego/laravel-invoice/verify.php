@@ -12,6 +12,10 @@ require __DIR__.'/vendor/autoload.php';
 /** @var Application $app */
 $app = require __DIR__.'/bootstrap/app.php';
 $app->make(Kernel::class)->bootstrap();
+set_exception_handler(static function (Throwable $error): never {
+    fwrite(STDERR, $error->getMessage()."\n");
+    exit(1);
+});
 
 $response = Document::view('invoice', ['rows' => range(1, 32)])
     ->pageSize('612x792')
@@ -46,7 +50,7 @@ $scene = json_decode((string) file_get_contents($scenePath), true, flags: JSON_T
 $structure = json_decode((string) file_get_contents($structurePath), true, flags: JSON_THROW_ON_ERROR);
 
 $headers = ['ITEM', 'QTY', 'DESCRIPTION', 'AMOUNT'];
-$expectedPages = [['INVOICE PLG-2026-001', ...$headers], $headers];
+$expectedPages = [['INVOICE', ' ', 'PLG-2026-001', ...$headers], $headers];
 foreach (range(1, 32) as $row) {
     $expectedPages[$row <= 16 ? 0 : 1] = [
         ...$expectedPages[$row <= 16 ? 0 : 1],

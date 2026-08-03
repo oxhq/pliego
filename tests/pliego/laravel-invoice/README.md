@@ -7,7 +7,8 @@ one-shot Pliego bridge.
 ```sh
 cp .env.example .env
 composer install
-# Set PLIEGO_BINARY to an absolute checked-release Pliego binary.
+php artisan pliego:install
+php artisan pliego:doctor
 composer verify
 ```
 
@@ -19,7 +20,7 @@ JSON paths for the retained PDF, input bundle, scene, and PDF-structure report.
 `composer rehearse:self-test` checks the exact six-job order and outcome
 contract without starting Pliego. The production-only `composer rehearse`
 command requires Linux, one durable queue connection, public
-`0.1.0-alpha.1` Composer distributions, the published runtime checksum, one
+`0.1.0-alpha.2` Composer distributions, the published runtime checksum, one
 local WOFF2, and exact CSS/WOFF2 URLs and hashes from a running two-origin
 fixture. It drains a unique queue with one worker and retains one manifest with
 job identities, durations, peak RSS, process-leak evidence, disk usage, and

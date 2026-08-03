@@ -6,6 +6,7 @@ use Composer\InstalledVersions;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Artisan;
 use Pliego\Laravel\Experimental\Facades\Document;
+use Pliego\Laravel\Experimental\ManagedRuntime;
 use Pliego\Php\Experimental\Exception\RenderException;
 use Pliego\Php\Experimental\JobRetention;
 use Symfony\Component\Process\Process;
@@ -38,8 +39,8 @@ final class PliegoQueueRehearsal
         $expectedVersion = self::requiredString($command, 'release-version');
         self::verifyPublicComposerInstall($expectedVersion);
 
-        $binary = (string) config('pliego.binary');
-        self::require(self::isAbsolutePath($binary) && is_file($binary) && is_executable($binary), 'PLIEGO_BINARY must be an executable absolute path');
+        $binary = app(ManagedRuntime::class)->binary();
+        self::require(self::isAbsolutePath($binary) && is_file($binary) && is_executable($binary), 'managed Pliego runtime must be an executable absolute path');
         $binarySha256 = self::requiredHash($command, 'binary-sha256');
         self::require(hash_file('sha256', $binary) === $binarySha256, 'published Pliego runtime checksum differs');
 

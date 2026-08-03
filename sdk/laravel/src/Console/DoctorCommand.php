@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Pliego\Laravel\Experimental\Console;
 
 use Illuminate\Console\Command;
+use Pliego\Laravel\Experimental\ManagedRuntime;
 use Pliego\Php\Experimental\Doctor;
 use Throwable;
 
@@ -14,11 +15,11 @@ final class DoctorCommand extends Command
 
     protected $description = 'Check the Pliego binary, work root, and one offline render';
 
-    public function handle(): int
+    public function handle(ManagedRuntime $runtime): int
     {
         try {
             $report = (new Doctor(
-                [(string) config('pliego.binary')],
+                [$runtime->binary()],
                 (int) config('pliego.timeout_seconds'),
             ))->run((string) config('pliego.work_dir'));
         } catch (Throwable $error) {

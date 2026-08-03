@@ -4,7 +4,8 @@ declare(strict_types=1);
 
 return [
     // Experimental one-shot binary; this is not a daemon endpoint.
-    'binary' => env('PLIEGO_BINARY', 'pliego'),
+    'binary' => env('PLIEGO_BINARY'),
+    'runtime_dir' => env('PLIEGO_RUNTIME_DIR', storage_path('app/pliego-runtime')),
     'timeout_seconds' => env('PLIEGO_TIMEOUT_SECONDS', 60),
     'success_retention_seconds' => env('PLIEGO_SUCCESS_RETENTION_SECONDS', 86400),
     'failure_retention_seconds' => env('PLIEGO_FAILURE_RETENTION_SECONDS', 604800),

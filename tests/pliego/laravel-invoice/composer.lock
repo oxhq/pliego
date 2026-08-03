@@ -4,7 +4,7 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "ddbb3f472c669fe25dd7b09d63ba0381",
+    "content-hash": "11b181e5ad9ee4993f50f36a023422fe",
     "packages": [
         {
             "name": "brick/math",
@@ -2418,17 +2418,19 @@
         },
         {
             "name": "oxhq/pliego-laravel",
-            "version": "0.1.0-alpha",
+            "version": "0.1.0-alpha.2",
             "dist": {
                 "type": "path",
                 "url": "../../../sdk/laravel",
-                "reference": "10081efaff378f53988ea126540af9881e1c7a07"
+                "reference": "06decf5cb3919cb6ac4e26fe43f0f2a1ec2a097f"
             },
             "require": {
+                "illuminate/console": "^13.0",
                 "illuminate/contracts": "^13.0",
+                "illuminate/http": "^13.0",
                 "illuminate/support": "^13.0",
                 "illuminate/view": "^13.0",
-                "oxhq/pliego-php": "0.1.0-alpha",
+                "oxhq/pliego-php": "0.1.0-alpha.2",
                 "php": "^8.3",
                 "symfony/http-foundation": "^7.4 || ^8.0"
             },
@@ -2445,6 +2447,14 @@
                     "Pliego\\Laravel\\Experimental\\": "src/"
                 }
             },
+            "scripts": {
+                "test:runtime": [
+                    "@php tests/managed_runtime_test.php"
+                ],
+                "test": [
+                    "@test:runtime"
+                ]
+            },
             "license": [
                 "MIT"
             ],
@@ -2456,11 +2466,11 @@
         },
         {
             "name": "oxhq/pliego-php",
-            "version": "0.1.0-alpha",
+            "version": "0.1.0-alpha.2",
             "dist": {
                 "type": "path",
                 "url": "../../../sdk/php",
-                "reference": "eae66658040ac00ef936fd96027917a2bdff3243"
+                "reference": "ec50159f6b11f014009a8c2a9e424f06d1dbcefa"
             },
             "require": {
                 "php": "^8.3"
@@ -2472,8 +2482,14 @@
                 }
             },
             "scripts": {
+                "test:doctor": [
+                    "@php tests/doctor_test.php"
+                ],
                 "test": [
-                    "@php tests/self_test.php"
+                    "@php tests/self_test.php",
+                    "@php tests/timeout_test.php",
+                    "@php tests/retention_test.php",
+                    "@php tests/doctor_test.php"
                 ]
             },
             "license": [

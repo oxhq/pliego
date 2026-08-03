@@ -100,14 +100,26 @@ jobs:
               --dir release-artifacts
           done
 
+      - name: Fetch package-pinned runtime manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api \
+            -H "Accept: application/vnd.github.raw+json" \
+            "repos/$GITHUB_REPOSITORY/contents/sdk/laravel/resources/runtimes.json?ref=$DEFAULT_BRANCH" \
+            > release-artifacts/runtimes.json
+
       - name: Verify exact release assets
         shell: bash
         run: |
           set -euo pipefail
           python3 <<'PY'
           import hashlib
+          import json
           import os
           import pathlib
+          import tarfile
+          import zipfile
 
           version = os.environ["PLIEGO_VERSION"]
           archives = {
@@ -116,7 +128,7 @@ jobs:
               f"pliego-{version}-macos-x86_64.tar.gz",
               f"pliego-{version}-macos-aarch64.tar.gz",
           }
-          expected = archives | {f"{archive}.sha256" for archive in archives}
+          expected = archives | {f"{archive}.sha256" for archive in archives} | {"runtimes.json"}
           root = pathlib.Path("release-artifacts")
           paths = list(root.iterdir())
           actual = {path.name for path in paths}
@@ -132,6 +144,35 @@ jobs:
               digest = hashlib.sha256(archive.read_bytes()).hexdigest()
               if checksum != [digest, name]:
                   raise SystemExit(f"invalid checksum for {name}")
+
+          manifest = json.loads((root / "runtimes.json").read_text(encoding="utf-8"))
+          platforms = ["linux-x86_64", "windows-x86_64", "macos-x86_64", "macos-aarch64"]
+          if (
+              manifest.get("schema") != 1
+              or manifest.get("version") != version
+              or manifest.get("api") != 1
+              or list(manifest.get("assets", {})) != platforms
+          ):
+              raise SystemExit("runtime manifest contract does not match the selected release")
+          for platform in platforms:
+              extension = "zip" if platform == "windows-x86_64" else "tar.gz"
+              bundle = f"pliego-{version}-{platform}"
+              name = f"{bundle}.{extension}"
+              archive = root / name
+              asset = manifest["assets"][platform]
+              if asset.get("bytes") != archive.stat().st_size:
+                  raise SystemExit(f"runtime manifest size mismatch for {platform}")
+              if asset.get("sha256") != hashlib.sha256(archive.read_bytes()).hexdigest():
+                  raise SystemExit(f"runtime manifest hash mismatch for {platform}")
+              expected_files = {f"{bundle}/{item}" for item in asset.get("files", [])}
+              if extension == "zip":
+                  with zipfile.ZipFile(archive) as package:
+                      actual_files = {item for item in package.namelist() if not item.endswith("/")}
+              else:
+                  with tarfile.open(archive, "r:gz") as package:
+                      actual_files = {item.name for item in package.getmembers() if item.isfile()}
+              if actual_files != expected_files:
+                  raise SystemExit(f"runtime manifest file mismatch for {platform}")
           print("native release assets: ok")
           PY
 

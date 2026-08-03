@@ -46,7 +46,7 @@ Artisan::command('pliego:rehearsal-job
 })->purpose('Run one internal job in the six-job Pliego queue rehearsal');
 
 Artisan::command('pliego:rehearse-queue
-    {--release-version=0.1.0-alpha.1}
+    {--release-version=0.1.0-alpha.2}
     {--connection=}
     {--report=}
     {--binary-sha256=}

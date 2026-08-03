@@ -19,6 +19,7 @@ Chromium, or Java dependency.
 cd tests/pliego/laravel-invoice
 cp .env.example .env
 composer install
+# Source-tree verification may override the not-yet-published runtime.
 PLIEGO_BINARY=/absolute/path/to/pliego composer verify
 ```
 
@@ -53,6 +54,24 @@ Engine failures retain their Pliego error code, exit code, and stderr as either
 `InvalidRequestException` or `EngineRenderException`. Successful results retain
 the input bundle and all Pliego artifacts under the configured work directory.
 
+## Native runtime installation
+
+The public package manages the native executable separately from render jobs:
+
+```sh
+composer require oxhq/pliego-laravel:^0.1.0-alpha.2 oxhq/pliego-php:^0.1.0-alpha.2
+php artisan pliego:install
+php artisan pliego:doctor
+```
+
+The installer selects one package-pinned GitHub release archive for the current
+OS and CPU, verifies the byte count and SHA-256 recorded in the Composer
+package, extracts only its declared files, and checks the exact engine and API
+versions before publishing it atomically under `storage/app/pliego-runtime`.
+Repeated installation is idempotent. It never downloads during a render or
+silently selects `latest`. `PLIEGO_BINARY` remains an explicit deployment
+override.
+
 ## Migration boundary
 
 - DOMPDF: replace `Pdf::loadView(...)->download(...)` with the fluent call
@@ -61,9 +80,9 @@ the input bundle and all Pliego artifacts under the configured work directory.
   loading with bundled assets or explicit HTTP roots, and keep the same Blade
   view.
 
-This slice intentionally omits queues, daemon reuse, automatic binary install,
-browser fallback, stable SDK compatibility, and worker lifecycle management.
-Add those only with the M8 protocol.
+This slice intentionally omits daemon reuse, browser fallback, stable SDK
+compatibility, and worker lifecycle management. Add those only with the M8
+protocol.
 
 The fixed-scope M4 commercial validation boundary is documented in the
 [production-document design-partner offer](./design-partner-offer.md). Its

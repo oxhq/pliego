@@ -1,0 +1,49 @@
+{
+    "schema": 1,
+    "version": "0.1.0-alpha.1",
+    "api": 1,
+    "assets": {
+        "linux-x86_64": {
+            "bytes": 68640286,
+            "sha256": "174d7c3192365f75097c613b8f8abd09235540cc6270f4cb5da0debe6909d9cc",
+            "files": [
+                "pliego",
+                "LICENSE",
+                "INSTALL.txt",
+                "VERSION.txt"
+            ]
+        },
+        "windows-x86_64": {
+            "bytes": 62342698,
+            "sha256": "ba8673653dce066a6effc6dd128885771f15b26791e66a88d9efbc3d24ddbe88",
+            "files": [
+                "pliego.exe",
+                "libEGL.dll",
+                "libGLESv2.dll",
+                "LICENSE",
+                "INSTALL.txt",
+                "VERSION.txt"
+            ]
+        },
+        "macos-x86_64": {
+            "bytes": 62509497,
+            "sha256": "732e710356180816e221f89d2c8cb523f29078d423a4833e0c8d06577e1ba550",
+            "files": [
+                "pliego",
+                "LICENSE",
+                "INSTALL.txt",
+                "VERSION.txt"
+            ]
+        },
+        "macos-aarch64": {
+            "bytes": 59169113,
+            "sha256": "d17796b87a6b4984b858c28104196d07236b2dad95a507b21e6cba7a6cee5ad0",
+            "files": [
+                "pliego",
+                "LICENSE",
+                "INSTALL.txt",
+                "VERSION.txt"
+            ]
+        }
+    }
+}

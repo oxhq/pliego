@@ -29,7 +29,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Resolve and verify coordinated alpha version
+      - name: Resolve and verify engine and SDK versions
         shell: bash
         run: |
           python <<'PY'
@@ -41,16 +41,21 @@ jobs:
           cargo = tomllib.loads(pathlib.Path("ports/pliego/Cargo.toml").read_text(encoding="utf-8"))
           lock = tomllib.loads(pathlib.Path("Cargo.lock").read_text(encoding="utf-8"))
           laravel = json.loads(pathlib.Path("sdk/laravel/composer.json").read_text(encoding="utf-8"))
-          version = cargo["package"]["version"]
-          versions = {
-              "cargo": version,
+          engine_version = cargo["package"]["version"]
+          php_version = pathlib.Path("sdk/php/VERSION").read_text(encoding="ascii").strip()
+          laravel_version = pathlib.Path("sdk/laravel/VERSION").read_text(encoding="ascii").strip()
+          engine_versions = {
+              "cargo": engine_version,
               "lock": next(package["version"] for package in lock["package"] if package["name"] == "pliego"),
-              "laravel": laravel["require"]["oxhq/pliego-php"],
           }
-          assert len(set(versions.values())) == 1, versions
+          assert len(set(engine_versions.values())) == 1, engine_versions
+          assert php_version == laravel["require"]["oxhq/pliego-php"] == "0.1.0-alpha.2"
+          assert laravel_version == php_version
           with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as environment:
-              environment.write(f"PLIEGO_COMPOSER_VERSION={version}\n")
-          print(f"coordinated alpha version: {version}")
+              environment.write(f"PLIEGO_ENGINE_VERSION={engine_version}\n")
+              environment.write(f"PLIEGO_PHP_VERSION={php_version}\n")
+              environment.write(f"PLIEGO_LARAVEL_VERSION={laravel_version}\n")
+          print(f"engine/PHP: {engine_version}; Laravel: {laravel_version}")
           PY
 
       - name: Show Composer toolchain
@@ -62,6 +67,11 @@ jobs:
         run: |
           composer --no-interaction --no-plugins --no-scripts --working-dir=sdk/php install --no-progress
           composer --no-interaction --no-plugins --working-dir=sdk/php test
+
+      - name: Run focused Laravel package self-test
+        run: |
+          composer --no-interaction --no-plugins --no-scripts --working-dir=tests/pliego/laravel-invoice install --no-progress
+          PLIEGO_TEST_AUTOLOAD="$GITHUB_WORKSPACE/tests/pliego/laravel-invoice/vendor/autoload.php" php sdk/laravel/tests/managed_runtime_test.php
 
       # These are root-level package trees from the committed SDK subtrees. Public
       # repository history splits, tags, pushes, and publication stay separate.
@@ -80,8 +90,8 @@ jobs:
       - name: Create Composer archives
         shell: bash
         run: |
-          COMPOSER_ROOT_VERSION="$PLIEGO_COMPOSER_VERSION" composer --no-interaction --working-dir=dist/pliego-php archive --format=zip --dir="$GITHUB_WORKSPACE/dist/packages" --file="oxhq-pliego-php-$PLIEGO_COMPOSER_VERSION" --no-plugins --no-scripts
-          COMPOSER_ROOT_VERSION="$PLIEGO_COMPOSER_VERSION" composer --no-interaction --working-dir=dist/pliego-laravel archive --format=zip --dir="$GITHUB_WORKSPACE/dist/packages" --file="oxhq-pliego-laravel-$PLIEGO_COMPOSER_VERSION" --no-plugins --no-scripts
+          COMPOSER_ROOT_VERSION="$PLIEGO_PHP_VERSION" composer --no-interaction --working-dir=dist/pliego-php archive --format=zip --dir="$GITHUB_WORKSPACE/dist/packages" --file="oxhq-pliego-php-$PLIEGO_PHP_VERSION" --no-plugins --no-scripts
+          COMPOSER_ROOT_VERSION="$PLIEGO_LARAVEL_VERSION" composer --no-interaction --working-dir=dist/pliego-laravel archive --format=zip --dir="$GITHUB_WORKSPACE/dist/packages" --file="oxhq-pliego-laravel-$PLIEGO_LARAVEL_VERSION" --no-plugins --no-scripts
 
       - name: Check package contract and archive roots
         shell: bash
@@ -95,8 +105,11 @@ jobs:
           import zipfile
 
           root = pathlib.Path("dist")
-          version = os.environ["PLIEGO_COMPOSER_VERSION"]
-          assert re.fullmatch(r"\d+\.\d+\.\d+-alpha(?:\.\d+)?", version), version
+          engine_version = os.environ["PLIEGO_ENGINE_VERSION"]
+          php_version = os.environ["PLIEGO_PHP_VERSION"]
+          laravel_version = os.environ["PLIEGO_LARAVEL_VERSION"]
+          for version in (engine_version, php_version, laravel_version):
+              assert re.fullmatch(r"\d+\.\d+\.\d+-alpha(?:\.\d+)?", version), version
 
           php_root = root / "pliego-php"
           laravel_root = root / "pliego-laravel"
@@ -105,10 +118,25 @@ jobs:
           assert php["name"] == "oxhq/pliego-php", php["name"]
           assert laravel["name"] == "oxhq/pliego-laravel", laravel["name"]
           assert php["license"] == laravel["license"] == "MIT"
+          assert laravel["require"]["oxhq/pliego-php"] == php_version
+          assert (php_root / "VERSION").read_text(encoding="ascii").strip() == php_version
+          assert (laravel_root / "VERSION").read_text(encoding="ascii").strip() == laravel_version
+
+          runtimes = json.loads((laravel_root / "resources" / "runtimes.json").read_text(encoding="utf-8"))
+          platforms = ["linux-x86_64", "windows-x86_64", "macos-x86_64", "macos-aarch64"]
+          assert runtimes["schema"] == runtimes["api"] == 1
+          assert runtimes["version"] == engine_version
+          assert list(runtimes["assets"]) == platforms
+          for platform, asset in runtimes["assets"].items():
+              assert isinstance(asset["bytes"], int) and asset["bytes"] > 0, platform
+              assert re.fullmatch(r"[0-9a-f]{64}", asset["sha256"]), platform
+              assert isinstance(asset["files"], list) and asset["files"], platform
+              executable = "pliego.exe" if platform == "windows-x86_64" else "pliego"
+              assert executable in asset["files"], platform
 
           archives = {
-              php_root: root / "packages" / f"oxhq-pliego-php-{version}.zip",
-              laravel_root: root / "packages" / f"oxhq-pliego-laravel-{version}.zip",
+              php_root: root / "packages" / f"oxhq-pliego-php-{php_version}.zip",
+              laravel_root: root / "packages" / f"oxhq-pliego-laravel-{laravel_version}.zip",
           }
           checksums = []
           for package_root, archive in archives.items():
@@ -133,7 +161,7 @@ jobs:
       - name: Retain Composer dry-run artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: pliego-composer-${{ env.PLIEGO_COMPOSER_VERSION }}
+          name: pliego-composer-${{ env.PLIEGO_LARAVEL_VERSION }}
           path: |
             dist/pliego-php/
             dist/pliego-laravel/
