@@ -12,6 +12,10 @@
         }
     },
     "scripts": {
-        "test": "@php tests/self_test.php"
+        "test": [
+            "@php tests/self_test.php",
+            "@php tests/timeout_test.php",
+            "@php tests/retention_test.php"
+        ]
     }
 }

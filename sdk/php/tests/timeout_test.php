@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 use Pliego\Php\Experimental\CliRenderer;
 use Pliego\Php\Experimental\Exception\EngineRenderException;
+use Pliego\Php\Experimental\JobRetention;
 
 require dirname(__DIR__).'/vendor/autoload.php';
 
@@ -32,6 +33,10 @@ try {
     throw new RuntimeException('expected the render timeout');
 } catch (EngineRenderException $error) {
     expect($error->errorCode === 'RENDER_TIMEOUT', 'timeout has a typed error code');
+    expect($error->jobPath === $root, 'timeout exposes the retained job');
+    expect($error->inputBundlePath === "{$root}/slow-input", 'timeout exposes the retained input');
+    expect($error->artifactsPath === "{$root}/slow-artifacts", 'timeout exposes retained artifacts');
+    expect(trim((string) file_get_contents("{$root}/".JobRetention::STATUS_FILE)) === 'failure', 'timeout is marked failed');
     expect(str_contains($error->stderr, 'SLOW_RENDER_STARTED'), 'fake engine wrote partial output');
     expect((hrtime(true) - $started) / 1_000_000_000 < 3, 'timeout is wall-clock bounded');
     expect(!is_file("{$root}/slow.pdf"), 'partial PDF is removed');

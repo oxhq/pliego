@@ -8,6 +8,8 @@ use RuntimeException;
 
 final readonly class RenderResult
 {
+    public string $jobPath;
+
     /**
      * @param array<string, mixed> $metadata
      */
@@ -16,7 +18,9 @@ final readonly class RenderResult
         public string $artifactsPath,
         public string $inputBundlePath,
         public array $metadata,
-    ) {}
+    ) {
+        $this->jobPath = dirname($inputBundlePath);
+    }
 
     public function bytes(): string
     {

@@ -53,6 +53,8 @@ final readonly class CliRenderer
         }
 
         $this->writeInputBundle($inputBundle, $html, $options, $assets);
+        $jobPath = dirname($inputBundle);
+        JobRetention::mark($jobPath, 'running');
         $arguments = [
             ...$this->command,
             'render',
@@ -84,6 +86,7 @@ final readonly class CliRenderer
             if (is_resource($stderrFile)) {
                 fclose($stderrFile);
             }
+            JobRetention::mark($jobPath, 'failure');
             throw new RuntimeException('cannot create Pliego process output streams');
         }
 
@@ -101,6 +104,7 @@ final readonly class CliRenderer
         if (!is_resource($process)) {
             fclose($stdoutFile);
             fclose($stderrFile);
+            JobRetention::mark($jobPath, 'failure');
             throw new RuntimeException('cannot start the Pliego process');
         }
 
@@ -133,11 +137,14 @@ final readonly class CliRenderer
             if (is_file($output)) {
                 @unlink($output);
             }
+            JobRetention::mark($jobPath, 'failure');
             throw new EngineRenderException(
                 'RENDER_TIMEOUT',
                 $exitCode,
                 $stderr === false ? '' : $stderr,
                 "Pliego render exceeded {$this->timeoutSeconds} seconds",
+                $inputBundle,
+                $artifacts,
             );
         }
 
@@ -153,16 +160,29 @@ final readonly class CliRenderer
             $exception = $exitCode === 2 || $code === 'INVALID_REQUEST'
                 ? InvalidRequestException::class
                 : EngineRenderException::class;
-            throw new $exception($code, $exitCode, $stderr === false ? '' : $stderr, $message);
+            JobRetention::mark($jobPath, 'failure');
+            throw new $exception(
+                $code,
+                $exitCode,
+                $stderr === false ? '' : $stderr,
+                $message,
+                $inputBundle,
+                $artifacts,
+            );
         }
         if (!is_file($output)) {
+            JobRetention::mark($jobPath, 'failure');
             throw new EngineRenderException(
                 'OUTPUT_MISSING',
                 $exitCode,
                 $stderr === false ? '' : $stderr,
                 "Pliego reported success without publishing {$output}",
+                $inputBundle,
+                $artifacts,
             );
         }
+
+        JobRetention::mark($jobPath, 'success');
 
         return new RenderResult($output, $artifacts, $inputBundle, $metadata);
     }

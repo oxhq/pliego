@@ -6,11 +6,19 @@ namespace Pliego\Laravel\Experimental;
 
 use Illuminate\Contracts\View\Factory as ViewFactory;
 use Illuminate\Support\ServiceProvider;
+use Pliego\Laravel\Experimental\Console\PruneCommand;
 use Pliego\Php\Experimental\CliRenderer;
 use Pliego\Php\Experimental\RenderOptions;
 
 final class PliegoServiceProvider extends ServiceProvider
 {
+    public function boot(): void
+    {
+        if ($this->app->runningInConsole()) {
+            $this->commands([PruneCommand::class]);
+        }
+    }
+
     public function register(): void
     {
         $this->mergeConfigFrom(dirname(__DIR__).'/config/pliego.php', 'pliego');
