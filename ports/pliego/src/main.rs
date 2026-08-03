@@ -1114,7 +1114,10 @@ fn render(request: RenderRequest) {
     record_artifact(std::fs::create_dir_all(&userscripts));
     record_artifact(std::fs::write(
         userscripts.join("00-pliego-readiness.js"),
-        readiness::document_start_script(READINESS_TIMEOUT_MS),
+        readiness::document_start_script(
+            READINESS_TIMEOUT_MS,
+            !resource_policy.allowed_http_roots.is_empty(),
+        ),
     ));
 
     record_artifact(artifacts.record_state("started", None));

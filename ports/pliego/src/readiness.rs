@@ -6,11 +6,14 @@ use serde_json::Value;
 
 const SCRIPT: &str = include_str!("readiness.js");
 const TIMEOUT_TOKEN: &str = "__PLIEGO_TIMEOUT_MS__";
+const WAIT_FOR_FONTS_TOKEN: &str = "__PLIEGO_WAIT_FOR_FONTS__";
 
 pub const HOST_EVALUATION_EXPRESSION: &str = "JSON.stringify(window.__pliegoReadiness ?? null)";
 
-pub fn document_start_script(timeout_ms: u64) -> String {
-    SCRIPT.replace(TIMEOUT_TOKEN, &timeout_ms.to_string())
+pub fn document_start_script(timeout_ms: u64, wait_for_fonts: bool) -> String {
+    SCRIPT
+        .replace(TIMEOUT_TOKEN, &timeout_ms.to_string())
+        .replace(WAIT_FOR_FONTS_TOKEN, if wait_for_fonts { "true" } else { "false" })
 }
 
 #[derive(Debug, PartialEq)]
@@ -40,8 +43,11 @@ pub fn parse_snapshot(json: &str) -> Result<Readiness, String> {
     match status {
         "pending" => Ok(Readiness::Pending),
         "ready" => {
-            if snapshot.get("font_status").and_then(Value::as_str) != Some("loaded") {
-                return Err("ready snapshot has no loaded font proof".to_owned());
+            if !matches!(
+                snapshot.get("font_status").and_then(Value::as_str),
+                Some("loaded" | "not-waited")
+            ) {
+                return Err("ready snapshot has no valid font wait status".to_owned());
             }
             Ok(Readiness::Ready {
                 payload: snapshot
@@ -82,14 +88,18 @@ mod tests {
 
     #[test]
     fn builds_a_script_with_the_requested_timeout() {
-        let script = document_start_script(2500);
+        let script = document_start_script(2500, true);
+        let offline_script = document_start_script(2500, false);
         assert!(!script.contains("__PLIEGO_TIMEOUT_MS__"));
+        assert!(!script.contains("__PLIEGO_WAIT_FOR_FONTS__"));
+        assert!(script.contains("const shouldWaitForFonts = true;"));
         assert!(script.contains("timed out after 2500 ms"));
         assert!(script.contains("}), 2500);"));
         assert!(script.contains("classList.add(\"test-wait\")"));
         assert!(script.contains("document.fonts.ready.then"));
         assert!(script.contains("addEventListener(\"load\", waitForFonts"));
         assert!(script.contains("font_status: \"loaded\""));
+        assert!(offline_script.contains("const shouldWaitForFonts = false;"));
     }
 
     #[test]
@@ -103,6 +113,13 @@ mod tests {
                 .unwrap(),
             Readiness::Ready {
                 payload: json!({ "pages": 2 })
+            }
+        );
+        assert_eq!(
+            parse_snapshot(r#"{"status":"ready","payload":null,"font_status":"not-waited"}"#)
+                .unwrap(),
+            Readiness::Ready {
+                payload: json!(null)
             }
         );
         assert_eq!(

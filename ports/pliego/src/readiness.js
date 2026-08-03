@@ -9,6 +9,7 @@
 
     let timer;
     let waitingForFonts = false;
+    const shouldWaitForFonts = __PLIEGO_WAIT_FOR_FONTS__;
     let state = Object.freeze({ status: "pending" });
     document.documentElement?.classList.add("test-wait");
 
@@ -38,6 +39,13 @@
     const ready = Object.freeze(payload => {
         if (state.status !== "pending" || waitingForFonts) {
             return false;
+        }
+        if (!shouldWaitForFonts) {
+            return settle({
+                status: "ready",
+                payload: payload === undefined ? null : payload,
+                font_status: "not-waited",
+            });
         }
         if (!document.fonts?.ready || typeof document.fonts.ready.then !== "function") {
             return fail({
