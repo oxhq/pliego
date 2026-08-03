@@ -20,7 +20,7 @@ from contextlib import redirect_stderr
 from pathlib import Path
 from typing import Any
 
-from PIL import Image, ImageChops
+from PIL import Image, ImageChops, ImageFilter
 
 FIXTURE_SCHEMA = "pliego.document-gate-fixtures"
 BENCHMARK_SCHEMA = "pliego.document-benchmark.v1"
@@ -30,6 +30,8 @@ CSS_PX_TO_PDF_PT = 0.75
 PROCESS_TIMEOUT_SECONDS = 900
 ROUND_DIGITS = 6
 GEOMETRY_TOLERANCE = 0.51
+PDF_RASTER_DPI = 96
+PDF_PREVIEW_MAX_INK_MISMATCH = 0.03
 PHASES = (
     "controlled_runtime",
     "scene_capture",
@@ -783,6 +785,8 @@ def verify_previews(
     summary: dict[str, Any],
     scene: dict[str, Any],
     fixture: dict[str, Any],
+    pdf: Path,
+    raster_directory: Path,
 ) -> tuple[bytes, ...]:
     pages_manifest = read_object(artifact_path(summary, "pages_artifact", "page preview manifest"), "page manifest")
     pages = list_value(pages_manifest.get("pages"), "page preview records")
@@ -795,6 +799,10 @@ def verify_previews(
         f"{fixture['name']} page preview manifest differs",
     )
     contents = []
+    visual_pages = set(visual_page_indices(fixture))
+    raster_directory.mkdir(parents=True)
+    pdftoppm = shutil.which("pdftoppm")
+    require(pdftoppm is not None, "pdftoppm is required for the document gate")
     artifacts = artifacts_directory(summary)
     for page_index, (raw_page, raw_scene_page) in enumerate(zip(pages, scene_pages, strict=True)):
         page = object_value(raw_page, f"{fixture['name']} preview {page_index}")
@@ -814,8 +822,7 @@ def verify_previews(
         try:
             with Image.open(preview) as image:
                 require(image.format == "PNG" and image.size == (612, 792), "preview PNG metadata differs")
-                image.load()
-                pixels = image.convert("RGB")
+                pixels = opaque_preview(image, fixture, page_index)
         except OSError as error:
             fail(f"{fixture['name']} preview {page_index} is not decodable: {error}")
         white = Image.new("RGB", pixels.size, "white")
@@ -823,8 +830,77 @@ def verify_previews(
             ImageChops.difference(pixels, white).getbbox() is not None,
             f"{fixture['name']} preview {page_index} is blank",
         )
+        if page_index in visual_pages:
+            prefix = raster_directory / f"page-{page_index + 1:03d}"
+            result = subprocess.run(
+                [
+                    pdftoppm, "-png", "-r", str(PDF_RASTER_DPI), "-f", str(page_index + 1),
+                    "-l", str(page_index + 1), "-singlefile", str(pdf), str(prefix),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=PROCESS_TIMEOUT_SECONDS,
+                check=False,
+            )
+            require(result.returncode == 0, f"{fixture['name']} page {page_index} pdftoppm failed: {result.stderr}")
+            raster_path = prefix.with_suffix(".png")
+            require(raster_path.is_file(), f"{fixture['name']} page {page_index} PDF raster is absent")
+            try:
+                with Image.open(raster_path) as raster:
+                    compare_preview_to_pdf_raster(pixels, raster.convert("RGB"), fixture, page_index)
+            except OSError as error:
+                fail(f"{fixture['name']} page {page_index} PDF raster is not decodable: {error}")
         contents.append(preview.read_bytes())
     return tuple(contents)
+
+
+def visual_page_indices(fixture: dict[str, Any]) -> tuple[int, ...]:
+    page_count = int(fixture["expected_pages"])
+    return tuple(range(page_count)) if fixture["name"] == "invoice" else (0, (page_count - 1) // 2, page_count - 1)
+
+
+def opaque_preview(image: Image.Image, fixture: dict[str, Any], page_index: int) -> Image.Image:
+    source = image.convert("RGBA")
+    require(
+        source.getchannel("A").getextrema() == (255, 255),
+        f"{fixture['name']} preview {page_index} alpha is not fully opaque",
+    )
+    return source.convert("RGB")
+
+
+def ink_mask(image: Image.Image) -> Image.Image:
+    pixels = image.convert("RGB")
+    return Image.frombytes("L", pixels.size, bytes(255 if min(pixel) < 245 else 0 for pixel in pixels.getdata()))
+
+
+def compare_preview_to_pdf_raster(
+    preview: Image.Image,
+    raster: Image.Image,
+    fixture: dict[str, Any],
+    page_index: int,
+) -> None:
+    require(preview.size == raster.size, f"{fixture['name']} page {page_index} preview/PDF raster sizes differ")
+    preview_ink = ink_mask(preview)
+    raster_ink = ink_mask(raster)
+    preview_bounds = preview_ink.getbbox()
+    raster_bounds = raster_ink.getbbox()
+    require(preview_bounds is not None and raster_bounds is not None, f"{fixture['name']} page {page_index} has no ink")
+    preview_dilated = preview_ink.filter(ImageFilter.MaxFilter(3))
+    raster_dilated = raster_ink.filter(ImageFilter.MaxFilter(3))
+    unmatched = ImageChops.lighter(
+        ImageChops.subtract(preview_ink, raster_dilated),
+        ImageChops.subtract(raster_ink, preview_dilated),
+    )
+    union = ImageChops.lighter(preview_ink, raster_ink)
+    mismatch = sum(unmatched.histogram()[1:]) / sum(union.histogram()[1:])
+    require(
+        mismatch <= PDF_PREVIEW_MAX_INK_MISMATCH,
+        f"{fixture['name']} page {page_index} preview/PDF ink mismatch is {mismatch:.6f}",
+    )
+    require(
+        all(abs(left - right) <= 1 for left, right in zip(preview_bounds, raster_bounds, strict=True)),
+        f"{fixture['name']} page {page_index} preview/PDF ink bounds differ: {preview_bounds!r} != {raster_bounds!r}",
+    )
 
 
 def session_span_ms(artifacts: Path) -> int:
@@ -929,7 +1005,7 @@ def run_document(
         output,
         destination / "extracted-text.txt",
     )
-    preview_bytes = verify_previews(summary, scene, fixture)
+    preview_bytes = verify_previews(summary, scene, fixture, output, destination / "pdf-raster")
     measurement = {
         "fixture": fixture["name"],
         "run": run_number,
@@ -974,6 +1050,7 @@ def identify_binary(binary: Path) -> list[str]:
     )
     require(result.returncode == 0 and result.stdout.strip(), "cannot identify the Pliego build")
     require(shutil.which("pdftotext") is not None, "pdftotext is required for the document gate")
+    require(shutil.which("pdftoppm") is not None, "pdftoppm is required for the document gate")
     require(bool(Image.registered_extensions()), "Pillow cannot decode preview images")
     return result.stdout.strip().splitlines()
 
@@ -1017,7 +1094,7 @@ def benchmark_report(
         "output_validation_method": [
             "full expected caption, header, body-cell, footer, and total text per physical page",
             "exact scene/PDF structure joins, PDF hashes and bytes, media boxes, fonts, and operation counts",
-            "decoded nonblank page PNGs and byte-identical clean-home reruns",
+            "decoded page PNGs joined to 96-DPI pdftoppm rasters and byte-identical clean-home reruns",
             "column text positions, complete border grids, visible edge rectangles, and continuous row seams",
             "pdftotext page count, text identity, order, and clean-home determinism",
             "table continuation rows, break constraints, identities, header repeats, and warning traces",
@@ -1166,6 +1243,21 @@ def self_test(directory: Path) -> None:
         require("table row seam count differs" in error_output.getvalue(), "extra-seam failure differs")
     else:
         fail("extra table row seam was accepted")
+    require(
+        visual_page_indices(manifest["fixtures"][0]) == (0, 1)
+        and visual_page_indices(manifest["fixtures"][1]) == (0, 49, 99),
+        "focused visual page selection differs",
+    )
+    preview = Image.new("RGBA", (32, 32), (0, 0, 0, 0))
+    preview.paste((0, 0, 0, 255), (8, 8, 24, 24))
+    error_output = io.StringIO()
+    try:
+        with redirect_stderr(error_output):
+            opaque_preview(preview, fixture, 0)
+    except SystemExit:
+        require("alpha is not fully opaque" in error_output.getvalue(), "transparent preview failure differs")
+    else:
+        fail("transparent-black preview was accepted")
     report = benchmark_report(["self-test"], "self-test", manifest, [])
     require(
         report["schema"] == BENCHMARK_SCHEMA
