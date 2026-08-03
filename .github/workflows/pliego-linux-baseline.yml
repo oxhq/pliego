@@ -2,9 +2,6 @@ name: Pliego Linux baseline
 
 on:
   workflow_dispatch:
-  push:
-    paths:
-      - .github/workflows/pliego-linux-baseline.yml
 
 permissions:
   contents: read

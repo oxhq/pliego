@@ -14,8 +14,8 @@ runner. It does not claim byte-for-byte reproducible artifacts.
 - Build profile: `checked-release`
 
 The fork-owned workflow is `.github/workflows/pliego-linux-baseline.yml`. It is
-triggered when that workflow file changes and can also be run manually. The
-inherited Servo workflows remain unadopted while they are audited.
+a frozen, manual diagnostic for the pinned upstream source; normal Pliego
+changes do not run it. The inherited Servo workflows remain unadopted.
 
 ## Clean Linux x86_64 run
 
