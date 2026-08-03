@@ -36,6 +36,7 @@ use style::properties::ComputedValues;
 use style::properties::longhands::visibility::computed_value::T as Visibility;
 use style::properties::style_structs::Border;
 use style::values::computed::basic_shape::ClipPath;
+use style::values::computed::image::Image;
 use style::values::computed::{
     BorderImageSideWidth, BorderImageWidth, BorderStyle, LengthPercentage,
     NonNegativeLengthOrNumber, NumberOrPercentage, OutlineStyle,
@@ -862,12 +863,14 @@ impl PaintTraversalHandler for DisplayListBuilder<'_> {
             return;
         };
 
-        self.debug_capture.record_fragment(
-            "box",
-            fragment.box_fragment,
-            fragment.base.tag,
-            state,
-        );
+        if box_has_unsupported_paint(fragment, self.paint_body_background) {
+            self.debug_capture.record_fragment(
+                "box",
+                fragment.box_fragment,
+                fragment.base.tag,
+                state,
+            );
+        }
         self.debug_capture.record_table_borders(
             fragment.box_fragment,
             fragment.base.tag,
@@ -2476,6 +2479,48 @@ fn separate_table_cell_borders(
         &colors.left,
     );
     borders
+}
+
+fn box_has_unsupported_paint(
+    fragment: &BoxFragmentWithStyle<'_>,
+    paint_body_background: bool,
+) -> bool {
+    if fragment
+        .base
+        .flags
+        .contains(FragmentFlags::DO_NOT_PAINT)
+    {
+        return false;
+    }
+
+    let style_has_background = |style: &ComputedValues| {
+        let background = style.get_background();
+        style.resolve_color(&background.background_color).alpha > 0.0 ||
+            background
+                .background_image
+                .0
+                .iter()
+                .any(|image| !matches!(image, Image::None))
+    };
+    let flags = fragment.base.flags;
+    let paints_background = !flags.intersects(FragmentFlags::IS_ROOT_ELEMENT) &&
+        (paint_body_background ||
+            !flags.intersects(FragmentFlags::IS_BODY_ELEMENT_OF_HTML_ELEMENT_ROOT)) &&
+        match &fragment.background_mode {
+            BackgroundMode::None => false,
+            BackgroundMode::Normal => style_has_background(fragment.style()),
+            BackgroundMode::Extra(backgrounds) => {
+                style_has_background(fragment.style()) ||
+                    backgrounds
+                        .iter()
+                        .any(|background| style_has_background(&background.style.borrow()))
+            },
+        };
+    let paints_shadow = !fragment.style().get_effects().box_shadow.0.is_empty();
+    let paints_border = !fragment.has_collapsed_borders() &&
+        fragment.border.to_webrender() != SideOffsets2D::zero();
+
+    paints_background || paints_shadow || paints_border
 }
 
 fn separate_table_grid_border_rows(
