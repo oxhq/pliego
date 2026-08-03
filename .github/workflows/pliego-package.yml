@@ -6,6 +6,8 @@ on:
     paths:
       - .github/workflows/pliego-package.yml
   push:
+    branches:
+      - "release-proof/**"
     tags:
       - "v*"
 
