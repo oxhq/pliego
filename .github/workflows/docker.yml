@@ -27,6 +27,7 @@ env:
 
 jobs:
   devcontainer_ubuntu_build:
+    if: github.event_name != 'push' || github.repository == 'servo/servo'
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false

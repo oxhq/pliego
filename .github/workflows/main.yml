@@ -27,6 +27,7 @@ on:
 jobs:
   decision:
     name: Generate Try Configuration
+    if: github.event_name != 'push' || github.repository == 'servo/servo'
     runs-on: ubuntu-22.04
     outputs:
       configuration: ${{ steps.configuration.outputs.result }}
@@ -78,7 +79,7 @@ jobs:
   build-result:
     name: Result
     runs-on: ubuntu-latest
-    if: always()
+    if: always() && (github.event_name != 'push' || github.repository == 'servo/servo')
     # needs all build to detect cancellation
     needs:
       - build
