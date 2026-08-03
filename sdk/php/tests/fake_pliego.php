@@ -3,11 +3,16 @@
 declare(strict_types=1);
 
 if (($argv[1] ?? null) === '--version') {
-    if (getenv('PLIEGO_DOCTOR_FAKE_MODE') === 'incompatible') {
+    $mode = getenv('PLIEGO_DOCTOR_FAKE_MODE');
+    if ($mode === 'incompatible') {
         fwrite(STDERR, "wrong platform\n");
         exit(193);
     }
-    fwrite(STDOUT, "pliego 0.1.0\nServoShell fake\nServo base fake\n");
+    $apiVersion = $mode === 'api-mismatch' ? "pliego-api 2\n" : "pliego-api 1\n";
+    if ($mode === 'api-missing') {
+        $apiVersion = '';
+    }
+    fwrite(STDOUT, "pliego 0.1.0\n{$apiVersion}ServoShell fake\nServo base fake\n");
     exit(0);
 }
 

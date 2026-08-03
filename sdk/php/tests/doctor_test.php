@@ -31,6 +31,7 @@ mkdir($root, 0700);
 $doctor = new Doctor([PHP_BINARY, __DIR__.'/fake_pliego.php'], 3);
 $report = $doctor->run($root);
 doctorExpect($report['version'] === '0.1.0', 'CLI version is reported');
+doctorExpect($report['api_version'] === 1, 'Pliego API v1 is reported');
 doctorExpect($report['platform'] !== '', 'platform is reported');
 doctorExpect(str_starts_with((string) file_get_contents($report['smoke_pdf']), '%PDF-'), 'offline PDF smoke passes');
 $manifest = json_decode(
@@ -46,7 +47,6 @@ $command = json_decode(
     flags: JSON_THROW_ON_ERROR,
 );
 doctorExpect(!isset($command['options']['--allow-http-root']), 'doctor smoke passes no network root');
-doctorExpect(str_contains($report['warning'], 'does not expose an API version'), 'API proof gap is explicit');
 
 doctorFailure(new Doctor([$root.'/missing-pliego']), $root, 'not found');
 $notExecutable = $root.'/not-executable.txt';
@@ -55,6 +55,12 @@ doctorFailure(new Doctor([$notExecutable]), $root, 'not executable');
 
 putenv('PLIEGO_DOCTOR_FAKE_MODE=incompatible');
 doctorFailure($doctor, $root, 'compatible executable');
+putenv('PLIEGO_DOCTOR_FAKE_MODE');
+
+putenv('PLIEGO_DOCTOR_FAKE_MODE=api-missing');
+doctorFailure($doctor, $root, 'requires Pliego API v1');
+putenv('PLIEGO_DOCTOR_FAKE_MODE=api-mismatch');
+doctorFailure($doctor, $root, 'unsupported Pliego API v2');
 putenv('PLIEGO_DOCTOR_FAKE_MODE');
 
 $filesystemRoot = DIRECTORY_SEPARATOR === '\\'

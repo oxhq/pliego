@@ -42,6 +42,7 @@ mod readiness;
 mod session;
 
 const SERVO_BASE_SHA: &str = "313b6d5ecc113b08010ce434140db3ca5abcc71c";
+const PLIEGO_API_VERSION: u32 = 1;
 const READINESS_TIMEOUT_MS: u64 = 10_000;
 const SESSION_CREATE_ATTEMPTS: u32 = 32;
 const DEFAULT_LOCALE: &str = "en-US";
@@ -925,8 +926,9 @@ fn print_help() {
 
 fn print_version() {
     println!(
-        "pliego {}\n{}\nServo base {}",
+        "pliego {}\npliego-api {}\n{}\nServo base {}",
         env!("CARGO_PKG_VERSION"),
+        PLIEGO_API_VERSION,
         servoshell::VERSION,
         SERVO_BASE_SHA
     );

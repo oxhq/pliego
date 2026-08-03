@@ -28,10 +28,10 @@ final class DoctorCommand extends Command
         }
 
         $this->info("Pliego {$report['version']}: {$report['binary']}");
+        $this->info("API: {$report['api_version']}");
         $this->info("Platform: {$report['platform']}");
         $this->info("Writable work root: {$report['work_root']}");
         $this->info("Offline smoke PDF: {$report['smoke_pdf']}");
-        $this->warn($report['warning']);
 
         return self::SUCCESS;
     }

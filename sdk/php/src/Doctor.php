@@ -9,6 +9,8 @@ use Throwable;
 
 final readonly class Doctor
 {
+    private const SUPPORTED_API_VERSION = '1';
+
     /**
      * @param non-empty-list<string> $command
      */
@@ -20,7 +22,7 @@ final readonly class Doctor
     }
 
     /**
-     * @return array{binary: string, version: string, platform: string, work_root: string, smoke_pdf: string, warning: string}
+     * @return array{binary: string, version: string, api_version: int, platform: string, work_root: string, smoke_pdf: string}
      */
     public function run(string $workDirectory): array
     {
@@ -32,9 +34,19 @@ final readonly class Doctor
                 "Pliego cannot run on ".PHP_OS_FAMILY.": {$detail}. Install Pliego or set PLIEGO_BINARY to a compatible executable.",
             );
         }
-        if (preg_match('/^pliego\s+([^\s]+)/m', $stdout, $match) !== 1) {
+        if (preg_match('/^pliego ([^\s]+)\r?$/m', $stdout, $match) !== 1) {
             throw new RuntimeException(
                 'PLIEGO_BINARY does not expose the expected `pliego <version>` output; install a compatible Pliego CLI.',
+            );
+        }
+        if (preg_match('/^pliego-api ([0-9]+)\r?$/m', $stdout, $apiMatch) !== 1) {
+            throw new RuntimeException(
+                'PLIEGO_BINARY does not expose `pliego-api <version>`; this SDK requires Pliego API v1.',
+            );
+        }
+        if ($apiMatch[1] !== self::SUPPORTED_API_VERSION) {
+            throw new RuntimeException(
+                "PLIEGO_BINARY exposes unsupported Pliego API v{$apiMatch[1]}; this SDK requires v1.",
             );
         }
 
@@ -72,10 +84,10 @@ final readonly class Doctor
         return [
             'binary' => $command[0],
             'version' => $match[1],
+            'api_version' => (int) $apiMatch[1],
             'platform' => PHP_OS_FAMILY.' '.(PHP_INT_SIZE * 8).'-bit',
             'work_root' => $root,
             'smoke_pdf' => $result->pdfPath,
-            'warning' => 'The CLI does not expose an API version; the offline render is a functional compatibility check only.',
         ];
     }
 
