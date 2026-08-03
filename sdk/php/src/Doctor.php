@@ -58,18 +58,30 @@ final readonly class Doctor
             );
         }
         $style = $job.DIRECTORY_SEPARATOR.'doctor.css';
-        if (file_put_contents($style, "body { font: 12px/1.4 serif; }\n", LOCK_EX) === false) {
+        $font = dirname(__DIR__).'/resources/HasubiMono-Regular.woff2';
+        if (!is_file($font)) {
+            throw new RuntimeException('Pliego doctor bundled font is missing; reinstall oxhq/pliego-php.');
+        }
+        if (file_put_contents(
+            $style,
+            "@font-face { font-family: \"Pliego Doctor\"; src: url(\"doctor.woff2\") format(\"woff2\"); }\n"
+                ."body { font: 12px/1.4 \"Pliego Doctor\"; }\n",
+            LOCK_EX,
+        ) === false) {
             throw new RuntimeException("cannot write the offline doctor asset in {$job}");
         }
 
         try {
             $result = (new CliRenderer($command, $this->timeoutSeconds))->render(
-                '<!doctype html><meta charset="utf-8"><link rel="stylesheet" href="assets/doctor.css"><p>Pliego doctor</p>',
+                '<!doctype html><meta charset="utf-8"><link rel="stylesheet" href="assets/doctor.css"><p>Pliego doctor</p><script>queueMicrotask(() => window.pliego?.ready({fixture: "doctor"}))</script>',
                 $job.DIRECTORY_SEPARATOR.'input',
                 $job.DIRECTORY_SEPARATOR.'doctor.pdf',
                 $job.DIRECTORY_SEPARATOR.'artifacts',
                 new RenderOptions(allowedHttpRoots: []),
-                ['assets/doctor.css' => $style],
+                [
+                    'assets/doctor.css' => $style,
+                    'assets/doctor.woff2' => $font,
+                ],
             );
         } catch (Throwable $error) {
             throw new RuntimeException(

@@ -41,6 +41,14 @@ $manifest = json_decode(
 );
 doctorExpect($manifest['environment']['network']['policy'] === 'deny', 'doctor smoke denies network');
 doctorExpect(isset($manifest['assets']['assets/doctor.css']), 'doctor smoke bundles its style');
+$font = dirname(__DIR__).'/resources/HasubiMono-Regular.woff2';
+doctorExpect(is_file(dirname(__DIR__).'/resources/HasubiMono-OFL.txt'), 'bundled font retains its OFL license');
+doctorExpect(
+    ($manifest['assets']['assets/doctor.woff2']['sha256'] ?? null) === 'sha256:'.hash_file('sha256', $font),
+    'doctor smoke bundles its licensed font',
+);
+$doctorCss = (string) file_get_contents(dirname($report['smoke_pdf']).'/input/assets/doctor.css');
+doctorExpect(str_contains($doctorCss, 'url("doctor.woff2")'), 'doctor smoke selects its bundled font');
 $command = json_decode(
     (string) file_get_contents(dirname($report['smoke_pdf']).'/artifacts/command.json'),
     true,
