@@ -253,7 +253,17 @@ fn decide_resource_policy(
                 );
             };
             match path.canonicalize() {
-                Ok(path) if path.starts_with(document_root) => ResourcePolicyDecision::Allow,
+                Ok(path) if path.starts_with(document_root) => match std::fs::read(path) {
+                    Ok(body) => ResourcePolicyDecision::Synthesize {
+                        body,
+                        content_type: resource_content_type(&request.url),
+                    },
+                    Err(error) => failure(
+                        "RESOURCE_NOT_FOUND",
+                        "not_found",
+                        format!("file inside the document root is unavailable: {error}"),
+                    ),
+                },
                 Ok(_) => failure(
                     "RESOURCE_DENIED",
                     "denied",
@@ -1114,10 +1124,7 @@ fn render(request: RenderRequest) {
     record_artifact(std::fs::create_dir_all(&userscripts));
     record_artifact(std::fs::write(
         userscripts.join("00-pliego-readiness.js"),
-        readiness::document_start_script(
-            READINESS_TIMEOUT_MS,
-            !resource_policy.allowed_http_roots.is_empty(),
-        ),
+        readiness::document_start_script(READINESS_TIMEOUT_MS, true),
     ));
 
     record_artifact(artifacts.record_state("started", None));
@@ -3099,16 +3106,17 @@ mod tests {
                     false,
                 )
             ),
-            ResourcePolicyDecision::FetchHttp
-        ));
-        assert!(matches!(
-            decide_resource_policy(
-                &policy,
-                &root,
-                &request(url::Url::from_file_path(&inside).unwrap(), false),
-            ),
             ResourcePolicyDecision::Allow
         ));
+        let ResourcePolicyDecision::Synthesize { body, content_type } = decide_resource_policy(
+            &policy,
+            &root,
+            &request(url::Url::from_file_path(&inside).unwrap(), false),
+        ) else {
+            panic!("inside-root file should be synthesized")
+        };
+        assert_eq!(body, b"body {}");
+        assert_eq!(content_type, "text/css");
         let ResourcePolicyDecision::Fail(outside_failure) = decide_resource_policy(
             &policy,
             &root,
@@ -3137,7 +3145,7 @@ mod tests {
                     false,
                 ),
             ),
-            ResourcePolicyDecision::Allow
+            ResourcePolicyDecision::FetchHttp
         ));
         let ResourcePolicyDecision::Fail(network_failure) = decide_resource_policy(
             &policy,
