@@ -39,12 +39,17 @@ pub fn parse_snapshot(json: &str) -> Result<Readiness, String> {
 
     match status {
         "pending" => Ok(Readiness::Pending),
-        "ready" => Ok(Readiness::Ready {
-            payload: snapshot
-                .get("payload")
-                .cloned()
-                .ok_or_else(|| "ready snapshot has no payload".to_owned())?,
-        }),
+        "ready" => {
+            if snapshot.get("font_status").and_then(Value::as_str) != Some("loaded") {
+                return Err("ready snapshot has no loaded font proof".to_owned());
+            }
+            Ok(Readiness::Ready {
+                payload: snapshot
+                    .get("payload")
+                    .cloned()
+                    .ok_or_else(|| "ready snapshot has no payload".to_owned())?,
+            })
+        },
         "failed" => {
             let error = snapshot
                 .get("error")
@@ -82,6 +87,9 @@ mod tests {
         assert!(script.contains("timed out after 2500 ms"));
         assert!(script.contains("}), 2500);"));
         assert!(script.contains("classList.add(\"test-wait\")"));
+        assert!(script.contains("document.fonts.ready.then"));
+        assert!(script.contains("addEventListener(\"load\", waitForFonts"));
+        assert!(script.contains("font_status: \"loaded\""));
     }
 
     #[test]
@@ -91,7 +99,8 @@ mod tests {
             Readiness::Pending
         );
         assert_eq!(
-            parse_snapshot(r#"{"status":"ready","payload":{"pages":2}}"#).unwrap(),
+            parse_snapshot(r#"{"status":"ready","payload":{"pages":2},"font_status":"loaded"}"#)
+                .unwrap(),
             Readiness::Ready {
                 payload: json!({ "pages": 2 })
             }
@@ -114,6 +123,9 @@ mod tests {
     fn rejects_missing_or_malformed_snapshots() {
         assert!(parse_snapshot("null").is_err());
         assert!(parse_snapshot(r#"{"status":"ready"}"#).is_err());
+        assert!(
+            parse_snapshot(r#"{"status":"ready","payload":null,"font_status":"loading"}"#).is_err()
+        );
         assert!(parse_snapshot(r#"{"status":"unknown"}"#).is_err());
         assert!(parse_snapshot("not-json").is_err());
     }

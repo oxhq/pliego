@@ -51,6 +51,7 @@ const DEFAULT_PAGE_HEIGHT_CSS_PX: f32 = 1122.5197;
 const DEFAULT_PAGE_MARGIN_VERTICAL_CSS_PX: f32 = 45.3543;
 const DEFAULT_PAGE_MARGIN_HORIZONTAL_CSS_PX: f32 = 60.4724;
 const RENDER_ID_SCHEMA_MARKER: &[u8] = b"pliego.render-id.v1";
+const RESOLVED_INPUT_HASH_SCHEMA_MARKER: &[u8] = b"pliego.resolved-input.v1";
 
 #[cfg(unix)]
 #[allow(unsafe_code)]
@@ -1142,6 +1143,8 @@ fn render(request: RenderRequest) {
     ];
     let policy_failures = Rc::new(RefCell::new(Vec::new()));
     let captured_policy_failures = Rc::clone(&policy_failures);
+    let controlled_http_bodies = Rc::new(RefCell::new(BTreeMap::new()));
+    let captured_http_bodies = Rc::clone(&controlled_http_bodies);
     let document_root = document.root().to_owned();
     let active_resource_policy = resource_policy.clone();
     let controlled_http_client = Rc::new(OnceCell::new());
@@ -1168,7 +1171,44 @@ fn render(request: RenderRequest) {
                     .clone();
                 match fetch_controlled_http(&client, request, active_resource_policy.timeout_ms) {
                     Ok((response, body)) => {
-                        servoshell::WebResourcePolicyDecision::Synthesize { response, body }
+                        let key = (request.method.to_string(), request.url.to_string());
+                        let fetched = ControlledHttpResource {
+                            status: response.status_code.as_u16(),
+                            content_type: response
+                                .headers
+                                .get(http::header::CONTENT_TYPE)
+                                .and_then(|value| value.to_str().ok())
+                                .map(str::to_owned),
+                            body: body.clone(),
+                        };
+                        let changed = captured_http_bodies
+                            .borrow()
+                            .get(&key)
+                            .is_some_and(|existing| existing != &fetched);
+                        if changed {
+                            captured_policy_failures
+                                .borrow_mut()
+                                .push(ResourcePolicyFailure {
+                                code: "RESOURCE_CHANGED_DURING_RENDER",
+                                status: "changed",
+                                url: request.url.to_string(),
+                                method: request.method.to_string(),
+                                destination: format!("{:?}", request.destination),
+                                referrer_url: request
+                                    .referrer_url
+                                    .as_ref()
+                                    .map(ToString::to_string),
+                                is_for_main_frame: request.is_for_main_frame,
+                                is_redirect: request.is_redirect,
+                                reason:
+                                    "controlled HTTP URL returned different bytes during one render"
+                                        .into(),
+                            });
+                            servoshell::WebResourcePolicyDecision::Cancel
+                        } else {
+                            captured_http_bodies.borrow_mut().insert(key, fetched);
+                            servoshell::WebResourcePolicyDecision::Synthesize { response, body }
+                        }
                     },
                     Err(failure) => {
                         captured_policy_failures.borrow_mut().push(failure);
@@ -1232,15 +1272,23 @@ fn render(request: RenderRequest) {
             &message.message,
         ));
     }
-    let resource_capture = record_resources(&artifacts, result.resources, &resource_policy)
-        .unwrap_or_else(|error| {
-            fail_session(
-                &artifacts,
-                &document_pdf_path,
-                "SCENE_CAPTURE_RESOURCE_MAP_CONFLICT",
-                &error.to_string(),
-            )
-        });
+    let resource_capture = {
+        let controlled_http_bodies = controlled_http_bodies.borrow();
+        record_resources(
+            &artifacts,
+            result.resources,
+            &resource_policy,
+            &controlled_http_bodies,
+        )
+    }
+    .unwrap_or_else(|error| {
+        fail_session(
+            &artifacts,
+            &document_pdf_path,
+            "SCENE_CAPTURE_RESOURCE_MAP_CONFLICT",
+            &error.to_string(),
+        )
+    });
     if let Some(failure) = &resource_capture.failure {
         record_artifact(artifacts.record_resource_failure(
             failure.code,
@@ -1260,6 +1308,9 @@ fn render(request: RenderRequest) {
             &format!("{}: {}", failure.reason, failure.url),
         )
     }
+    let resolved_input_hash = resolved_input_hash(&render_id, &resource_capture.url_to_resource);
+    environment["resolved_input_hash"] = serde_json::json!(resolved_input_hash);
+    record_artifact(artifacts.write_environment(&environment));
 
     let snapshot_json = match result.value {
         servoshell::JSValue::String(json) => json,
@@ -1501,6 +1552,7 @@ fn render(request: RenderRequest) {
             "pages_artifact": scene_artifacts.pages_path.to_string_lossy(),
             "readiness": readiness_payload,
             "render_id": render_id,
+            "resolved_input_hash": resolved_input_hash,
             "rendered_image": proof.to_string_lossy(),
             "scene": {
                 "schema": scene_capture.scene.schema,
@@ -1561,17 +1613,12 @@ fn stable_render_id(
     resource_policy: &ResourcePolicy,
     allow_host_fonts: bool,
 ) -> String {
-    fn update_field(hasher: &mut Sha256, bytes: &[u8]) {
-        hasher.update((bytes.len() as u64).to_be_bytes());
-        hasher.update(bytes);
-    }
-
     let margins = page.margins();
     let mut hasher = Sha256::new();
-    update_field(&mut hasher, RENDER_ID_SCHEMA_MARKER);
-    update_field(&mut hasher, input_bytes);
-    update_field(&mut hasher, environment.locale.as_bytes());
-    update_field(&mut hasher, environment.timezone.as_bytes());
+    update_hash_field(&mut hasher, RENDER_ID_SCHEMA_MARKER);
+    update_hash_field(&mut hasher, input_bytes);
+    update_hash_field(&mut hasher, environment.locale.as_bytes());
+    update_hash_field(&mut hasher, environment.timezone.as_bytes());
     for value in [
         page.width(),
         page.height(),
@@ -1583,36 +1630,57 @@ fn stable_render_id(
         hasher.update(value.to_bits().to_be_bytes());
     }
     if allow_host_fonts {
-        update_field(&mut hasher, b"pliego.host-fonts.v1");
+        update_hash_field(&mut hasher, b"pliego.host-fonts.v1");
     }
     if !resource_policy.allowed_http_roots.is_empty()
         || !resource_policy.virtual_resources.is_empty()
         || resource_policy.asset_manifest.is_some()
         || resource_policy.timeout_ms != READINESS_TIMEOUT_MS
     {
-        update_field(&mut hasher, RESOURCE_POLICY_ID.as_bytes());
-        update_field(&mut hasher, &resource_policy.timeout_ms.to_be_bytes());
+        update_hash_field(&mut hasher, RESOURCE_POLICY_ID.as_bytes());
+        update_hash_field(&mut hasher, &resource_policy.timeout_ms.to_be_bytes());
         for root in &resource_policy.allowed_http_roots {
-            update_field(&mut hasher, root.as_str().as_bytes());
+            update_hash_field(&mut hasher, root.as_str().as_bytes());
         }
         for resource in &resource_policy.virtual_resources {
-            update_field(&mut hasher, resource.url.as_str().as_bytes());
+            update_hash_field(&mut hasher, resource.url.as_str().as_bytes());
             match &resource.body {
-                Ok(body) => update_field(&mut hasher, body),
-                Err(_) => update_field(&mut hasher, b"missing"),
+                Ok(body) => update_hash_field(&mut hasher, body),
+                Err(_) => update_hash_field(&mut hasher, b"missing"),
             }
         }
         if let Some(assets) = &resource_policy.assets {
             for (url, content_hash) in assets.identity_entries() {
-                update_field(&mut hasher, url.as_bytes());
-                update_field(&mut hasher, content_hash.as_bytes());
+                update_hash_field(&mut hasher, url.as_bytes());
+                update_hash_field(&mut hasher, content_hash.as_bytes());
             }
         } else if let Some(error) = &resource_policy.asset_error {
-            update_field(&mut hasher, error.code.as_bytes());
-            update_field(&mut hasher, error.message.as_bytes());
+            update_hash_field(&mut hasher, error.code.as_bytes());
+            update_hash_field(&mut hasher, error.message.as_bytes());
         }
     }
     format!("sha256:{}", lowercase_hex(&hasher.finalize()))
+}
+
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+fn resolved_input_hash(render_id: &str, resources: &BTreeMap<String, String>) -> String {
+    let mut hasher = Sha256::new();
+    update_hash_field(&mut hasher, RESOLVED_INPUT_HASH_SCHEMA_MARKER);
+    update_hash_field(&mut hasher, render_id.as_bytes());
+    for (url, resource) in resources {
+        if !url.starts_with("http://") && !url.starts_with("https://") {
+            continue;
+        }
+        update_hash_field(&mut hasher, url.as_bytes());
+        update_hash_field(&mut hasher, resource.as_bytes());
+    }
+    format!("sha256:{}", lowercase_hex(&hasher.finalize()))
+}
+
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+fn update_hash_field(hasher: &mut Sha256, bytes: &[u8]) {
+    hasher.update((bytes.len() as u64).to_be_bytes());
+    hasher.update(bytes);
 }
 
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
@@ -1667,6 +1735,7 @@ fn create_session_artifacts(base: PathBuf, render_id: &str) -> std::io::Result<S
 #[derive(Debug, Default, PartialEq)]
 struct PendingResource {
     urls: Vec<String>,
+    method: Option<String>,
     response_status: Option<u16>,
     content_type: Option<String>,
 }
@@ -1686,9 +1755,18 @@ impl PendingResource {
 #[derive(Debug, PartialEq)]
 struct CompletedResource {
     urls: Vec<String>,
+    method: Option<String>,
     response_status: Option<u16>,
     content_type: Option<String>,
     sha256: String,
+    body: Vec<u8>,
+}
+
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+#[derive(Clone, Debug, PartialEq)]
+struct ControlledHttpResource {
+    status: u16,
+    content_type: Option<String>,
     body: Vec<u8>,
 }
 
@@ -1838,6 +1916,7 @@ fn record_resources(
     artifacts: &SessionArtifacts,
     resources: Vec<servoshell::ResourceEvent>,
     policy: &ResourcePolicy,
+    controlled_http_bodies: &BTreeMap<(String, String), ControlledHttpResource>,
 ) -> Result<ResourceCapture, ResourceMapConflict> {
     let mut pending: HashMap<String, PendingResource> = HashMap::new();
     let mut capture = ResourceCapture::default();
@@ -1846,8 +1925,10 @@ fn record_resources(
         match resource.event {
             servoshell::NetworkEvent::HttpRequest(request)
             | servoshell::NetworkEvent::HttpRequestUpdate(request) => {
+                let method = request.method.to_string();
                 let url = request.url.into_string();
                 let pending_resource = pending.entry(resource.request_id.clone()).or_default();
+                pending_resource.method = Some(method);
                 if pending_resource.observe_url(url.clone()) {
                     record_artifact(artifacts.record_resource_request(&resource.request_id, &url));
                 }
@@ -1912,6 +1993,19 @@ fn record_resources(
                             });
                     }
                 }
+                if let Some(fetched) =
+                    completed.method.as_ref().and_then(|method| {
+                        completed.urls.iter().rev().find_map(|url| {
+                            controlled_http_bodies.get(&(method.clone(), url.clone()))
+                        })
+                    })
+                {
+                    completed.body.clone_from(&fetched.body);
+                    completed.sha256 = sha256_hex(&completed.body);
+                    if completed.content_type.is_none() {
+                        completed.content_type.clone_from(&fetched.content_type);
+                    }
+                }
                 record_artifact(artifacts.record_loaded_resource(
                     &resource.request_id,
                     &completed.urls,
@@ -1927,6 +2021,32 @@ fn record_resources(
         }
     }
 
+    for ((method, url), fetched) in controlled_http_bodies {
+        if capture.url_to_resource.contains_key(url) {
+            continue;
+        }
+        let completed = CompletedResource {
+            urls: vec![url.clone()],
+            method: Some(method.clone()),
+            response_status: Some(fetched.status),
+            content_type: fetched.content_type.clone(),
+            sha256: sha256_hex(&fetched.body),
+            body: fetched.body.clone(),
+        };
+        let request_id = format!("controlled-http:{}", sha256_hex(url.as_bytes()));
+        record_artifact(artifacts.record_resource_request(&request_id, url));
+        record_artifact(artifacts.record_loaded_resource(
+            &request_id,
+            &completed.urls,
+            completed.response_status,
+            completed.content_type.as_deref(),
+            &completed.sha256,
+            &completed.body,
+            None,
+        ));
+        capture.retain_completed(&completed)?;
+    }
+
     let mut incomplete = pending
         .into_values()
         .flat_map(|resource| {
@@ -1936,6 +2056,7 @@ fn record_resources(
                 .into_iter()
                 .map(move |url| (url, response_status))
         })
+        .filter(|(url, _)| !capture.url_to_resource.contains_key(url))
         .filter(|(url, _)| {
             url.starts_with("file:")
                 || policy.allowed_http_roots.iter().any(|root| {
@@ -1985,6 +2106,7 @@ fn complete_resource(
     let sha256 = sha256_hex(&body);
     Some(CompletedResource {
         urls: pending.urls,
+        method: pending.method,
         response_status: pending.response_status,
         content_type: pending.content_type,
         sha256,
@@ -3157,6 +3279,7 @@ mod tests {
     #[test]
     fn completes_a_resource_and_hashes_exact_bytes() {
         let mut resource = PendingResource {
+            method: Some("GET".to_owned()),
             response_status: Some(200),
             content_type: Some("text/css; charset=utf-8".to_owned()),
             ..PendingResource::default()
@@ -3169,6 +3292,7 @@ mod tests {
         let completed = complete_resource(&mut pending, "request-1", Some(b"hello".to_vec()))
             .expect("a body completes the resource");
         assert_eq!(completed.urls, ["file:///style.css", "file:///theme.css"]);
+        assert_eq!(completed.method.as_deref(), Some("GET"));
         assert_eq!(completed.response_status, Some(200));
         assert_eq!(
             completed.content_type.as_deref(),
@@ -3196,6 +3320,7 @@ mod tests {
 
         let conflict = super::CompletedResource {
             urls: vec!["file:///theme.css".to_owned()],
+            method: Some("GET".to_owned()),
             response_status: Some(200),
             content_type: None,
             sha256: "0".repeat(64),
