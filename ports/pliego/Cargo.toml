@@ -26,7 +26,7 @@ serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 servo-canvas = { workspace = true }
-servoshell = { path = "../servoshell" }
+servoshell = { path = "../servoshell", default-features = false, features = ["baked-in-resources", "bundled_freetype"] }
 tokio = { workspace = true, features = ["time"] }
 unicode-segmentation = { workspace = true }
 url = { workspace = true }
