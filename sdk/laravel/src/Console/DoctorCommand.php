@@ -1,0 +1,38 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Pliego\Laravel\Experimental\Console;
+
+use Illuminate\Console\Command;
+use Pliego\Php\Experimental\Doctor;
+use Throwable;
+
+final class DoctorCommand extends Command
+{
+    protected $signature = 'pliego:doctor';
+
+    protected $description = 'Check the Pliego binary, work root, and one offline render';
+
+    public function handle(): int
+    {
+        try {
+            $report = (new Doctor(
+                [(string) config('pliego.binary')],
+                (int) config('pliego.timeout_seconds'),
+            ))->run((string) config('pliego.work_dir'));
+        } catch (Throwable $error) {
+            $this->error($error->getMessage());
+
+            return self::FAILURE;
+        }
+
+        $this->info("Pliego {$report['version']}: {$report['binary']}");
+        $this->info("Platform: {$report['platform']}");
+        $this->info("Writable work root: {$report['work_root']}");
+        $this->info("Offline smoke PDF: {$report['smoke_pdf']}");
+        $this->warn($report['warning']);
+
+        return self::SUCCESS;
+    }
+}

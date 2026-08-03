@@ -2,6 +2,15 @@
 
 declare(strict_types=1);
 
+if (($argv[1] ?? null) === '--version') {
+    if (getenv('PLIEGO_DOCTOR_FAKE_MODE') === 'incompatible') {
+        fwrite(STDERR, "wrong platform\n");
+        exit(193);
+    }
+    fwrite(STDOUT, "pliego 0.1.0\nServoShell fake\nServo base fake\n");
+    exit(0);
+}
+
 if (($argv[1] ?? null) !== 'render' || ($argv[2] ?? null) !== 'document.html') {
     fwrite(STDOUT, json_encode([
         'status' => 'failed',
@@ -36,7 +45,11 @@ if (str_contains($html, 'FILL_STDERR')) {
 
 $output = $options['--output'][0] ?? null;
 $artifacts = $options['--artifacts'][0] ?? null;
-if (!is_string($output) || !is_string($artifacts) || !is_file('assets/test.txt')) {
+if (
+    !is_string($output)
+    || !is_string($artifacts)
+    || (!is_file('assets/test.txt') && !is_file('assets/doctor.css'))
+) {
     fwrite(STDOUT, json_encode([
         'status' => 'failed',
         'error' => ['code' => 'INVALID_REQUEST', 'message' => 'missing fake paths or asset'],
