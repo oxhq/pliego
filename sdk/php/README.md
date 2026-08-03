@@ -4,7 +4,7 @@ Experimental PHP 8.3+ bridge for one Pliego process per document. See the
 [alpha support profile](../../docs/pliego/support-profile.md) before production use.
 
 ```sh
-composer require oxhq/pliego-php:^0.1@alpha
+composer require oxhq/pliego-php:^0.1.0-alpha.1
 composer test
 ```
 
