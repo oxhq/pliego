@@ -16,7 +16,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         .ancestors()
         .nth(3)
         .ok_or("unexpected Cargo OUT_DIR")?;
-    let angle_out = fs::read_dir(profile_dir.join("build"))?
+    let Some(angle_out) = fs::read_dir(profile_dir.join("build"))?
         .filter_map(Result::ok)
         .map(|entry| entry.path())
         .filter(|path| {
@@ -25,7 +25,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         })
         .map(|path| path.join("out"))
         .find(|path| path.join("libEGL.dll").is_file())
-        .ok_or("mozangle did not produce Windows runtime DLLs")?;
+    else {
+        return Ok(());
+    };
 
     for name in ["libEGL.dll", "libGLESv2.dll"] {
         fs::copy(angle_out.join(name), profile_dir.join(name))?;

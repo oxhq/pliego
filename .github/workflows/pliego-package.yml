@@ -104,7 +104,7 @@ jobs:
       - name: Configure Windows build
         if: runner.os == 'Windows'
         run: |
-          "LIBCLANG_PATH=C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          @("LIBCLANG_PATH=C:\Program Files\LLVM\bin", "CC=clang-cl.exe", "CXX=clang-cl.exe") | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           .\mach fetch
 
       - name: Build Pliego only
@@ -134,8 +134,11 @@ jobs:
           $directory = Join-Path dist $bundle
           New-Item -ItemType Directory -Force $directory | Out-Null
           Copy-Item "$env:CARGO_TARGET_DIR\checked-release\pliego.exe" "$directory\pliego.exe"
-          Copy-Item "$env:CARGO_TARGET_DIR\checked-release\libEGL.dll" "$directory\libEGL.dll"
-          Copy-Item "$env:CARGO_TARGET_DIR\checked-release\libGLESv2.dll" "$directory\libGLESv2.dll"
+          foreach ($dll in @('libEGL.dll', 'libGLESv2.dll')) {
+            $source = Get-ChildItem "$env:CARGO_TARGET_DIR\checked-release\build" -Filter $dll -Recurse | Select-Object -First 1
+            if (-not $source) { throw "$dll was not produced" }
+            Copy-Item $source.FullName "$directory\$dll"
+          }
           Copy-Item LICENSE "$directory\LICENSE"
           @('1. Verify the adjacent SHA-256 file.', '2. Put pliego.exe on PATH or set PLIEGO_BINARY.', '3. Run pliego.exe --version.') | Set-Content "$directory\INSTALL.txt" -Encoding ascii
           & "$directory\pliego.exe" --version | Tee-Object -FilePath "$directory\VERSION.txt"
