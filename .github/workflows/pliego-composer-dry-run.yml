@@ -5,6 +5,8 @@ on:
   pull_request:
     paths:
       - .github/workflows/pliego-composer-dry-run.yml
+      - Cargo.lock
+      - ports/pliego/Cargo.toml
       - sdk/php/**
       - sdk/laravel/**
 
@@ -14,9 +16,6 @@ permissions:
 concurrency:
   group: pliego-composer-${{ github.ref }}
   cancel-in-progress: true
-
-env:
-  PLIEGO_COMPOSER_VERSION: 0.1.0-alpha
 
 jobs:
   package:
@@ -29,6 +28,30 @@ jobs:
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           persist-credentials: false
+
+      - name: Resolve and verify coordinated alpha version
+        shell: bash
+        run: |
+          python <<'PY'
+          import json
+          import os
+          import pathlib
+          import tomllib
+
+          cargo = tomllib.loads(pathlib.Path("ports/pliego/Cargo.toml").read_text(encoding="utf-8"))
+          lock = tomllib.loads(pathlib.Path("Cargo.lock").read_text(encoding="utf-8"))
+          laravel = json.loads(pathlib.Path("sdk/laravel/composer.json").read_text(encoding="utf-8"))
+          version = cargo["package"]["version"]
+          versions = {
+              "cargo": version,
+              "lock": next(package["version"] for package in lock["package"] if package["name"] == "pliego"),
+              "laravel": laravel["require"]["oxhq/pliego-php"],
+          }
+          assert len(set(versions.values())) == 1, versions
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as environment:
+              environment.write(f"PLIEGO_COMPOSER_VERSION={version}\n")
+          print(f"coordinated alpha version: {version}")
+          PY
 
       - name: Show Composer toolchain
         run: |
@@ -82,7 +105,6 @@ jobs:
           assert php["name"] == "oxhq/pliego-php", php["name"]
           assert laravel["name"] == "oxhq/pliego-laravel", laravel["name"]
           assert php["license"] == laravel["license"] == "MIT"
-          assert laravel["require"]["oxhq/pliego-php"] == version
 
           archives = {
               php_root: root / "packages" / f"oxhq-pliego-php-{version}.zip",

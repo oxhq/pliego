@@ -9,7 +9,7 @@
         "illuminate/contracts": "^13.0",
         "illuminate/support": "^13.0",
         "illuminate/view": "^13.0",
-        "oxhq/pliego-php": "0.1.0-alpha",
+        "oxhq/pliego-php": "0.1.0-alpha.1",
         "symfony/http-foundation": "^7.4 || ^8.0"
     },
     "autoload": {
