@@ -82,7 +82,12 @@ def final_json(result: subprocess.CompletedProcess[str]) -> dict[str, Any]:
     return value
 
 
-def render(binary: Path, root: Path, document: str, roots: tuple[str, str]) -> dict[str, Any]:
+def run(
+    binary: Path,
+    root: Path,
+    document: str,
+    roots: tuple[str, ...],
+) -> tuple[subprocess.CompletedProcess[str], dict[str, Any]]:
     root.mkdir()
     home = root / "home"
     runtime = home / "runtime"
@@ -101,11 +106,9 @@ def render(binary: Path, root: Path, document: str, roots: tuple[str, str]) -> d
         "320x240",
         "--page-margins",
         "8,8,8,8",
-        "--allow-http-root",
-        roots[0],
-        "--allow-http-root",
-        roots[1],
     ]
+    for allowed_root in roots:
+        command.extend(("--allow-http-root", allowed_root))
     environment = os.environ.copy()
     environment.update(
         {
@@ -129,10 +132,15 @@ def render(binary: Path, root: Path, document: str, roots: tuple[str, str]) -> d
     )
     (root / "process.stdout.log").write_text(result.stdout, encoding="utf-8")
     (root / "process.stderr.log").write_text(result.stderr, encoding="utf-8")
-    require(result.returncode == 0, f"render failed: {result.stderr[-2000:]}")
     summary = final_json(result)
-    require(summary.get("status") == "rendered", repr(summary))
     (root / "summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return result, summary
+
+
+def render(binary: Path, root: Path, document: str, roots: tuple[str, str]) -> dict[str, Any]:
+    result, summary = run(binary, root, document, roots)
+    require(result.returncode == 0, f"render failed: {result.stderr[-2000:]}")
+    require(summary.get("status") == "rendered", repr(summary))
     return summary
 
 
@@ -172,6 +180,24 @@ def verify(summary: dict[str, Any], css_url: str, css: bytes, font_url: str, fon
     require(pdf.startswith(b"%PDF-") and (b"/FontFile2" in pdf or b"/FontFile3" in pdf), "PDF omitted font")
 
 
+def verify_denied(
+    result: subprocess.CompletedProcess[str],
+    summary: dict[str, Any],
+    root: Path,
+    font_url: str,
+) -> None:
+    require(result.returncode == 1 and summary.get("status") == "failed", repr(summary))
+    error = summary.get("error")
+    require(isinstance(error, dict) and error.get("code") == "RESOURCE_DENIED", repr(error))
+    rows = [json.loads(line) for line in (root / "artifacts/resources.jsonl").read_text().splitlines()]
+    require(
+        any(row.get("url") == font_url and row.get("code") == "RESOURCE_DENIED" for row in rows),
+        f"font-origin denial was not retained: {rows!r}",
+    )
+    require(not (root / "document.pdf").exists(), "denied render published a PDF")
+    require(not (root / "artifacts/document.pdf").exists(), "denied render retained a diagnostic PDF")
+
+
 def main() -> int:
     if len(sys.argv) != 3:
         fail(f"usage: {Path(sys.argv[0]).name} <pliego-binary> <output-directory>", 2)
@@ -207,7 +233,7 @@ def main() -> int:
 <meta charset="utf-8">
 <link rel="stylesheet" href="{css_url}">
 <div class="sample">P</div>
-<script>window.pliego.ready({{fixture: "live-remote-font"}});</script>
+<script>document.fonts.ready.then(() => window.pliego.ready({{fixture: "live-remote-font"}}));</script>
 """
         first_css = css_server.body()
         first = render(binary, output / "first", document, (css_server.base_url, font_server.base_url))
@@ -224,6 +250,13 @@ def main() -> int:
         require(first["render_id"] == changed["render_id"], "remote bytes changed the prefetch render ID")
         require(first["resolved_input_hash"] != changed["resolved_input_hash"], "remote bytes did not change identity")
         require(css_server.request_count >= 3 and font_server.request_count >= 3, "both live origins were not fetched")
+
+        css_requests = css_server.request_count
+        font_requests = font_server.request_count
+        denied_result, denied = run(binary, output / "denied-font-origin", document, (css_server.base_url,))
+        verify_denied(denied_result, denied, output / "denied-font-origin", font_url)
+        require(css_server.request_count > css_requests, "allowed stylesheet origin was not fetched")
+        require(font_server.request_count == font_requests, "denied font request reached its origin")
     finally:
         for server in servers:
             server.shutdown()
