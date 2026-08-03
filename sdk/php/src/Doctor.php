@@ -92,6 +92,47 @@ final readonly class Doctor
         if (!str_starts_with($result->bytes(), '%PDF-')) {
             throw new RuntimeException("Pliego offline smoke returned a non-PDF file at {$result->pdfPath}");
         }
+        try {
+            $fonts = json_decode(
+                (string) @file_get_contents($result->artifactsPath.DIRECTORY_SEPARATOR.'fonts.json'),
+                true,
+                flags: JSON_THROW_ON_ERROR,
+            );
+            $structure = json_decode(
+                (string) @file_get_contents($result->artifactsPath.DIRECTORY_SEPARATOR.'pdf-structure.json'),
+                true,
+                flags: JSON_THROW_ON_ERROR,
+            );
+        } catch (Throwable $error) {
+            throw new RuntimeException(
+                "Pliego offline smoke evidence is unreadable at {$result->artifactsPath}",
+                previous: $error,
+            );
+        }
+        $selection = is_array($fonts) && is_array($fonts['selections'][0] ?? null)
+            ? $fonts['selections'][0]
+            : [];
+        $page = is_array($structure) && is_array($structure['pages'][0] ?? null)
+            ? $structure['pages'][0]
+            : [];
+        if (
+            !is_array($fonts)
+            || !is_array($structure)
+            || ($fonts['schema'] ?? null) !== 'pliego.font-report'
+            || ($fonts['version'] ?? null) !== 1
+            || ($selection['source'] ?? null) !== 'bundled'
+            || ($selection['requested_families'] ?? null) !== ['Pliego Doctor']
+            || ($selection['selected_family'] ?? null) !== 'Pliego Doctor'
+            || ($structure['schema'] ?? null) !== 'pliego.pdf-structure'
+            || ($structure['version'] ?? null) !== 1
+            || ($structure['pdf']['bytes'] ?? null) !== filesize($result->pdfPath)
+            || ($structure['pdf']['sha256'] ?? null) !== 'sha256:'.hash_file('sha256', $result->pdfPath)
+            || ($page['expected_extracted_unicode'] ?? null) !== 'Pliego doctor'
+            || !is_int($page['operation_counts']['text'] ?? null)
+            || $page['operation_counts']['text'] < 1
+        ) {
+            throw new RuntimeException("Pliego offline smoke evidence is incomplete at {$result->artifactsPath}");
+        }
 
         return [
             'binary' => $command[0],

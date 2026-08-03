@@ -2,8 +2,9 @@
 
 declare(strict_types=1);
 
+$mode = getenv('PLIEGO_DOCTOR_FAKE_MODE');
+
 if (($argv[1] ?? null) === '--version') {
-    $mode = getenv('PLIEGO_DOCTOR_FAKE_MODE');
     if ($mode === 'incompatible') {
         fwrite(STDERR, "wrong platform\n");
         exit(193);
@@ -69,13 +70,34 @@ if (str_contains($html, 'SLOW_RENDER')) {
 }
 
 mkdir($artifacts, 0700, true);
-file_put_contents($output, "%PDF-1.7\n% fake Pliego self-test\n");
+$pdf = $mode === 'blank-pdf' ? "%PDF-1.7\n" : "%PDF-1.7\n% fake Pliego self-test\n";
+file_put_contents($output, $pdf);
 file_put_contents(
     "{$artifacts}/command.json",
     json_encode(['cwd' => getcwd(), 'options' => $options], JSON_PRETTY_PRINT)."\n",
 );
 file_put_contents("{$artifacts}/scene.json", "{}\n");
-file_put_contents("{$artifacts}/pdf-structure.json", "{}\n");
+file_put_contents("{$artifacts}/fonts.json", json_encode([
+    'schema' => 'pliego.font-report',
+    'version' => 1,
+    'selections' => [[
+        'source' => $mode === 'host-font' ? 'host' : 'bundled',
+        'requested_families' => ['Pliego Doctor'],
+        'selected_family' => 'Pliego Doctor',
+    ]],
+], JSON_PRETTY_PRINT)."\n");
+file_put_contents("{$artifacts}/pdf-structure.json", json_encode([
+    'schema' => 'pliego.pdf-structure',
+    'version' => 1,
+    'pdf' => [
+        'sha256' => 'sha256:'.hash('sha256', $pdf),
+        'bytes' => strlen($pdf),
+    ],
+    'pages' => [[
+        'expected_extracted_unicode' => $mode === 'blank-pdf' ? '' : 'Pliego doctor',
+        'operation_counts' => ['text' => $mode === 'blank-pdf' ? 0 : 1],
+    ]],
+], JSON_PRETTY_PRINT)."\n");
 
 fwrite(STDOUT, json_encode([
     'status' => 'rendered',

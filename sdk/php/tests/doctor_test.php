@@ -56,6 +56,12 @@ $command = json_decode(
 );
 doctorExpect(!isset($command['options']['--allow-http-root']), 'doctor smoke passes no network root');
 
+putenv('PLIEGO_DOCTOR_FAKE_MODE=blank-pdf');
+doctorFailure($doctor, $root, 'evidence is incomplete');
+putenv('PLIEGO_DOCTOR_FAKE_MODE=host-font');
+doctorFailure($doctor, $root, 'evidence is incomplete');
+putenv('PLIEGO_DOCTOR_FAKE_MODE');
+
 doctorFailure(new Doctor([$root.'/missing-pliego']), $root, 'not found');
 $notExecutable = $root.'/not-executable.txt';
 file_put_contents($notExecutable, "not executable\n");
