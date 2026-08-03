@@ -1,0 +1,120 @@
+name: Pliego Composer distribution dry run
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/pliego-composer-dry-run.yml
+      - sdk/php/**
+      - sdk/laravel/**
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pliego-composer-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PLIEGO_COMPOSER_VERSION: 0.1.0-alpha
+
+jobs:
+  package:
+    name: Validate and stage Composer packages
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out Pliego
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+
+      - name: Show Composer toolchain
+        run: |
+          php --version
+          composer --version
+
+      - name: Run focused PHP package self-test
+        run: |
+          composer --no-interaction --no-plugins --no-scripts --working-dir=sdk/php install --no-progress
+          composer --no-interaction --no-plugins --working-dir=sdk/php test
+
+      # These are root-level package trees from the committed SDK subtrees. Public
+      # repository history splits, tags, pushes, and publication stay separate.
+      - name: Stage package roots
+        shell: bash
+        run: |
+          mkdir -p dist/pliego-php dist/pliego-laravel dist/packages
+          git archive --format=tar HEAD:sdk/php | tar -xf - -C dist/pliego-php
+          git archive --format=tar HEAD:sdk/laravel | tar -xf - -C dist/pliego-laravel
+
+      - name: Validate Composer manifests strictly
+        run: |
+          composer --no-interaction --no-plugins --no-scripts validate --strict dist/pliego-php/composer.json
+          composer --no-interaction --no-plugins --no-scripts validate --strict dist/pliego-laravel/composer.json
+
+      - name: Create Composer archives
+        shell: bash
+        run: |
+          COMPOSER_ROOT_VERSION="$PLIEGO_COMPOSER_VERSION" composer --no-interaction --working-dir=dist/pliego-php archive --format=zip --dir="$GITHUB_WORKSPACE/dist/packages" --file="oxhq-pliego-php-$PLIEGO_COMPOSER_VERSION" --no-plugins --no-scripts
+          COMPOSER_ROOT_VERSION="$PLIEGO_COMPOSER_VERSION" composer --no-interaction --working-dir=dist/pliego-laravel archive --format=zip --dir="$GITHUB_WORKSPACE/dist/packages" --file="oxhq-pliego-laravel-$PLIEGO_COMPOSER_VERSION" --no-plugins --no-scripts
+
+      - name: Check package contract and archive roots
+        shell: bash
+        run: |
+          python <<'PY'
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import re
+          import zipfile
+
+          root = pathlib.Path("dist")
+          version = os.environ["PLIEGO_COMPOSER_VERSION"]
+          assert re.fullmatch(r"\d+\.\d+\.\d+-alpha(?:\.\d+)?", version), version
+
+          php_root = root / "pliego-php"
+          laravel_root = root / "pliego-laravel"
+          php = json.loads((php_root / "composer.json").read_text(encoding="utf-8"))
+          laravel = json.loads((laravel_root / "composer.json").read_text(encoding="utf-8"))
+          assert php["name"] == "oxhq/pliego-php", php["name"]
+          assert laravel["name"] == "oxhq/pliego-laravel", laravel["name"]
+          assert php["license"] == laravel["license"] == "MIT"
+          assert laravel["require"]["oxhq/pliego-php"] == version
+
+          archives = {
+              php_root: root / "packages" / f"oxhq-pliego-php-{version}.zip",
+              laravel_root: root / "packages" / f"oxhq-pliego-laravel-{version}.zip",
+          }
+          checksums = []
+          for package_root, archive in archives.items():
+              assert (package_root / "LICENSE").is_file()
+              expected = {
+                  path.relative_to(package_root).as_posix()
+                  for path in package_root.rglob("*")
+                  if path.is_file()
+              }
+              with zipfile.ZipFile(archive) as package:
+                  actual = {name for name in package.namelist() if not name.endswith("/")}
+              assert actual == expected, (archive, sorted(expected - actual), sorted(actual - expected))
+              checksums.append(f"{hashlib.sha256(archive.read_bytes()).hexdigest()}  {archive.name}")
+
+          (root / "packages" / "SHA256SUMS").write_text("\n".join(checksums) + "\n", encoding="ascii")
+          print("composer distribution check: ok")
+          PY
+
+      - name: Record dry-run boundary
+        run: echo "Staged committed package roots and Composer ZIPs only; public repository history, tags, pushes, Packagist publication, and consumer installation remain unproven." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Retain Composer dry-run artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: pliego-composer-${{ env.PLIEGO_COMPOSER_VERSION }}
+          path: |
+            dist/pliego-php/
+            dist/pliego-laravel/
+            dist/packages/
+          if-no-files-found: error
+          retention-days: 7
