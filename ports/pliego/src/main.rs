@@ -164,8 +164,15 @@ impl Default for ResourcePolicy {
 #[derive(Clone, Debug)]
 struct VirtualResource {
     url: url::Url,
-    body: Result<Vec<u8>, String>,
+    body: Result<Vec<u8>, LocalResourceReadError>,
     content_type: &'static str,
+}
+
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+#[derive(Clone, Debug)]
+enum LocalResourceReadError {
+    Unavailable(String),
+    TooLarge,
 }
 
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
@@ -217,15 +224,29 @@ fn decide_resource_policy(
         return failure("RESOURCE_DENIED", "denied", "redirects are disabled".into());
     }
 
+    if !matches!(request.method.as_str(), "GET" | "HEAD") {
+        return failure(
+            "RESOURCE_DENIED",
+            "denied",
+            "only GET and HEAD resource requests are allowed".into(),
+        );
+    }
+
+    let synthesize = |body: &[u8], content_type| ResourcePolicyDecision::Synthesize {
+        body: if request.method.as_str() == "HEAD" {
+            Vec::new()
+        } else {
+            body.to_vec()
+        },
+        content_type,
+    };
+
     if let Some(resource) = policy
         .assets
         .as_ref()
         .and_then(|assets| assets.get(&request.url))
     {
-        return ResourcePolicyDecision::Synthesize {
-            body: resource.body.clone(),
-            content_type: resource_content_type(&resource.url),
-        };
+        return synthesize(&resource.body, resource_content_type(&resource.url));
     }
 
     if let Some(resource) = policy
@@ -234,11 +255,20 @@ fn decide_resource_policy(
         .find(|resource| resource.url == request.url)
     {
         return match &resource.body {
-            Ok(body) => ResourcePolicyDecision::Synthesize {
-                body: body.clone(),
-                content_type: resource.content_type,
-            },
-            Err(reason) => failure("RESOURCE_NOT_FOUND", "not_found", reason.clone()),
+            Ok(body) => synthesize(body, resource.content_type),
+            Err(LocalResourceReadError::Unavailable(reason)) => failure(
+                "RESOURCE_NOT_FOUND",
+                "not_found",
+                format!("host virtual resource is unavailable: {reason}"),
+            ),
+            Err(LocalResourceReadError::TooLarge) => failure(
+                "RESOURCE_DENIED",
+                "denied",
+                format!(
+                    "host virtual resource exceeds the {}-byte limit",
+                    asset_cache::MAX_CACHE_BYTES
+                ),
+            ),
         };
     }
 
@@ -253,16 +283,23 @@ fn decide_resource_policy(
                 );
             };
             match path.canonicalize() {
-                Ok(path) if path.starts_with(document_root) => match std::fs::read(path) {
-                    Ok(body) => ResourcePolicyDecision::Synthesize {
-                        body,
-                        content_type: resource_content_type(&request.url),
-                    },
-                    Err(error) => failure(
-                        "RESOURCE_NOT_FOUND",
-                        "not_found",
-                        format!("file inside the document root is unavailable: {error}"),
-                    ),
+                Ok(path) if path.starts_with(document_root) => {
+                    match read_bounded_local_resource(&path) {
+                        Ok(body) => synthesize(&body, resource_content_type(&request.url)),
+                        Err(LocalResourceReadError::Unavailable(error)) => failure(
+                            "RESOURCE_NOT_FOUND",
+                            "not_found",
+                            format!("file inside the document root is unavailable: {error}"),
+                        ),
+                        Err(LocalResourceReadError::TooLarge) => failure(
+                            "RESOURCE_DENIED",
+                            "denied",
+                            format!(
+                                "local resource exceeds the {}-byte limit",
+                                asset_cache::MAX_CACHE_BYTES
+                            ),
+                        ),
+                    }
                 },
                 Ok(_) => failure(
                     "RESOURCE_DENIED",
@@ -482,16 +519,40 @@ fn nearest_existing_ancestor(path: &Path) -> Option<PathBuf> {
 }
 
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+fn read_bounded_local_resource(path: &Path) -> Result<Vec<u8>, LocalResourceReadError> {
+    let metadata = path
+        .metadata()
+        .map_err(|error| LocalResourceReadError::Unavailable(error.to_string()))?;
+    if metadata.len() > asset_cache::MAX_CACHE_BYTES {
+        return Err(LocalResourceReadError::TooLarge);
+    }
+
+    let file = std::fs::File::open(path)
+        .map_err(|error| LocalResourceReadError::Unavailable(error.to_string()))?;
+    let mut file = std::io::Read::take(file, asset_cache::MAX_CACHE_BYTES + 1);
+    let mut body = Vec::new();
+    std::io::Read::read_to_end(&mut file, &mut body)
+        .map_err(|error| LocalResourceReadError::Unavailable(error.to_string()))?;
+    if body.len() as u64 > asset_cache::MAX_CACHE_BYTES {
+        Err(LocalResourceReadError::TooLarge)
+    } else {
+        Ok(body)
+    }
+}
+
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
 fn resource_content_type(url: &url::Url) -> &'static str {
-    match Path::new(url.path())
+    let extension = Path::new(url.path())
         .extension()
         .and_then(|value| value.to_str())
-    {
+        .map(str::to_ascii_lowercase);
+    match extension.as_deref() {
         Some("css") => "text/css",
         Some("html") | Some("htm") => "text/html; charset=utf-8",
         Some("js") | Some("mjs") => "text/javascript",
         Some("png") => "image/png",
         Some("svg") => "image/svg+xml",
+        Some("otf") => "font/otf",
         Some("ttf") => "font/ttf",
         Some("woff") => "font/woff",
         Some("woff2") => "font/woff2",
@@ -513,8 +574,7 @@ impl ResourcePolicy {
                 };
                 VirtualResource {
                     url: resource.url.clone(),
-                    body: std::fs::read(&path)
-                        .map_err(|error| format!("host virtual resource is unavailable: {error}")),
+                    body: read_bounded_local_resource(&path),
                     content_type: resource_content_type(&resource.url),
                 }
             })
@@ -3087,9 +3147,13 @@ mod tests {
 
     #[test]
     fn resource_policy_is_rooted_typed_and_can_synthesize_host_resources() {
-        fn request(url: url::Url, is_redirect: bool) -> servoshell::WebResourceRequest {
+        fn request_with_method(
+            method: &str,
+            url: url::Url,
+            is_redirect: bool,
+        ) -> servoshell::WebResourceRequest {
             serde_json::from_value(serde_json::json!({
-                "method": "GET",
+                "method": method,
                 "headers": {},
                 "url": url,
                 "destination": "Style",
@@ -3100,13 +3164,40 @@ mod tests {
             .unwrap()
         }
 
+        fn request(url: url::Url, is_redirect: bool) -> servoshell::WebResourceRequest {
+            request_with_method("GET", url, is_redirect)
+        }
+
         let sandbox = temporary_artifacts("pliego-resource-policy");
         let root = sandbox.join("root");
         let inside = root.join("style.css");
+        let font = root.join("FONT.OTF");
+        let oversized = root.join("oversized.bin");
         let outside = sandbox.join("outside.css");
         fs::create_dir_all(&root).unwrap();
         fs::write(&inside, "body {}").unwrap();
+        fs::write(&font, b"font").unwrap();
+        fs::File::create(&oversized)
+            .unwrap()
+            .set_len(super::asset_cache::MAX_CACHE_BYTES + 1)
+            .unwrap();
         fs::write(&outside, "body {}").unwrap();
+        fs::write(root.join("asset.css"), b"asset {}").unwrap();
+        let asset_url = url::Url::parse("https://assets.test/asset.css").unwrap();
+        fs::write(
+            root.join("assets.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "schema": "pliego.asset-manifest",
+                "version": 1,
+                "assets": [{
+                    "url": asset_url,
+                    "path": "asset.css",
+                    "sha256": sha256_hex(b"asset {}"),
+                }],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
         let root = root.canonicalize().unwrap();
         let virtual_url = url::Url::parse("pliego://host/style.css").unwrap();
         let policy = ResourcePolicy::resolve(
@@ -3116,7 +3207,7 @@ mod tests {
                     url: virtual_url.clone(),
                     path: PathBuf::from("style.css"),
                 }],
-                asset_manifest: None,
+                asset_manifest: Some(PathBuf::from("assets.json")),
                 timeout_ms: 500,
             },
             &root,
@@ -3133,6 +3224,22 @@ mod tests {
             ),
             ResourcePolicyDecision::Allow
         ));
+        for url in [
+            url::Url::parse("data:text/plain,hello").unwrap(),
+            url::Url::from_file_path(&inside).unwrap(),
+            virtual_url.clone(),
+            asset_url.clone(),
+        ] {
+            let ResourcePolicyDecision::Fail(failure) =
+                decide_resource_policy(&policy, &root, &request_with_method("POST", url, false))
+            else {
+                panic!("unsupported method should fail before URL synthesis")
+            };
+            assert_eq!(
+                failure.reason,
+                "only GET and HEAD resource requests are allowed"
+            );
+        }
         let ResourcePolicyDecision::Synthesize { body, content_type } = decide_resource_policy(
             &policy,
             &root,
@@ -3142,6 +3249,23 @@ mod tests {
         };
         assert_eq!(body, b"body {}");
         assert_eq!(content_type, "text/css");
+        let ResourcePolicyDecision::Synthesize { body, content_type } = decide_resource_policy(
+            &policy,
+            &root,
+            &request(url::Url::from_file_path(&font).unwrap(), false),
+        ) else {
+            panic!("uppercase OTF should be synthesized")
+        };
+        assert_eq!(body, b"font");
+        assert_eq!(content_type, "font/otf");
+        let ResourcePolicyDecision::Fail(oversized_failure) = decide_resource_policy(
+            &policy,
+            &root,
+            &request(url::Url::from_file_path(&oversized).unwrap(), false),
+        ) else {
+            panic!("oversized local resource should fail")
+        };
+        assert_eq!(oversized_failure.code, "RESOURCE_DENIED");
         let ResourcePolicyDecision::Fail(outside_failure) = decide_resource_policy(
             &policy,
             &root,
@@ -3197,12 +3321,34 @@ mod tests {
         assert_eq!(redirect_failure.reason, "redirects are disabled");
 
         let ResourcePolicyDecision::Synthesize { body, content_type } =
-            decide_resource_policy(&policy, &root, &request(virtual_url, false))
+            decide_resource_policy(&policy, &root, &request(virtual_url.clone(), false))
         else {
             panic!("configured host resource should be synthesized")
         };
         assert_eq!(body, b"body {}");
         assert_eq!(content_type, "text/css");
+        let ResourcePolicyDecision::Synthesize { body, .. } = decide_resource_policy(
+            &policy,
+            &root,
+            &request_with_method("HEAD", virtual_url, false),
+        ) else {
+            panic!("HEAD should preserve synthesized response metadata")
+        };
+        assert!(body.is_empty());
+
+        #[cfg(unix)]
+        {
+            let escape = root.join("escape.css");
+            std::os::unix::fs::symlink(&outside, &escape).unwrap();
+            let ResourcePolicyDecision::Fail(failure) = decide_resource_policy(
+                &policy,
+                &root,
+                &request(url::Url::from_file_path(escape).unwrap(), false),
+            ) else {
+                panic!("symlink outside the root should fail")
+            };
+            assert_eq!(failure.code, "RESOURCE_DENIED");
+        }
 
         let artifact = policy.artifact("sha256:fixture");
         assert_eq!(artifact["render_id"], "sha256:fixture");
