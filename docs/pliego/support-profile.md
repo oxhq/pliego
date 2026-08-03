@@ -37,9 +37,11 @@ allowed stylesheet does not implicitly allow its font origin.
 | Cross-page rowspan continuation | Rejected | Typed/declared unsupported result; no synthesized or corrupted span. |
 | Table borders | Supported | Sampled page geometry and duplicate-border checks. |
 | Local TTF/OTF/WOFF/WOFF2 | Supported | Declared relative asset, selected and embedded/subset with `ToUnicode`; no host fallback. |
+| Font without embedding rights | Rejected | The application must supply an authorized face; Pliego does not grant, fetch, or override font rights. |
+| Missing declared font | Supported failure | Typed missing-resource evidence and no silent host-font substitution. |
 | Live allowlisted CSS/images/fonts | Supported | Two-origin local HTTP proof, readiness, typed failures, resource hashes, and resolved input identity. |
 | Google Fonts stylesheet link | Supported | Same two explicit roots as above; one real-provider release smoke, not a per-PR dependency. |
-| Missing or denied resource | Supported failure | Typed `RESOURCE_*` evidence and no published PDF. |
+| Denied URL | Supported failure | Typed `RESOURCE_DENIED` evidence and no published PDF. |
 | Redirect | Rejected | Typed redirect/resource failure. Add bounded redirects only when a supported direct URL cannot work. |
 | Variable-font axes | Partial | Static instance or authorized static face is the documented fallback. |
 | JavaScript readiness | Partial | Explicit readiness and font readiness only; arbitrary SPA/browser lifecycle parity is not promised. |
@@ -55,7 +57,7 @@ allowed stylesheet does not implicitly allow its font origin.
 | Whole render | Configurable PHP wall-clock timeout; timeout must terminate/reap the child, return `RENDER_TIMEOUT`, and publish no partial PDF. |
 | Document length | 100 pages is the qualified statement ceiling, not an arbitrary-length promise. |
 | HTML/input and memory | No engine hard cap is proven yet. The paid deployment must pin queue-payload and OS/container memory limits; engine enforcement remains a release gap. |
-| Artifacts | Successful and failed jobs retain bounded diagnostics under the configured work root. Automatic TTL/deletion remains a release gap; the deployment owns cleanup until OXH-284 closes it. |
+| Artifacts | Completed jobs retain one day and failed jobs seven days by default. `pliego:prune` applies configurable TTLs; zero seconds plus prune deletes completed evidence immediately. |
 
 Invalid requests, denied resources, timeouts, and engine failures are typed. Pliego
 must not publish a final PDF after a failed render or silently replace a declared
