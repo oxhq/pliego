@@ -4,6 +4,9 @@ Status: fixed-scope M4 validation offer. Pliego and its PHP/Laravel bridge are
 experimental; this is not a general-availability, compatibility, or hosted-service
 claim.
 
+Qualification uses the versioned [Pliego 0.1 alpha support profile](./support-profile.md);
+the paid engagement does not expand or privately gate that public capability set.
+
 This partnership is for a Laravel team with one production document that is painful
 to maintain or deploy with DOMPDF, Browsershot, wkhtmltopdf, or a remote rendering
 service. The purpose is to prove a real migration and production-assurance workflow,

@@ -2,6 +2,9 @@
 
 Status: experimental M4 revenue-wedge proof, introduced by OXH-272.
 
+The release contract, including offline/locked and live/allowlisted resource modes,
+is the [Pliego 0.1 alpha support profile](./support-profile.md).
+
 This bridge renders one Blade view through one isolated Pliego process. It is
 not the M8 daemon protocol and its PHP API may change. The generic engine and
 layout work remains MPL-2.0; the PHP packages are MIT.

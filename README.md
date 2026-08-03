@@ -1,4 +1,15 @@
-# The Servo Parallel Browser Engine Project
+# Pliego document engine
+
+Pliego is an experimental native HTML-to-PDF product built as a hard fork of Servo.
+The sellable OSS MVP targets trusted Laravel invoices, statements, and operational
+reports—not broad browser parity. Start with the
+[Pliego 0.1 alpha support profile](docs/pliego/support-profile.md) and
+[experimental Laravel bridge](docs/pliego/laravel-cli-bridge.md).
+
+The engine, native bundles, PHP/Laravel packages, URL/font capabilities, and generic
+fixes are public. Paid work covers private migration and production assurance.
+
+## Upstream Servo development
 
 Servo is a prototype web browser engine written in the
 [Rust](https://github.com/rust-lang/rust) language. It is currently developed on
