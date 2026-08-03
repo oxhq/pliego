@@ -3,6 +3,8 @@
 use Illuminate\Support\Facades\Artisan;
 use Pliego\Laravel\Experimental\Facades\Document;
 
+require_once base_path('rehearsal.php');
+
 Artisan::command('pliego:invoice', function (): int {
     $result = Document::view('invoice', ['rows' => range(1, 32)])
         ->pageSize('612x792')
@@ -27,3 +29,33 @@ Artisan::command('pliego:invoice', function (): int {
 
     return 0;
 })->purpose('Render the pinned synthetic invoice with Pliego');
+
+Artisan::command('pliego:rehearsal-job
+    {run}
+    {sequence}
+    {scenario}
+    {--report=}
+    {--work-root=}
+    {--offline-font=}
+    {--offline-font-sha256=}
+    {--css-url=}
+    {--css-sha256=}
+    {--font-url=}
+    {--font-sha256=}', function (): int {
+    return PliegoQueueRehearsal::runJob($this);
+})->purpose('Run one internal job in the six-job Pliego queue rehearsal');
+
+Artisan::command('pliego:rehearse-queue
+    {--release-version=0.1.0-alpha.1}
+    {--connection=}
+    {--report=}
+    {--binary-sha256=}
+    {--offline-font=}
+    {--offline-font-sha256=}
+    {--css-url=}
+    {--css-sha256=}
+    {--font-url=}
+    {--font-sha256=}
+    {--self-test}', function (): int {
+    return PliegoQueueRehearsal::run($this);
+})->purpose('Drain the focused six-job Pliego production rehearsal with one queue worker');

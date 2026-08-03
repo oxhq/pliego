@@ -3,13 +3,21 @@
   <head>
     <meta charset="utf-8">
     <title>Pliego Laravel synthetic invoice</title>
+    @if (($rehearsalMode ?? null) === 'live' || ($rehearsalMode ?? null) === 'denial')
+      <link rel="stylesheet" href="{{ $rehearsalCssUrl }}">
+    @endif
     <style>
-      @font-face {
-        font-family: Ahem;
-        src: url("assets/Ahem.ttf");
-      }
+      @if (($rehearsalMode ?? null) !== 'live')
+        @font-face {
+          font-family: Ahem;
+          src: url("assets/{{ $rehearsalFontFile ?? 'Ahem.ttf' }}")@isset($rehearsalFontFormat) format("{{ $rehearsalFontFormat }}")@endisset;
+        }
+      @endif
       html, body { margin: 0; }
       body { font: 12px/16px Ahem; }
+      @if (($rehearsalMode ?? null) === 'live')
+        body.sample { font-size: 12px; line-height: 16px; }
+      @endif
       table {
         border-collapse: collapse;
         table-layout: fixed;
@@ -32,7 +40,7 @@
       .page-end { break-after: page; }
     </style>
   </head>
-  <body>
+  <body{!! (($rehearsalMode ?? null) === 'live') ? ' class="sample"' : '' !!}>
     <table id="invoice">
       <caption>INVOICE PLG-2026-001</caption>
       <thead>
@@ -52,12 +60,17 @@
         <tr><td>TOTAL</td><td>32</td><td>MXN</td><td>5280.00</td></tr>
       </tfoot>
     </table>
-    <script>
-      queueMicrotask(() => window.pliego?.ready({
-        fixture: "laravel-invoice",
-        rows: 32,
-        expected_pages: 2
-      }));
-    </script>
+    @if (($rehearsalMode ?? null) !== 'timeout')
+      <script>
+        queueMicrotask(() => window.pliego?.ready({
+          fixture: "laravel-invoice",
+          @isset($rehearsalMode)
+            mode: @json($rehearsalMode),
+          @endisset
+          rows: 32,
+          expected_pages: 2
+        }));
+      </script>
+    @endif
   </body>
 </html>

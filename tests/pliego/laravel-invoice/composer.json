@@ -37,6 +37,8 @@
             "@php artisan package:discover --ansi"
         ],
         "render": "@php artisan pliego:invoice",
+        "rehearse": "@php artisan pliego:rehearse-queue",
+        "rehearse:self-test": "@php rehearsal.php --self-test",
         "verify": "@php verify.php"
     },
     "config": {
