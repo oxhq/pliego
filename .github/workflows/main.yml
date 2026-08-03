@@ -6,9 +6,20 @@ on:
     # for every change. This just offers an extra layer of testing and covers the case of
     # random force pushes.
     branches: ["main"]
+    # Pliego-owned surfaces have narrow product gates; reserve this inherited Servo
+    # pipeline for changes that can affect the upstream engine boundary.
+    paths-ignore: &pliego-owned-paths
+      - "ports/pliego/**"
+      - "sdk/php/**"
+      - "sdk/laravel/**"
+      - "tests/pliego/**"
+      - "docs/pliego/**"
+      - ".github/workflows/pliego-*.yml"
+      - "README.md"
   pull_request:
     types: ['opened', 'synchronize']
     branches: ["**"]
+    paths-ignore: *pliego-owned-paths
   merge_group:
     types: [checks_requested]
   workflow_dispatch:
