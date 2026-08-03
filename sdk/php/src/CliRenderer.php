@@ -19,7 +19,7 @@ final readonly class CliRenderer
     /**
      * @param non-empty-list<string> $command Production uses ["/path/to/pliego"].
      */
-    public function __construct(private array $command)
+    public function __construct(private array $command, private int $timeoutSeconds = 60)
     {
         if ($command === []) {
             throw new InvalidArgumentException('command must contain non-empty strings');
@@ -28,6 +28,9 @@ final readonly class CliRenderer
             if (!is_string($part) || $part === '' || str_contains($part, "\0")) {
                 throw new InvalidArgumentException('command must contain non-empty strings');
             }
+        }
+        if ($timeoutSeconds < 1) {
+            throw new InvalidArgumentException('timeoutSeconds must be at least 1');
         }
     }
 
@@ -102,13 +105,42 @@ final readonly class CliRenderer
         }
 
         fclose($pipes[0]);
-        $exitCode = proc_close($process);
+        $deadline = hrtime(true) + ($this->timeoutSeconds * 1_000_000_000);
+        $timedOut = false;
+        $status = proc_get_status($process);
+        while ($status['running']) {
+            if (hrtime(true) >= $deadline) {
+                $timedOut = true;
+                proc_terminate($process, 9);
+                break;
+            }
+            usleep(10_000);
+            $status = proc_get_status($process);
+        }
+        $exitCode = $status['exitcode'];
+        $closedExitCode = proc_close($process);
+        if ($exitCode < 0) {
+            $exitCode = $closedExitCode;
+        }
         rewind($stdoutFile);
         rewind($stderrFile);
         $stdout = stream_get_contents($stdoutFile);
         $stderr = stream_get_contents($stderrFile);
         fclose($stdoutFile);
         fclose($stderrFile);
+
+        if ($timedOut) {
+            if (is_file($output)) {
+                @unlink($output);
+            }
+            throw new EngineRenderException(
+                'RENDER_TIMEOUT',
+                $exitCode,
+                $stderr === false ? '' : $stderr,
+                "Pliego render exceeded {$this->timeoutSeconds} seconds",
+            );
+        }
+
         $metadata = $this->lastJsonObject($stdout === false ? '' : $stdout);
 
         if ($exitCode !== 0 || ($metadata['status'] ?? null) !== 'rendered') {

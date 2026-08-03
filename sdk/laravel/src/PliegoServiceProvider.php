@@ -16,7 +16,10 @@ final class PliegoServiceProvider extends ServiceProvider
         $this->mergeConfigFrom(dirname(__DIR__).'/config/pliego.php', 'pliego');
 
         $this->app->singleton(CliRenderer::class, function ($app): CliRenderer {
-            return new CliRenderer([(string) $app['config']->get('pliego.binary')]);
+            return new CliRenderer(
+                [(string) $app['config']->get('pliego.binary')],
+                (int) $app['config']->get('pliego.timeout_seconds'),
+            );
         });
         $this->app->singleton(DocumentFactory::class, function ($app): DocumentFactory {
             return new DocumentFactory(

@@ -43,6 +43,12 @@ if (!is_string($output) || !is_string($artifacts) || !is_file('assets/test.txt')
     ])."\n");
     exit(2);
 }
+if (str_contains($html, 'SLOW_RENDER')) {
+    file_put_contents($output, "%PDF-1.7\n% incomplete\n");
+    fwrite(STDERR, "SLOW_RENDER_STARTED\n");
+    fflush(STDERR);
+    sleep(5);
+}
 
 mkdir($artifacts, 0700, true);
 file_put_contents($output, "%PDF-1.7\n% fake Pliego self-test\n");
