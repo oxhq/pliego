@@ -71,6 +71,7 @@ fn exposes_exact_font_resource_bytes_and_face_parameters() {
     assert_eq!(resource.bytes, expected_bytes);
     assert_eq!(resource.face_index, 0);
     assert!(resource.variations.is_empty());
+    assert!(!resource.synthetic_bold);
 }
 
 #[test]

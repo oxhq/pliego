@@ -2556,6 +2556,7 @@ fn persist_scene_capture(
                     bytes,
                     face_index: instance.face_index,
                     variations,
+                    synthetic_bold: instance.synthetic_bold,
                 })
             },
             |image| image_resources.get(image).map(Vec::as_slice),
@@ -2657,6 +2658,7 @@ fn persist_scene_capture(
                         bytes,
                         face_index: instance.face_index,
                         variations,
+                        synthetic_bold: instance.synthetic_bold,
                     })
                 },
                 |image| image_resources.get(image).map(Vec::as_slice),
@@ -3835,6 +3837,7 @@ mod tests {
                 resource: resource.clone(),
                 face_index: 0,
                 variations: vec![],
+                synthetic_bold: false,
             }],
             font_selections: vec![CapturedFontSelection {
                 instance: font.clone(),

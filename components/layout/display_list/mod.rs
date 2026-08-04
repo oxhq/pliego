@@ -905,6 +905,7 @@ impl PaintTraversalHandler for DisplayListBuilder<'_> {
                 state,
             );
         }
+        BuilderForBoxFragment::new(fragment, state.origin).build(self, state);
         if box_paint_geometry_is_supported(self, state, fragment) {
             self.debug_capture.record_table_borders(
                 fragment.box_fragment,
@@ -919,7 +920,6 @@ impl PaintTraversalHandler for DisplayListBuilder<'_> {
                 }
             }
         }
-        BuilderForBoxFragment::new(fragment, state.origin).build(self, state)
     }
 
     fn visit_iframe(&mut self, state: &TraversalState, fragment: &Arc<IFrameFragment>) {

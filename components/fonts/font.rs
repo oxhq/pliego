@@ -285,6 +285,8 @@ pub struct FontResourceData<'a> {
     pub face_index: u32,
     /// Variation values accepted and normalized by the platform font implementation.
     pub variations: &'a [FontVariation],
+    /// Whether the selected face is painted with Servo's synthetic bold treatment.
+    pub synthetic_bold: bool,
 }
 
 impl std::fmt::Debug for Font {
@@ -412,6 +414,10 @@ impl Font {
             bytes: data_and_index.data.as_ref(),
             face_index: data_and_index.index,
             variations: self.handle.variations(),
+            synthetic_bold: self
+                .handle
+                .webrender_font_instance_flags()
+                .contains(FontInstanceFlags::SYNTHETIC_BOLD),
         })
     }
 

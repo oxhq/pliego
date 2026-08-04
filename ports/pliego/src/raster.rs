@@ -31,6 +31,7 @@ pub struct RasterFontResource<'a> {
     pub bytes: &'a [u8],
     pub face_index: u32,
     pub variations: &'a [RasterFontVariation],
+    pub synthetic_bold: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -156,7 +157,7 @@ pub fn render_pages_png_with_images<'font, 'image>(
     mut resolve_image: impl FnMut(&str) -> Option<&'image [u8]>,
 ) -> Result<Vec<Vec<u8>>, RasterError> {
     scene.validate().map_err(RasterError::InvalidScene)?;
-    let mut fonts = HashMap::<String, FontData>::new();
+    let mut fonts = HashMap::<String, (FontData, bool)>::new();
     let mut images = HashMap::<String, Arc<Pixmap>>::new();
     let mut image_budget = ImageBudget::default();
     scene
@@ -183,7 +184,7 @@ fn render_first_page_png_impl<'font, 'image>(
     images_supported: bool,
 ) -> Result<Vec<u8>, RasterError> {
     scene.validate().map_err(RasterError::InvalidScene)?;
-    let mut fonts = HashMap::<String, FontData>::new();
+    let mut fonts = HashMap::<String, (FontData, bool)>::new();
     let mut images = HashMap::<String, Arc<Pixmap>>::new();
     let mut image_budget = ImageBudget::default();
     render_page_png(
@@ -202,7 +203,7 @@ fn render_page_png<'font, 'image>(
     resolve_font: &mut impl FnMut(&str) -> Option<RasterFontResource<'font>>,
     resolve_image: &mut impl FnMut(&str) -> Option<&'image [u8]>,
     images_supported: bool,
-    fonts: &mut HashMap<String, FontData>,
+    fonts: &mut HashMap<String, (FontData, bool)>,
     images: &mut HashMap<String, Arc<Pixmap>>,
     image_budget: &mut ImageBudget,
 ) -> Result<Vec<u8>, RasterError> {
@@ -235,7 +236,6 @@ fn render_page_png<'font, 'image>(
                 glyphs,
                 ..
             } => {
-                context.set_paint(raster_color(color));
                 if !fonts.contains_key(font) {
                     let resource =
                         resolve_font(font).ok_or_else(|| RasterError::MissingFont(font.clone()))?;
@@ -244,8 +244,24 @@ fn render_page_png<'font, 'image>(
                     }
                     fonts.insert(
                         font.clone(),
-                        FontData::new(Blob::from(resource.bytes.to_vec()), resource.face_index),
+                        (
+                            FontData::new(Blob::from(resource.bytes.to_vec()), resource.face_index),
+                            resource.synthetic_bold,
+                        ),
                     );
+                }
+                let synthetic_bold = fonts[font].1;
+                let grouped_opacity = synthetic_bold && color.a < 1.0;
+                if grouped_opacity {
+                    context.push_opacity_layer(color.a as f32);
+                    context.set_paint(AlphaColor::<Srgb>::new([
+                        color.r as f32,
+                        color.g as f32,
+                        color.b as f32,
+                        1.0,
+                    ]));
+                } else {
+                    context.set_paint(raster_color(color));
                 }
 
                 let positioned_glyphs = glyphs
@@ -260,10 +276,21 @@ fn render_page_png<'font, 'image>(
                     .collect::<Result<Vec<_>, RasterError>>()?;
                 let font_size = raster_value(*font_size, "font_size")?;
                 context
-                    .glyph_run(&mut resources, &fonts[font])
+                    .glyph_run(&mut resources, &fonts[font].0)
                     .font_size(font_size)
                     .hint(false)
-                    .fill_glyphs(positioned_glyphs.into_iter());
+                    .fill_glyphs(positioned_glyphs.iter().copied());
+                if synthetic_bold {
+                    context.set_stroke(KurboStroke::new(f64::from(font_size / 24.0)));
+                    context
+                        .glyph_run(&mut resources, &fonts[font].0)
+                        .font_size(font_size)
+                        .hint(false)
+                        .stroke_glyphs(positioned_glyphs.into_iter());
+                }
+                if grouped_opacity {
+                    context.pop_layer();
+                }
             },
             Operation::Link { .. } => {},
             Operation::Path {

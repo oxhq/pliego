@@ -39,6 +39,7 @@ pub struct PdfFontResource<'a> {
     pub bytes: &'a [u8],
     pub face_index: u32,
     pub variations: &'a [PdfFontVariation],
+    pub synthetic_bold: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -225,7 +226,7 @@ pub fn render_document_pdf<'font, 'image>(
     let mut settings = SerializeSettings::default();
     settings.enable_tagging = false;
     let mut document = Document::new_with(settings);
-    let mut fonts = HashMap::<String, Font>::new();
+    let mut fonts = HashMap::<String, (Font, bool)>::new();
     let mut images = HashMap::<String, Image>::new();
     let mut image_budget = ImageBudget::default();
     for source_page in &scene.pages {
@@ -254,8 +255,6 @@ pub fn render_document_pdf<'font, 'image>(
                         let Some(first_glyph) = glyphs.first() else {
                             continue;
                         };
-                        surface.set_fill(Some(pdf_fill(color, FillRule::NonZero)));
-                        surface.set_stroke(None);
                         let source_font_size = *font_size;
                         let font_size = pdf_length(source_font_size, "font_size")?;
                         if font_size <= 0.0 {
@@ -264,9 +263,28 @@ pub fn render_document_pdf<'font, 'image>(
                         if !fonts.contains_key(font) {
                             let resource = resolve_font(font)
                                 .ok_or_else(|| PdfError::MissingFont(font.clone()))?;
-                            fonts.insert(font.clone(), load_font(font, resource)?);
+                            fonts.insert(
+                                font.clone(),
+                                (load_font(font, resource)?, resource.synthetic_bold),
+                            );
                         }
-                        let pdf_font = fonts[font].clone();
+                        let (pdf_font, synthetic_bold) = fonts[font].clone();
+                        let text_opacity = pdf_opacity(color.a);
+                        surface.set_fill(Some(Fill {
+                            paint: pdf_color(color).into(),
+                            opacity: if synthetic_bold {
+                                NormalizedF32::ONE
+                            } else {
+                                text_opacity
+                            },
+                            rule: PdfFillRule::NonZero,
+                        }));
+                        surface.set_stroke(synthetic_bold.then(|| PdfStroke {
+                            paint: pdf_color(color).into(),
+                            opacity: NormalizedF32::ONE,
+                            width: font_size / 24.0,
+                            ..PdfStroke::default()
+                        }));
 
                         // Keep the run intact so Krilla can span shared shaping clusters with ActualText.
                         let text_ranges = pdf_text_ranges(text, glyphs);
@@ -298,6 +316,9 @@ pub fn render_document_pdf<'font, 'image>(
                             ));
                             cursor_x += glyph.advance;
                         }
+                        if synthetic_bold && text_opacity != NormalizedF32::ONE {
+                            surface.push_opacity(text_opacity);
+                        }
                         surface.draw_glyphs(
                             Point::from_xy(
                                 pdf_length(first_glyph.x, "glyph.x")?,
@@ -309,6 +330,9 @@ pub fn render_document_pdf<'font, 'image>(
                             font_size,
                             false,
                         );
+                        if synthetic_bold && text_opacity != NormalizedF32::ONE {
+                            surface.pop();
+                        }
                     },
                     Operation::Path {
                         data,

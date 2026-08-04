@@ -60,6 +60,7 @@ pub struct CapturedFontInstance {
     pub resource: String,
     pub face_index: u32,
     pub variations: Vec<CapturedFontVariation>,
+    pub synthetic_bold: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
@@ -1423,7 +1424,12 @@ fn collect_font_instances(
         variations.sort_unstable_by_key(|variation| (variation.tag, variation.value.to_bits()));
 
         let resource_digest = content_address_digest(&instance.resource)?;
-        let actual_id = font_instance_id(&resource_digest, instance.face_index, &variations);
+        let actual_id = font_instance_id(
+            &resource_digest,
+            instance.face_index,
+            &variations,
+            instance.synthetic_bold,
+        );
         if actual_id != instance.id {
             return Err(CaptureError::FontInstanceIdMismatch {
                 instance: instance.id,
@@ -1440,6 +1446,7 @@ fn collect_font_instances(
                     resource: instance.resource,
                     face_index: instance.face_index,
                     variations,
+                    synthetic_bold: instance.synthetic_bold,
                 },
             )
             .is_some()
@@ -1721,12 +1728,13 @@ fn append_vector_image(
                 let bytes = decode_vector_font_resource(font)?;
                 merge_vector_font_resource(font_resources, font, &bytes)?;
                 let resource_digest = content_address_digest(&font.resource)?;
-                let instance_id = font_instance_id(&resource_digest, font.face_index, &[]);
+                let instance_id = font_instance_id(&resource_digest, font.face_index, &[], false);
                 let instance = CapturedFontInstance {
                     id: instance_id.clone(),
                     resource: font.resource.clone(),
                     face_index: font.face_index,
                     variations: Vec::new(),
+                    synthetic_bold: false,
                 };
                 if let Some(existing) = font_instances.get(&instance_id) {
                     if existing != &instance {
@@ -1923,15 +1931,23 @@ fn font_instance_id(
     resource_digest: &[u8; 32],
     face_index: u32,
     variations: &[CapturedFontVariation],
+    synthetic_bold: bool,
 ) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(b"pliego-font-instance-v1\0");
+    hasher.update(if synthetic_bold {
+        b"pliego-font-instance-v2\0".as_slice()
+    } else {
+        b"pliego-font-instance-v1\0".as_slice()
+    });
     hasher.update(resource_digest);
     hasher.update(face_index.to_be_bytes());
     hasher.update((variations.len() as u64).to_be_bytes());
     for variation in variations {
         hasher.update(variation.tag.to_be_bytes());
         hasher.update(variation.value.to_bits().to_be_bytes());
+    }
+    if synthetic_bold {
+        hasher.update([1]);
     }
     let digest: [u8; 32] = hasher.finalize().into();
     content_address(&digest)
@@ -2310,6 +2326,8 @@ struct CaptureFontInstance {
     resource: String,
     face_index: u32,
     variations: Vec<CaptureFontVariation>,
+    #[serde(default)]
+    synthetic_bold: bool,
 }
 
 #[derive(Deserialize)]
