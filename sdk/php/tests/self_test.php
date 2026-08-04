@@ -57,6 +57,38 @@ expect($command['options']['--page-size'] === ['816x1056'], 'default page size i
 expect($command['options']['--page-margins'] === ['48,48,48,48'], 'default margins are half an inch');
 expect(!isset($command['options']['--allow-http-root']), 'deny mode adds no network roots');
 
+$protected = "{$root}/protected.pdf";
+file_put_contents($protected, "caller-owned\n");
+try {
+    $renderer->render(
+        '<p>must not replace</p>',
+        "{$root}/protected-input",
+        $protected,
+        "{$root}/protected-artifacts",
+        assets: ['assets/test.txt' => $asset],
+    );
+    throw new RuntimeException('expected existing output rejection');
+} catch (InvalidArgumentException) {
+}
+expect(file_get_contents($protected) === "caller-owned\n", 'existing output is preserved');
+
+try {
+    $renderer->render(
+        '<p>PARTIAL_CAPTURE</p>',
+        "{$root}/partial-input",
+        "{$root}/partial.pdf",
+        "{$root}/partial-artifacts",
+        assets: ['assets/test.txt' => $asset],
+    );
+    throw new RuntimeException('expected partial scene capture to fail');
+} catch (EngineRenderException $error) {
+    expect(
+        $error->errorCode === 'SCENE_CAPTURE_UNSUPPORTED_PAINT_EVENTS',
+        'partial scene has a typed error',
+    );
+    expect(!is_file("{$root}/partial.pdf"), 'partial scene PDF is not published');
+}
+
 $allowed = $renderer->render(
     '<p>FILL_STDERR</p>',
     "{$root}/allowed-input",

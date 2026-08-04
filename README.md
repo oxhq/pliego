@@ -65,11 +65,12 @@ result; this does not imply compatibility with every Chart.js mode or Canvas API
 
 The current PDF paint boundary retains resolved sRGB text colors, solid
 backgrounds, uniform-color sharp axis-aligned solid borders, and uniform solid
-collapsed-table borders. CSS gradients and background-image layers, shadows,
-rounded or mixed-color borders, clips, non-solid and image borders, transforms,
-opacity, filters, and blend modes are explicitly unsupported and reported instead
-of approximated. See the
-[support profile](docs/pliego/support-profile.md) for the complete boundary.
+collapsed-table borders. CSS gradients and background-image layers, box and text
+shadows, text decorations, rounded or mixed-color borders, clips, non-solid and
+image borders, transforms, opacity, filters, and blend modes are explicitly
+unsupported and reported instead of approximated. Default rendering fails without
+publishing a partial PDF; `--allow-partial-scene` is only for retained diagnostics.
+See the [support profile](docs/pliego/support-profile.md) for the complete boundary.
 
 `download()` returns a Laravel file response. Use `render()` instead to receive a
 result with the PDF, input-bundle, and retained-artifact paths.
@@ -103,7 +104,8 @@ pliego render document.html --output document.pdf --artifacts artifacts
 ```
 
 Host-font fallback, network access, redirects, and asset caching are disabled by
-default. The [support profile](docs/pliego/support-profile.md) defines the current
+default. Partial scene capture also fails before the requested output is published.
+The [support profile](docs/pliego/support-profile.md) defines the current
 capability, resource, and failure boundaries.
 
 ## Release evidence

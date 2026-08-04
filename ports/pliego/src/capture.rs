@@ -125,6 +125,8 @@ pub enum UnsupportedPaintKind {
     Outline,
     CollapsedTableBorders,
     Iframe,
+    TextEffects,
+    ContentGeometry,
     SvgAnimation,
     SvgCompositing,
     SvgStroke,
@@ -821,7 +823,9 @@ pub fn capture_document_scene_with_canvas(
             | "root-background"
             | "outline"
             | "collapsed-table-borders"
-            | "iframe") => {
+            | "iframe"
+            | "text-effects"
+            | "content-geometry") => {
                 unsupported_events.push(UnsupportedPaintEvent {
                     sequence: event.sequence,
                     kind: match kind {
@@ -830,6 +834,8 @@ pub fn capture_document_scene_with_canvas(
                         "outline" => UnsupportedPaintKind::Outline,
                         "collapsed-table-borders" => UnsupportedPaintKind::CollapsedTableBorders,
                         "iframe" => UnsupportedPaintKind::Iframe,
+                        "text-effects" => UnsupportedPaintKind::TextEffects,
+                        "content-geometry" => UnsupportedPaintKind::ContentGeometry,
                         _ => unreachable!(),
                     },
                 });
@@ -1120,11 +1126,11 @@ fn distribute_operations(
                 page_index: repeat.page_index,
             });
         }
-        let fragments = repeated_header_fragments
-            .get(&repeat.header_tag_id)
-            .ok_or(CaptureError::MissingRepeatedTableHeader {
+        let fragments = repeated_header_fragments.get(&repeat.header_tag_id).ok_or(
+            CaptureError::MissingRepeatedTableHeader {
                 tag_id: repeat.header_tag_id,
-            })?;
+            },
+        )?;
         let translation =
             f64::from(repeat.target_block_start) - f64::from(repeat.source_block_start);
         for operation in operations.iter().filter(|operation| {
@@ -1133,8 +1139,8 @@ fn distribute_operations(
                 .and_then(|event| event.fragment_id)
                 .is_some_and(|fragment_id| fragments.contains(&fragment_id))
         }) {
-            if matches!(&operation.operation, Operation::Path { .. }) &&
-                !is_splittable_rect_path(&operation.operation)
+            if matches!(&operation.operation, Operation::Path { .. })
+                && !is_splittable_rect_path(&operation.operation)
             {
                 return Err(CaptureError::RepeatedTableHeaderPathUnsupported {
                     sequence: operation.sequence,
@@ -1144,11 +1150,7 @@ fn distribute_operations(
             }
             let mut repeated = operation.clone();
             repeated.bounds.y += translation;
-            translate_operation_y(
-                &mut repeated.operation,
-                -translation,
-                repeated.sequence,
-            )?;
+            translate_operation_y(&mut repeated.operation, -translation, repeated.sequence)?;
             let (page_index, page_origin) = operation_page(pages, &mut repeated)?;
             if page_index != repeat.page_index {
                 return Err(CaptureError::InvalidTableGroupRepeat {
@@ -2520,12 +2522,7 @@ mod tests {
         let (page_index, page_origin) =
             operation_page(&[page(0), page(1)], &mut positioned).unwrap();
         assert_eq!((page_index, page_origin), (1, 100.0));
-        translate_operation_y(
-            &mut positioned.operation,
-            page_origin,
-            positioned.sequence,
-        )
-        .unwrap();
+        translate_operation_y(&mut positioned.operation, page_origin, positioned.sequence).unwrap();
         let Operation::Path { bounds, data, .. } = positioned.operation else {
             unreachable!();
         };

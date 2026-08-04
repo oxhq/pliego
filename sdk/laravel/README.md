@@ -70,11 +70,16 @@ after its final draw and before `ready()`. The retained pixels become the
 authoritative canvas result; other versions, modes, plugins, and Canvas APIs are not
 implied.
 
+`render()` and `download()` reject partial scene capture instead of returning a PDF
+with unsupported paint omitted. Retained artifacts remain available on the typed
+exception.
+
 PDF paint retains resolved sRGB text colors, solid backgrounds, uniform-color sharp
 axis-aligned solid borders, and uniform solid collapsed-table borders. CSS
-gradients and background-image layers, shadows, rounded or mixed-color borders,
-clips, non-solid and image borders, transforms, opacity, filters, and blend modes
-are explicitly unsupported and reported rather than approximated.
+gradients and background-image layers, box and text shadows, text decorations,
+rounded or mixed-color borders, clips, non-solid and image borders, transforms,
+opacity, filters, and blend modes are explicitly unsupported and reported rather
+than approximated.
 
 Blade is rendered first. The package creates a private input directory, copies only
 declared relative assets, records their hashes, and launches one `pliego render`

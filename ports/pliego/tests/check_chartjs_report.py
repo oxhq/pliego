@@ -254,6 +254,11 @@ def run(binary: Path, fixture: Path, output: Path) -> tuple[int, int]:
     require(isinstance(operations, list), "scene page has no operations")
     texts = [operation for operation in operations if operation.get("type") == "text"]
     paths = [operation for operation in operations if operation.get("type") == "path"]
+    borders = [
+        operation
+        for operation in paths
+        if operation.get("meta", {}).get("semantics", {}).get("label") == "border"
+    ]
     images = [operation for operation in operations if operation.get("type") == "image"]
     require(len(texts) >= 12, f"styled report retained too little text: {len(texts)}")
     retained_text = " ".join(
@@ -262,6 +267,14 @@ def run(binary: Path, fixture: Path, output: Path) -> tuple[int, int]:
     for marker in ["Northstar Operations", "Recognized revenue", "Account contribution"]:
         require(marker in retained_text, f"retained report text is missing {marker!r}")
     require(len(paths) >= 8, f"styled report retained too few vector paths: {len(paths)}")
+    require(len(borders) >= 12, f"styled report silently dropped ordinary borders: {len(borders)}")
+    accents = [
+        operation
+        for operation in borders
+        if math.isclose(float(operation.get("bounds", {}).get("height", 0)), 3.0)
+        and float(operation.get("bounds", {}).get("width", 0)) > 200
+    ]
+    require(len(accents) == 3, f"KPI accent borders differ: {accents!r}")
     require(len(images) == 1, f"expected one Canvas image operation: {images!r}")
     resource = images[0].get("resource")
     require(isinstance(resource, str) and resource.startswith("sha256:"), repr(images[0]))

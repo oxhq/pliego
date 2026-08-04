@@ -1,0 +1,18 @@
+<!doctype html>
+<meta charset="utf-8">
+<style>
+  @font-face {
+    font-family: EffectsSans;
+    src: url("../../../../components/fonts/tests/support/dejavu-fonts-ttf-2.37/ttf/DejaVuSans.ttf");
+  }
+  body { font-family: EffectsSans; }
+  section { opacity: .25; }
+  p { text-decoration: underline; text-shadow: 1px 0 green; }
+  .clip { width: 120px; overflow: hidden; white-space: nowrap; }
+  .image-clip { width: 40px; height: 20px; overflow: hidden; }
+  .image-clip img { display: block; width: 80px; height: 20px; }
+</style>
+<p>Text effects must not disappear silently.</p>
+<section>Ancestor opacity must not disappear silently.</section>
+<div class="clip">Overflow clipping must not disappear silently.</div>
+<div class="image-clip"><img src="clip.svg" alt="Clipped paint"></div>

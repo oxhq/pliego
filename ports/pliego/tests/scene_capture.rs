@@ -148,7 +148,10 @@ fn retains_resolved_text_color_and_ordered_solid_background() {
             height: 12.0,
         }
     );
-    assert_eq!(meta.semantics.as_ref().unwrap().label.as_deref(), Some("background"));
+    assert_eq!(
+        meta.semantics.as_ref().unwrap().label.as_deref(),
+        Some("background")
+    );
     assert_eq!(fill.unwrap().r, f64::from(0.05_f32));
     let Operation::Text { color, .. } = &operations[1] else {
         panic!("text must follow its background");
@@ -352,10 +355,26 @@ fn snapshot(local_id_base: usize, link_tag: u64) -> Vec<u8> {
             },
             {
                 "sequence": 9,
+                "kind": "text-effects",
+                "fragment_id": first_text_id,
+                "tag_id": link_tag,
+                "spatial_node_id": local_id_base + 109,
+                "clip_id": null
+            },
+            {
+                "sequence": 10,
+                "kind": "content-geometry",
+                "fragment_id": first_text_id,
+                "tag_id": link_tag,
+                "spatial_node_id": local_id_base + 110,
+                "clip_id": local_id_base + 210
+            },
+            {
+                "sequence": 11,
                 "kind": "stacking-context-leave",
                 "fragment_id": null,
                 "tag_id": null,
-                "spatial_node_id": local_id_base + 109,
+                "spatial_node_id": local_id_base + 111,
                 "clip_id": null
             }
         ],
@@ -844,6 +863,14 @@ fn converts_dense_paint_order_without_leaking_capture_local_ids() {
             UnsupportedPaintEvent {
                 sequence: 8,
                 kind: UnsupportedPaintKind::Iframe,
+            },
+            UnsupportedPaintEvent {
+                sequence: 9,
+                kind: UnsupportedPaintKind::TextEffects,
+            },
+            UnsupportedPaintEvent {
+                sequence: 10,
+                kind: UnsupportedPaintKind::ContentGeometry,
             },
         ]
     );

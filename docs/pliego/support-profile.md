@@ -37,7 +37,7 @@ allow the font origin.
 | Rowspans contained in one page fragment | Supported | The complete touched-row run must fit together. |
 | Cross-page rowspan continuation | Rejected | Pliego does not split or synthesize spanning cells across pages. |
 | Solid CSS paint | Supported | Resolved sRGB text colors, solid root and element backgrounds, uniform-color sharp axis-aligned solid borders, and uniform solid collapsed-table borders retain paint order. |
-| Complex CSS paint | Explicitly unsupported | CSS gradients and background-image layers, shadows, border radii and rounded clips, mixed-color or non-solid borders, border images, negative paint origins, transforms, clips and `clip-path`, opacity, filters, and blend modes are reported instead of approximated. |
+| Complex CSS paint | Explicitly unsupported | CSS gradients and background-image layers, box and text shadows, text decorations, border radii and rounded clips, mixed-color or non-solid borders, border images, negative paint origins, transforms, clips and `clip-path`, opacity, filters, and blend modes are reported instead of approximated. |
 | Table borders | Partial | Uniform-color sharp ordinary solid borders and collapsed tables with a uniform solid color and width are verified. Non-uniform collapsed borders, mixed-color or non-solid styles, border images, rounded borders, transforms, clips, and unsupported writing modes remain outside the verified contract. |
 | Local TTF, OTF, WOFF, and WOFF2 | Supported | Declared fonts are embedded or subset with Unicode mappings; missing fonts do not silently fall back to the host. |
 | Fonts without embedding rights | Rejected | The application must supply an authorized face. |
@@ -51,6 +51,10 @@ allow the font origin.
 | Canvas | Partial | Retained Canvas 2D operations and bounded raster patches are covered. A synchronous full-canvas pixel readback can become the authoritative result; other Canvas APIs are not implied. |
 | Chart.js 4.5.1 | Supported within fixture boundary | Covered with fixed dimensions, animations and events disabled, final draw completed, then synchronous full-canvas `getImageData(0, 0, width, height)` before `window.pliego.ready()`. Other versions, modes, plugins, and partial readbacks are not implied. |
 | SVG and complex scripts | Partial | Only behavior covered by focused fixtures is included. |
+
+Partial scene capture is a failure in the default CLI and SDK paths, and the
+requested PDF is not published. `--allow-partial-scene` retains diagnostic output
+for engine development; it is not a delivery mode.
 
 ## Readiness and final canvas state
 

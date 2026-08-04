@@ -37,9 +37,9 @@ try {
     expect($error->inputBundlePath === "{$root}/slow-input", 'timeout exposes the retained input');
     expect($error->artifactsPath === "{$root}/slow-artifacts", 'timeout exposes retained artifacts');
     expect(trim((string) file_get_contents("{$root}/".JobRetention::STATUS_FILE)) === 'failure', 'timeout is marked failed');
-    expect(str_contains($error->stderr, 'SLOW_RENDER_STARTED'), 'fake engine wrote partial output');
+    expect(str_contains($error->stderr, 'SLOW_RENDER_STARTED'), 'fake engine started before timeout');
     expect((hrtime(true) - $started) / 1_000_000_000 < 3, 'timeout is wall-clock bounded');
-    expect(!is_file("{$root}/slow.pdf"), 'partial PDF is removed');
+    expect(!is_file("{$root}/slow.pdf"), 'timed-out render publishes no PDF');
 }
 
 $recovered = $renderer->render(

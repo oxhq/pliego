@@ -23,11 +23,15 @@ full-canvas `getImageData(0, 0, canvas.width, canvas.height)` readback before
 `ready()`. The retained pixels are authoritative for that canvas; the claim does
 not extend to every Chart.js configuration or Canvas API.
 
+The bridge rejects partial scene capture without publishing the requested PDF and
+preserves retained artifacts for diagnosis.
+
 PDF paint currently retains resolved sRGB text colors, solid backgrounds,
 uniform-color sharp axis-aligned solid borders, and uniform solid collapsed-table
-borders. CSS gradients and background-image layers, shadows, rounded or mixed-color
-borders, clips, non-solid and image borders, transforms, opacity, filters, and blend
-modes are explicitly unsupported and reported rather than approximated.
+borders. CSS gradients and background-image layers, box and text shadows, text
+decorations, rounded or mixed-color borders, clips, non-solid and image borders,
+transforms, opacity, filters, and blend modes are explicitly unsupported and
+reported rather than approximated.
 
 Resource examples:
 

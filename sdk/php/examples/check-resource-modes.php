@@ -13,7 +13,10 @@ if (($argv[1] ?? null) === 'render') {
     file_put_contents($output, "%PDF-1.7\n% fake quickstart\n");
     file_put_contents($artifacts.'/command.json', json_encode($options, JSON_PRETTY_PRINT)."\n");
     file_put_contents($artifacts.'/resources.jsonl', "{\"sha256\":\"sha256:fake\"}\n");
-    echo json_encode(['status' => 'rendered'])."\n";
+    echo json_encode([
+        'status' => 'rendered',
+        'scene' => ['capture_status' => 'complete'],
+    ])."\n";
     exit(0);
 }
 

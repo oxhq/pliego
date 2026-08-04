@@ -7,8 +7,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use app_units::{AU_PER_PX, Au};
-use clip::Clip;
 pub(crate) use clip::ClipId;
+use clip::{Clip, StackingContextTreeClipStore};
 use euclid::{Box2D, Point2D, Rect, Scale, SideOffsets2D, Size2D, UnknownUnit, Vector2D};
 use gradient::WebRenderGradient;
 use layout_api::{
@@ -122,6 +122,9 @@ pub(crate) struct DisplayListBuilder<'a> {
     /// A mapping from [`ClipId`] To WebRender [`ClipChainId`] used when building this WebRender
     /// display list.
     clip_map: Vec<ClipChainId>,
+
+    /// Clips created while building the stacking-context tree.
+    clip_store: &'a StackingContextTreeClipStore,
 
     /// An [`ImageResolver`] to use during display list construction.
     image_resolver: Arc<ImageResolver>,
@@ -341,6 +344,7 @@ impl DisplayListBuilder<'_> {
             inspector_highlight: highlighted_dom_node.map(InspectorHighlight::for_node),
             paint_body_background: true,
             clip_map: Default::default(),
+            clip_store: &stacking_context_tree.clip_store,
             image_resolver,
             device_pixel_ratio,
             paint_timing_handler,
@@ -972,6 +976,25 @@ impl PaintTraversalHandler for DisplayListBuilder<'_> {
             .to_webrender();
         let common = self.common_properties(state, clip, &style);
 
+        let paints_image = fragment.image_key.is_some()
+            || fragment.vector_image_id.is_some()
+            || fragment.showing_broken_image_icon;
+        let image_geometry_is_supported = state.spatial_id == self.paint_info.root_scroll_node_id
+            && paint_clip_contains_rect(clip, rect)
+            && paint_clip_chain_contains_rect(
+                self.clip_store,
+                state.clip_id,
+                self.paint_info.root_scroll_node_id,
+                rect,
+            );
+        if paints_image && !image_geometry_is_supported {
+            self.debug_capture.record_fragment(
+                "content-geometry",
+                fragment,
+                fragment.base.tag,
+                state,
+            );
+        }
         if fragment.image_key.is_some() || fragment.vector_image_id.is_some() {
             self.debug_capture
                 .record_fragment("image", fragment, fragment.base.tag, state);
@@ -1028,6 +1051,23 @@ impl PaintTraversalHandler for DisplayListBuilder<'_> {
         let style = fragment.base.style();
         if style.get_inherited_box().visibility != Visibility::Visible {
             return;
+        }
+        if !style.get_inherited_text().text_shadow.0.is_empty()
+            || state
+                .text_decorations
+                .iter()
+                .any(|decoration| !decoration.line.is_empty())
+        {
+            self.debug_capture
+                .record_fragment("text-effects", fragment, fragment.base.tag, state);
+        }
+        if !paint_state_is_axis_aligned(self.paint_info.root_scroll_node_id, state) {
+            self.debug_capture.record_fragment(
+                "content-geometry",
+                fragment,
+                fragment.base.tag,
+                state,
+            );
         }
         self.debug_capture
             .record_fragment("text", fragment, fragment.base.tag, state);
@@ -2219,10 +2259,11 @@ impl<'a> BuilderForBoxFragment<'a> {
 
         let current_color = style.get_inherited_text().clone_color();
         let style_color = BorderStyleColor::from_border(border, &current_color);
-        let captured_border_rects = (!self.fragment.box_fragment.captures_table_borders()
-            && box_paint_geometry_is_supported(builder, state, self.fragment))
-        .then(|| solid_border_paint_rects(self.border_rect, border_widths, &style_color))
-        .flatten();
+        let captured_border_rects =
+            (!separate_table_border_is_captured(self.fragment, self.containing_block_origin)
+                && box_paint_geometry_is_supported(builder, state, self.fragment))
+            .then(|| solid_border_paint_rects(self.border_rect, border_widths, &style_color))
+            .flatten();
         let details = wr::BorderDetails::Normal(wr::NormalBorder {
             top: self.build_border_side(style_color.top),
             right: self.build_border_side(style_color.right),
@@ -2601,8 +2642,7 @@ fn box_has_unsupported_paint(
                             .any(|background| background_has_image(&background.style.borrow()))
                 },
             });
-    let table_border_is_captured = fragment.box_fragment.captures_table_borders()
-        && crate::flow::separate_table_border_profile(fragment.box_fragment) == Some(true);
+    let table_border_is_captured = separate_table_border_is_captured(fragment, state.origin);
     let border_is_unsupported = paints_border
         && (!geometry_supported
             || !paint_rect_geometry_is_supported(border_rect)
@@ -2612,7 +2652,10 @@ fn box_has_unsupported_paint(
                     Image::None
                 ) || ordinary_border_paint_rects(fragment).is_none())));
 
-    background_is_unsupported || paints_shadow || border_is_unsupported
+    background_is_unsupported
+        || paints_shadow
+        || border_is_unsupported
+        || !style_effects_are_supported(fragment.style(), fragment.base.flags)
 }
 
 fn paint_state_is_axis_aligned(
@@ -2620,6 +2663,42 @@ fn paint_state_is_axis_aligned(
     state: &TraversalState,
 ) -> bool {
     state.spatial_id == root_scroll_node_id && state.clip_id == ClipId::INVALID
+}
+
+fn paint_clip_contains_rect(clip: LayoutRect, rect: LayoutRect) -> bool {
+    clip.min.x.is_finite()
+        && clip.min.y.is_finite()
+        && clip.max.x.is_finite()
+        && clip.max.y.is_finite()
+        && rect.min.x.is_finite()
+        && rect.min.y.is_finite()
+        && rect.max.x.is_finite()
+        && rect.max.y.is_finite()
+        && clip.min.x <= rect.min.x
+        && clip.min.y <= rect.min.y
+        && clip.max.x >= rect.max.x
+        && clip.max.y >= rect.max.y
+}
+
+fn paint_clip_chain_contains_rect(
+    store: &StackingContextTreeClipStore,
+    mut clip_id: ClipId,
+    root_scroll_node_id: ScrollTreeNodeId,
+    rect: LayoutRect,
+) -> bool {
+    while clip_id != ClipId::INVALID {
+        let Some(clip) = store.0.get(clip_id.0) else {
+            return false;
+        };
+        if clip.parent_scroll_node_id != root_scroll_node_id
+            || !clip.radii.is_zero()
+            || !paint_clip_contains_rect(clip.rect, rect)
+        {
+            return false;
+        }
+        clip_id = clip.parent_clip_id;
+    }
+    true
 }
 
 fn style_effects_are_supported(style: &ComputedValues, flags: FragmentFlags) -> bool {
@@ -2662,6 +2741,14 @@ fn ordinary_border_paint_rects(
         fragment.border.to_webrender(),
         &colors,
     )
+}
+
+fn separate_table_border_is_captured(
+    fragment: &BoxFragmentWithStyle<'_>,
+    containing_block_origin: PhysicalPoint<Au>,
+) -> bool {
+    !separate_table_cell_borders(fragment, containing_block_origin).is_empty()
+        || separate_table_grid_border_rows(fragment, containing_block_origin).is_some()
 }
 
 fn solid_border_paint_rects(
@@ -3482,5 +3569,39 @@ mod debug_capture_tests {
             LayoutPoint::new(-1.0, 0.0),
             LayoutPoint::new(20.0, 20.0),
         )));
+
+        let image = LayoutRect::new(LayoutPoint::new(10.0, 10.0), LayoutPoint::new(20.0, 20.0));
+        assert!(paint_clip_contains_rect(image, image));
+        assert!(!paint_clip_contains_rect(
+            LayoutRect::new(LayoutPoint::new(10.0, 10.0), LayoutPoint::new(19.0, 20.0)),
+            image,
+        ));
+
+        let root_scroll_node_id = ScrollTreeNodeId { index: 1 };
+        let mut clip_store = StackingContextTreeClipStore::default();
+        let containing_clip = clip_store.add(
+            BorderRadius::zero(),
+            image,
+            root_scroll_node_id,
+            ClipId::INVALID,
+        );
+        assert!(paint_clip_chain_contains_rect(
+            &clip_store,
+            containing_clip,
+            root_scroll_node_id,
+            image,
+        ));
+        let truncating_clip = clip_store.add(
+            BorderRadius::zero(),
+            LayoutRect::new(LayoutPoint::new(10.0, 10.0), LayoutPoint::new(19.0, 20.0)),
+            root_scroll_node_id,
+            ClipId::INVALID,
+        );
+        assert!(!paint_clip_chain_contains_rect(
+            &clip_store,
+            truncating_clip,
+            root_scroll_node_id,
+            image,
+        ));
     }
 }
