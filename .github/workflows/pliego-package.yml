@@ -22,8 +22,27 @@ env:
   SCCACHE_GHA_ENABLED: "true"
 
 jobs:
+  archive-contract:
+    name: Release archive contract
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - name: Check out Pliego
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version-file: .python-version
+
+      - name: Check release archive contract and source assets
+        run: python python/check_pliego_release_archive.py --self-test --check-source-assets .
+
   package:
     name: ${{ matrix.name }}
+    needs: archive-contract
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     strategy:
@@ -108,10 +127,18 @@ jobs:
           mkdir -p "dist/$bundle"
           cp "$CARGO_TARGET_DIR/checked-release/pliego" "dist/$bundle/pliego"
           cp LICENSE "dist/$bundle/LICENSE"
+          cp LICENSE_WHATWG_SPECS "dist/$bundle/LICENSE_WHATWG_SPECS"
+          cp resources/resource_protocol/license.html "dist/$bundle/THIRD_PARTY_LICENSES.html"
+          cp docs/pliego/third-party-notices.md "dist/$bundle/THIRD_PARTY_NOTICES.md"
+          mkdir -p "dist/$bundle/licenses"
+          cp -R licenses/krilla-0.8.2 "dist/$bundle/licenses/krilla-0.8.2"
+          printf 'Repository: %s/%s\nSource: %s/%s/tree/v%s\n' "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$PLIEGO_VERSION" > "dist/$bundle/SOURCE.txt"
+          printf 'Artifact: %s\nBundled native libraries: none\n' '${{ matrix.bundle }}' > "dist/$bundle/NATIVE-LIBRARIES.txt"
           printf '%s\n' '1. Verify the adjacent SHA-256 file.' '2. Put pliego on PATH or set PLIEGO_BINARY.' '3. Run pliego --version.' > "dist/$bundle/INSTALL.txt"
           "dist/$bundle/pliego" --version | tee "dist/$bundle/VERSION.txt"
           grep -Fqx 'pliego-api 1' "dist/$bundle/VERSION.txt"
           tar -C dist -czf "dist/$archive" "$bundle"
+          python python/check_pliego_release_archive.py "dist/$archive" --version "$PLIEGO_VERSION" --bundle '${{ matrix.bundle }}' --repository-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
           python -c 'import hashlib, pathlib, sys; p = pathlib.Path(sys.argv[1]); print(f"{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.name}")' "dist/$archive" > "dist/$archive.sha256"
 
       - name: Package and smoke-test Windows bundle
@@ -129,11 +156,23 @@ jobs:
             Copy-Item $source.FullName "$directory\$dll"
           }
           Copy-Item LICENSE "$directory\LICENSE"
+          Copy-Item LICENSE_WHATWG_SPECS "$directory\LICENSE_WHATWG_SPECS"
+          Copy-Item resources\resource_protocol\license.html "$directory\THIRD_PARTY_LICENSES.html"
+          Copy-Item docs\pliego\third-party-notices.md "$directory\THIRD_PARTY_NOTICES.md"
+          $licenses = Join-Path $directory licenses
+          New-Item -ItemType Directory -Force $licenses | Out-Null
+          Copy-Item -LiteralPath licenses\krilla-0.8.2 -Destination $licenses -Recurse
+          Copy-Item -LiteralPath licenses\mozangle-0.6.0 -Destination $licenses -Recurse
+          Copy-Item -LiteralPath licenses\zlib-1.3.2 -Destination $licenses -Recurse
+          @("Repository: $env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY", "Source: $env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/tree/v$env:PLIEGO_VERSION") | Set-Content "$directory\SOURCE.txt" -Encoding utf8
+          @('Artifact: ${{ matrix.bundle }}', 'Bundled native libraries:', '- libEGL.dll (ANGLE via mozangle 0.6.0 with zlib 1.3.2; notices: licenses/mozangle-0.6.0/, licenses/zlib-1.3.2/)', '- libGLESv2.dll (ANGLE via mozangle 0.6.0 with zlib 1.3.2; notices: licenses/mozangle-0.6.0/, licenses/zlib-1.3.2/)') | Set-Content "$directory\NATIVE-LIBRARIES.txt" -Encoding utf8
           @('1. Verify the adjacent SHA-256 file.', '2. Put pliego.exe on PATH or set PLIEGO_BINARY.', '3. Run pliego.exe --version.') | Set-Content "$directory\INSTALL.txt" -Encoding ascii
           & "$directory\pliego.exe" --version | Tee-Object -FilePath "$directory\VERSION.txt"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           if ((Get-Content -LiteralPath "$directory\VERSION.txt") -cnotcontains 'pliego-api 1') { throw 'VERSION.txt must contain pliego-api 1' }
           Compress-Archive -Path $directory -DestinationPath "dist/$archive"
+          python python/check_pliego_release_archive.py "dist/$archive" --version "$env:PLIEGO_VERSION" --bundle '${{ matrix.bundle }}' --repository-url "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $hash = (Get-FileHash "dist/$archive" -Algorithm SHA256).Hash.ToLowerInvariant()
           "$hash  $archive" | Set-Content "dist/$archive.sha256" -Encoding ascii
 
