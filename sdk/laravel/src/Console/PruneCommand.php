@@ -2,11 +2,11 @@
 
 declare(strict_types=1);
 
-namespace Pliego\Laravel\Experimental\Console;
+namespace Pliego\Laravel\Console;
 
 use Illuminate\Console\Command;
 use InvalidArgumentException;
-use Pliego\Php\Experimental\JobRetention;
+use Pliego\Php\JobRetention;
 use RuntimeException;
 
 final class PruneCommand extends Command

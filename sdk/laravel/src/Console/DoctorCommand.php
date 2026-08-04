@@ -2,11 +2,11 @@
 
 declare(strict_types=1);
 
-namespace Pliego\Laravel\Experimental\Console;
+namespace Pliego\Laravel\Console;
 
 use Illuminate\Console\Command;
-use Pliego\Laravel\Experimental\ManagedRuntime;
-use Pliego\Php\Experimental\Doctor;
+use Pliego\Laravel\ManagedRuntime;
+use Pliego\Php\Doctor;
 use Throwable;
 
 final class DoctorCommand extends Command

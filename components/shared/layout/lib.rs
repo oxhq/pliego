@@ -559,6 +559,23 @@ pub struct LayoutDebugPaintEvent {
     /// Solid table-border rectangles owned by this event's fragment.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub table_borders: Vec<LayoutDebugTableBorder>,
+    /// Axis-aligned solid rectangles retained at their exact display-list paint position.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paint_rects: Vec<LayoutDebugPaintRect>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+pub struct LayoutDebugPaintRect {
+    pub rect: LayoutDebugRect,
+    pub color: LayoutDebugColor,
+    pub kind: LayoutDebugPaintRectKind,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LayoutDebugPaintRectKind {
+    Background,
+    Border,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
@@ -573,6 +590,17 @@ pub struct LayoutDebugColor {
     pub g: f32,
     pub b: f32,
     pub a: f32,
+}
+
+impl Default for LayoutDebugColor {
+    fn default() -> Self {
+        Self {
+            r: 0.0,
+            g: 0.0,
+            b: 0.0,
+            a: 1.0,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
@@ -598,6 +626,9 @@ pub struct LayoutDebugTextRun {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selected_family: Option<String>,
     pub font_size: f32,
+    /// Resolved sRGB text color used by the display-list paint traversal.
+    #[serde(default)]
+    pub color: LayoutDebugColor,
     /// Positioned glyphs, including retained whitespace slices.
     pub glyphs: Vec<LayoutDebugGlyph>,
 }

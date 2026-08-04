@@ -1,6 +1,6 @@
 {
     "schema": 1,
-    "version": "0.1.0-alpha.2",
+    "version": "0.1.0",
     "api": 1,
     "assets": {
         "linux-x86_64": {

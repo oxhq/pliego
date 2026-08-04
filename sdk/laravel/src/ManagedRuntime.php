@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-namespace Pliego\Laravel\Experimental;
+namespace Pliego\Laravel;
 
 use Closure;
 use FilesystemIterator;

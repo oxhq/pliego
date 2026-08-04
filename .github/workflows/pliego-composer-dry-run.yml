@@ -117,7 +117,7 @@ jobs:
           php_version = os.environ["PLIEGO_PHP_VERSION"]
           laravel_version = os.environ["PLIEGO_LARAVEL_VERSION"]
           for version in (engine_version, php_version, laravel_version):
-              assert re.fullmatch(r"\d+\.\d+\.\d+-alpha(?:\.\d+)?", version), version
+              assert re.fullmatch(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?", version), version
 
           php_root = root / "pliego-php"
           laravel_root = root / "pliego-laravel"

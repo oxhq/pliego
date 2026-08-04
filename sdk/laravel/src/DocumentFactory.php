@@ -2,11 +2,11 @@
 
 declare(strict_types=1);
 
-namespace Pliego\Laravel\Experimental;
+namespace Pliego\Laravel;
 
 use Illuminate\Contracts\View\Factory as ViewFactory;
-use Pliego\Php\Experimental\CliRenderer;
-use Pliego\Php\Experimental\RenderOptions;
+use Pliego\Php\CliRenderer;
+use Pliego\Php\RenderOptions;
 
 final readonly class DocumentFactory
 {

@@ -2,10 +2,10 @@
 
 declare(strict_types=1);
 
-namespace Pliego\Laravel\Experimental\Console;
+namespace Pliego\Laravel\Console;
 
 use Illuminate\Console\Command;
-use Pliego\Laravel\Experimental\ManagedRuntime;
+use Pliego\Laravel\ManagedRuntime;
 use Throwable;
 
 final class InstallCommand extends Command

@@ -5,10 +5,10 @@ declare(strict_types=1);
 use Composer\InstalledVersions;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Artisan;
-use Pliego\Laravel\Experimental\Facades\Document;
-use Pliego\Laravel\Experimental\ManagedRuntime;
-use Pliego\Php\Experimental\Exception\RenderException;
-use Pliego\Php\Experimental\JobRetention;
+use Pliego\Laravel\Facades\Document;
+use Pliego\Laravel\ManagedRuntime;
+use Pliego\Php\Exception\RenderException;
+use Pliego\Php\JobRetention;
 use Symfony\Component\Process\Process;
 
 final class PliegoQueueRehearsal
@@ -220,8 +220,6 @@ final class PliegoQueueRehearsal
                 'rehearsalFontFile' => 'rehearsal.woff2',
                 'rehearsalFontFormat' => 'woff2',
             ])
-                ->pageSize('612x792')
-                ->margins('36,36,36,36')
                 ->locale('es-MX')
                 ->timezone('PST8PDT');
             if ($scenario === 'live') {

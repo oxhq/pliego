@@ -8,7 +8,7 @@ on:
         required: true
         type: string
       tag:
-        description: Exact v-prefixed Pliego version, for example v0.1.0-alpha.1
+        description: Exact v-prefixed Pliego version, for example v0.1.0
         required: true
         type: string
 

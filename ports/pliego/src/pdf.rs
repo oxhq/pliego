@@ -247,13 +247,14 @@ pub fn render_document_pdf<'font, 'image>(
                         text,
                         font,
                         font_size,
+                        color,
                         glyphs,
                         ..
                     } => {
                         let Some(first_glyph) = glyphs.first() else {
                             continue;
                         };
-                        surface.set_fill(None);
+                        surface.set_fill(Some(pdf_fill(color, FillRule::NonZero)));
                         surface.set_stroke(None);
                         let source_font_size = *font_size;
                         let font_size = pdf_length(source_font_size, "font_size")?;

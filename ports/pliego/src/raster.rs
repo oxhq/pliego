@@ -7,7 +7,7 @@ use std::fmt;
 use std::io::Cursor;
 use std::sync::Arc;
 
-use vello_cpu::color::palette::css::{BLACK, WHITE};
+use vello_cpu::color::palette::css::WHITE;
 use vello_cpu::color::{AlphaColor, Srgb};
 use vello_cpu::kurbo::{Affine, BezPath, Rect as KurboRect, Stroke as KurboStroke};
 use vello_cpu::peniko::{self, Blob, FontData};
@@ -226,17 +226,16 @@ fn render_page_png<'font, 'image>(
         f64::from(width),
         f64::from(height),
     ));
-    context.set_paint(BLACK);
-
     for (index, operation) in page.operations.iter().enumerate() {
         match operation {
             Operation::Text {
                 font,
                 font_size,
+                color,
                 glyphs,
                 ..
             } => {
-                context.set_paint(BLACK);
+                context.set_paint(raster_color(color));
                 if !fonts.contains_key(font) {
                     let resource =
                         resolve_font(font).ok_or_else(|| RasterError::MissingFont(font.clone()))?;

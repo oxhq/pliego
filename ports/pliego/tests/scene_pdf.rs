@@ -40,6 +40,7 @@ fn scene() -> DocumentScene {
                 text: "Hi".into(),
                 font: FONT_ID.into(),
                 font_size: 12.0,
+                color: Color::default(),
                 glyphs: vec![
                     Glyph {
                         id: 43,
@@ -112,6 +113,7 @@ fn two_page_scene() -> DocumentScene {
                 text: "Hi".into(),
                 font: FONT_ID.into(),
                 font_size: 12.0,
+                color: Color::default(),
                 glyphs: vec![
                     Glyph {
                         id: 43,
@@ -327,6 +329,7 @@ fn emits_positioned_devanagari_marks_as_one_actual_text_span() {
             text: "ङ्ङम".into(),
             font: DEVANAGARI_FONT_ID.into(),
             font_size: 16.0,
+            color: Color::default(),
             glyphs: vec![
                 Glyph {
                     id: 29,

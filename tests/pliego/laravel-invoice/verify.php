@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 use Illuminate\Contracts\Console\Kernel;
 use Illuminate\Foundation\Application;
-use Pliego\Laravel\Experimental\Facades\Document;
+use Pliego\Laravel\Facades\Document;
 use Symfony\Component\HttpFoundation\BinaryFileResponse;
 
 require __DIR__.'/vendor/autoload.php';
@@ -18,8 +18,6 @@ set_exception_handler(static function (Throwable $error): never {
 });
 
 $response = Document::view('invoice', ['rows' => range(1, 32)])
-    ->pageSize('612x792')
-    ->margins('36,36,36,36')
     ->locale('es-MX')
     ->timezone('PST8PDT')
     ->denyNetwork()

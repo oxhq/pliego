@@ -5,6 +5,7 @@
     <title>Pliego readiness timeout</title>
   </head>
   <body>
-    <p>This fixture intentionally never signals readiness.</p>
+    <p>This fixture defers and intentionally never signals readiness.</p>
+    <script>window.pliego.defer();</script>
   </body>
 </html>

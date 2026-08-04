@@ -3,7 +3,7 @@
 declare(strict_types=1);
 
 use Illuminate\Http\Client\Factory as HttpFactory;
-use Pliego\Laravel\Experimental\ManagedRuntime;
+use Pliego\Laravel\ManagedRuntime;
 
 $autoload = getenv('PLIEGO_TEST_AUTOLOAD');
 require is_string($autoload) && $autoload !== ''

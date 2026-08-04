@@ -2,12 +2,12 @@
 
 declare(strict_types=1);
 
-namespace Pliego\Php\Experimental;
+namespace Pliego\Php;
 
 use InvalidArgumentException;
 use JsonException;
-use Pliego\Php\Experimental\Exception\EngineRenderException;
-use Pliego\Php\Experimental\Exception\InvalidRequestException;
+use Pliego\Php\Exception\EngineRenderException;
+use Pliego\Php\Exception\InvalidRequestException;
 use RuntimeException;
 
 /**

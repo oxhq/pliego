@@ -2857,7 +2857,7 @@ mod tests {
         CapturedFontWarning, MissingTextMapping, SceneCapture, UnsupportedPaintEvent,
         UnsupportedPaintKind,
     };
-    use pliego::{DocumentScene, Glyph, Operation, OperationMeta, Page, Rect, Size, Utf8Range};
+    use pliego::{Color, DocumentScene, Glyph, Operation, OperationMeta, Page, Rect, Size, Utf8Range};
 
     use super::{
         Command, ControlledResource, DEFAULT_LOCALE, DEFAULT_TIMEZONE, ExplicitRenderPaths,
@@ -3710,6 +3710,7 @@ mod tests {
                     text: "notdef".into(),
                     font: font.clone(),
                     font_size: 32.0,
+                    color: Color::default(),
                     glyphs: vec![Glyph {
                         id: 0,
                         x: 8.0,

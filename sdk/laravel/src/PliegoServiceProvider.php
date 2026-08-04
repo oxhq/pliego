@@ -2,16 +2,16 @@
 
 declare(strict_types=1);
 
-namespace Pliego\Laravel\Experimental;
+namespace Pliego\Laravel;
 
 use Illuminate\Contracts\View\Factory as ViewFactory;
 use Illuminate\Http\Client\Factory as HttpFactory;
 use Illuminate\Support\ServiceProvider;
-use Pliego\Laravel\Experimental\Console\DoctorCommand;
-use Pliego\Laravel\Experimental\Console\InstallCommand;
-use Pliego\Laravel\Experimental\Console\PruneCommand;
-use Pliego\Php\Experimental\CliRenderer;
-use Pliego\Php\Experimental\RenderOptions;
+use Pliego\Laravel\Console\DoctorCommand;
+use Pliego\Laravel\Console\InstallCommand;
+use Pliego\Laravel\Console\PruneCommand;
+use Pliego\Php\CliRenderer;
+use Pliego\Php\RenderOptions;
 
 final class PliegoServiceProvider extends ServiceProvider
 {

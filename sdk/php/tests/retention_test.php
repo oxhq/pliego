@@ -2,10 +2,10 @@
 
 declare(strict_types=1);
 
-use Pliego\Php\Experimental\CliRenderer;
-use Pliego\Php\Experimental\Exception\EngineRenderException;
-use Pliego\Php\Experimental\Exception\InvalidRequestException;
-use Pliego\Php\Experimental\JobRetention;
+use Pliego\Php\CliRenderer;
+use Pliego\Php\Exception\EngineRenderException;
+use Pliego\Php\Exception\InvalidRequestException;
+use Pliego\Php\JobRetention;
 
 require dirname(__DIR__).'/vendor/autoload.php';
 

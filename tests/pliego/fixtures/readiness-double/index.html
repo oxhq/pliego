@@ -7,11 +7,14 @@
   <body>
     <p id="result">waiting</p>
     <script>
-      queueMicrotask(() => {
-        document.querySelector("#result").textContent = "first terminal call wins";
-        window.pliego.ready({ fixture: "readiness-double", winner: "ready" });
-        window.pliego.fail({ code: "TOO_LATE", message: "must be ignored" });
-      });
+      window.pliego.defer();
+      addEventListener("load", () => {
+        setTimeout(() => {
+          document.querySelector("#result").textContent = "first terminal call wins";
+          window.pliego.ready({ fixture: "readiness-double", winner: "ready" });
+          window.pliego.fail({ code: "TOO_LATE", message: "must be ignored" });
+        }, 25);
+      }, { once: true });
     </script>
   </body>
 </html>

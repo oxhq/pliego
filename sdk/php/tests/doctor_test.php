@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-use Pliego\Php\Experimental\Doctor;
+use Pliego\Php\Doctor;
 
 require dirname(__DIR__).'/vendor/autoload.php';
 
@@ -43,8 +43,8 @@ doctorExpect($manifest['environment']['network']['policy'] === 'deny', 'doctor s
 doctorExpect(isset($manifest['assets']['assets/doctor.css']), 'doctor smoke bundles its style');
 $doctorHtml = (string) file_get_contents(dirname($report['smoke_pdf']).'/input/document.html');
 doctorExpect(
-    str_contains($doctorHtml, 'document.fonts.ready.then(() => window.pliego?.ready'),
-    'doctor smoke waits for bundled font readiness before signaling Pliego',
+    !str_contains($doctorHtml, 'window.pliego'),
+    'doctor smoke uses zero-config readiness',
 );
 $font = dirname(__DIR__).'/resources/HasubiMono-Regular.woff2';
 doctorExpect(is_file(dirname(__DIR__).'/resources/HasubiMono-OFL.txt'), 'bundled font retains its OFL license');

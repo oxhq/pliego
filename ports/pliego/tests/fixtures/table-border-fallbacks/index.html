@@ -5,12 +5,12 @@
     <title>Pliego table border fallback fixture</title>
     <style>
       body { margin: 0; font: 10px/20px sans-serif; }
-      #lead { height: 80px; }
+      #lead { height: 80px; white-space: nowrap; }
       table {
         border-collapse: separate;
         border-spacing: 0;
         table-layout: fixed;
-        width: 200px;
+        width: 202px;
         border-top: 2px solid #0057b8;
         border-left: 2px solid #0057b8;
       }
@@ -18,6 +18,7 @@
         box-sizing: border-box;
         padding: 0;
         text-align: left;
+        white-space: nowrap;
         border-right: 2px solid #0057b8;
         border-bottom: 2px solid #0057b8;
       }

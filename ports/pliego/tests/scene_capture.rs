@@ -112,6 +112,58 @@ fn reports_font_source_resolution_order_and_fallbacks() {
     );
 }
 
+#[test]
+fn retains_resolved_text_color_and_ordered_solid_background() {
+    let mut snapshot: Value = serde_json::from_slice(&snapshot(10, 1000)).unwrap();
+    snapshot["fragments"][1]["text_run"]["color"] =
+        json!({ "r": 0.2, "g": 0.4, "b": 0.8, "a": 0.75 });
+    snapshot["paint_events"][1] = json!({
+        "sequence": 1,
+        "kind": "paint-rect",
+        "fragment_id": 10,
+        "tag_id": null,
+        "spatial_node_id": 110,
+        "clip_id": null,
+        "paint_rects": [{
+            "rect": { "x": 4.0, "y": 5.0, "width": 40.0, "height": 12.0 },
+            "color": { "r": 0.05, "g": 0.1, "b": 0.2, "a": 1.0 },
+            "kind": "background"
+        }]
+    });
+
+    let captured = convert(&serde_json::to_vec(&snapshot).unwrap());
+    let operations = &captured.scene.pages[0].operations;
+    let Operation::Path {
+        bounds, fill, meta, ..
+    } = &operations[0]
+    else {
+        panic!("solid background must precede text");
+    };
+    assert_eq!(
+        bounds,
+        &Rect {
+            x: 4.0,
+            y: 5.0,
+            width: 40.0,
+            height: 12.0,
+        }
+    );
+    assert_eq!(meta.semantics.as_ref().unwrap().label.as_deref(), Some("background"));
+    assert_eq!(fill.unwrap().r, f64::from(0.05_f32));
+    let Operation::Text { color, .. } = &operations[1] else {
+        panic!("text must follow its background");
+    };
+    assert_eq!(
+        *color,
+        Color {
+            r: f64::from(0.2_f32),
+            g: f64::from(0.4_f32),
+            b: f64::from(0.8_f32),
+            a: f64::from(0.75_f32),
+        }
+    );
+}
+
 fn snapshot(local_id_base: usize, link_tag: u64) -> Vec<u8> {
     let variation_b = [(u32::from_be_bytes(*b"wght"), 700.0)];
     let font_resource_a = content_address(b"A");
@@ -678,6 +730,7 @@ fn converts_dense_paint_order_without_leaking_capture_local_ids() {
                 text: "A".into(),
                 font: font_instance_a.clone(),
                 font_size: 12.0,
+                color: Color::default(),
                 glyphs: vec![Glyph {
                     id: 41,
                     x: 10.0,
@@ -701,6 +754,7 @@ fn converts_dense_paint_order_without_leaking_capture_local_ids() {
                 text: "B".into(),
                 font: font_instance_b.clone(),
                 font_size: 12.0,
+                color: Color::default(),
                 glyphs: vec![Glyph {
                     id: 42,
                     x: 10.0,
@@ -836,6 +890,7 @@ fn converts_two_pages_to_page_local_operations_with_shared_resources() {
                 text: "A".into(),
                 font: shared_font.clone(),
                 font_size: 12.0,
+                color: Color::default(),
                 glyphs: vec![Glyph {
                     id: 41,
                     x: 10.0,
@@ -864,6 +919,7 @@ fn converts_two_pages_to_page_local_operations_with_shared_resources() {
                 text: "B".into(),
                 font: shared_font.clone(),
                 font_size: 12.0,
+                color: Color::default(),
                 glyphs: vec![Glyph {
                     id: 42,
                     x: 10.0,

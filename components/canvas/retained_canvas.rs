@@ -316,6 +316,13 @@ pub(crate) fn retain_pixel_readback(
     let Some(canvas) = registry.canvases.get_mut(&canvas_id) else {
         return;
     };
+    if origin.x == 0 && origin.y == 0 && size.width == canvas.width && size.height == canvas.height
+    {
+        // A synchronous full-canvas readback is an authoritative fallback for every command
+        // that produced those pixels. Later unsupported commands still invalidate it normally.
+        canvas.commands.clear();
+        canvas.unsupported = None;
+    }
     canvas.commands.push(RetainedCanvasCommand::RasterPatch {
         x: f64::from(origin.x),
         y: f64::from(origin.y),
@@ -345,6 +352,7 @@ pub(crate) fn mark_unsupported(
 #[cfg(test)]
 mod tests {
     use euclid::default::{Point2D, Rect, Size2D, Transform2D};
+    use pixels::{Snapshot, SnapshotAlphaMode, SnapshotPixelFormat};
     use servo_canvas_traits::canvas::{
         CanvasId, CompositionOptions, FillOrStrokeStyle, ShadowOptions,
     };
@@ -352,8 +360,9 @@ mod tests {
     use webrender_api::{IdNamespace, ImageKey};
 
     use super::{
-        RetainedCanvasCommand, associate_image_key, finish_canvas, register_canvas, registry,
-        retain_fill_rect, snapshot_for_image_key, start_retaining_canvas_commands,
+        RetainedCanvasCommand, RetainedCanvasUnsupportedReason, associate_image_key, finish_canvas,
+        mark_unsupported, register_canvas, registry, retain_fill_rect, retain_pixel_readback,
+        snapshot_for_image_key, start_retaining_canvas_commands,
     };
 
     #[test]
@@ -397,5 +406,45 @@ mod tests {
             assert!(snapshot_for_image_key(7, 11).is_some());
         }
         assert!(snapshot_for_image_key(7, 11).is_none());
+    }
+
+    #[test]
+    fn full_readback_replaces_unsupported_commands_with_authoritative_pixels() {
+        let key = ImageKey(IdNamespace(7), 12);
+        let _guard = start_retaining_canvas_commands();
+        register_canvas(CanvasId(4), Size2D::new(2, 2));
+        associate_image_key(CanvasId(4), key);
+        mark_unsupported(
+            CanvasId(4),
+            "fill_path",
+            RetainedCanvasUnsupportedReason::UnsupportedCommand,
+        );
+
+        let pixels = Snapshot::from_vec(
+            Size2D::new(2, 2),
+            SnapshotPixelFormat::RGBA,
+            SnapshotAlphaMode::Transparent {
+                premultiplied: true,
+            },
+            vec![255; 16],
+        );
+        retain_pixel_readback(
+            CanvasId(4),
+            Some(Rect::new(Point2D::zero(), Size2D::new(2, 2))),
+            &pixels,
+        );
+
+        let snapshot = snapshot_for_image_key(7, 12).unwrap();
+        assert!(snapshot.unsupported.is_none());
+        assert!(matches!(
+            snapshot.commands.as_slice(),
+            [RetainedCanvasCommand::RasterPatch {
+                x: 0.0,
+                y: 0.0,
+                width: 2,
+                height: 2,
+                ..
+            }]
+        ));
     }
 }

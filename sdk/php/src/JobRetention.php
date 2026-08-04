@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-namespace Pliego\Php\Experimental;
+namespace Pliego\Php;
 
 use FilesystemIterator;
 use InvalidArgumentException;
