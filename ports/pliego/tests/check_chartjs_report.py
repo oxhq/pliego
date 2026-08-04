@@ -55,6 +55,35 @@ def canonical_text(operation: dict[str, Any]) -> str:
     return " ".join(str(operation.get("text", "")).split())
 
 
+def fidelity_probe_slices(texts: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    probes = {}
+    cursor = 0
+    for marker in FIDELITY_PROBE_SEQUENCE:
+        matches = []
+        for start in range(cursor, len(texts)):
+            combined = ""
+            for end in range(start, len(texts)):
+                fragment = canonical_text(texts[end])
+                if not fragment:
+                    break
+                combined += fragment
+                if combined == marker:
+                    matches.append((start, end + 1))
+                    break
+                if not marker.startswith(combined):
+                    break
+        require(len(matches) == 1, f"font fidelity probe {marker!r} is absent or duplicated: {matches!r}")
+        start, cursor = matches[0]
+        probe = texts[start:cursor]
+        for field in ("font", "font_size", "color"):
+            require(
+                all(operation.get(field) == probe[0].get(field) for operation in probe[1:]),
+                f"font fidelity probe {marker!r} changes {field} inside its text slice",
+            )
+        probes[marker] = probe
+    return probes
+
+
 def verify_font_fidelity(texts: list[dict[str, Any]], instances: object) -> None:
     require(isinstance(instances, list) and len(instances) == 2, repr(instances))
     require(all(isinstance(instance, dict) for instance in instances), repr(instances))
@@ -81,20 +110,7 @@ def verify_font_fidelity(texts: list[dict[str, Any]], instances: object) -> None
         "regular and synthetic-bold text were not both retained",
     )
 
-    probe_set = set(FIDELITY_PROBE_SEQUENCE)
-    ordered_probe_text = [canonical_text(operation) for operation in texts if canonical_text(operation) in probe_set]
-    require(
-        ordered_probe_text == list(FIDELITY_PROBE_SEQUENCE),
-        f"font fidelity probe order differs: {ordered_probe_text!r}",
-    )
-    probes = {
-        marker: [operation for operation in texts if canonical_text(operation) == marker]
-        for marker in FIDELITY_PROBE_SEQUENCE
-    }
-    require(
-        all(len(operations) == 1 for operations in probes.values()),
-        f"font fidelity probes are absent or duplicated: {probes!r}",
-    )
+    probes = fidelity_probe_slices(texts)
     regular_id = probes[REGULAR_BEFORE][0].get("font")
     require(flags_by_id.get(regular_id) is False, "regular-before text is not bound to the regular instance")
     require(
@@ -427,6 +443,7 @@ def self_test(fixture: Path) -> None:
 
     regular_id = "sha256:regular"
     bold_id = "sha256:bold"
+    opaque_color = {"r": 0.4, "g": 0.45, "b": 0.55, "a": 1.0}
     instances = [
         {
             "id": regular_id,
@@ -444,17 +461,45 @@ def self_test(fixture: Path) -> None:
         },
     ]
     probe_texts = [
-        {"type": "text", "text": REGULAR_BEFORE, "font": regular_id},
-        {"type": "text", "text": SYNTHETIC_BOLD, "font": bold_id},
-        {"type": "text", "text": REGULAR_AFTER, "font": regular_id},
+        {
+            "type": "text",
+            "text": REGULAR_BEFORE,
+            "font": regular_id,
+            "font_size": 9.0,
+            "color": opaque_color,
+        },
+        {
+            "type": "text",
+            "text": SYNTHETIC_BOLD,
+            "font": bold_id,
+            "font_size": 9.0,
+            "color": opaque_color,
+        },
+        {
+            "type": "text",
+            "text": REGULAR_AFTER,
+            "font": regular_id,
+            "font_size": 9.0,
+            "color": opaque_color,
+        },
         {
             "type": "text",
             "text": TRANSLUCENT_BOLD,
             "font": bold_id,
+            "font_size": 9.0,
             "color": dict(zip(("r", "g", "b", "a"), TRANSLUCENT_COLOR)),
         },
     ]
     verify_font_fidelity(probe_texts, instances)
+
+    split_probe_texts = []
+    for operation in probe_texts:
+        prefix = copy.deepcopy(operation)
+        prefix["text"] = "PLIEGO-"
+        suffix = copy.deepcopy(operation)
+        suffix["text"] = canonical_text(operation).removeprefix("PLIEGO-")
+        split_probe_texts.extend([prefix, suffix])
+    verify_font_fidelity(split_probe_texts, instances)
 
     def require_fidelity_rejection(broken: list[dict[str, Any]], description: str) -> None:
         with redirect_stderr(StringIO()):
@@ -473,6 +518,12 @@ def self_test(fixture: Path) -> None:
     opaque = copy.deepcopy(probe_texts)
     opaque[3]["color"]["a"] = 1.0
     require_fidelity_rejection(opaque, "opaque text in the translucent probe")
+    mixed_font_split = copy.deepcopy(split_probe_texts)
+    mixed_font_split[1]["font"] = bold_id
+    require_fidelity_rejection(mixed_font_split, "split probe with mixed font instances")
+    mixed_style_split = copy.deepcopy(split_probe_texts)
+    mixed_style_split[-1]["font_size"] = 10.0
+    require_fidelity_rejection(mixed_style_split, "split probe with mixed text styles")
 
     licenses = (fixture / "THIRD_PARTY_LICENSES.md").read_text(encoding="utf-8")
     require(
