@@ -6,7 +6,13 @@ on:
     paths:
       - .github/workflows/pliego-composer-dry-run.yml
       - Cargo.lock
+      - LICENSE
+      - LICENSE_WHATWG_SPECS
+      - docs/pliego/third-party-notices.md
+      - licenses/**
       - ports/pliego/Cargo.toml
+      - python/check_pliego_release_archive.py
+      - resources/resource_protocol/license.html
       - sdk/php/**
       - sdk/laravel/**
 
@@ -28,6 +34,9 @@ jobs:
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           persist-credentials: false
+
+      - name: Check release archive contract and source assets
+        run: python python/check_pliego_release_archive.py --self-test --check-source-assets .
 
       - name: Resolve and verify engine and SDK versions
         shell: bash

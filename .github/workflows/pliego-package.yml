@@ -163,8 +163,9 @@ jobs:
           New-Item -ItemType Directory -Force $licenses | Out-Null
           Copy-Item -LiteralPath licenses\krilla-0.8.2 -Destination $licenses -Recurse
           Copy-Item -LiteralPath licenses\mozangle-0.6.0 -Destination $licenses -Recurse
+          Copy-Item -LiteralPath licenses\zlib-1.3.2 -Destination $licenses -Recurse
           @("Repository: $env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY", "Source: $env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/tree/v$env:PLIEGO_VERSION") | Set-Content "$directory\SOURCE.txt" -Encoding utf8
-          @('Artifact: ${{ matrix.bundle }}', 'Bundled native libraries:', '- libEGL.dll (ANGLE via mozangle 0.6.0; notices: licenses/mozangle-0.6.0/)', '- libGLESv2.dll (ANGLE via mozangle 0.6.0; notices: licenses/mozangle-0.6.0/)') | Set-Content "$directory\NATIVE-LIBRARIES.txt" -Encoding utf8
+          @('Artifact: ${{ matrix.bundle }}', 'Bundled native libraries:', '- libEGL.dll (ANGLE via mozangle 0.6.0 with zlib 1.3.2; notices: licenses/mozangle-0.6.0/, licenses/zlib-1.3.2/)', '- libGLESv2.dll (ANGLE via mozangle 0.6.0 with zlib 1.3.2; notices: licenses/mozangle-0.6.0/, licenses/zlib-1.3.2/)') | Set-Content "$directory\NATIVE-LIBRARIES.txt" -Encoding utf8
           @('1. Verify the adjacent SHA-256 file.', '2. Put pliego.exe on PATH or set PLIEGO_BINARY.', '3. Run pliego.exe --version.') | Set-Content "$directory\INSTALL.txt" -Encoding ascii
           & "$directory\pliego.exe" --version | Tee-Object -FilePath "$directory\VERSION.txt"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
