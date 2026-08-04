@@ -11,8 +11,8 @@ use Pliego\Php\Experimental\Exception\InvalidRequestException;
 use RuntimeException;
 
 /**
- * Experimental one-render-per-process bridge. It deliberately does not model
- * the planned daemon protocol.
+ * One-render-per-process bridge. It deliberately does not model a persistent
+ * daemon protocol.
  */
 final readonly class CliRenderer
 {

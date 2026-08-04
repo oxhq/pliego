@@ -1,85 +1,75 @@
-# Pliego 0.1 alpha support profile
+# Pliego 0.1 support profile
 
-Status: release contract for the sellable OSS MVP. A row marked **Supported** is
-part of the alpha promise only after its named proof passes on the released
-artifact. Until then, the proof column is the truthful current boundary.
+This page defines the current public behavior of Pliego 0.1. Behavior outside this
+profile is not implied by Servo or by successful rendering of a different document.
 
-## Buyer and deployment
+## Intended documents
 
-Pliego 0.1 targets a trusted Laravel application rendering one application-owned
-Latin-script invoice, statement, or operational-report family. Production uses one
-native Pliego process per queued job at concurrency 1. The required bundles are
-Linux x86_64, Windows x86_64, macOS x86_64, and macOS arm64; deep correctness is
-qualified on Ubuntu 22.04 x86_64 and every other target runs an unpacked invoice
-smoke.
+Pliego renders trusted, application-owned HTML such as Blade invoices, statements,
+and operational reports. Each document runs in its own native process. It is not a
+sandbox for hostile or tenant-authored markup and does not promise general browser
+compatibility.
+
+Published bundles target Linux x86_64, Windows x86_64, macOS x86_64, and macOS
+arm64. The same engine API is checked after unpacking on each target; document-level
+regression coverage is deepest on Linux x86_64.
 
 ## Resource modes
 
-- **Offline/locked:** network denied, assets supplied by the application, exact
-  bytes in the input/evidence manifests. This is the deterministic mode.
-- **Live/allowlisted:** the caller opts in to explicit HTTP(S) roots. Successful
-  requests record URL, status, content type, byte count, and SHA-256; those bytes
-  contribute to `resolved_input_hash`. This mode is content-addressed, but it is
-  repeatable only while the provider returns the same bytes.
+- **Offline:** network denied, assets supplied by the application, and exact bytes
+  recorded in the input and evidence manifests. This is the repeatable default.
+- **Allowlisted:** the caller opts in to explicit HTTP(S) roots. Successful requests
+  record URL, status, content type, byte count, and SHA-256. Repeatability depends on
+  the provider returning the same bytes.
 
-Network, host fonts, and redirects remain denied by default. Google Fonts requires
-both `https://fonts.googleapis.com/` and `https://fonts.gstatic.com/s/` roots; an
-allowed stylesheet does not implicitly allow its font origin.
+Host fonts, network access, redirects, and asset caching are disabled by default.
+Google Fonts requires both `https://fonts.googleapis.com/` and
+`https://fonts.gstatic.com/s/`; allowing the stylesheet origin does not implicitly
+allow the font origin.
 
-## Capability matrix
+## Capabilities
 
-| Capability | Alpha state | Required behavior and proof |
+| Capability | Status | Boundary |
 | --- | --- | --- |
-| Trusted Blade/HTML | Supported | One application-owned document; no hostile or tenant-authored markup claim. |
-| Authored page breaks and basic keep-together | Supported | Invoice gate; unsupported fragmentation must warn or fail, never silently drop content. |
-| Paged tables and repeated headers | Supported | Invoice plus first/middle/last statement pages; every required row occurs once. |
-| Rowspan contained in one fragment | Supported | Contiguous touched rows stay together. |
-| Cross-page rowspan continuation | Rejected | Typed/declared unsupported result; no synthesized or corrupted span. |
-| Table borders | Supported | Sampled page geometry and duplicate-border checks. |
-| Local TTF/OTF/WOFF/WOFF2 | Supported | Declared relative asset, selected and embedded/subset with `ToUnicode`; no host fallback. |
-| Font without embedding rights | Rejected | The application must supply an authorized face; Pliego does not grant, fetch, or override font rights. |
-| Missing declared font | Supported failure | Typed missing-resource evidence and no silent host-font substitution. |
-| Live allowlisted CSS/images/fonts | Supported | Two-origin local HTTP proof, readiness, typed failures, resource hashes, and resolved input identity. |
-| Google Fonts stylesheet link | Supported | Same two explicit roots as above; one real-provider release smoke, not a per-PR dependency. |
-| Denied URL | Supported failure | Typed `RESOURCE_DENIED` evidence and no published PDF. |
-| Redirect | Rejected | Typed redirect/resource failure. Add bounded redirects only when a supported direct URL cannot work. |
-| Variable-font axes | Partial | Static instance or authorized static face is the documented fallback. |
-| JavaScript readiness | Partial | Explicit readiness and font readiness only; arbitrary SPA/browser lifecycle parity is not promised. |
-| Selectable text and links | Supported | PDF structure/extraction gate; unsafe or oversized link targets are rejected. |
-| SVG/Canvas and complex scripts | Partial | Only separately evidenced fixtures; not part of the invoice/report promise. |
+| Trusted Blade or HTML | Supported | Application-owned documents with explicit locale, timezone, page geometry, and resources. |
+| Authored page breaks and keep-together | Supported | Unsupported fragmentation reports a failure or diagnostic instead of silently dropping content. |
+| Paged tables and repeated headers | Supported | Rows remain unique across pages; see [paged-table compatibility](paged-table-compatibility.md). |
+| Rowspans contained in one page fragment | Supported | The complete touched-row run must fit together. |
+| Cross-page rowspan continuation | Rejected | Pliego does not split or synthesize spanning cells across pages. |
+| Table borders | Partial | Solid horizontal LTR table borders are covered; complex border styles and writing modes are outside the current contract. |
+| Local TTF, OTF, WOFF, and WOFF2 | Supported | Declared fonts are embedded or subset with Unicode mappings; missing fonts do not silently fall back to the host. |
+| Fonts without embedding rights | Rejected | The application must supply an authorized face. |
+| Allowlisted CSS, images, and fonts | Supported | Every permitted root is explicit and fetched bytes contribute to the resolved input identity. |
+| Google Fonts stylesheet links | Supported | Both stylesheet and font roots must be allowlisted. |
+| Denied URLs | Supported failure | The render records `RESOURCE_DENIED` and publishes no final PDF. |
+| Redirects | Rejected | Redirects produce a typed resource failure. |
+| Variable-font axes | Partial | Use an authorized static instance when an axis combination is not covered. |
+| JavaScript readiness | Partial | Explicit readiness and font readiness are supported; general browser lifecycle parity is not. |
+| Selectable text and links | Supported | Unsafe or oversized link targets are rejected. |
+| SVG, Canvas, and complex scripts | Partial | Only behavior covered by focused fixtures is included. |
 
-## Limits and failure ownership
+## Operational limits
 
-| Boundary | Alpha contract |
+| Boundary | Current behavior |
 | --- | --- |
-| Resource body/cache | 64 MiB maximum; oversize is a typed resource failure. |
+| Resource body or cache | 64 MiB maximum; oversize is a typed resource failure. |
 | Resource connection | 10 seconds by default; configurable from 1 to 60,000 ms. |
-| Whole render | Configurable PHP wall-clock timeout; timeout must terminate/reap the child, return `RENDER_TIMEOUT`, and publish no partial PDF. |
-| Document length | 100 pages is the qualified statement ceiling, not an arbitrary-length promise. |
-| HTML/input and memory | No engine hard cap is proven yet. The paid deployment must pin queue-payload and OS/container memory limits; engine enforcement remains a release gap. |
-| Artifacts | Completed jobs retain one day and failed jobs seven days by default. `pliego:prune` applies configurable TTLs; zero seconds plus prune deletes completed evidence immediately. |
+| Whole render | The PHP bridge has a configurable wall-clock timeout, terminates the child on timeout, and publishes no partial PDF. |
+| Document length | Regression coverage includes a 100-page statement; this is not an arbitrary-length guarantee. |
+| HTML size and memory | No engine-wide hard cap is defined. Deployments must set their own request and process limits. |
+| Retained jobs | Successful jobs default to one day and failed jobs to seven days; `pliego:prune` applies configurable retention. |
 
-Invalid requests, denied resources, timeouts, and engine failures are typed. Pliego
-must not publish a final PDF after a failed render or silently replace a declared
-font/resource with a host value.
+Invalid requests, denied resources, timeouts, and engine failures are typed. A failed
+render must not publish a final PDF or silently substitute a declared resource.
 
-## Verification budget
+## Verification boundary
 
-Each change runs one affected package checker or fixture. Pull requests do not run
-`cargo test --workspace`, the full Servo/WPT matrix, `mach test`, or every historical
-Pliego gate by default. The native matrix builds/packages Pliego and checks the
-unpacked artifact; the deep invoice/live-resource gate runs once on Linux. Broad
-inherited suites are scheduled or pre-release exceptions when an upstream boundary
-actually changed.
+The release matrix builds, packages, and checks the unpacked engine API on every
+published target. Focused fixtures cover document pagination, text extraction,
+fonts, tables, resource policy, PDF structure, and repeatability. Composer checks
+exercise the PHP and Laravel package contracts. These are release and regression
+checks for the profile above, not a promise that arbitrary web pages will render.
 
-## OSS and paid boundary
-
-The engine, native bundles, PHP/Laravel packages, local and live URL/font support,
-generic fixes, diagnostics, examples, and release automation are public. The paid
-offer covers private preflight, one template-family migration, acceptance evidence,
-one deployment integration/runbook, and support. Payment never unlocks a generic
-renderer capability.
-
-Deferred: daemon/cloud, unrestricted or credentialed network, redirect chains,
-untrusted HTML, broad browser parity, extra CPU targets, installers/auto-update,
-variable-font guarantees, and M5+ compatibility breadth.
+Outside the current profile: persistent daemon or hosted rendering, credentialed or
+unrestricted network access, redirect chains, untrusted HTML, browser-wide parity,
+installers or automatic updates, and general variable-font guarantees.

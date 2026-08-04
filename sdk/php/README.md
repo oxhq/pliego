@@ -1,27 +1,27 @@
 # oxhq/pliego-php
 
-Experimental PHP 8.3+ bridge for one Pliego process per document. See the
-[alpha support profile](../../docs/pliego/support-profile.md) before production use.
+PHP 8.3+ client for rendering one document per native Pliego process.
 
 ```sh
 composer require oxhq/pliego-php:^0.1.0-alpha.2
 composer test
 ```
 
-Network is denied unless `RenderOptions::allowedHttpRoots` names explicit HTTP(S)
-roots. The engine, packages, URL/font support, and generic fixes are public OSS;
-paid work covers private migration and production assurance.
+Network access is denied unless `RenderOptions::allowedHttpRoots` names explicit
+HTTP(S) roots. Local files must live inside the document input bundle. Host-font
+fallback and redirects remain disabled by default.
 
-Resource quickstarts:
+Resource examples:
 
-- [Offline/locked local WOFF2](examples/offline-locked-font.php) copies an explicitly declared font into the input bundle.
-- [Allowlisted Google Fonts](examples/google-fonts.php) keeps the public `<link>` unchanged and permits only the stylesheet and font roots.
+- [Offline local WOFF2](examples/offline-locked-font.php) copies a declared font
+  into the rooted input bundle.
+- [Allowlisted Google Fonts](examples/google-fonts.php) keeps the public `<link>`
+  unchanged and permits both the stylesheet and font roots.
 
-Both examples print the retained `resources.jsonl` path for resource hashes and
-handle typed render failures. The repository self-check uses a fake process and
-does not prove live access to Google.
+Results and typed render exceptions expose `jobPath`, `inputBundlePath`, and
+`artifactsPath`. These directories may contain private input, PDFs, extracted text,
+URLs, and diagnostics; remove them after acceptance when the evidence is no longer
+needed.
 
-Each result or typed render exception exposes `jobPath`, `inputBundlePath`, and
-`artifactsPath`. These may contain private input, PDFs, extracted text, URLs, and
-diagnostics; delete the job directory after acceptance when that evidence is no
-longer needed.
+See the project [support profile](../../docs/pliego/support-profile.md) for the
+current rendering and resource boundaries.

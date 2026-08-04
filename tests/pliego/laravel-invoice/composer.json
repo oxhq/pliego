@@ -1,7 +1,7 @@
 {
     "$schema": "https://getcomposer.org/schema.json",
     "name": "oxhq/pliego-laravel-invoice-fixture",
-    "description": "Pinned Laravel 13 invoice fixture for the experimental Pliego CLI bridge",
+    "description": "Pinned Laravel 13 invoice fixture for Pliego rendering",
     "type": "project",
     "license": "MIT",
     "repositories": [

@@ -7,7 +7,7 @@ namespace Pliego\Php\Experimental;
 use InvalidArgumentException;
 
 /**
- * Experimental one-shot CLI options. This is not the future daemon protocol.
+ * Options for one-shot CLI rendering, not a persistent daemon protocol.
  */
 final readonly class RenderOptions
 {

@@ -1,4 +1,4 @@
-# Hybrid Canvas prototype
+# Hybrid Canvas fixture
 
 The retained vector-safe subset is intentionally one command: solid-color `fillRect` with the
 identity transform, source-over composition, and no clip, shadow, or filter. `raster_patch` carries

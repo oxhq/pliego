@@ -22,13 +22,13 @@ Use Krilla 0.8.2 with only its raster-image support:
 krilla = { version = "0.8.2", default-features = false, features = ["raster-images"] }
 ```
 
-The adapter will:
+The adapter does the following:
 
-- call `Surface::draw_glyphs` with scene glyph IDs, positions, source text, and validated UTF-8
-  cluster ranges; it will not invoke Krilla's simple-text shaping path;
-- construct each font from the scene's exact bytes, face index, and variation coordinates;
-- map scene paths, images, and links directly to Krilla surfaces and annotations; and
-- convert CSS pixels to PDF points exactly once inside the adapter so PDF choices cannot affect
+- calls `Surface::draw_glyphs` with scene glyph IDs, positions, source text, and validated UTF-8
+  cluster ranges; it does not invoke Krilla's simple-text shaping path;
+- constructs each font from the scene's exact bytes, face index, and variation coordinates;
+- maps scene paths, images, and links directly to Krilla surfaces and annotations; and
+- converts CSS pixels to PDF points exactly once inside the adapter so PDF choices cannot affect
   layout or scene geometry.
 
 Krilla's positioned-glyph API delegates bidi, fallback, shaping, and layout to the caller. Its
@@ -43,14 +43,12 @@ contracts at commit `3ffdf0588cf98050aad6edba51ca70162e1fb5b5`.
 
 ## Dependency-policy gates
 
-Krilla 0.8.2 declares Rust 1.92 while the Servo workspace declares Rust 1.88. The active Pliego
-toolchain is newer, but accepting the backend requires a Pliego-package-only Rust 1.92 declaration;
-the Servo-wide declaration must not be raised for this adapter.
+Krilla 0.8.2 declares Rust 1.92 while the Servo workspace declares Rust 1.88. The Pliego package
+therefore declares Rust 1.92 without raising the Servo-wide declaration.
 
 Krilla also requires `yoke` 0.8 and `yoke-derive` 0.8 while the workspace retains 0.7.5.
-`cargo deny check bans` rejects those duplicates unless Pliego adds documented, version-specific
-exceptions. Upgrading Servo's ICU4X graph solely for the PDF adapter is disproportionate. Both
-exceptions must say to remove them when Servo's ICU4X graph reaches yoke 0.8 or Krilla no longer
+`cargo deny check bans` permits those duplicates through documented, version-specific exceptions.
+Both exceptions say to remove them when Servo's ICU4X graph reaches yoke 0.8 or Krilla no longer
 requires it.
 
 Krilla is MIT OR Apache-2.0. Its NOTICE identifies adapted MPL and Apache code and must be included
@@ -68,7 +66,7 @@ behavior.
 ## Rejected alternatives
 
 - `pdf-writer` and `lopdf` expose serialization building blocks but leave Pliego implementing the
-  font, Unicode, graphics, annotation, and object policy that this milestone is meant to buy.
+  required font, Unicode, graphics, annotation, and object policy.
 - `resvg`, Typst, and Cairo introduce a second rendering/layout model or discard the document
   semantics required by the canonical scene.
 
@@ -81,7 +79,6 @@ typed failures for absent mappings and unsafe resources.
 
 ## References
 
-- OXH-245
 - [`ports/pliego/src/scene.rs`](../../../ports/pliego/src/scene.rs)
 - [Krilla 0.8.2 package](https://crates.io/crates/krilla/0.8.2)
 - [Krilla repository at the reviewed tag](https://github.com/LaurenzV/krilla/tree/3ffdf0588cf98050aad6edba51ca70162e1fb5b5)

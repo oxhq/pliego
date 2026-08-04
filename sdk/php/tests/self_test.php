@@ -183,4 +183,4 @@ foreach (['document.html::$DATA', 'document.html.', 'NUL', 'assets/aux.txt'] as 
     }
 }
 
-echo "Pliego PHP experimental bridge self-test passed; evidence retained at {$root}\n";
+echo "Pliego PHP bridge self-test passed; evidence retained at {$root}\n";
