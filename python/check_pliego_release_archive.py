@@ -102,7 +102,8 @@ def _native_libraries_text(bundle: str) -> str:
         libraries = f"- libEGL.dll ({notice})\n- libGLESv2.dll ({notice})\n"
     else:
         libraries = "none\n"
-    return f"Artifact: {bundle}\nBundled native libraries: {libraries}"
+    separator = "\n" if bundle.startswith("windows-") else " "
+    return f"Artifact: {bundle}\nBundled native libraries:{separator}{libraries}"
 
 
 def _member_parts(name: str) -> tuple[str, ...]:
