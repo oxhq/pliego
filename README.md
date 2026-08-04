@@ -1,102 +1,89 @@
-# Pliego document engine
+# Pliego
 
-Pliego is an experimental native HTML-to-PDF product built as a hard fork of Servo.
-The sellable OSS MVP targets trusted Laravel invoices, statements, and operational
-reports—not broad browser parity. Start with the
-[Pliego 0.1 alpha support profile](docs/pliego/support-profile.md) and
-[experimental Laravel bridge](docs/pliego/laravel-cli-bridge.md).
+Pliego is an open-source native HTML-to-PDF engine built on Servo for
+application-owned invoices, statements, and operational reports. It turns HTML and
+CSS into paginated PDFs without Chromium, Node.js, or Java in the runtime.
 
-The engine, native bundles, PHP/Laravel packages, URL/font capabilities, and generic
-fixes are public. Paid work covers private migration and production assurance.
+Pliego focuses on predictable document workflows:
 
-## Upstream Servo development
+- authored page breaks, paged tables, repeated headers, and row constraints;
+- selectable text, links, and embedded TTF, OTF, WOFF, and WOFF2 fonts;
+- network-denied rendering by default, with explicit URL allowlists for remote
+  stylesheets, images, and fonts;
+- typed failures and retained input, resource, scene, PDF, and diagnostic artifacts;
+  and
+- native bundles for Linux x86_64, Windows x86_64, macOS x86_64, and macOS arm64.
 
-Servo is a prototype web browser engine written in the
-[Rust](https://github.com/rust-lang/rust) language. It is currently developed on
-64-bit macOS, 64-bit Linux, 64-bit Windows, 64-bit OpenHarmony, and Android.
+## Laravel quick start
 
-Servo welcomes contribution from everyone. Check out:
+```sh
+composer require oxhq/pliego-laravel:^0.1.0-alpha.2 oxhq/pliego-php:^0.1.0-alpha.2
+php artisan pliego:install
+php artisan pliego:doctor
+```
 
-- The [Servo Book](https://book.servo.org) for documentation
-- [servo.org](https://servo.org/) for news and guides
+`pliego:install` downloads the package-pinned runtime for the current platform and
+verifies its size and SHA-256 before installation. `pliego:doctor` checks the engine
+API, writable storage, bundled font, and an offline PDF render.
 
-Coordination of Servo development happens:
-- Here in the Github Issues
-- On the [Servo Zulip](https://servo.zulipchat.com/)
-- In video calls advertised in the [Servo Project](https://github.com/servo/project/issues) repo.
+Network access remains opt-in. A Google Fonts stylesheet needs explicit roots for
+both `https://fonts.googleapis.com/` and `https://fonts.gstatic.com/s/`.
 
-## Getting started
+See the [Laravel package guide](sdk/laravel/README.md) for Blade rendering, local
+assets, controlled URLs, typed failures, and artifact retention.
 
-For more detailed build instructions, see the Servo Book under [Getting the Code] and [Building Servo].
+## Native CLI
 
-[Getting the Code]: https://book.servo.org/building/getting-the-code.html
-[Building Servo]: https://book.servo.org/building/building.html
+Download a bundle from [Releases](https://github.com/oxhq/pliego/releases), verify
+its adjacent SHA-256 file, and run:
 
-### macOS
+```sh
+pliego render document.html --output document.pdf --artifacts artifacts
+```
 
-- Download and install [Xcode](https://developer.apple.com/xcode/) and [`brew`](https://brew.sh/).
-- Install `uv`: `curl -LsSf https://astral.sh/uv/install.sh | sh` 
-- Install `rustup`: `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
-- Restart your shell to make sure `cargo` is available
-- Install the other dependencies: `./mach bootstrap`
-- Build servoshell: `./mach build`
+Host-font fallback, network access, redirects, and asset caching are disabled by
+default. The [support profile](docs/pliego/support-profile.md) defines the current
+capability, resource, and failure boundaries.
 
-### Linux
+## Release evidence
 
-- Install `curl`:
-  - Arch: `sudo pacman -S --needed curl`
-  - Debian, Ubuntu: `sudo apt install curl`
-  - Fedora: `sudo dnf install curl`
-  - Gentoo: `sudo emerge net-misc/curl`
-- Install `uv`: `curl -LsSf https://astral.sh/uv/install.sh | sh` 
-- Install `rustup`: `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
-- Restart your shell to make sure `cargo` is available
-- Install the other dependencies: `./mach bootstrap`
-- Build servoshell: `./mach build`
+The current native release publishes checksummed archives built and API-smoked on
+all four targets in the
+[package matrix](https://github.com/oxhq/pliego/actions/runs/30855634783). The
+[PHP package](https://packagist.org/packages/oxhq/pliego-php) and
+[Laravel package](https://packagist.org/packages/oxhq/pliego-laravel) are available
+on Packagist and pass focused hosted package checks.
 
-### Windows
+These checks prove the packaged binaries start with the expected engine API and the
+Composer distributions pass their focused contracts. The support profile remains
+the boundary; Pliego does not claim browser-wide compatibility or safe rendering of
+untrusted HTML.
 
-- Download [`uv`](https://docs.astral.sh/uv/getting-started/installation/#standalone-installer), and [`rustup`](https://win.rustup.rs/)
-  - Be sure to select *Quick install via the Visual Studio Community installer*
-- Ensure that [`winget`](https://learn.microsoft.com/en-us/windows/package-manager/winget/) is available. It should be preinstalled on Windows 10 1809+ and Windows 11, otherwise can be [`manually installed`](https://github.com/microsoft/winget-cli#installing-the-client).
-- In the Visual Studio Installer, ensure the following components are installed:
-  - **Windows 10/11 SDK (anything >= 10.0.19041.0)** (`Microsoft.VisualStudio.Component.Windows{10, 11}SDK.{>=19041}`)
-  - **MSVC v143 - VS 2022 C++ x64/x86 build tools (Latest)** (`Microsoft.VisualStudio.Component.VC.Tools.x86.x64`)
-  - **C++ ATL for latest v143 build tools (x86 & x64)** (`Microsoft.VisualStudio.Component.VC.ATL`)
-- Restart your shell to make sure `cargo` is available
-- Install the other dependencies: `.\mach bootstrap`
-- Build servoshell: `.\mach build`
+Redistributors should note that the `v0.1.0-alpha.1` native archives include the
+root MPL-2.0 license and GitHub provides the exact tagged source, but the archives do
+not yet bundle the full dependency and copied-native-library notice set. A
+notice-complete archive is needed before redistributing those bundles.
 
-### Android
+## Building from source
 
-- Ensure that the following environment variables are set:
-  - `ANDROID_SDK_ROOT`
-  - `ANDROID_NDK_ROOT`: `$ANDROID_SDK_ROOT/ndk/28.2.13676358/`
- `ANDROID_SDK_ROOT` can be any directory (such as `~/android-sdk`).
-  All of the Android build dependencies will be installed there.
-- Install the latest version of the [Android command-line
-  tools](https://developer.android.com/studio#command-tools) to
-  `$ANDROID_SDK_ROOT/cmdline-tools/latest`.
-- Run the following command to install the necessary components:
-  ```shell
-  sudo $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager --install \
-   "build-tools;36.0.0" \
-   "emulator" \
-   "ndk;28.2.13676358" \
-   "platform-tools" \
-   "platforms;android-37" \
-   "system-images;android-37;google_apis;x86_64"
-  ```
-- Follow the instructions above for the platform you are building on
+```sh
+./mach bootstrap
+cargo build -p pliego --locked --profile checked-release
+```
 
-### OpenHarmony
+On Windows, run `./mach` as `./mach.bat` or `python mach` from a configured Servo
+build environment.
 
-- Follow the instructions above for the platform you are building on to prepare the environment.
-- Depending on the target distribution (e.g. `HarmonyOS NEXT` vs pure `OpenHarmony`) the build configuration will differ slightly.
-- Ensure that the following environment variables are set
-  - `DEVECO_SDK_HOME` (Required when targeting `HarmonyOS NEXT`)
-  - `OHOS_BASE_SDK_HOME` (Required when targeting `OpenHarmony`)
-  - `OHOS_SDK_NATIVE` (e.g. `${DEVECO_SDK_HOME}/default/openharmony/native` or `${OHOS_BASE_SDK_HOME}/${API_VERSION}/native`)
-  - `SERVO_OHOS_SIGNING_CONFIG`: Path to json file containing a valid signing configuration for the demo app.
-- Review the detailed instructions at [Building for OpenHarmony].
-- The target distribution can be modified by passing `--flavor=<default|harmonyos>` to `mach <build|package|install>`.
+## Servo relationship
+
+Pliego preserves Servo's source layout so upstream security and web-platform fixes
+can be reviewed without rewriting the fork. The `upstream-main` branch mirrors
+Servo `main`; temporary `sync/servo-YYYY-MM-DD` branches carry reviewed updates into
+Pliego. Servo build documentation remains available in the
+[Servo Book](https://book.servo.org/).
+
+## License and contributing
+
+The engine is MPL-2.0. The PHP and Laravel packages are MIT-licensed. See
+[CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), and the
+[third-party notices](docs/pliego/third-party-notices.md).

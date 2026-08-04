@@ -1,8 +1,6 @@
 # oxhq/pliego-laravel
 
-Experimental Laravel 13 bridge for application-owned Blade documents. See the
-[alpha support profile](../../docs/pliego/support-profile.md) and
-[CLI bridge guide](../../docs/pliego/laravel-cli-bridge.md).
+Laravel 13 integration for application-owned Blade documents.
 
 ```sh
 composer require oxhq/pliego-laravel:^0.1.0-alpha.2 oxhq/pliego-php:^0.1.0-alpha.2
@@ -10,51 +8,57 @@ php artisan pliego:install
 php artisan pliego:doctor
 ```
 
-Both constraints are explicit during alpha so Composer accepts the transitive
-PHP package without changing the application's global minimum stability.
-`pliego:install` downloads the package-pinned native runtime for Linux x64,
-Windows x64, or macOS Intel/Apple Silicon, verifies its bundled size and
-SHA-256, and stores it under `storage/app/pliego-runtime`. Set
-`PLIEGO_RUNTIME_DIR` to move that managed directory. `PLIEGO_BINARY` remains an
-explicit override for system packages and air-gapped deployments.
+Both Composer constraints are explicit so applications do not need to change their
+global minimum stability. `pliego:install` selects the pinned
+runtime for Linux x64, Windows x64, or macOS Intel/Apple Silicon, verifies its size
+and SHA-256, and installs it under `storage/app/pliego-runtime`.
 
-Offline assets are the reproducible default. Live URLs are opt-in with
-`allowHttpRoot()`; a Google Fonts stylesheet needs explicit roots for both
-`fonts.googleapis.com` and `fonts.gstatic.com/s/`.
+Set `PLIEGO_RUNTIME_DIR` to move the managed directory. `PLIEGO_BINARY` is an
+explicit override for system packages and air-gapped deployments; unset it when
+testing managed installation.
+
+## Rendering a Blade view
 
 ```php
 use Pliego\Laravel\Experimental\Facades\Document;
 
-$offline = Document::view('invoice')
+return Document::view('invoice', ['rows' => $rows])
+    ->pageSize('612x792')
+    ->margins('36,36,36,36')
+    ->locale('es-MX')
+    ->timezone('PST8PDT')
     ->denyNetwork()
     ->asset('fonts/invoice.woff2', resource_path('fonts/invoice.woff2'))
-    ->render();
+    ->download('invoice.pdf');
+```
 
-$live = Document::view('invoice-with-google-fonts')
+Blade is rendered first. The package creates a private input directory, copies only
+declared relative assets, records their hashes, and launches one `pliego render`
+process with explicit locale, timezone, page geometry, and resource policy.
+
+For Google Fonts, keep the stylesheet `<link>` in the Blade view and allow both
+origins:
+
+```php
+$pdf = Document::view('invoice')
     ->allowHttpRoot('https://fonts.googleapis.com/')
     ->allowHttpRoot('https://fonts.gstatic.com/s/')
     ->render();
-
-// Exact resource URLs and hashes:
-$resources = $live->artifactsPath.'/resources.jsonl';
 ```
 
-Keep the Google Fonts `<link>` unchanged in the Blade view. Catch
-`Pliego\Php\Experimental\Exception\RenderException` for typed failures; its
-input and artifact paths point to retained evidence.
+## Failures and retained evidence
 
-Completed jobs are retained for one day and failed jobs for seven days by
-default. Their inputs, PDFs, extracted text, URLs, and diagnostics may contain
-private data. Preview or apply cleanup with:
+Catch `Pliego\Php\Experimental\Exception\RenderException` for typed failures. The
+exception preserves the engine code, process exit code, stderr, and retained input
+and artifact paths. Failed renders do not publish a final PDF.
+
+Successful jobs are retained for one day and failed jobs for seven days by default.
+Preview or apply cleanup with:
 
 ```sh
 php artisan pliego:prune --dry-run
 php artisan pliego:prune
 ```
 
-Set both `PLIEGO_SUCCESS_RETENTION_SECONDS=0` and
-`PLIEGO_FAILURE_RETENTION_SECONDS=0`, then prune, to delete completed evidence
-immediately after acceptance.
-
-Migrating a production document? Request a fixed-scope private preflight. All
-generic renderer and package capabilities remain public OSS.
+See the project [support profile](../../docs/pliego/support-profile.md) for the
+current rendering and resource boundaries.

@@ -5,14 +5,9 @@
 
 ## Context
 
-The normative source is *Pliego*, Draft 0.1 (2026-07-14), §§0, 17.1, 26, 44, 51, and §54 open
-decision 13. It requires an ADR choosing Servo-main tracking or an LTS base before intentional
-divergence.
-
-At this decision, `oxhq/pliego` is a GitHub fork whose default `main` is the recorded Servo baseline.
-This implementation checkout has only the `origin` remote, and the project has not yet created an
-`upstream-main` mirror or `sync/*` branch. This ADR establishes their roles; the first auditable sync
-will exercise them.
+`oxhq/pliego` is a GitHub fork with intentional document-engine changes on `main`.
+The repository needs one auditable route for receiving Servo fixes without mixing
+upstream history with Pliego development.
 
 ## Decision
 
@@ -25,7 +20,7 @@ maintain a Pliego release, but it does not change the Servo base strategy.
 ### Branch and merge roles
 
 - On adoption, `main` becomes the Pliego development branch.
-- Once created, `upstream-main` must be an exact fast-forward mirror of `servo/servo` `main` and contain
+- `upstream-main` is an exact fast-forward mirror of `servo/servo` `main` and contains
   no Pliego work.
 - Each sync uses a temporary `sync/servo-YYYY-MM-DD` branch created from `main` and deleted after its
   reviewed PR lands.
@@ -74,6 +69,5 @@ missing declarations.
 
 ## References
 
-- *Pliego*, Draft 0.1 (2026-07-14), §§0, 17.1, 26, 44, 51, and §54 open decision 13.
 - [`ownership.toml`](../../../ownership.toml)
 - [`PULL_REQUEST_TEMPLATE.md`](../../../PULL_REQUEST_TEMPLATE.md)

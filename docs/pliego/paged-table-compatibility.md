@@ -1,30 +1,40 @@
-# Pliego paged-table compatibility
+# Paged-table compatibility
 
-Pliego paginates retained table rows only when it can preserve the laid-out grid. The current
-rowspan subset is deliberately conservative:
+Pliego paginates retained table rows only when it can preserve the laid-out grid.
+Unsupported cases fall back with a typed diagnostic before a partial row plan is
+applied.
+
+## Row and rowspan behavior
 
 | Table case | Paged behavior |
 | --- | --- |
-| Horizontal LTR, separate-border table without rowspans | Rows use the existing retained-grid pagination path. |
-| One or more rowspans whose touched rows form a run that fits in one fragment | The maximal contiguous run of rows touched by any rowspan stays on one page. Adjacent spans may therefore be kept together. |
-| Repeated header or terminal footer with a contained rowspan | A body or footer run must fit below the repeated header and cannot cross a header/body/footer placement boundary. |
-| Rowspan run taller than its fragment capacity | Retained-row pagination falls back. Ordinary tables emit `unsupported-table-rowspan-pagination`; repeated-header or terminal-footer tables preserve `unsupported-table-group-pagination` with reason `rowspan`. |
-| Forced row or row-group break inside a rowspan run | Retained-row pagination falls back before translating fragments, using the same ordinary/group diagnostic split above. |
-| Cross-page rowspan continuation | Unsupported. Pliego does not split or synthesize a spanning cell across pages. |
+| Horizontal LTR table without rowspans | Rows use the retained-grid pagination path. |
+| Rowspans whose touched rows form a run that fits in one fragment | The maximal contiguous run stays on one page. |
+| Repeated header or terminal footer with a contained rowspan | The run must fit below the repeated header and cannot cross a header, body, or footer boundary. |
+| Rowspan run taller than the available fragment | Pagination falls back with an unsupported-rowspan diagnostic. |
+| Forced row or row-group break inside a rowspan run | Pagination falls back before translating fragments. |
+| Cross-page rowspan continuation | Unsupported; Pliego does not split or synthesize a spanning cell across pages. |
 
-Every physical row in the supported subset must retain at least one cell that originates in that
-row. Collapsed borders, vertical or RTL table writing modes, and captions keep their existing
-compatibility boundaries.
+Every physical row in the supported subset retains at least one cell originating in
+that row. Diagnostics include the affected row range, laid-out size, available size,
+and whether an internal forced break caused the fallback.
 
-The diagnostic records the half-open row range, its laid-out block size, the available block size,
-and whether an internal forced break caused the fallback. It is emitted before retained fragments
-are translated, so the generic table fallback cannot partially apply the row plan.
+## Border behavior
 
-Run the focused checker with an existing Pliego binary:
+The supported border profile covers horizontal LTR tables using
+`border-collapse: collapse` or `border-collapse: separate` with finite,
+positive-width `solid` borders. Repeated headers keep their original coordinates,
+widths, and colors on each page. Shared fragment seams and repeated-header edges are
+emitted once.
 
-```bash
+Complex border styles, border images, radii, mixed resolved styles, vertical or RTL
+table writing modes, bordered oversized rows, and cross-page rowspans are outside
+this profile. They must remain observable as a fallback rather than being silently
+approximated.
+
+Focused contributor checks:
+
+```sh
 python ports/pliego/tests/check_table_rowspans.py <pliego-binary>
+python ports/pliego/tests/check_table_borders.py <pliego-binary>
 ```
-
-The checker renders both `fixtures/table-rowspans/index.html` and
-`fixtures/table-rowspans/forced-cross-page.html`.

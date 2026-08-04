@@ -2458,7 +2458,7 @@
             "license": [
                 "MIT"
             ],
-            "description": "Experimental Laravel bridge for one-shot Pliego CLI rendering",
+            "description": "Laravel integration for native Pliego document rendering",
             "transport-options": {
                 "symlink": true,
                 "relative": true
@@ -2495,7 +2495,7 @@
             "license": [
                 "MIT"
             ],
-            "description": "Experimental one-shot PHP bridge for the Pliego document engine",
+            "description": "PHP client for one-shot Pliego document rendering",
             "transport-options": {
                 "symlink": true,
                 "relative": true

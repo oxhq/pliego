@@ -5,32 +5,32 @@
 
 ## Context
 
-Pliego needs an early visible preview of the canonical document scene without re-entering Servo
+Pliego needs a visible preview of the canonical document scene without re-entering Servo
 layout or requiring a browser compositor. ADR 0014 establishes `DocumentScene` as the boundary after
 layout and paint-order capture. The first preview backend must preserve that boundary so it tests the
 scene Pliego intends to share with later document backends, rather than creating another source of
 layout truth.
 
 The current scene does not yet encode enough paint, variable-font, or physical-output data to
-claim CSS visual parity. The prototype therefore needs an intentionally narrow rendering contract
+claim CSS visual parity. The preview therefore has an intentionally narrow rendering contract
 whose unsupported cases are visible to callers.
 
 ## Decision
 
 ### Adapter boundary
 
-The structural preview is a direct `vello_cpu` adapter exposed by
-`render_first_page_png`. It accepts a validated `DocumentScene` and a font-resource resolver. It does
-not accept DOM nodes, Servo layout objects, a WebRender display list, or a live graphics context, and
-it does not initiate layout.
+The structural preview is a direct `vello_cpu` adapter exposed by the first-page compatibility
+entry points and `render_pages_png_with_images`. It accepts a validated `DocumentScene` and resource
+resolvers. It does not accept DOM nodes, Servo layout objects, a WebRender display list, or a live
+graphics context, and it does not initiate layout.
 
 The resolvers supply the exact font bytes and face index named by a scene text operation and, for the
 image-aware entry point, the exact PNG bytes named by a scene image operation. This keeps resource
 lookup outside the renderer while leaving `DocumentScene` as the only geometry and operation input.
 
-### Prototype raster semantics
+### Raster semantics
 
-For this prototype, one scene coordinate unit maps directly to one structural raster pixel. Page
+One scene coordinate unit maps directly to one structural raster pixel. Page
 extents are rounded up to whole pixels; there is no DPI, device-scale, zoom, or physical-page
 conversion. This mapping is useful for inspecting structure and repeatability, not for asserting
 print dimensions.
@@ -60,16 +60,15 @@ geometry, out-of-range values, and PNG encoding failures likewise remain typed e
   strings. The extra representation would weaken the rule that recorded glyph IDs and positions are
   authoritative.
 - **GPU Vello:** device initialization and driver-dependent execution add complexity and variability
-  that the first small, headless structural preview does not need. The CPU backend is sufficient for
-  the accepted prototype scope.
+  that the headless structural preview does not need. The CPU backend is sufficient for this scope.
 
-### Deferred work
+### Deliberate limits
 
-Text color and richer box paint semantics are deferred until they are represented in the scene. DPI
-and physical-output scaling require a separate contract rather than changing the prototype's
-one-to-one mapping implicitly. JPEG, GIF, WebP, SVG, normalized variable-font behavior, multi-page
-output, and visual parity with Servo/WebRender or a future PDF backend are also deferred. This ADR
-does not claim that the structural PNG is a production preview or an exact PDF preview.
+Text color and richer box paint semantics remain unavailable until represented in the scene. DPI
+and physical-output scaling require a separate contract rather than changing the one-to-one mapping
+implicitly. JPEG, GIF, WebP, SVG, normalized variable-font behavior, and visual parity with
+Servo/WebRender or the PDF backend are outside this adapter. The structural PNG is not an exact PDF
+preview.
 
 ## Consequences
 
@@ -77,7 +76,7 @@ does not claim that the structural PNG is a production preview or an exact PDF p
   without DOM, layout, compositor, or GPU state.
 - The preview exercises the canonical scene boundary directly, so a successful render cannot hide a
   second layout or shaping pass.
-- Current text previews are deliberately monochrome and one-to-one in scene units and pixels;
+- Text previews are deliberately monochrome and one-to-one in scene units and pixels;
   retained vector paths preserve their explicit fill and stroke colors.
 - Content-addressed PNG resources paint into their retained image bounds without DOM or layout
   access.
@@ -88,7 +87,6 @@ does not claim that the structural PNG is a production preview or an exact PDF p
 
 ## References
 
-- OXH-244
 - Implementation commit `038d50b32605d8d5b77895093b8faa592f54e6bd`
   (`feat(pliego): rasterize positioned scene glyphs`)
 - [ADR 0014: Document scene v1 and canonical ordering](0014-document-scene-v1-and-canonical-ordering.md)

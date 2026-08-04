@@ -1,6 +1,6 @@
 {
     "name": "oxhq/pliego-laravel",
-    "description": "Experimental Laravel bridge for one-shot Pliego CLI rendering",
+    "description": "Laravel integration for native Pliego document rendering",
     "type": "library",
     "license": "MIT",
     "require": {

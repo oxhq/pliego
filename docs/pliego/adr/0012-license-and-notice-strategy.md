@@ -5,7 +5,6 @@
 
 ## Context
 
-The normative source is *Pliego*, Draft 0.1 (2026-07-14), §§32, 46.6, 52, and §54 open decision 12.
 The fork inherits Servo's MPL-2.0 default, historical files with other attached licenses, the
 BSD-3-Clause `LICENSE_WHATWG_SPECS`, nested third-party notices, and a Cargo dependency notice report.
 The license boundary must be explicit before Pliego-owned source is added.
@@ -34,7 +33,7 @@ modifies MPL-covered code remains MPL-2.0 and is not eligible for the MIT defaul
   ships a package-local copy of the MIT license.
 - Imported code records its provenance and keeps every notice required by its source license.
 
-Do not mass-rewrite inherited headers. Two experimental SDK packages now exist:
+Do not mass-rewrite inherited headers. Two independently licensed SDK packages exist:
 [`sdk/php`](../../../sdk/php) and [`sdk/laravel`](../../../sdk/laravel). Each Composer package
 declares MIT and ships a package-local MIT license. The file-level rule above remains controlling:
 independently authored SDK files use the MIT boundary, while any file that copies or modifies
@@ -75,7 +74,6 @@ bundles, have an artifact-specific license and source-notice inventory.
 
 ## References
 
-- *Pliego*, Draft 0.1 (2026-07-14), §§32, 46.6, 52, and §54 open decision 12.
 - [Mozilla Public License 2.0](https://www.mozilla.org/en-US/MPL/2.0/)
 - [Mozilla MPL 2.0 FAQ](https://www.mozilla.org/en-US/MPL/2.0/FAQ/)
 - [The MIT License](https://opensource.org/license/mit)

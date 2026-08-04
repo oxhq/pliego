@@ -1,6 +1,6 @@
 {
     "name": "oxhq/pliego-php",
-    "description": "Experimental one-shot PHP bridge for the Pliego document engine",
+    "description": "PHP client for one-shot Pliego document rendering",
     "type": "library",
     "license": "MIT",
     "require": {

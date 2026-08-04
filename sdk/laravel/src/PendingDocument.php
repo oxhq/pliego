@@ -13,7 +13,7 @@ use RuntimeException;
 use Symfony\Component\HttpFoundation\BinaryFileResponse;
 
 /**
- * Experimental Blade-to-one-shot-CLI request. The API may change before M8.
+ * Blade-to-one-shot-CLI render request.
  */
 final class PendingDocument
 {

@@ -10,8 +10,7 @@ The current implementation defines `DocumentScene` as typed JSON, retains paint 
 display-list traversal, and stores captured binary resources by SHA-256. The format needs an explicit
 hash boundary and ordering rule before more operations and resources are added.
 
-This decision describes the implemented internal format. It does not declare a stable public schema
-or complete the multi-page model.
+This decision describes the implemented internal format. It does not declare a stable public schema.
 
 ## Decision
 
@@ -32,13 +31,12 @@ A document scene is a JSON object with this typed envelope:
 }
 ```
 
-Readers validate both `schema` and `version` and reject values they do not implement. Version 1 uses
-an ordered `pages` sequence, but validation currently requires exactly one page. The sequence shape
-is retained so adding page-sequence semantics does not require a new top-level envelope.
+Readers validate both `schema` and `version` and reject values they do not implement. Version 1
+requires at least one page and preserves the ordered page sequence produced by pagination.
 
-Multi-page layout, page ordering across fragmentation, named pages, and stable page identifiers are
-deferred. Version 1 is an internal working schema, not a compatibility promise for external clients.
-A stable public schema and its compatibility policy require a later ADR.
+Named pages and stable page identifiers are not scene fields. Version 1 is an internal working
+schema, not a compatibility promise for external clients. A stable public schema and compatibility
+policy require a separate decision.
 
 ### Canonical operation order
 
@@ -74,8 +72,9 @@ ordering before it can enter the hash boundary.
 ### Normalized hash boundary
 
 The scene hash is SHA-256 over the exact compact UTF-8 bytes returned by
-`DocumentScene::normalized_json()`. That function first validates the schema, version, one-page
-constraint, geometry, and required strings, then serializes the typed value with `serde_json::to_vec`.
+`DocumentScene::normalized_json()`. That function first validates the schema, version, non-empty
+ordered page sequence, geometry, and required strings, then serializes the typed value with
+`serde_json::to_vec`.
 Pretty-printed artifacts, input whitespace, debug snapshots, process-local join IDs, and binary
 resource bytes outside the scene envelope are not hashed directly. Content-addressed resource
 references inside operations are part of the serialized scene and therefore bind the scene to those
@@ -89,11 +88,10 @@ bytes.
 - Unknown operation types and unknown schema versions fail instead of degrading silently.
 - Binary resources deduplicate by content while URLs and runtime identifiers cannot perturb resource
   identity.
-- Multi-page behavior and a stable public compatibility contract remain intentionally unresolved.
+- A stable public compatibility contract remains intentionally unresolved.
 
 ## References
 
-- OXH-243
 - [`ports/pliego/src/scene.rs`](../../../ports/pliego/src/scene.rs)
 - [`ports/pliego/src/session.rs`](../../../ports/pliego/src/session.rs)
 - [`components/shared/layout/lib.rs`](../../../components/shared/layout/lib.rs)
