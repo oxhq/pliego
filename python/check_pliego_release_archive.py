@@ -416,6 +416,11 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.native_inventory is not None:
+        if any(
+            value is not None
+            for value in (args.archive, args.bundle, args.version, args.check_source_assets)
+        ) or args.self_test:
+            parser.error("--native-inventory cannot be combined with validation inputs")
         sys.stdout.write(_native_libraries_text(args.native_inventory))
         return 0
     if args.self_test:
