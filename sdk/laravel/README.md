@@ -3,7 +3,7 @@
 Laravel 13 integration for application-owned Blade documents.
 
 ```sh
-composer require oxhq/pliego-laravel:^0.1.0-alpha.3 oxhq/pliego-php:^0.1.0-alpha.2
+composer require oxhq/pliego-laravel:^0.1.0-alpha.4 oxhq/pliego-php:^0.1.0-alpha.3
 php artisan pliego:install
 php artisan pliego:doctor
 ```
@@ -41,9 +41,19 @@ return Document::view('invoice', ['rows' => $rows])
     ->download('invoice.pdf');
 ```
 
+Signal readiness from the Blade view after its fonts finish loading:
+
+```html
+<script>
+document.fonts.ready.then(() => window.pliego?.ready());
+</script>
+```
+
 Blade is rendered first. The package creates a private input directory, copies only
 declared relative assets, records their hashes, and launches one `pliego render`
 process with explicit locale, timezone, page geometry, and resource policy.
+`download()` returns a Laravel file response; `render()` returns the PDF,
+input-bundle, and retained-artifact paths.
 
 For Google Fonts, keep the stylesheet `<link>` in the Blade view and allow both
 origins:

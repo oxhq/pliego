@@ -3,7 +3,7 @@
 PHP 8.3+ client for rendering one document per native Pliego process.
 
 ```sh
-composer require oxhq/pliego-php:^0.1.0-alpha.2
+composer require oxhq/pliego-php:^0.1.0-alpha.3
 composer test
 ```
 

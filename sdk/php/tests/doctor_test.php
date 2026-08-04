@@ -41,9 +41,10 @@ $manifest = json_decode(
 );
 doctorExpect($manifest['environment']['network']['policy'] === 'deny', 'doctor smoke denies network');
 doctorExpect(isset($manifest['assets']['assets/doctor.css']), 'doctor smoke bundles its style');
+$doctorHtml = (string) file_get_contents(dirname($report['smoke_pdf']).'/input/document.html');
 doctorExpect(
-    str_contains((string) file_get_contents(dirname($report['smoke_pdf']).'/input/document.html'), 'window.pliego?.ready'),
-    'doctor smoke declares readiness',
+    str_contains($doctorHtml, 'document.fonts.ready.then(() => window.pliego?.ready'),
+    'doctor smoke waits for bundled font readiness before signaling Pliego',
 );
 $font = dirname(__DIR__).'/resources/HasubiMono-Regular.woff2';
 doctorExpect(is_file(dirname(__DIR__).'/resources/HasubiMono-OFL.txt'), 'bundled font retains its OFL license');

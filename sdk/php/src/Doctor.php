@@ -73,7 +73,7 @@ final readonly class Doctor
 
         try {
             $result = (new CliRenderer($command, $this->timeoutSeconds))->render(
-                '<!doctype html><meta charset="utf-8"><link rel="stylesheet" href="assets/doctor.css"><p>Pliego doctor</p><script>queueMicrotask(() => window.pliego?.ready({fixture: "doctor"}))</script>',
+                '<!doctype html><meta charset="utf-8"><link rel="stylesheet" href="assets/doctor.css"><p>Pliego doctor</p><script>document.fonts.ready.then(() => window.pliego?.ready({fixture: "doctor"}))</script>',
                 $job.DIRECTORY_SEPARATOR.'input',
                 $job.DIRECTORY_SEPARATOR.'doctor.pdf',
                 $job.DIRECTORY_SEPARATOR.'artifacts',
