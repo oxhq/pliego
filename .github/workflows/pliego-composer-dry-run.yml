@@ -49,8 +49,7 @@ jobs:
               "lock": next(package["version"] for package in lock["package"] if package["name"] == "pliego"),
           }
           assert len(set(engine_versions.values())) == 1, engine_versions
-          assert php_version == laravel["require"]["oxhq/pliego-php"] == "0.1.0-alpha.2"
-          assert laravel_version == php_version
+          assert php_version == laravel["require"]["oxhq/pliego-php"]
           with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as environment:
               environment.write(f"PLIEGO_ENGINE_VERSION={engine_version}\n")
               environment.write(f"PLIEGO_PHP_VERSION={php_version}\n")

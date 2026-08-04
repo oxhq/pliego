@@ -58,7 +58,8 @@ register_shutdown_function(static fn () => removeRuntimeFixture($fixture));
 
 $version = '9.8.7-test.1';
 $bundle = "pliego-{$version}-linux-x86_64";
-$files = ['pliego', 'LICENSE', 'INSTALL.txt', 'VERSION.txt'];
+$nestedLicense = 'licenses/krilla-0.8.2/LICENSE_MIT';
+$files = ['pliego', 'LICENSE', 'INSTALL.txt', 'VERSION.txt', $nestedLicense];
 $tarPath = $fixture.DIRECTORY_SEPARATOR.'runtime.tar';
 $archive = new PharData($tarPath);
 foreach ($files as $file) {
@@ -112,6 +113,7 @@ $runtime = new ManagedRuntime($runtimeRoot, $manifestPath, $http, versionProbe: 
 $binary = $runtime->install('linux-x86_64');
 runtimeExpect(is_file($binary), 'managed binary was not installed');
 runtimeExpect(file_get_contents($binary) === 'fake executable', 'managed binary contents changed');
+runtimeExpect(is_file(dirname($binary).DIRECTORY_SEPARATOR.$nestedLicense), 'nested license was not installed');
 runtimeExpect(!file_exists(dirname($binary).DIRECTORY_SEPARATOR.'unexpected.txt'), 'unlisted archive file was extracted');
 runtimeExpect($runtime->binary('linux-x86_64') === $binary, 'managed binary was not resolved');
 runtimeExpect($runtime->install('linux-x86_64') === $binary, 'managed install is not idempotent');
