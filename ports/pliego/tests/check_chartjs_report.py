@@ -4,6 +4,7 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
+import copy
 import hashlib
 import json
 import math
@@ -12,6 +13,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from contextlib import redirect_stderr
+from io import StringIO
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +28,17 @@ REPORT_FONT = (
     Path(__file__).resolve().parents[3] / "components/fonts/tests/support/dejavu-fonts-ttf-2.37/ttf/DejaVuSans.ttf"
 )
 REPORT_FONT_SHA256 = "7da195a74c55bef988d0d48f9508bd5d849425c1770dba5d7bfc6ce9ed848954"
+REGULAR_BEFORE = "PLIEGO-R1"
+SYNTHETIC_BOLD = "PLIEGO-B"
+REGULAR_AFTER = "PLIEGO-R2"
+TRANSLUCENT_BOLD = "PLIEGO-B50"
+FIDELITY_PROBE_SEQUENCE = (
+    REGULAR_BEFORE,
+    SYNTHETIC_BOLD,
+    REGULAR_AFTER,
+    TRANSLUCENT_BOLD,
+)
+TRANSLUCENT_COLOR = (15.0 / 255.0, 23.0 / 255.0, 42.0 / 255.0, 0.5)
 
 
 def fail(message: str, code: int = 1) -> None:
@@ -35,6 +49,98 @@ def fail(message: str, code: int = 1) -> None:
 def require(condition: bool, message: str) -> None:
     if not condition:
         fail(message)
+
+
+def canonical_text(operation: dict[str, Any]) -> str:
+    return " ".join(str(operation.get("text", "")).split())
+
+
+def fidelity_probe_slices(texts: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    probes = {}
+    cursor = 0
+    for marker in FIDELITY_PROBE_SEQUENCE:
+        matches = []
+        for start in range(cursor, len(texts)):
+            combined = ""
+            for end in range(start, len(texts)):
+                fragment = canonical_text(texts[end])
+                if not fragment:
+                    break
+                combined += fragment
+                if combined == marker:
+                    matches.append((start, end + 1))
+                    break
+                if not marker.startswith(combined):
+                    break
+        require(len(matches) == 1, f"font fidelity probe {marker!r} is absent or duplicated: {matches!r}")
+        start, cursor = matches[0]
+        probe = texts[start:cursor]
+        for field in ("font", "font_size", "color"):
+            require(
+                all(operation.get(field) == probe[0].get(field) for operation in probe[1:]),
+                f"font fidelity probe {marker!r} changes {field} inside its text slice",
+            )
+        probes[marker] = probe
+    return probes
+
+
+def verify_font_fidelity(texts: list[dict[str, Any]], instances: object) -> None:
+    require(isinstance(instances, list) and len(instances) == 2, repr(instances))
+    require(all(isinstance(instance, dict) for instance in instances), repr(instances))
+    flags_by_id: dict[str, bool] = {}
+    identities = set()
+    for instance in instances:
+        instance_id = instance.get("id")
+        synthetic_bold = instance.get("synthetic_bold")
+        require(isinstance(instance_id, str) and instance_id.startswith("sha256:"), repr(instance))
+        require(isinstance(synthetic_bold, bool), repr(instance))
+        require(instance_id not in flags_by_id, f"duplicate font instance identity: {instance_id}")
+        flags_by_id[instance_id] = synthetic_bold
+        identities.add(
+            (
+                instance.get("resource"),
+                instance.get("face_index"),
+                repr(instance.get("variations")),
+            )
+        )
+    require(set(flags_by_id.values()) == {False, True}, repr(instances))
+    require(len(identities) == 1, repr(instances))
+    require(
+        {operation.get("font") for operation in texts} == set(flags_by_id),
+        "regular and synthetic-bold text were not both retained",
+    )
+
+    probes = fidelity_probe_slices(texts)
+    regular_id = probes[REGULAR_BEFORE][0].get("font")
+    require(flags_by_id.get(regular_id) is False, "regular-before text is not bound to the regular instance")
+    require(
+        probes[SYNTHETIC_BOLD][0].get("font") != regular_id
+        and flags_by_id.get(probes[SYNTHETIC_BOLD][0].get("font")) is True,
+        "bold probe text is not bound to the synthetic-bold instance",
+    )
+    require(
+        probes[REGULAR_AFTER][0].get("font") == regular_id,
+        "regular-after text did not return to the regular font instance",
+    )
+    require(
+        probes[TRANSLUCENT_BOLD][0].get("font") == probes[SYNTHETIC_BOLD][0].get("font"),
+        "translucent bold text is not bound to the synthetic-bold instance",
+    )
+
+    color = probes[TRANSLUCENT_BOLD][0].get("color")
+    require(isinstance(color, dict), "translucent text has no resolved color")
+    channels = []
+    for channel in ("r", "g", "b", "a"):
+        value = color.get(channel)
+        require(
+            isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value)),
+            f"translucent text {channel} is not finite",
+        )
+        channels.append(float(value))
+    require(
+        all(math.isclose(actual, expected, abs_tol=1e-6) for actual, expected in zip(channels, TRANSLUCENT_COLOR)),
+        f"translucent text color differs: {tuple(channels)!r}",
+    )
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -266,6 +372,9 @@ def run(binary: Path, fixture: Path, output: Path) -> tuple[int, int]:
     )
     for marker in ["Northstar Operations", "Recognized revenue", "Account contribution"]:
         require(marker in retained_text, f"retained report text is missing {marker!r}")
+
+    fonts = read_json(artifact(summary, "fonts_artifact"))
+    verify_font_fidelity(texts, fonts.get("font_instances"))
     require(len(paths) >= 8, f"styled report retained too few vector paths: {len(paths)}")
     require(len(borders) >= 12, f"styled report silently dropped ordinary borders: {len(borders)}")
     accents = [
@@ -325,10 +434,97 @@ def self_test(fixture: Path) -> None:
         "events: []",
         "getImageData(0, 0, canvas.width, canvas.height)",
         "window.pliego?.ready(",
+        *FIDELITY_PROBE_SEQUENCE,
+        "rgba(15, 23, 42, 0.5)",
     ]:
         require(marker in html, f"fixture is missing {marker!r}")
     for unsupported_style in ["border-radius", "box-shadow", "transform:", "filter:", "opacity:"]:
         require(unsupported_style not in html, f"fixture uses {unsupported_style!r}")
+
+    regular_id = "sha256:regular"
+    bold_id = "sha256:bold"
+    opaque_color = {"r": 0.4, "g": 0.45, "b": 0.55, "a": 1.0}
+    instances = [
+        {
+            "id": regular_id,
+            "resource": "sha256:font",
+            "face_index": 0,
+            "variations": [],
+            "synthetic_bold": False,
+        },
+        {
+            "id": bold_id,
+            "resource": "sha256:font",
+            "face_index": 0,
+            "variations": [],
+            "synthetic_bold": True,
+        },
+    ]
+    probe_texts = [
+        {
+            "type": "text",
+            "text": REGULAR_BEFORE,
+            "font": regular_id,
+            "font_size": 9.0,
+            "color": opaque_color,
+        },
+        {
+            "type": "text",
+            "text": SYNTHETIC_BOLD,
+            "font": bold_id,
+            "font_size": 9.0,
+            "color": opaque_color,
+        },
+        {
+            "type": "text",
+            "text": REGULAR_AFTER,
+            "font": regular_id,
+            "font_size": 9.0,
+            "color": opaque_color,
+        },
+        {
+            "type": "text",
+            "text": TRANSLUCENT_BOLD,
+            "font": bold_id,
+            "font_size": 9.0,
+            "color": dict(zip(("r", "g", "b", "a"), TRANSLUCENT_COLOR)),
+        },
+    ]
+    verify_font_fidelity(probe_texts, instances)
+
+    split_probe_texts = []
+    for operation in probe_texts:
+        prefix = copy.deepcopy(operation)
+        prefix["text"] = "PLIEGO-"
+        suffix = copy.deepcopy(operation)
+        suffix["text"] = canonical_text(operation).removeprefix("PLIEGO-")
+        split_probe_texts.extend([prefix, suffix])
+    verify_font_fidelity(split_probe_texts, instances)
+
+    def require_fidelity_rejection(broken: list[dict[str, Any]], description: str) -> None:
+        with redirect_stderr(StringIO()):
+            try:
+                verify_font_fidelity(broken, instances)
+            except SystemExit:
+                return
+        fail(f"self-test accepted {description}")
+
+    wrong_binding = copy.deepcopy(probe_texts)
+    wrong_binding[1]["font"] = regular_id
+    require_fidelity_rejection(wrong_binding, "bold text bound to the regular instance")
+    wrong_order = copy.deepcopy(probe_texts)
+    wrong_order[1], wrong_order[2] = wrong_order[2], wrong_order[1]
+    require_fidelity_rejection(wrong_order, "regular-bold-regular state order drift")
+    opaque = copy.deepcopy(probe_texts)
+    opaque[3]["color"]["a"] = 1.0
+    require_fidelity_rejection(opaque, "opaque text in the translucent probe")
+    mixed_font_split = copy.deepcopy(split_probe_texts)
+    mixed_font_split[1]["font"] = bold_id
+    require_fidelity_rejection(mixed_font_split, "split probe with mixed font instances")
+    mixed_style_split = copy.deepcopy(split_probe_texts)
+    mixed_style_split[-1]["font_size"] = 10.0
+    require_fidelity_rejection(mixed_style_split, "split probe with mixed text styles")
+
     licenses = (fixture / "THIRD_PARTY_LICENSES.md").read_text(encoding="utf-8")
     require(
         all(name in licenses for name in ["Chart.js 4.5.1", "@kurkle/color 0.3.4", "DejaVu Sans 2.37"]),

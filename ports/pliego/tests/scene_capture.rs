@@ -36,16 +36,28 @@ fn content_address(bytes: &[u8]) -> String {
     )
 }
 
-fn font_instance_address(bytes: &[u8], face_index: u32, variations: &[(u32, f32)]) -> String {
+fn font_instance_address(
+    bytes: &[u8],
+    face_index: u32,
+    variations: &[(u32, f32)],
+    synthetic_bold: bool,
+) -> String {
     let resource_digest: [u8; 32] = Sha256::digest(bytes).into();
     let mut hasher = Sha256::new();
-    hasher.update(b"pliego-font-instance-v1\0");
+    hasher.update(if synthetic_bold {
+        b"pliego-font-instance-v2\0".as_slice()
+    } else {
+        b"pliego-font-instance-v1\0".as_slice()
+    });
     hasher.update(resource_digest);
     hasher.update(face_index.to_be_bytes());
     hasher.update((variations.len() as u64).to_be_bytes());
     for (tag, value) in variations {
         hasher.update(tag.to_be_bytes());
         hasher.update(value.to_bits().to_be_bytes());
+    }
+    if synthetic_bold {
+        hasher.update([1]);
     }
     format!(
         "sha256:{}",
@@ -171,8 +183,8 @@ fn snapshot(local_id_base: usize, link_tag: u64) -> Vec<u8> {
     let variation_b = [(u32::from_be_bytes(*b"wght"), 700.0)];
     let font_resource_a = content_address(b"A");
     let font_resource_b = content_address(b"B");
-    let font_instance_a = font_instance_address(b"A", 0, &[]);
-    let font_instance_b = font_instance_address(b"B", 1, &variation_b);
+    let font_instance_a = font_instance_address(b"A", 0, &[], false);
+    let font_instance_b = font_instance_address(b"B", 1, &variation_b, false);
     let box_id = local_id_base;
     let first_text_id = local_id_base + 1;
     let second_text_id = local_id_base + 2;
@@ -258,13 +270,15 @@ fn snapshot(local_id_base: usize, link_tag: u64) -> Vec<u8> {
                 "variations": [{
                     "tag": variation_b[0].0,
                     "value": variation_b[0].1
-                }]
+                }],
+                "synthetic_bold": false
             },
             {
                 "id": font_instance_a,
                 "resource": font_resource_a,
                 "face_index": 0,
-                "variations": []
+                "variations": [],
+                "synthetic_bold": false
             }
         ],
         "page_sequence": {
@@ -444,6 +458,67 @@ fn convert(snapshot: &[u8]) -> pliego::capture::SceneCapture {
     .unwrap()
 }
 
+#[test]
+fn omitted_synthetic_bold_keeps_the_v1_regular_font_identity() {
+    let explicit = convert(&snapshot(10, 1000));
+    let mut legacy: Value = serde_json::from_slice(&snapshot(10, 1000)).unwrap();
+    for instance in legacy["font_instances"].as_array_mut().unwrap() {
+        instance.as_object_mut().unwrap().remove("synthetic_bold");
+    }
+
+    let omitted = convert(&serde_json::to_vec(&legacy).unwrap());
+    assert_eq!(omitted.scene, explicit.scene);
+    assert_eq!(omitted.font_instances, explicit.font_instances);
+    assert!(
+        omitted
+            .font_instances
+            .iter()
+            .all(|instance| !instance.synthetic_bold)
+    );
+    let mut expected_ids = vec![
+        font_instance_address(b"A", 0, &[], false),
+        font_instance_address(b"B", 1, &[(u32::from_be_bytes(*b"wght"), 700.0)], false),
+    ];
+    expected_ids.sort();
+    assert_eq!(
+        omitted
+            .font_instances
+            .iter()
+            .map(|instance| instance.id.clone())
+            .collect::<Vec<_>>(),
+        expected_ids
+    );
+}
+
+#[test]
+fn synthetic_bold_uses_a_distinct_v2_identity_bound_to_its_text_run() {
+    let variations = [(u32::from_be_bytes(*b"wght"), 700.0)];
+    let regular_id = font_instance_address(b"B", 1, &variations, false);
+    let bold_id = font_instance_address(b"B", 1, &variations, true);
+    let mut capture: Value = serde_json::from_slice(&snapshot(10, 1000)).unwrap();
+    capture["font_instances"][0]["id"] = json!(bold_id);
+    capture["font_instances"][0]["synthetic_bold"] = json!(true);
+    capture["fragments"][2]["text_run"]["font_instance_id"] = json!(bold_id);
+
+    let captured = convert(&serde_json::to_vec(&capture).unwrap());
+    assert_ne!(regular_id, bold_id);
+    let bold = captured
+        .font_instances
+        .iter()
+        .find(|instance| instance.id == bold_id)
+        .unwrap();
+    assert!(bold.synthetic_bold);
+    assert!(
+        captured.scene.pages[0]
+            .operations
+            .iter()
+            .any(|operation| matches!(
+                operation,
+                Operation::Text { text, font, .. } if text == "B" && font == &bold_id
+            ))
+    );
+}
+
 fn vector_only_snapshot() -> Vec<u8> {
     serde_json::to_vec(&json!({
         "boxes": [],
@@ -578,7 +653,7 @@ fn retains_svg_text_font_identity_and_embedded_png_for_both_backends() {
     let advance = f32::from(face.glyph_hor_advance(glyph_id).unwrap()) * font_size
         / f32::from(face.units_per_em());
     let font_resource = content_address(FONT_BYTES);
-    let font_instance = font_instance_address(FONT_BYTES, 0, &[]);
+    let font_instance = font_instance_address(FONT_BYTES, 0, &[], false);
 
     let mut source_image = Pixmap::new(2, 1);
     source_image
@@ -693,6 +768,7 @@ fn retains_svg_text_font_identity_and_embedded_png_for_both_backends() {
                 bytes: FONT_BYTES,
                 face_index: 0,
                 variations: &[],
+                synthetic_bold: false,
             })
         },
         |resource| (resource == image_resource).then_some(source_png.as_slice()),
@@ -706,6 +782,7 @@ fn retains_svg_text_font_identity_and_embedded_png_for_both_backends() {
                 bytes: FONT_BYTES,
                 face_index: 0,
                 variations: &[],
+                synthetic_bold: false,
             })
         },
         |resource| (resource == image_resource).then_some(source_png.as_slice()),
@@ -722,8 +799,9 @@ fn retains_svg_text_font_identity_and_embedded_png_for_both_backends() {
 fn converts_dense_paint_order_without_leaking_capture_local_ids() {
     let first = convert(&snapshot(10, 1000));
     let second = convert(&snapshot(800, 9000));
-    let font_instance_a = font_instance_address(b"A", 0, &[]);
-    let font_instance_b = font_instance_address(b"B", 1, &[(u32::from_be_bytes(*b"wght"), 700.0)]);
+    let font_instance_a = font_instance_address(b"A", 0, &[], false);
+    let font_instance_b =
+        font_instance_address(b"B", 1, &[(u32::from_be_bytes(*b"wght"), 700.0)], false);
 
     assert_eq!(first.scene, second.scene);
     assert_eq!(
@@ -887,7 +965,7 @@ fn converts_two_pages_to_page_local_operations_with_shared_resources() {
     let captured = convert(&serde_json::to_vec(&capture).unwrap());
     let second = two_page_snapshot(800, 9000);
     let second = convert(&serde_json::to_vec(&second).unwrap());
-    let shared_font = font_instance_address(b"A", 0, &[]);
+    let shared_font = font_instance_address(b"A", 0, &[], false);
 
     assert_eq!(captured.scene, second.scene);
     assert_eq!(captured.font_resources, second.font_resources);

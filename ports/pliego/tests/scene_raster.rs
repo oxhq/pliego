@@ -19,6 +19,7 @@ const DEJAVU_SANS: &[u8] = include_bytes!(concat!(
     "/../../components/fonts/tests/support/dejavu-fonts-ttf-2.37/ttf/DejaVuSans.ttf"
 ));
 const FONT_ID: &str = "sha256:dejavu-sans-fixture";
+const BOLD_FONT_ID: &str = "sha256:dejavu-sans-synthetic-bold-fixture";
 
 fn text_scene() -> DocumentScene {
     DocumentScene::new(Page {
@@ -60,6 +61,7 @@ fn fixture_font(font: &str) -> Option<RasterFontResource<'static>> {
         bytes: DEJAVU_SANS,
         face_index: 0,
         variations: &[],
+        synthetic_bold: false,
     })
 }
 
@@ -134,6 +136,97 @@ fn rasterizes_positioned_glyphs_without_dom_layout_or_shaping() {
 }
 
 #[test]
+fn synthetic_bold_increases_positioned_glyph_ink() {
+    let mut scene = text_scene();
+    let Operation::Text { text, glyphs, .. } = &mut scene.pages[0].operations[0] else {
+        unreachable!();
+    };
+    *text = "H".into();
+    glyphs[0].id = 43;
+    glyphs[0].text_range = Some(pliego::Utf8Range { start: 0, end: 1 });
+    let render = |synthetic_bold| {
+        render_first_page_png(&scene, |font| {
+            (font == FONT_ID).then_some(RasterFontResource {
+                bytes: DEJAVU_SANS,
+                face_index: 0,
+                variations: &[],
+                synthetic_bold,
+            })
+        })
+        .unwrap()
+    };
+    let ink = |png| {
+        Pixmap::from_png(Cursor::new(png))
+            .unwrap()
+            .data_as_u8_slice()
+            .chunks_exact(4)
+            .map(|pixel| u64::from(255 - pixel[0]))
+            .sum::<u64>()
+    };
+
+    let regular = ink(render(false));
+    let bold = ink(render(true));
+    assert!(
+        bold > regular + regular / 20,
+        "{regular} regular ink, {bold} bold ink"
+    );
+}
+
+#[test]
+fn translucent_synthetic_bold_applies_opacity_once_to_fill_and_stroke() {
+    let render = |alpha: f64| {
+        let mut scene = text_scene();
+        let Operation::Text {
+            text,
+            font,
+            color,
+            glyphs,
+            ..
+        } = &mut scene.pages[0].operations[0]
+        else {
+            unreachable!();
+        };
+        *text = "H".into();
+        *font = BOLD_FONT_ID.into();
+        color.a = alpha;
+        glyphs[0].id = 43;
+        glyphs[0].text_range = Some(pliego::Utf8Range { start: 0, end: 1 });
+        render_first_page_png(&scene, |font| {
+            (font == BOLD_FONT_ID).then_some(RasterFontResource {
+                bytes: DEJAVU_SANS,
+                face_index: 0,
+                variations: &[],
+                synthetic_bold: true,
+            })
+        })
+        .unwrap()
+    };
+    let opaque = Pixmap::from_png(Cursor::new(render(1.0))).unwrap();
+    let translucent = Pixmap::from_png(Cursor::new(render(0.5))).unwrap();
+    let mut tested_channels = 0;
+    for (opaque_pixel, translucent_pixel) in opaque
+        .data_as_u8_slice()
+        .chunks_exact(4)
+        .zip(translucent.data_as_u8_slice().chunks_exact(4))
+    {
+        assert_eq!(translucent_pixel[3], 255);
+        for channel in 0..3 {
+            if opaque_pixel[channel] < 250 {
+                tested_channels += 1;
+                let expected = (f64::from(opaque_pixel[channel]) + 255.0) / 2.0;
+                assert!(
+                    (f64::from(translucent_pixel[channel]) - expected).abs() <= 1.0,
+                    "opaque={}, translucent={}, expected={expected}",
+                    opaque_pixel[channel],
+                    translucent_pixel[channel]
+                );
+            }
+        }
+    }
+    assert!(tested_channels > 100, "glyph rendered too little ink");
+}
+
+#[test]
 fn rasterizes_text_with_its_resolved_scene_color() {
     let mut scene = text_scene();
     let Operation::Text { color, .. } = &mut scene.pages[0].operations[0] else {
@@ -149,9 +242,10 @@ fn rasterizes_text_with_its_resolved_scene_color() {
     let png = render_first_page_png(&scene, fixture_font).unwrap();
     let pixmap = Pixmap::from_png(Cursor::new(png)).unwrap();
     assert!(
-        pixmap.data_as_u8_slice().chunks_exact(4).any(|pixel| {
-            pixel[3] == 255 && pixel[0] > 160 && pixel[1] < 100 && pixel[2] < 120
-        }),
+        pixmap
+            .data_as_u8_slice()
+            .chunks_exact(4)
+            .any(|pixel| { pixel[3] == 255 && pixel[0] > 160 && pixel[1] < 100 && pixel[2] < 120 }),
         "the positioned glyph should retain its red scene paint"
     );
 }
@@ -420,6 +514,7 @@ fn rejects_operations_and_font_instances_without_a_truthful_mapping() {
                 bytes: DEJAVU_SANS,
                 face_index: 0,
                 variations: &variations,
+                synthetic_bold: false,
             })
         }),
         Err(RasterError::UnsupportedFontVariations(FONT_ID.into()))

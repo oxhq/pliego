@@ -44,6 +44,8 @@ FALLBACK_UNSUPPORTED_PAGE_INDEX = 2
 FALLBACK_FITTING_CHILD_INDEX = 1
 FALLBACK_UNSUPPORTED_CHILD_INDEX = 2
 FALLBACK_BORDER_COLOR = (0.0, 87.0 / 255.0, 184.0 / 255.0, 1.0)
+ROW_BACKGROUND_COLOR = (232.0 / 255.0, 240.0 / 255.0, 251.0 / 255.0, 1.0)
+STRIPED_SEPARATE_ROWS = {1, 3, 5}
 FALLBACK_BORDER_RECTANGLES = {
     (10.0, 10.0, 202.0, 2.0),
     (10.0, 10.0, 2.0, 26.0),
@@ -140,6 +142,78 @@ def rectangle(operation: dict[str, Any], page_index: int) -> tuple[float, float,
 def rectangle_path_data(bounds: tuple[float, float, float, float]) -> str:
     x, y, width, height = bounds
     return f"M{x:g} {y:g}h{width:g}v{height:g}h-{width:g}z"
+
+
+def semantic_label(operation: dict[str, Any]) -> Any:
+    return operation.get("meta", {}).get("semantics", {}).get("label")
+
+
+def is_table_border(operation: dict[str, Any]) -> bool:
+    return operation.get("type") == "path" and semantic_label(operation) in {
+        "table-border",
+        "repeated-table-header",
+    }
+
+
+def is_row_background(operation: dict[str, Any], page_index: int) -> bool:
+    if operation.get("type") != "path" or semantic_label(operation) != "background":
+        return False
+    fill = operation.get("fill")
+    require(isinstance(fill, dict), f"page {page_index} background is not filled")
+    actual = tuple(
+        number(fill.get(channel), f"page {page_index} background {channel}")
+        for channel in ("r", "g", "b", "a")
+    )
+    return all(
+        math.isclose(actual_channel, expected_channel, abs_tol=EPSILON)
+        for actual_channel, expected_channel in zip(actual, ROW_BACKGROUND_COLOR)
+    )
+
+
+def operation_bounds(operation: dict[str, Any], page_index: int) -> tuple[float, float, float, float]:
+    bounds = operation.get("bounds")
+    require(isinstance(bounds, dict), f"page {page_index} paint operation has no bounds")
+    return tuple(
+        number(bounds.get(field), f"page {page_index} paint operation {field}")
+        for field in ("x", "y", "width", "height")
+    )
+
+
+def overlap(first: tuple[float, float, float, float], second: tuple[float, float, float, float]) -> bool:
+    return (
+        first[0] < second[0] + second[2]
+        and second[0] < first[0] + first[2]
+        and first[1] < second[1] + second[3]
+        and second[1] < first[1] + first[3]
+    )
+
+
+def contains_point(bounds: tuple[float, float, float, float], x: float, y: float) -> bool:
+    return (
+        bounds[0] - EPSILON <= x <= bounds[0] + bounds[2] + EPSILON
+        and bounds[1] - EPSILON <= y <= bounds[1] + bounds[3] + EPSILON
+    )
+
+
+def require_row_backgrounds_before_borders(objects: list[dict[str, Any]], page_index: int) -> int:
+    borders = [
+        (index, operation_bounds(operation, page_index))
+        for index, operation in enumerate(objects)
+        if is_table_border(operation)
+    ]
+    checked = 0
+    for background_index, background in enumerate(objects):
+        if not is_row_background(background, page_index):
+            continue
+        background_bounds = operation_bounds(background, page_index)
+        for border_index, border_bounds in borders:
+            if overlap(background_bounds, border_bounds):
+                checked += 1
+                require(
+                    background_index < border_index,
+                    f"page {page_index} background paints over a table border",
+                )
+    return checked
 
 
 def fallback_rectangle(
@@ -303,13 +377,19 @@ def border_geometry(scene: dict[str, Any]) -> list[tuple[Any, ...]]:
     fragments: dict[str, list[tuple[int, set[float]]]] = {mode: [] for mode in MODE_PREFIXES}
     body_text: dict[str, list[str]] = {mode: [] for mode in MODE_PREFIXES}
     geometry: list[tuple[Any, ...]] = []
+    paint_order_checks = 0
+    striped_rows_seen: set[int] = set()
 
     for page_index, page in enumerate(pages):
         require(isinstance(page, dict), f"scene page {page_index} is not an object")
         operations = page.get("operations")
         require(isinstance(operations, list), f"scene page {page_index} has no operations")
         objects = [operation for operation in operations if isinstance(operation, dict)]
-        paths = [operation for operation in objects if operation.get("type") == "path"]
+        paths = [
+            operation
+            for operation in objects
+            if is_table_border(operation)
+        ]
         text = [
             canonical_text(str(operation.get("text", "")))
             for operation in objects
@@ -321,6 +401,7 @@ def border_geometry(scene: dict[str, Any]) -> list[tuple[Any, ...]]:
 
         mode, prefix = page_mode(objects, page_index)
         require(bool(paths), f"page {page_index} {mode} table fragment contains no borders")
+        paint_order_checks += require_row_backgrounds_before_borders(objects, page_index)
         headers = [
             operation
             for operation in objects
@@ -341,6 +422,29 @@ def border_geometry(scene: dict[str, Any]) -> list[tuple[Any, ...]]:
         )
         require(bool(body) and len(body) % 2 == 0, f"page {page_index} contains incomplete body rows")
         body_text[mode].extend(canonical_text(str(operation.get("text", ""))) for operation in body)
+        row_backgrounds = [
+            operation_bounds(operation, page_index)
+            for operation in objects
+            if is_row_background(operation, page_index)
+        ]
+        if mode == "collapsed":
+            require(not row_backgrounds, f"page {page_index} collapsed table unexpectedly has row stripes")
+        else:
+            for operation in body:
+                token = canonical_text(str(operation.get("text", "")))
+                match = re.fullmatch(r"S-R([0-6])-[AB]", token)
+                require(match is not None, f"page {page_index} has malformed separate row token: {token!r}")
+                row = int(match.group(1))
+                covered = any(
+                    contains_point(bounds, text_x(operation), text_y(operation))
+                    for bounds in row_backgrounds
+                )
+                require(
+                    covered == (row in STRIPED_SEPARATE_ROWS),
+                    f"page {page_index} row background coverage differs for {token}",
+                )
+                if covered:
+                    striped_rows_seen.add(row)
 
         rectangles = [rectangle(operation, page_index) for operation in paths]
         require(
@@ -396,6 +500,11 @@ def border_geometry(scene: dict[str, Any]) -> list[tuple[Any, ...]]:
             and set(body_text[mode]) == EXPECTED_BODY_TEXT[mode],
             f"{mode} table body text differs: {sorted(body_text[mode])!r}",
         )
+    require(
+        striped_rows_seen == STRIPED_SEPARATE_ROWS,
+        f"row-level table stripes differ: {sorted(striped_rows_seen)!r}",
+    )
+    require(paint_order_checks > 0, "row backgrounds did not exercise background/border order")
     return sorted(geometry)
 
 
@@ -563,6 +672,17 @@ def verify_fallback_capture(scene: dict[str, Any], layout: dict[str, Any]) -> No
 
 
 def self_test() -> None:
+    fixture = Path(__file__).resolve().parent / "fixtures/table-borders/index.html"
+    html = fixture.read_text(encoding="utf-8")
+    require(
+        "#separate tbody tr:nth-child(even) { background: #e8f0fb; }" in html,
+        "fixture does not exercise row-level table backgrounds",
+    )
+    require(
+        "#separate tbody tr:nth-child(even) td" not in html,
+        "fixture stripes cells directly instead of exercising row background propagation",
+    )
+
     def text(value: str, y: float) -> dict[str, Any]:
         return {"type": "text", "text": value, "glyphs": [{"x": 20.0, "y": y}]}
 
@@ -572,6 +692,16 @@ def self_test() -> None:
             "bounds": {"x": x, "y": y, "width": width, "height": height},
             "data": f"M{x} {y}h{width}v{height}h-{width}z",
             "fill": {"r": 0.1, "g": 0.2, "b": 0.3, "a": 1.0},
+            "meta": {"semantics": {"role": "artifact", "label": "table-border"}},
+        }
+
+    def background(x: float, y: float, width: float, height: float) -> dict[str, Any]:
+        return {
+            "type": "path",
+            "bounds": {"x": x, "y": y, "width": width, "height": height},
+            "data": f"M{x} {y}h{width}v{height}h-{width}z",
+            "fill": dict(zip(("r", "g", "b", "a"), ROW_BACKGROUND_COLOR)),
+            "meta": {"semantics": {"role": "artifact", "label": "background"}},
         }
 
     def fallback_path(bounds: tuple[float, float, float, float]) -> dict[str, Any]:
@@ -607,6 +737,11 @@ def self_test() -> None:
             for y in [top, top + 24.0] + [top + 24.0 + 32.0 * index for index in range(1, len(rows) + 1)]:
                 operations.extend([path(10.0, y, 112.0, 2.0), path(122.0, y, 90.0, 2.0)])
         else:
+            operations[0:0] = [
+                background(10.0, top + 26.0 + 32.0 * position, 202.0, 32.0)
+                for position, row in enumerate(rows)
+                if row in STRIPED_SEPARATE_ROWS
+            ]
             operations.extend([path(10.0, top, 2.0, 26.0), path(10.0, top, 202.0, 2.0)])
             for x in EXPECTED_VERTICAL_X[1:]:
                 operations.append(path(x, top + 2.0, 2.0, 24.0))
@@ -649,11 +784,15 @@ def self_test() -> None:
     for operation in duplicate_header["pages"][0]["operations"]:
         if operation.get("type") == "text" and operation.get("text") == "C-H-B":
             operation["text"] = "C-H-A"
+    covered_border = copy.deepcopy(first)
+    covered_operations = covered_border["pages"][3]["operations"]
+    covered_operations.append(covered_operations.pop(0))
 
     for broken, description in [
         (zero_path, "zero-path table continuation"),
         (shifted, "shifted and shortened right edge"),
         (duplicate_header, "duplicate H-A and missing H-B"),
+        (covered_border, "background painted after its table borders"),
     ]:
         with redirect_stderr(StringIO()):
             try:

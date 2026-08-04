@@ -26,6 +26,7 @@ const IMAGE: &[u8] = include_bytes!(concat!(
     "/../../tests/wpt/tests/images/lcp-1x1.png"
 ));
 const FONT_ID: &str = "sha256:dejavu-sans-fixture";
+const BOLD_FONT_ID: &str = "sha256:dejavu-sans-synthetic-bold-fixture";
 const DEVANAGARI_FONT_ID: &str = "sha256:noto-sans-devanagari-fixture";
 const IMAGE_ID: &str = "sha256:image-fixture";
 
@@ -162,6 +163,7 @@ fn fixture_font(font: &str) -> Option<PdfFontResource<'static>> {
         bytes: DEJAVU_SANS,
         face_index: 0,
         variations: &[],
+        synthetic_bold: false,
     })
 }
 
@@ -229,6 +231,96 @@ fn emits_a_deterministic_structural_pdf_with_selectable_unicode() {
         contains(&cmap, b"0069"),
         "ToUnicode must map the retained i cluster"
     );
+}
+
+#[test]
+fn synthetic_bold_strokes_text_without_losing_unicode() {
+    let regular = render_document_pdf(&scene(), fixture_font, fixture_image).unwrap();
+    let bold = render_document_pdf(
+        &scene(),
+        |font| {
+            (font == FONT_ID).then_some(PdfFontResource {
+                bytes: DEJAVU_SANS,
+                face_index: 0,
+                variations: &[],
+                synthetic_bold: true,
+            })
+        },
+        fixture_image,
+    )
+    .unwrap();
+
+    assert_ne!(regular, bold);
+    assert!(
+        decoded_streams(&bold)
+            .iter()
+            .any(|stream| contains(stream, b"2 Tr")),
+        "synthetic bold must use PDF fill-and-stroke text rendering"
+    );
+    assert_eq!(
+        referenced_stream(&regular, b"/ToUnicode"),
+        referenced_stream(&bold, b"/ToUnicode")
+    );
+}
+
+#[test]
+fn translucent_synthetic_bold_uses_one_isolated_opacity_group() {
+    let text = |font: &str, x: f64, alpha: f64| Operation::Text {
+        text: "H".into(),
+        font: font.into(),
+        font_size: 32.0,
+        color: Color {
+            r: 0.0,
+            g: 0.0,
+            b: 0.0,
+            a: alpha,
+        },
+        glyphs: vec![Glyph {
+            id: 43,
+            x,
+            y: 50.0,
+            advance: 24.0,
+            text_range: Some(Utf8Range { start: 0, end: 1 }),
+        }],
+        meta: OperationMeta::default(),
+    };
+    let scene = DocumentScene::new(Page {
+        size: Size {
+            width: 160.0,
+            height: 80.0,
+        },
+        operations: vec![
+            text(FONT_ID, 10.0, 1.0),
+            text(BOLD_FONT_ID, 60.0, 0.5),
+            text(FONT_ID, 110.0, 1.0),
+        ],
+    });
+    let pdf = render_document_pdf(
+        &scene,
+        |font| {
+            [FONT_ID, BOLD_FONT_ID]
+                .contains(&font)
+                .then_some(PdfFontResource {
+                    bytes: DEJAVU_SANS,
+                    face_index: 0,
+                    variations: &[],
+                    synthetic_bold: font == BOLD_FONT_ID,
+                })
+        },
+        |_| None,
+    )
+    .unwrap();
+
+    assert_eq!(
+        decoded_streams(&pdf)
+            .iter()
+            .filter(|stream| contains(stream, b"2 Tr"))
+            .count(),
+        1,
+        "only the synthetic-bold run should use fill-and-stroke"
+    );
+    assert!(contains(&pdf, b"/Transparency"));
+    assert!(contains(&pdf, b"/ca") && contains(&pdf, b"/CA"));
 }
 
 #[test]
@@ -313,9 +405,11 @@ fn emits_descending_rtl_ranges_as_one_logical_actual_text_span() {
     glyphs[1].text_range = Some(Utf8Range { start: 0, end: 1 });
 
     let pdf = render_document_pdf(&rtl, fixture_font, fixture_image).unwrap();
-    assert!(decoded_streams(&pdf).iter().any(|stream| {
-        contains(stream, b"/ActualText") && contains(stream, b"(Hi)")
-    }));
+    assert!(
+        decoded_streams(&pdf)
+            .iter()
+            .any(|stream| { contains(stream, b"/ActualText") && contains(stream, b"(Hi)") })
+    );
 }
 
 #[test]
@@ -370,6 +464,7 @@ fn emits_positioned_devanagari_marks_as_one_actual_text_span() {
                 bytes: NOTO_SANS_DEVANAGARI,
                 face_index: 0,
                 variations: &[],
+                synthetic_bold: false,
             })
         },
         |_| None,
@@ -527,6 +622,7 @@ fn rejects_unmapped_text_and_unsafe_or_oversized_resources() {
                     bytes: DEJAVU_SANS,
                     face_index: 0,
                     variations: &variations,
+                    synthetic_bold: false,
                 })
             },
             fixture_image,
@@ -551,6 +647,7 @@ fn enforces_font_embedding_and_subsetting_rights() {
                         bytes: &font,
                         face_index: 0,
                         variations: &[],
+                        synthetic_bold: false,
                     })
                 },
                 fixture_image,
@@ -572,6 +669,7 @@ fn enforces_font_embedding_and_subsetting_rights() {
                         bytes: &font,
                         face_index: 0,
                         variations: &[],
+                        synthetic_bold: false,
                     })
                 },
                 fixture_image,

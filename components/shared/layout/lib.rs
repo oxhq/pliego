@@ -651,6 +651,8 @@ pub struct LayoutDebugFontInstance {
     pub resource: String,
     pub face_index: u32,
     pub variations: Vec<LayoutDebugFontVariation>,
+    #[serde(default)]
+    pub synthetic_bold: bool,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]

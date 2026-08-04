@@ -160,6 +160,7 @@ impl LayoutDebugFontCapture {
                 .variations
                 .iter()
                 .map(|variation| (variation.tag, variation.value)),
+            resource_data.synthetic_bold,
         );
         self.instance_ids_by_pointer
             .insert(pointer, instance_id.clone());
@@ -171,6 +172,7 @@ impl LayoutDebugFontCapture {
         bytes: &[u8],
         face_index: u32,
         variations: impl IntoIterator<Item = (u32, f32)>,
+        synthetic_bold: bool,
     ) -> Option<String> {
         let variations = canonical_font_variations(variations)?;
         let resource_digest: [u8; 32] = Sha256::digest(bytes).into();
@@ -182,7 +184,7 @@ impl LayoutDebugFontCapture {
                 bytes_base64: BASE64_STANDARD.encode(bytes),
             });
 
-        let id = font_instance_id(&resource_digest, face_index, &variations);
+        let id = font_instance_id(&resource_digest, face_index, &variations, synthetic_bold);
         self.instances_by_id
             .entry(id.clone())
             .or_insert_with(|| LayoutDebugFontInstance {
@@ -190,6 +192,7 @@ impl LayoutDebugFontCapture {
                 resource,
                 face_index,
                 variations,
+                synthetic_bold,
             });
         Some(id)
     }
@@ -229,15 +232,23 @@ fn font_instance_id(
     resource_digest: &[u8; 32],
     face_index: u32,
     variations: &[LayoutDebugFontVariation],
+    synthetic_bold: bool,
 ) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(b"pliego-font-instance-v1\0");
+    hasher.update(if synthetic_bold {
+        b"pliego-font-instance-v2\0".as_slice()
+    } else {
+        b"pliego-font-instance-v1\0".as_slice()
+    });
     hasher.update(resource_digest);
     hasher.update(face_index.to_be_bytes());
     hasher.update((variations.len() as u64).to_be_bytes());
     for variation in variations {
         hasher.update(variation.tag.to_be_bytes());
         hasher.update(variation.value.to_bits().to_be_bytes());
+    }
+    if synthetic_bold {
+        hasher.update([1]);
     }
     format!("sha256:{}", lowercase_hex(&hasher.finalize()))
 }
@@ -2302,37 +2313,48 @@ mod tests {
             b"abc",
             0,
             [(WGHT, 700.0), (WDTH, -0.0), (WGHT, 400.0)],
+            false,
         )
         .expect("finite canonical instance should be retained");
         let reordered = capture.capture_resource_data(
             b"abc",
             0,
             [(WGHT, 400.0), (WGHT, 700.0), (WDTH, 0.0)],
+            false,
         )
         .expect("reordered finite instance should be retained");
         assert!(
             capture
-                .capture_resource_data(b"reject-nan", 0, [(OPSZ, f32::NAN)])
+                .capture_resource_data(b"reject-nan", 0, [(OPSZ, f32::NAN)], false)
                 .is_none()
         );
         assert!(
             capture
-                .capture_resource_data(b"reject-inf", 0, [(OPSZ, f32::INFINITY)])
+                .capture_resource_data(b"reject-inf", 0, [(OPSZ, f32::INFINITY)], false)
                 .is_none()
         );
         let different_face = capture
-            .capture_resource_data(b"abc", 1, [(WDTH, 0.0)])
+            .capture_resource_data(b"abc", 1, [(WDTH, 0.0)], false)
             .expect("different face should be retained");
         let different_variation =
-            capture.capture_resource_data(b"abc", 0, [(WDTH, 1.0), (WGHT, 400.0)])
+            capture.capture_resource_data(b"abc", 0, [(WDTH, 1.0), (WGHT, 400.0)], false)
                 .expect("different variation should be retained");
+        let different_synthesis = capture
+            .capture_resource_data(
+                b"abc",
+                0,
+                [(WGHT, 700.0), (WDTH, 0.0), (WGHT, 400.0)],
+                true,
+            )
+            .expect("synthetic bold instance should be retained");
         let different_bytes = capture
-            .capture_resource_data(b"xyz", 0, [])
+            .capture_resource_data(b"xyz", 0, [], false)
             .expect("different bytes should be retained");
 
         assert_eq!(canonical, reordered);
         assert_ne!(canonical, different_face);
         assert_ne!(canonical, different_variation);
+        assert_ne!(canonical, different_synthesis);
         assert_ne!(canonical, different_bytes);
 
         let (resources, instances) = capture.into_entries();
@@ -2351,7 +2373,7 @@ mod tests {
             "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
 
-        assert_eq!(instances.len(), 4);
+        assert_eq!(instances.len(), 5);
         assert!(
             instances
                 .windows(2)
@@ -2363,6 +2385,7 @@ mod tests {
             .expect("canonical font instance should be retained once");
         assert_eq!(canonical_instance.resource, abc_resource.resource);
         assert_eq!(canonical_instance.face_index, 0);
+        assert!(!canonical_instance.synthetic_bold);
         assert_eq!(
             canonical_instance
                 .variations
