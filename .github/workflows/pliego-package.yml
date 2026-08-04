@@ -133,7 +133,7 @@ jobs:
           mkdir -p "dist/$bundle/licenses"
           cp -R licenses/krilla-0.8.2 "dist/$bundle/licenses/krilla-0.8.2"
           printf 'Repository: %s/%s\nSource: %s/%s/tree/v%s\n' "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$PLIEGO_VERSION" > "dist/$bundle/SOURCE.txt"
-          printf 'Artifact: %s\nBundled native libraries: none\n' '${{ matrix.bundle }}' > "dist/$bundle/NATIVE-LIBRARIES.txt"
+          python python/check_pliego_release_archive.py --native-inventory '${{ matrix.bundle }}' > "dist/$bundle/NATIVE-LIBRARIES.txt"
           printf '%s\n' '1. Verify the adjacent SHA-256 file.' '2. Put pliego on PATH or set PLIEGO_BINARY.' '3. Run pliego --version.' > "dist/$bundle/INSTALL.txt"
           "dist/$bundle/pliego" --version | tee "dist/$bundle/VERSION.txt"
           grep -Fqx 'pliego-api 1' "dist/$bundle/VERSION.txt"
@@ -165,7 +165,7 @@ jobs:
           Copy-Item -LiteralPath licenses\mozangle-0.6.0 -Destination $licenses -Recurse
           Copy-Item -LiteralPath licenses\zlib-1.3.2 -Destination $licenses -Recurse
           @("Repository: $env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY", "Source: $env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/tree/v$env:PLIEGO_VERSION") | Set-Content "$directory\SOURCE.txt" -Encoding utf8
-          @('Artifact: ${{ matrix.bundle }}', 'Bundled native libraries:', '- libEGL.dll (ANGLE via mozangle 0.6.0 with zlib 1.3.2; notices: licenses/mozangle-0.6.0/, licenses/zlib-1.3.2/)', '- libGLESv2.dll (ANGLE via mozangle 0.6.0 with zlib 1.3.2; notices: licenses/mozangle-0.6.0/, licenses/zlib-1.3.2/)') | Set-Content "$directory\NATIVE-LIBRARIES.txt" -Encoding utf8
+          python python/check_pliego_release_archive.py --native-inventory '${{ matrix.bundle }}' | Set-Content "$directory\NATIVE-LIBRARIES.txt" -Encoding utf8
           @('1. Verify the adjacent SHA-256 file.', '2. Put pliego.exe on PATH or set PLIEGO_BINARY.', '3. Run pliego.exe --version.') | Set-Content "$directory\INSTALL.txt" -Encoding ascii
           & "$directory\pliego.exe" --version | Tee-Object -FilePath "$directory\VERSION.txt"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

@@ -408,9 +408,16 @@ def main() -> int:
     parser.add_argument("--version")
     parser.add_argument("--repository-url", default="https://github.com/oxhq/pliego")
     parser.add_argument("--check-source-assets", type=Path)
+    parser.add_argument(
+        "--native-inventory",
+        choices=("linux-x86_64", "windows-x86_64", "macos-x86_64", "macos-aarch64"),
+    )
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
 
+    if args.native_inventory is not None:
+        sys.stdout.write(_native_libraries_text(args.native_inventory))
+        return 0
     if args.self_test:
         self_test()
         print("release archive checker self-test: ok")
