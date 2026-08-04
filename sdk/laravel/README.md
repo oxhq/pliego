@@ -3,10 +3,19 @@
 Laravel 13 integration for application-owned Blade documents.
 
 ```sh
-composer require oxhq/pliego-laravel:^0.1.0-alpha.2 oxhq/pliego-php:^0.1.0-alpha.2
+composer require oxhq/pliego-laravel:^0.1.0-alpha.3 oxhq/pliego-php:^0.1.0-alpha.2
 php artisan pliego:install
 php artisan pliego:doctor
 ```
+
+Ubuntu 22.04 x86_64 needs `ca-certificates`, `libfontconfig1`, `libegl1`, and
+`libgl1-mesa-dri`. Headless containers also need a writable mode-0700
+`XDG_RUNTIME_DIR`; no display server or Xvfb is required.
+Windows x64 requires the latest
+[Microsoft Visual C++ v14 Redistributable](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist?view=msvc-170).
+macOS Intel and Apple Silicon bundles require macOS 13 or newer. The Intel
+binary is unsigned and Apple Silicon is ad-hoc signed; neither is Developer ID
+signed or notarized.
 
 Both Composer constraints are explicit so applications do not need to change their
 global minimum stability. `pliego:install` selects the pinned

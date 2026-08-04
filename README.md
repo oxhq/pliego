@@ -17,10 +17,19 @@ Pliego focuses on predictable document workflows:
 ## Laravel quick start
 
 ```sh
-composer require oxhq/pliego-laravel:^0.1.0-alpha.2 oxhq/pliego-php:^0.1.0-alpha.2
+composer require oxhq/pliego-laravel:^0.1.0-alpha.3 oxhq/pliego-php:^0.1.0-alpha.2
 php artisan pliego:install
 php artisan pliego:doctor
 ```
+
+Ubuntu 22.04 x86_64 needs `ca-certificates`, `libfontconfig1`, `libegl1`, and
+`libgl1-mesa-dri`. Headless containers also need a writable mode-0700
+`XDG_RUNTIME_DIR`; no display server or Xvfb is required.
+Windows x64 requires the latest
+[Microsoft Visual C++ v14 Redistributable](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist?view=msvc-170).
+macOS Intel and Apple Silicon bundles require macOS 13 or newer. The Intel
+binary is unsigned and Apple Silicon is ad-hoc signed; neither is Developer ID
+signed or notarized.
 
 `pliego:install` downloads the package-pinned runtime for the current platform and
 verifies its size and SHA-256 before installation. `pliego:doctor` checks the engine
@@ -47,9 +56,9 @@ capability, resource, and failure boundaries.
 
 ## Release evidence
 
-The current native release publishes checksummed archives built and API-smoked on
+The `v0.1.0-alpha.2` native bundles are built and API-smoked on
 all four targets in the
-[package matrix](https://github.com/oxhq/pliego/actions/runs/30855634783). The
+[package matrix](https://github.com/oxhq/pliego/actions/runs/30874336010). The
 [PHP package](https://packagist.org/packages/oxhq/pliego-php) and
 [Laravel package](https://packagist.org/packages/oxhq/pliego-laravel) are available
 on Packagist and pass focused hosted package checks.
@@ -59,10 +68,10 @@ Composer distributions pass their focused contracts. The support profile remains
 the boundary; Pliego does not claim browser-wide compatibility or safe rendering of
 untrusted HTML.
 
-Redistributors should note that the `v0.1.0-alpha.1` native archives include the
-root MPL-2.0 license and GitHub provides the exact tagged source, but the archives do
-not yet bundle the full dependency and copied-native-library notice set. A
-notice-complete archive is needed before redistributing those bundles.
+Every native archive includes the project and specification licenses, an exact tagged
+source pointer, the generated Cargo dependency report, and pinned notices for copied
+or linked native code. Windows archives additionally inventory their ANGLE DLLs and
+the exact mozangle, Chromium, Khronos/Vulkan, Bison, and zlib notices they require.
 
 ## Building from source
 
