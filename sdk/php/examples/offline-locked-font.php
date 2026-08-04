@@ -35,6 +35,7 @@ try {
           body { font-family: "Quickstart Locked", sans-serif; }
         </style>
         <p>This font is copied into the locked input bundle.</p>
+        <script>document.fonts.ready.then(() => window.pliego?.ready())</script>
         HTML,
         $job.'/input',
         $job.'/document.pdf',

@@ -62,7 +62,7 @@
     </table>
     @if (($rehearsalMode ?? null) !== 'timeout')
       <script>
-        queueMicrotask(() => window.pliego?.ready({
+        document.fonts.ready.then(() => window.pliego?.ready({
           fixture: "laravel-invoice",
           @isset($rehearsalMode)
             mode: @json($rehearsalMode),

@@ -17,10 +17,36 @@ Pliego focuses on predictable document workflows:
 ## Laravel quick start
 
 ```sh
-composer require oxhq/pliego-laravel:^0.1.0-alpha.3 oxhq/pliego-php:^0.1.0-alpha.2
+composer require oxhq/pliego-laravel:^0.1.0-alpha.4 oxhq/pliego-php:^0.1.0-alpha.3
 php artisan pliego:install
 php artisan pliego:doctor
 ```
+
+Render a Blade view from a controller:
+
+```php
+use Pliego\Laravel\Experimental\Facades\Document;
+
+return Document::view('invoices.show', ['invoice' => $invoice])
+    ->pageSize('612x792')
+    ->margins('36,36,36,36')
+    ->locale('es-MX')
+    ->timezone('PST8PDT')
+    ->denyNetwork()
+    ->asset('fonts/invoice.woff2', resource_path('fonts/invoice.woff2'))
+    ->download('invoice.pdf');
+```
+
+Signal readiness from the Blade view after its fonts finish loading:
+
+```html
+<script>
+document.fonts.ready.then(() => window.pliego?.ready());
+</script>
+```
+
+`download()` returns a Laravel file response. Use `render()` instead to receive a
+result with the PDF, input-bundle, and retained-artifact paths.
 
 Ubuntu 22.04 x86_64 needs `ca-certificates`, `libfontconfig1`, `libegl1`, and
 `libgl1-mesa-dri`. Headless containers also need a writable mode-0700

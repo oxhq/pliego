@@ -17,7 +17,8 @@
             "@php tests/self_test.php",
             "@php tests/timeout_test.php",
             "@php tests/retention_test.php",
-            "@php tests/doctor_test.php"
+            "@php tests/doctor_test.php",
+            "@php examples/check-resource-modes.php"
         ]
     }
 }

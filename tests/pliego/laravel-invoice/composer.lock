@@ -4,7 +4,7 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "08314d17554d7768f88d195edd229caf",
+    "content-hash": "c1f618f4ba94ca984da28c6cc11f16ef",
     "packages": [
         {
             "name": "brick/math",
@@ -2418,11 +2418,11 @@
         },
         {
             "name": "oxhq/pliego-laravel",
-            "version": "0.1.0-alpha.3",
+            "version": "0.1.0-alpha.4",
             "dist": {
                 "type": "path",
                 "url": "../../../sdk/laravel",
-                "reference": "4845441e9867aad4ea1d7460297c5336519be4fe"
+                "reference": "7129355f96002aad8f1331009867eab0ee049a5e"
             },
             "require": {
                 "illuminate/console": "^13.0",
@@ -2430,7 +2430,7 @@
                 "illuminate/http": "^13.0",
                 "illuminate/support": "^13.0",
                 "illuminate/view": "^13.0",
-                "oxhq/pliego-php": "0.1.0-alpha.2",
+                "oxhq/pliego-php": "0.1.0-alpha.3",
                 "php": "^8.3",
                 "symfony/http-foundation": "^7.4 || ^8.0"
             },
@@ -2466,11 +2466,11 @@
         },
         {
             "name": "oxhq/pliego-php",
-            "version": "0.1.0-alpha.2",
+            "version": "0.1.0-alpha.3",
             "dist": {
                 "type": "path",
                 "url": "../../../sdk/php",
-                "reference": "54bf858bfe4ca3dce740b5966d20d4b2f939136b"
+                "reference": "7c3771b277623c7f03569d2f8098d44cb2e3f7d2"
             },
             "require": {
                 "php": "^8.3"
@@ -2489,7 +2489,8 @@
                     "@php tests/self_test.php",
                     "@php tests/timeout_test.php",
                     "@php tests/retention_test.php",
-                    "@php tests/doctor_test.php"
+                    "@php tests/doctor_test.php",
+                    "@php examples/check-resource-modes.php"
                 ]
             },
             "license": [

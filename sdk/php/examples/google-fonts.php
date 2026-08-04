@@ -25,6 +25,7 @@ try {
         <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;700&display=swap">
         <style>body { font-family: "Inter", sans-serif; }</style>
         <p>The Google Fonts link is passed to Pliego unchanged.</p>
+        <script>document.fonts.ready.then(() => window.pliego?.ready())</script>
         HTML,
         $job.'/input',
         $job.'/document.pdf',

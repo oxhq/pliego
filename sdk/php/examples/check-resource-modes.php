@@ -66,5 +66,10 @@ quickstartExpect(
     ),
     'Google Fonts link is retained unchanged',
 );
+quickstartExpect(
+    str_contains((string) file_get_contents($offlineResult->inputBundlePath.'/document.html'), 'document.fonts.ready.then(() => window.pliego?.ready')
+        && str_contains((string) file_get_contents($googleResult->inputBundlePath.'/document.html'), 'document.fonts.ready.then(() => window.pliego?.ready'),
+    'font examples wait for font readiness before signaling Pliego',
+);
 
 echo "Pliego resource-mode examples self-check passed; no live network was used. Evidence: {$root}\n";
