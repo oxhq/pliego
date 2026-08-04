@@ -207,13 +207,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+          created_ref=$(gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
             -f ref="refs/tags/$TAG" \
-            -f sha="$HEAD_SHA" \
-            > /dev/null
+            -f sha="$HEAD_SHA")
           read -r tag_type tag_sha < <(
-            gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" \
-              --jq '[.object.type, .object.sha] | @tsv'
+            jq -r '[.object.type, .object.sha] | @tsv' <<< "$created_ref"
           )
           if [[ "$tag_type" != "commit" || "$tag_sha" != "$HEAD_SHA" ]]; then
             echo "created tag does not resolve exactly to $HEAD_SHA" >&2
