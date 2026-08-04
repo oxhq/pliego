@@ -14,6 +14,18 @@ Pliego focuses on predictable document workflows:
   and
 - native bundles for Linux x86_64, Windows x86_64, macOS x86_64, and macOS arm64.
 
+## Rendered output
+
+These are exact PDF responses from a Laravel application running Pliego v0.1.1.
+The operating report draws Chart.js 4.5.1, signals readiness after the final
+canvas readback, and then renders to PDF. The invoice exercises embedded fonts,
+an authored page break, a dense 20-row ledger, and calculated totals.
+
+[![Chart.js operating report rendered by Pliego](docs/pliego/showcase/chartjs-report.png)](docs/pliego/showcase/chartjs-report.pdf)
+
+- [Chart.js operating report (PDF, one page)](docs/pliego/showcase/chartjs-report.pdf)
+- [Styled invoice (PDF, two pages)](docs/pliego/showcase/invoice.pdf)
+
 ## Laravel quick start
 
 ```sh
