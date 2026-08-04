@@ -406,7 +406,7 @@ def main() -> int:
     parser.add_argument("archive", nargs="?", type=Path)
     parser.add_argument("--bundle")
     parser.add_argument("--version")
-    parser.add_argument("--repository-url", default="https://github.com/oxhq/pliego")
+    parser.add_argument("--repository-url")
     parser.add_argument("--check-source-assets", type=Path)
     parser.add_argument(
         "--native-inventory",
@@ -418,11 +418,21 @@ def main() -> int:
     if args.native_inventory is not None:
         if any(
             value is not None
-            for value in (args.archive, args.bundle, args.version, args.check_source_assets)
+            for value in (
+                args.archive,
+                args.bundle,
+                args.version,
+                args.repository_url,
+                args.check_source_assets,
+            )
         ) or args.self_test:
             parser.error("--native-inventory cannot be combined with validation inputs")
         sys.stdout.write(_native_libraries_text(args.native_inventory))
         return 0
+    if (args.self_test or args.check_source_assets is not None) and any(
+        value is not None for value in (args.archive, args.bundle, args.version, args.repository_url)
+    ):
+        parser.error("self-test and source checks cannot be combined with archive inputs")
     if args.self_test:
         self_test()
         print("release archive checker self-test: ok")
@@ -442,7 +452,7 @@ def main() -> int:
         args.archive,
         version=args.version,
         bundle=args.bundle,
-        repository_url=args.repository_url,
+        repository_url=args.repository_url or "https://github.com/oxhq/pliego",
     )
     for error in errors:
         print(f"error: {error}", file=sys.stderr)
