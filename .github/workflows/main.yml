@@ -15,7 +15,12 @@ on:
       - "tests/pliego/**"
       - "docs/pliego/**"
       - ".github/workflows/pliego-*.yml"
+      - ".github/ISSUE_TEMPLATE/**"
       - "README.md"
+      - "CODE_OF_CONDUCT.md"
+      - "CONTRIBUTING.md"
+      - "PULL_REQUEST_TEMPLATE.md"
+      - "SECURITY.md"
   pull_request:
     types: ['opened', 'synchronize']
     branches: ["**"]
