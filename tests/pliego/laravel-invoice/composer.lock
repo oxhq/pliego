@@ -4,7 +4,7 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "c1f618f4ba94ca984da28c6cc11f16ef",
+    "content-hash": "ecafc33779bd58f41d624739dea09160",
     "packages": [
         {
             "name": "brick/math",
@@ -2418,11 +2418,11 @@
         },
         {
             "name": "oxhq/pliego-laravel",
-            "version": "0.1.0-alpha.4",
+            "version": "0.1.0",
             "dist": {
                 "type": "path",
                 "url": "../../../sdk/laravel",
-                "reference": "7129355f96002aad8f1331009867eab0ee049a5e"
+                "reference": "d9c09f7dacda99509ea3ebde4eef8c5d452423bc"
             },
             "require": {
                 "illuminate/console": "^13.0",
@@ -2430,7 +2430,7 @@
                 "illuminate/http": "^13.0",
                 "illuminate/support": "^13.0",
                 "illuminate/view": "^13.0",
-                "oxhq/pliego-php": "0.1.0-alpha.3",
+                "oxhq/pliego-php": "0.1.0",
                 "php": "^8.3",
                 "symfony/http-foundation": "^7.4 || ^8.0"
             },
@@ -2438,13 +2438,13 @@
             "extra": {
                 "laravel": {
                     "providers": [
-                        "Pliego\\Laravel\\Experimental\\PliegoServiceProvider"
+                        "Pliego\\Laravel\\PliegoServiceProvider"
                     ]
                 }
             },
             "autoload": {
                 "psr-4": {
-                    "Pliego\\Laravel\\Experimental\\": "src/"
+                    "Pliego\\Laravel\\": "src/"
                 }
             },
             "scripts": {
@@ -2466,11 +2466,11 @@
         },
         {
             "name": "oxhq/pliego-php",
-            "version": "0.1.0-alpha.3",
+            "version": "0.1.0",
             "dist": {
                 "type": "path",
                 "url": "../../../sdk/php",
-                "reference": "7c3771b277623c7f03569d2f8098d44cb2e3f7d2"
+                "reference": "ee3870005b51f7ea1734ed56772f1e82e1b2b278"
             },
             "require": {
                 "php": "^8.3"
@@ -2478,7 +2478,7 @@
             "type": "library",
             "autoload": {
                 "psr-4": {
-                    "Pliego\\Php\\Experimental\\": "src/"
+                    "Pliego\\Php\\": "src/"
                 }
             },
             "scripts": {
@@ -5992,11 +5992,9 @@
     ],
     "packages-dev": [],
     "aliases": [],
-    "minimum-stability": "alpha",
-    "stability-flags": {
-        "oxhq/pliego-laravel": 15
-    },
-    "prefer-stable": true,
+    "minimum-stability": "stable",
+    "stability-flags": {},
+    "prefer-stable": false,
     "prefer-lowest": false,
     "platform": {
         "php": "^8.3"

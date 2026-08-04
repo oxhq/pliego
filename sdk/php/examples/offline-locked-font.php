@@ -2,9 +2,9 @@
 
 declare(strict_types=1);
 
-use Pliego\Php\Experimental\CliRenderer;
-use Pliego\Php\Experimental\Exception\RenderException;
-use Pliego\Php\Experimental\RenderOptions;
+use Pliego\Php\CliRenderer;
+use Pliego\Php\Exception\RenderException;
+use Pliego\Php\RenderOptions;
 
 require_once dirname(__DIR__).'/vendor/autoload.php';
 
@@ -35,7 +35,6 @@ try {
           body { font-family: "Quickstart Locked", sans-serif; }
         </style>
         <p>This font is copied into the locked input bundle.</p>
-        <script>document.fonts.ready.then(() => window.pliego?.ready())</script>
         HTML,
         $job.'/input',
         $job.'/document.pdf',

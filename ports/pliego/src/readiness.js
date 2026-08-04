@@ -8,6 +8,7 @@
     }
 
     let timer;
+    let deferred = false;
     let waitingForFonts = false;
     const shouldWaitForFonts = __PLIEGO_WAIT_FOR_FONTS__;
     let state = Object.freeze({ status: "pending" });
@@ -32,10 +33,18 @@
         return Object.freeze({ code, message });
     };
 
-    const fail = Object.freeze(error => settle({
+    const failNow = error => settle({
         status: "failed",
         error: normalizeError(error),
-    }));
+    });
+    const fail = Object.freeze(error => waitingForFonts ? false : failNow(error));
+    const defer = Object.freeze(() => {
+        if (state.status !== "pending" || waitingForFonts) {
+            return false;
+        }
+        deferred = true;
+        return true;
+    });
     const ready = Object.freeze(payload => {
         if (state.status !== "pending" || waitingForFonts) {
             return false;
@@ -60,7 +69,7 @@
                 payload: payload === undefined ? null : payload,
                 font_status: "loaded",
             });
-        }, error => fail({
+        }, error => failNow({
             code: "FONT_READINESS_FAILED",
             message: error,
         }));
@@ -81,11 +90,22 @@
         configurable: false,
         enumerable: true,
         writable: false,
-        value: Object.freeze({ ready, fail }),
+        value: Object.freeze({ defer, ready, fail }),
     });
 
-    timer = setTimeout(() => fail({
+    timer = setTimeout(() => failNow({
         code: "READINESS_TIMEOUT",
         message: "Document readiness timed out after __PLIEGO_TIMEOUT_MS__ ms",
     }), __PLIEGO_TIMEOUT_MS__);
+
+    const inferReadiness = () => setTimeout(() => {
+        if (!deferred) {
+            ready();
+        }
+    }, 0);
+    if (document.readyState === "complete") {
+        inferReadiness();
+    } else {
+        addEventListener("load", inferReadiness, { once: true });
+    }
 })();

@@ -103,6 +103,7 @@ struct RenderRequest {
     page: PageDefinition,
     resources: ResourcePolicyConfig,
     allow_host_fonts: bool,
+    allow_partial_scene: bool,
     explicit_paths: Option<ExplicitRenderPaths>,
 }
 
@@ -697,6 +698,7 @@ fn parse_args(mut args: Vec<OsString>) -> Result<Command, String> {
     let mut asset_manifest = None;
     let mut resource_timeout_ms = None;
     let mut allow_host_fonts = false;
+    let mut allow_partial_scene = false;
     let mut args = args.into_iter();
     while let Some(argument) = args.next() {
         if argument == "--locale" {
@@ -790,6 +792,8 @@ fn parse_args(mut args: Vec<OsString>) -> Result<Command, String> {
             resource_timeout_ms = Some(parse_resource_timeout(&value)?);
         } else if argument == "--allow-host-fonts" {
             allow_host_fonts = true;
+        } else if argument == "--allow-partial-scene" {
+            allow_partial_scene = true;
         } else if argument.to_string_lossy().starts_with('-') {
             return Err(format!("unknown option: {}", argument.to_string_lossy()));
         } else if input.replace(PathBuf::from(argument)).is_some() {
@@ -843,6 +847,7 @@ fn parse_args(mut args: Vec<OsString>) -> Result<Command, String> {
             timeout_ms: resource_timeout_ms.unwrap_or(READINESS_TIMEOUT_MS),
         },
         allow_host_fonts,
+        allow_partial_scene,
         explicit_paths,
     }))
 }
@@ -990,7 +995,7 @@ fn main() {
 
 fn print_help() {
     println!(
-        "Pliego — native document rendering on Servo\n\nUsage:\n  pliego render <document.html> --output <document.pdf> --artifacts <directory> [options]\n  pliego [options] <document.html>\n  pliego --version\n\nOptions:\n  --locale en-US|es-MX\n  --timezone UTC|PST8PDT\n  --page-size WIDTHxHEIGHT\n  --page-margins TOP,RIGHT,BOTTOM,LEFT\n  --allow-host-fonts          Opt in to observable system-font resolution\n  --allow-http-root URL       Allow GET/HEAD below one explicit http(s) URL root\n  --virtual-resource URL=FILE Serve one exact URL from a host-provided file\n  --asset-manifest FILE       Verify and cache manifest-backed assets locally\n  --resource-timeout-ms MS    Bound controlled network connection time (1..60000)\n\nHost fonts, network, redirects, and asset caching are disabled by default. The shorthand form writes outputs to a temporary artifact directory. Page geometry is expressed in CSS pixels."
+        "Pliego — native document rendering on Servo\n\nUsage:\n  pliego render <document.html> --output <document.pdf> --artifacts <directory> [options]\n  pliego [options] <document.html>\n  pliego --version\n\nOptions:\n  --locale en-US|es-MX\n  --timezone UTC|PST8PDT\n  --page-size WIDTHxHEIGHT\n  --page-margins TOP,RIGHT,BOTTOM,LEFT\n  --allow-host-fonts          Opt in to observable system-font resolution\n  --allow-partial-scene       Retain diagnostic output for unsupported paint\n  --allow-http-root URL       Allow GET/HEAD below one explicit http(s) URL root\n  --virtual-resource URL=FILE Serve one exact URL from a host-provided file\n  --asset-manifest FILE       Verify and cache manifest-backed assets locally\n  --resource-timeout-ms MS    Bound controlled network connection time (1..60000)\n\nHost fonts, partial scenes, network, redirects, and asset caching are disabled by default. The shorthand form writes outputs to a temporary artifact directory. Page geometry is expressed in CSS pixels."
     );
 }
 
@@ -1120,6 +1125,25 @@ fn render(request: RenderRequest) {
             )
         })
     };
+    if let Some(paths) = &request.explicit_paths {
+        match output_overlaps_artifacts(&paths.output, artifacts.directory()) {
+            Ok(false) => {},
+            Ok(true) => fail_render_request(
+                artifacts.directory(),
+                &paths.output,
+                &render_id,
+                "OUTPUT_ARTIFACTS_OVERLAP",
+                "requested output must be outside the artifact directory",
+            ),
+            Err(error) => fail_render_request(
+                artifacts.directory(),
+                &paths.output,
+                &render_id,
+                "OUTPUT_PATH_CHECK_FAILED",
+                &format!("cannot compare output and artifact paths: {error}"),
+            ),
+        }
+    }
     let proof = artifacts.directory().join("render.png");
     let document_pdf_path = request
         .explicit_paths
@@ -1509,6 +1533,7 @@ fn render(request: RenderRequest) {
         &artifacts,
         &scene_capture,
         request.allow_host_fonts,
+        request.allow_partial_scene,
     ) {
         Ok(summary) => summary,
         Err(error) => {
@@ -1528,6 +1553,32 @@ fn render(request: RenderRequest) {
             fail_session(&artifacts, &document_pdf_path, error.code, &error.message)
         },
     };
+    if scene_artifacts.capture_status != "complete" && !request.allow_partial_scene {
+        let failure = SceneArtifactError::new(
+            scene_artifacts
+                .capture_code
+                .unwrap_or("SCENE_CAPTURE_INCOMPLETE"),
+            format!(
+                "document uses paint outside the supported profile; inspect {}",
+                scene_artifacts.report_path.display()
+            ),
+        );
+        set_document_pdf_environment(
+            &mut environment,
+            &document_pdf_path,
+            "failed",
+            Some(&failure),
+        );
+        if let Err(error) = artifacts.write_environment(&environment) {
+            eprintln!("pliego: warning: cannot record rejected PDF state: {error}");
+        }
+        fail_session(
+            &artifacts,
+            &document_pdf_path,
+            failure.code,
+            &failure.message,
+        );
+    }
     let rendered_bytes = std::fs::metadata(&proof)
         .map(|metadata| metadata.len())
         .unwrap_or(0);
@@ -1767,6 +1818,38 @@ fn set_document_pdf_environment(
             "message": &error.message,
         })),
     });
+}
+
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+fn output_overlaps_artifacts(output: &Path, artifacts: &Path) -> std::io::Result<bool> {
+    let output = lexical_absolute_path(output)?;
+    let artifacts_lexical = lexical_absolute_path(artifacts)?;
+    if output.starts_with(&artifacts_lexical) {
+        return Ok(true);
+    }
+
+    let artifacts = artifacts.canonicalize()?;
+    match output.parent().map(Path::canonicalize) {
+        Some(Ok(parent)) => Ok(parent.starts_with(artifacts)),
+        Some(Err(error)) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Some(Err(error)) => Err(error),
+        None => Ok(false),
+    }
+}
+
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+fn lexical_absolute_path(path: &Path) -> std::io::Result<PathBuf> {
+    let mut normalized = PathBuf::new();
+    for component in std::path::absolute(path)?.components() {
+        match component {
+            std::path::Component::CurDir => {},
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            },
+            _ => normalized.push(component.as_os_str()),
+        }
+    }
+    Ok(normalized)
 }
 
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
@@ -2286,6 +2369,7 @@ fn persist_scene_capture(
     artifacts: &SessionArtifacts,
     capture: &SceneCapture,
     allow_host_fonts: bool,
+    allow_partial_scene: bool,
 ) -> Result<SceneArtifactSummary, SceneArtifactError> {
     let scene_setup_started = Instant::now();
     let scene_bytes = capture.scene.normalized_json().map_err(|message| {
@@ -2517,74 +2601,96 @@ fn persist_scene_capture(
     })?;
     let preview_ms = elapsed_milliseconds(preview_started);
 
+    let capture_status =
+        if capture.unsupported_events.is_empty() && capture.text_mapping_gaps.is_empty() {
+            "complete"
+        } else {
+            "partial"
+        };
+    let capture_code = if !capture.text_mapping_gaps.is_empty() {
+        Some("SCENE_CAPTURE_LIMITATIONS")
+    } else if !capture.unsupported_events.is_empty() {
+        Some("SCENE_CAPTURE_UNSUPPORTED_PAINT_EVENTS")
+    } else {
+        None
+    };
+    let render_pdf = capture_status == "complete" || allow_partial_scene;
+
     let pdf_path = artifacts.directory().join("document.pdf");
     let pdf_structure_path = artifacts.directory().join("pdf-structure.json");
     let mut pdf_written = false;
     let mut pdf_structure_written = false;
     let pdf_started = Instant::now();
-    let pdf_result = (|| -> Result<(), SceneArtifactError> {
-        let variations_by_instance = capture
-            .font_instances
-            .iter()
-            .map(|instance| {
-                (
-                    instance.id.clone(),
-                    instance
-                        .variations
-                        .iter()
-                        .map(|variation| PdfFontVariation {
-                            tag: variation.tag,
-                            value: variation.value,
-                        })
-                        .collect::<Vec<_>>(),
-                )
-            })
-            .collect::<BTreeMap<_, _>>();
-        if let Some(message) = image_resource_errors.values().next() {
-            return Err(SceneArtifactError::new(
-                "DOCUMENT_PDF_GENERATION_FAILED",
-                message.clone(),
-            ));
-        }
-
-        let pdf = render_document_pdf(
-            &capture.scene,
-            |font| {
-                let instance = instances_by_id.get(font)?;
-                let bytes = decoded_resources.get(&instance.resource)?;
-                let variations = variations_by_instance.get(font)?;
-                Some(PdfFontResource {
-                    bytes,
-                    face_index: instance.face_index,
-                    variations,
+    let pdf_result = if render_pdf {
+        (|| -> Result<(), SceneArtifactError> {
+            let variations_by_instance = capture
+                .font_instances
+                .iter()
+                .map(|instance| {
+                    (
+                        instance.id.clone(),
+                        instance
+                            .variations
+                            .iter()
+                            .map(|variation| PdfFontVariation {
+                                tag: variation.tag,
+                                value: variation.value,
+                            })
+                            .collect::<Vec<_>>(),
+                    )
                 })
-            },
-            |image| image_resources.get(image).map(Vec::as_slice),
-        )
-        .map_err(|error| {
-            SceneArtifactError::new(
-                "DOCUMENT_PDF_GENERATION_FAILED",
-                format!("cannot generate document.pdf from captured scene: {error}"),
-            )
-        })?;
-        artifacts.write_document_pdf(&pdf).map_err(|error| {
-            SceneArtifactError::new(
-                "DOCUMENT_PDF_WRITE_FAILED",
-                format!("cannot write {}: {error}", pdf_path.display()),
-            )
-        })?;
-        pdf_written = true;
+                .collect::<BTreeMap<_, _>>();
+            if let Some(message) = image_resource_errors.values().next() {
+                return Err(SceneArtifactError::new(
+                    "DOCUMENT_PDF_GENERATION_FAILED",
+                    message.clone(),
+                ));
+            }
 
-        let structure = document_pdf_structure(&capture.scene, &pdf);
-        artifacts.write_pdf_structure(&structure).map_err(|error| {
-            SceneArtifactError::new(
-                "DOCUMENT_PDF_STRUCTURE_WRITE_FAILED",
-                format!("cannot write {}: {error}", pdf_structure_path.display()),
+            let pdf = render_document_pdf(
+                &capture.scene,
+                |font| {
+                    let instance = instances_by_id.get(font)?;
+                    let bytes = decoded_resources.get(&instance.resource)?;
+                    let variations = variations_by_instance.get(font)?;
+                    Some(PdfFontResource {
+                        bytes,
+                        face_index: instance.face_index,
+                        variations,
+                    })
+                },
+                |image| image_resources.get(image).map(Vec::as_slice),
             )
-        })?;
-        pdf_structure_written = true;
-        Ok(())
-    })();
+            .map_err(|error| {
+                SceneArtifactError::new(
+                    "DOCUMENT_PDF_GENERATION_FAILED",
+                    format!("cannot generate document.pdf from captured scene: {error}"),
+                )
+            })?;
+            artifacts.write_document_pdf(&pdf).map_err(|error| {
+                SceneArtifactError::new(
+                    "DOCUMENT_PDF_WRITE_FAILED",
+                    format!("cannot write {}: {error}", pdf_path.display()),
+                )
+            })?;
+            pdf_written = true;
+
+            let structure = document_pdf_structure(&capture.scene, &pdf);
+            artifacts.write_pdf_structure(&structure).map_err(|error| {
+                SceneArtifactError::new(
+                    "DOCUMENT_PDF_STRUCTURE_WRITE_FAILED",
+                    format!("cannot write {}: {error}", pdf_structure_path.display()),
+                )
+            })?;
+            pdf_structure_written = true;
+            Ok(())
+        })()
+    } else {
+        Err(SceneArtifactError::new(
+            capture_code.unwrap_or("SCENE_CAPTURE_INCOMPLETE"),
+            "partial scene PDF was not published",
+        ))
+    };
     let pdf_ms = elapsed_milliseconds(pdf_started);
     let pdf_error = pdf_result.err();
     let pdf_status = if pdf_written { "rendered" } else { "failed" };
@@ -2594,23 +2700,10 @@ fn persist_scene_capture(
         "failed"
     };
 
-    let capture_status =
-        if capture.unsupported_events.is_empty() && capture.text_mapping_gaps.is_empty() {
-            "complete"
-        } else {
-            "partial"
-        };
     let preview_status = if preview_paths.len() == capture.scene.pages.len() {
         "rendered"
     } else {
         "unsupported"
-    };
-    let capture_code = if !capture.text_mapping_gaps.is_empty() {
-        Some("SCENE_CAPTURE_LIMITATIONS")
-    } else if !capture.unsupported_events.is_empty() {
-        Some("SCENE_CAPTURE_UNSUPPORTED_PAINT_EVENTS")
-    } else {
-        None
     };
     let report = serde_json::json!({
         "scene": {
@@ -2663,8 +2756,10 @@ fn persist_scene_capture(
     artifacts.write_scene_report(&report).map_err(|error| {
         SceneArtifactError::new("SCENE_CAPTURE_REPORT_WRITE_FAILED", error.to_string())
     })?;
-    if let Some(error) = pdf_error {
-        return Err(error);
+    if render_pdf {
+        if let Some(error) = pdf_error {
+            return Err(error);
+        }
     }
 
     Ok(SceneArtifactSummary {
@@ -2857,7 +2952,9 @@ mod tests {
         CapturedFontWarning, MissingTextMapping, SceneCapture, UnsupportedPaintEvent,
         UnsupportedPaintKind,
     };
-    use pliego::{DocumentScene, Glyph, Operation, OperationMeta, Page, Rect, Size, Utf8Range};
+    use pliego::{
+        Color, DocumentScene, Glyph, Operation, OperationMeta, Page, Rect, Size, Utf8Range,
+    };
 
     use super::{
         Command, ControlledResource, DEFAULT_LOCALE, DEFAULT_TIMEZONE, ExplicitRenderPaths,
@@ -2895,6 +2992,7 @@ mod tests {
                 page: default_page(),
                 resources: ResourcePolicyConfig::default(),
                 allow_host_fonts: false,
+                allow_partial_scene: false,
                 explicit_paths: None,
             })
         );
@@ -2925,6 +3023,7 @@ mod tests {
                 page: default_page(),
                 resources: ResourcePolicyConfig::default(),
                 allow_host_fonts: false,
+                allow_partial_scene: false,
                 explicit_paths: Some(ExplicitRenderPaths {
                     output: PathBuf::from("requested/invoice.pdf"),
                     artifacts: PathBuf::from("diagnostics/render-1"),
@@ -3082,6 +3181,7 @@ mod tests {
                 page: default_page(),
                 resources: ResourcePolicyConfig::default(),
                 allow_host_fonts: false,
+                allow_partial_scene: false,
                 explicit_paths: None,
             })
         );
@@ -3104,12 +3204,14 @@ mod tests {
 
         let Command::Render(opted_in) = parse_args(vec![
             OsString::from("--allow-host-fonts"),
+            OsString::from("--allow-partial-scene"),
             OsString::from("invoice.html"),
         ])
         .unwrap() else {
             panic!("document should parse as a render request")
         };
         assert!(opted_in.allow_host_fonts);
+        assert!(opted_in.allow_partial_scene);
     }
 
     #[test]
@@ -3664,7 +3766,7 @@ mod tests {
             text_mapping_gaps: vec![],
         };
 
-        let summary = persist_scene_capture(&artifacts, &capture, false).unwrap();
+        let summary = persist_scene_capture(&artifacts, &capture, false, false).unwrap();
         assert!(summary.scene_setup_ms.is_finite() && summary.scene_setup_ms >= 0.0);
         assert!(summary.preview_ms.is_finite() && summary.preview_ms >= 0.0);
         assert!(summary.pdf_ms.is_finite() && summary.pdf_ms >= 0.0);
@@ -3710,6 +3812,7 @@ mod tests {
                     text: "notdef".into(),
                     font: font.clone(),
                     font_size: 32.0,
+                    color: Color::default(),
                     glyphs: vec![Glyph {
                         id: 0,
                         x: 8.0,
@@ -3752,7 +3855,7 @@ mod tests {
             text_mapping_gaps: vec![],
         };
 
-        let summary = persist_scene_capture(&artifacts, &capture, false).unwrap();
+        let summary = persist_scene_capture(&artifacts, &capture, false, false).unwrap();
         let exact_scene = capture.scene.normalized_json().unwrap();
         assert_eq!(summary.capture_status, "complete");
         assert_eq!(summary.capture_code, None);
@@ -3877,10 +3980,14 @@ mod tests {
             sequence: 0,
             glyph_index: 0,
         }];
-        let partial_error =
-            persist_scene_capture(&partial_artifacts, &partial_capture, false).unwrap_err();
-        assert_eq!(partial_error.code, "DOCUMENT_PDF_GENERATION_FAILED");
-        assert!(partial_error.message.contains("source-text mapping"));
+        let partial_summary =
+            persist_scene_capture(&partial_artifacts, &partial_capture, false, false).unwrap();
+        assert_eq!(partial_summary.capture_status, "partial");
+        assert_eq!(
+            partial_summary.capture_code,
+            Some("SCENE_CAPTURE_LIMITATIONS")
+        );
+        assert_eq!(partial_summary.pdf_status, "failed");
         let partial_report: serde_json::Value =
             serde_json::from_slice(&fs::read(partial_directory.join("scene-report.json")).unwrap())
                 .unwrap();
@@ -3896,7 +4003,7 @@ mod tests {
         assert_eq!(partial_report["document_pdf"]["status"], "failed");
         assert_eq!(
             partial_report["document_pdf"]["error"]["code"],
-            "DOCUMENT_PDF_GENERATION_FAILED"
+            "SCENE_CAPTURE_LIMITATIONS"
         );
         assert!(!partial_directory.join("document.pdf").exists());
         assert_eq!(partial_report["pdf_structure"]["status"], "failed");
@@ -3941,7 +4048,7 @@ mod tests {
             text_mapping_gaps: vec![],
         };
 
-        let error = persist_scene_capture(&artifacts, &capture, false).unwrap_err();
+        let error = persist_scene_capture(&artifacts, &capture, false, true).unwrap_err();
         assert_eq!(error.code, "DOCUMENT_PDF_GENERATION_FAILED");
         assert!(
             error

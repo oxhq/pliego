@@ -2,12 +2,12 @@
 
 declare(strict_types=1);
 
-namespace Pliego\Php\Experimental;
+namespace Pliego\Php;
 
 use InvalidArgumentException;
 use JsonException;
-use Pliego\Php\Experimental\Exception\EngineRenderException;
-use Pliego\Php\Experimental\Exception\InvalidRequestException;
+use Pliego\Php\Exception\EngineRenderException;
+use Pliego\Php\Exception\InvalidRequestException;
 use RuntimeException;
 
 /**
@@ -50,6 +50,13 @@ final readonly class CliRenderer
             if (!$this->isAbsolutePath($path) || str_contains($path, "\0")) {
                 throw new InvalidArgumentException("render paths must be absolute: {$path}");
             }
+        }
+        if (file_exists($output) || is_link($output)) {
+            throw new InvalidArgumentException("render output already exists: {$output}");
+        }
+        $outputDirectory = dirname($output);
+        if (!is_dir($outputDirectory)) {
+            throw new InvalidArgumentException("render output directory does not exist: {$outputDirectory}");
         }
 
         $this->writeInputBundle($inputBundle, $html, $options, $assets);
@@ -134,9 +141,6 @@ final readonly class CliRenderer
         fclose($stderrFile);
 
         if ($timedOut) {
-            if (is_file($output)) {
-                @unlink($output);
-            }
             JobRetention::mark($jobPath, 'failure');
             throw new EngineRenderException(
                 'RENDER_TIMEOUT',
@@ -166,6 +170,20 @@ final readonly class CliRenderer
                 $exitCode,
                 $stderr === false ? '' : $stderr,
                 $message,
+                $inputBundle,
+                $artifacts,
+            );
+        }
+        if (($metadata['scene']['capture_status'] ?? null) !== 'complete') {
+            $code = is_string($metadata['scene']['capture_code'] ?? null)
+                ? $metadata['scene']['capture_code']
+                : 'SCENE_CAPTURE_INCOMPLETE';
+            JobRetention::mark($jobPath, 'failure');
+            throw new EngineRenderException(
+                $code,
+                $exitCode,
+                $stderr === false ? '' : $stderr,
+                'Pliego did not capture the complete document paint',
                 $inputBundle,
                 $artifacts,
             );

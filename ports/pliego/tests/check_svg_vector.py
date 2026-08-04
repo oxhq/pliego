@@ -98,9 +98,18 @@ def run(binary: Path, fixture: Path, root: Path) -> tuple[bytes, bytes, bytes, b
     environment.update({"TMPDIR": str(root), "TMP": str(root), "TEMP": str(root)})
     result = subprocess.run(
         [
-            str(binary), "render", fixture.name, "--output", str(output),
-            "--artifacts", str(artifacts), "--page-size", "200x120",
-            "--page-margins", "0,0,0,0",
+            str(binary),
+            "render",
+            fixture.name,
+            "--allow-partial-scene",
+            "--output",
+            str(output),
+            "--artifacts",
+            str(artifacts),
+            "--page-size",
+            "200x120",
+            "--page-margins",
+            "0,0,0,0",
         ],
         cwd=root,
         env=environment,

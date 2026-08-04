@@ -63,13 +63,22 @@ if (
     exit(2);
 }
 if (str_contains($html, 'SLOW_RENDER')) {
-    file_put_contents($output, "%PDF-1.7\n% incomplete\n");
     fwrite(STDERR, "SLOW_RENDER_STARTED\n");
     fflush(STDERR);
     sleep(5);
 }
 
 mkdir($artifacts, 0700, true);
+if (str_contains($html, 'PARTIAL_CAPTURE')) {
+    fwrite(STDOUT, json_encode([
+        'status' => 'failed',
+        'error' => [
+            'code' => 'SCENE_CAPTURE_UNSUPPORTED_PAINT_EVENTS',
+            'message' => 'synthetic partial capture',
+        ],
+    ])."\n");
+    exit(1);
+}
 $pdf = $mode === 'blank-pdf' ? "%PDF-1.7\n" : "%PDF-1.7\n% fake Pliego self-test\n";
 file_put_contents($output, $pdf);
 file_put_contents(
@@ -102,6 +111,10 @@ file_put_contents("{$artifacts}/pdf-structure.json", json_encode([
 fwrite(STDOUT, json_encode([
     'status' => 'rendered',
     'engine' => 'pliego',
+    'scene' => [
+        'capture_status' => 'complete',
+        'capture_code' => null,
+    ],
     'document_pdf' => $output,
     'artifacts' => $artifacts,
     'scene_artifact' => "{$artifacts}/scene.json",

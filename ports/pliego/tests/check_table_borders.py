@@ -808,6 +808,7 @@ def render(binary: Path, temp: Path, fixture_name: str) -> dict[str, Any]:
     result = subprocess.run(
         [
             str(binary),
+            *(["--allow-partial-scene"] if fixture_name == "table-border-fallbacks" else []),
             "--allow-host-fonts",
             "--page-size",
             "240x140",

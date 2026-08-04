@@ -1,0 +1,9 @@
+{
+  "name": "pliego-chartjs-report-fixture",
+  "version": "1.0.0",
+  "private": true,
+  "license": "MPL-2.0",
+  "dependencies": {
+    "chart.js": "4.5.1"
+  }
+}

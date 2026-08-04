@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Pliego Chart.js report fixture</title>
+  <link rel="icon" href="data:,">
+  <style>
+    @font-face {
+      font-family: ReportSans;
+      src: url("./ReportSans.ttf") format("truetype");
+      font-style: normal;
+      font-weight: 400;
+    }
+    @page { size: 760px 840px; margin: 28px; }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; }
+    body {
+      color: #0f172a;
+      font-family: ReportSans, sans-serif;
+      font-size: 11px;
+      line-height: 1.35;
+    }
+    table { color: inherit; font: inherit; }
+    .report { width: 704px; }
+    .report-header {
+      display: flex;
+      width: 100%;
+      background: #0f172a;
+      color: #ffffff;
+    }
+    .report-header > div { padding: 16px 18px; }
+    .report-header .identity { flex: 1; }
+    .report-header .report-id {
+      width: 170px;
+      border-left: 1px solid #334155;
+      text-align: right;
+    }
+    .eyebrow { color: #93c5fd; font-size: 10px; font-weight: 700; }
+    h1 { margin: 3px 0 4px; font-size: 23px; line-height: 1.1; }
+    .subtitle { margin: 0; color: #cbd5e1; }
+    .report-id strong { display: block; font-size: 13px; }
+    .report-id span { color: #cbd5e1; }
+    .meta, .kpis {
+      display: flex;
+      width: 100%;
+    }
+    .section-heading, .detail-table {
+      width: 100%;
+      border-collapse: separate;
+      border-spacing: 0;
+    }
+    .meta { margin-top: 10px; }
+    .meta-item {
+      flex: 1;
+      padding: 7px 9px;
+      border: 1px solid #cbd5e1;
+      background: #f8fafc;
+    }
+    .label { display: block; color: #64748b; font-size: 9px; font-weight: 700; }
+    .meta strong { display: block; margin-top: 2px; }
+    .kpis { margin-top: 10px; }
+    .kpi { flex: 1; padding: 9px 10px; border: 0; }
+    .kpi-blue { background: #eff6ff; border-top: 3px solid #2563eb !important; }
+    .kpi-amber { background: #fffbeb; border-top: 3px solid #f59e0b !important; }
+    .kpi-slate { background: #f8fafc; border-top: 3px solid #475569 !important; }
+    .kpi-value { display: block; font-size: 19px; font-weight: 700; }
+    .kpi-name { display: block; color: #475569; }
+    .kpi-note { display: block; margin-top: 2px; color: #166534; font-size: 10px; font-weight: 700; }
+    .panel { margin-top: 10px; padding: 9px 12px; border: 1px solid #cbd5e1; }
+    .section-heading { margin-bottom: 5px; }
+    .section-heading td { padding: 0 0 5px; border-bottom: 1px solid #e2e8f0; }
+    .section-heading .unit { color: #64748b; text-align: right; }
+    h2 { margin: 0; font-size: 13px; }
+    canvas { display: block; width: 678px; height: 250px; }
+    .detail-table th {
+      padding: 6px 7px;
+      border: 1px solid #cbd5e1;
+      background: #e2e8f0;
+      text-align: left;
+    }
+    .detail-table td { padding: 6px 7px; border: 1px solid #cbd5e1; }
+    .detail-table .number { text-align: right; }
+    .detail-table .status { color: #166534; font-weight: 700; }
+    .footer {
+      margin-top: 10px;
+      padding-top: 7px;
+      border-top: 1px solid #cbd5e1;
+      color: #64748b;
+      text-align: right;
+    }
+  </style>
+  <script>window.pliego?.defer();</script>
+  <script src="./node_modules/chart.js/dist/chart.umd.js"></script>
+</head>
+<body>
+  <main class="report">
+    <div class="report-header">
+      <div class="identity">
+        <span class="eyebrow">PLIEGO OPERATING REPORT</span>
+        <h1>Northstar Operations</h1>
+        <p class="subtitle">Performance summary and account contribution</p>
+      </div>
+      <div class="report-id">
+        <strong>PLG-RPT-2026-08</strong>
+        <span>January–June 2026</span>
+      </div>
+    </div>
+
+    <div class="meta">
+      <div class="meta-item"><span class="label">PREPARED FOR</span><strong>Finance &amp; Operations</strong></div>
+      <div class="meta-item"><span class="label">ISSUED</span><strong>August 3, 2026</strong></div>
+      <div class="meta-item"><span class="label">BASIS</span><strong>USD · accrual</strong></div>
+    </div>
+
+    <div class="kpis">
+      <div class="kpi kpi-blue">
+        <span class="kpi-value">$296.1K</span>
+        <span class="kpi-name">Recognized revenue</span>
+        <span class="kpi-note">+8.4% vs plan</span>
+      </div>
+      <div class="kpi kpi-amber">
+        <span class="kpi-value">35.5%</span>
+        <span class="kpi-name">Contribution margin</span>
+        <span class="kpi-note">+2.1 points</span>
+      </div>
+      <div class="kpi kpi-slate">
+        <span class="kpi-value">$648K</span>
+        <span class="kpi-name">Full-year forecast</span>
+        <span class="kpi-note">On target</span>
+      </div>
+    </div>
+
+    <section class="panel">
+      <table class="section-heading" role="presentation">
+        <tr>
+          <td><h2>Revenue and operating cost</h2></td>
+          <td class="unit">Monthly · USD thousands</td>
+        </tr>
+      </table>
+      <canvas id="chart" width="678" height="250" aria-label="Monthly revenue and operating cost"></canvas>
+      <script>
+    (async () => {
+      try {
+      await document.fonts.ready;
+      Chart.defaults.font.family = "ReportSans";
+      const canvas = document.querySelector("#chart");
+      const context = canvas.getContext("2d", { willReadFrequently: true });
+      const chart = new Chart(context, {
+        type: "bar",
+        data: {
+          labels: ["Jan", "Feb", "Mar", "Apr", "May", "Jun"],
+          datasets: [
+            {
+              label: "Revenue",
+              data: [42, 45, 47, 49, 54, 59],
+              backgroundColor: "#2563eb",
+              borderWidth: 0,
+            },
+            {
+              label: "Operating cost",
+              data: [29, 30, 31, 32, 34, 36],
+              backgroundColor: "#f59e0b",
+              borderWidth: 0,
+            },
+          ],
+        },
+        options: {
+          responsive: false,
+          animation: false,
+          events: [],
+          devicePixelRatio: 1,
+          plugins: {
+            legend: {
+              display: true,
+              labels: { color: "#0f172a", font: { size: 12 } },
+            },
+            title: {
+              display: true,
+              text: "Operating performance — H1 2026",
+              color: "#0f172a",
+              font: { size: 16, weight: "bold" },
+            },
+          },
+          scales: {
+            x: {
+              grid: { display: false },
+              ticks: { color: "#334155" },
+              border: { color: "#94a3b8" },
+            },
+            y: {
+              beginAtZero: true,
+              max: 70,
+              grid: { color: "#e2e8f0" },
+              ticks: { color: "#334155", stepSize: 10 },
+              border: { display: false },
+            },
+          },
+        },
+      });
+      chart.update("none");
+
+      const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
+      let paintedPixels = 0;
+      const chromaticBuckets = new Set();
+      for (let offset = 0; offset < pixels.length; offset += 4) {
+        const red = pixels[offset];
+        const green = pixels[offset + 1];
+        const blue = pixels[offset + 2];
+        const alpha = pixels[offset + 3];
+        if (alpha === 0) continue;
+        paintedPixels += 1;
+        if (alpha >= 64 && Math.max(red, green, blue) - Math.min(red, green, blue) >= 48) {
+          chromaticBuckets.add(`${red >> 5}:${green >> 5}:${blue >> 5}`);
+        }
+      }
+
+      window.pliego?.ready({
+        fixture: "chartjs-report",
+        chartVersion: Chart.version,
+        canvasWidth: canvas.width,
+        canvasHeight: canvas.height,
+        datasetCount: chart.data.datasets.length,
+        dataPointCount: chart.data.labels.length,
+        readbackBytes: pixels.length,
+        paintedPixels,
+        chromaticBuckets: chromaticBuckets.size,
+      });
+      } catch (error) {
+        window.pliego?.fail({
+          code: "CHART_RENDER_FAILED",
+          message: error instanceof Error ? error.message : String(error),
+        });
+      }
+    })();
+      </script>
+    </section>
+
+    <section class="panel">
+      <table class="section-heading" role="presentation">
+        <tr>
+          <td><h2>Account contribution</h2></td>
+          <td class="unit">Top four accounts</td>
+        </tr>
+      </table>
+      <table class="detail-table">
+        <thead>
+          <tr>
+            <th>Account</th>
+            <th class="number">Revenue</th>
+            <th class="number">Share</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td>Northstar Operations</td><td class="number">$84,500</td><td class="number">28.5%</td><td class="status">Expanded</td></tr>
+          <tr><td>Terra Logistics</td><td class="number">$73,200</td><td class="number">24.7%</td><td class="status">Renewed</td></tr>
+          <tr><td>Lumen Retail Group</td><td class="number">$61,900</td><td class="number">20.9%</td><td class="status">Healthy</td></tr>
+          <tr><td>Atlas Field Services</td><td class="number">$44,800</td><td class="number">15.1%</td><td class="status">Healthy</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <footer class="footer">Generated by Pliego · deterministic Chart.js 4.5.1 capture</footer>
+  </main>
+</body>
+</html>

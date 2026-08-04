@@ -3,7 +3,7 @@
 Laravel 13 integration for application-owned Blade documents.
 
 ```sh
-composer require oxhq/pliego-laravel:^0.1.0-alpha.4 oxhq/pliego-php:^0.1.0-alpha.3
+composer require oxhq/pliego-laravel:^0.1.0
 php artisan pliego:install
 php artisan pliego:doctor
 ```
@@ -17,10 +17,10 @@ macOS Intel and Apple Silicon bundles require macOS 13 or newer. The Intel
 binary is unsigned and Apple Silicon is ad-hoc signed; neither is Developer ID
 signed or notarized.
 
-Both Composer constraints are explicit so applications do not need to change their
-global minimum stability. `pliego:install` selects the pinned
-runtime for Linux x64, Windows x64, or macOS Intel/Apple Silicon, verifies its size
-and SHA-256, and installs it under `storage/app/pliego-runtime`.
+The Laravel package installs the PHP bridge as its dependency. `pliego:install`
+selects the pinned runtime for Linux x64, Windows x64, or macOS Intel/Apple
+Silicon, verifies its size and SHA-256, and installs it under
+`storage/app/pliego-runtime`.
 
 Set `PLIEGO_RUNTIME_DIR` to move the managed directory. `PLIEGO_BINARY` is an
 explicit override for system packages and air-gapped deployments; unset it when
@@ -28,12 +28,20 @@ testing managed installation.
 
 ## Rendering a Blade view
 
+The default render path is:
+
 ```php
-use Pliego\Laravel\Experimental\Facades\Document;
+use Pliego\Laravel\Facades\Document;
+
+return Document::view('invoice', compact('rows'))->download();
+```
+
+Add locale, resource policy, and local assets only when the view needs them:
+
+```php
+use Pliego\Laravel\Facades\Document;
 
 return Document::view('invoice', ['rows' => $rows])
-    ->pageSize('612x792')
-    ->margins('36,36,36,36')
     ->locale('es-MX')
     ->timezone('PST8PDT')
     ->denyNetwork()
@@ -41,13 +49,37 @@ return Document::view('invoice', ['rows' => $rows])
     ->download('invoice.pdf');
 ```
 
-Signal readiness from the Blade view after its fonts finish loading:
+Static Blade views need no readiness calls. Pliego infers readiness after page load
+and waits for `document.fonts.ready`. Call `defer()` only when JavaScript continues
+changing the document or a canvas after load, then finish with `ready()` or
+`fail()`:
 
 ```html
 <script>
-document.fonts.ready.then(() => window.pliego?.ready());
+window.pliego?.defer();
+loadReportData()
+    .then(drawReport)
+    .then(() => window.pliego?.ready())
+    .catch(error => window.pliego?.fail(error.message));
 </script>
 ```
+
+Chart.js 4.5.1 is covered for a fixed, non-animated chart that performs a
+synchronous full-canvas `getImageData(0, 0, canvas.width, canvas.height)` readback
+after its final draw and before `ready()`. The retained pixels become the
+authoritative canvas result; other versions, modes, plugins, and Canvas APIs are not
+implied.
+
+`render()` and `download()` reject partial scene capture instead of returning a PDF
+with unsupported paint omitted. Retained artifacts remain available on the typed
+exception.
+
+PDF paint retains resolved sRGB text colors, solid backgrounds, uniform-color sharp
+axis-aligned solid borders, and uniform solid collapsed-table borders. CSS
+gradients and background-image layers, box and text shadows, text decorations,
+rounded or mixed-color borders, clips, non-solid and image borders, transforms,
+opacity, filters, and blend modes are explicitly unsupported and reported rather
+than approximated.
 
 Blade is rendered first. The package creates a private input directory, copies only
 declared relative assets, records their hashes, and launches one `pliego render`
@@ -67,7 +99,7 @@ $pdf = Document::view('invoice')
 
 ## Failures and retained evidence
 
-Catch `Pliego\Php\Experimental\Exception\RenderException` for typed failures. The
+Catch `Pliego\Php\Exception\RenderException` for typed failures. The
 exception preserves the engine code, process exit code, stderr, and retained input
 and artifact paths. Failed renders do not publish a final PDF.
 

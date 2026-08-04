@@ -125,6 +125,8 @@ pub enum UnsupportedPaintKind {
     Outline,
     CollapsedTableBorders,
     Iframe,
+    TextEffects,
+    ContentGeometry,
     SvgAnimation,
     SvgCompositing,
     SvgStroke,
@@ -504,6 +506,8 @@ pub fn capture_document_scene_with_canvas(
         .unwrap_or_default();
     let repeated_header_fragments =
         repeated_table_header_fragments(&capture.fragments, &table_group_repeats)?;
+    let unsupported_box_fragments =
+        unsupported_box_subtree_fragments(&capture.fragments, &capture.paint_events);
 
     let mut font_resources = collect_font_resources(capture.font_resources)?;
     let mut font_instances = collect_font_instances(capture.font_instances, &font_resources)?;
@@ -626,6 +630,7 @@ pub fn capture_document_scene_with_canvas(
                         text: text_run.text.clone(),
                         font: font.clone(),
                         font_size: f64::from(text_run.font_size),
+                        color: text_run.color.into_scene_color(),
                         glyphs: text_run
                             .glyphs
                             .iter()
@@ -779,11 +784,48 @@ pub fn capture_document_scene_with_canvas(
                     });
                 }
             },
+            "paint-rect" => {
+                if event
+                    .fragment_id
+                    .is_some_and(|fragment_id| unsupported_box_fragments.contains(&fragment_id))
+                {
+                    continue;
+                }
+                for paint_rect in &event.paint_rects {
+                    let bounds = paint_rect.rect.into_scene_rect();
+                    operations.push(PositionedOperation {
+                        sequence: event.sequence,
+                        bounds: bounds.clone(),
+                        operation: Operation::Path {
+                            data: rectangle_path_data(&bounds),
+                            bounds,
+                            fill: Some(paint_rect.color.into_scene_color()),
+                            fill_rule: FillRule::NonZero,
+                            stroke: None,
+                            meta: OperationMeta {
+                                semantics: Some(Semantics {
+                                    role: "artifact".into(),
+                                    label: Some(
+                                        match paint_rect.kind {
+                                            CapturePaintRectKind::Background => "background",
+                                            CapturePaintRectKind::Border => "border",
+                                        }
+                                        .into(),
+                                    ),
+                                }),
+                                source: None,
+                            },
+                        },
+                    });
+                }
+            },
             kind @ ("box"
             | "root-background"
             | "outline"
             | "collapsed-table-borders"
-            | "iframe") => {
+            | "iframe"
+            | "text-effects"
+            | "content-geometry") => {
                 unsupported_events.push(UnsupportedPaintEvent {
                     sequence: event.sequence,
                     kind: match kind {
@@ -792,6 +834,8 @@ pub fn capture_document_scene_with_canvas(
                         "outline" => UnsupportedPaintKind::Outline,
                         "collapsed-table-borders" => UnsupportedPaintKind::CollapsedTableBorders,
                         "iframe" => UnsupportedPaintKind::Iframe,
+                        "text-effects" => UnsupportedPaintKind::TextEffects,
+                        "content-geometry" => UnsupportedPaintKind::ContentGeometry,
                         _ => unreachable!(),
                     },
                 });
@@ -1058,6 +1102,7 @@ fn distribute_operations(
     repeats: &[CaptureTableGroupRepeat],
     repeated_header_fragments: &HashMap<u64, HashSet<usize>>,
 ) -> Result<Vec<Page>, CaptureError> {
+    let operations = split_solid_rect_operations(pages, operations)?;
     let mut scene_pages = pages
         .iter()
         .map(|page| Page {
@@ -1081,11 +1126,11 @@ fn distribute_operations(
                 page_index: repeat.page_index,
             });
         }
-        let fragments = repeated_header_fragments
-            .get(&repeat.header_tag_id)
-            .ok_or(CaptureError::MissingRepeatedTableHeader {
+        let fragments = repeated_header_fragments.get(&repeat.header_tag_id).ok_or(
+            CaptureError::MissingRepeatedTableHeader {
                 tag_id: repeat.header_tag_id,
-            })?;
+            },
+        )?;
         let translation =
             f64::from(repeat.target_block_start) - f64::from(repeat.source_block_start);
         for operation in operations.iter().filter(|operation| {
@@ -1094,8 +1139,8 @@ fn distribute_operations(
                 .and_then(|event| event.fragment_id)
                 .is_some_and(|fragment_id| fragments.contains(&fragment_id))
         }) {
-            if matches!(&operation.operation, Operation::Path { .. }) &&
-                !is_table_border_path(&operation.operation)
+            if matches!(&operation.operation, Operation::Path { .. })
+                && !is_splittable_rect_path(&operation.operation)
             {
                 return Err(CaptureError::RepeatedTableHeaderPathUnsupported {
                     sequence: operation.sequence,
@@ -1105,11 +1150,7 @@ fn distribute_operations(
             }
             let mut repeated = operation.clone();
             repeated.bounds.y += translation;
-            translate_operation_y(
-                &mut repeated.operation,
-                -translation,
-                repeated.sequence,
-            )?;
+            translate_operation_y(&mut repeated.operation, -translation, repeated.sequence)?;
             let (page_index, page_origin) = operation_page(pages, &mut repeated)?;
             if page_index != repeat.page_index {
                 return Err(CaptureError::InvalidTableGroupRepeat {
@@ -1134,6 +1175,49 @@ fn distribute_operations(
         page.operations = repeated;
     }
     Ok(scene_pages)
+}
+
+fn split_solid_rect_operations(
+    pages: &[CapturePage],
+    operations: Vec<PositionedOperation>,
+) -> Result<Vec<PositionedOperation>, CaptureError> {
+    let mut split = Vec::with_capacity(operations.len());
+    for operation in operations {
+        if !is_page_spanning_rect_path(&operation.operation) || operation.bounds.height == 0.0 {
+            split.push(operation);
+            continue;
+        }
+
+        let top = operation.bounds.y;
+        let bottom = top + operation.bounds.height;
+        let mut page_origin = 0.0;
+        let mut covered_height = 0.0;
+        for page in pages {
+            let page_end = page_origin + f64::from(page.height);
+            let intersection_top = top.max(page_origin);
+            let intersection_bottom = bottom.min(page_end);
+            if intersection_bottom > intersection_top {
+                let mut part = operation.clone();
+                part.bounds.y = intersection_top;
+                part.bounds.height = intersection_bottom - intersection_top;
+                let Operation::Path { bounds, data, .. } = &mut part.operation else {
+                    unreachable!("splittable rectangle is always a path")
+                };
+                bounds.y = intersection_top;
+                bounds.height = intersection_bottom - intersection_top;
+                *data = rectangle_path_data(bounds);
+                covered_height += part.bounds.height;
+                split.push(part);
+            }
+            page_origin = page_end;
+        }
+        if (covered_height - operation.bounds.height).abs() > 0.000_001 {
+            return Err(CaptureError::OperationOutsidePageSequence {
+                sequence: operation.sequence,
+            });
+        }
+    }
+    Ok(split)
 }
 
 fn mark_repeated_table_header(operation: &mut Operation) {
@@ -1178,7 +1262,7 @@ fn operation_page(
                         page_index,
                     });
                 };
-                if !is_table_border_meta(meta) {
+                if !is_splittable_rect_meta(meta) {
                     return Err(CaptureError::OperationCrossesPageBoundary {
                         sequence: operation.sequence,
                         page_index,
@@ -1210,7 +1294,7 @@ fn translate_operation_y(
         },
         Operation::Path {
             bounds, data, meta, ..
-        } if is_table_border_meta(meta) => {
+        } if is_splittable_rect_meta(meta) => {
             bounds.y -= page_origin;
             *data = rectangle_path_data(bounds);
         },
@@ -1225,16 +1309,31 @@ fn translate_operation_y(
     Ok(())
 }
 
-fn is_table_border_path(operation: &Operation) -> bool {
+fn is_splittable_rect_path(operation: &Operation) -> bool {
     matches!(
         operation,
-        Operation::Path { meta, .. } if is_table_border_meta(meta)
+        Operation::Path { meta, .. } if is_splittable_rect_meta(meta)
     )
 }
 
-fn is_table_border_meta(meta: &OperationMeta) -> bool {
+fn is_page_spanning_rect_path(operation: &Operation) -> bool {
+    matches!(
+        operation,
+        Operation::Path { meta, .. }
+            if meta.semantics.as_ref().is_some_and(|semantics| {
+                semantics.role == "artifact"
+                    && matches!(semantics.label.as_deref(), Some("background" | "border"))
+            })
+    )
+}
+
+fn is_splittable_rect_meta(meta: &OperationMeta) -> bool {
     meta.semantics.as_ref().is_some_and(|semantics| {
-        semantics.role == "artifact" && semantics.label.as_deref() == Some("table-border")
+        semantics.role == "artifact"
+            && matches!(
+                semantics.label.as_deref(),
+                Some("table-border" | "background" | "border")
+            )
     })
 }
 
@@ -1364,6 +1463,33 @@ fn collect_fragments(
         }
     }
     Ok(by_id)
+}
+
+fn unsupported_box_subtree_fragments(
+    fragments: &[CaptureFragment],
+    events: &[CapturePaintEvent],
+) -> HashSet<usize> {
+    let roots = events
+        .iter()
+        .filter(|event| event.kind == "box")
+        .filter_map(|event| event.fragment_id)
+        .collect::<HashSet<_>>();
+    let mut unsupported = HashSet::new();
+    for (index, root) in fragments.iter().enumerate() {
+        if !root
+            .paint_fragment_id
+            .is_some_and(|fragment_id| roots.contains(&fragment_id))
+        {
+            continue;
+        }
+        for (offset, fragment) in fragments[index..].iter().enumerate() {
+            if offset > 0 && fragment.depth <= root.depth {
+                break;
+            }
+            unsupported.extend(fragment.paint_fragment_id);
+        }
+    }
+    unsupported
 }
 
 fn collect_links(links: Vec<CaptureLink>) -> Result<HashMap<u64, String>, CaptureError> {
@@ -1651,6 +1777,7 @@ fn append_vector_image(
                         text: text.clone(),
                         font: instance_id,
                         font_size: f64::from(*font_size) * scale_x,
+                        color: Color::default(),
                         glyphs,
                         meta: OperationMeta::default(),
                     },
@@ -2051,6 +2178,23 @@ struct CapturePaintEvent {
     _clip_id: Option<usize>,
     #[serde(default)]
     table_borders: Vec<CaptureTableBorder>,
+    #[serde(default)]
+    paint_rects: Vec<CapturePaintRect>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CapturePaintRect {
+    rect: CaptureRect,
+    color: CaptureColor,
+    kind: CapturePaintRectKind,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum CapturePaintRectKind {
+    Background,
+    Border,
 }
 
 #[derive(Deserialize)]
@@ -2060,13 +2204,35 @@ struct CaptureTableBorder {
     color: CaptureColor,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Copy, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CaptureColor {
     r: f32,
     g: f32,
     b: f32,
     a: f32,
+}
+
+impl Default for CaptureColor {
+    fn default() -> Self {
+        Self {
+            r: 0.0,
+            g: 0.0,
+            b: 0.0,
+            a: 1.0,
+        }
+    }
+}
+
+impl CaptureColor {
+    fn into_scene_color(self) -> Color {
+        Color {
+            r: f64::from(self.r),
+            g: f64::from(self.g),
+            b: f64::from(self.b),
+            a: f64::from(self.a),
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -2080,6 +2246,8 @@ struct CaptureTextRun {
     #[serde(default)]
     selected_family: Option<String>,
     font_size: f32,
+    #[serde(default)]
+    color: CaptureColor,
     glyphs: Vec<CaptureGlyph>,
 }
 
@@ -2248,6 +2416,58 @@ mod tests {
     }
 
     #[test]
+    fn splits_a_solid_background_across_every_intersected_page() {
+        let page = |index| CapturePage {
+            index,
+            width: 100.0,
+            height: 100.0,
+            margin_top: 10.0,
+            margin_right: 10.0,
+            margin_bottom: 10.0,
+            margin_left: 10.0,
+            available_inline_size: 80.0,
+            available_block_size: 80.0,
+        };
+        let bounds = Rect {
+            x: 5.0,
+            y: 50.0,
+            width: 90.0,
+            height: 220.0,
+        };
+        let parts = split_solid_rect_operations(
+            &[page(0), page(1), page(2)],
+            vec![PositionedOperation {
+                sequence: 4,
+                bounds: bounds.clone(),
+                operation: Operation::Path {
+                    data: rectangle_path_data(&bounds),
+                    bounds,
+                    fill: Some(crate::Color::default()),
+                    fill_rule: crate::FillRule::NonZero,
+                    stroke: None,
+                    meta: OperationMeta {
+                        semantics: Some(Semantics {
+                            role: "artifact".into(),
+                            label: Some("background".into()),
+                        }),
+                        source: None,
+                    },
+                },
+            }],
+        )
+        .unwrap();
+
+        assert_eq!(parts.len(), 3);
+        assert_eq!(
+            parts
+                .iter()
+                .map(|part| (part.bounds.y, part.bounds.height))
+                .collect::<Vec<_>>(),
+            [(50.0, 50.0), (100.0, 100.0), (200.0, 70.0)]
+        );
+    }
+
+    #[test]
     fn clips_only_a_centered_table_edge_to_its_owning_page() {
         let page = |index| CapturePage {
             index,
@@ -2302,12 +2522,7 @@ mod tests {
         let (page_index, page_origin) =
             operation_page(&[page(0), page(1)], &mut positioned).unwrap();
         assert_eq!((page_index, page_origin), (1, 100.0));
-        translate_operation_y(
-            &mut positioned.operation,
-            page_origin,
-            positioned.sequence,
-        )
-        .unwrap();
+        translate_operation_y(&mut positioned.operation, page_origin, positioned.sequence).unwrap();
         let Operation::Path { bounds, data, .. } = positioned.operation else {
             unreachable!();
         };

@@ -29,7 +29,7 @@ use layout_api::{
     ScrollContainerResponse, TrustedNodeAddress, with_layout_state,
 };
 use layout_api::{
-    LayoutDebugCanvasImageKey, LayoutDebugFontInstance, LayoutDebugFontResource,
+    LayoutDebugCanvasImageKey, LayoutDebugColor, LayoutDebugFontInstance, LayoutDebugFontResource,
     LayoutDebugFontVariation, LayoutDebugFragment, LayoutDebugGlyph, LayoutDebugRect,
     LayoutDebugSnapshot, LayoutDebugTextRun, LayoutDebugUtf8Range,
 };
@@ -58,6 +58,7 @@ use servo_config::opts::{self, DiagnosticsLogging, DiagnosticsLoggingOption};
 use servo_config::pref;
 use servo_url::ServoUrl;
 use style::animation::DocumentAnimationSet;
+use style::color::ColorSpace;
 use style::context::{
     QuirksMode, RegisteredSpeculativePainter, RegisteredSpeculativePainters, SharedStyleContext,
 };
@@ -486,6 +487,11 @@ impl Layout for LayoutThread {
                                 font_capture_warned = true;
                             }
                             let prefix_len = continuation_prefix.len();
+                            let color = text_fragment
+                                .base
+                                .style()
+                                .clone_color()
+                                .to_color_space(ColorSpace::Srgb);
                             let mut glyphs = glyphs
                                 .into_iter()
                                 .map(|glyph| LayoutDebugGlyph {
@@ -529,6 +535,12 @@ impl Layout for LayoutThread {
                                     .collect(),
                                 selected_family: text_fragment.font.selected_family_name(),
                                 font_size: text_fragment.font.descriptor.pt_size.to_f32_px(),
+                                color: LayoutDebugColor {
+                                    r: color.components.0.clamp(0.0, 1.0),
+                                    g: color.components.1.clamp(0.0, 1.0),
+                                    b: color.components.2.clamp(0.0, 1.0),
+                                    a: color.alpha.clamp(0.0, 1.0),
+                                },
                                 glyphs,
                             })
                         },

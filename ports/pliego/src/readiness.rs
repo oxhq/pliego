@@ -13,7 +13,10 @@ pub const HOST_EVALUATION_EXPRESSION: &str = "JSON.stringify(window.__pliegoRead
 pub fn document_start_script(timeout_ms: u64, wait_for_fonts: bool) -> String {
     SCRIPT
         .replace(TIMEOUT_TOKEN, &timeout_ms.to_string())
-        .replace(WAIT_FOR_FONTS_TOKEN, if wait_for_fonts { "true" } else { "false" })
+        .replace(
+            WAIT_FOR_FONTS_TOKEN,
+            if wait_for_fonts { "true" } else { "false" },
+        )
 }
 
 #[derive(Debug, PartialEq)]
@@ -96,8 +99,11 @@ mod tests {
         assert!(script.contains("timed out after 2500 ms"));
         assert!(script.contains("}), 2500);"));
         assert!(script.contains("classList.add(\"test-wait\")"));
+        assert!(script.contains("const defer = Object.freeze"));
+        assert!(script.contains("value: Object.freeze({ defer, ready, fail })"));
         assert!(script.contains("document.fonts.ready.then"));
         assert!(script.contains("addEventListener(\"load\", waitForFonts"));
+        assert!(script.contains("addEventListener(\"load\", inferReadiness"));
         assert!(script.contains("font_status: \"loaded\""));
         assert!(offline_script.contains("const shouldWaitForFonts = false;"));
     }

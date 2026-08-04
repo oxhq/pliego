@@ -563,6 +563,7 @@ def run_and_verify(
             str(binary),
             "render",
             materialized_fixture.name,
+            "--allow-partial-scene",
             "--allow-host-fonts",
             "--output",
             str(temp_root / "document.pdf"),

@@ -145,6 +145,17 @@ pub struct Color {
     pub a: f64,
 }
 
+impl Default for Color {
+    fn default() -> Self {
+        Self {
+            r: 0.0,
+            g: 0.0,
+            b: 0.0,
+            a: 1.0,
+        }
+    }
+}
+
 impl Color {
     fn validate(&self) -> Result<(), &'static str> {
         unit_interval(self.r)?;
@@ -204,6 +215,8 @@ pub enum Operation {
         text: String,
         font: String,
         font_size: f64,
+        #[serde(default)]
+        color: Color,
         glyphs: Vec<Glyph>,
         #[serde(default)]
         meta: OperationMeta,
@@ -241,12 +254,14 @@ impl Operation {
                 text,
                 font,
                 font_size,
+                color,
                 glyphs,
                 meta,
             } => {
                 nonempty(text)?;
                 nonempty(font)?;
                 finite_nonnegative(*font_size)?;
+                color.validate()?;
                 for glyph in glyphs {
                     glyph.validate(text)?;
                 }
@@ -346,6 +361,7 @@ mod tests {
                     text: "Hi".into(),
                     font: "font/inter".into(),
                     font_size: 12.0,
+                    color: Color::default(),
                     glyphs: vec![Glyph {
                         id: 42,
                         x: 24.0,

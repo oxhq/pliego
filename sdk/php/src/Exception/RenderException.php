@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-namespace Pliego\Php\Experimental\Exception;
+namespace Pliego\Php\Exception;
 
 use RuntimeException;
 

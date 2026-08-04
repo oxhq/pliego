@@ -1,11 +1,11 @@
 {
     "schema": 1,
-    "version": "0.1.0-alpha.2",
+    "version": "0.1.0",
     "api": 1,
     "assets": {
         "linux-x86_64": {
-            "bytes": 68706332,
-            "sha256": "6c9ae8008f280ac97edf5c55ee92fa2c8bd00460b73f92cebe08eeb1b54aabf6",
+            "bytes": 68720270,
+            "sha256": "8cbc39118d75fb2eb95ede84feea605e97e120f56ed1b00150948281ae353827",
             "files": [
                 "pliego",
                 "INSTALL.txt",
@@ -23,8 +23,8 @@
             ]
         },
         "windows-x86_64": {
-            "bytes": 62453296,
-            "sha256": "d69c81fd64ab8f9493565e4eb88f9b1663fe36be835f43a55dc169acd7505dfb",
+            "bytes": 62464731,
+            "sha256": "6dd0f72febb4bdd4eef9d2eb359d6477f0cfda461cb9ad3b09468836f876aa08",
             "files": [
                 "pliego.exe",
                 "INSTALL.txt",
@@ -48,8 +48,8 @@
             ]
         },
         "macos-x86_64": {
-            "bytes": 62575021,
-            "sha256": "7e32da8dcbbeb5c84c40856c05ef73cbb1143b5cbb6ef10a0ab6a74406425542",
+            "bytes": 62576416,
+            "sha256": "52a327fce0bd14deea314e13bc5c8590f018967e6cfde7303cee3431a7f8dea0",
             "files": [
                 "pliego",
                 "INSTALL.txt",
@@ -67,8 +67,8 @@
             ]
         },
         "macos-aarch64": {
-            "bytes": 59236436,
-            "sha256": "a62fa16d14abdcb149954d6e2844f8d39280209f51e28d5304d664c489ebbcf4",
+            "bytes": 59249901,
+            "sha256": "a17f10bc158acdf68b913a0b32190c558bd45a611557f3b14c00bd73509f5f24",
             "files": [
                 "pliego",
                 "INSTALL.txt",

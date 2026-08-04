@@ -31,6 +31,7 @@ fn text_scene() -> DocumentScene {
                 text: "notdef".into(),
                 font: FONT_ID.into(),
                 font_size: 32.0,
+                color: Color::default(),
                 glyphs: vec![Glyph {
                     id: 0,
                     x: 8.0,
@@ -133,6 +134,29 @@ fn rasterizes_positioned_glyphs_without_dom_layout_or_shaping() {
 }
 
 #[test]
+fn rasterizes_text_with_its_resolved_scene_color() {
+    let mut scene = text_scene();
+    let Operation::Text { color, .. } = &mut scene.pages[0].operations[0] else {
+        unreachable!();
+    };
+    *color = Color {
+        r: 0.9,
+        g: 0.05,
+        b: 0.1,
+        a: 1.0,
+    };
+
+    let png = render_first_page_png(&scene, fixture_font).unwrap();
+    let pixmap = Pixmap::from_png(Cursor::new(png)).unwrap();
+    assert!(
+        pixmap.data_as_u8_slice().chunks_exact(4).any(|pixel| {
+            pixel[3] == 255 && pixel[0] > 160 && pixel[1] < 100 && pixel[2] < 120
+        }),
+        "the positioned glyph should retain its red scene paint"
+    );
+}
+
+#[test]
 fn rasterizes_exact_png_resource_at_scene_bounds() {
     let scene = image_scene();
     let source = image_png();
@@ -193,6 +217,7 @@ fn rasterizes_all_pages_without_dom_or_layout_and_shares_resource_caches() {
                 text: "second".into(),
                 font: FONT_ID.into(),
                 font_size: 16.0,
+                color: Color::default(),
                 glyphs: vec![Glyph {
                     id: 0,
                     x: 4.0,

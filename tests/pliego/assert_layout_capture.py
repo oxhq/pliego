@@ -62,12 +62,14 @@ def output_path(summary: dict[str, object], key: str, root: Path) -> Path:
 def main() -> int:
     modes = {
         None: "session",
+        "defer": "readiness-double",
         "text": "text-capture",
         "link": "link-capture",
+        "effects": "effects-capture",
     }
     mode = sys.argv[2] if len(sys.argv) == 3 else None
     if len(sys.argv) not in (2, 3) or mode not in modes:
-        fail(f"usage: {Path(sys.argv[0]).name} <pliego-binary> [text|link]", 2)
+        fail(f"usage: {Path(sys.argv[0]).name} <pliego-binary> [defer|text|link|effects]", 2)
 
     root = Path(__file__).resolve().parents[2]
     binary = Path(sys.argv[1]).expanduser().resolve()
@@ -80,8 +82,88 @@ def main() -> int:
         environment = os.environ.copy()
         environment.update({"TMPDIR": temp_dir, "TMP": temp_dir, "TEMP": temp_dir})
         try:
+            if mode == "effects":
+                overlap_artifacts = Path(temp_dir) / "overlap-artifacts"
+                overlap_output = overlap_artifacts / "document.pdf"
+                overlap = subprocess.run(
+                    [
+                        str(binary),
+                        "render",
+                        str(fixture),
+                        "--output",
+                        str(overlap_output),
+                        "--artifacts",
+                        str(overlap_artifacts),
+                    ],
+                    cwd=root,
+                    env=environment,
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                    check=False,
+                )
+                overlap_lines = [line.strip() for line in overlap.stdout.splitlines() if line.strip()]
+                require(overlap.returncode != 0 and bool(overlap_lines), "overlapping output was accepted")
+                overlap_summary = json.loads(overlap_lines[-1])
+                require(
+                    overlap_summary.get("error", {}).get("code") == "OUTPUT_ARTIFACTS_OVERLAP",
+                    repr(overlap_summary),
+                )
+                require(not overlap_output.exists(), "overlapping output path was populated")
+
+                rejected_artifacts = Path(temp_dir) / "rejected-artifacts"
+                rejected_output = Path(temp_dir) / "rejected.pdf"
+                rejected = subprocess.run(
+                    [
+                        str(binary),
+                        "render",
+                        str(fixture),
+                        "--output",
+                        str(rejected_output),
+                        "--artifacts",
+                        str(rejected_artifacts),
+                    ],
+                    cwd=root,
+                    env=environment,
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                    check=False,
+                )
+                rejected_lines = [line.strip() for line in rejected.stdout.splitlines() if line.strip()]
+                require(rejected.returncode != 0 and bool(rejected_lines), "partial scene was published")
+                rejected_summary = json.loads(rejected_lines[-1])
+                require(
+                    rejected_summary.get("status") == "failed"
+                    and rejected_summary.get("error", {}).get("code")
+                    == "SCENE_CAPTURE_UNSUPPORTED_PAINT_EVENTS",
+                    repr(rejected_summary),
+                )
+                require(not rejected_output.exists(), "partial scene PDF was published")
+                rejected_environment = json.loads(
+                    (rejected_artifacts / "environment.json").read_text(encoding="utf-8")
+                )
+                require(
+                    rejected_environment.get("document_pdf", {}).get("status") == "failed"
+                    and rejected_environment.get("document_pdf", {}).get("error", {}).get("code")
+                    == "SCENE_CAPTURE_UNSUPPORTED_PAINT_EVENTS",
+                    repr(rejected_environment.get("document_pdf")),
+                )
+                rejected_report = json.loads(
+                    (rejected_artifacts / "scene-report.json").read_text(encoding="utf-8")
+                )
+                require(
+                    rejected_report.get("document_pdf", {}).get("status") == "failed"
+                    and rejected_report.get("document_pdf", {}).get("error", {}).get("code")
+                    == "SCENE_CAPTURE_UNSUPPORTED_PAINT_EVENTS",
+                    repr(rejected_report.get("document_pdf")),
+                )
+            command = [str(binary)]
+            if mode == "effects":
+                command.append("--allow-partial-scene")
+            command.append(str(fixture))
             result = subprocess.run(
-                [str(binary), str(fixture)],
+                command,
                 cwd=root,
                 env=environment,
                 capture_output=True,
@@ -105,6 +187,32 @@ def main() -> int:
         except json.JSONDecodeError as error:
             fail(f"final stdout line is not JSON: {error}: {lines[-1]!r}")
         require(isinstance(summary, dict), "final stdout JSON is not an object")
+
+        artifacts = output_path(summary, "artifacts", root)
+        readiness_path = artifacts / "readiness.json"
+        require(readiness_path.is_file(), f"readiness artifact does not exist: {readiness_path}")
+        try:
+            readiness = json.loads(readiness_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            fail(f"could not load readiness artifact {readiness_path}: {error}")
+        require(isinstance(readiness, dict), "readiness artifact is not a JSON object")
+        if mode is None:
+            require(summary.get("readiness") is None, repr(summary.get("readiness")))
+            require(
+                readiness.get("status") == "ready"
+                and readiness.get("payload") is None
+                and readiness.get("font_status") == "loaded",
+                repr(readiness),
+            )
+        elif mode == "defer":
+            expected_readiness = {"fixture": "readiness-double", "winner": "ready"}
+            require(summary.get("readiness") == expected_readiness, repr(summary.get("readiness")))
+            require(
+                readiness.get("status") == "ready"
+                and readiness.get("payload") == expected_readiness
+                and readiness.get("font_status") == "loaded",
+                repr(readiness),
+            )
 
         layout_path = output_path(summary, "layout_debug", root)
         require(layout_path.is_file(), f"layout debug artifact does not exist: {layout_path}")
@@ -133,7 +241,26 @@ def main() -> int:
             sequences == list(range(len(paint_events))),
             f"paint event sequences are not dense and ordered: {sequences!r}",
         )
-        if mode == "text":
+        if mode == "effects":
+            kinds = {event.get("kind") for event in paint_events}
+            require("box" in kinds, f"ancestor opacity was not reported: {kinds!r}")
+            require("text-effects" in kinds, f"text effects were not reported: {kinds!r}")
+            require("content-geometry" in kinds, f"overflow clipping was not reported: {kinds!r}")
+            image_ids = {
+                fragment.get("paint_fragment_id")
+                for fragment in fragments
+                if isinstance(fragment, dict) and fragment.get("kind") == "image"
+            }
+            clipped_ids = {
+                event.get("fragment_id")
+                for event in paint_events
+                if event.get("kind") == "content-geometry"
+            }
+            require(
+                bool(image_ids & clipped_ids),
+                f"clipped image was not rejected: images={image_ids!r}, clips={clipped_ids!r}",
+            )
+        elif mode == "text":
             font_resources = snapshot.get("font_resources")
             require(
                 isinstance(font_resources, list) and bool(font_resources),
@@ -296,7 +423,7 @@ def main() -> int:
                 len(link_rects) >= 2,
                 f"expected one wrapping link to join at least two fragments; got {link_rects!r}",
             )
-        else:
+        elif mode is None:
             box_kinds = [box.get("kind") for box in boxes if isinstance(box, dict)]
             require(
                 "independent" in box_kinds,
@@ -334,7 +461,6 @@ def main() -> int:
                 expected_image_url in image_urls,
                 f"expected laid-out image URL {expected_image_url!r}; got {image_urls!r}",
             )
-            artifacts = output_path(summary, "artifacts", root)
             resource_log = artifacts / "resources.jsonl"
             require(resource_log.is_file(), f"resource log does not exist: {resource_log}")
             try:

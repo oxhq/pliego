@@ -60,17 +60,8 @@
         <tr><td>TOTAL</td><td>32</td><td>MXN</td><td>5280.00</td></tr>
       </tfoot>
     </table>
-    @if (($rehearsalMode ?? null) !== 'timeout')
-      <script>
-        document.fonts.ready.then(() => window.pliego?.ready({
-          fixture: "laravel-invoice",
-          @isset($rehearsalMode)
-            mode: @json($rehearsalMode),
-          @endisset
-          rows: 32,
-          expected_pages: 2
-        }));
-      </script>
+    @if (($rehearsalMode ?? null) === 'timeout')
+      <script>window.pliego?.defer();</script>
     @endif
   </body>
 </html>

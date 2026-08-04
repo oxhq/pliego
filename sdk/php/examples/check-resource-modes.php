@@ -13,7 +13,10 @@ if (($argv[1] ?? null) === 'render') {
     file_put_contents($output, "%PDF-1.7\n% fake quickstart\n");
     file_put_contents($artifacts.'/command.json', json_encode($options, JSON_PRETTY_PRINT)."\n");
     file_put_contents($artifacts.'/resources.jsonl', "{\"sha256\":\"sha256:fake\"}\n");
-    echo json_encode(['status' => 'rendered'])."\n";
+    echo json_encode([
+        'status' => 'rendered',
+        'scene' => ['capture_status' => 'complete'],
+    ])."\n";
     exit(0);
 }
 
@@ -67,9 +70,9 @@ quickstartExpect(
     'Google Fonts link is retained unchanged',
 );
 quickstartExpect(
-    str_contains((string) file_get_contents($offlineResult->inputBundlePath.'/document.html'), 'document.fonts.ready.then(() => window.pliego?.ready')
-        && str_contains((string) file_get_contents($googleResult->inputBundlePath.'/document.html'), 'document.fonts.ready.then(() => window.pliego?.ready'),
-    'font examples wait for font readiness before signaling Pliego',
+    !str_contains((string) file_get_contents($offlineResult->inputBundlePath.'/document.html'), 'window.pliego')
+        && !str_contains((string) file_get_contents($googleResult->inputBundlePath.'/document.html'), 'window.pliego'),
+    'static font examples use zero-config readiness',
 );
 
 echo "Pliego resource-mode examples self-check passed; no live network was used. Evidence: {$root}\n";

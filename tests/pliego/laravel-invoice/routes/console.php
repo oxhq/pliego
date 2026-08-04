@@ -1,14 +1,12 @@
 <?php
 
 use Illuminate\Support\Facades\Artisan;
-use Pliego\Laravel\Experimental\Facades\Document;
+use Pliego\Laravel\Facades\Document;
 
 require_once base_path('rehearsal.php');
 
 Artisan::command('pliego:invoice', function (): int {
     $result = Document::view('invoice', ['rows' => range(1, 32)])
-        ->pageSize('612x792')
-        ->margins('36,36,36,36')
         ->locale('es-MX')
         ->timezone('PST8PDT')
         ->denyNetwork()
@@ -46,7 +44,7 @@ Artisan::command('pliego:rehearsal-job
 })->purpose('Run one internal job in the six-job Pliego queue rehearsal');
 
 Artisan::command('pliego:rehearse-queue
-    {--release-version=0.1.0-alpha.2}
+    {--release-version=0.1.0}
     {--connection=}
     {--report=}
     {--binary-sha256=}

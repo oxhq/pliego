@@ -17,19 +17,26 @@ Pliego focuses on predictable document workflows:
 ## Laravel quick start
 
 ```sh
-composer require oxhq/pliego-laravel:^0.1.0-alpha.4 oxhq/pliego-php:^0.1.0-alpha.3
+composer require oxhq/pliego-laravel:^0.1.0
 php artisan pliego:install
 php artisan pliego:doctor
 ```
 
-Render a Blade view from a controller:
+The default render path is:
 
 ```php
-use Pliego\Laravel\Experimental\Facades\Document;
+use Pliego\Laravel\Facades\Document;
+
+return Document::view('invoice', compact('rows'))->download();
+```
+
+The defaults cover the common local document path. Add policy and document options
+only when the view needs them:
+
+```php
+use Pliego\Laravel\Facades\Document;
 
 return Document::view('invoices.show', ['invoice' => $invoice])
-    ->pageSize('612x792')
-    ->margins('36,36,36,36')
     ->locale('es-MX')
     ->timezone('PST8PDT')
     ->denyNetwork()
@@ -37,13 +44,33 @@ return Document::view('invoices.show', ['invoice' => $invoice])
     ->download('invoice.pdf');
 ```
 
-Signal readiness from the Blade view after its fonts finish loading:
+Static Blade views need no readiness calls. Pliego infers readiness after page load
+and waits for `document.fonts.ready`. Call `defer()` only when JavaScript will keep
+changing the document or a canvas after load, then finish with `ready()` or `fail()`:
 
 ```html
 <script>
-document.fonts.ready.then(() => window.pliego?.ready());
+window.pliego?.defer();
+loadReportData()
+    .then(drawReport)
+    .then(() => window.pliego?.ready())
+    .catch(error => window.pliego?.fail(error.message));
 </script>
 ```
+
+Chart.js 4.5.1 is covered for a deterministic, non-animated chart that performs a
+synchronous full-canvas `getImageData(0, 0, canvas.width, canvas.height)` readback
+after its final draw. Pliego retains those pixels as the authoritative canvas
+result; this does not imply compatibility with every Chart.js mode or Canvas API.
+
+The current PDF paint boundary retains resolved sRGB text colors, solid
+backgrounds, uniform-color sharp axis-aligned solid borders, and uniform solid
+collapsed-table borders. CSS gradients and background-image layers, box and text
+shadows, text decorations, rounded or mixed-color borders, clips, non-solid and
+image borders, transforms, opacity, filters, and blend modes are explicitly
+unsupported and reported instead of approximated. Default rendering fails without
+publishing a partial PDF; `--allow-partial-scene` is only for retained diagnostics.
+See the [support profile](docs/pliego/support-profile.md) for the complete boundary.
 
 `download()` returns a Laravel file response. Use `render()` instead to receive a
 result with the PDF, input-bundle, and retained-artifact paths.
@@ -77,14 +104,14 @@ pliego render document.html --output document.pdf --artifacts artifacts
 ```
 
 Host-font fallback, network access, redirects, and asset caching are disabled by
-default. The [support profile](docs/pliego/support-profile.md) defines the current
+default. Partial scene capture also fails before the requested output is published.
+The [support profile](docs/pliego/support-profile.md) defines the current
 capability, resource, and failure boundaries.
 
 ## Release evidence
 
-The `v0.1.0-alpha.2` native bundles are built and API-smoked on
-all four targets in the
-[package matrix](https://github.com/oxhq/pliego/actions/runs/30874336010). The
+Native bundles are built and API-smoked on all four targets in the
+[package matrix](https://github.com/oxhq/pliego/actions/workflows/pliego-package.yml). The
 [PHP package](https://packagist.org/packages/oxhq/pliego-php) and
 [Laravel package](https://packagist.org/packages/oxhq/pliego-laravel) are available
 on Packagist and pass focused hosted package checks.
