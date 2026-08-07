@@ -1,0 +1,100 @@
+# Pliego benchmark manifest — single source of truth for the B0 harness.
+# Paths in `input` and `prepare` are relative to the repository root.
+
+schema = "pliego.benchmark-manifest"
+version = 1
+
+[protocol]
+binary_profile = "checked-release"
+network = "disabled"
+warmup_iterations = 10
+samples_short = 50
+samples_long = 20
+sample_order = "random"
+seed = 1
+rss_method = "process-tree"
+
+[targets."pliego-0.1.1"]
+label = "Pliego 0.1.1 (published bundle)"
+enabled = true
+# The binary path is supplied at run time. Bundles are downloaded from
+# Releases and verified against their adjacent SHA-256 before benchmarking.
+
+[targets."pliego-1.0.0-rc.1"]
+label = "Pliego 1.0.0-rc.1 (document runtime)"
+enabled = false
+
+[fixtures.minimal-static]
+purpose = "pure startup: one small page, no scripts, no fonts, no images"
+category = "static"
+samples = 50
+input = "benchmarks/fixtures/minimal-static/input.html"
+
+[fixtures.minimal-static.correctness]
+page_count = 1
+text_contains = ["Minimal"]
+
+[fixtures.invoice-showcase]
+purpose = "two-page invoice: Ahem font, paged table, totals, authored page break"
+category = "static"
+samples = 50
+input = "benchmarks/fixtures/invoice-showcase/input.html"
+
+[fixtures.invoice-showcase.correctness]
+page_count = 2
+text_contains = ["INVOICE PLG-2026-001", "TOTAL", "5280.00"]
+
+[fixtures.chartjs-showcase]
+purpose = "Chart.js 4.5.1 canvas readback and readiness (managed reference)"
+category = "scripted"
+samples = 50
+input = "ports/pliego/tests/fixtures/chartjs-report/index.html"
+prepare = [
+  "npm ci (in ports/pliego/tests/fixtures/chartjs-report)",
+  "copy DejaVuSans.ttf to ReportSans.ttf in ports/pliego/tests/fixtures/chartjs-report",
+]
+
+[fixtures.chartjs-showcase.correctness]
+page_count = 1
+text_contains = ["Northstar Operations", "Account contribution"]
+
+[fixtures.ledger-20-pages]
+purpose = "fragmentation and repeated headers at ~20 pages"
+category = "scale"
+samples = 20
+input = "benchmarks/fixtures/ledger-20-pages/input.html"
+generated = true
+
+[fixtures.ledger-20-pages.correctness]
+page_count = 20 # estimate; pinned by the first B0 run
+
+[fixtures.statement-100-pages]
+purpose = "100-page statement: scaling, memory, per-page cost"
+category = "scale"
+samples = 20
+input = "benchmarks/fixtures/statement-100-pages/input.html"
+generated = true
+
+[fixtures.statement-100-pages.correctness]
+page_count = 100 # estimate; pinned by the first B0 run
+
+[fixtures.font-image-heavy]
+purpose = "font embedding, image decode, resources and I/O"
+category = "resources"
+samples = 20
+input = "benchmarks/fixtures/font-image-heavy/input.html"
+generated = true
+
+[fixtures.font-image-heavy.correctness]
+page_count = 6 # estimate; pinned by the first B0 run
+
+[fixtures.unsupported-paint]
+purpose = "fail-closed path for unsupported CSS paint (gradient, shadow, radius)"
+category = "failure"
+samples = 20
+input = "benchmarks/fixtures/unsupported-paint/input.html"
+expect_failure = true
+
+[fixtures.unsupported-paint.correctness]
+failure_code = "SCENE_CAPTURE_UNSUPPORTED_PAINT_EVENTS"
+pdf_published = false
