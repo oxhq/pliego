@@ -167,6 +167,36 @@ def engine_identity(binary: Path) -> dict[str, Any]:
     return identity
 
 
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def harness_revision() -> str | None:
+    result = run(["git", "rev-parse", "HEAD"], ROOT)
+    revision = result.stdout.strip()
+    return revision if result.returncode == 0 and 7 <= len(revision) <= 64 else None
+
+
+def benchmark_tree_is_clean() -> bool:
+    result = run(["git", "status", "--porcelain", "--", "benchmarks"], ROOT)
+    return result.returncode == 0 and not result.stdout.strip()
+
+
+def fixture_identity(fixture: dict[str, Any]) -> tuple[str, str]:
+    input_path = (ROOT / fixture["input"]).resolve()
+    paths = [input_path, *(input_path.parent / asset for asset in fixture.get("assets", []))]
+    digest = hashlib.sha256()
+    for path in sorted(paths, key=lambda candidate: candidate.relative_to(input_path.parent).as_posix()):
+        relative = path.relative_to(input_path.parent).as_posix()
+        digest.update(relative.encode("utf-8") + b"\0")
+        digest.update(bytes.fromhex(file_sha256(path)))
+    return file_sha256(input_path), digest.hexdigest()
+
+
 def tool_version(command: list[str]) -> str:
     try:
         result = run(command)
@@ -176,25 +206,11 @@ def tool_version(command: list[str]) -> str:
 
 
 def check_prep(fixture_id: str, fixture: dict[str, Any]) -> None:
-    if fixture_id == "chartjs-showcase":
-        base = ROOT / "ports" / "pliego" / "tests" / "fixtures" / "chartjs-report"
-        missing = [
-            p for p in (base / "node_modules" / "chart.js" / "dist" / "chart.umd.js", base / "ReportSans.ttf")
-            if not p.is_file()
-        ]
-        if missing:
-            fail(
-                f"fixture {fixture_id!r} is not prepared; missing {missing}. "
-                f"Run: npm ci in {base} and copy DejaVuSans.ttf to ReportSans.ttf there."
-            )
-    for generated in ("ledger-20-pages", "statement-100-pages", "font-image-heavy"):
-        if fixture_id == generated:
-            fixture_input = ROOT / fixture["input"]
-            if not fixture_input.is_file():
-                fail(
-                    f"fixture {fixture_id!r} is missing {fixture_input.relative_to(ROOT)}; "
-                    "run: python3 benchmarks/tools/generate_fixtures.py"
-                )
+    fixture_input = (ROOT / fixture["input"]).resolve()
+    required = [fixture_input, *(fixture_input.parent / asset for asset in fixture.get("assets", []))]
+    missing = [path for path in required if not path.is_file()]
+    if missing:
+        fail(f"fixture {fixture_id!r} is not prepared; missing {missing}")
 
 
 def build_command(
@@ -328,6 +344,14 @@ def main() -> int:
     parser.add_argument("--schema", default=str(DEFAULT_SCHEMA), help="result schema path")
     args = parser.parse_args()
 
+    if args.samples is not None and args.samples < 1:
+        fail("--samples must be at least 1")
+    if args.warmup is not None and args.warmup < 0:
+        fail("--warmup cannot be negative")
+    benchmark_clean = benchmark_tree_is_clean()
+    if args.dedicated and not benchmark_clean:
+        fail("--dedicated requires a clean benchmarks tree so the recorded revision identifies the harness and fixtures")
+
     binary = Path(args.binary)
     if not binary.is_file():
         fail(f"binary not found: {binary}")
@@ -346,6 +370,18 @@ def main() -> int:
     fixture_ids = args.fixture or sorted(manifest["fixtures"].keys())
     if args.fixture is None and protocol.get("seed") is not None:
         random.Random(protocol["seed"]).shuffle(fixture_ids)
+
+    generated_at = datetime.now(timezone.utc).isoformat()
+    host = host_info(args.dedicated)
+    engine = engine_identity(binary)
+    revision = harness_revision() if benchmark_clean else None
+    toolchain = {
+        "engine": engine,
+        "python_version": platform.python_version(),
+        "php_version": tool_version([str(php), "--version"]),
+    }
+    if revision:
+        toolchain["harness_revision"] = revision
 
     print(f"host: {platform.system()} {platform.machine()} ({os_cpu_count()} cores)")
     print(f"engine: {actual_version}")
@@ -369,16 +405,15 @@ def main() -> int:
         ]
         if page_count is None and measured_pages:
             page_count = int(statistics.median(measured_pages))
+        aggregate = aggregates(samples, page_count)
+        input_sha256, bundle_sha256 = fixture_identity(fixture)
         result: dict[str, Any] = {
             "schema": "pliego.benchmark-result",
             "version": 1,
-            "generated_at": datetime.now(timezone.utc).isoformat(),
-            "host": host_info(args.dedicated),
-            "toolchain": {
-                "engine": engine_identity(binary),
-                "python_version": platform.python_version(),
-                "php_version": tool_version([str(php), "--version"]),
-            },
+            "status": "supported" if aggregate["correctness"]["passed"] else "failed",
+            "generated_at": generated_at,
+            "host": host,
+            "toolchain": toolchain,
             "protocol": {
                 "warmup_iterations": warmup_n,
                 "sample_count": len(samples),
@@ -394,16 +429,14 @@ def main() -> int:
                 "purpose": fixture["purpose"],
                 "category": fixture["category"],
                 "input": fixture["input"],
+                "input_sha256": input_sha256,
+                "bundle_sha256": bundle_sha256,
                 "expected_page_count": page_count,
                 "expected_failure_code": correctness.get("failure_code"),
             },
             "samples": samples,
-            "aggregates": aggregates(samples, page_count),
+            "aggregates": aggregate,
         }
-        violations: list[Any] = []
-        validate_result.validate(result, json.loads(schema.read_text(encoding="utf-8")), "$", violations)
-        if violations:
-            fail(f"result for {fixture_id!r} failed validation: {violations[0]}")
         results.append(result)
         print(f"  -> p50 {result['aggregates']['latency']['p50']:.1f} ms, "
               f"p95 {result['aggregates']['latency']['p95']:.1f} ms, "
@@ -413,9 +446,19 @@ def main() -> int:
         out = Path(args.out)
     else:
         safe_host = platform.system().lower().replace(" ", "-")
-        out = ROOT / "benchmarks" / "baselines" / f"pliego-{args.target}-{safe_host}-{platform.machine().lower()}.json"
+        out = ROOT / "benchmarks" / "baselines" / f"{args.target}-{safe_host}-{platform.machine().lower()}.json"
+    payload = results[0] if len(results) == 1 else {
+        "schema": "pliego.benchmark-bundle",
+        "version": 1,
+        "generated_at": generated_at,
+        "results": results,
+    }
+    violations: list[Any] = []
+    validate_result.validate(payload, json.loads(schema.read_text(encoding="utf-8")), "$", violations)
+    if violations:
+        fail(f"benchmark output failed validation: {violations[0]}")
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(results if len(results) > 1 else results[0], indent=2) + "\n", encoding="utf-8")
+    out.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     print(f"wrote {out}")
     failed = [result["fixture"]["id"] for result in results if not result["aggregates"]["correctness"]["passed"]]
     if failed:

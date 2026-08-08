@@ -31,6 +31,7 @@ purpose = "pure startup: one small page, one bundled font, no scripts or images"
 category = "static"
 samples = 50
 input = "benchmarks/fixtures/minimal-static/input.html"
+assets = ["Ahem.ttf"]
 
 [fixtures.minimal-static.correctness]
 page_count = 1
@@ -41,6 +42,7 @@ purpose = "two-page invoice: Ahem font, paged table, totals, authored page break
 category = "static"
 samples = 50
 input = "benchmarks/fixtures/invoice-showcase/input.html"
+assets = ["Ahem.ttf"]
 
 [fixtures.invoice-showcase.correctness]
 page_count = 2
@@ -51,6 +53,7 @@ purpose = "Chart.js 4.5.1 canvas readback and readiness (managed reference)"
 category = "scripted"
 samples = 50
 input = "ports/pliego/tests/fixtures/chartjs-report/index.html"
+assets = ["ReportSans.ttf", "node_modules/chart.js/dist/chart.umd.js"]
 prepare = [
   "npm ci (in ports/pliego/tests/fixtures/chartjs-report)",
   "copy DejaVuSans.ttf to ReportSans.ttf in ports/pliego/tests/fixtures/chartjs-report",
@@ -65,32 +68,35 @@ purpose = "fragmentation and repeated headers at ~20 pages"
 category = "scale"
 samples = 20
 input = "benchmarks/fixtures/ledger-20-pages/input.html"
+assets = ["Ahem.ttf"]
 generated = true
 
 [fixtures.ledger-20-pages.correctness]
-page_count = 20 # estimate; pinned by the first signed baseline
-text_contains = ["LEDGER PLG-2026-01", "REF-000500"]
+page_count = 20
+text_contains = ["LEDGER PLG-2026-01", "REF-000250"]
 
 [fixtures.statement-100-pages]
 purpose = "100-page statement: scaling, memory, per-page cost"
 category = "scale"
 samples = 20
 input = "benchmarks/fixtures/statement-100-pages/input.html"
+assets = ["Ahem.ttf"]
 generated = true
 
 [fixtures.statement-100-pages.correctness]
-page_count = 100 # estimate; pinned by the first signed baseline
-text_contains = ["STATEMENT PLG-2026-01", "REF-002500"]
+page_count = 100
+text_contains = ["STATEMENT PLG-2026-01", "REF-001300"]
 
 [fixtures.font-image-heavy]
 purpose = "font embedding, image decode, resources and I/O"
 category = "resources"
 samples = 20
 input = "benchmarks/fixtures/font-image-heavy/input.html"
+assets = ["Ahem.ttf"]
 generated = true
 
 [fixtures.font-image-heavy.correctness]
-page_count = 6 # estimate; pinned by the first signed baseline
+page_count = 6
 text_contains = ["Font and image heavy"]
 
 [fixtures.unsupported-paint]

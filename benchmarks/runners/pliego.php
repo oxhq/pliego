@@ -212,7 +212,7 @@ function pdf_text(string $pdfPath): ?string
  *     phase_timings_ms: array<string, float>|null, output: array<string, mixed>,
  *     correctness: array{pass: bool, checks: list<array{name: string, status: string, detail?: string}>},
  *     failure: array{code: string|null, message: string|null, published_pdf: bool},
- *     retained: array{artifacts_dir: string, output_dir: string}|null,
+ *     retained?: array{artifacts_dir: string, output_dir: string},
  *     summary: array<string, mixed>|null} */
 function run_sample(array $state, int $index): array
 {
@@ -344,10 +344,12 @@ function run_sample(array $state, int $index): array
                 if ($text === null) {
                     $checks[] = ['name' => 'text', 'status' => 'fail', 'detail' => 'pdftotext produced no output'];
                 } else {
+                    $normalizedText = preg_replace('/\s+/u', ' ', trim($text)) ?? $text;
                     foreach ($state['textContains'] as $fragment) {
+                        $normalizedFragment = preg_replace('/\s+/u', ' ', trim($fragment)) ?? $fragment;
                         $checks[] = [
                             'name' => "text:{$fragment}",
-                            'status' => str_contains($text, $fragment) ? 'pass' : 'fail',
+                            'status' => str_contains($normalizedText, $normalizedFragment) ? 'pass' : 'fail',
                         ];
                     }
                 }
@@ -387,13 +389,14 @@ function run_sample(array $state, int $index): array
             'message' => $failureMessage,
             'published_pdf' => $pdfPublished,
         ],
-        'retained' => $pass ? null : ['artifacts_dir' => $artifactsDir, 'output_dir' => $outDir],
         'summary' => $summary,
     ];
 
     if ($pass) {
         rrmdir($outDir);
         rrmdir($artifactsDir);
+    } else {
+        $sample['retained'] = ['artifacts_dir' => $artifactsDir, 'output_dir' => $outDir];
     }
     return $sample;
 }

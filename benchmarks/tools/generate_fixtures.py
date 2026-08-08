@@ -23,10 +23,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 FIXTURES = ROOT / "benchmarks" / "fixtures"
 
-# Row heights match the invoice fixture (36px rows, 32px header) so page
-# estimates are comparable. Targets are estimates; the first signed baseline pins them.
-LEDGER_ROWS = 500  # ~20 pages at ~25 rows/page
-STATEMENT_ROWS = 2500  # ~100 pages
+# Counts are pinned against the published Linux 0.1.1 renderer.
+LEDGER_ROWS = 250
+STATEMENT_ROWS = 1300
 FONT_IMAGE_PAGES = 6
 IMAGES_PER_PAGE = 8
 IMAGE_WIDTH = 320
