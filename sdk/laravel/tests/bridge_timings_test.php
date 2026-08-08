@@ -17,7 +17,10 @@ use Pliego\Php\CliRenderer;
 use Pliego\Php\Exception\EngineRenderException;
 use Pliego\Php\RenderOptions;
 
-require dirname(__DIR__).'/vendor/autoload.php';
+$autoload = getenv('PLIEGO_TEST_AUTOLOAD');
+require is_string($autoload) && $autoload !== ''
+    ? $autoload
+    : dirname(__DIR__).'/vendor/autoload.php';
 $localPhpAutoload = dirname(__DIR__, 2).'/php/vendor/autoload.php';
 if (is_file($localPhpAutoload)) {
     require $localPhpAutoload;

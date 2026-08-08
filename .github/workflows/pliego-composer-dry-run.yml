@@ -80,6 +80,7 @@ jobs:
         run: |
           composer --no-interaction --no-plugins --no-scripts --working-dir=tests/pliego/laravel-invoice install --no-progress
           PLIEGO_TEST_AUTOLOAD="$GITHUB_WORKSPACE/tests/pliego/laravel-invoice/vendor/autoload.php" php sdk/laravel/tests/managed_runtime_test.php
+          PLIEGO_TEST_AUTOLOAD="$GITHUB_WORKSPACE/tests/pliego/laravel-invoice/vendor/autoload.php" php sdk/laravel/tests/bridge_timings_test.php
 
       # These are root-level package trees from the committed SDK subtrees. Public
       # repository history splits, tags, pushes, and publication stay separate.
