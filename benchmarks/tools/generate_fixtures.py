@@ -189,8 +189,12 @@ def statement_document(rows: int, title: str, caption: str) -> str:
     <meta charset="utf-8">
     <title>{title}</title>
     <style>
+      @font-face {{
+        font-family: Ahem;
+        src: url("Ahem.ttf");
+      }}
       html, body {{ margin: 0; }}
-      body {{ font: 12px/16px sans-serif; }}
+      body {{ font: 12px/16px Ahem; }}
 {TABLE_CSS}    </style>
   </head>
   <body>

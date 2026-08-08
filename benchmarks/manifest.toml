@@ -69,6 +69,7 @@ generated = true
 
 [fixtures.ledger-20-pages.correctness]
 page_count = 20 # estimate; pinned by the first signed baseline
+text_contains = ["LEDGER PLG-2026-01", "REF-000500"]
 
 [fixtures.statement-100-pages]
 purpose = "100-page statement: scaling, memory, per-page cost"
@@ -79,6 +80,7 @@ generated = true
 
 [fixtures.statement-100-pages.correctness]
 page_count = 100 # estimate; pinned by the first signed baseline
+text_contains = ["STATEMENT PLG-2026-01", "REF-002500"]
 
 [fixtures.font-image-heavy]
 purpose = "font embedding, image decode, resources and I/O"
@@ -89,6 +91,7 @@ generated = true
 
 [fixtures.font-image-heavy.correctness]
 page_count = 6 # estimate; pinned by the first signed baseline
+text_contains = ["Font and image heavy"]
 
 [fixtures.unsupported-paint]
 purpose = "fail-closed path for unsupported CSS paint (gradient, shadow, radius)"
