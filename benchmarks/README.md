@@ -113,7 +113,9 @@ Each sample is one fresh `pliego render` process with the fixture's flags; the
 runner captures wall time, the engine's `scene-report.json`, phase timings,
 PDF bytes/hash, and correctness facts. On Linux it starts Pliego in a new
 session and samples every process retaining that session through `/proc`: RSS,
-CPU and I/O every 30 ms, and PSS from `smaps_rollup` every 250 ms when readable.
+CPU and I/O every 75 ms, and PSS from `smaps_rollup` every 250 ms after the
+first full interval when readable. PSS is null for shorter commands instead
+of reporting an early, misleading value.
 Peak RSS/PSS are maxima of each instantaneous tree sum, never sums of per-PID
 peaks. Raw samples, PID/start-time identities, final counters, signal/exit,
 sample gaps, and sampler CPU are retained in each result.

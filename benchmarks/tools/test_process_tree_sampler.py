@@ -51,7 +51,7 @@ def sampled(command: list[str]) -> dict:
             sys.executable,
             str(SAMPLER),
             "--interval-ms",
-            "30",
+            "75",
             "--pss-interval-ms",
             "250",
             "--",

@@ -114,12 +114,13 @@ def sample_command(
 
         def sample_loop() -> None:
             try:
-                next_pss = started
+                next_pss = started + pss_interval_ms / 1000.0
                 empty_after_exit = 0
                 while True:
                     before_scan = time.monotonic()
                     include_pss = before_scan >= next_pss
                     members = scan_session(process.pid, include_pss)
+                    summed_rss_kib = sum(int(member["rss_pages"]) * page_size // 1024 for member in members)
                     elapsed_ms = round((time.monotonic() - started) * 1000.0, 3)
                     if include_pss:
                         next_pss = before_scan + pss_interval_ms / 1000.0
@@ -164,7 +165,7 @@ def sample_command(
                     samples.append(
                         {
                             "elapsed_ms": elapsed_ms,
-                            "summed_rss_kib": sum(int(member["rss_pages"]) * page_size // 1024 for member in members),
+                            "summed_rss_kib": summed_rss_kib,
                             "summed_pss_kib": (
                                 sum(int(value) for value in pss_values)
                                 if include_pss and members and all(value is not None for value in pss_values)
@@ -246,7 +247,8 @@ def sample_command(
         "discovery": (
             "all /proc PIDs whose session id matches the root; membership survives reparenting, "
             "but a process created and reaped entirely between samples cannot be observed, and "
-            "counter increments after a process's final observation cannot be recovered"
+            "counter increments after a process's final observation cannot be recovered; PSS starts "
+            "after one full PSS interval and is unavailable for shorter commands"
         ),
         "sampler_cpu_user_ms": round(sampler_user_ms, 3),
         "sampler_cpu_sys_ms": round(sampler_sys_ms, 3),
@@ -263,7 +265,7 @@ def main() -> int:
     parser.add_argument("--cwd", default=os.getcwd())
     parser.add_argument("--stdout", default=os.devnull, help="command stdout file")
     parser.add_argument("--stderr", default=os.devnull, help="command stderr file")
-    parser.add_argument("--interval-ms", type=float, default=30.0)
+    parser.add_argument("--interval-ms", type=float, default=75.0)
     parser.add_argument("--pss-interval-ms", type=float, default=250.0)
     parser.add_argument("--descendant-grace-ms", type=float, default=1000.0)
     parser.add_argument("command", nargs=argparse.REMAINDER)
