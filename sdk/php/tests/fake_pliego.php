@@ -110,10 +110,9 @@ file_put_contents("{$artifacts}/pdf-structure.json", json_encode([
     ]],
 ], JSON_PRETTY_PRINT)."\n");
 
-fwrite(STDOUT, json_encode([
+$summary = [
     'status' => 'rendered',
     'engine' => 'pliego',
-    'engine_timings' => ['total_ms' => (hrtime(true) - $engineStartedAt) / 1_000_000],
     'scene' => [
         'capture_status' => 'complete',
         'capture_code' => null,
@@ -122,4 +121,8 @@ fwrite(STDOUT, json_encode([
     'artifacts' => $artifacts,
     'scene_artifact' => "{$artifacts}/scene.json",
     'pdf_structure' => "{$artifacts}/pdf-structure.json",
-])."\n");
+];
+if (!str_contains($html, 'NO_ENGINE_TIMINGS')) {
+    $summary['engine_timings'] = ['total_ms' => (hrtime(true) - $engineStartedAt) / 1_000_000];
+}
+fwrite(STDOUT, json_encode($summary)."\n");

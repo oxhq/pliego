@@ -74,6 +74,20 @@ timingExpect(
 );
 timingExpect(!str_contains(json_encode($result->bridgeTimings, JSON_THROW_ON_ERROR), $root), 'timings leak no paths');
 
+$unavailable = $renderer->render(
+    '<p>NO_ENGINE_TIMINGS</p>',
+    "{$root}/unavailable-input",
+    "{$root}/unavailable.pdf",
+    "{$root}/unavailable-artifacts",
+    assets: ['assets/test.txt' => $asset],
+)->bridgeTimings;
+timingExpect($unavailable['native_engine_ms'] === null, 'missing native total remains unavailable');
+timingExpect($unavailable['bridge_overhead_ms'] === null, 'bridge overhead is not fabricated without native total');
+timingExpect(
+    ($unavailable['unavailable']['native_engine'] ?? null) === 'engine-did-not-report-total-engine',
+    'missing native total has an explicit reason',
+);
+
 try {
     $renderer->render(
         'FAIL_ENGINE',
