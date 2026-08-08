@@ -122,7 +122,11 @@ def run(binary: Path, fixture: Path, root: Path) -> tuple[bytes, bytes, bytes, b
         fail(result.stderr[-4000:] or result.stdout[-4000:])
     summary = final_json(result)
     require(summary.get("status") == "rendered", repr(summary))
-    require(summary.get("readiness", {}).get("fixture") == "live-svg-vector", repr(summary))
+    readiness = summary.get("readiness")
+    require(
+        isinstance(readiness, dict) and readiness.get("fixture") == "live-svg-vector",
+        repr(summary),
+    )
 
     layout = read_json(artifact(summary, "layout_debug"))
     fragments = layout.get("fragments")

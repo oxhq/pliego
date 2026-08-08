@@ -11,6 +11,7 @@
 </style>
 <img id="vector" src="graphic.svg" width="160" height="80" alt="Retained SVG vector fixture">
 <script>
+  window.pliego?.defer();
   queueMicrotask(async () => {
     try {
       for (let attempt = 0; !window.pliego && attempt < 120; attempt += 1) {

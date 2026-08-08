@@ -167,6 +167,8 @@ def verify(summary: dict[str, Any], css_url: str, css: bytes, font_url: str, fon
     readiness = read_object(artifacts / "readiness.json")
     require(readiness.get("status") == "ready", repr(readiness))
     require(readiness.get("font_status") == "loaded", repr(readiness))
+    payload = readiness.get("payload")
+    require(isinstance(payload, dict) and payload.get("fixture") == "live-remote-font", repr(readiness))
     loaded_resource(artifacts, css_url, css, "text/css")
     loaded_resource(artifacts, font_url, font, "font/woff2")
 
@@ -216,11 +218,13 @@ def main() -> int:
         "/family.css",
         "text/css; charset=utf-8",
         lambda: (
-            '@font-face { font-family: "Pliego Remote"; '
-            f'src: url("{font_server.base_url}fixture.woff2") format("woff2"); }}\n'
-            '.sample { font: 200px "Pliego Remote"; }\n'
-        ).encode()
-        + css_suffix[0],
+            (
+                '@font-face { font-family: "Pliego Remote"; '
+                f'src: url("{font_server.base_url}fixture.woff2") format("woff2"); }}\n'
+                '.sample { font: 200px "Pliego Remote"; }\n'
+            ).encode()
+            + css_suffix[0]
+        ),
     )
     servers = (css_server, font_server)
     threads = [threading.Thread(target=server.serve_forever, daemon=True) for server in servers]
@@ -233,7 +237,10 @@ def main() -> int:
 <meta charset="utf-8">
 <link rel="stylesheet" href="{css_url}">
 <div class="sample">P</div>
-<script>document.fonts.ready.then(() => window.pliego.ready({{fixture: "live-remote-font"}}));</script>
+<script>
+window.pliego.defer();
+document.fonts.ready.then(() => window.pliego.ready({{fixture: "live-remote-font"}}));
+</script>
 """
         first_css = css_server.body()
         first = render(binary, output / "first", document, (css_server.base_url, font_server.base_url))

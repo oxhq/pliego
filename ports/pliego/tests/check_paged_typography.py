@@ -161,6 +161,12 @@ def render(binary: Path, repo: Path, case: Case, fixture: Path, destination: Pat
     require(result.returncode == 0, f"{case.fixture} failed: {result.stderr[-3000:]}")
     summary = final_json(result)
     require(summary.get("status") == "rendered", repr(summary))
+    readiness = summary.get("readiness")
+    expected_fixture = f"paged-typography-{Path(case.fixture).stem}"
+    require(
+        isinstance(readiness, dict) and readiness.get("fixture") == expected_fixture,
+        repr(summary),
+    )
     require(summary.get("document_pdf_status") == "rendered", repr(summary))
     require(summary.get("scene", {}).get("text_mapping_gap_count") == 0, repr(summary.get("scene")))
     return summary

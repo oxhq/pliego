@@ -23,6 +23,7 @@
   <body>
     <p>LATIN CONTROL LATIN CONTROL LATIN CONTROL LATIN CONTROL LATIN CONTROL LATIN CONTROL LATIN CONTROL LATIN CONTROL</p>
     <script>
+      window.pliego?.defer();
       queueMicrotask(async () => {
         try {
           for (let attempt = 0; !window.pliego && attempt < 120; attempt += 1) {

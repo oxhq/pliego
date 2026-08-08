@@ -61,7 +61,15 @@ def materialize_fixture(template: Path, font: Path, output: Path) -> Path:
     return output
 
 
-def render(binary: Path, fixture: Path, root: Path, host: str, *, allow_host_fonts: bool = False) -> dict[str, Any]:
+def render(
+    binary: Path,
+    fixture: Path,
+    root: Path,
+    host: str,
+    expected_fixture: str,
+    *,
+    allow_host_fonts: bool = False,
+) -> dict[str, Any]:
     home = root / f"home-{host}"
     home.mkdir()
     runtime = home / "runtime"
@@ -95,6 +103,11 @@ def render(binary: Path, fixture: Path, root: Path, host: str, *, allow_host_fon
     require(result.returncode == 0, f"{host} render failed: {result.stderr[-2000:]}")
     summary = final_json(result)
     require(summary.get("status") == "rendered", repr(summary))
+    readiness = summary.get("readiness")
+    require(
+        isinstance(readiness, dict) and readiness.get("fixture") == expected_fixture,
+        repr(summary),
+    )
     require(summary.get("document_pdf_status") == "rendered", repr(summary))
     return summary
 
@@ -202,13 +215,13 @@ def check(binary: Path) -> None:
     with tempfile.TemporaryDirectory(prefix="pliego-font-resolution-") as temp:
         root = Path(temp)
         fixture = materialize_fixture(fixture_template, fixture_root / "Ahem.ttf", root / "font-resolution.html")
-        first = render(binary, fixture, root, "first")
-        second = render(binary, fixture, root, "second")
+        first = render(binary, fixture, root, "first", "font-resolution")
+        second = render(binary, fixture, root, "second", "font-resolution")
         require(first["render_id"] == second["render_id"], "render IDs differ across clean homes")
         require(first["scene"]["hash"] == second["scene"]["hash"], "scene hashes differ across clean homes")
         require(verify_fonts(first) == verify_fonts(second), "font reports differ across clean homes")
         require(verify_pdf(first) == verify_pdf(second), "PDF bytes differ across clean homes")
-        opted_in = render(binary, host_fixture, root, "host-opt-in", allow_host_fonts=True)
+        opted_in = render(binary, host_fixture, root, "host-opt-in", "text-scene", allow_host_fonts=True)
         verify_host_opt_in(opted_in)
 
 
