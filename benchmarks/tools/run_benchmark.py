@@ -34,8 +34,6 @@ import random
 import statistics
 import subprocess
 import sys
-import tempfile
-import time
 import tomllib
 from datetime import datetime, timezone
 from pathlib import Path
@@ -254,9 +252,7 @@ def collect_samples(
     php: Path, fixture_id: str, fixture: dict[str, Any], binary: Path, samples: int, warmup: int
 ) -> list[dict[str, Any]]:
     command = build_command(php, fixture_id, fixture, binary, samples, warmup)
-    started = time.monotonic()
     result = subprocess.run(command, capture_output=True, text=True, timeout=max(600, samples * 60))
-    wall_s = time.monotonic() - started
     lines = [line for line in result.stdout.splitlines() if line.strip()]
     samples_out: list[dict[str, Any]] = []
     for line in lines:
