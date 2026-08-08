@@ -34,5 +34,6 @@ jobs:
           php --version
           python -m compileall -q benchmarks/tools
           python benchmarks/tools/test_validate_result.py
+          python benchmarks/tools/test_run_benchmark.py
           python benchmarks/tools/generate_fixtures.py --check
           php -l benchmarks/runners/pliego.php

@@ -263,9 +263,12 @@ def collect_samples(
             continue
         if isinstance(parsed, dict) and "wall_ms" in parsed:
             samples_out.append(parsed)
-    if not samples_out:
+    if result.returncode != 0:
+        fail(f"runner failed for {fixture_id!r}: {result.stderr[-2000:]}")
+    if len(samples_out) != samples:
         fail(
-            f"runner produced no samples for {fixture_id!r}: {result.stderr[-2000:]}"
+            f"runner produced {len(samples_out)} of {samples} samples for {fixture_id!r}: "
+            f"{result.stderr[-2000:]}"
         )
     return samples_out
 
