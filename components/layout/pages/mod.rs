@@ -704,6 +704,7 @@ impl BlockPageBuilder {
     }
 
     /// Place retained table rows at legal row boundaries without recomputing the table grid.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn place_table_child(
         &mut self,
         child_index: usize,
@@ -1064,16 +1065,15 @@ impl BlockPageBuilder {
             }
             if let (Some(group), Some(group_block_size)) =
                 (avoided_group, avoided_group_block_size)
+                && group_block_size > body_page_capacity
             {
-                if group_block_size > body_page_capacity {
-                    self.warn_oversized_table_row_group_avoid(
-                        child_index,
-                        table_node,
-                        *group,
-                        group_block_size,
-                        body_page_capacity,
-                    );
-                }
+                self.warn_oversized_table_row_group_avoid(
+                    child_index,
+                    table_node,
+                    *group,
+                    group_block_size,
+                    body_page_capacity,
+                );
             }
             let oversized_fragment = oversized.then(|| {
                 cell_fragments
@@ -1543,7 +1543,7 @@ impl BlockPageBuilder {
             } else if fragment.fragment_index != 0 {
                 return TableRowsSupport::Unsupported;
             }
-            if previous.map_or(true, |previous| {
+            if previous.is_none_or(|previous| {
                 previous.row_index != fragment.row_index
                     || previous.cell_index != fragment.cell_index
             }) && fragment.fragment_index != 0

@@ -2777,7 +2777,7 @@ fn solid_border_paint_rects(
         (widths.bottom, &colors.bottom),
         (widths.left, &colors.left),
     ] {
-        let color = rgba(side.color.clone());
+        let color = rgba(side.color);
         if width <= 0.0
             || color.a <= 0.0
             || matches!(side.style, BorderStyle::None | BorderStyle::Hidden)
@@ -2838,7 +2838,7 @@ fn append_solid_border_paint_rect(
     if rect.width() <= 0.0 || rect.height() <= 0.0 {
         return Some(());
     }
-    let color = rgba(style_color.color.clone());
+    let color = rgba(style_color.color);
     if color.a <= 0.0 || matches!(style_color.style, BorderStyle::None | BorderStyle::Hidden) {
         return Some(());
     }
@@ -3014,10 +3014,10 @@ fn separate_table_grid_border_rows(
     )
 }
 
-fn collapsed_table_border_rows<'a>(
-    grid: &'a Arc<BoxFragment>,
+fn collapsed_table_border_rows(
+    grid: &Arc<BoxFragment>,
     containing_block_origin: PhysicalPoint<Au>,
-) -> Option<Vec<(&'a Arc<BoxFragment>, Vec<LayoutDebugTableBorder>)>> {
+) -> Option<Vec<(&Arc<BoxFragment>, Vec<LayoutDebugTableBorder>)>> {
     if !grid.captures_table_borders() {
         return None;
     }
@@ -3208,7 +3208,7 @@ fn append_solid_table_border(
     {
         return;
     }
-    let color = rgba(style_color.color.clone());
+    let color = rgba(style_color.color);
     if color.a <= 0.0 {
         return;
     }

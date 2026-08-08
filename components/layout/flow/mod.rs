@@ -919,6 +919,7 @@ fn layout_block_level_children_sequentially(
     fragments
 }
 
+#[allow(clippy::too_many_arguments)]
 fn layout_block_level_child(
     layout_context: &LayoutContext,
     positioning_context: &mut PositioningContext,

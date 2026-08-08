@@ -1067,6 +1067,7 @@ impl TextRunLineItem {
         self.text.is_empty()
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn merge_if_possible(
         &mut self,
         new_info: &Arc<FontAndScriptInfo>,

@@ -97,7 +97,7 @@ pub enum WebResourcePolicyDecision {
     Allow,
     /// Complete the load without network I/O using the supplied response and body.
     Synthesize {
-        response: WebResourceResponse,
+        response: Box<WebResourceResponse>,
         body: Vec<u8>,
     },
     /// Cancel the load before network I/O.

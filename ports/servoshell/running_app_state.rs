@@ -61,7 +61,7 @@ fn handle_web_resource_load(policy: Option<&WebResourcePolicyHandler>, load: Web
     match decide_web_resource_policy(policy, load.request()) {
         WebResourcePolicyDecision::Allow => {},
         WebResourcePolicyDecision::Synthesize { response, body } => {
-            let mut intercepted = load.intercept(response);
+            let mut intercepted = load.intercept(*response);
             if !body.is_empty() {
                 intercepted.send_body_data(body);
             }

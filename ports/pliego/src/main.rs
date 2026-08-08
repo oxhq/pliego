@@ -1281,8 +1281,9 @@ fn render(request: RenderRequest) {
                             request,
                             fetched,
                         ) {
-                            Ok(()) => {
-                                servoshell::WebResourcePolicyDecision::Synthesize { response, body }
+                            Ok(()) => servoshell::WebResourcePolicyDecision::Synthesize {
+                                response: Box::new(response),
+                                body,
                             },
                             Err(failure) => {
                                 captured_policy_failures.borrow_mut().push(failure);
@@ -1316,8 +1317,9 @@ fn render(request: RenderRequest) {
                     http::HeaderValue::from_static(content_type),
                 );
                 servoshell::WebResourcePolicyDecision::Synthesize {
-                    response: servoshell::WebResourceResponse::new(request.url.clone())
-                        .headers(headers),
+                    response: Box::new(
+                        servoshell::WebResourceResponse::new(request.url.clone()).headers(headers),
+                    ),
                     body,
                 }
             },
