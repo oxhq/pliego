@@ -3,10 +3,9 @@
 """Dependency-free JSON Schema validation for benchmark results.
 
 Implements the subset of draft-07 used by `schema/benchmark-result.v1.json`
-(no `jsonschema` required): type (including null unions), const, enum,
+(no `jsonschema` required): type (including null unions), const, enum, oneOf,
 required, properties, additionalProperties, minimum, minItems, $ref
-resolution into `definitions`, and pattern. Anything outside that subset is
-ignored so the schema stays the only authority.
+resolution into `definitions`, and pattern.
 
 Usage:
     python3 benchmarks/tools/validate_result.py <result.json> [<schema.json>]
@@ -74,6 +73,21 @@ def validate(
         validate(data, resolve(root, schema["$ref"]), path, violations, root)
         return
 
+    if "oneOf" in schema:
+        branch_violations: list[list[Violation]] = []
+        for branch in schema["oneOf"]:
+            failures: list[Violation] = []
+            validate(data, branch, path, failures, root)
+            branch_violations.append(failures)
+        matches = sum(not failures for failures in branch_violations)
+        if matches != 1:
+            closest = min(branch_violations, key=len)
+            detail = f"; closest: {closest[0]}" if closest else ""
+            violations.append(
+                Violation(path, f"expected exactly one oneOf match, got {matches}{detail}")
+            )
+        return
+
     if "type" in schema:
         types = schema["type"] if isinstance(schema["type"], list) else [schema["type"]]
         if not any(type_matches(data, t) for t in types):
@@ -116,6 +130,8 @@ def validate(
                 validate(value, properties[key], child, violations, root)
             elif schema.get("additionalProperties") is False:
                 violations.append(Violation(path, f"unexpected property {key!r}"))
+            elif isinstance(schema.get("additionalProperties"), dict):
+                validate(value, schema["additionalProperties"], child, violations, root)
 
 
 def load_json(path: Path) -> Any:

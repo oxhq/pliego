@@ -2,38 +2,94 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://pliego.dev/schema/benchmark-result.v1.json",
   "title": "Pliego benchmark result",
-  "description": "One benchmark-result document per (target, fixture) run. Raw samples are retained, never only averages.",
-  "type": "object",
-  "additionalProperties": false,
-  "required": [
-    "schema",
-    "version",
-    "generated_at",
-    "host",
-    "toolchain",
-    "protocol",
-    "target",
-    "fixture",
-    "samples",
-    "aggregates"
+  "description": "One benchmark result, an explicit not-applicable record, or a validated multi-fixture bundle.",
+  "oneOf": [
+    { "$ref": "#/definitions/result" },
+    { "$ref": "#/definitions/not_applicable" },
+    { "$ref": "#/definitions/bundle" }
   ],
-  "properties": {
-    "schema": { "const": "pliego.benchmark-result" },
-    "version": { "const": 1 },
-    "generated_at": { "type": "string" },
-    "host": { "$ref": "#/definitions/host" },
-    "toolchain": { "$ref": "#/definitions/toolchain" },
-    "protocol": { "$ref": "#/definitions/protocol" },
-    "target": { "$ref": "#/definitions/target" },
-    "fixture": { "$ref": "#/definitions/fixture" },
-    "samples": {
-      "type": "array",
-      "minItems": 1,
-      "items": { "$ref": "#/definitions/sample" }
-    },
-    "aggregates": { "$ref": "#/definitions/aggregates" }
-  },
   "definitions": {
+    "result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "version",
+        "generated_at",
+        "host",
+        "toolchain",
+        "protocol",
+        "target",
+        "fixture",
+        "samples",
+        "aggregates"
+      ],
+      "properties": {
+        "schema": { "const": "pliego.benchmark-result" },
+        "version": { "const": 1 },
+        "generated_at": { "type": "string" },
+        "status": { "type": "string", "enum": ["supported", "failed"] },
+        "host": { "$ref": "#/definitions/host" },
+        "toolchain": { "$ref": "#/definitions/toolchain" },
+        "protocol": { "$ref": "#/definitions/protocol" },
+        "target": { "$ref": "#/definitions/target" },
+        "fixture": { "$ref": "#/definitions/fixture" },
+        "samples": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/definitions/sample" }
+        },
+        "aggregates": { "$ref": "#/definitions/aggregates" }
+      }
+    },
+    "not_applicable": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "version",
+        "generated_at",
+        "status",
+        "reason",
+        "host",
+        "toolchain",
+        "protocol",
+        "target",
+        "fixture"
+      ],
+      "properties": {
+        "schema": { "const": "pliego.benchmark-result" },
+        "version": { "const": 1 },
+        "generated_at": { "type": "string" },
+        "status": { "const": "not-applicable" },
+        "reason": { "type": "string", "pattern": ".+" },
+        "host": { "$ref": "#/definitions/host" },
+        "toolchain": { "$ref": "#/definitions/toolchain" },
+        "protocol": { "$ref": "#/definitions/not_applicable_protocol" },
+        "target": { "$ref": "#/definitions/target" },
+        "fixture": { "$ref": "#/definitions/fixture" }
+      }
+    },
+    "bundle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "version", "generated_at", "results"],
+      "properties": {
+        "schema": { "const": "pliego.benchmark-bundle" },
+        "version": { "const": 1 },
+        "generated_at": { "type": "string" },
+        "results": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "oneOf": [
+              { "$ref": "#/definitions/result" },
+              { "$ref": "#/definitions/not_applicable" }
+            ]
+          }
+        }
+      }
+    },
     "host": {
       "type": "object",
       "additionalProperties": false,
@@ -57,17 +113,22 @@
         "engine": { "$ref": "#/definitions/engine" },
         "python_version": { "type": "string" },
         "php_version": { "type": "string" },
-        "competitors": { "type": "object" }
+        "harness_revision": { "type": "string", "pattern": "^[0-9a-f]{7,64}$" },
+        "competitors": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        }
       }
     },
     "engine": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["name", "version", "binary_path"],
+      "required": ["name", "version"],
       "properties": {
-        "name": { "type": "string", "const": "pliego" },
+        "name": { "type": "string" },
         "version": { "type": "string" },
         "commit": { "type": "string" },
+        "package": { "type": "string" },
         "binary_path": { "type": "string" },
         "binary_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
         "binary_bytes": { "type": "integer", "minimum": 0 },
@@ -97,6 +158,27 @@
         "rss_method": { "type": "string", "enum": ["time-v", "ps-poll", "unavailable"] }
       }
     },
+    "not_applicable_protocol": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "warmup_iterations",
+        "sample_count",
+        "sample_order",
+        "network",
+        "binary_profile",
+        "rss_method"
+      ],
+      "properties": {
+        "warmup_iterations": { "type": "integer", "minimum": 0 },
+        "sample_count": { "const": 0 },
+        "sample_order": { "type": "string", "enum": ["random", "sequential"] },
+        "seed": { "type": "integer" },
+        "network": { "const": "disabled" },
+        "binary_profile": { "type": "string" },
+        "rss_method": { "const": "unavailable" }
+      }
+    },
     "target": {
       "type": "object",
       "additionalProperties": false,
@@ -118,6 +200,8 @@
           "enum": ["static", "scripted", "scale", "resources", "failure"]
         },
         "input": { "type": "string" },
+        "input_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "bundle_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
         "expected_page_count": { "type": ["integer", "null"], "minimum": 1 },
         "expected_failure_code": { "type": ["string", "null"] }
       }
@@ -125,7 +209,19 @@
     "sample": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["index", "ok", "exit_code", "wall_ms", "user_ms", "sys_ms", "peak_rss_kib"],
+      "required": [
+        "index",
+        "ok",
+        "exit_code",
+        "wall_ms",
+        "user_ms",
+        "sys_ms",
+        "peak_rss_kib",
+        "rss_method",
+        "output",
+        "correctness",
+        "failure"
+      ],
       "properties": {
         "index": { "type": "integer", "minimum": 0 },
         "ok": { "type": "boolean" },
@@ -143,10 +239,20 @@
           "type": ["object", "null"],
           "additionalProperties": { "type": "number", "minimum": 0 }
         },
+        "retained": { "$ref": "#/definitions/retained" },
         "output": { "$ref": "#/definitions/output" },
         "correctness": { "$ref": "#/definitions/correctness" },
         "failure": { "$ref": "#/definitions/failure" },
         "summary": { "type": ["object", "null"] }
+      }
+    },
+    "retained": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["output_dir", "artifacts_dir"],
+      "properties": {
+        "output_dir": { "type": "string" },
+        "artifacts_dir": { "type": "string" }
       }
     },
     "output": {
@@ -268,7 +374,10 @@
           "required": ["count"],
           "properties": {
             "count": { "type": "integer", "minimum": 0 },
-            "codes": { "type": "object" }
+            "codes": {
+              "type": "object",
+              "additionalProperties": { "type": "integer", "minimum": 1 }
+            }
           }
         }
       }
