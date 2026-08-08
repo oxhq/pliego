@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+$engineStartedAt = hrtime(true);
 $mode = getenv('PLIEGO_DOCTOR_FAKE_MODE');
 
 if (($argv[1] ?? null) === '--version') {
@@ -41,6 +42,7 @@ if (str_contains($html, 'FAIL_ENGINE')) {
     fwrite(STDOUT, json_encode([
         'status' => 'failed',
         'error' => ['code' => 'RESOURCE_DENIED', 'message' => 'synthetic denial'],
+        'phase_timings_ms' => ['total_engine' => (hrtime(true) - $engineStartedAt) / 1_000_000],
     ])."\n");
     fwrite(STDERR, "pliego: RESOURCE_DENIED: synthetic denial\n");
     exit(1);
@@ -111,6 +113,7 @@ file_put_contents("{$artifacts}/pdf-structure.json", json_encode([
 fwrite(STDOUT, json_encode([
     'status' => 'rendered',
     'engine' => 'pliego',
+    'phase_timings_ms' => ['total_engine' => (hrtime(true) - $engineStartedAt) / 1_000_000],
     'scene' => [
         'capture_status' => 'complete',
         'capture_code' => null,

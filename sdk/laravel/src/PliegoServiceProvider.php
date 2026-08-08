@@ -37,9 +37,13 @@ final class PliegoServiceProvider extends ServiceProvider
             );
         });
         $this->app->singleton(CliRenderer::class, function ($app): CliRenderer {
+            $runtimeStartedAt = hrtime(true);
+            $binary = $app->make(ManagedRuntime::class)->binary();
+
             return new CliRenderer(
-                [$app->make(ManagedRuntime::class)->binary()],
+                [$binary],
                 (int) $app['config']->get('pliego.timeout_seconds'),
+                runtimeResolutionNanoseconds: hrtime(true) - $runtimeStartedAt,
             );
         });
         $this->app->singleton(DocumentFactory::class, function ($app): DocumentFactory {

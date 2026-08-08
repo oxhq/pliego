@@ -97,6 +97,7 @@ final class PendingDocument
 
     public function render(string $filename = 'document.pdf'): RenderResult
     {
+        $totalStartedAt = hrtime(true);
         if ($filename === '' || basename($filename) !== $filename || str_contains($filename, "\0")) {
             throw new InvalidArgumentException('PDF filename must be a plain file name');
         }
@@ -108,9 +109,12 @@ final class PendingDocument
         if (!@mkdir($job, 0700)) {
             throw new RuntimeException("cannot create Pliego job directory {$job}");
         }
+        $viewStartedAt = hrtime(true);
+        $html = $this->views->make($this->view, $this->data)->render();
+        $viewFinishedAt = hrtime(true);
 
         return $this->renderer->render(
-            $this->views->make($this->view, $this->data)->render(),
+            $html,
             "{$job}/input",
             "{$job}/{$filename}",
             "{$job}/artifacts",
@@ -122,6 +126,11 @@ final class PendingDocument
                 allowedHttpRoots: array_values(array_unique($this->allowedHttpRoots)),
             ),
             $this->assets,
+            bridgeContext: [
+                'total_started_ns' => $totalStartedAt,
+                'laravel_setup_ns' => $viewStartedAt - $totalStartedAt,
+                'view_render_ns' => $viewFinishedAt - $viewStartedAt,
+            ],
         );
     }
 

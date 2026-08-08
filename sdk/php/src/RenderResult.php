@@ -12,12 +12,14 @@ final readonly class RenderResult
 
     /**
      * @param array<string, mixed> $metadata
+     * @param array<string, mixed> $bridgeTimings
      */
     public function __construct(
         public string $pdfPath,
         public string $artifactsPath,
         public string $inputBundlePath,
         public array $metadata,
+        public array $bridgeTimings = [],
     ) {
         $this->jobPath = dirname($inputBundlePath);
     }

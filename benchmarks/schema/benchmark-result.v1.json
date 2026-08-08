@@ -243,11 +243,84 @@
           "type": ["object", "null"],
           "additionalProperties": { "type": "number", "minimum": 0 }
         },
+        "bridge_timings": { "$ref": "#/definitions/bridge_timings" },
         "retained": { "$ref": "#/definitions/retained" },
         "output": { "$ref": "#/definitions/output" },
         "correctness": { "$ref": "#/definitions/correctness" },
         "failure": { "$ref": "#/definitions/failure" },
         "summary": { "type": ["object", "null"] }
+      }
+    },
+    "bridge_timings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "version",
+        "total_ms",
+        "native_engine_ms",
+        "bridge_overhead_ms",
+        "phases_ms",
+        "unavailable",
+        "notes",
+        "diagnostics"
+      ],
+      "properties": {
+        "schema": { "const": "pliego.php-bridge-timings" },
+        "version": { "const": 1 },
+        "total_ms": { "type": "number", "minimum": 0 },
+        "native_engine_ms": { "type": ["number", "null"], "minimum": 0 },
+        "bridge_overhead_ms": { "type": ["number", "null"], "minimum": 0 },
+        "phases_ms": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "laravel_setup",
+            "view_render",
+            "bundle_staging",
+            "asset_manifest_hash",
+            "runtime_resolution",
+            "runtime_install",
+            "process_launch",
+            "stdin_stdout",
+            "native_wait",
+            "result_parse",
+            "publication_copy",
+            "cleanup",
+            "unattributed"
+          ],
+          "properties": {
+            "laravel_setup": { "type": ["number", "null"], "minimum": 0 },
+            "view_render": { "type": ["number", "null"], "minimum": 0 },
+            "bundle_staging": { "type": "number", "minimum": 0 },
+            "asset_manifest_hash": { "type": "number", "minimum": 0 },
+            "runtime_resolution": { "type": ["number", "null"], "minimum": 0 },
+            "runtime_install": { "type": ["number", "null"], "minimum": 0 },
+            "process_launch": { "type": "number", "minimum": 0 },
+            "stdin_stdout": { "type": "number", "minimum": 0 },
+            "native_wait": { "type": "number", "minimum": 0 },
+            "result_parse": { "type": "number", "minimum": 0 },
+            "publication_copy": { "type": ["number", "null"], "minimum": 0 },
+            "cleanup": { "type": "number", "minimum": 0 },
+            "unattributed": { "type": "number", "minimum": 0 }
+          }
+        },
+        "unavailable": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        },
+        "notes": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        },
+        "diagnostics": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["retained"],
+          "properties": {
+            "retained": { "type": "boolean" }
+          }
+        }
       }
     },
     "retained": {

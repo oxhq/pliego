@@ -10,6 +10,7 @@ class RenderException extends RuntimeException
 {
     public readonly string $jobPath;
 
+    /** @param array<string, mixed> $bridgeTimings */
     public function __construct(
         public readonly string $errorCode,
         public readonly int $exitCode,
@@ -17,6 +18,7 @@ class RenderException extends RuntimeException
         string $message,
         public readonly string $inputBundlePath,
         public readonly string $artifactsPath,
+        public readonly array $bridgeTimings = [],
     ) {
         $this->jobPath = dirname($inputBundlePath);
         parent::__construct($message);
