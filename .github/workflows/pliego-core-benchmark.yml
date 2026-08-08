@@ -1,0 +1,66 @@
+name: Pliego core benchmark
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - ".github/workflows/pliego-core-benchmark.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "ports/pliego/Cargo.toml"
+      - "ports/pliego/benches/document_scene_pdf.rs"
+      - "ports/pliego/src/image_limits.rs"
+      - "ports/pliego/src/pdf.rs"
+      - "ports/pliego/src/scene.rs"
+      - "components/fonts/tests/support/dejavu-fonts-ttf-2.37/ttf/DejaVuSans.ttf"
+      - "tests/wpt/tests/images/lcp-1x1.png"
+  pull_request:
+    paths:
+      - ".github/workflows/pliego-core-benchmark.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "ports/pliego/Cargo.toml"
+      - "ports/pliego/benches/document_scene_pdf.rs"
+      - "ports/pliego/src/image_limits.rs"
+      - "ports/pliego/src/pdf.rs"
+      - "ports/pliego/src/scene.rs"
+      - "components/fonts/tests/support/dejavu-fonts-ttf-2.37/ttf/DejaVuSans.ttf"
+      - "tests/wpt/tests/images/lcp-1x1.png"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pliego-core-benchmark-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  correctness:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+
+      - name: Install text and image oracles
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends poppler-utils libfreetype6-dev libfontconfig1-dev
+
+      - name: Use a minimal Rust toolchain
+        run: |
+          rustup toolchain install 1.95.0 --profile minimal
+          rustup override set 1.95.0
+
+      - name: Check core boundary and correctness preflight
+        run: |
+          tree=$(cargo tree -p pliego --no-default-features --edges normal --locked)
+          if grep -E '(^|[[:space:]])(servo-layout|servoshell|mozjs) v' <<< "$tree"; then
+            echo "core benchmark pulled in the shell, layout, or JavaScript runtime" >&2
+            exit 1
+          fi
+          cargo test -p pliego --lib --no-default-features --locked
+          cargo test -p pliego --bench document_scene_pdf --no-default-features --locked
