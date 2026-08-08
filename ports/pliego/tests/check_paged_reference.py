@@ -19,23 +19,16 @@ def fail(message: str, code: int = 1) -> None:
     raise SystemExit(code)
 
 
-def extract_reference(
-    scene: dict[str, Any], layout: dict[str, Any]
-) -> dict[str, Any]:
+def extract_reference(scene: dict[str, Any], layout: dict[str, Any]) -> dict[str, Any]:
     pages = scene.get("pages")
     if not isinstance(pages, list):
         fail("scene.json has no pages array")
     page_sequence = layout.get("page_sequence")
-    if not isinstance(page_sequence, dict) or not isinstance(
-        page_sequence.get("pages"), list
-    ):
+    if not isinstance(page_sequence, dict) or not isinstance(page_sequence.get("pages"), list):
         fail("layout-debug.json has no page sequence")
     layout_pages = page_sequence["pages"]
     if len(layout_pages) != len(pages):
-        fail(
-            "layout/scene page count differs: "
-            f"layout has {len(layout_pages)}, scene has {len(pages)}"
-        )
+        fail(f"layout/scene page count differs: layout has {len(layout_pages)}, scene has {len(pages)}")
     extracted = []
     for index, page in enumerate(pages):
         if not isinstance(page, dict) or not isinstance(page.get("size"), dict):
@@ -47,9 +40,7 @@ def extract_reference(
         if not isinstance(operations, list):
             fail(f"scene page {index} has no operations array")
         text_operations = [
-            operation
-            for operation in operations
-            if isinstance(operation, dict) and operation.get("type") == "text"
+            operation for operation in operations if isinstance(operation, dict) and operation.get("type") == "text"
         ]
         if not text_operations or not isinstance(text_operations[0].get("glyphs"), list):
             fail(f"scene page {index} has no text glyphs")
@@ -70,9 +61,7 @@ def extract_reference(
                     "y": glyphs[0].get("y"),
                 },
                 "ordered_operations": [
-                    operation.get("type")
-                    for operation in operations
-                    if isinstance(operation, dict)
+                    operation.get("type") for operation in operations if isinstance(operation, dict)
                 ],
                 "ordered_text": [operation["text"] for operation in text_operations],
             }
@@ -82,9 +71,7 @@ def extract_reference(
     if not isinstance(raw_continuations, list):
         fail("layout-debug.json page continuations are not an array")
     for index, continuation in enumerate(raw_continuations):
-        if not isinstance(continuation, dict) or not isinstance(
-            continuation.get("token"), dict
-        ):
+        if not isinstance(continuation, dict) or not isinstance(continuation.get("token"), dict):
             fail(f"layout-debug.json continuation {index} is invalid")
         token = continuation["token"]
         kind = token.get("kind")
@@ -121,9 +108,7 @@ def extract_reference(
 def compare_reference(actual: dict[str, Any], expected: dict[str, Any]) -> list[str]:
     errors = []
     if actual.get("page_count") != expected.get("page_count"):
-        errors.append(
-            f"page count: expected {expected.get('page_count')}, got {actual.get('page_count')}"
-        )
+        errors.append(f"page count: expected {expected.get('page_count')}, got {actual.get('page_count')}")
     actual_pages = actual.get("pages", [])
     expected_pages = expected.get("pages", [])
     for index, (actual_page, expected_page) in enumerate(zip(actual_pages, expected_pages)):
@@ -152,8 +137,7 @@ def compare_reference(actual: dict[str, Any], expected: dict[str, Any]) -> list[
         expected_glyph = expected_page["first_glyph_css_px"]
         if actual_glyph.get("x") != expected_glyph.get("x"):
             errors.append(
-                f"page {index} first glyph x: expected {expected_glyph.get('x')}, "
-                f"got {actual_glyph.get('x')}"
+                f"page {index} first glyph x: expected {expected_glyph.get('x')}, got {actual_glyph.get('x')}"
             )
         glyph_y = actual_glyph.get("y")
         minimum_y = expected_glyph.get("minimum_y")
@@ -163,10 +147,7 @@ def compare_reference(actual: dict[str, Any], expected: dict[str, Any]) -> list[
             and isinstance(maximum_y, (int, float))
             and minimum_y <= glyph_y < maximum_y
         ):
-            errors.append(
-                f"page {index} first glyph y: expected {minimum_y} <= y < {maximum_y}, "
-                f"got {glyph_y}"
-            )
+            errors.append(f"page {index} first glyph y: expected {minimum_y} <= y < {maximum_y}, got {glyph_y}")
         if actual_page["ordered_operations"] != expected_page["ordered_operations"]:
             errors.append(
                 f"page {index} operation order: expected "
@@ -179,10 +160,7 @@ def compare_reference(actual: dict[str, Any], expected: dict[str, Any]) -> list[
                 f"got {actual_page['ordered_text']!r}"
             )
     if "continuations" in expected and actual.get("continuations") != expected["continuations"]:
-        errors.append(
-            f"continuations: expected {expected['continuations']!r}, "
-            f"got {actual.get('continuations')!r}"
-        )
+        errors.append(f"continuations: expected {expected['continuations']!r}, got {actual.get('continuations')!r}")
     return errors
 
 
@@ -277,9 +255,7 @@ def verify_output_contract(summary: dict[str, Any], reference: dict[str, Any]) -
         fail("legacy scene_preview is not the first page preview")
 
     required_bundle_paths = {"document.pdf", "pages.json"}
-    for index, (page, expected_page, preview_value) in enumerate(
-        zip(preview_pages, reference["pages"], previews)
-    ):
+    for index, (page, expected_page, preview_value) in enumerate(zip(preview_pages, reference["pages"], previews)):
         if page.get("index") != index or page.get("page_size") != expected_page["geometry_css_px"]:
             fail(f"preview page {index} geometry differs: {page!r}")
         preview = Path(preview_value)
@@ -302,11 +278,7 @@ def verify_output_contract(summary: dict[str, Any], reference: dict[str, Any]) -
         fail(f"published document is not PDF: {pdf}")
 
     bundle = json.loads(Path(summary["bundle"]).read_text(encoding="utf-8"))
-    entries = {
-        entry.get("path"): entry
-        for entry in bundle.get("entries", [])
-        if isinstance(entry, dict)
-    }
+    entries = {entry.get("path"): entry for entry in bundle.get("entries", []) if isinstance(entry, dict)}
     if not required_bundle_paths <= entries.keys():
         fail(f"bundle omits multi-page artifacts: {required_bundle_paths - entries.keys()!r}")
     for path in required_bundle_paths:
@@ -401,21 +373,14 @@ def check_paragraph_continuation(binary: Path) -> None:
 
         page_text = []
         for page_index, page in enumerate(scene["pages"]):
-            text_operations = [
-                operation
-                for operation in page["operations"]
-                if operation.get("type") == "text"
-            ]
+            text_operations = [operation for operation in page["operations"] if operation.get("type") == "text"]
             text = "".join(operation["text"] for operation in text_operations)
             if not text:
                 fail(f"paragraph scene page {page_index} has no text")
             page_text.append(text)
             for operation_index, operation in enumerate(text_operations):
                 run = operation["text"]
-                boundaries = {
-                    len(run[:character].encode("utf-8"))
-                    for character in range(len(run) + 1)
-                }
+                boundaries = {len(run[:character].encode("utf-8")) for character in range(len(run) + 1)}
                 previous = (0, 0)
                 for glyph_index, glyph in enumerate(operation.get("glyphs", [])):
                     text_range = glyph.get("text_range")
@@ -446,10 +411,7 @@ def check_paragraph_continuation(binary: Path) -> None:
         if not isinstance(continuations, list) or len(continuations) != len(page_text) - 1:
             fail(f"paragraph continuation count differs: {continuations!r}")
         previous_progress = None
-        source_boundaries = {
-            len(source[:character].encode("utf-8"))
-            for character in range(len(source) + 1)
-        }
+        source_boundaries = {len(source[:character].encode("utf-8")) for character in range(len(source) + 1)}
         for boundary, continuation in enumerate(continuations):
             token = continuation.get("token", {})
             progress = (
@@ -476,9 +438,7 @@ def check_paragraph_continuation(binary: Path) -> None:
             previous_progress = progress
 
         structure = json.loads(Path(summary["pdf_structure"]).read_text(encoding="utf-8"))
-        pdf_text = "".join(
-            page.get("expected_extracted_unicode", "") for page in structure.get("pages", [])
-        )
+        pdf_text = "".join(page.get("expected_extracted_unicode", "") for page in structure.get("pages", []))
         if pdf_text != source:
             fail(f"PDF source text differs: expected {source!r}, got {pdf_text!r}")
 

@@ -106,9 +106,7 @@ def document_pdf(summary: dict[str, object]) -> bytes:
     return pdf
 
 
-def verify_environment_artifact(
-    summary: dict[str, object], requested_locale: str, requested_timezone: str
-) -> None:
+def verify_environment_artifact(summary: dict[str, object], requested_locale: str, requested_timezone: str) -> None:
     value = summary.get("environment_artifact")
     require(isinstance(value, str) and bool(value), "summary has no environment artifact")
     path = Path(value)
@@ -189,14 +187,10 @@ def verify_invalid_request(binary: Path, fixture: Path) -> None:
         )
 
 
-def require_only_changes(
-    baseline: dict[str, object], changed: dict[str, object], allowed: set[str]
-) -> None:
+def require_only_changes(baseline: dict[str, object], changed: dict[str, object], allowed: set[str]) -> None:
     keys = baseline.keys() | changed.keys()
     unexpected = {
-        key: (baseline.get(key), changed.get(key))
-        for key in keys - allowed
-        if baseline.get(key) != changed.get(key)
+        key: (baseline.get(key), changed.get(key)) for key in keys - allowed if baseline.get(key) != changed.get(key)
     }
     require(not unexpected, f"unexpected environment-dependent changes: {unexpected!r}")
 
@@ -261,8 +255,7 @@ def main() -> int:
         )
         require(
             first_scene_hash == second_scene_hash,
-            "scene hash changed with host locale/timezone: "
-            f"{first_scene_hash} != {second_scene_hash}",
+            f"scene hash changed with host locale/timezone: {first_scene_hash} != {second_scene_hash}",
         )
         require(
             first_pdf == second_pdf,

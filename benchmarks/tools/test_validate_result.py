@@ -10,9 +10,7 @@ import validate_result
 
 
 SCHEMA = json.loads(
-    (Path(__file__).resolve().parents[1] / "schema" / "benchmark-result.v1.json").read_text(
-        encoding="utf-8"
-    )
+    (Path(__file__).resolve().parents[1] / "schema" / "benchmark-result.v1.json").read_text(encoding="utf-8")
 )
 HASH = "0" * 64
 PERCENTILES = {key: 1 for key in ("min", "p50", "p95", "p99", "max", "mean")}

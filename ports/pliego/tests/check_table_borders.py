@@ -21,8 +21,7 @@ from typing import Any
 
 MODE_PREFIXES = {"collapsed": "C", "separate": "S"}
 EXPECTED_BODY_TEXT = {
-    mode: {f"{prefix}-R{row}-{column}" for row in range(7) for column in "AB"}
-    for mode, prefix in MODE_PREFIXES.items()
+    mode: {f"{prefix}-R{row}-{column}" for row in range(7) for column in "AB"} for mode, prefix in MODE_PREFIXES.items()
 }
 EXPECTED_VERTICAL_X = (10.0, 120.0, 210.0)
 EXPECTED_INLINE_END = 212.0
@@ -161,8 +160,7 @@ def is_row_background(operation: dict[str, Any], page_index: int) -> bool:
     fill = operation.get("fill")
     require(isinstance(fill, dict), f"page {page_index} background is not filled")
     actual = tuple(
-        number(fill.get(channel), f"page {page_index} background {channel}")
-        for channel in ("r", "g", "b", "a")
+        number(fill.get(channel), f"page {page_index} background {channel}") for channel in ("r", "g", "b", "a")
     )
     return all(
         math.isclose(actual_channel, expected_channel, abs_tol=EPSILON)
@@ -257,9 +255,7 @@ def fallback_rectangle(
 
 def page_mode(operations: list[dict[str, Any]], page_index: int) -> tuple[str, str]:
     text = [
-        canonical_text(str(operation.get("text", "")))
-        for operation in operations
-        if operation.get("type") == "text"
+        canonical_text(str(operation.get("text", ""))) for operation in operations if operation.get("type") == "text"
     ]
     modes = {
         (mode, prefix)
@@ -326,9 +322,7 @@ def require_exact_grid(
         f"page {page_index} table block extent drifted",
     )
     for x in EXPECTED_VERTICAL_X:
-        intervals = sorted(
-            (item[1], item[1] + item[3]) for item in vertical if math.isclose(item[0], x)
-        )
+        intervals = sorted((item[1], item[1] + item[3]) for item in vertical if math.isclose(item[0], x))
         expected_start = top + (BORDER_WIDTH if mode == "separate" and x != EXPECTED_VERTICAL_X[0] else 0)
         first_height = 24.0 if mode == "separate" and x != EXPECTED_VERTICAL_X[0] else 26.0
         expected_heights = [first_height] + [32.0] * body_rows
@@ -385,15 +379,9 @@ def border_geometry(scene: dict[str, Any]) -> list[tuple[Any, ...]]:
         operations = page.get("operations")
         require(isinstance(operations, list), f"scene page {page_index} has no operations")
         objects = [operation for operation in operations if isinstance(operation, dict)]
-        paths = [
-            operation
-            for operation in objects
-            if is_table_border(operation)
-        ]
+        paths = [operation for operation in objects if is_table_border(operation)]
         text = [
-            canonical_text(str(operation.get("text", "")))
-            for operation in objects
-            if operation.get("type") == "text"
+            canonical_text(str(operation.get("text", ""))) for operation in objects if operation.get("type") == "text"
         ]
         if not any(token.startswith(("C-", "S-")) for token in text):
             require(not paths, f"page {page_index} contains paths without table fixture text")
@@ -423,9 +411,7 @@ def border_geometry(scene: dict[str, Any]) -> list[tuple[Any, ...]]:
         require(bool(body) and len(body) % 2 == 0, f"page {page_index} contains incomplete body rows")
         body_text[mode].extend(canonical_text(str(operation.get("text", ""))) for operation in body)
         row_backgrounds = [
-            operation_bounds(operation, page_index)
-            for operation in objects
-            if is_row_background(operation, page_index)
+            operation_bounds(operation, page_index) for operation in objects if is_row_background(operation, page_index)
         ]
         if mode == "collapsed":
             require(not row_backgrounds, f"page {page_index} collapsed table unexpectedly has row stripes")
@@ -436,8 +422,7 @@ def border_geometry(scene: dict[str, Any]) -> list[tuple[Any, ...]]:
                 require(match is not None, f"page {page_index} has malformed separate row token: {token!r}")
                 row = int(match.group(1))
                 covered = any(
-                    contains_point(bounds, text_x(operation), text_y(operation))
-                    for bounds in row_backgrounds
+                    contains_point(bounds, text_x(operation), text_y(operation)) for bounds in row_backgrounds
                 )
                 require(
                     covered == (row in STRIPED_SEPARATE_ROWS),
@@ -464,17 +449,13 @@ def border_geometry(scene: dict[str, Any]) -> list[tuple[Any, ...]]:
         )
         if mode == "collapsed":
             require(
-                all(
-                    math.isclose(min(item[2], item[3]), BORDER_WIDTH, abs_tol=EPSILON)
-                    for item in rectangles
-                ),
+                all(math.isclose(min(item[2], item[3]), BORDER_WIDTH, abs_tol=EPSILON) for item in rectangles),
                 f"page {page_index} collapsed border width drifted",
             )
         else:
             require(
                 any(
-                    item[2] > item[3]
-                    and item[1] + item[3] / 2 < min(text_y(operation) for operation in headers)
+                    item[2] > item[3] and item[1] + item[3] / 2 < min(text_y(operation) for operation in headers)
                     for item in rectangles
                 ),
                 f"page {page_index} has no grid-authored table top border",
@@ -496,8 +477,7 @@ def border_geometry(scene: dict[str, Any]) -> list[tuple[Any, ...]]:
             f"{mode} vertical border x coordinates drifted: {mode_fragments!r}",
         )
         require(
-            len(body_text[mode]) == len(EXPECTED_BODY_TEXT[mode])
-            and set(body_text[mode]) == EXPECTED_BODY_TEXT[mode],
+            len(body_text[mode]) == len(EXPECTED_BODY_TEXT[mode]) and set(body_text[mode]) == EXPECTED_BODY_TEXT[mode],
             f"{mode} table body text differs: {sorted(body_text[mode])!r}",
         )
     require(
@@ -537,11 +517,7 @@ def verify_fallback_capture(scene: dict[str, Any], layout: dict[str, Any]) -> No
         )
         paths = [operation for operation in objects if operation.get("type") == "path"]
         page_fitting_text = Counter(
-            {
-                token: count
-                for token, count in text.items()
-                if token.startswith(("A-H-", "A-R-"))
-            }
+            {token: count for token, count in text.items() if token.startswith(("A-H-", "A-R-"))}
         )
         if page_fitting_text:
             fitting_text.update(page_fitting_text)
@@ -751,9 +727,7 @@ def self_test() -> None:
                     operations.append(path(x, y, 2.0, 32.0))
             for y in [top + 24.0] + [top + 24.0 + 32.0 * index for index in range(1, len(rows) + 1)]:
                 operations.extend([path(12.0, y, 110.0, 2.0), path(122.0, y, 90.0, 2.0)])
-        return {
-            "operations": operations
-        }
+        return {"operations": operations}
 
     first = {
         "pages": [
@@ -769,9 +743,7 @@ def self_test() -> None:
 
     zero_path = copy.deepcopy(first)
     zero_path["pages"][1]["operations"] = [
-        operation
-        for operation in zero_path["pages"][1]["operations"]
-        if operation.get("type") != "path"
+        operation for operation in zero_path["pages"][1]["operations"] if operation.get("type") != "path"
     ]
     shifted = copy.deepcopy(first)
     for page in shifted["pages"][:3]:

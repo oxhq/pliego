@@ -820,13 +820,13 @@ pub fn capture_document_scene_with_canvas(
                     });
                 }
             },
-            kind @ ("box"
-            | "root-background"
-            | "outline"
-            | "collapsed-table-borders"
-            | "iframe"
-            | "text-effects"
-            | "content-geometry") => {
+            kind @ ("box" |
+            "root-background" |
+            "outline" |
+            "collapsed-table-borders" |
+            "iframe" |
+            "text-effects" |
+            "content-geometry") => {
                 unsupported_events.push(UnsupportedPaintEvent {
                     sequence: event.sequence,
                     kind: match kind {
@@ -903,10 +903,10 @@ fn append_canvas(
     sequence: usize,
 ) -> Result<(), CaptureError> {
     let source_page = &canvas.scene.pages[0];
-    if source_page.size.width <= 0.0
-        || source_page.size.height <= 0.0
-        || destination.width <= 0.0
-        || destination.height <= 0.0
+    if source_page.size.width <= 0.0 ||
+        source_page.size.height <= 0.0 ||
+        destination.width <= 0.0 ||
+        destination.height <= 0.0
     {
         return Err(CaptureError::Canvas {
             sequence,
@@ -914,8 +914,8 @@ fn append_canvas(
         });
     }
     for resource in &canvas.resources {
-        if let Some(existing) = resources.get(&resource.resource)
-            && existing.png != resource.png
+        if let Some(existing) = resources.get(&resource.resource) &&
+            existing.png != resource.png
         {
             return Err(CaptureError::Canvas {
                 sequence,
@@ -1070,18 +1070,18 @@ fn capture_pages(capture: &LayoutCapture) -> Result<Vec<CapturePage>, CaptureErr
         if page.index != expected_index {
             return Err(CaptureError::InvalidPageIndex { actual: page.index });
         }
-        if !positive_finite(page.width)
-            || !positive_finite(page.height)
-            || !nonnegative_finite(page.margin_top)
-            || !nonnegative_finite(page.margin_right)
-            || !nonnegative_finite(page.margin_bottom)
-            || !nonnegative_finite(page.margin_left)
-            || !positive_finite(page.available_inline_size)
-            || !positive_finite(page.available_block_size)
-            || page.margin_left + page.margin_right >= page.width
-            || page.margin_top + page.margin_bottom >= page.height
-            || page.available_inline_size > page.width
-            || page.available_block_size > page.height
+        if !positive_finite(page.width) ||
+            !positive_finite(page.height) ||
+            !nonnegative_finite(page.margin_top) ||
+            !nonnegative_finite(page.margin_right) ||
+            !nonnegative_finite(page.margin_bottom) ||
+            !nonnegative_finite(page.margin_left) ||
+            !positive_finite(page.available_inline_size) ||
+            !positive_finite(page.available_block_size) ||
+            page.margin_left + page.margin_right >= page.width ||
+            page.margin_top + page.margin_bottom >= page.height ||
+            page.available_inline_size > page.width ||
+            page.available_block_size > page.height
         {
             return Err(CaptureError::InvalidPageGeometry);
         }
@@ -1117,11 +1117,11 @@ fn distribute_operations(
     let mut repeated_operations = vec![Vec::new(); pages.len()];
 
     for repeat in repeats {
-        if repeat.page_index == 0
-            || repeat.page_index >= pages.len()
-            || !nonnegative_finite(repeat.source_block_start)
-            || !nonnegative_finite(repeat.target_block_start)
-            || !positive_finite(repeat.block_size)
+        if repeat.page_index == 0 ||
+            repeat.page_index >= pages.len() ||
+            !nonnegative_finite(repeat.source_block_start) ||
+            !nonnegative_finite(repeat.target_block_start) ||
+            !positive_finite(repeat.block_size)
         {
             return Err(CaptureError::InvalidTableGroupRepeat {
                 page_index: repeat.page_index,
@@ -1140,8 +1140,8 @@ fn distribute_operations(
                 .and_then(|event| event.fragment_id)
                 .is_some_and(|fragment_id| fragments.contains(&fragment_id))
         }) {
-            if matches!(&operation.operation, Operation::Path { .. })
-                && !is_splittable_rect_path(&operation.operation)
+            if matches!(&operation.operation, Operation::Path { .. }) &&
+                !is_splittable_rect_path(&operation.operation)
             {
                 return Err(CaptureError::RepeatedTableHeaderPathUnsupported {
                     sequence: operation.sequence,
@@ -1223,10 +1223,10 @@ fn split_solid_rect_operations(
 
 fn mark_repeated_table_header(operation: &mut Operation) {
     let meta = match operation {
-        Operation::Text { meta, .. }
-        | Operation::Image { meta, .. }
-        | Operation::Link { meta, .. }
-        | Operation::Path { meta, .. } => meta,
+        Operation::Text { meta, .. } |
+        Operation::Image { meta, .. } |
+        Operation::Link { meta, .. } |
+        Operation::Path { meta, .. } => meta,
     };
     meta.semantics = Some(Semantics {
         role: "artifact".into(),
@@ -1330,8 +1330,8 @@ fn is_page_spanning_rect_path(operation: &Operation) -> bool {
 
 fn is_splittable_rect_meta(meta: &OperationMeta) -> bool {
     meta.semantics.as_ref().is_some_and(|semantics| {
-        semantics.role == "artifact"
-            && matches!(
+        semantics.role == "artifact" &&
+            matches!(
                 semantics.label.as_deref(),
                 Some("table-border" | "background" | "border")
             )
@@ -1591,8 +1591,8 @@ fn append_vector_image(
     rect: &CaptureRect,
     sequence: usize,
 ) -> Result<(), CaptureError> {
-    if !positive_finite(vector_image.viewport_width)
-        || !positive_finite(vector_image.viewport_height)
+    if !positive_finite(vector_image.viewport_width) ||
+        !positive_finite(vector_image.viewport_height)
     {
         return Err(CaptureError::InvalidVectorImageGeometry { sequence });
     }
@@ -1684,8 +1684,8 @@ fn append_vector_image(
                     return Err(CaptureError::InvalidVectorImageGeometry { sequence });
                 }
                 let bytes = decode_vector_resource(resource, bytes_base64)?;
-                if let Some(existing) = embedded_image_resources.get(resource)
-                    && existing.png != bytes
+                if let Some(existing) = embedded_image_resources.get(resource) &&
+                    existing.png != bytes
                 {
                     return Err(CaptureError::ConflictingVectorResource(resource.clone()));
                 }

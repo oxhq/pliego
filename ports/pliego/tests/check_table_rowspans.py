@@ -100,11 +100,7 @@ def page_sequence(layout: dict[str, Any]) -> dict[str, Any]:
 def table_continuations(sequence: dict[str, Any]) -> list[dict[str, Any]]:
     continuations = sequence.get("continuations")
     require(isinstance(continuations, list), "continuation trace is absent")
-    return [
-        item
-        for item in continuations
-        if isinstance(item, dict) and item.get("token", {}).get("kind") == "table"
-    ]
+    return [item for item in continuations if isinstance(item, dict) and item.get("token", {}).get("kind") == "table"]
 
 
 def verify_contained(scene: dict[str, Any], layout: dict[str, Any]) -> None:
@@ -147,10 +143,7 @@ def verify_contained(scene: dict[str, Any], layout: dict[str, Any]) -> None:
         f"rowspan selection differs: {selected!r}",
     )
     require(
-        all(
-            item.get("retry_count") == 0 and item.get("retry_limit") == RETRY_LIMIT
-            for item in decisions
-        ),
+        all(item.get("retry_count") == 0 and item.get("retry_limit") == RETRY_LIMIT for item in decisions),
         "rowspan changed constraint retry accounting",
     )
     continuations = table_continuations(sequence)

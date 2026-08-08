@@ -23,15 +23,13 @@ use fonts_traits::StylesheetWebFontLoadFinishedCallback;
 use icu_locid::subtags::Language;
 use layout_api::{
     AxesOverflow, BoxAreaType, CSSPixelRectVec, DangerousStyleNode, IFrameSizes, Layout,
-    LayoutConfig, LayoutDamage, LayoutElement, LayoutFactory, LayoutNode, NodeRenderingType,
-    OffsetParentResponse, PhysicalSides, QueryMsg, ReflowGoal, ReflowPhasesRun, ReflowRequest,
-    ReflowRequestRestyle, ReflowResult, ReflowStatistics, ScrollContainerQueryFlags,
+    LayoutConfig, LayoutDamage, LayoutDebugCanvasImageKey, LayoutDebugColor,
+    LayoutDebugFontInstance, LayoutDebugFontResource, LayoutDebugFontVariation,
+    LayoutDebugFragment, LayoutDebugGlyph, LayoutDebugRect, LayoutDebugSnapshot,
+    LayoutDebugTextRun, LayoutDebugUtf8Range, LayoutElement, LayoutFactory, LayoutNode,
+    NodeRenderingType, OffsetParentResponse, PhysicalSides, QueryMsg, ReflowGoal, ReflowPhasesRun,
+    ReflowRequest, ReflowRequestRestyle, ReflowResult, ReflowStatistics, ScrollContainerQueryFlags,
     ScrollContainerResponse, TrustedNodeAddress, with_layout_state,
-};
-use layout_api::{
-    LayoutDebugCanvasImageKey, LayoutDebugColor, LayoutDebugFontInstance, LayoutDebugFontResource,
-    LayoutDebugFontVariation, LayoutDebugFragment, LayoutDebugGlyph, LayoutDebugRect,
-    LayoutDebugSnapshot, LayoutDebugTextRun, LayoutDebugUtf8Range,
 };
 use log::{debug, warn};
 use malloc_size_of::{MallocConditionalSizeOf, MallocSizeOf, MallocSizeOfOps};
@@ -48,15 +46,14 @@ use rustc_hash::FxHashMap;
 use script::layout_dom::{
     ServoDangerousStyleDocument, ServoDangerousStyleElement, ServoLayoutElement, ServoLayoutNode,
 };
-use style::properties::longhands::visibility::computed_value::T as Visibility;
 use script_traits::{DrawAPaintImageResult, PaintWorkletError, Painter, ScriptThreadMessage};
-use sha2::{Digest, Sha256};
 use servo_arc::Arc as ServoArc;
 use servo_base::Epoch;
 use servo_base::id::{PipelineId, WebViewId};
 use servo_config::opts::{self, DiagnosticsLogging, DiagnosticsLoggingOption};
 use servo_config::pref;
 use servo_url::ServoUrl;
+use sha2::{Digest, Sha256};
 use style::animation::DocumentAnimationSet;
 use style::color::ColorSpace;
 use style::context::{
@@ -70,6 +67,7 @@ use style::global_style_data::GLOBAL_STYLE_DATA;
 use style::invalidation::element::restyle_hints::RestyleHint;
 use style::invalidation::stylesheets::StylesheetInvalidationSet;
 use style::media_queries::{MediaList, MediaType};
+use style::properties::longhands::visibility::computed_value::T as Visibility;
 use style::properties::style_structs::Font;
 use style::properties::{ComputedValues, LonghandId, NonCustomPropertyId, PropertyId, ShorthandId};
 use style::queries::values::PrefersColorScheme;
@@ -197,12 +195,7 @@ impl LayoutDebugFontCapture {
         Some(id)
     }
 
-    fn into_entries(
-        self,
-    ) -> (
-        Vec<LayoutDebugFontResource>,
-        Vec<LayoutDebugFontInstance>,
-    ) {
+    fn into_entries(self) -> (Vec<LayoutDebugFontResource>, Vec<LayoutDebugFontInstance>) {
         (
             self.resources_by_id.into_values().collect(),
             self.instances_by_id.into_values().collect(),
@@ -2309,20 +2302,22 @@ mod tests {
         const OPSZ: u32 = u32::from_be_bytes(*b"opsz");
 
         let mut capture = LayoutDebugFontCapture::default();
-        let canonical = capture.capture_resource_data(
-            b"abc",
-            0,
-            [(WGHT, 700.0), (WDTH, -0.0), (WGHT, 400.0)],
-            false,
-        )
-        .expect("finite canonical instance should be retained");
-        let reordered = capture.capture_resource_data(
-            b"abc",
-            0,
-            [(WGHT, 400.0), (WGHT, 700.0), (WDTH, 0.0)],
-            false,
-        )
-        .expect("reordered finite instance should be retained");
+        let canonical = capture
+            .capture_resource_data(
+                b"abc",
+                0,
+                [(WGHT, 700.0), (WDTH, -0.0), (WGHT, 400.0)],
+                false,
+            )
+            .expect("finite canonical instance should be retained");
+        let reordered = capture
+            .capture_resource_data(
+                b"abc",
+                0,
+                [(WGHT, 400.0), (WGHT, 700.0), (WDTH, 0.0)],
+                false,
+            )
+            .expect("reordered finite instance should be retained");
         assert!(
             capture
                 .capture_resource_data(b"reject-nan", 0, [(OPSZ, f32::NAN)], false)
@@ -2336,16 +2331,11 @@ mod tests {
         let different_face = capture
             .capture_resource_data(b"abc", 1, [(WDTH, 0.0)], false)
             .expect("different face should be retained");
-        let different_variation =
-            capture.capture_resource_data(b"abc", 0, [(WDTH, 1.0), (WGHT, 400.0)], false)
-                .expect("different variation should be retained");
+        let different_variation = capture
+            .capture_resource_data(b"abc", 0, [(WDTH, 1.0), (WGHT, 400.0)], false)
+            .expect("different variation should be retained");
         let different_synthesis = capture
-            .capture_resource_data(
-                b"abc",
-                0,
-                [(WGHT, 700.0), (WDTH, 0.0), (WGHT, 400.0)],
-                true,
-            )
+            .capture_resource_data(b"abc", 0, [(WGHT, 700.0), (WDTH, 0.0), (WGHT, 400.0)], true)
             .expect("synthetic bold instance should be retained");
         let different_bytes = capture
             .capture_resource_data(b"xyz", 0, [], false)

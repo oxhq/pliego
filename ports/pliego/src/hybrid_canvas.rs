@@ -251,14 +251,14 @@ pub fn adapt_canvas(transcript: CanvasTranscript) -> Result<HybridCanvasCapture,
                 let Some(area) = u64::from(width).checked_mul(u64::from(height)) else {
                     return Err(CanvasError::InvalidRasterBounds { command_index });
                 };
-                if width == 0
-                    || height == 0
-                    || u64::from(width) > IMAGE_LIMITS.declared_dimension
-                    || u64::from(height) > IMAGE_LIMITS.declared_dimension
-                    || area > IMAGE_LIMITS.decoded_pixels
-                    || bounds.width != f64::from(width)
-                    || bounds.height != f64::from(height)
-                    || !contained_by(&bounds, &transcript.size)
+                if width == 0 ||
+                    height == 0 ||
+                    u64::from(width) > IMAGE_LIMITS.declared_dimension ||
+                    u64::from(height) > IMAGE_LIMITS.declared_dimension ||
+                    area > IMAGE_LIMITS.decoded_pixels ||
+                    bounds.width != f64::from(width) ||
+                    bounds.height != f64::from(height) ||
+                    !contained_by(&bounds, &transcript.size)
                 {
                     return Err(CanvasError::InvalidRasterBounds { command_index });
                 }
@@ -331,9 +331,9 @@ pub fn adapt_canvas(transcript: CanvasTranscript) -> Result<HybridCanvasCapture,
 fn contained_by(bounds: &Rect, size: &Size) -> bool {
     [bounds.x, bounds.y, bounds.width, bounds.height]
         .into_iter()
-        .all(|value| value.is_finite() && value >= 0.0 && !value.is_sign_negative())
-        && bounds.x + bounds.width <= size.width
-        && bounds.y + bounds.height <= size.height
+        .all(|value| value.is_finite() && value >= 0.0 && !value.is_sign_negative()) &&
+        bounds.x + bounds.width <= size.width &&
+        bounds.y + bounds.height <= size.height
 }
 
 fn lowercase_hex(bytes: &[u8]) -> String {

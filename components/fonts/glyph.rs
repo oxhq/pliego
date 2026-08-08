@@ -834,16 +834,14 @@ mod tests {
         }
 
         fn iter(&self) -> impl Iterator<Item = ShapedGlyph> {
-            self.cluster_offsets
-                .iter()
-                .copied()
-                .enumerate()
-                .map(|(glyph_id, string_byte_offset)| ShapedGlyph {
+            self.cluster_offsets.iter().copied().enumerate().map(
+                |(glyph_id, string_byte_offset)| ShapedGlyph {
                     glyph_id: glyph_id as u32,
                     string_byte_offset,
                     advance: Au::zero(),
                     offset: None,
-                })
+                },
+            )
         }
     }
 

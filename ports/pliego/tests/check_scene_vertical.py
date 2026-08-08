@@ -252,9 +252,7 @@ def verify_paged_root(summary: dict[str, Any]) -> None:
     )
 
 
-def verify_fonts(
-    summary: dict[str, Any], referenced_fonts: set[str], fixture_font: Path
-) -> tuple[bytes, set[str]]:
+def verify_fonts(summary: dict[str, Any], referenced_fonts: set[str], fixture_font: Path) -> tuple[bytes, set[str]]:
     fonts_path = artifact_path(summary, "fonts_artifact")
     fonts_bytes = fonts_path.read_bytes()
     fonts = read_json(fonts_path)
@@ -382,9 +380,7 @@ def verify_report_and_preview(summary: dict[str, Any], scene_hash: str, scene_by
     return preview_bytes
 
 
-def verify_pdf_bundle(
-    summary: dict[str, Any], scene_bytes: bytes, fixture_font_ids: set[str]
-) -> dict[str, Any]:
+def verify_pdf_bundle(summary: dict[str, Any], scene_bytes: bytes, fixture_font_ids: set[str]) -> dict[str, Any]:
     pdf_path = artifact_path(summary, "document_pdf")
     require(summary.get("document_pdf_status") == "rendered", repr(summary))
     pdf_bytes = pdf_path.read_bytes()
@@ -505,11 +501,7 @@ def verify_artifact_bundle(summary: dict[str, Any]) -> None:
         if not artifact.is_file() or artifact == bundle_path:
             continue
         require(
-            not (
-                artifact.name.startswith(".")
-                and ".pliego-" in artifact.name
-                and artifact.name.endswith(".tmp")
-            ),
+            not (artifact.name.startswith(".") and ".pliego-" in artifact.name and artifact.name.endswith(".tmp")),
             f"temporary publication file survived: {artifact}",
         )
         actual_paths.append(artifact.relative_to(artifact_root).as_posix())

@@ -239,10 +239,7 @@ def require_pdf_chart(pdf: Path, bounds: object, output: Path) -> None:
             math.ceil(y + height),
         )
         require(
-            crop_box[0] >= 0
-            and crop_box[1] >= 0
-            and crop_box[2] <= page.width
-            and crop_box[3] <= page.height,
+            crop_box[0] >= 0 and crop_box[1] >= 0 and crop_box[2] <= page.width and crop_box[3] <= page.height,
             f"Canvas image escapes the PDF page: {crop_box!r}",
         )
         chart = page.crop(crop_box)
@@ -361,15 +358,11 @@ def run(binary: Path, fixture: Path, output: Path) -> tuple[int, int]:
     texts = [operation for operation in operations if operation.get("type") == "text"]
     paths = [operation for operation in operations if operation.get("type") == "path"]
     borders = [
-        operation
-        for operation in paths
-        if operation.get("meta", {}).get("semantics", {}).get("label") == "border"
+        operation for operation in paths if operation.get("meta", {}).get("semantics", {}).get("label") == "border"
     ]
     images = [operation for operation in operations if operation.get("type") == "image"]
     require(len(texts) >= 12, f"styled report retained too little text: {len(texts)}")
-    retained_text = " ".join(
-        " ".join(str(operation.get("text", "")) for operation in texts).split()
-    )
+    retained_text = " ".join(" ".join(str(operation.get("text", "")) for operation in texts).split())
     for marker in ["Northstar Operations", "Recognized revenue", "Account contribution"]:
         require(marker in retained_text, f"retained report text is missing {marker!r}")
 

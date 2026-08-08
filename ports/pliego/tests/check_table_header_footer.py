@@ -87,8 +87,7 @@ def canonical_text_operations(
     operations: list[dict[str, Any]],
 ) -> list[tuple[dict[str, Any], str]]:
     canonical = [
-        (operation, canonical_text(str(operation.get("text", ""))))
-        for operation in text_operations(operations)
+        (operation, canonical_text(str(operation.get("text", "")))) for operation in text_operations(operations)
     ]
     return [(operation, text) for operation, text in canonical if text]
 
@@ -124,12 +123,7 @@ def verify_supported(
     require(len(pages) == 4, f"supported table should occupy four pages: {len(pages)}")
     page_text = [canonical_text_operations(page) for page in pages]
     physical_text = [text for page in page_text for _, text in page]
-    logical_text = [
-        text
-        for page in page_text
-        for operation, text in page
-        if not artifact(operation)
-    ]
+    logical_text = [text for page in page_text for operation, text in page if not artifact(operation)]
     require(logical_text == LOGICAL_TEXT, f"logical table text differs: {logical_text!r}")
     require(
         canonical_text(pdf_text) == canonical_text(" ".join(physical_text)),
@@ -187,9 +181,7 @@ def verify_supported(
 
     continuations = page_sequence.get("continuations")
     require(isinstance(continuations, list), "table continuation trace is absent")
-    table_continuations = [
-        item for item in continuations if item.get("token", {}).get("kind") == "table"
-    ]
+    table_continuations = [item for item in continuations if item.get("token", {}).get("kind") == "table"]
     require(
         [item["token"].get("resume_page_index") for item in table_continuations] == [1, 2, 3],
         f"table continuation pages differ: {table_continuations!r}",
@@ -202,9 +194,7 @@ def verify_supported(
     require(isinstance(decisions, list), "table break trace is absent")
     require(
         any(
-            decision.get("selected")
-            and decision.get("next_row_index") == 9
-            and decision.get("resume_page_index") == 3
+            decision.get("selected") and decision.get("next_row_index") == 9 and decision.get("resume_page_index") == 3
             for decision in decisions
         ),
         "terminal footer move is absent from the break trace",
@@ -230,11 +220,7 @@ def verify_unsupported(layout: dict[str, Any]) -> None:
     require(isinstance(page_sequence, dict), "unsupported fixture has no page sequence")
     warnings = page_sequence.get("warnings")
     require(isinstance(warnings, list), "unsupported fixture has no warnings")
-    group_warnings = [
-        warning
-        for warning in warnings
-        if warning.get("kind") == "unsupported-table-group-pagination"
-    ]
+    group_warnings = [warning for warning in warnings if warning.get("kind") == "unsupported-table-group-pagination"]
     require(
         {warning.get("reason") for warning in group_warnings} == UNSUPPORTED_REASONS,
         f"typed unsupported reasons differ: {group_warnings!r}",
@@ -256,9 +242,7 @@ def operation(
     if text is not None:
         value.update({"text": text, "glyphs": [{"y": y}]})
     if repeated:
-        value["meta"] = {
-            "semantics": {"role": "artifact", "label": "repeated-table-header"}
-        }
+        value["meta"] = {"semantics": {"role": "artifact", "label": "repeated-table-header"}}
     return value
 
 
@@ -342,12 +326,7 @@ def self_test() -> None:
             ],
         },
     }
-    physical = [
-        operation["text"]
-        for page in pages
-        for operation in page["operations"]
-        if operation["type"] == "text"
-    ]
+    physical = [operation["text"] for page in pages for operation in page["operations"] if operation["type"] == "text"]
     verify_supported(
         {"pages": pages},
         layout,

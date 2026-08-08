@@ -152,13 +152,10 @@ def run(binary: Path, fixture: Path, root: Path) -> tuple[bytes, bytes, bytes, b
     texts = [item for item in operations if item.get("type") == "text"]
     require(len(paths) == len(images) == 1 and bool(texts), repr(operations))
     path_item = next(item for item in items if item.get("kind") == "path")
-    points = [
-        (segment["x"], segment["y"])
-        for segment in path_item["segments"]
-        if "x" in segment and "y" in segment
-    ]
+    points = [(segment["x"], segment["y"]) for segment in path_item["segments"] if "x" in segment and "y" in segment]
     source_bounds = {
-        "x": min(x for x, _ in points), "y": min(y for _, y in points),
+        "x": min(x for x, _ in points),
+        "y": min(y for _, y in points),
         "width": max(x for x, _ in points) - min(x for x, _ in points),
         "height": max(y for _, y in points) - min(y for _, y in points),
     }
@@ -168,27 +165,34 @@ def run(binary: Path, fixture: Path, root: Path) -> tuple[bytes, bytes, bytes, b
     require_rect(images[0]["bounds"], mapped_rect(fragment, image_item), "image")
     expected_image = f"sha256:{hashlib.sha256(INLINE_PNG).hexdigest()}"
     require(images[0].get("resource") == expected_image, repr(images[0]))
-    require((artifacts / "resources" / expected_image.removeprefix("sha256:")).read_bytes() == INLINE_PNG,
-            "embedded SVG PNG sidecar differs")
+    require(
+        (artifacts / "resources" / expected_image.removeprefix("sha256:")).read_bytes() == INLINE_PNG,
+        "embedded SVG PNG sidecar differs",
+    )
 
     font_path = fixture.parent.parent / "text-scene" / "Ahem.ttf"
-    require(hashlib.sha256(font_path.read_bytes()).hexdigest() == SOURCE_AHEM_SHA256,
-            "bundled Ahem source changed")
+    require(hashlib.sha256(font_path.read_bytes()).hexdigest() == SOURCE_AHEM_SHA256, "bundled Ahem source changed")
     expected_font = f"sha256:{SANITIZED_AHEM_SHA256}"
     fonts_bytes = artifact(summary, "fonts_artifact").read_bytes()
     fonts = json.loads(fonts_bytes)
-    require(any(resource.get("resource") == expected_font for resource in fonts["font_resources"]),
-            f"exact bundled Ahem bytes are absent: {fonts!r}")
+    require(
+        any(resource.get("resource") == expected_font for resource in fonts["font_resources"]),
+        f"exact bundled Ahem bytes are absent: {fonts!r}",
+    )
     text_fonts = {item["font"] for item in texts}
     require(text_fonts <= {item["instance"] for item in fonts["selections"]}, repr(fonts))
 
     report = read_json(artifact(summary, "scene_report"))
     capture = report.get("capture", {})
     require(capture.get("status") == "partial", repr(capture))
-    require(any(event.get("kind") == "svg-compositing" for event in capture.get("unsupported_events", [])),
-            f"typed SVG diagnostic is absent: {capture!r}")
-    require(any(event.get("kind") == "svg-animation" for event in capture.get("unsupported_events", [])),
-            f"typed SVG animation diagnostic is absent: {capture!r}")
+    require(
+        any(event.get("kind") == "svg-compositing" for event in capture.get("unsupported_events", [])),
+        f"typed SVG diagnostic is absent: {capture!r}",
+    )
+    require(
+        any(event.get("kind") == "svg-animation" for event in capture.get("unsupported_events", [])),
+        f"typed SVG animation diagnostic is absent: {capture!r}",
+    )
     preview = artifact(summary, "scene_preview").read_bytes()
     require(preview.startswith(b"\x89PNG\r\n\x1a\n"), "preview is not PNG")
     preview_size = (int.from_bytes(preview[16:20], "big"), int.from_bytes(preview[20:24], "big"))
@@ -205,8 +209,10 @@ def run(binary: Path, fixture: Path, root: Path) -> tuple[bytes, bytes, bytes, b
     page = structure["pages"][0]
     require("SVG" in page.get("expected_extracted_unicode", ""), repr(page))
     require(page.get("operation_counts") == {"text": len(texts), "vector": 1, "image": 1, "link": 0}, repr(page))
-    require(all(close(value, expected) for value, expected in zip(page["media_box_pt"], [0, 0, 150, 90])),
-            f"PDF media box differs: {page['media_box_pt']!r}")
+    require(
+        all(close(value, expected) for value, expected in zip(page["media_box_pt"], [0, 0, 150, 90])),
+        f"PDF media box differs: {page['media_box_pt']!r}",
+    )
     return scene_bytes, preview, pdf, fonts_bytes
 
 

@@ -449,9 +449,7 @@ impl TextFragment {
         let mut rendered_text_offset = 0;
 
         debug_assert_eq!(self.glyphs.len(), self.text_ranges.len());
-        for (shaped_text_slice, retained_text_range) in
-            self.glyphs.iter().zip(&self.text_ranges)
-        {
+        for (shaped_text_slice, retained_text_range) in self.glyphs.iter().zip(&self.text_ranges) {
             let retained_text = self.text_content.get(retained_text_range.clone());
             let shaped_source_range = shaped_text_slice.source_text_range();
             for (glyph, glyph_source_range) in shaped_text_slice.glyphs_with_source_ranges() {

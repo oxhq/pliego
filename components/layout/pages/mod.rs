@@ -67,10 +67,10 @@ impl PageDefinition {
         if !positive_finite(width) || !positive_finite(height) {
             return Err(PageGeometryError::InvalidPageSize);
         }
-        if !nonnegative_finite(margins.top)
-            || !nonnegative_finite(margins.right)
-            || !nonnegative_finite(margins.bottom)
-            || !nonnegative_finite(margins.left)
+        if !nonnegative_finite(margins.top) ||
+            !nonnegative_finite(margins.right) ||
+            !nonnegative_finite(margins.bottom) ||
+            !nonnegative_finite(margins.left)
         {
             return Err(PageGeometryError::InvalidPageMargin);
         }
@@ -87,8 +87,8 @@ impl PageDefinition {
                 Au::from_f32_px(margins.left),
             ),
         };
-        if definition.available_inline_size() <= Au::from_px(0)
-            || definition.available_block_size() <= Au::from_px(0)
+        if definition.available_inline_size() <= Au::from_px(0) ||
+            definition.available_block_size() <= Au::from_px(0)
         {
             return Err(PageGeometryError::MarginsConsumePage);
         }
@@ -639,9 +639,8 @@ impl BlockPageBuilder {
         let forced_origin =
             self.forced_break_before(child_index, node, current_block_position, breaks);
         let last_line = lines.last().expect("inline lines are non-empty");
-        let fresh_block_size = (last_line.block_start + last_line.block_size -
-            current_block_position)
-            .max(Au::zero());
+        let fresh_block_size =
+            (last_line.block_start + last_line.block_size - current_block_position).max(Au::zero());
         let mut translation = forced_origin.map_or_else(Au::zero, |block_origin| {
             block_origin - current_block_position
         });
@@ -698,7 +697,9 @@ impl BlockPageBuilder {
         }
 
         Some(InlineChildPlacement {
-            added_block_size: *line_translations.last().expect("inline lines are non-empty"),
+            added_block_size: *line_translations
+                .last()
+                .expect("inline lines are non-empty"),
             line_translations,
         })
     }
@@ -718,8 +719,7 @@ impl BlockPageBuilder {
     ) -> TableChildPlacementOutcome {
         assert_eq!(child_index, self.next_child_index);
         let rowspan_ranges = table_rowspan_ranges(rows);
-        let support =
-            self.table_rows_support(rows, groups, cell_fragments, &rowspan_ranges);
+        let support = self.table_rows_support(rows, groups, cell_fragments, &rowspan_ranges);
         let header = groups
             .iter()
             .find(|group| group.kind == TableRowGroupKind::Header)
@@ -741,9 +741,9 @@ impl BlockPageBuilder {
         let header_block_size = header.map_or_else(Au::zero, |group| group.block_size);
         let body_page_capacity = self.request.available_block_size - header_block_size;
         if header.is_some_and(|group| {
-            group.tag_id.is_none()
-                || group.block_size <= Au::zero()
-                || group.block_size >= self.request.available_block_size
+            group.tag_id.is_none() ||
+                group.block_size <= Au::zero() ||
+                group.block_size >= self.request.available_block_size
         }) {
             self.warn_unsupported_table_group_pagination(
                 child_index,
@@ -764,12 +764,12 @@ impl BlockPageBuilder {
         }
         let body_start = header.map_or(0, |group| group.end_row_index);
         let body_end = footer.map_or(rows.len(), |group| group.first_row_index);
-        if body_start > body_end
-            || body_end > rows.len()
-            || header.is_some_and(|group| group.first_row_index != 0)
-            || footer.is_some_and(|group| group.end_row_index != rows.len())
-            || (header.is_some()
-                && rows[body_start..body_end]
+        if body_start > body_end ||
+            body_end > rows.len() ||
+            header.is_some_and(|group| group.first_row_index != 0) ||
+            footer.is_some_and(|group| group.end_row_index != rows.len()) ||
+            (header.is_some() &&
+                rows[body_start..body_end]
                     .iter()
                     .filter(|row| row.block_size > body_page_capacity)
                     .any(|row| {
@@ -781,8 +781,8 @@ impl BlockPageBuilder {
                             .filter(|fragment| fragment.row_index == row.row_index)
                         {
                             has_fragment = true;
-                            crosses_body_capacity |= fragment.block_start + fragment.block_size
-                                > row.block_start + body_page_capacity;
+                            crosses_body_capacity |= fragment.block_start + fragment.block_size >
+                                row.block_start + body_page_capacity;
                             fragments_fit &= fragment.block_size <= body_page_capacity;
                         }
                         !has_fragment || !crosses_body_capacity || !fragments_fit
@@ -798,8 +798,7 @@ impl BlockPageBuilder {
         for range in &rowspan_ranges {
             let first_row = &rows[range.start];
             let last_row = &rows[range.end - 1];
-            let block_size =
-                last_row.block_start + last_row.block_size - first_row.block_start;
+            let block_size = last_row.block_start + last_row.block_size - first_row.block_start;
             let crosses_group_segment = (range.start < body_start && range.end > body_start) ||
                 (range.start < body_end && range.end > body_end);
             let available_block_size = if range.end <= body_start {
@@ -815,10 +814,7 @@ impl BlockPageBuilder {
                             (group.end_row_index == position && group.breaks.after)
                     })
             });
-            if crosses_group_segment ||
-                block_size > available_block_size ||
-                forced_break_inside
-            {
+            if crosses_group_segment || block_size > available_block_size || forced_break_inside {
                 if header.is_some() || footer.is_some() {
                     self.warn_unsupported_table_group_pagination(
                         child_index,
@@ -840,8 +836,8 @@ impl BlockPageBuilder {
         }
         if breaks.inside_avoid {
             let has_forced_internal_break =
-                rows.iter().any(|row| row.breaks.before || row.breaks.after)
-                    || groups
+                rows.iter().any(|row| row.breaks.before || row.breaks.after) ||
+                    groups
                         .iter()
                         .any(|group| group.breaks.before || group.breaks.after);
             if fresh_block_size <= self.request.available_block_size && !has_forced_internal_break {
@@ -855,8 +851,9 @@ impl BlockPageBuilder {
 
         let forced_origin =
             self.forced_break_before(child_index, table_node, current_block_position, breaks);
-        let mut translation = forced_origin
-            .map_or_else(Au::zero, |block_origin| block_origin - current_block_position);
+        let mut translation = forced_origin.map_or_else(Au::zero, |block_origin| {
+            block_origin - current_block_position
+        });
         let mut row_translations = vec![translation; rows.len()];
         let mut row_block_extensions = vec![Au::zero(); rows.len()];
         let mut cell_fragment_translations = vec![Au::zero(); cell_fragments.len()];
@@ -876,12 +873,12 @@ impl BlockPageBuilder {
             let mut block_start = header.block_start + translation;
             let page_end = self.current_page_origin + self.request.available_block_size;
             let considered_page_index = self.current_page_index;
-            let selected = table_page_has_content
-                && (constraint == LayoutDebugTableConstraint::ForcedBefore
-                    || block_start + header.block_size > page_end);
+            let selected = table_page_has_content &&
+                (constraint == LayoutDebugTableConstraint::ForcedBefore ||
+                    block_start + header.block_size > page_end);
             let retry_count = u8::from(
-                selected
-                    && matches!(
+                selected &&
+                    matches!(
                         constraint,
                         LayoutDebugTableConstraint::AvoidRow |
                             LayoutDebugTableConstraint::AvoidGroup
@@ -949,20 +946,20 @@ impl BlockPageBuilder {
             let rowspan_range = rowspan_ranges
                 .get(rowspan_position)
                 .filter(|range| range.start <= position && position < range.end);
-            let rowspan_block_size = rowspan_range
-                .filter(|range| range.start == position)
-                .map(|range| {
-                    let last_row = &rows[range.end - 1];
-                    last_row.block_start + last_row.block_size - row.block_start
-                });
+            let rowspan_block_size =
+                rowspan_range
+                    .filter(|range| range.start == position)
+                    .map(|range| {
+                        let last_row = &rows[range.end - 1];
+                        last_row.block_start + last_row.block_size - row.block_start
+                    });
             let mut group_break_after = false;
             while groups
                 .get(group_position)
                 .is_some_and(|group| group.end_row_index <= position)
             {
-                group_break_after =
-                    groups[group_position].end_row_index == position
-                        && groups[group_position].breaks.after;
+                group_break_after = groups[group_position].end_row_index == position &&
+                    groups[group_position].breaks.after;
                 group_position += 1;
             }
             let starting_group = groups
@@ -979,8 +976,8 @@ impl BlockPageBuilder {
             let oversized = row.block_size > body_page_capacity;
             let forced_before =
                 row.breaks.before || starting_group.is_some_and(|group| group.breaks.before);
-            let forced_after = position > 0
-                && (rows[position - 1].breaks.after || group_break_after);
+            let forced_after =
+                position > 0 && (rows[position - 1].breaks.after || group_break_after);
             let constraint = if forced_before {
                 LayoutDebugTableConstraint::ForcedBefore
             } else if forced_after {
@@ -992,30 +989,28 @@ impl BlockPageBuilder {
             } else {
                 LayoutDebugTableConstraint::Auto
             };
-            let constraint_selected = table_page_has_content
-                && rowspan_range.is_none_or(|range| range.start == position)
-                && match constraint {
+            let constraint_selected = table_page_has_content &&
+                rowspan_range.is_none_or(|range| range.start == position) &&
+                match constraint {
                     LayoutDebugTableConstraint::ForcedBefore |
                     LayoutDebugTableConstraint::ForcedAfter => true,
                     LayoutDebugTableConstraint::AvoidGroup => {
                         let group_block_size =
                             avoided_group_block_size.expect("avoid-group starts at this row");
-                        group_block_size <= body_page_capacity
-                            && block_start + group_block_size > page_end
+                        group_block_size <= body_page_capacity &&
+                            block_start + group_block_size > page_end
                     },
-                    LayoutDebugTableConstraint::Auto |
-                    LayoutDebugTableConstraint::AvoidRow => {
+                    LayoutDebugTableConstraint::Auto | LayoutDebugTableConstraint::AvoidRow => {
                         !oversized && block_start + row.block_size > page_end
                     },
                 };
-            let rowspan_selected = table_page_has_content
-                && !constraint_selected
-                && rowspan_block_size
-                    .is_some_and(|block_size| block_start + block_size > page_end);
+            let rowspan_selected = table_page_has_content &&
+                !constraint_selected &&
+                rowspan_block_size.is_some_and(|block_size| block_start + block_size > page_end);
             let selected = constraint_selected || rowspan_selected;
             let retry_count = u8::from(
-                constraint_selected
-                    && matches!(
+                constraint_selected &&
+                    matches!(
                         constraint,
                         LayoutDebugTableConstraint::AvoidRow |
                             LayoutDebugTableConstraint::AvoidGroup
@@ -1063,9 +1058,8 @@ impl BlockPageBuilder {
                     body_page_capacity,
                 );
             }
-            if let (Some(group), Some(group_block_size)) =
-                (avoided_group, avoided_group_block_size)
-                && group_block_size > body_page_capacity
+            if let (Some(group), Some(group_block_size)) = (avoided_group, avoided_group_block_size) &&
+                group_block_size > body_page_capacity
             {
                 self.warn_oversized_table_row_group_avoid(
                     child_index,
@@ -1075,15 +1069,17 @@ impl BlockPageBuilder {
                     body_page_capacity,
                 );
             }
-            let oversized_fragment = oversized.then(|| {
-                cell_fragments
-                    .iter()
-                    .find(|fragment| {
-                        fragment.row_index == row.row_index
-                            && fragment.block_size > body_page_capacity
-                    })
-                    .copied()
-            }).flatten();
+            let oversized_fragment = oversized
+                .then(|| {
+                    cell_fragments
+                        .iter()
+                        .find(|fragment| {
+                            fragment.row_index == row.row_index &&
+                                fragment.block_size > body_page_capacity
+                        })
+                        .copied()
+                })
+                .flatten();
             if let Some(fragment) = oversized_fragment {
                 self.warn_oversized_table_cell(child_index, table_node, fragment);
             }
@@ -1100,9 +1096,11 @@ impl BlockPageBuilder {
                     let mut cell_page_index = start_page_index;
                     let mut cell_page_origin = start_page_origin;
                     let mut cell_translation = Au::zero();
-                    for (index, fragment) in cell_fragments.iter().enumerate().filter(|(_, item)| {
-                        item.row_index == row.row_index && item.cell_index == cell_index
-                    }) {
+                    for (index, fragment) in
+                        cell_fragments.iter().enumerate().filter(|(_, item)| {
+                            item.row_index == row.row_index && item.cell_index == cell_index
+                        })
+                    {
                         let mut fragment_start =
                             fragment.block_start + translation + cell_translation;
                         while fragment_start >= cell_page_origin + self.request.page_stride {
@@ -1111,8 +1109,8 @@ impl BlockPageBuilder {
                             cell_translation += header_block_size;
                             fragment_start += header_block_size;
                         }
-                        if fragment_start + fragment.block_size
-                            > cell_page_origin + self.request.available_block_size
+                        if fragment_start + fragment.block_size >
+                            cell_page_origin + self.request.available_block_size
                         {
                             cell_page_index += 1;
                             cell_page_origin += self.request.page_stride;
@@ -1121,8 +1119,8 @@ impl BlockPageBuilder {
                             fragment_start = cell_page_origin + header_block_size;
                         }
                         debug_assert!(
-                            fragment_start + fragment.block_size
-                                <= cell_page_origin + self.request.available_block_size
+                            fragment_start + fragment.block_size <=
+                                cell_page_origin + self.request.available_block_size
                         );
                         cell_fragment_translations[index] = cell_translation;
                         assigned_pages[index] = Some(cell_page_index);
@@ -1151,9 +1149,9 @@ impl BlockPageBuilder {
                 }
 
                 for resume_page_index in start_page_index + 1..=last_page_index {
-                    let target_block_start = start_page_origin
-                        + self.request.page_stride
-                            * i32::try_from(resume_page_index - start_page_index)
+                    let target_block_start = start_page_origin +
+                        self.request.page_stride *
+                            i32::try_from(resume_page_index - start_page_index)
                                 .expect("page counts fit app units");
                     self.outcome.continuations.push(PageContinuation {
                         page_index: resume_page_index - 1,
@@ -1173,18 +1171,21 @@ impl BlockPageBuilder {
                         target_block_start,
                     );
                     for cell_index in 0..row.cell_count {
-                        let next_fragment_index = cell_fragments
-                            .iter()
-                            .enumerate()
-                            .find_map(|(index, fragment)| {
-                                (fragment.row_index == row.row_index
-                                    && fragment.cell_index == cell_index
-                                    && assigned_pages[index]
-                                        .is_some_and(|page_index| page_index >= resume_page_index))
-                                .then_some(fragment.fragment_index)
-                            });
-                        self.outcome.table_cell_continuations.push(
-                            TableCellContinuationDecision {
+                        let next_fragment_index =
+                            cell_fragments
+                                .iter()
+                                .enumerate()
+                                .find_map(|(index, fragment)| {
+                                    (fragment.row_index == row.row_index &&
+                                        fragment.cell_index == cell_index &&
+                                        assigned_pages[index].is_some_and(|page_index| {
+                                            page_index >= resume_page_index
+                                        }))
+                                    .then_some(fragment.fragment_index)
+                                });
+                        self.outcome
+                            .table_cell_continuations
+                            .push(TableCellContinuationDecision {
                                 page_index: resume_page_index - 1,
                                 table_node,
                                 row_group_index: row.row_group_index,
@@ -1192,8 +1193,7 @@ impl BlockPageBuilder {
                                 cell_index,
                                 next_fragment_index,
                                 resume_page_index,
-                            },
-                        );
+                            });
                     }
                 }
 
@@ -1206,9 +1206,9 @@ impl BlockPageBuilder {
                 translation += row_block_extension;
                 block_start = row.block_start + translation;
             }
-            if oversized
-                && (oversized_fragment.is_some()
-                    || self.current_page_index == considered_page_index)
+            if oversized &&
+                (oversized_fragment.is_some() ||
+                    self.current_page_index == considered_page_index)
             {
                 let row_end = block_start + row.block_size;
                 while self.current_page_origin + self.request.page_stride < row_end {
@@ -1216,10 +1216,7 @@ impl BlockPageBuilder {
                     self.current_page_origin += self.request.page_stride;
                 }
             }
-            if position > 0 ||
-                constraint != LayoutDebugTableConstraint::Auto ||
-                rowspan_selected
-            {
+            if position > 0 || constraint != LayoutDebugTableConstraint::Auto || rowspan_selected {
                 self.outcome.table_breaks.push(TableBreakDecision {
                     page_index: considered_page_index,
                     table_node,
@@ -1241,12 +1238,12 @@ impl BlockPageBuilder {
 
         if let Some(footer) = footer {
             let first_row = &rows[footer.first_row_index];
-            let group_break_after = groups.iter().any(|group| {
-                group.end_row_index == footer.first_row_index && group.breaks.after
-            });
+            let group_break_after = groups
+                .iter()
+                .any(|group| group.end_row_index == footer.first_row_index && group.breaks.after);
             let forced_before = first_row.breaks.before || footer.breaks.before;
-            let forced_after = footer.first_row_index > 0
-                && (rows[footer.first_row_index - 1].breaks.after || group_break_after);
+            let forced_after = footer.first_row_index > 0 &&
+                (rows[footer.first_row_index - 1].breaks.after || group_break_after);
             let constraint = if forced_before {
                 LayoutDebugTableConstraint::ForcedBefore
             } else if forced_after {
@@ -1261,15 +1258,15 @@ impl BlockPageBuilder {
             let mut block_start = footer.block_start + translation;
             let page_end = self.current_page_origin + self.request.available_block_size;
             let considered_page_index = self.current_page_index;
-            let selected = table_page_has_content
-                && (matches!(
+            let selected = table_page_has_content &&
+                (matches!(
                     constraint,
                     LayoutDebugTableConstraint::ForcedBefore |
                         LayoutDebugTableConstraint::ForcedAfter
                 ) || block_start + footer.block_size > page_end);
             let retry_count = u8::from(
-                selected
-                    && matches!(
+                selected &&
+                    matches!(
                         constraint,
                         LayoutDebugTableConstraint::AvoidRow |
                             LayoutDebugTableConstraint::AvoidGroup
@@ -1327,8 +1324,8 @@ impl BlockPageBuilder {
             self.include_content_through(block_start + footer.block_size);
         }
 
-        self.previous_break_after |= rows.last().is_some_and(|row| row.breaks.after)
-            || groups
+        self.previous_break_after |= rows.last().is_some_and(|row| row.breaks.after) ||
+            groups
                 .last()
                 .is_some_and(|group| group.end_row_index == rows.len() && group.breaks.after);
 
@@ -1348,9 +1345,11 @@ impl BlockPageBuilder {
         page_index: usize,
         target_block_start: Au,
     ) {
-        let (Some(header), Some(source_block_start), Some(header_tag_id)) =
-            (header, source_block_start, header.and_then(|group| group.tag_id))
-        else {
+        let (Some(header), Some(source_block_start), Some(header_tag_id)) = (
+            header,
+            source_block_start,
+            header.and_then(|group| group.tag_id),
+        ) else {
             return;
         };
         self.outcome
@@ -1427,10 +1426,10 @@ impl BlockPageBuilder {
         }
         let mut previous: Option<&InlineLine> = None;
         for line in lines {
-            if line.block_size <= Au::zero()
-                || line.block_size > self.request.available_block_size
-                || line.source_start >= line.source_end
-                || line.resume.text_offset != line.source_start
+            if line.block_size <= Au::zero() ||
+                line.block_size > self.request.available_block_size ||
+                line.source_start >= line.source_end ||
+                line.resume.text_offset != line.source_start
             {
                 return false;
             }
@@ -1445,9 +1444,9 @@ impl BlockPageBuilder {
                     line.resume.shaping_result_index,
                     line.resume.text_offset,
                 );
-                if line.block_start < previous.block_start
-                    || line.source_start < previous.source_end
-                    || progress <= previous_progress
+                if line.block_start < previous.block_start ||
+                    line.source_start < previous.source_end ||
+                    progress <= previous_progress
                 {
                     return false;
                 }
@@ -1464,24 +1463,23 @@ impl BlockPageBuilder {
         cell_fragments: &[TableCellFragment],
         rowspan_ranges: &[Range<usize>],
     ) -> TableRowsSupport {
-        if rows.is_empty()
-            || rows.iter().enumerate().any(|(position, row)| {
-                row.row_index != position
-                    || row.cell_count == 0
-                    || row.block_size <= Au::zero()
-                    || (position > 0
-                        && row.block_start
-                            < rows[position - 1].block_start + rows[position - 1].block_size)
+        if rows.is_empty() ||
+            rows.iter().enumerate().any(|(position, row)| {
+                row.row_index != position ||
+                    row.cell_count == 0 ||
+                    row.block_size <= Au::zero() ||
+                    (position > 0 &&
+                        row.block_start <
+                            rows[position - 1].block_start + rows[position - 1].block_size)
             })
         {
             return TableRowsSupport::Unsupported;
         }
 
         if row_groups.iter().enumerate().any(|(position, group)| {
-            group.first_row_index >= group.end_row_index
-                || group.end_row_index > rows.len()
-                || (position > 0
-                    && group.first_row_index < row_groups[position - 1].end_row_index)
+            group.first_row_index >= group.end_row_index ||
+                group.end_row_index > rows.len() ||
+                (position > 0 && group.first_row_index < row_groups[position - 1].end_row_index)
         }) {
             return TableRowsSupport::Unsupported;
         }
@@ -1513,10 +1511,10 @@ impl BlockPageBuilder {
                     let last_row = &rows[range.end - 1];
                     last_row.block_start + last_row.block_size
                 });
-            if fragment.cell_index >= row.cell_count
-                || fragment.block_size <= Au::zero()
-                || fragment.block_start < row.block_start
-                || fragment.block_start + fragment.block_size > row_block_end
+            if fragment.cell_index >= row.cell_count ||
+                fragment.block_size <= Au::zero() ||
+                fragment.block_start < row.block_start ||
+                fragment.block_start + fragment.block_size > row_block_end
             {
                 return TableRowsSupport::Unsupported;
             }
@@ -1531,12 +1529,12 @@ impl BlockPageBuilder {
                     fragment.cell_index,
                     fragment.fragment_index,
                 );
-                if key <= previous_key
-                    || (fragment.row_index == previous.row_index
-                        && fragment.cell_index == previous.cell_index
-                        && (fragment.fragment_index != previous.fragment_index + 1
-                            || fragment.block_start
-                                < previous.block_start + previous.block_size))
+                if key <= previous_key ||
+                    (fragment.row_index == previous.row_index &&
+                        fragment.cell_index == previous.cell_index &&
+                        (fragment.fragment_index != previous.fragment_index + 1 ||
+                            fragment.block_start <
+                                previous.block_start + previous.block_size))
                 {
                     return TableRowsSupport::Unsupported;
                 }
@@ -1544,8 +1542,8 @@ impl BlockPageBuilder {
                 return TableRowsSupport::Unsupported;
             }
             if previous.is_none_or(|previous| {
-                previous.row_index != fragment.row_index
-                    || previous.cell_index != fragment.cell_index
+                previous.row_index != fragment.row_index ||
+                    previous.cell_index != fragment.cell_index
             }) && fragment.fragment_index != 0
             {
                 return TableRowsSupport::Unsupported;
@@ -1609,8 +1607,9 @@ impl BlockPageBuilder {
             row.block_size.to_f32_px(),
             available_block_size.to_f32_px(),
         );
-        self.outcome.warnings.push(
-            BlockPaginationWarning::OversizedTableRowBreakInsideAvoid {
+        self.outcome
+            .warnings
+            .push(BlockPaginationWarning::OversizedTableRowBreakInsideAvoid {
                 child_index,
                 table_node,
                 row_group_index: row.row_group_index,
@@ -1619,8 +1618,7 @@ impl BlockPageBuilder {
                 available_block_size,
                 retry_count: 0,
                 retry_limit: TABLE_ROW_RETRY_LIMIT,
-            },
-        );
+            });
     }
 
     fn warn_oversized_table_row_group_avoid(
@@ -1668,15 +1666,15 @@ impl BlockPageBuilder {
                 block_size.to_f32_px(),
                 self.request.available_block_size.to_f32_px(),
             );
-            self.outcome.warnings.push(
-                BlockPaginationWarning::OversizedBreakInsideAvoid {
+            self.outcome
+                .warnings
+                .push(BlockPaginationWarning::OversizedBreakInsideAvoid {
                     child_index,
                     node,
                     block_size,
                     available_block_size: self.request.available_block_size,
                     retry_count: 0,
-                },
-            );
+                });
             return;
         }
         warn!(
@@ -1746,8 +1744,9 @@ impl BlockPageBuilder {
             block_size.to_f32_px(),
             available_block_size.to_f32_px(),
         );
-        self.outcome.warnings.push(
-            BlockPaginationWarning::UnsupportedTableRowspanPagination {
+        self.outcome
+            .warnings
+            .push(BlockPaginationWarning::UnsupportedTableRowspanPagination {
                 child_index,
                 table_node,
                 first_row_index: range.start,
@@ -1755,8 +1754,7 @@ impl BlockPageBuilder {
                 block_size,
                 available_block_size,
                 forced_break_inside,
-            },
-        );
+            });
     }
 
     fn include_content_through(&mut self, block_end: Au) {
@@ -3402,13 +3400,11 @@ mod tests {
         );
         assert_eq!(
             builder.finish().warnings,
-            vec![
-                BlockPaginationWarning::UnsupportedTableGroupPagination {
-                    child_index: 0,
-                    table_node: Some(10),
-                    reason: TableGroupUnsupportedReason::UnsupportedLayout,
-                },
-            ]
+            vec![BlockPaginationWarning::UnsupportedTableGroupPagination {
+                child_index: 0,
+                table_node: Some(10),
+                reason: TableGroupUnsupportedReason::UnsupportedLayout,
+            },]
         );
     }
 

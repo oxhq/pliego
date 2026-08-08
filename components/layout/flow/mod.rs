@@ -771,21 +771,19 @@ fn layout_block_level_children(
     let supports_simple_block_pagination = child_boxes
         .iter()
         .all(|child_box| is_simple_normal_flow_child(&child_box.borrow()));
-    let supports_single_fragmentable_child = child_boxes.len() == 1
-        && match &*child_boxes[0].borrow() {
+    let supports_single_fragmentable_child = child_boxes.len() == 1 &&
+        match &*child_boxes[0].borrow() {
             BlockLevelBox::SameFormattingContextBlock(block) => {
                 matches!(&block.contents, BlockContainer::InlineFormattingContext(_))
             },
             BlockLevelBox::Independent(context) => context.is_table(),
             _ => false,
         };
-    let mut page_builder = layout_context
-        .block_pagination
-        .claim(
-            child_boxes.len(),
-            supports_simple_block_pagination,
-            supports_single_fragmentable_child,
-        );
+    let mut page_builder = layout_context.block_pagination.claim(
+        child_boxes.len(),
+        supports_simple_block_pagination,
+        supports_single_fragmentable_child,
+    );
 
     let fragments = match sequential_layout_state {
         Some(ref mut sequential_layout_state) => layout_block_level_children_sequentially(
@@ -998,9 +996,10 @@ fn prepare_fragmentainer_boundary(
             None
         },
     };
-    let has_table_captions = retained_table
-        .as_ref()
-        .map_or_else(|| table_has_captions(fragment), |table| table.has_captions());
+    let has_table_captions = retained_table.as_ref().map_or_else(
+        || table_has_captions(fragment),
+        |table| table.has_captions(),
+    );
     if let Some(table) = retained_table.as_ref() {
         if !table.bordered_rows_fit(page_builder.available_block_size()) {
             page_builder.warn_unsupported_table_group_pagination(
@@ -1038,8 +1037,8 @@ fn prepare_fragmentainer_boundary(
         page_builder.warn_unsupported_table_caption_pagination(child_index, node);
     }
     if let Some((lines, line_fragments, box_fragment)) =
-        retained_inline_lines(fragment, placement_state)
-        && let Some(placement) = page_builder.place_inline_child(
+        retained_inline_lines(fragment, placement_state) &&
+        let Some(placement) = page_builder.place_inline_child(
             child_index,
             node,
             placement_state.current_block_direction_position,
@@ -1048,10 +1047,7 @@ fn prepare_fragmentainer_boundary(
         )
     {
         let writing_mode = placement_state.containing_block.style.writing_mode;
-        for (line, translation) in line_fragments
-            .iter()
-            .zip(&placement.line_translations)
-        {
+        for (line, translation) in line_fragments.iter().zip(&placement.line_translations) {
             if translation.is_zero() {
                 continue;
             }
@@ -1188,13 +1184,14 @@ impl RetainedTableFragments<'_> {
         }) && body_capacity > Au::zero() &&
             self.rows.iter().enumerate().all(|(position, row)| {
                 row.block_size > Au::zero() &&
-                    row.block_size <= if header.is_some_and(|group| {
-                        position >= group.first_row_index && position < group.end_row_index
-                    }) {
-                        available_block_size
-                    } else {
-                        body_capacity
-                    }
+                    row.block_size <=
+                        if header.is_some_and(|group| {
+                            position >= group.first_row_index && position < group.end_row_index
+                        }) {
+                            available_block_size
+                        } else {
+                            body_capacity
+                        }
             })
     }
 
@@ -1231,11 +1228,7 @@ impl RetainedTableFragments<'_> {
                     split_container_extensions[index].max(*translation);
             }
         }
-        for (container, extension) in self
-            .split_containers
-            .iter()
-            .zip(split_container_extensions)
-        {
+        for (container, extension) in self.split_containers.iter().zip(split_container_extensions) {
             grow_horizontal_box(container, extension);
         }
 
@@ -1336,9 +1329,9 @@ fn retained_table_rows<'a>(
         .containing_block
         .style
         .writing_mode
-        .is_horizontal()
-        || !wrapper_writing_mode.is_horizontal()
-        || !wrapper_writing_mode.is_bidi_ltr()
+        .is_horizontal() ||
+        !wrapper_writing_mode.is_horizontal() ||
+        !wrapper_writing_mode.is_bidi_ltr()
     {
         return Err(TableGroupUnsupportedReason::UnsupportedLayout);
     }
@@ -1508,10 +1501,7 @@ fn retained_table_rows<'a>(
                 }
                 if first_row_index < rows.len() {
                     groups.push(TableRowGroup {
-                        tag_id: child
-                            .base
-                            .tag
-                            .map(|tag| tag.to_display_list_fragment_id()),
+                        tag_id: child.base.tag.map(|tag| tag.to_display_list_fragment_id()),
                         row_group_index,
                         first_row_index,
                         end_row_index: rows.len(),
@@ -1526,9 +1516,8 @@ fn retained_table_rows<'a>(
             _ => return Err(TableGroupUnsupportedReason::UnsupportedLayout),
         }
     }
-    if rows.is_empty()
-        || rows
-            .iter()
+    if rows.is_empty() ||
+        rows.iter()
             .enumerate()
             .any(|(expected, row)| row.row_index != expected)
     {
@@ -1545,19 +1534,17 @@ fn retained_table_rows<'a>(
     if footers.len() > 1 {
         return Err(TableGroupUnsupportedReason::MultipleFooters);
     }
-    if headers.len() > 1
-        || headers
+    if headers.len() > 1 ||
+        headers
             .first()
-            .is_some_and(|group| group.first_row_index != 0)
-        || footers
+            .is_some_and(|group| group.first_row_index != 0) ||
+        footers
             .first()
             .is_some_and(|group| group.end_row_index != rows.len())
     {
         return Err(TableGroupUnsupportedReason::UnsupportedLayout);
     }
-    if collapsed_grid &&
-        (headers.len() != 1 || rows.iter().any(|row| row.has_rowspan))
-    {
+    if collapsed_grid && (headers.len() != 1 || rows.iter().any(|row| row.has_rowspan)) {
         return Err(TableGroupUnsupportedReason::CollapsedBorders);
     }
     if has_borders && !collapsed_grid {
@@ -1628,8 +1615,8 @@ fn table_has_captions(fragment: &Fragment) -> bool {
     let Fragment::Box(wrapper) = fragment else {
         return false;
     };
-    wrapper.is_table_wrapper()
-        && wrapper.children.iter().any(|child| {
+    wrapper.is_table_wrapper() &&
+        wrapper.children.iter().any(|child| {
             let Fragment::Box(child) = child else {
                 return false;
             };
@@ -1714,10 +1701,10 @@ fn retain_table_cell_fragment<'a>(
             Some(())
         },
         Fragment::Box(box_fragment)
-            if box_fragment.children.len() >= 2
-                && box_fragment.children.iter().all(|child| {
-                    matches!(child, Fragment::Positioning(line) if line.is_line_box())
-                }) =>
+            if box_fragment.children.len() >= 2 &&
+                box_fragment.children.iter().all(
+                    |child| matches!(child, Fragment::Positioning(line) if line.is_line_box()),
+                ) =>
         {
             let block_start = parent_block_start + box_fragment.base.rect().origin.y;
             let container_index = split_containers.len();
@@ -1737,12 +1724,14 @@ fn retain_table_cell_fragment<'a>(
             }
             Some(())
         },
-        Fragment::Box(_)
-        | Fragment::Positioning(_)
-        | Fragment::Text(_)
-        | Fragment::Image(_)
-        | Fragment::IFrame(_) => {
-            let base = fragment.base().expect("retained cell fragments have geometry");
+        Fragment::Box(_) |
+        Fragment::Positioning(_) |
+        Fragment::Text(_) |
+        Fragment::Image(_) |
+        Fragment::IFrame(_) => {
+            let base = fragment
+                .base()
+                .expect("retained cell fragments have geometry");
             let rect = base.rect();
             if rect.size.height <= Au::zero() {
                 return Some(());
@@ -1761,9 +1750,9 @@ fn retain_table_cell_fragment<'a>(
             *fragment_index += 1;
             Some(())
         },
-        Fragment::LayoutRoot(_)
-        | Fragment::Float(_)
-        | Fragment::AbsoluteOrFixedPositionedPlaceholder(_) => None,
+        Fragment::LayoutRoot(_) |
+        Fragment::Float(_) |
+        Fragment::AbsoluteOrFixedPositionedPlaceholder(_) => None,
     }
 }
 
@@ -1786,11 +1775,11 @@ fn table_cell_fragment_has_excluded_layout(fragment: &Fragment) -> bool {
             .children
             .iter()
             .any(table_cell_fragment_has_excluded_layout),
-        Fragment::LayoutRoot(_)
-        | Fragment::AbsoluteOrFixedPositionedPlaceholder(_)
-        | Fragment::Text(_)
-        | Fragment::Image(_)
-        | Fragment::IFrame(_) => false,
+        Fragment::LayoutRoot(_) |
+        Fragment::AbsoluteOrFixedPositionedPlaceholder(_) |
+        Fragment::Text(_) |
+        Fragment::Image(_) |
+        Fragment::IFrame(_) => false,
     }
 }
 
@@ -1820,8 +1809,7 @@ fn retained_inline_lines<'a>(
     let Fragment::Box(box_fragment) = fragment else {
         return None;
     };
-    if box_fragment.padding != PhysicalSides::zero()
-        || box_fragment.border != PhysicalSides::zero()
+    if box_fragment.padding != PhysicalSides::zero() || box_fragment.border != PhysicalSides::zero()
     {
         return None;
     }
@@ -1842,8 +1830,8 @@ fn retained_inline_lines<'a>(
     let mut lines = Vec::with_capacity(line_fragments.len());
     for line in &line_fragments {
         let source = retained_line_source(&line.children)?;
-        if let Some(existing) = text_content.as_ref()
-            && !Arc::ptr_eq(existing, &source.text_content)
+        if let Some(existing) = text_content.as_ref() &&
+            !Arc::ptr_eq(existing, &source.text_content)
         {
             return None;
         }
@@ -1866,8 +1854,8 @@ fn retained_inline_lines<'a>(
 fn retained_line_source(fragments: &[Fragment]) -> Option<RetainedLineSource> {
     let mut text_content = None;
     let mut retained = Vec::new();
-    if !collect_retained_line_text(fragments, &mut text_content, &mut retained)
-        || retained.is_empty()
+    if !collect_retained_line_text(fragments, &mut text_content, &mut retained) ||
+        retained.is_empty()
     {
         return None;
     }
@@ -1898,12 +1886,11 @@ fn collect_retained_line_text(
     for fragment in fragments {
         match fragment {
             Fragment::Text(text) => {
-                if text.glyphs.len() != text.text_ranges.len()
-                    || text.glyphs.len() != text.sources.len()
-                    || text
-                        .text_ranges
-                        .iter()
-                        .any(|range| range.start >= range.end || range.end > text.text_content.len())
+                if text.glyphs.len() != text.text_ranges.len() ||
+                    text.glyphs.len() != text.sources.len() ||
+                    text.text_ranges.iter().any(|range| {
+                        range.start >= range.end || range.end > text.text_content.len()
+                    })
                 {
                     return false;
                 }
@@ -1914,7 +1901,12 @@ fn collect_retained_line_text(
                 } else {
                     *text_content = Some(text.text_content.clone());
                 }
-                retained.extend(text.text_ranges.iter().cloned().zip(text.sources.iter().copied()));
+                retained.extend(
+                    text.text_ranges
+                        .iter()
+                        .cloned()
+                        .zip(text.sources.iter().copied()),
+                );
             },
             Fragment::Box(box_fragment) => {
                 if !collect_retained_line_text(&box_fragment.children, text_content, retained) {
@@ -2961,8 +2953,8 @@ impl<'container> PlacementState<'container> {
             .border_rect()
             .size
             .to_logical(self.containing_block.style.writing_mode)
-            .block
-            + clearance.unwrap_or_default();
+            .block +
+            clearance.unwrap_or_default();
         let current_margin = self.current_margin.adjoin(&margins.start);
         let fresh_margin = CollapsedMargin::zero().adjoin(&margins.start);
         let (current_margin, fresh_margin) = if margins.collapsed_through {

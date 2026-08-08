@@ -93,12 +93,8 @@ def verify_supported(
     require(flattened == EXPECTED_TEXT, f"caption or row text differs: {flattened!r}")
 
     occurrences: dict[str, list[int]] = {"TOP_CAPTION": [], "BOTTOM_CAPTION": []}
-    row_pages: dict[tuple[str, int], set[int]] = {
-        (table, row): set() for table in "TB" for row in range(ROW_COUNT)
-    }
-    column_x: dict[tuple[str, str], set[float]] = {
-        (table, column): set() for table in "TB" for column in "AB"
-    }
+    row_pages: dict[tuple[str, int], set[int]] = {(table, row): set() for table in "TB" for row in range(ROW_COUNT)}
+    column_x: dict[tuple[str, str], set[float]] = {(table, column): set() for table in "TB" for column in "AB"}
     for page_index, operations in enumerate(pages):
         for operation in operations:
             text = str(operation.get("text", ""))
@@ -139,9 +135,7 @@ def verify_supported(
     continuations = page_sequence.get("continuations")
     require(isinstance(continuations, list), "continuation trace is absent")
     table_continuations = [
-        item
-        for item in continuations
-        if isinstance(item, dict) and item.get("token", {}).get("kind") == "table"
+        item for item in continuations if isinstance(item, dict) and item.get("token", {}).get("kind") == "table"
     ]
     table_nodes = {item["token"].get("table_node") for item in table_continuations}
     require(len(table_nodes) == 2 and None not in table_nodes, f"table identity differs: {table_nodes!r}")
@@ -157,9 +151,7 @@ def verify_supported(
     require(isinstance(decisions, list), "table break decisions are absent")
     require({item.get("table_node") for item in decisions} == table_nodes, "decision identity differs")
     for node in table_nodes:
-        boundaries = [
-            item.get("next_row_index") for item in decisions if item.get("table_node") == node
-        ]
+        boundaries = [item.get("next_row_index") for item in decisions if item.get("table_node") == node]
         require(boundaries == list(range(1, ROW_COUNT)), f"row boundaries differ: {boundaries!r}")
     require(page_sequence.get("warnings") in (None, []), "supported captions emitted a warning")
 
@@ -191,9 +183,7 @@ def self_test() -> None:
     pages[0]["operations"].append(operation("TOP_CAPTION", 10.0))
     for table, page_by_row in (("T", [0, 0, 0, 1, 1, 1]), ("B", [1, 2, 2, 2, 2, 3])):
         for row, page in enumerate(page_by_row):
-            pages[page]["operations"].extend(
-                [operation(f"{table}{row}A", 10.0), operation(f"{table}{row}B", 70.0)]
-            )
+            pages[page]["operations"].extend([operation(f"{table}{row}A", 10.0), operation(f"{table}{row}B", 70.0)])
     pages[3]["operations"].append(operation("BOTTOM_CAPTION", 10.0))
 
     decisions = []

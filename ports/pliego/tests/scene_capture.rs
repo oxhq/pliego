@@ -650,8 +650,8 @@ fn retains_svg_text_font_identity_and_embedded_png_for_both_backends() {
     let face = ttf_parser::Face::parse(FONT_BYTES, 0).unwrap();
     let glyph_id = face.glyph_index('A').unwrap();
     let font_size = 8.0_f32;
-    let advance = f32::from(face.glyph_hor_advance(glyph_id).unwrap()) * font_size
-        / f32::from(face.units_per_em());
+    let advance = f32::from(face.glyph_hor_advance(glyph_id).unwrap()) * font_size /
+        f32::from(face.units_per_em());
     let font_resource = content_address(FONT_BYTES);
     let font_instance = font_instance_address(FONT_BYTES, 0, &[], false);
 

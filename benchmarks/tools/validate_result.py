@@ -83,17 +83,13 @@ def validate(
         if matches != 1:
             closest = min(branch_violations, key=len)
             detail = f"; closest: {closest[0]}" if closest else ""
-            violations.append(
-                Violation(path, f"expected exactly one oneOf match, got {matches}{detail}")
-            )
+            violations.append(Violation(path, f"expected exactly one oneOf match, got {matches}{detail}"))
         return
 
     if "type" in schema:
         types = schema["type"] if isinstance(schema["type"], list) else [schema["type"]]
         if not any(type_matches(data, t) for t in types):
-            violations.append(
-                Violation(path, f"expected type {types!r}, got {type(data).__name__}")
-            )
+            violations.append(Violation(path, f"expected type {types!r}, got {type(data).__name__}"))
             return
 
     if "const" in schema and data != schema["const"]:
@@ -112,9 +108,7 @@ def validate(
 
     if isinstance(data, list):
         if "minItems" in schema and len(data) < schema["minItems"]:
-            violations.append(
-                Violation(path, f"expected >= {schema['minItems']} items, got {len(data)}")
-            )
+            violations.append(Violation(path, f"expected >= {schema['minItems']} items, got {len(data)}"))
         if "items" in schema and isinstance(schema["items"], dict):
             for index, item in enumerate(data):
                 validate(item, schema["items"], f"{path}[{index}]", violations, root)

@@ -266,10 +266,7 @@ def collect_samples(
     if result.returncode != 0:
         fail(f"runner failed for {fixture_id!r}: {result.stderr[-2000:]}")
     if len(samples_out) != samples:
-        fail(
-            f"runner produced {len(samples_out)} of {samples} samples for {fixture_id!r}: "
-            f"{result.stderr[-2000:]}"
-        )
+        fail(f"runner produced {len(samples_out)} of {samples} samples for {fixture_id!r}: {result.stderr[-2000:]}")
     return samples_out
 
 
@@ -321,9 +318,7 @@ def aggregates(samples: list[dict[str, Any]], page_count: int | None) -> dict[st
     if page_count:
         agg["scaling"] = {
             "per_page_wall_ms": round(mean_wall / page_count, 3),
-            "per_page_peak_rss_kib": (
-                round(percentiles(rss)["mean"] / page_count, 1) if rss else 0.0
-            ),
+            "per_page_peak_rss_kib": (round(percentiles(rss)["mean"] / page_count, 1) if rss else 0.0),
         }
     if mean_wall > 0:
         agg["throughput"] = {"renders_per_minute": round(60_000 / mean_wall, 2), "concurrency": 1}
@@ -349,7 +344,9 @@ def main() -> int:
         fail("--warmup cannot be negative")
     benchmark_clean = benchmark_tree_is_clean()
     if args.dedicated and not benchmark_clean:
-        fail("--dedicated requires a clean benchmarks tree so the recorded revision identifies the harness and fixtures")
+        fail(
+            "--dedicated requires a clean benchmarks tree so the recorded revision identifies the harness and fixtures"
+        )
 
     binary = Path(args.binary)
     if not binary.is_file():
@@ -437,21 +434,27 @@ def main() -> int:
             "aggregates": aggregate,
         }
         results.append(result)
-        print(f"  -> p50 {result['aggregates']['latency']['p50']:.1f} ms, "
-              f"p95 {result['aggregates']['latency']['p95']:.1f} ms, "
-              f"correctness {result['aggregates']['correctness']['pass_count']}/{result['aggregates']['correctness']['total']}")
+        print(
+            f"  -> p50 {result['aggregates']['latency']['p50']:.1f} ms, "
+            f"p95 {result['aggregates']['latency']['p95']:.1f} ms, "
+            f"correctness {result['aggregates']['correctness']['pass_count']}/{result['aggregates']['correctness']['total']}"
+        )
 
     if args.out:
         out = Path(args.out)
     else:
         safe_host = platform.system().lower().replace(" ", "-")
         out = ROOT / "benchmarks" / "baselines" / f"{args.target}-{safe_host}-{platform.machine().lower()}.json"
-    payload = results[0] if len(results) == 1 else {
-        "schema": "pliego.benchmark-bundle",
-        "version": 1,
-        "generated_at": generated_at,
-        "results": results,
-    }
+    payload = (
+        results[0]
+        if len(results) == 1
+        else {
+            "schema": "pliego.benchmark-bundle",
+            "version": 1,
+            "generated_at": generated_at,
+            "results": results,
+        }
+    )
     violations: list[Any] = []
     validate_result.validate(payload, json.loads(schema.read_text(encoding="utf-8")), "$", violations)
     if violations:

@@ -51,12 +51,7 @@ TABLE_CSS = """
 
 
 def chunk(kind: bytes, data: bytes) -> bytes:
-    return (
-        struct.pack(">I", len(data))
-        + kind
-        + data
-        + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
-    )
+    return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
 
 
 def validate_png(png: bytes, width: int, height: int) -> None:
@@ -122,25 +117,20 @@ def make_png(width: int, height: int, index: int) -> bytes:
                 color = background
             raw.extend(color)
     ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
-    png = (
-        b"\x89PNG\r\n\x1a\n"
-        + chunk(b"IHDR", ihdr)
-        + chunk(b"IDAT", zlib.compress(raw, 9))
-        + chunk(b"IEND", b"")
-    )
+    png = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IDAT", zlib.compress(raw, 9)) + chunk(b"IEND", b"")
     validate_png(png, width, height)
     return png
 
 
 PALETTE = [
-    (37, 99, 235),    # blue
-    (245, 158, 11),   # amber
-    (71, 85, 105),    # slate
-    (16, 185, 129),   # emerald
-    (220, 38, 38),    # red
-    (124, 58, 237),   # violet
-    (14, 165, 233),   # sky
-    (234, 88, 12),    # orange
+    (37, 99, 235),  # blue
+    (245, 158, 11),  # amber
+    (71, 85, 105),  # slate
+    (16, 185, 129),  # emerald
+    (220, 38, 38),  # red
+    (124, 58, 237),  # violet
+    (14, 165, 233),  # sky
+    (234, 88, 12),  # orange
 ]
 
 
@@ -161,9 +151,7 @@ def image_pages() -> str:
             '    <section class="page">\n'
             f"      <h1>Font and image heavy - page {page + 1}</h1>\n"
             "      <p>Deterministic embedded-font labels and unique decoded chart images.</p>\n"
-            '      <div class="grid">\n'
-            + "\n".join(cards)
-            + "\n      </div>\n"
+            '      <div class="grid">\n' + "\n".join(cards) + "\n      </div>\n"
             "    </section>"
         )
     return "\n".join(pages)

@@ -308,8 +308,8 @@ fn decide_resource_policy(
                     "file is outside the document root".into(),
                 ),
                 Err(error)
-                    if error.kind() == std::io::ErrorKind::NotFound
-                        && nearest_existing_ancestor(&path)
+                    if error.kind() == std::io::ErrorKind::NotFound &&
+                        nearest_existing_ancestor(&path)
                             .is_some_and(|ancestor| ancestor.starts_with(document_root)) =>
                 {
                     failure(
@@ -326,8 +326,8 @@ fn decide_resource_policy(
             }
         },
         "http" | "https"
-            if matches!(request.method.as_str(), "GET" | "HEAD")
-                && policy
+            if matches!(request.method.as_str(), "GET" | "HEAD") &&
+                policy
                     .allowed_http_roots
                     .iter()
                     .any(|root| http_root_allows(root, &request.url)) =>
@@ -504,12 +504,12 @@ fn classify_controlled_http_status(
 
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
 fn http_root_allows(root: &url::Url, requested: &url::Url) -> bool {
-    requested.username().is_empty()
-        && requested.password().is_none()
-        && root.scheme() == requested.scheme()
-        && root.host_str() == requested.host_str()
-        && root.port_or_known_default() == requested.port_or_known_default()
-        && requested.path().starts_with(root.path())
+    requested.username().is_empty() &&
+        requested.password().is_none() &&
+        root.scheme() == requested.scheme() &&
+        root.host_str() == requested.host_str() &&
+        root.port_or_known_default() == requested.port_or_known_default() &&
+        requested.path().starts_with(root.path())
 }
 
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
@@ -857,12 +857,12 @@ fn parse_http_root(value: &OsString) -> Result<url::Url, String> {
         .to_str()
         .ok_or_else(|| "HTTP root must be valid UTF-8".to_owned())?;
     let mut root = url::Url::parse(value).map_err(|error| format!("invalid HTTP root: {error}"))?;
-    if !matches!(root.scheme(), "http" | "https")
-        || root.host_str().is_none()
-        || !root.username().is_empty()
-        || root.password().is_some()
-        || root.query().is_some()
-        || root.fragment().is_some()
+    if !matches!(root.scheme(), "http" | "https") ||
+        root.host_str().is_none() ||
+        !root.username().is_empty() ||
+        root.password().is_some() ||
+        root.query().is_some() ||
+        root.fragment().is_some()
     {
         return Err(
             "HTTP root must be an http(s) URL without credentials, query, or fragment".into(),
@@ -1515,8 +1515,8 @@ fn render(request: RenderRequest) {
         )
     });
     let scene_capture_ms = elapsed_milliseconds(scene_capture_started);
-    if !request.allow_host_fonts
-        && let Some(selection) = scene_capture
+    if !request.allow_host_fonts &&
+        let Some(selection) = scene_capture
             .font_selections
             .iter()
             .find(|selection| selection.source.is_host())
@@ -1754,10 +1754,10 @@ fn stable_render_id(
     if allow_host_fonts {
         update_hash_field(&mut hasher, b"pliego.host-fonts.v1");
     }
-    if !resource_policy.allowed_http_roots.is_empty()
-        || !resource_policy.virtual_resources.is_empty()
-        || resource_policy.asset_manifest.is_some()
-        || resource_policy.timeout_ms != READINESS_TIMEOUT_MS
+    if !resource_policy.allowed_http_roots.is_empty() ||
+        !resource_policy.virtual_resources.is_empty() ||
+        resource_policy.asset_manifest.is_some() ||
+        resource_policy.timeout_ms != READINESS_TIMEOUT_MS
     {
         update_hash_field(&mut hasher, RESOURCE_POLICY_ID.as_bytes());
         update_hash_field(&mut hasher, &resource_policy.timeout_ms.to_be_bytes());
@@ -2104,8 +2104,8 @@ fn record_resources(
 
     for resource in resources {
         match resource.event {
-            servoshell::NetworkEvent::HttpRequest(request)
-            | servoshell::NetworkEvent::HttpRequestUpdate(request) => {
+            servoshell::NetworkEvent::HttpRequest(request) |
+            servoshell::NetworkEvent::HttpRequestUpdate(request) => {
                 let method = request.method.to_string();
                 let url = request.url.into_string();
                 let pending_resource = pending.entry(resource.request_id.clone()).or_default();
@@ -2239,8 +2239,8 @@ fn record_resources(
         })
         .filter(|(url, _)| !capture.url_to_resource.contains_key(url))
         .filter(|(url, _)| {
-            url.starts_with("file:")
-                || policy.allowed_http_roots.iter().any(|root| {
+            url.starts_with("file:") ||
+                policy.allowed_http_roots.iter().any(|root| {
                     url::Url::parse(url).is_ok_and(|requested| http_root_allows(root, &requested))
                 })
         })
@@ -2274,8 +2274,8 @@ fn complete_resource(
     request_id: &str,
     body: Option<Vec<u8>>,
 ) -> Option<CompletedResource> {
-    if body.is_none()
-        && !pending
+    if body.is_none() &&
+        !pending
             .get(request_id)?
             .response_status
             .is_some_and(|status| (200..300).contains(&status))
@@ -2946,7 +2946,9 @@ fn render(_request: RenderRequest) {
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, HashMap};
+    use std::ffi::OsString;
     use std::fs;
+    use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use base64::Engine as _;
@@ -2970,8 +2972,6 @@ mod tests {
         sha256_hex, stable_render_id,
     };
     use crate::session::SessionArtifacts;
-    use std::ffi::OsString;
-    use std::path::PathBuf;
 
     const DEJAVU_SANS: &[u8] = include_bytes!(concat!(
         env!("CARGO_MANIFEST_DIR"),

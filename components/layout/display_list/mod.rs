@@ -554,12 +554,12 @@ impl DisplayListBuilder<'_> {
         let style = fragment.style();
         let effects = style.get_effects();
         let transform_style = style.used_transform_style(fragment.base.flags);
-        if effects.filter.0.is_empty()
-            && effects.opacity == 1.0
-            && effects.mix_blend_mode == ComputedMixBlendMode::Normal
-            && !style.has_effective_transform_or_perspective(FragmentFlags::empty())
-            && style.get_svg().clip_path == ClipPath::None
-            && transform_style == TransformStyle::Flat
+        if effects.filter.0.is_empty() &&
+            effects.opacity == 1.0 &&
+            effects.mix_blend_mode == ComputedMixBlendMode::Normal &&
+            !style.has_effective_transform_or_perspective(FragmentFlags::empty()) &&
+            style.get_svg().clip_path == ClipPath::None &&
+            transform_style == TransformStyle::Flat
         {
             return false;
         }
@@ -881,8 +881,8 @@ impl PaintTraversalHandler for DisplayListBuilder<'_> {
     fn visit_box(&mut self, state: &TraversalState, fragment: &BoxFragmentWithStyle<'_>) {
         fragment.base.visit_fragment(self);
 
-        if let Some(mut inspector_highlight) = self.inspector_highlight.take()
-            && fragment.base.tag == Some(inspector_highlight.tag)
+        if let Some(mut inspector_highlight) = self.inspector_highlight.take() &&
+            fragment.base.tag == Some(inspector_highlight.tag)
         {
             inspector_highlight.register_fragment_of_highlighted_dom_node(self, state, fragment);
             self.inspector_highlight = Some(inspector_highlight);
@@ -976,12 +976,12 @@ impl PaintTraversalHandler for DisplayListBuilder<'_> {
             .to_webrender();
         let common = self.common_properties(state, clip, &style);
 
-        let paints_image = fragment.image_key.is_some()
-            || fragment.vector_image_id.is_some()
-            || fragment.showing_broken_image_icon;
-        let image_geometry_is_supported = state.spatial_id == self.paint_info.root_scroll_node_id
-            && paint_clip_contains_rect(clip, rect)
-            && paint_clip_chain_contains_rect(
+        let paints_image = fragment.image_key.is_some() ||
+            fragment.vector_image_id.is_some() ||
+            fragment.showing_broken_image_icon;
+        let image_geometry_is_supported = state.spatial_id == self.paint_info.root_scroll_node_id &&
+            paint_clip_contains_rect(clip, rect) &&
+            paint_clip_chain_contains_rect(
                 self.clip_store,
                 state.clip_id,
                 self.paint_info.root_scroll_node_id,
@@ -1052,8 +1052,8 @@ impl PaintTraversalHandler for DisplayListBuilder<'_> {
         if style.get_inherited_box().visibility != Visibility::Visible {
             return;
         }
-        if !style.get_inherited_text().text_shadow.0.is_empty()
-            || state
+        if !style.get_inherited_text().text_shadow.0.is_empty() ||
+            state
                 .text_decorations
                 .iter()
                 .any(|decoration| !decoration.line.is_empty())
@@ -1159,9 +1159,9 @@ impl PaintTraversalHandler for DisplayListBuilder<'_> {
             }
         }
 
-        if background_has_image(&source_style)
-            || !paint_state_is_axis_aligned(self.paint_info.root_scroll_node_id, state)
-            || !paint_rect_geometry_is_supported(painting_area)
+        if background_has_image(&source_style) ||
+            !paint_state_is_axis_aligned(self.paint_info.root_scroll_node_id, state) ||
+            !paint_rect_geometry_is_supported(painting_area)
         {
             self.debug_capture.record_fragment(
                 "root-background",
@@ -1205,8 +1205,8 @@ impl PaintTraversalHandler for DisplayListBuilder<'_> {
         if fragment.style().get_inherited_box().visibility != Visibility::Visible {
             return;
         };
-        if box_paint_geometry_is_supported(self, state, fragment)
-            && let Some(rows) = collapsed_table_border_rows(fragment.box_fragment, state.origin)
+        if box_paint_geometry_is_supported(self, state, fragment) &&
+            let Some(rows) = collapsed_table_border_rows(fragment.box_fragment, state.origin)
         {
             for (row, borders) in rows {
                 self.debug_capture
@@ -1280,8 +1280,8 @@ impl Fragment {
         let mut baseline_origin = rect.origin;
         baseline_origin.y += fragment.font_metrics.ascent;
 
-        let include_whitespace = fragment.offsets.is_some()
-            || state
+        let include_whitespace = fragment.offsets.is_some() ||
+            state
                 .text_decorations
                 .iter()
                 .any(|item| !item.line.is_empty());
@@ -1437,9 +1437,9 @@ impl Fragment {
         let expand_rect_for_text_decoration = |mut rect: Box2D<f32, LayoutPixel>| {
             if matches!(
                 text_decoration.style,
-                ComputedTextDecorationStyle::Dotted
-                    | ComputedTextDecorationStyle::Dashed
-                    | ComputedTextDecorationStyle::Wavy,
+                ComputedTextDecorationStyle::Dotted |
+                    ComputedTextDecorationStyle::Dashed |
+                    ComputedTextDecorationStyle::Wavy,
             ) {
                 rect.min.x = rect.min.x.min(0.0);
             }
@@ -1518,8 +1518,8 @@ impl Fragment {
             return;
         }
 
-        if offsets.character_range.start > shared_selection.character_range.end
-            || offsets.character_range.end < shared_selection.character_range.start
+        if offsets.character_range.start > shared_selection.character_range.end ||
+            offsets.character_range.end < shared_selection.character_range.start
         {
             return;
         }
@@ -1528,8 +1528,8 @@ impl Fragment {
         // layout will push an empty fragment in order to trigger painting of the cursor on an empty line.
         // This code ensure that it is only painted if the cursor is on the starting index of the empty
         // fragment.
-        if fragment.is_empty_for_text_cursor
-            && !offsets
+        if fragment.is_empty_for_text_cursor &&
+            !offsets
                 .character_range
                 .contains(&shared_selection.character_range.start)
         {
@@ -1542,11 +1542,11 @@ impl Fragment {
         let mut end_advance = None;
         for glyph_store in fragment.glyphs.iter() {
             let glyph_store_character_count = glyph_store.character_count();
-            if current_character_index + glyph_store_character_count
-                < shared_selection.character_range.start
+            if current_character_index + glyph_store_character_count <
+                shared_selection.character_range.start
             {
-                current_advance += glyph_store.total_advance()
-                    + (justification_adjustment * glyph_store.total_word_separators() as i32);
+                current_advance += glyph_store.total_advance() +
+                    (justification_adjustment * glyph_store.total_word_separators() as i32);
                 current_character_index += glyph_store_character_count;
                 continue;
             }
@@ -1578,8 +1578,8 @@ impl Fragment {
         let parent_style = fragment.base.style();
         if !shared_selection.range.is_empty() {
             let selection_rect = Rect::new(
-                containing_block_rect.origin
-                    + Vector2D::new(fragment_x_offset + start_x, Au::zero()),
+                containing_block_rect.origin +
+                    Vector2D::new(fragment_x_offset + start_x, Au::zero()),
                 Size2D::new(end_x - start_x, containing_block_rect.height()),
             )
             .to_webrender();
@@ -1784,9 +1784,9 @@ impl<'a> BuilderForBoxFragment<'a> {
             .effective_overflow(self.fragment.base.flags);
         let scrolls_via_user_input =
             |overflow| matches!(overflow, ComputedOverflow::Scroll | ComputedOverflow::Auto);
-        if (scrolls_via_user_input(overflow.x) || scrolls_via_user_input(overflow.y))
-            && self.fragment.style().get_inherited_ui().pointer_events
-                != style::computed_values::pointer_events::T::None
+        if (scrolls_via_user_input(overflow.x) || scrolls_via_user_input(overflow.y)) &&
+            self.fragment.style().get_inherited_ui().pointer_events !=
+                style::computed_values::pointer_events::T::None
         {
             let mut inner_state = state.clone();
             inner_state.spatial_id = self
@@ -1891,8 +1891,8 @@ impl<'a> BuilderForBoxFragment<'a> {
             return;
         }
         // If the `<body>` background was inherited by the root element, don't paint it again here.
-        if !builder.paint_body_background
-            && flags.intersects(FragmentFlags::IS_BODY_ELEMENT_OF_HTML_ELEMENT_ROOT)
+        if !builder.paint_body_background &&
+            flags.intersects(FragmentFlags::IS_BODY_ELEMENT_OF_HTML_ELEMENT_ROOT)
         {
             return;
         }
@@ -2260,8 +2260,8 @@ impl<'a> BuilderForBoxFragment<'a> {
         let current_color = style.get_inherited_text().clone_color();
         let style_color = BorderStyleColor::from_border(border, &current_color);
         let captured_border_rects =
-            (!separate_table_border_is_captured(self.fragment, self.containing_block_origin)
-                && box_paint_geometry_is_supported(builder, state, self.fragment))
+            (!separate_table_border_is_captured(self.fragment, self.containing_block_origin) &&
+                box_paint_geometry_is_supported(builder, state, self.fragment))
             .then(|| solid_border_paint_rects(self.border_rect, border_widths, &style_color))
             .flatten();
         let details = wr::BorderDetails::Normal(wr::NormalBorder {
@@ -2532,10 +2532,10 @@ fn separate_table_cell_borders(
     fragment: &BoxFragmentWithStyle<'_>,
     containing_block_origin: PhysicalPoint<Au>,
 ) -> Vec<LayoutDebugTableBorder> {
-    if !fragment.box_fragment.captures_table_borders()
-        || fragment.has_collapsed_borders()
-        || crate::flow::separate_table_border_profile(fragment.box_fragment) != Some(true)
-        || !matches!(
+    if !fragment.box_fragment.captures_table_borders() ||
+        fragment.has_collapsed_borders() ||
+        crate::flow::separate_table_border_profile(fragment.box_fragment) != Some(true) ||
+        !matches!(
             LayoutDisplay::from(fragment.style().get_box().display),
             LayoutDisplay::GeneratingBox(DisplayGeneratingBox::LayoutInternal(
                 DisplayLayoutInternal::TableCell
@@ -2598,64 +2598,64 @@ fn box_has_unsupported_paint(
 
     let style_has_background = |style: &ComputedValues| {
         let background = style.get_background();
-        style.resolve_color(&background.background_color).alpha > 0.0
-            || background
+        style.resolve_color(&background.background_color).alpha > 0.0 ||
+            background
                 .background_image
                 .0
                 .iter()
                 .any(|image| !matches!(image, Image::None))
     };
     let flags = fragment.base.flags;
-    let paints_background = !flags.intersects(FragmentFlags::IS_ROOT_ELEMENT)
-        && (paint_body_background
-            || !flags.intersects(FragmentFlags::IS_BODY_ELEMENT_OF_HTML_ELEMENT_ROOT))
-        && match &fragment.background_mode {
+    let paints_background = !flags.intersects(FragmentFlags::IS_ROOT_ELEMENT) &&
+        (paint_body_background ||
+            !flags.intersects(FragmentFlags::IS_BODY_ELEMENT_OF_HTML_ELEMENT_ROOT)) &&
+        match &fragment.background_mode {
             BackgroundMode::None => false,
             BackgroundMode::Normal => style_has_background(fragment.style()),
             BackgroundMode::Extra(backgrounds) => {
-                style_has_background(fragment.style())
-                    || backgrounds
+                style_has_background(fragment.style()) ||
+                    backgrounds
                         .iter()
                         .any(|background| style_has_background(&background.style.borrow()))
             },
         };
     let paints_shadow = !fragment.style().get_effects().box_shadow.0.is_empty();
-    let paints_border = !fragment.has_collapsed_borders()
-        && fragment.border.to_webrender() != SideOffsets2D::zero();
-    let geometry_supported = paint_state_is_axis_aligned(root_scroll_node_id, state)
-        && fragment.border_radius() == BorderRadius::default()
-        && style_effects_are_supported(fragment.style(), fragment.base.flags);
+    let paints_border = !fragment.has_collapsed_borders() &&
+        fragment.border.to_webrender() != SideOffsets2D::zero();
+    let geometry_supported = paint_state_is_axis_aligned(root_scroll_node_id, state) &&
+        fragment.border_radius() == BorderRadius::default() &&
+        style_effects_are_supported(fragment.style(), fragment.base.flags);
     let border_rect = fragment
         .border_rect()
         .translate(state.origin.to_vector())
         .to_webrender();
-    let background_is_unsupported = paints_background
-        && (!geometry_supported
-            || !paint_rect_geometry_is_supported(border_rect)
-            || match &fragment.background_mode {
+    let background_is_unsupported = paints_background &&
+        (!geometry_supported ||
+            !paint_rect_geometry_is_supported(border_rect) ||
+            match &fragment.background_mode {
                 BackgroundMode::None => false,
                 BackgroundMode::Normal => background_has_image(fragment.style()),
                 BackgroundMode::Extra(backgrounds) => {
-                    background_has_image(fragment.style())
-                        || backgrounds
+                    background_has_image(fragment.style()) ||
+                        backgrounds
                             .iter()
                             .any(|background| background_has_image(&background.style.borrow()))
                 },
             });
     let table_border_is_captured = separate_table_border_is_captured(fragment, state.origin);
-    let border_is_unsupported = paints_border
-        && (!geometry_supported
-            || !paint_rect_geometry_is_supported(border_rect)
-            || (!table_border_is_captured
-                && (!matches!(
+    let border_is_unsupported = paints_border &&
+        (!geometry_supported ||
+            !paint_rect_geometry_is_supported(border_rect) ||
+            (!table_border_is_captured &&
+                (!matches!(
                     &fragment.style().get_border().border_image_source,
                     Image::None
                 ) || ordinary_border_paint_rects(fragment).is_none())));
 
-    background_is_unsupported
-        || paints_shadow
-        || border_is_unsupported
-        || !style_effects_are_supported(fragment.style(), fragment.base.flags)
+    background_is_unsupported ||
+        paints_shadow ||
+        border_is_unsupported ||
+        !style_effects_are_supported(fragment.style(), fragment.base.flags)
 }
 
 fn paint_state_is_axis_aligned(
@@ -2666,18 +2666,18 @@ fn paint_state_is_axis_aligned(
 }
 
 fn paint_clip_contains_rect(clip: LayoutRect, rect: LayoutRect) -> bool {
-    clip.min.x.is_finite()
-        && clip.min.y.is_finite()
-        && clip.max.x.is_finite()
-        && clip.max.y.is_finite()
-        && rect.min.x.is_finite()
-        && rect.min.y.is_finite()
-        && rect.max.x.is_finite()
-        && rect.max.y.is_finite()
-        && clip.min.x <= rect.min.x
-        && clip.min.y <= rect.min.y
-        && clip.max.x >= rect.max.x
-        && clip.max.y >= rect.max.y
+    clip.min.x.is_finite() &&
+        clip.min.y.is_finite() &&
+        clip.max.x.is_finite() &&
+        clip.max.y.is_finite() &&
+        rect.min.x.is_finite() &&
+        rect.min.y.is_finite() &&
+        rect.max.x.is_finite() &&
+        rect.max.y.is_finite() &&
+        clip.min.x <= rect.min.x &&
+        clip.min.y <= rect.min.y &&
+        clip.max.x >= rect.max.x &&
+        clip.max.y >= rect.max.y
 }
 
 fn paint_clip_chain_contains_rect(
@@ -2690,9 +2690,9 @@ fn paint_clip_chain_contains_rect(
         let Some(clip) = store.0.get(clip_id.0) else {
             return false;
         };
-        if clip.parent_scroll_node_id != root_scroll_node_id
-            || !clip.radii.is_zero()
-            || !paint_clip_contains_rect(clip.rect, rect)
+        if clip.parent_scroll_node_id != root_scroll_node_id ||
+            !clip.radii.is_zero() ||
+            !paint_clip_contains_rect(clip.rect, rect)
         {
             return false;
         }
@@ -2703,12 +2703,12 @@ fn paint_clip_chain_contains_rect(
 
 fn style_effects_are_supported(style: &ComputedValues, flags: FragmentFlags) -> bool {
     let effects = style.get_effects();
-    effects.opacity == 1.0
-        && effects.filter.0.is_empty()
-        && effects.mix_blend_mode == ComputedMixBlendMode::Normal
-        && effects.clip.is_auto()
-        && style.get_svg().clip_path == ClipPath::None
-        && !style.has_effective_transform_or_perspective(flags)
+    effects.opacity == 1.0 &&
+        effects.filter.0.is_empty() &&
+        effects.mix_blend_mode == ComputedMixBlendMode::Normal &&
+        effects.clip.is_auto() &&
+        style.get_svg().clip_path == ClipPath::None &&
+        !style.has_effective_transform_or_perspective(flags)
 }
 
 fn box_paint_geometry_is_supported(
@@ -2716,9 +2716,9 @@ fn box_paint_geometry_is_supported(
     state: &TraversalState,
     fragment: &BoxFragmentWithStyle<'_>,
 ) -> bool {
-    paint_state_is_axis_aligned(builder.paint_info.root_scroll_node_id, state)
-        && fragment.border_radius() == BorderRadius::default()
-        && style_effects_are_supported(fragment.style(), fragment.base.flags)
+    paint_state_is_axis_aligned(builder.paint_info.root_scroll_node_id, state) &&
+        fragment.border_radius() == BorderRadius::default() &&
+        style_effects_are_supported(fragment.style(), fragment.base.flags)
 }
 
 fn background_has_image(style: &ComputedValues) -> bool {
@@ -2747,8 +2747,8 @@ fn separate_table_border_is_captured(
     fragment: &BoxFragmentWithStyle<'_>,
     containing_block_origin: PhysicalPoint<Au>,
 ) -> bool {
-    !separate_table_cell_borders(fragment, containing_block_origin).is_empty()
-        || separate_table_grid_border_rows(fragment, containing_block_origin).is_some()
+    !separate_table_cell_borders(fragment, containing_block_origin).is_empty() ||
+        separate_table_grid_border_rows(fragment, containing_block_origin).is_some()
 }
 
 fn solid_border_paint_rects(
@@ -2756,16 +2756,16 @@ fn solid_border_paint_rects(
     widths: SideOffsets2D<f32, LayoutPixel>,
     colors: &PhysicalSides<BorderStyleColor>,
 ) -> Option<Vec<LayoutDebugPaintRect>> {
-    if !rect.min.x.is_finite()
-        || !rect.min.y.is_finite()
-        || !rect.max.x.is_finite()
-        || !rect.max.y.is_finite()
-        || rect.min.x < 0.0
-        || rect.min.y < 0.0
-        || rect.width() < 0.0
-        || rect.height() < 0.0
-        || widths.top + widths.bottom > rect.height()
-        || widths.left + widths.right > rect.width()
+    if !rect.min.x.is_finite() ||
+        !rect.min.y.is_finite() ||
+        !rect.max.x.is_finite() ||
+        !rect.max.y.is_finite() ||
+        rect.min.x < 0.0 ||
+        rect.min.y < 0.0 ||
+        rect.width() < 0.0 ||
+        rect.height() < 0.0 ||
+        widths.top + widths.bottom > rect.height() ||
+        widths.left + widths.right > rect.width()
     {
         return None;
     }
@@ -2778,14 +2778,14 @@ fn solid_border_paint_rects(
         (widths.left, &colors.left),
     ] {
         let color = rgba(side.color);
-        if width <= 0.0
-            || color.a <= 0.0
-            || matches!(side.style, BorderStyle::None | BorderStyle::Hidden)
+        if width <= 0.0 ||
+            color.a <= 0.0 ||
+            matches!(side.style, BorderStyle::None | BorderStyle::Hidden)
         {
             continue;
         }
-        if side.style != BorderStyle::Solid
-            || visible_color.is_some_and(|first| first != &side.color)
+        if side.style != BorderStyle::Solid ||
+            visible_color.is_some_and(|first| first != &side.color)
         {
             return None;
         }
@@ -2858,12 +2858,12 @@ fn debug_paint_rect(
     color: ColorF,
     kind: LayoutDebugPaintRectKind,
 ) -> Option<LayoutDebugPaintRect> {
-    if !paint_rect_geometry_is_supported(rect)
-        || !color.r.is_finite()
-        || !color.g.is_finite()
-        || !color.b.is_finite()
-        || !color.a.is_finite()
-        || color.a <= 0.0
+    if !paint_rect_geometry_is_supported(rect) ||
+        !color.r.is_finite() ||
+        !color.g.is_finite() ||
+        !color.b.is_finite() ||
+        !color.a.is_finite() ||
+        color.a <= 0.0
     {
         return None;
     }
@@ -2885,23 +2885,23 @@ fn debug_paint_rect(
 }
 
 fn paint_rect_geometry_is_supported(rect: LayoutRect) -> bool {
-    rect.min.x.is_finite()
-        && rect.min.y.is_finite()
-        && rect.max.x.is_finite()
-        && rect.max.y.is_finite()
-        && rect.min.x >= 0.0
-        && rect.min.y >= 0.0
-        && rect.width() > 0.0
-        && rect.height() > 0.0
+    rect.min.x.is_finite() &&
+        rect.min.y.is_finite() &&
+        rect.max.x.is_finite() &&
+        rect.max.y.is_finite() &&
+        rect.min.x >= 0.0 &&
+        rect.min.y >= 0.0 &&
+        rect.width() > 0.0 &&
+        rect.height() > 0.0
 }
 
 fn separate_table_grid_border_rows(
     fragment: &BoxFragmentWithStyle<'_>,
     containing_block_origin: PhysicalPoint<Au>,
 ) -> Option<Vec<(Arc<BoxFragment>, Vec<LayoutDebugTableBorder>)>> {
-    if !fragment.box_fragment.captures_table_borders()
-        || !fragment.box_fragment.is_table_grid()
-        || crate::flow::separate_table_border_profile(fragment.box_fragment) != Some(true)
+    if !fragment.box_fragment.captures_table_borders() ||
+        !fragment.box_fragment.is_table_grid() ||
+        crate::flow::separate_table_border_profile(fragment.box_fragment) != Some(true)
     {
         return None;
     }
@@ -2945,9 +2945,8 @@ fn separate_table_grid_border_rows(
         }
     }
     rows.sort_by_key(|(row_index, _, _)| *row_index);
-    if rows.is_empty()
-        || rows
-            .iter()
+    if rows.is_empty() ||
+        rows.iter()
             .enumerate()
             .any(|(expected, (actual, _, _))| expected != *actual)
     {
@@ -3029,27 +3028,27 @@ fn collapsed_table_border_rows(
     };
     let column_count = table_info.track_sizes.x.len();
     let row_count = table_info.track_sizes.y.len();
-    if column_count == 0
-        || row_count == 0
-        || table_info
+    if column_count == 0 ||
+        row_count == 0 ||
+        table_info
             .track_sizes
             .x
             .iter()
             .chain(&table_info.track_sizes.y)
-            .any(|size| *size <= Au::zero())
-        || table_info.collapsed_borders.x.len() != column_count + 1
-        || table_info.collapsed_borders.y.len() != row_count + 1
-        || table_info
+            .any(|size| *size <= Au::zero()) ||
+        table_info.collapsed_borders.x.len() != column_count + 1 ||
+        table_info.collapsed_borders.y.len() != row_count + 1 ||
+        table_info
             .collapsed_borders
             .x
             .iter()
-            .any(|line| line.len() != row_count)
-        || table_info
+            .any(|line| line.len() != row_count) ||
+        table_info
             .collapsed_borders
             .y
             .iter()
-            .any(|line| line.len() != column_count)
-        || table_info.uniform_solid_visible_border().is_none()
+            .any(|line| line.len() != column_count) ||
+        table_info.uniform_solid_visible_border().is_none()
     {
         return None;
     }
@@ -3124,8 +3123,8 @@ fn append_collapsed_table_row<'a>(
     let row_rect = row
         .content_rect()
         .translate(containing_block_origin.to_vector());
-    if row_rect.size.height <= Au::zero()
-        || row_rect.size.height != *table_info.track_sizes.y.get(row_index)?
+    if row_rect.size.height <= Au::zero() ||
+        row_rect.size.height != *table_info.track_sizes.y.get(row_index)?
     {
         return None;
     }
@@ -3202,9 +3201,9 @@ fn append_solid_table_border(
     rect: PhysicalRect<Au>,
     style_color: &BorderStyleColor,
 ) {
-    if rect.size.width <= Au::zero()
-        || rect.size.height <= Au::zero()
-        || style_color.style != BorderStyle::Solid
+    if rect.size.width <= Au::zero() ||
+        rect.size.height <= Au::zero() ||
+        style_color.style != BorderStyle::Solid
     {
         return;
     }
@@ -3448,10 +3447,10 @@ impl BoxFragment {
     fn border_radius(&self) -> BorderRadius {
         let style = self.style();
         let border = style.get_border();
-        if border.border_top_left_radius.0.is_zero()
-            && border.border_top_right_radius.0.is_zero()
-            && border.border_bottom_right_radius.0.is_zero()
-            && border.border_bottom_left_radius.0.is_zero()
+        if border.border_top_left_radius.0.is_zero() &&
+            border.border_top_right_radius.0.is_zero() &&
+            border.border_bottom_right_radius.0.is_zero() &&
+            border.border_bottom_left_radius.0.is_zero()
         {
             return BorderRadius::zero();
         }

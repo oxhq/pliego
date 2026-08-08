@@ -60,11 +60,7 @@ def page_text_operations(scene: dict[str, Any]) -> list[list[dict[str, Any]]]:
 
 
 def table_tokens(page_operations: list[list[dict[str, Any]]]) -> list[str]:
-    return [
-        str(operation.get("text", ""))
-        for operations in page_operations
-        for operation in operations
-    ]
+    return [str(operation.get("text", "")) for operations in page_operations for operation in operations]
 
 
 def canonical_text(value: str) -> str:
@@ -121,8 +117,7 @@ def verify(
     table_continuations = [
         continuation
         for continuation in continuations
-        if isinstance(continuation, dict)
-        and continuation.get("token", {}).get("kind") == "table"
+        if isinstance(continuation, dict) and continuation.get("token", {}).get("kind") == "table"
     ]
     require(bool(table_continuations), "no table continuation was selected")
     selected_rows = [item["token"]["next_row_index"] for item in table_continuations]
@@ -136,14 +131,14 @@ def verify(
 
     decisions = page_sequence.get("table_breaks")
     require(isinstance(decisions, list), "table break decision trace is absent")
-    require([item.get("next_row_index") for item in decisions] == list(range(1, 8)), "not every row boundary was considered")
+    require(
+        [item.get("next_row_index") for item in decisions] == list(range(1, 8)), "not every row boundary was considered"
+    )
     traced_selected = [item.get("next_row_index") for item in decisions if item.get("selected") is True]
     require(traced_selected == selected_rows, "considered/selected break traces differ")
     require(
         all(
-            item.get("resume_page_index") is not None
-            if item.get("selected")
-            else item.get("resume_page_index") is None
+            item.get("resume_page_index") is not None if item.get("selected") else item.get("resume_page_index") is None
             for item in decisions
         ),
         "table break resume trace is inconsistent",
@@ -164,9 +159,7 @@ def self_test() -> None:
     scene = {"pages": [{"operations": [operation("Lead.", 10.0)]}, {"operations": []}]}
     for row in range(8):
         page = 0 if row < 4 else 1
-        scene["pages"][page]["operations"].extend(
-            [operation(f"R{row}A", 10.0), operation(f"R{row}B", 70.0)]
-        )
+        scene["pages"][page]["operations"].extend([operation(f"R{row}A", 10.0), operation(f"R{row}B", 70.0)])
     decisions = [
         {
             "page_index": 0 if row <= 4 else 1,
