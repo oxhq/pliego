@@ -38,10 +38,9 @@ benchmarks/
 ├── tools/
 │   ├── generate_fixtures.py   Deterministic generation of long/image fixtures
 │   ├── run_benchmark.py       Orchestrator: manifest → runner → aggregates → result file
-│   ├── compare_parity.py      Differential parity gate for engine changes
 │   └── validate_result.py     Stdlib-only JSON Schema check for result files
 ├── baselines/                 Released-runtime baselines
-└── reports/                   Cross-milestone and competitor reports land here
+└── reports/                   Comparison reports land here
 ```
 
 ## Prerequisites
@@ -105,27 +104,6 @@ runner captures wall time, the engine's `scene-report.json`, phase timings,
 PDF bytes/hash, and correctness facts. CPU and process-tree memory fields stay
 unavailable until an audited whole-tree sampler is used.
 
-## Parity gate
-
-Engine refactors must not change outputs. `compare_parity.py` is the
-differential oracle:
-
-```sh
-python3 benchmarks/tools/compare_parity.py \
-  --baseline /path/to/pliego-0.1.1 \
-  --candidate /path/to/pliego-new \
-  --fixture minimal-static --fixture invoice-showcase --fixture unsupported-paint
-```
-
-It runs both binaries on the same fixtures with identical arguments (cwd = the
-fixture directory, relative input — the engine rejects absolute paths, matching
-the PHP SDK's invocation) and compares the *stable outcome contract*: status,
-typed failure code, render id, scene identity/capture status, page count, and
-the published PDF (hash + bytes). Timing fields, artifact paths, and ephemeral
-temp directories are normalized away. Passing `--repeat N` adds a determinism
-check. Without `--candidate` it is a self-parity/determinism gate for one build.
-Any mismatch exits non-zero.
-
 ## Protocol (from `manifest.toml`)
 
 * 10 warm-up iterations, 50 samples for short documents, 20 for long ones.
@@ -146,8 +124,8 @@ variation), and typed failures (code, timing, published/no PDF).
 
 Each fixture declares expected correctness in `manifest.toml`. A sample counts
 toward performance only when its checks pass; a wrong result is not "faster".
-`page_count` targets for the generated fixtures are estimates and are pinned to
-the measured values by the first signed baseline run.
+Generated-fixture `page_count` targets are pinned to the published Linux 0.1.1
+renderer.
 
 | Fixture | Category | Purpose | Expected |
 | --- | --- | --- | --- |
