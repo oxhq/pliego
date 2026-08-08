@@ -268,7 +268,7 @@ pub(crate) fn retain_fill_rect(
     else {
         return;
     };
-    let srgb = color.clone().into_srgb_legacy();
+    let srgb = (*color).into_srgb_legacy();
     canvas.commands.push(RetainedCanvasCommand::FillRect {
         x: f64::from(rect.origin.x),
         y: f64::from(rect.origin.y),
