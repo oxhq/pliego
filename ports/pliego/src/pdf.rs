@@ -440,8 +440,8 @@ fn pdf_text_ranges(
                 .text_range
                 .ok_or(PdfError::MissingTextMapping { operation, glyph })?;
             let range = usize::try_from(range.start)
-                .map_err(|_| PdfError::InvalidTextMapping { operation, glyph })?
-                ..usize::try_from(range.end)
+                .map_err(|_| PdfError::InvalidTextMapping { operation, glyph })?..
+                usize::try_from(range.end)
                     .map_err(|_| PdfError::InvalidTextMapping { operation, glyph })?;
             let start = graphemes
                 .iter()
