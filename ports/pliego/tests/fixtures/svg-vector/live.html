@@ -8,8 +8,15 @@
   }
   html, body { margin: 0; }
   img { display: block; width: 160px; height: 80px; }
+  #font-probe {
+    position: absolute;
+    left: -10000px;
+    visibility: hidden;
+    font: 12px "Ahem";
+  }
 </style>
-<img id="vector" src="graphic.svg" width="160" height="80" alt="Retained SVG vector fixture">
+<span id="font-probe" aria-hidden="true">SVG</span>
+<img id="vector" width="160" height="80" alt="Retained SVG vector fixture">
 <script>
   window.pliego?.defer();
   queueMicrotask(async () => {
@@ -18,8 +25,10 @@
         await new Promise(requestAnimationFrame);
       }
       if (!window.pliego) throw new Error("Pliego bridge was not installed");
+      document.querySelector("#font-probe").getBoundingClientRect();
       await document.fonts.ready;
       const image = document.querySelector("#vector");
+      image.src = "graphic.svg";
       for (let attempt = 0; !image.complete && attempt < 200; attempt += 1) {
         await new Promise(resolve => setTimeout(resolve, 25));
       }

@@ -9,6 +9,7 @@ use std::collections::hash_map::Entry::{Occupied, Vacant};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::{mem, thread_local};
 
 use base64::Engine as _;
@@ -89,14 +90,22 @@ fn parse_svg_document_in_memory(
     bytes: &[u8],
     fontdb: Arc<fontdb::Database>,
     font_resolver: Arc<dyn FontResolver>,
-) -> Result<(usvg::Tree, bool), &'static str> {
+) -> Result<(usvg::Tree, bool, bool), &'static str> {
     let image_string_href_resolver = Box::new(move |_: &str, _: &usvg::Options| {
         // Do not try to load `href` in <image> as local file path.
         None
     });
 
+    let has_unresolved_text = Arc::new(AtomicBool::new(false));
+    let unresolved_text = has_unresolved_text.clone();
     let font_resolver = usvg::FontResolver {
-        select_font: Box::new(move |font, database| font_resolver.resolve(font, database)),
+        select_font: Box::new(move |font, database| {
+            let resolved = font_resolver.resolve(font, database);
+            if resolved.is_none() {
+                unresolved_text.store(true, Ordering::Relaxed);
+            }
+            resolved
+        }),
         select_fallback: usvg::FontResolver::default_fallback_selector(),
     };
 
@@ -141,6 +150,7 @@ fn parse_svg_document_in_memory(
         Ok((
             usvg::Tree::from_xmltree(&document, &opt)?,
             has_smil_animation,
+            has_unresolved_text.load(Ordering::Relaxed),
         ))
     })();
 
@@ -170,10 +180,11 @@ fn decode_bytes_sync(
     let image = if is_svg_document {
         parse_svg_document_in_memory(bytes, fontdb, font_resolver.clone())
             .ok()
-            .map(|(svg_tree, has_smil_animation)| {
+            .map(|(svg_tree, has_smil_animation, has_unresolved_text)| {
                 DecodedImage::Vector(VectorImageData {
                     svg_tree: Arc::new(svg_tree),
                     has_smil_animation,
+                    has_unresolved_text,
                     cors_status: cors,
                 })
             })
@@ -310,6 +321,7 @@ struct VectorImageData {
     #[conditional_malloc_size_of]
     svg_tree: Arc<usvg::Tree>,
     has_smil_animation: bool,
+    has_unresolved_text: bool,
     cors_status: CorsStatus,
 }
 
@@ -320,6 +332,11 @@ fn snapshot_vector_image(image: &VectorImageData) -> VectorImageSnapshot {
     if image.has_smil_animation {
         items.push(VectorImageSnapshotItem::Unsupported {
             reason: VectorImageUnsupportedReason::Animation,
+        });
+    }
+    if image.has_unresolved_text {
+        items.push(VectorImageSnapshotItem::Unsupported {
+            reason: VectorImageUnsupportedReason::Text,
         });
     }
     snapshot_vector_group(tree, tree.root(), &mut items);

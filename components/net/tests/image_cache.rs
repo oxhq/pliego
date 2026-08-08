@@ -90,6 +90,7 @@ fn svg_image_bytes() -> Vec<u8> {
 fn smil_svg_image_bytes() -> Vec<u8> {
     br#"<svg height="16" width="16" xmlns="http://www.w3.org/2000/svg">
     <path d="M1 1h14v14H1z"><animate attributeName="opacity" dur="1s" values="1;0"/></path>
+    <text x="1" y="12" font-family="Missing">text</text>
 </svg>"#
         .to_vec()
 }
@@ -587,11 +588,17 @@ fn test_svg_rasterization() {
         (snapshot.viewport_width, snapshot.viewport_height),
         (16.0, 16.0)
     );
-    assert_eq!(snapshot.items.len(), 2);
+    assert_eq!(snapshot.items.len(), 3);
     assert_eq!(
         snapshot.items[0],
         VectorImageSnapshotItem::Unsupported {
             reason: VectorImageUnsupportedReason::Animation,
+        }
+    );
+    assert_eq!(
+        snapshot.items[1],
+        VectorImageSnapshotItem::Unsupported {
+            reason: VectorImageUnsupportedReason::Text,
         }
     );
     let VectorImageSnapshotItem::Path {
@@ -599,7 +606,7 @@ fn test_svg_rasterization() {
         fill,
         fill_rule,
         stroke,
-    } = &snapshot.items[1]
+    } = &snapshot.items[2]
     else {
         panic!("Expected retained SVG path");
     };
