@@ -531,6 +531,14 @@ def materialize_fixture(source: Path, font: Path, destination: Path) -> Path:
     marker = 'url("Ahem.ttf")'
     document = source.read_text(encoding="utf-8")
     require(document.count(marker) == 1, "canonical fixture has no unique font URL marker")
+    defer = "window.pliego?.defer();"
+    async_work = "queueMicrotask(async"
+    require(document.count(defer) == 1, "canonical fixture must defer asynchronous readiness exactly once")
+    require(document.count(async_work) == 1, "canonical fixture has no unique asynchronous work marker")
+    require(
+        document.index(defer) < document.index(async_work),
+        "canonical fixture must defer before starting asynchronous work",
+    )
     encoded_font = base64.b64encode(font.read_bytes()).decode("ascii")
     materialized = destination / source.name
     materialized.write_text(
@@ -617,6 +625,9 @@ def self_test() -> None:
     changed: RunResult = (b"scene", "sha256:changed", b"fonts", b"preview", {"page_count": 1})
     mismatch = comparison_report(first, changed)
     require(mismatch["comparisons"]["scene_hash"] is False, repr(mismatch))
+    fixture = Path(__file__).resolve().parent / "fixtures/text-scene/index.html"
+    with tempfile.TemporaryDirectory(prefix="pliego-canonical-scene-self-test-") as temp:
+        materialize_fixture(fixture, fixture.with_name("Ahem.ttf"), Path(temp))
 
 
 def main() -> int:
