@@ -305,6 +305,7 @@ jobs:
             xvfb-run python ports/pliego/tests/check_resource_policy.py "$binary" "$output/resource-policy" &&
             python ports/pliego/tests/check_asset_cache.py --self-test &&
             xvfb-run python ports/pliego/tests/check_asset_cache.py "$binary" "$output/asset-cache" &&
+            xvfb-run python ports/pliego/tests/check_live_fonts.py "$binary" "$output/live-fonts" &&
             python ports/pliego/tests/check_hybrid_canvas_live.py --self-test &&
             xvfb-run python ports/pliego/tests/check_hybrid_canvas_live.py "$binary" "$output/canvas" &&
             python ports/pliego/tests/check_chartjs_report.py --self-test &&
