@@ -19,8 +19,8 @@ Usage:
         [--php /usr/bin/php] [--dedicated]
 
 Design notes:
-* The PHP runner is the only component that spawns the engine; this script
-  never touches the binary directly except to read its version.
+* The PHP runner owns each engine launch and delegates Linux execution to the
+  procfs sampler; this script only reads the binary version.
 * Results are validated against the schema before being written; a result
   that fails validation is not saved.
 * Throughput is serial renders/minute (concurrency 1); concurrent 2/4/8
@@ -271,9 +271,12 @@ def collect_samples(
 def aggregates(samples: list[dict[str, Any]], page_count: int | None) -> dict[str, Any]:
     valid = [s for s in samples if s.get("ok") and (s.get("correctness") or {}).get("pass")]
     walls = [s["wall_ms"] for s in valid]
-    users = [s.get("user_ms") for s in valid]
-    syss = [s.get("sys_ms") for s in valid]
-    rss = [s.get("peak_rss_kib") for s in valid]
+    users = [value for s in valid if (value := s.get("user_ms")) is not None]
+    syss = [value for s in valid if (value := s.get("sys_ms")) is not None]
+    rss = [value for s in valid if (value := s.get("peak_rss_kib")) is not None]
+    pss = [value for s in valid if (value := s.get("peak_pss_kib")) is not None]
+    reads = [value for s in valid if (value := s.get("read_bytes")) is not None]
+    writes = [value for s in valid if (value := s.get("write_bytes")) is not None]
     pdfs = [s.get("output", {}).get("pdf_bytes") for s in valid]
     sha256s = [s.get("output", {}).get("pdf_sha256") for s in valid]
     pdf_hashes = [h for h in sha256s if h]
@@ -313,6 +316,10 @@ def aggregates(samples: list[dict[str, Any]], page_count: int | None) -> dict[st
         },
         "failures": {"count": len(failures), "codes": codes},
     }
+    if pss and len(pss) == len(valid):
+        agg["memory"]["peak_pss_kib"] = percentiles(pss)
+    if reads and len(reads) == len(valid) and len(writes) == len(valid):
+        agg["io"] = {"read_bytes": percentiles(reads), "write_bytes": percentiles(writes)}
     if page_count:
         agg["scaling"] = {
             "per_page_wall_ms": round(mean_wall / page_count, 3),

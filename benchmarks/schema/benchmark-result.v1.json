@@ -159,7 +159,7 @@
         "seed": { "type": "integer" },
         "network": { "const": "disabled" },
         "binary_profile": { "type": "string" },
-        "rss_method": { "type": "string", "enum": ["time-v", "ps-poll", "unavailable"] }
+        "rss_method": { "type": "string", "enum": ["linux-procfs-session-poll-v1", "time-v", "ps-poll", "unavailable"] }
       }
     },
     "not_applicable_protocol": {
@@ -234,7 +234,12 @@
         "user_ms": { "type": ["number", "null"], "minimum": 0 },
         "sys_ms": { "type": ["number", "null"], "minimum": 0 },
         "peak_rss_kib": { "type": ["integer", "null"], "minimum": 0 },
-        "rss_method": { "type": "string", "enum": ["time-v", "ps-poll", "unavailable"] },
+        "peak_pss_kib": { "type": ["integer", "null"], "minimum": 0 },
+        "read_bytes": { "type": ["integer", "null"], "minimum": 0 },
+        "write_bytes": { "type": ["integer", "null"], "minimum": 0 },
+        "rss_method": { "type": "string", "enum": ["linux-procfs-session-poll-v1", "time-v", "ps-poll", "unavailable"] },
+        "signal": { "type": ["integer", "null"], "minimum": 1 },
+        "process_tree": { "type": ["object", "null"] },
         "phase_timings_ms": {
           "type": ["object", "null"],
           "additionalProperties": { "type": "number", "minimum": 0 }
@@ -405,7 +410,17 @@
           "additionalProperties": false,
           "required": ["peak_rss_kib"],
           "properties": {
-            "peak_rss_kib": { "$ref": "#/definitions/percentiles" }
+            "peak_rss_kib": { "$ref": "#/definitions/percentiles" },
+            "peak_pss_kib": { "$ref": "#/definitions/percentiles" }
+          }
+        },
+        "io": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["read_bytes", "write_bytes"],
+          "properties": {
+            "read_bytes": { "$ref": "#/definitions/percentiles" },
+            "write_bytes": { "$ref": "#/definitions/percentiles" }
           }
         },
         "scaling": {

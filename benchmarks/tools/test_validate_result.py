@@ -52,7 +52,7 @@ def result() -> dict:
             "sample_order": "sequential",
             "network": "disabled",
             "binary_profile": "checked-release",
-            "rss_method": "time-v",
+            "rss_method": "linux-procfs-session-poll-v1",
         },
         "target": {"id": "pliego-0.1.1", "label": "Pliego 0.1.1"},
         "fixture": {
@@ -74,7 +74,12 @@ def result() -> dict:
                 "user_ms": 1,
                 "sys_ms": 0,
                 "peak_rss_kib": 1,
-                "rss_method": "time-v",
+                "peak_pss_kib": 1,
+                "read_bytes": 0,
+                "write_bytes": 1,
+                "rss_method": "linux-procfs-session-poll-v1",
+                "signal": None,
+                "process_tree": {"method": "linux-procfs-session-poll-v1"},
                 "phase_timings_ms": {"capture": 1},
                 "output": {
                     "pdf_bytes": 1,
@@ -97,7 +102,8 @@ def result() -> dict:
                 "sys_ms": ZERO_PERCENTILES,
                 "wall_ms": PERCENTILES,
             },
-            "memory": {"peak_rss_kib": PERCENTILES},
+            "memory": {"peak_rss_kib": PERCENTILES, "peak_pss_kib": PERCENTILES},
+            "io": {"read_bytes": PERCENTILES, "write_bytes": PERCENTILES},
             "scaling": {"per_page_wall_ms": 1, "per_page_peak_rss_kib": 1},
             "throughput": {"renders_per_minute": 60000, "concurrency": 1},
             "output": {"pdf_bytes": PERCENTILES, "page_count": 1},
@@ -267,6 +273,9 @@ def main() -> None:
     broken = deepcopy(valid)
     broken["samples"][0]["phase_timings_ms"]["capture"] = "fast"
     must_fail(broken, "phase_timings_ms.capture")
+    broken = deepcopy(valid)
+    broken["samples"][0]["process_tree"] = "opaque"
+    must_fail(broken, "process_tree")
     broken = deepcopy(valid)
     broken["toolchain"]["competitors"] = {"dompdf": 3}
     must_fail(broken, "competitors.dompdf")

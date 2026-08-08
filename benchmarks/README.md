@@ -37,7 +37,9 @@ benchmarks/
 │   └── pliego.php             One process per sample; NDJSON on stdout
 ├── tools/
 │   ├── generate_fixtures.py   Deterministic generation of long/image fixtures
+│   ├── process_tree_sampler.py Linux session/process-tree measurement
 │   ├── run_benchmark.py       Orchestrator: manifest → runner → aggregates → result file
+│   ├── test_process_tree_sampler.py Synthetic tree and overhead proof
 │   └── validate_result.py     Stdlib-only JSON Schema check for result files
 ├── baselines/                 Released-runtime baselines
 └── reports/                   Comparison reports land here
@@ -109,8 +111,20 @@ Subset or override with `--fixture invoice-showcase`, `--samples 50`,
 
 Each sample is one fresh `pliego render` process with the fixture's flags; the
 runner captures wall time, the engine's `scene-report.json`, phase timings,
-PDF bytes/hash, and correctness facts. CPU and process-tree memory fields stay
-unavailable until an audited whole-tree sampler is used.
+PDF bytes/hash, and correctness facts. On Linux it starts Pliego in a new
+session and samples every process retaining that session through `/proc`: RSS,
+CPU and I/O every 30 ms, and PSS from `smaps_rollup` every 250 ms when readable.
+Peak RSS/PSS are maxima of each instantaneous tree sum, never sums of per-PID
+peaks. Raw samples, PID/start-time identities, final counters, signal/exit,
+sample gaps, and sampler CPU are retained in each result.
+
+Run `python3 benchmarks/tools/test_process_tree_sampler.py` on Linux for the
+parent-plus-two-children proof and measured overhead. Session discovery keeps
+reparented descendants, but a process born and reaped wholly between polls—or
+one that deliberately creates a new session—cannot be observed; final
+sub-interval CPU/I/O increments can likewise be missed. The result records
+this limitation and the actual interval. PSS remains null when
+`smaps_rollup` is unavailable.
 
 ## Protocol (from `manifest.toml`)
 
