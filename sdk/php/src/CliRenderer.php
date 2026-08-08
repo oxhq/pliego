@@ -491,6 +491,7 @@ final class CliRenderer
     ): array {
         $totalNanoseconds = hrtime(true) - $context['total_started_ns']
             + ($runtimeResolutionNanoseconds ?? 0);
+        $rawTotalMilliseconds = $totalNanoseconds / 1_000_000;
         $totalMilliseconds = $this->milliseconds($totalNanoseconds);
         $attributedNanoseconds = array_sum($phaseNanoseconds)
             + ($context['laravel_setup_ns'] ?? 0)
@@ -508,7 +509,7 @@ final class CliRenderer
         if (
             (!is_int($nativeEngineMilliseconds) && !is_float($nativeEngineMilliseconds))
             || $nativeEngineMilliseconds < 0
-            || $nativeEngineMilliseconds > $totalMilliseconds
+            || $nativeEngineMilliseconds > $rawTotalMilliseconds
         ) {
             $nativeEngineMilliseconds = null;
         } else {
@@ -555,7 +556,7 @@ final class CliRenderer
             'native_engine_ms' => $nativeEngineMilliseconds,
             'bridge_overhead_ms' => $nativeEngineMilliseconds === null
                 ? null
-                : round($totalMilliseconds - $nativeEngineMilliseconds, 3),
+                : round($rawTotalMilliseconds - $nativeEngineMilliseconds, 3),
             'phases_ms' => $phases,
             'unavailable' => $unavailable,
             'notes' => [
