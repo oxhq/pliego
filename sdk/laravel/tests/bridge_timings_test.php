@@ -39,6 +39,7 @@ function bridgeReconciles(array $timings): bool
     $sum = array_sum(array_filter($timings['phases_ms'], is_float(...)));
 
     return abs($sum - $timings['total_ms']) < 0.02
+        && ($timings['measurement_boundary'] ?? null) === 'render-invocation-before-timing-diagnostics'
         && is_float($timings['native_engine_ms'])
         && abs($timings['native_engine_ms'] + $timings['bridge_overhead_ms'] - $timings['total_ms']) < 0.002;
 }
@@ -99,16 +100,19 @@ $result = Document::view('invoice', ['title' => 'Invoice', 'rows' => ['A', 'B']]
 $wallMilliseconds = (hrtime(true) - $startedAt) / 1_000_000;
 $timings = $result->bridgeTimings;
 bridgeExpect(is_float($timings['phases_ms']['view_render']), 'Blade render is measured');
-bridgeExpect(is_float($timings['phases_ms']['runtime_resolution']), 'runtime resolution is measured');
-bridgeExpect($timings['phases_ms']['runtime_install'] === null, 'install is outside render');
+bridgeExpect(is_float($timings['setup_ms']['runtime_resolution']), 'runtime resolution is measured');
+bridgeExpect($timings['setup_ms']['runtime_install'] === null, 'install is outside render');
 bridgeExpect(bridgeReconciles($timings), 'Laravel phases reconcile');
-bridgeExpect(abs($timings['total_ms'] - $wallMilliseconds) < 5, 'timings reconcile to facade wall time');
+bridgeExpect(
+    abs($timings['total_ms'] + $timings['setup_ms']['runtime_resolution'] - $wallMilliseconds) < 5,
+    'render total plus cold setup reconcile to fresh facade wall time',
+);
 bridgeExpect(str_contains((string) file_get_contents($result->inputBundlePath.'/document.html'), 'Invoice'), 'Blade output rendered');
 
 $warm = Document::view('invoice', ['title' => 'Warm', 'rows' => []])
     ->asset('assets/test.txt', $asset)
     ->render();
-bridgeExpect($warm->bridgeTimings['phases_ms']['runtime_resolution'] === 0.0, 'cached runtime costs zero');
+bridgeExpect($warm->bridgeTimings['setup_ms']['runtime_resolution'] === 0.0, 'cached runtime costs zero');
 
 try {
     Document::view('invoice', ['title' => 'FAIL_ENGINE', 'rows' => []])
@@ -121,10 +125,14 @@ try {
     bridgeExpect(bridgeReconciles($error->bridgeTimings), 'failed Laravel phases reconcile');
 }
 
+$runtimeSetupMilliseconds = $timings['setup_ms']['runtime_resolution'];
+$coldMilliseconds = $timings['total_ms'] + $runtimeSetupMilliseconds;
 echo sprintf(
-    "Pliego Laravel facade timing proof passed; wall=%.3fms bridge=%.3fms delta=%.3fms; evidence retained at %s\n",
+    "Pliego Laravel facade timing proof passed; wall=%.3fms render=%.3fms setup=%.3fms cold=%.3fms residual=%.3fms; evidence retained at %s\n",
     $wallMilliseconds,
     $timings['total_ms'],
-    abs($timings['total_ms'] - $wallMilliseconds),
+    $runtimeSetupMilliseconds,
+    $coldMilliseconds,
+    abs($coldMilliseconds - $wallMilliseconds),
     $root,
 );

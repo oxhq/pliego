@@ -489,31 +489,41 @@ final class CliRenderer
         array $phaseNanoseconds,
         array $metadata,
     ): array {
-        $totalNanoseconds = hrtime(true) - $context['total_started_ns']
-            + ($runtimeResolutionNanoseconds ?? 0);
+        $totalNanoseconds = hrtime(true) - $context['total_started_ns'];
         $rawTotalMilliseconds = $totalNanoseconds / 1_000_000;
         $totalMilliseconds = $this->milliseconds($totalNanoseconds);
         $attributedNanoseconds = array_sum($phaseNanoseconds)
             + ($context['laravel_setup_ns'] ?? 0)
-            + ($context['view_render_ns'] ?? 0)
-            + ($runtimeResolutionNanoseconds ?? 0);
+            + ($context['view_render_ns'] ?? 0);
         $nativePhaseTimings = is_array($metadata['phase_timings_ms'] ?? null)
             ? $metadata['phase_timings_ms']
             : [];
         $nativeEngineTimings = is_array($metadata['engine_timings'] ?? null)
             ? $metadata['engine_timings']
             : [];
-        $nativeEngineMilliseconds = $nativeEngineTimings['total_ms']
-            ?? $nativePhaseTimings['total_engine']
-            ?? null;
-        if (
-            (!is_int($nativeEngineMilliseconds) && !is_float($nativeEngineMilliseconds))
-            || $nativeEngineMilliseconds < 0
-            || $nativeEngineMilliseconds > $rawTotalMilliseconds
-        ) {
-            $nativeEngineMilliseconds = null;
+        $nativeEngineUnavailable = null;
+        if (array_key_exists('total_ms', $nativeEngineTimings)) {
+            $nativeEngineMilliseconds = $nativeEngineTimings['total_ms'];
+        } elseif (array_key_exists('total_engine', $nativePhaseTimings)) {
+            $nativeEngineMilliseconds = $nativePhaseTimings['total_engine'];
         } else {
-            $nativeEngineMilliseconds = (float) $nativeEngineMilliseconds;
+            $nativeEngineMilliseconds = null;
+            $nativeEngineUnavailable = 'engine-total-not-reported';
+        }
+        if ($nativeEngineUnavailable === null) {
+            if (
+                (!is_int($nativeEngineMilliseconds) && !is_float($nativeEngineMilliseconds))
+                || !is_finite((float) $nativeEngineMilliseconds)
+                || $nativeEngineMilliseconds < 0
+            ) {
+                $nativeEngineMilliseconds = null;
+                $nativeEngineUnavailable = 'engine-total-invalid';
+            } elseif ($nativeEngineMilliseconds > $rawTotalMilliseconds) {
+                $nativeEngineMilliseconds = null;
+                $nativeEngineUnavailable = 'engine-total-exceeds-render-boundary';
+            } else {
+                $nativeEngineMilliseconds = (float) $nativeEngineMilliseconds;
+            }
         }
 
         $phases = [
@@ -521,8 +531,6 @@ final class CliRenderer
             'view_render' => $this->milliseconds($context['view_render_ns']),
             'bundle_staging' => $this->milliseconds($phaseNanoseconds['bundle_staging']),
             'asset_manifest_hash' => $this->milliseconds($phaseNanoseconds['asset_manifest_hash']),
-            'runtime_resolution' => $this->milliseconds($runtimeResolutionNanoseconds),
-            'runtime_install' => null,
             'process_launch' => $this->milliseconds($phaseNanoseconds['process_launch']),
             'stdin_stdout' => $this->milliseconds($phaseNanoseconds['stdin_stdout']),
             'native_wait' => $this->milliseconds($phaseNanoseconds['native_wait']),
@@ -538,29 +546,38 @@ final class CliRenderer
         foreach ([
             'laravel_setup' => $context['laravel_setup_ns'],
             'view_render' => $context['view_render_ns'],
-            'runtime_resolution' => $runtimeResolutionNanoseconds,
         ] as $phase => $value) {
             if ($value === null) {
                 $unavailable[$phase] = 'outside-this-render-path';
             }
         }
-        if ($nativeEngineMilliseconds === null) {
-            $unavailable['native_engine'] = 'engine-did-not-report-total-engine';
+        if ($runtimeResolutionNanoseconds === null) {
+            $unavailable['runtime_resolution'] = 'outside-this-render-path';
+        }
+        if ($nativeEngineUnavailable !== null) {
+            $unavailable['native_engine'] = $nativeEngineUnavailable;
             $unavailable['bridge_overhead'] = 'native-engine-total-unavailable';
         }
 
         return [
             'schema' => 'pliego.php-bridge-timings',
             'version' => 1,
+            'measurement_boundary' => 'render-invocation-before-timing-diagnostics',
             'total_ms' => $totalMilliseconds,
             'native_engine_ms' => $nativeEngineMilliseconds,
             'bridge_overhead_ms' => $nativeEngineMilliseconds === null
                 ? null
                 : round($rawTotalMilliseconds - $nativeEngineMilliseconds, 3),
+            'setup_ms' => [
+                'runtime_resolution' => $this->milliseconds($runtimeResolutionNanoseconds),
+                'runtime_install' => null,
+            ],
             'phases_ms' => $phases,
             'unavailable' => $unavailable,
             'notes' => [
-                'native_engine_ms' => 'Engine-reported time contained within native_wait; bridge_overhead_ms plus native_engine_ms equals total_ms.',
+                'measurement_boundary' => 'total_ms covers this render invocation and stops before its timing diagnostic is encoded and written.',
+                'setup_ms' => 'One-time setup observations are reported separately and are never added to total_ms.',
+                'native_engine_ms' => 'Engine-reported time is contained within total_ms and may overlap process_launch and native_wait.',
                 'cleanup' => 'The bridge closes process resources and marks the retained job; scheduled pruning removes it later.',
             ],
         ];
@@ -576,7 +593,7 @@ final class CliRenderer
         try {
             $json = json_encode(
                 $timings,
-                JSON_THROW_ON_ERROR | JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES,
+                JSON_THROW_ON_ERROR | JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_PRESERVE_ZERO_FRACTION,
             )."\n";
         } catch (JsonException) {
             $timings['diagnostics']['retained'] = false;

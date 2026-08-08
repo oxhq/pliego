@@ -223,16 +223,19 @@ def main() -> None:
     timed["samples"][0]["bridge_timings"] = {
         "schema": "pliego.php-bridge-timings",
         "version": 1,
+        "measurement_boundary": "render-invocation-before-timing-diagnostics",
         "total_ms": 1.0,
         "native_engine_ms": 0.25,
         "bridge_overhead_ms": 0.75,
+        "setup_ms": {
+            "runtime_resolution": None,
+            "runtime_install": None,
+        },
         "phases_ms": {
             "laravel_setup": None,
             "view_render": None,
             "bundle_staging": 0.1,
             "asset_manifest_hash": 0.1,
-            "runtime_resolution": None,
-            "runtime_install": None,
             "process_launch": 0.1,
             "stdin_stdout": 0.1,
             "native_wait": 0.3,

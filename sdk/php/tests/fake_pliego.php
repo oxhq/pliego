@@ -122,7 +122,11 @@ $summary = [
     'scene_artifact' => "{$artifacts}/scene.json",
     'pdf_structure' => "{$artifacts}/pdf-structure.json",
 ];
-if (!str_contains($html, 'NO_ENGINE_TIMINGS')) {
+if (str_contains($html, 'INVALID_ENGINE_TIMINGS')) {
+    $summary['engine_timings'] = ['total_ms' => -1];
+} elseif (str_contains($html, 'OUT_OF_BOUND_ENGINE_TIMINGS')) {
+    $summary['engine_timings'] = ['total_ms' => 60_000];
+} elseif (!str_contains($html, 'NO_ENGINE_TIMINGS')) {
     $summary['engine_timings'] = ['total_ms' => (hrtime(true) - $engineStartedAt) / 1_000_000];
 }
 fwrite(STDOUT, json_encode($summary)."\n");
