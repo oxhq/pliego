@@ -77,7 +77,7 @@ once:
 ```sh
 cd ports/pliego/tests/fixtures/chartjs-report
 npm ci
-cp ../../../../components/fonts/tests/support/dejavu-fonts-ttf-2.37/ttf/DejaVuSans.ttf ReportSans.ttf
+cp ../../../../../components/fonts/tests/support/dejavu-fonts-ttf-2.37/ttf/DejaVuSans.ttf ReportSans.ttf
 ```
 
 The orchestrator refuses to run it until both files exist.

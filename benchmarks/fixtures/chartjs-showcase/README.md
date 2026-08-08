@@ -11,7 +11,7 @@ full-canvas `getImageData` readback, and `window.pliego.ready()`.
 ```sh
 cd ports/pliego/tests/fixtures/chartjs-report
 npm ci                                   # installs chart.js 4.5.1 (pinned)
-cp ../../../../components/fonts/tests/support/dejavu-fonts-ttf-2.37/ttf/DejaVuSans.ttf ReportSans.ttf
+cp ../../../../../components/fonts/tests/support/dejavu-fonts-ttf-2.37/ttf/DejaVuSans.ttf ReportSans.ttf
 ```
 
 `run_benchmark.py` refuses to run this fixture until
