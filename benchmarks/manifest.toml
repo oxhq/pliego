@@ -27,7 +27,7 @@ version = "1.0.0-rc.1"
 enabled = false
 
 [fixtures.minimal-static]
-purpose = "pure startup: one small page, no scripts, no fonts, no images"
+purpose = "pure startup: one small page, one bundled font, no scripts or images"
 category = "static"
 samples = 50
 input = "benchmarks/fixtures/minimal-static/input.html"
