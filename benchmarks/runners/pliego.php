@@ -5,11 +5,12 @@
  * Pliego benchmark runner — one engine process per sample.
  *
  * Executes `pliego render` once per sample against a published binary, records
- * wall/user/sys time and process-tree peak RSS, reads the engine's
- * `scene-report.json` and stdout summary, checks the fixture's correctness
- * contract, and emits one JSON object per sample (NDJSON) on stdout. Warmup
- * samples are executed and discarded before real samples. Aggregation and
- * schema validation happen in tools/run_benchmark.py.
+ * wall time, reads the engine's `scene-report.json` and stdout summary, checks
+ * the fixture's correctness contract, and emits one JSON object per sample
+ * (NDJSON) on stdout. CPU and process-tree memory remain unavailable until the
+ * audited Linux sampler is integrated. Warmup samples are executed and
+ * discarded before real samples. Aggregation and schema validation happen in
+ * tools/run_benchmark.py.
  *
  * Invocation contract: the engine resolves the input relative to the process
  * cwd and rejects absolute or parent-traversing paths, so the runner is given
@@ -17,11 +18,8 @@
  * file against that cwd. The requested output is placed in a sibling temp
  * directory, never inside the artifact directory.
  *
- * Timing: the primary method wraps the engine with `/usr/bin/time -v` (GNU
- * time, Linux) for wall/user/sys and process-tree peak RSS in one shot.
- * Fallback (non-Linux or missing time): wall clock, getrusage(RUSAGE_CHILDREN)
- * deltas, and `ps` polling of the process tree. Peak RSS may be null on
- * platforms without any of those.
+ * Timing: this foundation records process wall time only. The separate audited
+ * Linux sampler owns summed process-tree RSS/PSS, CPU, I/O, and lifecycle data.
  *
  * Publishable host contract: Linux x86_64, released `checked-release` bundle.
  */

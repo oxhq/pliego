@@ -113,12 +113,11 @@ unavailable until an audited whole-tree sampler is used.
 
 ## Metrics
 
-Latency (p50/p95/p99/min/max/mean), CPU (user/sys), whole-process-tree peak RSS,
-scaling (per-page time and memory), throughput (serial
-renders/minute; concurrent 2/4/8 is a later increment), I/O and artifact bytes,
-runtime distribution, output bytes/page count, correctness (page count, text,
-row uniqueness, totals, links, fonts), repeatability (scene hash / PDF hash
-variation), and typed failures (code, timing, published/no PDF).
+This foundation records wall latency (p50/p95/p99/min/max/mean), serial
+throughput, per-page wall time, PDF and artifact bytes, page count, required
+text, capture status, PDF hash variation, and typed failure publication state.
+CPU, process-tree RSS/PSS, I/O, runtime archive size, and deeper document checks
+are separate audited increments required before a signed baseline is published.
 
 ## Fixtures and correctness gates
 
