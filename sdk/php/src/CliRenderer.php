@@ -499,7 +499,12 @@ final class CliRenderer
         $nativePhaseTimings = is_array($metadata['phase_timings_ms'] ?? null)
             ? $metadata['phase_timings_ms']
             : [];
-        $nativeEngineMilliseconds = $nativePhaseTimings['total_engine'] ?? null;
+        $nativeEngineTimings = is_array($metadata['engine_timings'] ?? null)
+            ? $metadata['engine_timings']
+            : [];
+        $nativeEngineMilliseconds = $nativeEngineTimings['total_ms']
+            ?? $nativePhaseTimings['total_engine']
+            ?? null;
         if (
             (!is_int($nativeEngineMilliseconds) && !is_float($nativeEngineMilliseconds))
             || $nativeEngineMilliseconds < 0
