@@ -269,7 +269,7 @@ pub fn render_document_pdf<'font, 'image>(
                             );
                         }
                         let (pdf_font, synthetic_bold) = fonts[font].clone();
-                        let text_opacity = pdf_opacity(color.a);
+                        let text_opacity = pdf_opacity(color.a)?;
                         surface.set_fill(Some(Fill {
                             paint: pdf_color(color).into(),
                             opacity: if synthetic_bold {
@@ -287,7 +287,7 @@ pub fn render_document_pdf<'font, 'image>(
                         }));
 
                         // Keep the run intact so Krilla can span shared shaping clusters with ActualText.
-                        let text_ranges = pdf_text_ranges(text, glyphs);
+                        let text_ranges = pdf_text_ranges(text, glyphs, operation_index)?;
                         let mut cursor_x = first_glyph.x;
                         let mut pdf_glyphs = Vec::with_capacity(glyphs.len());
                         for (glyph_index, (glyph, range)) in
@@ -341,11 +341,15 @@ pub fn render_document_pdf<'font, 'image>(
                         stroke,
                         ..
                     } => {
-                        surface.set_fill(fill.as_ref().map(|color| pdf_fill(color, *fill_rule)));
+                        surface.set_fill(
+                            fill.as_ref()
+                                .map(|color| pdf_fill(color, *fill_rule))
+                                .transpose()?,
+                        );
                         surface.set_stroke(match stroke {
                             Some(stroke) => Some(PdfStroke {
                                 paint: pdf_color(&stroke.color).into(),
-                                opacity: pdf_opacity(stroke.color.a),
+                                opacity: pdf_opacity(stroke.color.a)?,
                                 width: pdf_length(stroke.width, "path.stroke.width")?,
                                 ..PdfStroke::default()
                             }),
@@ -419,38 +423,49 @@ pub fn render_document_pdf<'font, 'image>(
 /// Coalesce per-character shaping ranges into PDF extraction units. Positioned marks inside an
 /// extended grapheme must share one `ActualText` span or PDF readers can infer word boundaries from
 /// their positioning adjustments.
-fn pdf_text_ranges(text: &str, glyphs: &[crate::Glyph]) -> Vec<std::ops::Range<usize>> {
+fn pdf_text_ranges(
+    text: &str,
+    glyphs: &[crate::Glyph],
+    operation: usize,
+) -> Result<Vec<std::ops::Range<usize>>, PdfError> {
     let graphemes = text
         .grapheme_indices(true)
         .map(|(start, grapheme)| start..start + grapheme.len())
         .collect::<Vec<_>>();
     let expanded = glyphs
         .iter()
-        .map(|glyph| {
-            let range = glyph.text_range.expect("text mappings were prevalidated");
-            let range = usize::try_from(range.start).unwrap()..usize::try_from(range.end).unwrap();
+        .enumerate()
+        .map(|(glyph, value)| {
+            let range = value
+                .text_range
+                .ok_or(PdfError::MissingTextMapping { operation, glyph })?;
+            let range = usize::try_from(range.start)
+                .map_err(|_| PdfError::InvalidTextMapping { operation, glyph })?
+                ..usize::try_from(range.end)
+                    .map_err(|_| PdfError::InvalidTextMapping { operation, glyph })?;
             let start = graphemes
                 .iter()
                 .find(|item| item.end > range.start)
-                .unwrap()
+                .ok_or(PdfError::InvalidTextMapping { operation, glyph })?
                 .start;
             let end = graphemes
                 .iter()
                 .rev()
                 .find(|item| item.start < range.end)
-                .unwrap()
+                .ok_or(PdfError::InvalidTextMapping { operation, glyph })?
                 .end;
-            start..end
+            Ok(start..end)
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>, PdfError>>()?;
     // Poppler ignores ReversedChars, so a visual-order RTL run needs one logical ActualText span.
-    if expanded.len() > 1 &&
+    if let (Some(first), Some(last)) = (expanded.first(), expanded.last()) &&
+        expanded.len() > 1 &&
         expanded
             .windows(2)
             .all(|ranges| ranges[0].start >= ranges[1].start) &&
-        expanded.first().unwrap().start > expanded.last().unwrap().start
+        first.start > last.start
     {
-        return vec![0..text.len(); expanded.len()];
+        return Ok(vec![0..text.len(); expanded.len()]);
     }
 
     let mut sorted = expanded.clone();
@@ -467,12 +482,13 @@ fn pdf_text_ranges(text: &str, glyphs: &[crate::Glyph]) -> Vec<std::ops::Range<u
     }
     expanded
         .into_iter()
-        .map(|range| {
+        .enumerate()
+        .map(|(glyph, range)| {
             groups
                 .iter()
                 .find(|group| group.start <= range.start && group.end >= range.end)
-                .unwrap()
-                .clone()
+                .cloned()
+                .ok_or(PdfError::InvalidTextMapping { operation, glyph })
         })
         .collect()
 }
@@ -591,7 +607,10 @@ fn load_image(
     } else if webp {
         Image::from_webp(data, false)
     } else {
-        unreachable!("image format was prevalidated")
+        return Err(PdfError::InvalidImage {
+            resource: resource_id.into(),
+            message: "unsupported image format".into(),
+        });
     };
     let image = result.map_err(|message| PdfError::InvalidImage {
         resource: resource_id.into(),
@@ -660,15 +679,15 @@ fn pdf_path(data: &str, operation: usize) -> Result<krilla::geom::Path, PdfError
     })
 }
 
-fn pdf_fill(color: &Color, rule: FillRule) -> Fill {
-    Fill {
+fn pdf_fill(color: &Color, rule: FillRule) -> Result<Fill, PdfError> {
+    Ok(Fill {
         paint: pdf_color(color).into(),
-        opacity: pdf_opacity(color.a),
+        opacity: pdf_opacity(color.a)?,
         rule: match rule {
             FillRule::NonZero => PdfFillRule::NonZero,
             FillRule::EvenOdd => PdfFillRule::EvenOdd,
         },
-    }
+    })
 }
 
 fn pdf_color(color: &Color) -> rgb::Color {
@@ -676,8 +695,11 @@ fn pdf_color(color: &Color) -> rgb::Color {
     rgb::Color::new(channel(color.r), channel(color.g), channel(color.b))
 }
 
-fn pdf_opacity(value: f64) -> NormalizedF32 {
-    NormalizedF32::new(value as f32).expect("scene colors were validated")
+fn pdf_opacity(value: f64) -> Result<NormalizedF32, PdfError> {
+    NormalizedF32::new(value as f32).ok_or(PdfError::ValueOutOfRange {
+        field: "color.alpha",
+        value,
+    })
 }
 
 fn safe_link_target(target: &str, operation: usize) -> Result<String, PdfError> {

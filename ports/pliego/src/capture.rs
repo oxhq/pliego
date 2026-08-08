@@ -858,7 +858,12 @@ pub fn capture_document_scene_with_canvas(
                         "iframe" => UnsupportedPaintKind::Iframe,
                         "text-effects" => UnsupportedPaintKind::TextEffects,
                         "content-geometry" => UnsupportedPaintKind::ContentGeometry,
-                        _ => unreachable!(),
+                        _ => {
+                            return Err(CaptureError::UnknownPaintEvent {
+                                sequence: event.sequence,
+                                kind: kind.into(),
+                            });
+                        },
                     },
                 });
 
@@ -1000,7 +1005,12 @@ fn append_canvas(
         };
         let bounds = match &operation {
             Operation::Path { bounds, .. } | Operation::Image { bounds, .. } => bounds.clone(),
-            Operation::Text { .. } | Operation::Link { .. } => unreachable!(),
+            Operation::Text { .. } | Operation::Link { .. } => {
+                return Err(CaptureError::Canvas {
+                    sequence,
+                    message: "hybrid Canvas adapter emitted an unexpected operation".into(),
+                });
+            },
         };
         operations.push(PositionedOperation {
             sequence,
@@ -1249,7 +1259,9 @@ fn split_solid_rect_operations(
                 part.bounds.y = intersection_top;
                 part.bounds.height = intersection_bottom - intersection_top;
                 let Operation::Path { bounds, data, .. } = &mut part.operation else {
-                    unreachable!("splittable rectangle is always a path")
+                    return Err(CaptureError::InvalidScene(
+                        "splittable rectangle operation is not a path",
+                    ));
                 };
                 bounds.y = intersection_top;
                 bounds.height = intersection_bottom - intersection_top;

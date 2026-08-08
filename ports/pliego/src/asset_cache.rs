@@ -3,7 +3,6 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 use std::collections::{BTreeMap, HashSet};
-use std::fmt::Write as _;
 use std::fs::{self, OpenOptions};
 use std::io::Write as _;
 use std::path::{Component, Path, PathBuf};
@@ -65,7 +64,13 @@ impl AssetStore {
                 ),
             )
         })?;
-        let root = manifest.parent().expect("canonical file has a parent");
+        let root = manifest.parent().ok_or_else(|| {
+            AssetError::new(
+                "ASSET_MANIFEST_INVALID",
+                None,
+                "asset manifest has no parent directory".into(),
+            )
+        })?;
         let bytes = fs::read(&manifest).map_err(|error| {
             AssetError::new(
                 "ASSET_MANIFEST_INVALID",
@@ -474,12 +479,14 @@ fn prune_cache(directory: &Path) -> Result<usize, AssetError> {
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .fold(String::with_capacity(64), |mut output, byte| {
-            write!(&mut output, "{byte:02x}").expect("writing to String cannot fail");
-            output
-        })
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let digest = Sha256::digest(bytes);
+    let mut output = String::with_capacity(64);
+    for byte in digest {
+        output.push(HEX[(byte >> 4) as usize] as char);
+        output.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    output
 }
 
 #[cfg(test)]

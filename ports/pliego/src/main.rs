@@ -38,8 +38,14 @@ use sha2::{Digest, Sha256};
 
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
 mod asset_cache;
+mod engine;
 mod readiness;
 mod session;
+
+use engine::{
+    DocumentEngine, ExplicitRenderPaths, RenderEnvironment, RenderError, RenderOutcome,
+    RenderRequest, ResourcePolicyConfig, VirtualResourceSpec,
+};
 
 const SERVO_BASE_SHA: &str = "313b6d5ecc113b08010ce434140db3ca5abcc71c";
 const PLIEGO_API_VERSION: u32 = 1;
@@ -60,81 +66,9 @@ unsafe extern "C" {
     fn tzset();
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct RenderEnvironment {
-    locale: &'static str,
-    timezone: &'static str,
-}
-
-impl Default for RenderEnvironment {
-    fn default() -> Self {
-        Self {
-            locale: DEFAULT_LOCALE,
-            timezone: DEFAULT_TIMEZONE,
-        }
-    }
-}
-
-impl RenderEnvironment {
-    fn artifact(self) -> serde_json::Value {
-        serde_json::json!({
-            "locale": {
-                "requested": self.locale,
-                "resolved": self.locale,
-            },
-            "timezone": {
-                "requested": self.timezone,
-                "resolved": self.timezone,
-            },
-        })
-    }
-}
-
-#[derive(Debug, PartialEq)]
-struct ExplicitRenderPaths {
-    output: PathBuf,
-    artifacts: PathBuf,
-}
-
-#[derive(Debug, PartialEq)]
-struct RenderRequest {
-    input: PathBuf,
-    environment: RenderEnvironment,
-    page: PageDefinition,
-    resources: ResourcePolicyConfig,
-    allow_host_fonts: bool,
-    allow_partial_scene: bool,
-    explicit_paths: Option<ExplicitRenderPaths>,
-}
-
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
 const RESOURCE_POLICY_ID: &str = "pliego.resource-policy.v1";
 const MAX_RESOURCE_TIMEOUT_MS: u64 = 60_000;
-
-#[derive(Clone, Debug, PartialEq)]
-struct ResourcePolicyConfig {
-    allowed_http_roots: Vec<url::Url>,
-    virtual_resources: Vec<VirtualResourceSpec>,
-    asset_manifest: Option<PathBuf>,
-    timeout_ms: u64,
-}
-
-impl Default for ResourcePolicyConfig {
-    fn default() -> Self {
-        Self {
-            allowed_http_roots: Vec::new(),
-            virtual_resources: Vec::new(),
-            asset_manifest: None,
-            timeout_ms: READINESS_TIMEOUT_MS,
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq)]
-struct VirtualResourceSpec {
-    url: url::Url,
-    path: PathBuf,
-}
 
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
 #[derive(Clone, Debug)]
@@ -989,7 +923,10 @@ fn main() {
     match command {
         Command::Help => print_help(),
         Command::Version => print_version(),
-        Command::Render(request) => render(request),
+        Command::Render(request) => match DocumentEngine::render(request) {
+            Ok(outcome) => println!("{}", outcome.summary),
+            Err(error) => print_render_error(&error),
+        },
     }
 }
 
@@ -1024,11 +961,41 @@ fn invalid_request(message: &str) -> ! {
     std::process::exit(2)
 }
 
+fn print_render_error(error: &RenderError) -> ! {
+    for warning in &error.warnings {
+        eprintln!("pliego: warning: {warning}");
+    }
+    if let (Some(artifacts), Some(document_pdf), Some(render_id)) = (
+        error.artifacts.as_deref(),
+        error.document_pdf.as_deref(),
+        error.render_id.as_deref(),
+    ) {
+        println!(
+            "{}",
+            serde_json::json!({
+                "artifacts": artifacts.to_string_lossy(),
+                "document_pdf": document_pdf.to_string_lossy(),
+                "engine": "pliego",
+                "error": {
+                    "code": &error.code,
+                    "message": &error.message,
+                },
+                "render_id": render_id,
+                "status": "failed",
+            })
+        );
+        eprintln!("pliego: {}: {}", error.code, error.message);
+    } else {
+        eprintln!("pliego: {}", error.message);
+    }
+    std::process::exit(error.exit_code)
+}
+
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
 /// Sets the process-global timezone before Servo starts any worker threads.
 /// This is deliberately scoped to Pliego's one-render-per-process CLI model.
 fn apply_timezone(timezone: &str) -> Result<(), String> {
-    let variable = CString::new("TZ").unwrap();
+    let variable = CString::new("TZ").map_err(|error| error.to_string())?;
     let value = CString::new(timezone).map_err(|_| "timezone contains a null byte")?;
 
     #[cfg(target_os = "windows")]
@@ -1060,22 +1027,24 @@ fn apply_timezone(timezone: &str) -> Result<(), String> {
 }
 
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
-fn render(request: RenderRequest) {
-    layout::pages::configure_for_process(request.page).unwrap_or_else(|_| {
-        eprintln!("pliego: paged layout was already configured for this process");
-        std::process::exit(2)
-    });
-    let document = LocalDocument::resolve(".", &request.input).unwrap_or_else(|error| {
-        eprintln!("pliego: {error}");
-        std::process::exit(2)
-    });
-    let input_bytes = std::fs::read(document.path()).unwrap_or_else(|error| {
-        eprintln!(
-            "pliego: cannot read input document {}: {error}",
-            document.path().display()
-        );
-        std::process::exit(2)
-    });
+fn render(request: RenderRequest) -> Result<RenderOutcome, RenderError> {
+    layout::pages::configure_for_process(request.page).map_err(|_| {
+        RenderError::request(
+            "LAYOUT_CONFIGURATION_FAILED",
+            "paged layout was already configured for this process",
+        )
+    })?;
+    let document = LocalDocument::resolve(".", &request.input)
+        .map_err(|error| RenderError::request("INVALID_REQUEST", error.to_string()))?;
+    let input_bytes = std::fs::read(document.path()).map_err(|error| {
+        RenderError::request(
+            "INVALID_REQUEST",
+            format!(
+                "cannot read input document {}: {error}",
+                document.path().display()
+            ),
+        )
+    })?;
     let resource_policy = ResourcePolicy::resolve(&request.resources, document.root());
     let render_id = stable_render_id(
         &input_bytes,
@@ -1084,30 +1053,30 @@ fn render(request: RenderRequest) {
         &resource_policy,
         request.allow_host_fonts,
     );
-    let input_url = url::Url::from_file_path(document.path()).unwrap_or_else(|_| {
-        eprintln!("pliego: cannot convert document path to a file URL");
-        std::process::exit(2)
-    });
-    let artifacts = if let Some(paths) = &request.explicit_paths {
-        SessionArtifacts::create_with_render_id(&paths.artifacts, &render_id).unwrap_or_else(
-            |error| {
-                let code = if error.kind() == std::io::ErrorKind::AlreadyExists {
-                    "ARTIFACTS_ALREADY_EXISTS"
-                } else {
-                    "ARTIFACTS_CREATE_FAILED"
-                };
-                fail_render_request(
-                    &paths.artifacts,
-                    &paths.output,
-                    &render_id,
-                    code,
-                    &format!(
-                        "cannot create exclusive artifact directory {}: {error}",
-                        paths.artifacts.display()
-                    ),
-                )
-            },
+    let input_url = url::Url::from_file_path(document.path()).map_err(|_| {
+        RenderError::request(
+            "INVALID_REQUEST",
+            "cannot convert document path to a file URL",
         )
+    })?;
+    let artifacts = if let Some(paths) = &request.explicit_paths {
+        SessionArtifacts::create_with_render_id(&paths.artifacts, &render_id).map_err(|error| {
+            let code = if error.kind() == std::io::ErrorKind::AlreadyExists {
+                "ARTIFACTS_ALREADY_EXISTS"
+            } else {
+                "ARTIFACTS_CREATE_FAILED"
+            };
+            RenderError::session(
+                &paths.artifacts,
+                &paths.output,
+                &render_id,
+                code,
+                format!(
+                    "cannot create exclusive artifact directory {}: {error}",
+                    paths.artifacts.display()
+                ),
+            )
+        })?
     } else {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1115,33 +1084,37 @@ fn render(request: RenderRequest) {
             .as_nanos();
         let session_path =
             std::env::temp_dir().join(format!("pliego-session-{}-{unique}", std::process::id()));
-        create_session_artifacts(session_path.clone(), &render_id).unwrap_or_else(|error| {
-            fail_render_request(
+        create_session_artifacts(session_path.clone(), &render_id).map_err(|error| {
+            RenderError::session(
                 &session_path,
                 &session_path.join("document.pdf"),
                 &render_id,
                 "ARTIFACTS_CREATE_FAILED",
-                &format!("cannot create session artifacts: {error}"),
+                format!("cannot create session artifacts: {error}"),
             )
-        })
+        })?
     };
     if let Some(paths) = &request.explicit_paths {
         match output_overlaps_artifacts(&paths.output, artifacts.directory()) {
             Ok(false) => {},
-            Ok(true) => fail_render_request(
-                artifacts.directory(),
-                &paths.output,
-                &render_id,
-                "OUTPUT_ARTIFACTS_OVERLAP",
-                "requested output must be outside the artifact directory",
-            ),
-            Err(error) => fail_render_request(
-                artifacts.directory(),
-                &paths.output,
-                &render_id,
-                "OUTPUT_PATH_CHECK_FAILED",
-                &format!("cannot compare output and artifact paths: {error}"),
-            ),
+            Ok(true) => {
+                return Err(RenderError::session(
+                    artifacts.directory(),
+                    &paths.output,
+                    &render_id,
+                    "OUTPUT_ARTIFACTS_OVERLAP",
+                    "requested output must be outside the artifact directory",
+                ));
+            },
+            Err(error) => {
+                return Err(RenderError::session(
+                    artifacts.directory(),
+                    &paths.output,
+                    &render_id,
+                    "OUTPUT_PATH_CHECK_FAILED",
+                    format!("cannot compare output and artifact paths: {error}"),
+                ));
+            },
         }
     }
     let proof = artifacts.directory().join("render.png");
@@ -1158,7 +1131,7 @@ fn render(request: RenderRequest) {
         "host_fonts": if request.allow_host_fonts { "allowed" } else { "denied" },
     });
     set_document_pdf_environment(&mut environment, &document_pdf_path, "pending", None);
-    record_artifact(artifacts.write_environment(&environment));
+    record_artifact(artifacts.write_environment(&environment))?;
     if let (Some(error), Some(manifest)) = (
         resource_policy.asset_error.as_ref(),
         resource_policy.asset_manifest.as_deref(),
@@ -1170,48 +1143,57 @@ fn render(request: RenderRequest) {
             &error.message,
             error.expected.as_deref(),
             error.actual.as_deref(),
+        ))?;
+        return Err(fail_session(
+            &artifacts,
+            &document_pdf_path,
+            error.code,
+            &error.message,
         ));
-        fail_session(&artifacts, &document_pdf_path, error.code, &error.message);
     }
     if request.explicit_paths.is_some() {
         match document_pdf_path.try_exists() {
             Ok(false) => {},
-            Ok(true) => fail_session(
-                &artifacts,
-                &document_pdf_path,
-                "OUTPUT_ALREADY_EXISTS",
-                &format!(
-                    "requested output already exists: {}",
-                    document_pdf_path.display()
-                ),
-            ),
-            Err(error) => fail_session(
-                &artifacts,
-                &document_pdf_path,
-                "OUTPUT_PATH_CHECK_FAILED",
-                &format!(
-                    "cannot check requested output {}: {error}",
-                    document_pdf_path.display()
-                ),
-            ),
+            Ok(true) => {
+                return Err(fail_session(
+                    &artifacts,
+                    &document_pdf_path,
+                    "OUTPUT_ALREADY_EXISTS",
+                    &format!(
+                        "requested output already exists: {}",
+                        document_pdf_path.display()
+                    ),
+                ));
+            },
+            Err(error) => {
+                return Err(fail_session(
+                    &artifacts,
+                    &document_pdf_path,
+                    "OUTPUT_PATH_CHECK_FAILED",
+                    &format!(
+                        "cannot check requested output {}: {error}",
+                        document_pdf_path.display()
+                    ),
+                ));
+            },
         }
     }
-    apply_timezone(request.environment.timezone).unwrap_or_else(|error| {
+    apply_timezone(request.environment.timezone).map_err(|error| {
         fail_session(
             &artifacts,
             &document_pdf_path,
             "ENVIRONMENT_CONFIGURATION_FAILED",
             &error,
         )
-    });
+    })?;
     let userscripts = artifacts.directory().join("userscripts");
-    record_artifact(std::fs::create_dir_all(&userscripts));
+    record_artifact(std::fs::create_dir_all(&userscripts))?;
     record_artifact(std::fs::write(
         userscripts.join("00-pliego-readiness.js"),
         readiness::document_start_script(READINESS_TIMEOUT_MS, true),
-    ));
+    ))?;
 
-    record_artifact(artifacts.record_state("started", None));
+    record_artifact(artifacts.record_state("started", None))?;
 
     let servo_args = [
         "--headless".into(),
@@ -1342,30 +1324,30 @@ fn render(request: RenderRequest) {
             failure.is_for_main_frame,
             failure.is_redirect,
             &failure.reason,
-        ));
+        ))?;
     }
     if let Some(failure) = policy_failures.first() {
-        fail_session(
+        return Err(fail_session(
             &artifacts,
             &document_pdf_path,
             failure.code,
             &format!("{}: {}", failure.reason, failure.url),
-        )
+        ));
     }
-    let result = result.unwrap_or_else(|error| {
+    let result = result.map_err(|error| {
         fail_session(
             &artifacts,
             &document_pdf_path,
             "READINESS_EVALUATION_FAILED",
             &error.to_string(),
         )
-    });
+    })?;
 
     for message in result.console {
         record_artifact(artifacts.record_console(
             &format!("{:?}", message.level).to_ascii_lowercase(),
             &message.message,
-        ));
+        ))?;
     }
     let resource_capture = {
         let controlled_resources = controlled_resources.borrow();
@@ -1374,16 +1356,9 @@ fn render(request: RenderRequest) {
             result.resources,
             &resource_policy,
             &controlled_resources,
-        )
-    }
-    .unwrap_or_else(|error| {
-        fail_session(
-            &artifacts,
             &document_pdf_path,
-            "SCENE_CAPTURE_RESOURCE_MAP_CONFLICT",
-            &error.to_string(),
         )
-    });
+    }?;
     if let Some(failure) = &resource_capture.failure {
         record_artifact(artifacts.record_resource_failure(
             failure.code,
@@ -1395,84 +1370,93 @@ fn render(request: RenderRequest) {
             failure.is_for_main_frame,
             failure.is_redirect,
             &failure.reason,
-        ));
-        fail_session(
+        ))?;
+        return Err(fail_session(
             &artifacts,
             &document_pdf_path,
             failure.code,
             &format!("{}: {}", failure.reason, failure.url),
-        )
+        ));
     }
     let resolved_input_hash = resolved_input_hash(&render_id, &resource_capture.url_to_resource);
     environment["resolved_input_hash"] = serde_json::json!(resolved_input_hash);
-    record_artifact(artifacts.write_environment(&environment));
+    record_artifact(artifacts.write_environment(&environment))?;
 
     let snapshot_json = match result.value {
         servoshell::JSValue::String(json) => json,
-        value => fail_session(
-            &artifacts,
-            &document_pdf_path,
-            "READINESS_INVALID_RESULT",
-            &format!("expected readiness JSON string, got {value:?}"),
-        ),
+        value => {
+            return Err(fail_session(
+                &artifacts,
+                &document_pdf_path,
+                "READINESS_INVALID_RESULT",
+                &format!("expected readiness JSON string, got {value:?}"),
+            ));
+        },
     };
-    let readiness = parse_snapshot(&snapshot_json).unwrap_or_else(|error| {
+    let readiness = parse_snapshot(&snapshot_json).map_err(|error| {
         fail_session(
             &artifacts,
             &document_pdf_path,
             "READINESS_INVALID_RESULT",
             &error,
         )
-    });
+    })?;
     let readiness_json: serde_json::Value =
-        serde_json::from_str(&snapshot_json).unwrap_or_else(|error| {
+        serde_json::from_str(&snapshot_json).map_err(|error| {
             fail_session(
                 &artifacts,
                 &document_pdf_path,
                 "READINESS_INVALID_RESULT",
                 &error.to_string(),
             )
-        });
-    record_artifact(artifacts.write_readiness(&readiness_json));
+        })?;
+    record_artifact(artifacts.write_readiness(&readiness_json))?;
     let readiness_payload = match readiness {
         Readiness::Ready { payload } => payload,
         Readiness::Failed { error } => {
-            fail_session(&artifacts, &document_pdf_path, &error.code, &error.message)
+            return Err(fail_session(
+                &artifacts,
+                &document_pdf_path,
+                &error.code,
+                &error.message,
+            ));
         },
-        Readiness::Pending => fail_session(
-            &artifacts,
-            &document_pdf_path,
-            "READINESS_PENDING",
-            "document remained pending after stable capture",
-        ),
+        Readiness::Pending => {
+            return Err(fail_session(
+                &artifacts,
+                &document_pdf_path,
+                "READINESS_PENDING",
+                "document remained pending after stable capture",
+            ));
+        },
     };
-    let layout_debug_json = result.layout_debug.unwrap_or_else(|| {
+    let layout_debug_json = result.layout_debug.ok_or_else(|| {
         fail_session(
             &artifacts,
             &document_pdf_path,
             "SCENE_CAPTURE_UNAVAILABLE",
             "Servo did not return cached layout data",
         )
-    });
+    })?;
     let layout_debug: serde_json::Value =
-        serde_json::from_str(&layout_debug_json).unwrap_or_else(|error| {
+        serde_json::from_str(&layout_debug_json).map_err(|error| {
             fail_session(
                 &artifacts,
                 &document_pdf_path,
                 "SCENE_CAPTURE_LAYOUT_JSON_INVALID",
                 &error.to_string(),
             )
-        });
+        })?;
     artifacts
         .write_layout_debug(&layout_debug)
-        .unwrap_or_else(|error| {
+        .map_err(|error| {
             fail_session(
                 &artifacts,
                 &document_pdf_path,
                 "SCENE_CAPTURE_LAYOUT_WRITE_FAILED",
                 &error.to_string(),
             )
-        });
+        })?;
     let layout_debug_path = artifacts.directory().join("layout-debug.json");
     let mut resource_resolution_error = None;
     let scene_capture_started = Instant::now();
@@ -1504,16 +1488,21 @@ fn render(request: RenderRequest) {
         },
     );
     if let Some(error) = resource_resolution_error {
-        fail_session(&artifacts, &document_pdf_path, error.code, &error.message);
+        return Err(fail_session(
+            &artifacts,
+            &document_pdf_path,
+            error.code,
+            &error.message,
+        ));
     }
-    let scene_capture = scene_capture.unwrap_or_else(|error| {
+    let scene_capture = scene_capture.map_err(|error| {
         fail_session(
             &artifacts,
             &document_pdf_path,
             "SCENE_CAPTURE_CONVERSION_FAILED",
             &error.to_string(),
         )
-    });
+    })?;
     let scene_capture_ms = elapsed_milliseconds(scene_capture_started);
     if !request.allow_host_fonts &&
         let Some(selection) = scene_capture
@@ -1521,7 +1510,7 @@ fn render(request: RenderRequest) {
             .iter()
             .find(|selection| selection.source.is_host())
     {
-        fail_session(
+        return Err(fail_session(
             &artifacts,
             &document_pdf_path,
             "HOST_FONT_POLICY_VIOLATION",
@@ -1529,7 +1518,7 @@ fn render(request: RenderRequest) {
                 "Servo selected host font {} while host fonts were disabled",
                 selection.resource
             ),
-        )
+        ));
     }
     let scene_artifacts = match persist_scene_capture(
         &artifacts,
@@ -1539,6 +1528,7 @@ fn render(request: RenderRequest) {
     ) {
         Ok(summary) => summary,
         Err(error) => {
+            let mut warning = None;
             if error.code.starts_with("DOCUMENT_PDF_") {
                 set_document_pdf_environment(
                     &mut environment,
@@ -1547,12 +1537,17 @@ fn render(request: RenderRequest) {
                     Some(&error),
                 );
                 if let Err(write_error) = artifacts.write_environment(&environment) {
-                    eprintln!(
-                        "pliego: warning: cannot record failed PDF environment state: {write_error}"
-                    );
+                    warning = Some(format!(
+                        "cannot record failed PDF environment state: {write_error}"
+                    ));
                 }
             }
-            fail_session(&artifacts, &document_pdf_path, error.code, &error.message)
+            let mut failure =
+                fail_session(&artifacts, &document_pdf_path, error.code, &error.message);
+            if let Some(warning) = warning {
+                failure.warnings.insert(0, warning);
+            }
+            return Err(failure);
         },
     };
     if scene_artifacts.capture_status != "complete" && !request.allow_partial_scene {
@@ -1571,26 +1566,31 @@ fn render(request: RenderRequest) {
             "failed",
             Some(&failure),
         );
-        if let Err(error) = artifacts.write_environment(&environment) {
-            eprintln!("pliego: warning: cannot record rejected PDF state: {error}");
-        }
-        fail_session(
+        let warning = artifacts
+            .write_environment(&environment)
+            .err()
+            .map(|error| format!("cannot record rejected PDF state: {error}"));
+        let mut error = fail_session(
             &artifacts,
             &document_pdf_path,
             failure.code,
             &failure.message,
         );
+        if let Some(warning) = warning {
+            error.warnings.insert(0, warning);
+        }
+        return Err(error);
     }
     let rendered_bytes = std::fs::metadata(&proof)
         .map(|metadata| metadata.len())
         .unwrap_or(0);
     if rendered_bytes == 0 {
-        fail_session(
+        return Err(fail_session(
             &artifacts,
             &document_pdf_path,
             "RENDER_OUTPUT_MISSING",
             "Servo did not produce a rendered image",
-        );
+        ));
     }
     if request.explicit_paths.is_some() {
         if let Err(error) = artifacts.publish_document_pdf(&document_pdf_path) {
@@ -1612,17 +1612,22 @@ fn render(request: RenderRequest) {
                 "failed",
                 Some(&failure),
             );
-            if let Err(write_error) = artifacts.write_environment(&environment) {
-                eprintln!(
-                    "pliego: warning: cannot record failed PDF publication state: {write_error}"
-                );
-            }
-            fail_session(
+            let warning = artifacts
+                .write_environment(&environment)
+                .err()
+                .map(|write_error| {
+                    format!("cannot record failed PDF publication state: {write_error}")
+                });
+            let mut error = fail_session(
                 &artifacts,
                 &document_pdf_path,
                 failure.code,
                 &failure.message,
-            )
+            );
+            if let Some(warning) = warning {
+                error.warnings.insert(0, warning);
+            }
+            return Err(error);
         }
     }
     set_document_pdf_environment(
@@ -1631,37 +1636,34 @@ fn render(request: RenderRequest) {
         scene_artifacts.pdf_status,
         None,
     );
-    artifacts
-        .write_environment(&environment)
-        .unwrap_or_else(|error| {
-            fail_session(
-                &artifacts,
-                &document_pdf_path,
-                "DOCUMENT_PDF_ENVIRONMENT_WRITE_FAILED",
-                &error.to_string(),
-            )
-        });
+    artifacts.write_environment(&environment).map_err(|error| {
+        fail_session(
+            &artifacts,
+            &document_pdf_path,
+            "DOCUMENT_PDF_ENVIRONMENT_WRITE_FAILED",
+            &error.to_string(),
+        )
+    })?;
     let scene_previews = scene_artifacts
         .preview_paths
         .iter()
         .map(|path| path.to_string_lossy().into_owned())
         .collect::<Vec<_>>();
     let scene_preview = scene_previews.first().cloned();
-    record_artifact(artifacts.record_state("rendered", None));
+    record_artifact(artifacts.record_state("rendered", None))?;
     let bundle_path = artifacts
         .write_bundle(&document_pdf_path)
-        .unwrap_or_else(|error| {
+        .map_err(|error| {
             fail_session(
                 &artifacts,
                 &document_pdf_path,
                 "BUNDLE_WRITE_FAILED",
                 &error.to_string(),
             )
-        });
+        })?;
 
-    println!(
-        "{}",
-        serde_json::json!({
+    Ok(RenderOutcome {
+        summary: serde_json::json!({
             "artifacts": artifacts.directory().to_string_lossy(),
             "bundle": bundle_path.to_string_lossy(),
             "engine": "pliego",
@@ -1707,8 +1709,8 @@ fn render(request: RenderRequest) {
             "servo_build": servoshell::VERSION,
             "rendered_bytes": rendered_bytes,
             "status": "rendered"
-        })
-    );
+        }),
+    })
 }
 
 fn page_artifact(page: PageDefinition) -> serde_json::Value {
@@ -2098,7 +2100,8 @@ fn record_resources(
     resources: Vec<servoshell::ResourceEvent>,
     policy: &ResourcePolicy,
     controlled_resources: &BTreeMap<(String, String), ControlledResource>,
-) -> Result<ResourceCapture, ResourceMapConflict> {
+    document_pdf: &Path,
+) -> Result<ResourceCapture, RenderError> {
     let mut pending: HashMap<String, PendingResource> = HashMap::new();
     let mut capture = ResourceCapture::default();
 
@@ -2111,7 +2114,7 @@ fn record_resources(
                 let pending_resource = pending.entry(resource.request_id.clone()).or_default();
                 pending_resource.method = Some(method);
                 if pending_resource.observe_url(url.clone()) {
-                    record_artifact(artifacts.record_resource_request(&resource.request_id, &url));
+                    record_artifact(artifacts.record_resource_request(&resource.request_id, &url))?;
                 }
             },
             servoshell::NetworkEvent::HttpResponse(response) => {
@@ -2195,8 +2198,15 @@ fn record_resources(
                     &completed.sha256,
                     &completed.body,
                     cached_asset.map(|asset| asset.cache_result.as_str()),
-                ));
-                capture.retain_completed(&completed)?;
+                ))?;
+                capture.retain_completed(&completed).map_err(|error| {
+                    fail_session(
+                        artifacts,
+                        document_pdf,
+                        "SCENE_CAPTURE_RESOURCE_MAP_CONFLICT",
+                        &error.to_string(),
+                    )
+                })?;
             },
             servoshell::NetworkEvent::SecurityInfo(_) => {},
         }
@@ -2215,7 +2225,7 @@ fn record_resources(
             body: fetched.body.clone(),
         };
         let request_id = format!("controlled-resource:{}", sha256_hex(url.as_bytes()));
-        record_artifact(artifacts.record_resource_request(&request_id, url));
+        record_artifact(artifacts.record_resource_request(&request_id, url))?;
         record_artifact(artifacts.record_loaded_resource(
             &request_id,
             &completed.urls,
@@ -2224,8 +2234,15 @@ fn record_resources(
             &completed.sha256,
             &completed.body,
             None,
-        ));
-        capture.retain_completed(&completed)?;
+        ))?;
+        capture.retain_completed(&completed).map_err(|error| {
+            fail_session(
+                artifacts,
+                document_pdf,
+                "SCENE_CAPTURE_RESOURCE_MAP_CONFLICT",
+                &error.to_string(),
+            )
+        })?;
     }
 
     let mut incomplete = pending
@@ -2302,14 +2319,13 @@ fn sha256_hex(bytes: &[u8]) -> String {
 
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
 fn lowercase_hex(bytes: &[u8]) -> String {
-    bytes.iter().fold(
-        String::with_capacity(bytes.len() * 2),
-        |mut output, byte| {
-            use std::fmt::Write as _;
-            write!(&mut output, "{byte:02x}").expect("writing to a String cannot fail");
-            output
-        },
-    )
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push(HEX[(byte >> 4) as usize] as char);
+        output.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    output
 }
 
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
@@ -2456,9 +2472,12 @@ fn persist_scene_capture(
         for (operation_index, operation) in page.operations.iter().enumerate() {
             match operation {
                 Operation::Text { font, .. } => {
-                    let instance = instances_by_id
-                        .get(font)
-                        .expect("capture validated scene font references");
+                    let Some(instance) = instances_by_id.get(font) else {
+                        return Err(SceneArtifactError::new(
+                            "SCENE_CAPTURE_FONT_INSTANCE_MISSING",
+                            format!("scene references missing font instance {font}"),
+                        ));
+                    };
                     if !instance.variations.is_empty() {
                         unsupported.push(PreviewUnsupported {
                             code: "SCENE_CAPTURE_PREVIEW_UNSUPPORTED_FONT_VARIATIONS",
@@ -2579,20 +2598,26 @@ fn persist_scene_capture(
         .iter()
         .enumerate()
         .map(|(index, page)| {
-            let artifact = preview_paths.get(index).map(|path| {
-                path.strip_prefix(artifacts.directory())
-                    .expect("preview artifact stays inside the session directory")
-                    .to_string_lossy()
-                    .replace('\\', "/")
-            });
-            serde_json::json!({
+            let artifact = preview_paths
+                .get(index)
+                .map(|path| {
+                    path.strip_prefix(artifacts.directory()).map_err(|error| {
+                        SceneArtifactError::new(
+                            "SCENE_CAPTURE_PREVIEW_PATH_INVALID",
+                            error.to_string(),
+                        )
+                    })
+                })
+                .transpose()?
+                .map(|path| path.to_string_lossy().replace('\\', "/"));
+            Ok(serde_json::json!({
                 "index": index,
                 "artifact": artifact,
                 "page_size": &page.size,
                 "operation_counts": scene_operation_counts(&page.operations),
-            })
+            }))
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>, SceneArtifactError>>()?;
     let pages = serde_json::json!({
         "schema": "pliego.pages",
         "version": 1,
@@ -2866,37 +2891,14 @@ fn scene_operation_counts(operations: &[Operation]) -> serde_json::Value {
 }
 
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
-fn record_artifact(result: std::io::Result<()>) {
-    if let Err(error) = result {
-        eprintln!("pliego: cannot write session artifact: {error}");
-        std::process::exit(1);
-    }
-}
-
-#[cfg(not(any(target_os = "android", target_env = "ohos")))]
-fn fail_render_request(
-    artifacts: &std::path::Path,
-    document_pdf: &std::path::Path,
-    render_id: &str,
-    code: &str,
-    message: &str,
-) -> ! {
-    println!(
-        "{}",
-        serde_json::json!({
-            "artifacts": artifacts.to_string_lossy(),
-            "document_pdf": document_pdf.to_string_lossy(),
-            "engine": "pliego",
-            "error": {
-                "code": code,
-                "message": message,
-            },
-            "render_id": render_id,
-            "status": "failed",
-        })
-    );
-    eprintln!("pliego: {code}: {message}");
-    std::process::exit(1)
+fn record_artifact(result: std::io::Result<()>) -> Result<(), RenderError> {
+    result.map_err(|error| {
+        RenderError::without_publication(
+            "SESSION_ARTIFACT_WRITE_FAILED",
+            format!("cannot write session artifact: {error}"),
+            1,
+        )
+    })
 }
 
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
@@ -2905,7 +2907,7 @@ fn fail_session(
     document_pdf: &std::path::Path,
     code: &str,
     message: &str,
-) -> ! {
+) -> RenderError {
     let failure = serde_json::json!({
         "status": "failed",
         "error": {
@@ -2913,34 +2915,33 @@ fn fail_session(
             "message": message,
         }
     });
+    let mut warnings = Vec::new();
     if let Err(error) = artifacts.write_failure(code, message) {
-        eprintln!("pliego: warning: cannot write failure artifact: {error}");
+        warnings.push(format!("cannot write failure artifact: {error}"));
     }
     if let Err(error) = artifacts.write_readiness(&failure) {
-        eprintln!("pliego: warning: cannot write readiness artifact: {error}");
+        warnings.push(format!("cannot write readiness artifact: {error}"));
     }
     if let Err(error) = artifacts.record_state("failed", Some(message)) {
-        eprintln!("pliego: warning: cannot record failed session state: {error}");
+        warnings.push(format!("cannot record failed session state: {error}"));
     }
-    println!(
-        "{}",
-        serde_json::json!({
-            "artifacts": artifacts.directory().to_string_lossy(),
-            "document_pdf": document_pdf.to_string_lossy(),
-            "engine": "pliego",
-            "error": failure["error"],
-            "render_id": artifacts.render_id(),
-            "status": "failed",
-        })
+    let mut error = RenderError::session(
+        artifacts.directory(),
+        document_pdf,
+        &artifacts.render_id(),
+        code,
+        message,
     );
-    eprintln!("pliego: {code}: {message}");
-    std::process::exit(1)
+    error.warnings = warnings;
+    error
 }
 
 #[cfg(any(target_os = "android", target_env = "ohos"))]
-fn render(_request: RenderRequest) {
-    eprintln!("pliego: the command-line renderer is only available on desktop targets");
-    std::process::exit(2);
+fn render(_request: RenderRequest) -> Result<RenderOutcome, RenderError> {
+    Err(RenderError::request(
+        "UNSUPPORTED_TARGET",
+        "the command-line renderer is only available on desktop targets",
+    ))
 }
 
 #[cfg(test)]
