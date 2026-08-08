@@ -128,12 +128,16 @@
         "name": { "type": "string" },
         "version": { "type": "string" },
         "commit": { "type": "string" },
+        "release_tag": { "type": "string" },
+        "servo_build": { "type": "string" },
+        "servo_base": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
         "package": { "type": "string" },
         "binary_path": { "type": "string" },
         "binary_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
         "binary_bytes": { "type": "integer", "minimum": 0 },
         "bundle": { "type": "string" },
         "bundle_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "bundle_bytes": { "type": "integer", "minimum": 1 },
         "profile": { "type": "string" }
       }
     },

@@ -47,8 +47,8 @@ benchmarks/
 
 * Dedicated or self-hosted **Linux x86_64** — GitHub-hosted Actions are for
   smoke checks only, never for publishable numbers.
-* The **published bundle** (`checked-release` profile) downloaded from
-  Releases and verified against its adjacent SHA-256. Never `cargo run`.
+* The **published bundle** (`checked-release` profile) resolved by the pinned
+  release verifier. Never `cargo run`.
 * `php-cli` ≥ 8.1 (runner), `python3` ≥ 3.11 (orchestrator/validator; stdlib only),
   and `poppler-utils` (`pdftotext` for text correctness checks).
 * All resources local, network disabled, same fonts and assets for every run.
@@ -85,10 +85,18 @@ The orchestrator refuses to run it until both files exist.
 ## Running a baseline
 
 ```sh
+cache="$HOME/.cache/pliego-benchmarks"
+binary="$(python3 benchmarks/tools/resolve_release.py \
+  --cache "$cache" --metadata-out "$cache/verified-release.json")"
 python3 benchmarks/tools/run_benchmark.py \
-  --binary /path/to/pliego \
+  --binary "$binary" \
   --out benchmarks/baselines/pliego-0.1.1-linux-x86_64.json
 ```
+
+The resolver accepts only the committed Linux x86_64 release name, size,
+archive SHA-256, exact file set, binary SHA-256, native commit, and Servo build.
+Use `--offline` after the verified archive is cached. The orchestrator checks
+the binary digest again before starting a sample.
 
 Subset or override with `--fixture invoice-showcase`, `--samples 50`,
 `--warmup 10`, `--php /usr/bin/php`. The orchestrator:

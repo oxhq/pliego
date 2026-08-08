@@ -130,7 +130,7 @@ def engine_version(binary: Path) -> str:
     return text.splitlines()[0] if text else "unknown"
 
 
-def engine_identity(binary: Path) -> dict[str, Any]:
+def engine_identity(binary: Path, target: dict[str, Any]) -> dict[str, Any]:
     identity: dict[str, Any] = {
         "name": "pliego",
         "version": engine_version(binary),
@@ -144,6 +144,20 @@ def engine_identity(binary: Path) -> dict[str, Any]:
             size += len(chunk)
     identity["binary_sha256"] = digest.hexdigest()
     identity["binary_bytes"] = size
+    if identity["binary_sha256"] != target["binary_sha256"] or size != target["binary_bytes"]:
+        fail(f"binary does not match the immutable {target['release_tag']} Linux release")
+    identity.update(
+        {
+            "commit": target["commit"],
+            "release_tag": target["release_tag"],
+            "servo_build": target["servo_build"],
+            "servo_base": target["servo_base"],
+            "bundle": target["archive"],
+            "bundle_sha256": target["archive_sha256"],
+            "bundle_bytes": target["archive_bytes"],
+            "profile": target["profile"],
+        }
+    )
     return identity
 
 
@@ -353,7 +367,7 @@ def main() -> int:
 
     generated_at = datetime.now(timezone.utc).isoformat()
     host = host_info(args.dedicated)
-    engine = engine_identity(binary)
+    engine = engine_identity(binary, target)
     revision = harness_revision() if benchmark_clean else None
     toolchain = {
         "engine": engine,
