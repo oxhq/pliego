@@ -4,6 +4,9 @@
 
 from __future__ import annotations
 
+import argparse
+import contextlib
+import io
 import json
 import os
 import signal
@@ -96,8 +99,22 @@ def recycled_root_pid_proof() -> None:
             process_tree_sampler.PROC = original_proc
 
 
+def unsupported_platform_proof() -> None:
+    parser = argparse.ArgumentParser(prog="process_tree_sampler")
+    error = io.StringIO()
+    with contextlib.redirect_stderr(error):
+        try:
+            process_tree_sampler.require_linux(parser, "win32")
+        except SystemExit as exit_error:
+            assert exit_error.code == 2
+        else:
+            raise AssertionError("unsupported platform was accepted")
+    assert "this sampler requires Linux procfs" in error.getvalue()
+
+
 def main() -> None:
     recycled_root_pid_proof()
+    unsupported_platform_proof()
     command = workload_command()
     proof = sampled(command)
     assert proof["exit_code"] == 0 and proof["signal"] is None

@@ -7,7 +7,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import resource
 import subprocess
 import sys
 import threading
@@ -16,6 +15,14 @@ from pathlib import Path
 from typing import Any
 
 PROC = Path("/proc")
+resource = None
+if sys.platform == "linux":
+    import resource
+
+
+def require_linux(parser: argparse.ArgumentParser, platform: str) -> None:
+    if platform != "linux":
+        parser.error("this sampler requires Linux procfs")
 
 
 def read_stat(pid: int) -> dict[str, int] | None:
@@ -90,6 +97,8 @@ def sample_command(
     pss_interval_ms: float,
     descendant_grace_ms: float,
 ) -> dict[str, Any]:
+    if resource is None:
+        raise OSError("this sampler requires Linux procfs")
     page_size = os.sysconf("SC_PAGE_SIZE")
     clock_ticks = os.sysconf("SC_CLK_TCK")
     samples: list[dict[str, Any]] = []
@@ -271,8 +280,7 @@ def main() -> int:
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
-    if sys.platform != "linux":
-        parser.error("this sampler requires Linux procfs")
+    require_linux(parser, sys.platform)
     if not command:
         parser.error("a command is required after --")
     if args.interval_ms <= 0 or args.pss_interval_ms < args.interval_ms or args.descendant_grace_ms < 0:
