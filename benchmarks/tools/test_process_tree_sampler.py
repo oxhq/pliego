@@ -9,6 +9,7 @@ import contextlib
 import io
 import json
 import os
+import random
 import signal
 import statistics
 import subprocess
@@ -77,6 +78,15 @@ def direct_wall_ms(command: list[str]) -> float:
     return (time.monotonic() - started) * 1000.0
 
 
+def percentile(values: list[float], fraction: float) -> float:
+    ordered = sorted(values)
+    rank = (len(ordered) - 1) * fraction
+    lower = int(rank)
+    upper = min(lower + 1, len(ordered) - 1)
+    weight = rank - lower
+    return ordered[lower] * (1.0 - weight) + ordered[upper] * weight
+
+
 def recycled_root_pid_proof() -> None:
     root_pid = 4242
     original_start_ticks = 100
@@ -112,7 +122,60 @@ def unsupported_platform_proof() -> None:
     assert "this sampler requires Linux procfs" in error.getvalue()
 
 
-def main() -> None:
+def acceptance_overhead_proof() -> tuple[dict, dict]:
+    acceptance_duration_seconds = 1.5
+    acceptance_command = workload_command(duration=acceptance_duration_seconds)
+    pair_count = 20
+    seed = 20260808
+    rng = random.Random(seed)
+    pairs: list[dict] = []
+    direct_wall_ms(acceptance_command)
+    sampled(acceptance_command)
+    for index in range(pair_count):
+        order = ["direct", "sampled"]
+        rng.shuffle(order)
+        direct_ms = 0.0
+        measurement: dict = {}
+        for mode in order:
+            if mode == "direct":
+                direct_ms = direct_wall_ms(acceptance_command)
+            else:
+                measurement = sampled(acceptance_command)
+        sampled_ms = float(measurement["wall_ms"])
+        pairs.append(
+            {
+                "index": index,
+                "order": order,
+                "direct_wall_ms": direct_ms,
+                "sampled_wall_ms": sampled_ms,
+                "overhead_percent": (sampled_ms - direct_ms) * 100.0 / direct_ms,
+                "sampler_cpu_percent_of_wall": float(measurement["sampler_cpu_percent_of_wall"]),
+            }
+        )
+    overhead = [float(pair["overhead_percent"]) for pair in pairs]
+    sampler_cpu = [float(pair["sampler_cpu_percent_of_wall"]) for pair in pairs]
+    overhead_p95 = percentile(overhead, 0.95)
+    observer_effect = {
+        "method": "randomized-paired-wall-v1",
+        "seed": seed,
+        "pair_count": pair_count,
+        "workload_duration_seconds": acceptance_duration_seconds,
+        "percentile_method": "linear interpolation at rank (n - 1) * 0.95",
+        "p95_overhead_percent": round(overhead_p95, 3),
+        "threshold_percent_exclusive": 2.0,
+        "passed": overhead_p95 < 2.0,
+        "pairs": pairs,
+    }
+    sampler_cpu_diagnostic = {
+        "method": "sampler-process-cpu-divided-by-engine-wall",
+        "median_percent_of_wall": round(statistics.median(sampler_cpu), 3),
+        "p95_percent_of_wall": round(percentile(sampler_cpu, 0.95), 3),
+        "raw_percent_of_wall": sampler_cpu,
+    }
+    return observer_effect, sampler_cpu_diagnostic
+
+
+def main(acceptance_overhead: bool) -> None:
     recycled_root_pid_proof()
     unsupported_platform_proof()
     command = workload_command()
@@ -129,40 +192,31 @@ def main() -> None:
     assert signaled["exit_code"] == 128 + signal.SIGTERM
     assert signaled["signal"] == signal.SIGTERM
 
-    direct: list[float] = []
-    instrumented: list[float] = []
-    sampler_cpu: list[float] = []
-    direct_wall_ms(command)
-    sampled(command)
-    for iteration in range(3):
-        if iteration % 2 == 0:
-            direct.append(direct_wall_ms(command))
-            measurement = sampled(command)
-        else:
-            measurement = sampled(command)
-            direct.append(direct_wall_ms(command))
-        instrumented.append(float(measurement["wall_ms"]))
-        sampler_cpu.append(float(measurement["sampler_cpu_percent_of_wall"]))
-    direct_median = statistics.median(direct)
-    sampled_median = statistics.median(instrumented)
-    wall_delta = (sampled_median - direct_median) * 100.0 / direct_median
-    sampler_cpu_median = statistics.median(sampler_cpu)
-    assert sampler_cpu_median < 2.0, sampler_cpu
+    report = {
+        "proof": "parent-plus-two-memory-heavy-children",
+        "observed_pids": proof["observed_pids"],
+        "peak_summed_rss_kib": proof["peak_summed_rss_kib"],
+        "peak_summed_pss_kib": proof["peak_summed_pss_kib"],
+        "sampler_cpu_diagnostic": {
+            "method": "sampler-process-cpu-divided-by-engine-wall",
+            "functional_sample_percent_of_wall": proof["sampler_cpu_percent_of_wall"],
+        },
+    }
+    observer_effect: dict | None = None
+    if acceptance_overhead:
+        observer_effect, sampler_cpu_diagnostic = acceptance_overhead_proof()
+        report["observer_effect"] = observer_effect
+        report["sampler_cpu_diagnostic"] = sampler_cpu_diagnostic
     print(
         json.dumps(
-            {
-                "proof": "parent-plus-two-memory-heavy-children",
-                "observed_pids": proof["observed_pids"],
-                "peak_summed_rss_kib": proof["peak_summed_rss_kib"],
-                "peak_summed_pss_kib": proof["peak_summed_pss_kib"],
-                "sampler_cpu_percent_of_wall_median": round(sampler_cpu_median, 3),
-                "direct_wall_median_ms": round(direct_median, 3),
-                "sampled_wall_median_ms": round(sampled_median, 3),
-                "paired_wall_delta_percent": round(wall_delta, 3),
-            },
+            report,
             indent=2,
         )
     )
+    if observer_effect is not None and not observer_effect["passed"]:
+        raise AssertionError(
+            f"p95 paired observer overhead {observer_effect['p95_overhead_percent']}% is not below 2%"
+        )
 
 
 if __name__ == "__main__":
@@ -170,4 +224,10 @@ if __name__ == "__main__":
         raise SystemExit(child_workload(int(sys.argv[2]), float(sys.argv[3])))
     if len(sys.argv) == 4 and sys.argv[1] == "--workload-parent":
         raise SystemExit(parent_workload(int(sys.argv[2]), float(sys.argv[3])))
-    main()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--acceptance-overhead",
+        action="store_true",
+        help="run the 20-pair p95 observer-effect gate on a dedicated Linux host",
+    )
+    main(parser.parse_args().acceptance_overhead)

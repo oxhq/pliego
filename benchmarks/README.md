@@ -121,12 +121,15 @@ peaks. Raw samples, PID/start-time identities, final counters, signal/exit,
 sample gaps, and sampler CPU are retained in each result.
 
 Run `python3 benchmarks/tools/test_process_tree_sampler.py` on Linux for the
-parent-plus-two-children proof and measured overhead. Session discovery keeps
-reparented descendants, but a process born and reaped wholly between polls—or
-one that deliberately creates a new session—cannot be observed; final
-sub-interval CPU/I/O increments can likewise be missed. The result records
-this limitation and the actual interval. PSS remains null when
-`smaps_rollup` is unavailable.
+parent-plus-two-children functional proof. On a dedicated benchmark host, add
+`--acceptance-overhead` for the 20-pair randomized on/off gate; it retains raw
+pair order, wall durations and deltas, and fails unless p95 observer overhead
+is below 2%. Sampler CPU share is reported separately and is not treated as
+observer overhead. Session discovery keeps reparented descendants, but a
+process born and reaped wholly between polls—or one that deliberately creates
+a new session—cannot be observed; final sub-interval CPU/I/O increments can
+likewise be missed. The result records this limitation and the actual interval.
+PSS remains null when `smaps_rollup` is unavailable.
 
 ## Protocol (from `manifest.toml`)
 
