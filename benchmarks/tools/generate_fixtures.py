@@ -28,7 +28,9 @@ FIXTURES = ROOT / "benchmarks" / "fixtures"
 LEDGER_ROWS = 500  # ~20 pages at ~25 rows/page
 STATEMENT_ROWS = 2500  # ~100 pages
 FONT_IMAGE_PAGES = 6
-IMAGES_PER_PAGE = 10
+IMAGES_PER_PAGE = 8
+IMAGE_WIDTH = 320
+IMAGE_HEIGHT = 180
 
 TABLE_CSS = """
       table { border-collapse: collapse; table-layout: fixed; width: 560px; }
@@ -49,22 +51,86 @@ TABLE_CSS = """
 """
 
 
-def chunk(data: bytes, kind: bytes) -> bytes:
-    return kind + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF) + data
-
-
-def make_png(width: int, height: int, rgb: tuple[int, int, int]) -> bytes:
-    """Minimal deterministic truecolor PNG, no external dependencies."""
-    pixel = bytes(rgb)
-    row = b"\x00" + pixel * width
-    raw = row * height
-    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+def chunk(kind: bytes, data: bytes) -> bytes:
     return (
-        b"\x89PNG\r\n\x1a\n"
-        + chunk(ihdr, b"IHDR")
-        + chunk(zlib.compress(raw, 9), b"IDAT")
-        + chunk(b"", b"IEND")
+        struct.pack(">I", len(data))
+        + kind
+        + data
+        + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
     )
+
+
+def validate_png(png: bytes, width: int, height: int) -> None:
+    """Decode enough PNG structure to catch invalid generated fixtures."""
+    if not png.startswith(b"\x89PNG\r\n\x1a\n"):
+        raise ValueError("invalid PNG signature")
+
+    offset = 8
+    chunks = []
+    compressed = bytearray()
+    while offset < len(png):
+        if offset + 12 > len(png):
+            raise ValueError("truncated PNG chunk")
+        length = struct.unpack(">I", png[offset : offset + 4])[0]
+        kind = png[offset + 4 : offset + 8]
+        data_start = offset + 8
+        data_end = data_start + length
+        crc_end = data_end + 4
+        if crc_end > len(png):
+            raise ValueError("PNG chunk exceeds file length")
+        data = png[data_start:data_end]
+        expected_crc = struct.unpack(">I", png[data_end:crc_end])[0]
+        if zlib.crc32(kind + data) & 0xFFFFFFFF != expected_crc:
+            raise ValueError(f"invalid {kind!r} chunk CRC")
+        chunks.append(kind)
+        if kind == b"IHDR":
+            expected = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+            if data != expected:
+                raise ValueError("unexpected PNG header")
+        elif kind == b"IDAT":
+            compressed.extend(data)
+        offset = crc_end
+
+    if chunks != [b"IHDR", b"IDAT", b"IEND"]:
+        raise ValueError(f"unexpected PNG chunks: {chunks!r}")
+    raw = zlib.decompress(compressed)
+    row_bytes = 1 + width * 3
+    if len(raw) != height * row_bytes:
+        raise ValueError("unexpected decoded PNG size")
+    if any(raw[row * row_bytes] != 0 for row in range(height)):
+        raise ValueError("unexpected PNG row filter")
+
+
+def make_png(width: int, height: int, index: int) -> bytes:
+    """Deterministic chart-like truecolor PNG, no external dependencies."""
+    background = (248, 250, 252)
+    grid = (203, 213, 225)
+    accent = PALETTE[index % len(PALETTE)]
+    bars = 8
+    bar_width = width // bars
+    heights = [24 + ((index * 29 + bar * 37) % (height - 48)) for bar in range(bars)]
+    raw = bytearray()
+    for y in range(height):
+        raw.append(0)
+        for x in range(width):
+            bar = min(x // bar_width, bars - 1)
+            inside_bar = 7 <= x % bar_width < bar_width - 7
+            if inside_bar and y >= height - heights[bar]:
+                color = accent
+            elif x % 64 == 0 or y % 45 == 0:
+                color = grid
+            else:
+                color = background
+            raw.extend(color)
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    png = (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", ihdr)
+        + chunk(b"IDAT", zlib.compress(raw, 9))
+        + chunk(b"IEND", b"")
+    )
+    validate_png(png, width, height)
+    return png
 
 
 PALETTE = [
@@ -79,15 +145,29 @@ PALETTE = [
 ]
 
 
-def image_tags(total: int) -> str:
-    pngs = [make_png(64, 48, color) for color in PALETTE]
-    uris = [base64.b64encode(png).decode("ascii") for png in pngs]
-    tags = []
-    for index in range(total):
-        uri = uris[index % len(uris)]
-        alt = f"Chart color {index % len(uris) + 1}"
-        tags.append(f'        <img src="data:image/png;base64,{uri}" alt="{alt}">')
-    return "\n".join(tags)
+def image_pages() -> str:
+    pages = []
+    for page in range(FONT_IMAGE_PAGES):
+        cards = []
+        for slot in range(IMAGES_PER_PAGE):
+            index = page * IMAGES_PER_PAGE + slot
+            uri = base64.b64encode(make_png(IMAGE_WIDTH, IMAGE_HEIGHT, index)).decode("ascii")
+            cards.append(
+                "          <figure>"
+                f'<img src="data:image/png;base64,{uri}" alt="Chart {index + 1}">'
+                f"<figcaption>Chart {index + 1:02d} / page {page + 1}</figcaption>"
+                "</figure>"
+            )
+        pages.append(
+            '    <section class="page">\n'
+            f"      <h1>Font and image heavy - page {page + 1}</h1>\n"
+            "      <p>Deterministic embedded-font labels and unique decoded chart images.</p>\n"
+            '      <div class="grid">\n'
+            + "\n".join(cards)
+            + "\n      </div>\n"
+            "    </section>"
+        )
+    return "\n".join(pages)
 
 
 def statement_document(rows: int, title: str, caption: str) -> str:
@@ -129,7 +209,6 @@ def statement_document(rows: int, title: str, caption: str) -> str:
 
 
 def font_image_document() -> str:
-    total_images = FONT_IMAGE_PAGES * IMAGES_PER_PAGE
     return f"""<!doctype html>
 <html lang="en">
   <head>
@@ -142,16 +221,18 @@ def font_image_document() -> str:
       }}
       html, body {{ margin: 0; }}
       body {{ font: 12px/16px Ahem; padding: 16px; }}
-      h1 {{ font-size: 18px; }}
+      .page {{ page-break-after: always; break-after: page; }}
+      .page:last-child {{ page-break-after: auto; break-after: auto; }}
+      h1 {{ font-size: 18px; margin: 0 0 8px; }}
+      p {{ margin: 0 0 12px; }}
       .grid {{ display: flex; flex-wrap: wrap; gap: 8px; }}
-      .grid img {{ width: 64px; height: 48px; }}
+      figure {{ margin: 0; width: 160px; }}
+      .grid img {{ display: block; width: 160px; height: 90px; }}
+      figcaption {{ margin-top: 2px; }}
     </style>
   </head>
   <body>
-    <h1>Font and image heavy</h1>
-    <div class="grid">
-{image_tags(total_images)}
-    </div>
+{image_pages()}
   </body>
 </html>
 """
