@@ -210,7 +210,7 @@ def run(binary: Path, fixture: Path, root: Path) -> tuple[bytes, bytes, bytes, b
     require("SVG" in page.get("expected_extracted_unicode", ""), repr(page))
     require(page.get("operation_counts") == {"text": len(texts), "vector": 1, "image": 1, "link": 0}, repr(page))
     require(
-        all(close(value, expected) for value, expected in zip(page["media_box_pt"], [0, 0, 150, 90])),
+        all(close(value, expected) for value, expected in zip(page["media_box_pt"], [0, 0, 150, 90], strict=True)),
         f"PDF media box differs: {page['media_box_pt']!r}",
     )
     return scene_bytes, preview, pdf, fonts_bytes
@@ -223,6 +223,12 @@ def self_test() -> None:
     require("<animate " in graphic.read_text(encoding="utf-8"), "SVG animation fixture is missing")
     require((fixture_root / "text-scene/Ahem.ttf").is_file(), "bundled Ahem fixture is missing")
     require(close(10.0, 10.01) and not close(10.0, 10.03), "geometry tolerance is broken")
+    try:
+        list(zip([0, 0, 150], [0, 0, 150, 90], strict=True))
+    except ValueError:
+        pass
+    else:
+        fail("media-box length mismatch was silently accepted")
     require(INLINE_PNG.startswith(b"\x89PNG\r\n\x1a\n"), "inline PNG fixture is invalid")
 
 

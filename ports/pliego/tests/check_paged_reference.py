@@ -255,7 +255,9 @@ def verify_output_contract(summary: dict[str, Any], reference: dict[str, Any]) -
         fail("legacy scene_preview is not the first page preview")
 
     required_bundle_paths = {"document.pdf", "pages.json"}
-    for index, (page, expected_page, preview_value) in enumerate(zip(preview_pages, reference["pages"], previews)):
+    for index, (page, expected_page, preview_value) in enumerate(
+        zip(preview_pages, reference["pages"], previews, strict=True)
+    ):
         if page.get("index") != index or page.get("page_size") != expected_page["geometry_css_px"]:
             fail(f"preview page {index} geometry differs: {page!r}")
         preview = Path(preview_value)

@@ -37,3 +37,5 @@ jobs:
           python benchmarks/tools/test_run_benchmark.py
           python benchmarks/tools/generate_fixtures.py --check
           php -l benchmarks/runners/pliego.php
+          php benchmarks/runners/pliego.php --self-test \
+            --text-contains "Revenue, net" --text-contains " Total " --text-contains 0

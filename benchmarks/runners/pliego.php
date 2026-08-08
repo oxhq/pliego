@@ -28,9 +28,9 @@ declare(strict_types=1);
 
 const USAGE = <<<EOT
 Usage: php pliego.php --binary <path> --input <file.html> --output <file.pdf> --artifacts <dir>
-  [--samples N] [--warmup N] [--page-count N] [--text-contains a,b,c]
+  [--samples N] [--warmup N] [--page-count N] [--text-contains TEXT]...
   [--expect-failure] [--expected-code CODE] [--page-size WxH] [--page-margins T,R,B,L]
-  [--locale X] [--timezone Y] [--cwd DIR]
+  [--locale X] [--timezone Y] [--cwd DIR] [--self-test]
 EOT;
 
 function option(array $options, string $name): ?string
@@ -38,6 +38,20 @@ function option(array $options, string $name): ?string
     return isset($options[$name]) && is_scalar($options[$name])
         ? (string) $options[$name]
         : null;
+}
+
+/** @return list<string> */
+function text_contains_options(mixed $value): array
+{
+    $values = is_array($value) ? $value : [$value];
+    $fragments = array_map(
+        static fn (mixed $fragment): string => is_scalar($fragment) ? trim((string) $fragment) : '',
+        $values
+    );
+    return array_values(array_filter(
+        $fragments,
+        static fn (string $fragment): bool => $fragment !== ''
+    ));
 }
 
 function fail(string $message, int $code = 2): never
@@ -50,10 +64,26 @@ $options = getopt('', [
     'binary:', 'input:', 'output:', 'artifacts:', 'samples:', 'warmup:',
     'page-count:', 'text-contains:', 'expect-failure', 'expected-code:',
     'page-size:', 'page-margins:', 'locale:', 'timezone:', 'cwd:',
+    'self-test',
 ]);
 if ($options === false) {
     fwrite(STDERR, USAGE . "\n");
     exit(2);
+}
+
+if (array_key_exists('self-test', $options)) {
+    $fragments = text_contains_options($options['text-contains'] ?? []);
+    if ($fragments !== ['Revenue, net', 'Total', '0']) {
+        fail('text-contains self-test failed', 1);
+    }
+    $summary = parse_stdout_summary("{\"ok\":true}\n[]\n");
+    if (($summary['ok'] ?? null) !== true
+        || parse_stdout_summary("[]\n") !== null
+        || !is_array(parse_stdout_summary("{}\n"))) {
+        fail('stdout summary self-test failed', 1);
+    }
+    fwrite(STDOUT, "Pliego PHP runner self-test passed\n");
+    exit(0);
 }
 
 $binary = option($options, 'binary') ?? fail('--binary is required');
@@ -63,9 +93,7 @@ $artifacts = option($options, 'artifacts') ?? 'artifacts';
 $samples = max(1, (int) (option($options, 'samples') ?? 1));
 $warmup = max(0, (int) (option($options, 'warmup') ?? 0));
 $pageCount = option($options, 'page-count') !== null ? (int) $options['page-count'] : null;
-$textContains = option($options, 'text-contains') !== null
-    ? array_values(array_filter(array_map('trim', explode(',', $options['text-contains']))))
-    : [];
+$textContains = text_contains_options($options['text-contains'] ?? []);
 $expectFailure = array_key_exists('expect-failure', $options);
 $expectedCode = option($options, 'expected-code');
 $pageSize = option($options, 'page-size');
@@ -96,8 +124,8 @@ if (!is_file($inputFull)) {
 /**
  * @param list<string> $command
  * @return array{error: string}|array{wall_ms: float, user_ms: float|null,
- *     sys_ms: float|null, peak_rss_kib: int|null, exit_code: int,
- *     stdout: string, stderr: string}
+ *     sys_ms: float|null, peak_rss_kib: int|null, rss_method: string,
+ *     exit_code: int, stdout: string, stderr: string}
  */
 function run_engine(array $command, string $cwd): array
 {
@@ -156,9 +184,9 @@ function parse_stdout_summary(string $stdout): ?array
         if ($line === '') {
             continue;
         }
-        $value = json_decode($line, true);
-        if (is_array($value)) {
-            return $value;
+        $value = json_decode($line);
+        if (is_object($value)) {
+            return (array) $value;
         }
     }
     return null;
@@ -265,7 +293,7 @@ function run_sample(array $state, int $index): array
     $captureCode = null;
     $captureStatus = null;
     if (is_array($report)) {
-        $captureStatus = is_array($report['capture'] ?? null) ? $report['capture']['status'] : null;
+        $captureStatus = is_array($report['capture'] ?? null) ? ($report['capture']['status'] ?? null) : null;
         $captureCode = is_array($report['capture'] ?? null) ? ($report['capture']['code'] ?? null) : null;
     }
     $pageCount = null;

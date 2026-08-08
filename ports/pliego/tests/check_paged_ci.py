@@ -235,7 +235,7 @@ def verify_run(run: dict[str, Any], expected: dict[str, Any]) -> dict[str, Any]:
 
     page_geometry = expected["page"]
     page_text = []
-    for index, (page, layout_page, reference_page) in enumerate(zip(pages, layout_pages, reference_pages)):
+    for index, (page, layout_page, reference_page) in enumerate(zip(pages, layout_pages, reference_pages, strict=True)):
         require(isinstance(page, dict) and isinstance(layout_page, dict), f"invalid page {index}")
         require(page.get("size") == {"width": 180.0, "height": 80.0}, f"scene page {index} size differs")
         require(layout_page.get("index") == index, f"layout page {index} index differs")

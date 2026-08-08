@@ -41,7 +41,7 @@ import sys
 import tomllib
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 ROOT = Path(__file__).resolve().parents[2]
 MANIFEST = ROOT / "benchmarks" / "manifest.toml"
@@ -52,7 +52,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import validate_result  # noqa: E402
 
 
-def fail(message: str) -> None:
+def fail(message: str) -> NoReturn:
     print(f"run_benchmark: {message}", file=sys.stderr)
     raise SystemExit(1)
 
@@ -202,7 +202,8 @@ def fixture_identity(fixture: dict[str, Any]) -> tuple[str, str]:
 def tool_version(command: list[str]) -> str:
     try:
         result = run(command)
-        return (result.stdout + result.stderr).strip().splitlines()[0] if result.stdout.strip() else ""
+        text = (result.stdout + result.stderr).strip()
+        return text.splitlines()[0] if text else ""
     except (OSError, subprocess.TimeoutExpired):
         return ""
 
@@ -244,7 +245,8 @@ def build_command(
     if "page_count" in correctness:
         command += ["--page-count", str(correctness["page_count"])]
     if "text_contains" in correctness:
-        command += ["--text-contains", ",".join(correctness["text_contains"])]
+        for fragment in correctness["text_contains"]:
+            command += ["--text-contains", fragment]
     if fixture.get("expect_failure"):
         command.append("--expect-failure")
         if "failure_code" in correctness:

@@ -9,6 +9,7 @@ from __future__ import annotations
 import importlib.util
 import subprocess
 from pathlib import Path
+from unittest.mock import patch
 
 SCRIPT = Path(__file__).with_name("run_benchmark.py")
 SPEC = importlib.util.spec_from_file_location("run_benchmark", SCRIPT)
@@ -18,11 +19,11 @@ SPEC.loader.exec_module(benchmark)
 
 
 def main() -> None:
-    original = benchmark.subprocess.run
-    benchmark.subprocess.run = lambda *args, **kwargs: subprocess.CompletedProcess(
-        args=[], returncode=0, stdout='{"wall_ms":1}\n', stderr=""
-    )
-    try:
+    with patch.object(
+        benchmark.subprocess,
+        "run",
+        return_value=subprocess.CompletedProcess(args=[], returncode=0, stdout='{"wall_ms":1}\n', stderr=""),
+    ):
         try:
             benchmark.collect_samples(
                 Path("php"),
@@ -36,8 +37,27 @@ def main() -> None:
             assert error.code == 1
         else:
             raise AssertionError("partial runner output was accepted")
-    finally:
-        benchmark.subprocess.run = original
+
+    with patch.object(
+        benchmark,
+        "run",
+        return_value=subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="PHP 8.4.0\n"),
+    ):
+        assert benchmark.tool_version(["php", "--version"]) == "PHP 8.4.0"
+
+    command = benchmark.build_command(
+        Path("php"),
+        "comma-text",
+        {
+            "input": "benchmarks/fixtures/minimal-static/input.html",
+            "correctness": {"text_contains": ["Revenue, net", "Total"]},
+        },
+        Path("pliego"),
+        1,
+        0,
+    )
+    fragments = [command[index + 1] for index, value in enumerate(command) if value == "--text-contains"]
+    assert fragments == ["Revenue, net", "Total"]
 
     print("Pliego benchmark runner-count self-test passed")
 
