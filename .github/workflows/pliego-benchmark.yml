@@ -1,0 +1,38 @@
+name: Pliego benchmark contract
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - ".github/workflows/pliego-benchmark.yml"
+      - "benchmarks/**"
+  pull_request:
+    paths:
+      - ".github/workflows/pliego-benchmark.yml"
+      - "benchmarks/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pliego-benchmark-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contract:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+
+      - name: Check benchmark contract
+        run: |
+          python --version
+          php --version
+          python -m compileall -q benchmarks/tools
+          python benchmarks/tools/test_validate_result.py
+          python benchmarks/tools/generate_fixtures.py --check
+          php -l benchmarks/runners/pliego.php

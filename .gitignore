@@ -5,7 +5,6 @@
 /.servobuild
 /.wpt
 /.vs
-/.freebuff
 /target
 /tests/wpt/reftests-report/report.html
 /python/_virtualenv*
