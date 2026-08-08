@@ -14,6 +14,8 @@ import tempfile
 import time
 from pathlib import Path
 
+import process_tree_sampler
+
 SAMPLER = Path(__file__).with_name("process_tree_sampler.py")
 
 
@@ -72,7 +74,30 @@ def direct_wall_ms(command: list[str]) -> float:
     return (time.monotonic() - started) * 1000.0
 
 
+def recycled_root_pid_proof() -> None:
+    root_pid = 4242
+    original_start_ticks = 100
+    with tempfile.TemporaryDirectory() as directory:
+        proc = Path(directory)
+        recycled = proc / str(root_pid)
+        recycled.mkdir()
+        fields = [
+            "S", "1", str(root_pid), str(root_pid + 1), "0", "0", "0", "0", "0", "0", "0",
+            "1", "1", "0", "0", "20", "0", "1", "0", str(original_start_ticks + 1), "4096", "1",
+        ]
+        (recycled / "stat").write_text(f"{root_pid} (recycled) {' '.join(fields)}\n", encoding="ascii")
+        (recycled / "io").write_text("read_bytes: 0\nwrite_bytes: 0\n", encoding="ascii")
+
+        original_proc = process_tree_sampler.PROC
+        process_tree_sampler.PROC = proc
+        try:
+            assert process_tree_sampler.scan_session(root_pid, include_pss=False) == []
+        finally:
+            process_tree_sampler.PROC = original_proc
+
+
 def main() -> None:
+    recycled_root_pid_proof()
     command = workload_command()
     proof = sampled(command)
     assert proof["exit_code"] == 0 and proof["signal"] is None

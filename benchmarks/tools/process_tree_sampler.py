@@ -71,7 +71,7 @@ def scan_session(root_pid: int, include_pss: bool) -> list[dict[str, int | None]
             if not entry.name.isdigit():
                 continue
             stat = read_stat(int(entry.name))
-            if stat is None or (stat["pid"] != root_pid and stat["session"] != root_pid):
+            if stat is None or stat["session"] != root_pid:
                 continue
             io = read_io(stat["pid"])
             stat["read_bytes"] = io[0] if io is not None else None
