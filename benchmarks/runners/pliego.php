@@ -82,7 +82,7 @@ if (array_key_exists('self-test', $options)) {
     if (($summary['phase_timings_ms']['layout'] ?? null) !== 1
         || ($summary['error']['code'] ?? null) !== 'TEST'
         || parse_stdout_summary("[]\n") !== null
-        || !is_array(parse_stdout_summary("{}\n"))) {
+        || parse_stdout_summary("{}\n") !== null) {
         fail('stdout summary self-test failed', 1);
     }
     fwrite(STDOUT, "Pliego PHP runner self-test passed\n");
@@ -189,7 +189,7 @@ function parse_stdout_summary(string $stdout): ?array
         }
         if (is_object(json_decode($line))) {
             $value = json_decode($line, true);
-            if (is_array($value)) {
+            if (is_array($value) && $value !== []) {
                 return $value;
             }
         }
