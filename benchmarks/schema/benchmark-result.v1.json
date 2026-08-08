@@ -239,10 +239,6 @@
           "type": ["object", "null"],
           "additionalProperties": { "type": "number", "minimum": 0 }
         },
-        "bridge_timings_ms": {
-          "type": ["object", "null"],
-          "additionalProperties": { "type": "number", "minimum": 0 }
-        },
         "bridge_timings": { "$ref": "#/definitions/bridge_timings" },
         "retained": { "$ref": "#/definitions/retained" },
         "output": { "$ref": "#/definitions/output" },
