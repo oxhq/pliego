@@ -61,6 +61,19 @@ def materialize_fixture(template: Path, font: Path, output: Path) -> Path:
     return output
 
 
+def materialize_host_fixture(output: Path) -> Path:
+    output.write_text(
+        """<!doctype html>
+<meta charset="utf-8">
+<style>body { font-family: serif; }</style>
+<p>HOST FONT OPT IN</p>
+<script>window.pliego.ready({ fixture: "host-opt-in" });</script>
+""",
+        encoding="utf-8",
+    )
+    return output
+
+
 def render(
     binary: Path,
     fixture: Path,
@@ -211,17 +224,17 @@ def verify_pdf(summary: dict[str, Any]) -> bytes:
 def check(binary: Path) -> None:
     fixture_root = Path(__file__).resolve().parent / "fixtures/text-scene"
     fixture_template = fixture_root / "font-resolution.html"
-    host_fixture = fixture_root / "index.html"
     with tempfile.TemporaryDirectory(prefix="pliego-font-resolution-") as temp:
         root = Path(temp)
         fixture = materialize_fixture(fixture_template, fixture_root / "Ahem.ttf", root / "font-resolution.html")
+        host_fixture = materialize_host_fixture(root / "host-opt-in.html")
         first = render(binary, fixture, root, "first", "font-resolution")
         second = render(binary, fixture, root, "second", "font-resolution")
         require(first["render_id"] == second["render_id"], "render IDs differ across clean homes")
         require(first["scene"]["hash"] == second["scene"]["hash"], "scene hashes differ across clean homes")
         require(verify_fonts(first) == verify_fonts(second), "font reports differ across clean homes")
         require(verify_pdf(first) == verify_pdf(second), "PDF bytes differ across clean homes")
-        opted_in = render(binary, host_fixture, root, "host-opt-in", "text-scene", allow_host_fonts=True)
+        opted_in = render(binary, host_fixture, root, "host-opt-in", "host-opt-in", allow_host_fonts=True)
         verify_host_opt_in(opted_in)
 
 
@@ -229,6 +242,9 @@ def self_test() -> None:
     require(FALLBACK_CHAIN[0] != FALLBACK_CHAIN[1], "fallback fixture needs two families")
     sample = b"font"
     require(len(hashlib.sha256(sample).hexdigest()) == 64, "SHA-256 unavailable")
+    with tempfile.TemporaryDirectory(prefix="pliego-host-font-self-test-") as temp:
+        host_fixture = materialize_host_fixture(Path(temp) / "host.html").read_text(encoding="utf-8")
+        require("font-family: serif" in host_fixture, "host opt-in fixture does not request a host font")
 
 
 def main() -> int:
