@@ -76,8 +76,11 @@ if (array_key_exists('self-test', $options)) {
     if ($fragments !== ['Revenue, net', 'Total', '0']) {
         fail('text-contains self-test failed', 1);
     }
-    $summary = parse_stdout_summary("{\"ok\":true}\n[]\n");
-    if (($summary['ok'] ?? null) !== true
+    $summary = parse_stdout_summary(
+        "{\"phase_timings_ms\":{\"layout\":1},\"error\":{\"code\":\"TEST\"}}\n[]\n"
+    );
+    if (($summary['phase_timings_ms']['layout'] ?? null) !== 1
+        || ($summary['error']['code'] ?? null) !== 'TEST'
         || parse_stdout_summary("[]\n") !== null
         || !is_array(parse_stdout_summary("{}\n"))) {
         fail('stdout summary self-test failed', 1);
@@ -184,9 +187,11 @@ function parse_stdout_summary(string $stdout): ?array
         if ($line === '') {
             continue;
         }
-        $value = json_decode($line);
-        if (is_object($value)) {
-            return (array) $value;
+        if (is_object(json_decode($line))) {
+            $value = json_decode($line, true);
+            if (is_array($value)) {
+                return $value;
+            }
         }
     }
     return null;
