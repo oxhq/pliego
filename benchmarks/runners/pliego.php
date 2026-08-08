@@ -23,7 +23,7 @@
  * deltas, and `ps` polling of the process tree. Peak RSS may be null on
  * platforms without any of those.
  *
- * B0 host contract: Linux x86_64, published `checked-release` bundle.
+ * Publishable host contract: Linux x86_64, released `checked-release` bundle.
  */
 
 declare(strict_types=1);
@@ -103,12 +103,7 @@ if (!is_file($inputFull)) {
  */
 function run_engine(array $command, string $cwd): array
 {
-    $linux = PHP_OS_FAMILY === 'Linux';
-    $useTime = $linux && is_executable('/usr/bin/time');
-    $rssMethod = $useTime ? 'time-v' : ($linux ? 'ps-poll' : 'unavailable');
-    $final = $useTime ? array_merge(['/usr/bin/time', '-v'], $command) : $command;
-
-    $nullDevice = $linux ? '/dev/null' : 'NUL';
+    $nullDevice = PHP_OS_FAMILY === 'Windows' ? 'NUL' : '/dev/null';
     $stdoutTmp = tempnam(sys_get_temp_dir(), 'pliego-bench-out-');
     $stderrTmp = tempnam(sys_get_temp_dir(), 'pliego-bench-err-');
     $descriptors = [
@@ -118,130 +113,30 @@ function run_engine(array $command, string $cwd): array
     ];
 
     $wallStart = microtime(true);
-    $hasRusage = function_exists('getrusage');
-    $beforeRusage = $hasRusage ? getrusage() : null;
-
-    $process = proc_open($final, $descriptors, $pipes, $cwd);
+    $process = proc_open($command, $descriptors, $pipes, $cwd);
     if (!is_resource($process)) {
         @unlink($stdoutTmp);
         @unlink($stderrTmp);
         return ['error' => 'proc_open failed for engine command'];
     }
 
-    $peakRss = null;
-    if (!$useTime && $linux) {
-        $peakRss = poll_peak_rss($process);
-    }
-
     $exitCode = proc_close($process);
     $wallMs = (microtime(true) - $wallStart) * 1000.0;
-
-    $userMs = null;
-    $sysMs = null;
-    if ($hasRusage) {
-        $afterRusage = getrusage();
-        $userMs = rusage_ms($afterRusage, $beforeRusage, 'ru_utime');
-        $sysMs = rusage_ms($afterRusage, $beforeRusage, 'ru_stime');
-    }
 
     $stdout = (string) file_get_contents($stdoutTmp);
     $stderr = (string) file_get_contents($stderrTmp);
     @unlink($stdoutTmp);
     @unlink($stderrTmp);
 
-    if ($useTime) {
-        $parsed = parse_time_output($stderr);
-        if ($parsed !== null) {
-            $wallMs = $parsed['wall_ms'];
-            $userMs = $parsed['user_ms'];
-            $sysMs = $parsed['sys_ms'];
-            $peakRss = $parsed['peak_rss_kib'];
-        }
-    }
-
     return [
         'wall_ms' => round($wallMs, 3),
-        'user_ms' => $userMs,
-        'sys_ms' => $sysMs,
-        'peak_rss_kib' => $peakRss,
-        'rss_method' => $rssMethod,
+        'user_ms' => null,
+        'sys_ms' => null,
+        'peak_rss_kib' => null,
+        'rss_method' => 'unavailable',
         'exit_code' => $exitCode,
         'stdout' => $stdout,
         'stderr' => $stderr,
-    ];
-}
-
-/** Peak RSS of the process tree via `ps` polling (Linux fallback). */
-function poll_peak_rss($process): ?int
-{
-    $peak = 0;
-    while (true) {
-        $status = proc_get_status($process);
-        if ($status === false || !$status['running']) {
-            break;
-        }
-        $pid = $status['pid'];
-        $lines = [];
-        exec('ps -o rss= -p ' . $pid . ' --ppid ' . $pid . ' 2>/dev/null', $lines);
-        $total = 0;
-        foreach ($lines as $line) {
-            $kib = (int) trim($line);
-            if ($kib > 0) {
-                $total += $kib;
-            }
-        }
-        if ($total > $peak) {
-            $peak = $total;
-        }
-        usleep(25_000);
-    }
-    return $peak > 0 ? $peak : null;
-}
-
-/** @param array<string, int|string> $after */
-function rusage_ms(array $after, ?array $before, string $field): float
-{
-    $afterSec = (int) ($after[$field . '.tv_sec'] ?? 0);
-    $afterUsec = (int) ($after[$field . '.tv_usec'] ?? 0);
-    $afterMs = ($afterSec * 1000) + ($afterUsec / 1000);
-    if ($before === null) {
-        return round($afterMs, 3);
-    }
-    $beforeSec = (int) ($before[$field . '.tv_sec'] ?? 0);
-    $beforeUsec = (int) ($before[$field . '.tv_usec'] ?? 0);
-    $beforeMs = ($beforeSec * 1000) + ($beforeUsec / 1000);
-    return round(max(0.0, $afterMs - $beforeMs), 3);
-}
-
-/**
- * Parse `/usr/bin/time -v` stderr into wall/user/sys ms and peak RSS KiB.
- *
- * @return array{wall_ms: float, user_ms: float, sys_ms: float, peak_rss_kib: int|null}|null
- */
-function parse_time_output(string $stderr): ?array
-{
-    if (preg_match('/Maximum resident set size \(kbytes\):\s*(\d+)/', $stderr, $rssMatch) !== 1) {
-        return null;
-    }
-    $user = 0.0;
-    $sys = 0.0;
-    $wall = 0.0;
-    if (preg_match('/User time \(seconds\):\s*([0-9.]+)/', $stderr, $match) === 1) {
-        $user = (float) $match[1];
-    }
-    if (preg_match('/System time \(seconds\):\s*([0-9.]+)/', $stderr, $match) === 1) {
-        $sys = (float) $match[1];
-    }
-    if (preg_match('/Elapsed \(wall clock\) time \(h:mm:ss or m:ss\):\s*(\d+):(\d{2}):(\d{2}\.\d+)/', $stderr, $match) === 1) {
-        $wall = ((int) $match[1] * 3600) + ((int) $match[2] * 60) + (float) $match[3];
-    } elseif (preg_match('/Elapsed \(wall clock\) time \(h:mm:ss or m:ss\):\s*(\d+):(\d{2}\.\d+)/', $stderr, $match) === 1) {
-        $wall = ((int) $match[1] * 60) + (float) $match[2];
-    }
-    return [
-        'wall_ms' => round($wall * 1000.0, 3),
-        'user_ms' => round($user * 1000.0, 3),
-        'sys_ms' => round($sys * 1000.0, 3),
-        'peak_rss_kib' => (int) $rssMatch[1],
     ];
 }
 
@@ -292,8 +187,10 @@ function rrmdir(string $path): void
 
 function pdftotext_available(): bool
 {
-    $output = shell_exec('command -v pdftotext 2>/dev/null');
-    return is_string($output) && trim($output) !== '';
+    $lines = [];
+    $code = 0;
+    exec(PHP_OS_FAMILY === 'Windows' ? 'where pdftotext 2>NUL' : 'command -v pdftotext 2>/dev/null', $lines, $code);
+    return $code === 0;
 }
 
 function pdf_text(string $pdfPath): ?string
@@ -315,16 +212,13 @@ function pdf_text(string $pdfPath): ?string
  *     phase_timings_ms: array<string, float>|null, output: array<string, mixed>,
  *     correctness: array{pass: bool, checks: list<array{name: string, status: string, detail?: string}>},
  *     failure: array{code: string|null, message: string|null, published_pdf: bool},
+ *     retained: array{artifacts_dir: string, output_dir: string}|null,
  *     summary: array<string, mixed>|null} */
 function run_sample(array $state, int $index): array
 {
     $artifactsDir = sys_get_temp_dir() . '/pliego-bench-' . bin2hex(random_bytes(8));
     $outDir = sys_get_temp_dir() . '/pliego-bench-out-' . bin2hex(random_bytes(8));
-    if (!mkdir($artifactsDir, 0777, true) && !is_dir($artifactsDir)) {
-        fail("cannot create artifacts dir: {$artifactsDir}");
-    }
     if (!mkdir($outDir, 0777, true) && !is_dir($outDir)) {
-        rrmdir($artifactsDir);
         fail("cannot create output dir: {$outDir}");
     }
     // The engine requires the requested output to live outside the artifact
@@ -389,6 +283,9 @@ function run_sample(array $state, int $index): array
         && is_array($report['document_pdf']['error'] ?? null)) {
         $failureCode = $report['document_pdf']['error']['code'] ?? null;
         $failureMessage = $report['document_pdf']['error']['message'] ?? null;
+    } elseif (is_array($summary) && is_array($summary['error'] ?? null)) {
+        $failureCode = $summary['error']['code'] ?? null;
+        $failureMessage = $summary['error']['message'] ?? null;
     }
 
     $artifactBytes = 0;
@@ -403,7 +300,7 @@ function run_sample(array $state, int $index): array
 
     $checks = [];
     if ($state['expectFailure']) {
-        $failed = $exec['exit_code'] !== 0 || !$pdfPublished;
+        $failed = $exec['exit_code'] !== 0 && !$pdfPublished;
         $checks[] = [
             'name' => 'render_failed_closed',
             'status' => $failed ? 'pass' : 'fail',
@@ -445,7 +342,7 @@ function run_sample(array $state, int $index): array
             if (pdftotext_available()) {
                 $text = pdf_text($pdfPath);
                 if ($text === null) {
-                    $checks[] = ['name' => 'text', 'status' => 'unverified', 'detail' => 'pdftotext produced no output'];
+                    $checks[] = ['name' => 'text', 'status' => 'fail', 'detail' => 'pdftotext produced no output'];
                 } else {
                     foreach ($state['textContains'] as $fragment) {
                         $checks[] = [
@@ -455,7 +352,7 @@ function run_sample(array $state, int $index): array
                     }
                 }
             } else {
-                $checks[] = ['name' => 'text', 'status' => 'unverified', 'detail' => 'pdftotext unavailable'];
+                $checks[] = ['name' => 'text', 'status' => 'fail', 'detail' => 'pdftotext unavailable'];
             }
         }
     }
@@ -490,11 +387,14 @@ function run_sample(array $state, int $index): array
             'message' => $failureMessage,
             'published_pdf' => $pdfPublished,
         ],
+        'retained' => $pass ? null : ['artifacts_dir' => $artifactsDir, 'output_dir' => $outDir],
         'summary' => $summary,
     ];
 
-    rrmdir($outDir);
-    rrmdir($artifactsDir);
+    if ($pass) {
+        rrmdir($outDir);
+        rrmdir($artifactsDir);
+    }
     return $sample;
 }
 
@@ -514,7 +414,10 @@ $state = [
 ];
 
 for ($iteration = 0; $iteration < $warmup; $iteration++) {
-    run_sample($state, -1 - $iteration);
+    $sample = run_sample($state, -1 - $iteration);
+    if (!$sample['ok']) {
+        fail('warmup failed; evidence retained at ' . $sample['retained']['artifacts_dir']);
+    }
 }
 for ($iteration = 0; $iteration < $samples; $iteration++) {
     $sample = run_sample($state, $iteration);

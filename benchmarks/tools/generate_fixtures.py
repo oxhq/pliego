@@ -24,7 +24,7 @@ ROOT = Path(__file__).resolve().parents[2]
 FIXTURES = ROOT / "benchmarks" / "fixtures"
 
 # Row heights match the invoice fixture (36px rows, 32px header) so page
-# estimates are comparable. Targets are estimates; B0 pins the real counts.
+# estimates are comparable. Targets are estimates; the first signed baseline pins them.
 LEDGER_ROWS = 500  # ~20 pages at ~25 rows/page
 STATEMENT_ROWS = 2500  # ~100 pages
 FONT_IMAGE_PAGES = 6

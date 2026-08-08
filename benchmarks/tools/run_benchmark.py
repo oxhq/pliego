@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-"""B0 benchmark orchestrator.
+"""Pliego benchmark orchestrator.
 
 Reads `benchmarks/manifest.toml`, drives `benchmarks/runners/pliego.php` for
 each enabled fixture against a published Pliego binary, aggregates raw samples
@@ -259,12 +259,13 @@ def collect_samples(
 
 
 def aggregates(samples: list[dict[str, Any]], page_count: int | None) -> dict[str, Any]:
-    walls = [s["wall_ms"] for s in samples]
-    users = [s.get("user_ms") for s in samples]
-    syss = [s.get("sys_ms") for s in samples]
-    rss = [s.get("peak_rss_kib") for s in samples]
-    pdfs = [s.get("output", {}).get("pdf_bytes") for s in samples]
-    sha256s = [s.get("output", {}).get("pdf_sha256") for s in samples]
+    valid = [s for s in samples if s.get("ok") and (s.get("correctness") or {}).get("pass")]
+    walls = [s["wall_ms"] for s in valid]
+    users = [s.get("user_ms") for s in valid]
+    syss = [s.get("sys_ms") for s in valid]
+    rss = [s.get("peak_rss_kib") for s in valid]
+    pdfs = [s.get("output", {}).get("pdf_bytes") for s in valid]
+    sha256s = [s.get("output", {}).get("pdf_sha256") for s in valid]
     pdf_hashes = [h for h in sha256s if h]
     identical = max(
         (sum(1 for h in pdf_hashes if h == candidate) for candidate in set(pdf_hashes)),
@@ -315,7 +316,7 @@ def aggregates(samples: list[dict[str, Any]], page_count: int | None) -> dict[st
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Pliego B0 benchmark orchestrator")
+    parser = argparse.ArgumentParser(description="Pliego benchmark orchestrator")
     parser.add_argument("--binary", required=True, help="path to the published pliego binary")
     parser.add_argument("--out", help="result file path (default: baselines/pliego-<target>-<host>.json)")
     parser.add_argument("--fixture", action="append", help="restrict to these fixture ids (repeatable)")
@@ -335,6 +336,9 @@ def main() -> int:
     target = manifest["targets"].get(args.target)
     if not target or not target.get("enabled", False):
         fail(f"target {args.target!r} is not enabled in {MANIFEST}")
+    actual_version = engine_version(binary)
+    if actual_version != f"pliego {target['version']}":
+        fail(f"target {args.target!r} requires pliego {target['version']}, got {actual_version!r}")
 
     protocol = manifest["protocol"]
     php = Path(args.php)
@@ -344,7 +348,7 @@ def main() -> int:
         random.Random(protocol["seed"]).shuffle(fixture_ids)
 
     print(f"host: {platform.system()} {platform.machine()} ({os_cpu_count()} cores)")
-    print(f"engine: {engine_version(binary)}")
+    print(f"engine: {actual_version}")
 
     results: list[dict[str, Any]] = []
     for fixture_id in fixture_ids:
@@ -413,6 +417,10 @@ def main() -> int:
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(results if len(results) > 1 else results[0], indent=2) + "\n", encoding="utf-8")
     print(f"wrote {out}")
+    failed = [result["fixture"]["id"] for result in results if not result["aggregates"]["correctness"]["passed"]]
+    if failed:
+        print(f"correctness gate failed: {', '.join(failed)}", file=sys.stderr)
+        return 1
     return 0
 
 

@@ -1,4 +1,4 @@
-# Pliego benchmark manifest — single source of truth for the B0 harness.
+# Pliego benchmark manifest — single source of truth for the benchmark harness.
 # Paths in `input` and `prepare` are relative to the repository root.
 
 schema = "pliego.benchmark-manifest"
@@ -16,12 +16,14 @@ rss_method = "process-tree"
 
 [targets."pliego-0.1.1"]
 label = "Pliego 0.1.1 (published bundle)"
+version = "0.1.1"
 enabled = true
 # The binary path is supplied at run time. Bundles are downloaded from
 # Releases and verified against their adjacent SHA-256 before benchmarking.
 
 [targets."pliego-1.0.0-rc.1"]
 label = "Pliego 1.0.0-rc.1 (document runtime)"
+version = "1.0.0-rc.1"
 enabled = false
 
 [fixtures.minimal-static]
@@ -66,7 +68,7 @@ input = "benchmarks/fixtures/ledger-20-pages/input.html"
 generated = true
 
 [fixtures.ledger-20-pages.correctness]
-page_count = 20 # estimate; pinned by the first B0 run
+page_count = 20 # estimate; pinned by the first signed baseline
 
 [fixtures.statement-100-pages]
 purpose = "100-page statement: scaling, memory, per-page cost"
@@ -76,7 +78,7 @@ input = "benchmarks/fixtures/statement-100-pages/input.html"
 generated = true
 
 [fixtures.statement-100-pages.correctness]
-page_count = 100 # estimate; pinned by the first B0 run
+page_count = 100 # estimate; pinned by the first signed baseline
 
 [fixtures.font-image-heavy]
 purpose = "font embedding, image decode, resources and I/O"
@@ -86,7 +88,7 @@ input = "benchmarks/fixtures/font-image-heavy/input.html"
 generated = true
 
 [fixtures.font-image-heavy.correctness]
-page_count = 6 # estimate; pinned by the first B0 run
+page_count = 6 # estimate; pinned by the first signed baseline
 
 [fixtures.unsupported-paint]
 purpose = "fail-closed path for unsupported CSS paint (gradient, shadow, radius)"
