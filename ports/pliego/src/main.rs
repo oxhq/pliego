@@ -961,33 +961,52 @@ fn invalid_request(message: &str) -> ! {
     std::process::exit(2)
 }
 
-fn print_render_error(error: &RenderError) -> ! {
-    for warning in &error.warnings {
-        eprintln!("pliego: warning: {warning}");
-    }
+#[derive(Debug, PartialEq)]
+struct CliRenderError {
+    stdout: Option<String>,
+    stderr: String,
+}
+
+fn cli_render_error(error: &RenderError) -> CliRenderError {
     if let (Some(artifacts), Some(document_pdf), Some(render_id)) = (
         error.artifacts.as_deref(),
         error.document_pdf.as_deref(),
         error.render_id.as_deref(),
     ) {
-        println!(
-            "{}",
-            serde_json::json!({
-                "artifacts": artifacts.to_string_lossy(),
-                "document_pdf": document_pdf.to_string_lossy(),
-                "engine": "pliego",
-                "error": {
-                    "code": &error.code,
-                    "message": &error.message,
-                },
-                "render_id": render_id,
-                "status": "failed",
-            })
-        );
-        eprintln!("pliego: {}: {}", error.code, error.message);
+        CliRenderError {
+            stdout: Some(
+                serde_json::json!({
+                    "artifacts": artifacts.to_string_lossy(),
+                    "document_pdf": document_pdf.to_string_lossy(),
+                    "engine": "pliego",
+                    "error": {
+                        "code": &error.code,
+                        "message": &error.message,
+                    },
+                    "render_id": render_id,
+                    "status": "failed",
+                })
+                .to_string(),
+            ),
+            stderr: format!("pliego: {}: {}", error.code, error.message),
+        }
     } else {
-        eprintln!("pliego: {}", error.message);
+        CliRenderError {
+            stdout: None,
+            stderr: format!("pliego: {}", error.message),
+        }
     }
+}
+
+fn print_render_error(error: &RenderError) -> ! {
+    for warning in &error.warnings {
+        eprintln!("pliego: warning: {warning}");
+    }
+    let output = cli_render_error(error);
+    if let Some(stdout) = output.stdout {
+        println!("{stdout}");
+    }
+    eprintln!("{}", output.stderr);
     std::process::exit(error.exit_code)
 }
 
@@ -2965,12 +2984,12 @@ mod tests {
 
     use super::{
         Command, ControlledResource, DEFAULT_LOCALE, DEFAULT_TIMEZONE, ExplicitRenderPaths,
-        PageDefinition, PageMargins, PendingResource, RenderEnvironment, RenderRequest,
-        ResourceCapture, ResourcePolicy, ResourcePolicyConfig, ResourcePolicyDecision,
-        classify_controlled_http_status, complete_resource, create_session_artifacts,
-        decide_resource_policy, default_page, page_artifact, parse_args, persist_scene_capture,
-        resolve_scene_resource, retain_controlled_resource, set_document_pdf_environment,
-        sha256_hex, stable_render_id,
+        PageDefinition, PageMargins, PendingResource, RenderEnvironment, RenderError,
+        RenderRequest, ResourceCapture, ResourcePolicy, ResourcePolicyConfig,
+        ResourcePolicyDecision, classify_controlled_http_status, cli_render_error,
+        complete_resource, create_session_artifacts, decide_resource_policy, default_page,
+        page_artifact, parse_args, persist_scene_capture, resolve_scene_resource,
+        retain_controlled_resource, set_document_pdf_environment, sha256_hex, stable_render_id,
     };
     use crate::session::SessionArtifacts;
 
@@ -3008,6 +3027,22 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[test]
+    fn missing_input_cli_error_remains_stderr_only() {
+        let error = RenderError::request(
+            "INVALID_REQUEST",
+            "document is unavailable: C:\\workspace\\missing.html",
+        );
+        let output = cli_render_error(&error);
+
+        assert_eq!(output.stdout, None);
+        assert_eq!(
+            output.stderr,
+            "pliego: document is unavailable: C:\\workspace\\missing.html"
+        );
+        assert_eq!(error.exit_code, 2);
     }
 
     #[test]
