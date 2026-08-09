@@ -36,6 +36,7 @@ jobs:
           python benchmarks/tools/test_validate_result.py
           python benchmarks/tools/test_run_benchmark.py
           python benchmarks/tools/test_resolve_release.py
+          python benchmarks/tools/test_compare_parity.py
           python python/check_pliego_release_archive.py --self-test
           python benchmarks/tools/generate_fixtures.py --check
           php -l benchmarks/runners/pliego.php
