@@ -11,10 +11,12 @@ on:
       - "Cargo.toml"
       - "rust-toolchain.toml"
       - "ports/pliego/**"
+      - "components/canvas/**"
       - "components/fonts/**"
       - "components/layout/**"
       - "components/script/**"
       - "components/servo/**"
+      - "components/shared/canvas/**"
       - "components/shared/fonts/**"
       - "components/shared/script/**"
       - "benchmarks/fixtures/minimal-static/**"
@@ -83,6 +85,26 @@ jobs:
 
       - name: Test the direct document session
         run: cargo test -p pliego --test document_session --no-default-features --features document-session --locked
+
+      - name: Test Canvas retention accounting
+        run: |
+          cargo test -p servo-canvas --lib retained_canvas::tests --locked
+          cargo test -p pliego --lib --no-default-features retained_canvas_aliases_share_one_adapted_capture --locked
+
+      - name: Set up Node for the locked Chart.js fixture
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - name: Test unmodified Chart.js twice in fresh sessions
+        run: |
+          fixture="$PWD/ports/pliego/tests/fixtures/chartjs-report"
+          npm ci --prefix "$fixture" --ignore-scripts --no-audit --no-fund
+          PLIEGO_DOCUMENT_SESSION_CHARTJS_INPUT="$fixture/index.html" \
+            cargo test -p pliego --test document_session \
+              --no-default-features --features document-session --locked \
+              document_session::tests::installed_chartjs_fixture_matches_the_legacy_oracle_twice \
+              -- --exact --ignored --nocapture
 
       - name: Test the shared resource policy
         run: |
