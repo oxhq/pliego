@@ -82,7 +82,7 @@ pub(crate) enum LocalResourceReadError {
 }
 
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ResourceRequest {
     pub(crate) method: String,
     pub(crate) url: url::Url,
@@ -90,6 +90,113 @@ pub(crate) struct ResourceRequest {
     pub(crate) referrer_url: Option<url::Url>,
     pub(crate) is_for_main_frame: bool,
     pub(crate) is_redirect: bool,
+}
+
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ResourceSource {
+    AssetCache(&'static str),
+    DataUrl,
+    DocumentRoot,
+    VirtualResource,
+}
+
+#[cfg(all(
+    feature = "document-session",
+    not(any(target_os = "android", target_env = "ohos"))
+))]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ResourceEvidence {
+    pub(crate) request: ResourceRequest,
+    pub(crate) source: ResourceSource,
+    pub(crate) status: &'static str,
+    pub(crate) response_status: Option<u16>,
+    pub(crate) content_type: Option<String>,
+    pub(crate) bytes: Option<u64>,
+    pub(crate) sha256: Option<String>,
+}
+
+#[cfg(all(
+    feature = "document-session",
+    not(any(target_os = "android", target_env = "ohos"))
+))]
+impl ResourceEvidence {
+    pub(crate) fn loaded(
+        request: ResourceRequest,
+        source: ResourceSource,
+        content_type: &'static str,
+        body: &[u8],
+    ) -> Self {
+        let bytes = body.len() as u64;
+        let sha256 = sha256_hex(&body);
+        Self {
+            request,
+            source,
+            status: "loaded",
+            response_status: Some(200),
+            content_type: Some(content_type.into()),
+            bytes: Some(bytes),
+            sha256: Some(sha256),
+        }
+    }
+
+    pub(crate) fn delegated(request: ResourceRequest, source: ResourceSource) -> Self {
+        Self {
+            request,
+            source,
+            status: "delegated",
+            response_status: None,
+            content_type: None,
+            bytes: None,
+            sha256: None,
+        }
+    }
+}
+
+#[cfg(all(
+    feature = "document-session",
+    not(any(target_os = "android", target_env = "ohos"))
+))]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct ResourceAccounting {
+    pub(crate) requests: usize,
+    pub(crate) loaded: usize,
+    pub(crate) delegated: usize,
+    pub(crate) failed: usize,
+    pub(crate) body_bytes: u64,
+    pub(crate) unavailable_bodies: usize,
+}
+
+#[cfg(all(
+    feature = "document-session",
+    not(any(target_os = "android", target_env = "ohos"))
+))]
+impl ResourceAccounting {
+    pub(crate) fn from_evidence(resources: &[ResourceEvidence]) -> Self {
+        Self {
+            requests: resources.len(),
+            loaded: resources
+                .iter()
+                .filter(|resource| resource.status == "loaded")
+                .count(),
+            delegated: resources
+                .iter()
+                .filter(|resource| resource.status == "delegated")
+                .count(),
+            failed: 0,
+            body_bytes: resources.iter().filter_map(|resource| resource.bytes).sum(),
+            unavailable_bodies: resources
+                .iter()
+                .filter(|resource| resource.bytes.is_none())
+                .count(),
+        }
+    }
+
+    pub(crate) fn with_failure(mut self) -> Self {
+        self.requests += 1;
+        self.failed = 1;
+        self
+    }
 }
 
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
@@ -130,11 +237,16 @@ impl ResourcePolicyFailure {
 
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
 pub(crate) enum ResourcePolicyDecision {
-    Allow,
+    Allow {
+        #[cfg_attr(not(feature = "document-session"), allow(dead_code))]
+        source: ResourceSource,
+    },
     FetchHttp,
     Synthesize {
         body: Vec<u8>,
         content_type: &'static str,
+        #[cfg_attr(not(feature = "document-session"), allow(dead_code))]
+        source: ResourceSource,
     },
     Fail(ResourcePolicyFailure),
 }
@@ -203,13 +315,14 @@ impl ResourcePolicy {
             );
         }
 
-        let synthesize = |body: &[u8], content_type| ResourcePolicyDecision::Synthesize {
+        let synthesize = |body: &[u8], content_type, source| ResourcePolicyDecision::Synthesize {
             body: if request.method == "HEAD" {
                 Vec::new()
             } else {
                 body.to_vec()
             },
             content_type,
+            source,
         };
 
         if let Some(resource) = self
@@ -217,7 +330,11 @@ impl ResourcePolicy {
             .as_ref()
             .and_then(|assets| assets.get(&request.url))
         {
-            return synthesize(&resource.body, resource_content_type(&resource.url));
+            return synthesize(
+                &resource.body,
+                resource_content_type(&resource.url),
+                ResourceSource::AssetCache(resource.cache_result.as_str()),
+            );
         }
 
         if let Some(resource) = self
@@ -226,7 +343,9 @@ impl ResourcePolicy {
             .find(|resource| resource.url == request.url)
         {
             return match &resource.body {
-                Ok(body) => synthesize(body, resource.content_type),
+                Ok(body) => {
+                    synthesize(body, resource.content_type, ResourceSource::VirtualResource)
+                },
                 Err(LocalResourceReadError::Unavailable(reason)) => failure(
                     "RESOURCE_NOT_FOUND",
                     "not_found",
@@ -244,7 +363,9 @@ impl ResourcePolicy {
         }
 
         match request.url.scheme() {
-            "data" => ResourcePolicyDecision::Allow,
+            "data" => ResourcePolicyDecision::Allow {
+                source: ResourceSource::DataUrl,
+            },
             "file" => {
                 let Ok(path) = request.url.to_file_path() else {
                     return failure(
@@ -256,7 +377,11 @@ impl ResourcePolicy {
                 match path.canonicalize() {
                     Ok(path) if path.starts_with(document_root) => {
                         match read_bounded_local_resource(&path) {
-                            Ok(body) => synthesize(&body, resource_content_type(&request.url)),
+                            Ok(body) => synthesize(
+                                &body,
+                                resource_content_type(&request.url),
+                                ResourceSource::DocumentRoot,
+                            ),
                             Err(LocalResourceReadError::Unavailable(error)) => failure(
                                 "RESOURCE_NOT_FOUND",
                                 "not_found",
@@ -455,8 +580,9 @@ mod tests {
         };
 
         let inside = url::Url::from_file_path(root.join("inside.css")).unwrap();
-        let ResourcePolicyDecision::Synthesize { body, content_type } =
-            policy.decide(&root, &request("GET", inside.clone(), false))
+        let ResourcePolicyDecision::Synthesize {
+            body, content_type, ..
+        } = policy.decide(&root, &request("GET", inside.clone(), false))
         else {
             panic!("inside-root GET should synthesize")
         };
@@ -501,5 +627,51 @@ mod tests {
         assert_eq!(artifact["filesystem"], "document-root");
         assert_eq!(artifact["redirects"], "deny");
         fs::remove_dir_all(sandbox).unwrap();
+    }
+
+    #[test]
+    #[cfg(feature = "document-session")]
+    fn evidence_preserves_resource_status_hash_and_accounting() {
+        let request = ResourceRequest {
+            method: "GET".into(),
+            url: url::Url::parse("file:///document.css").unwrap(),
+            destination: "Style".into(),
+            referrer_url: Some(url::Url::parse("file:///document.html").unwrap()),
+            is_for_main_frame: false,
+            is_redirect: false,
+        };
+        let loaded = ResourceEvidence::loaded(
+            request.clone(),
+            ResourceSource::DocumentRoot,
+            "text/css",
+            b"body {}",
+        );
+        let delegated = ResourceEvidence::delegated(request, ResourceSource::DataUrl);
+        assert_eq!(loaded.source, ResourceSource::DocumentRoot);
+        assert_eq!(loaded.status, "loaded");
+        assert_eq!(loaded.response_status, Some(200));
+        assert_eq!(loaded.content_type.as_deref(), Some("text/css"));
+        assert_eq!(loaded.bytes, Some(7));
+        assert_eq!(
+            loaded.sha256.as_deref(),
+            Some(sha256_hex(b"body {}").as_str())
+        );
+        assert_eq!(delegated.source, ResourceSource::DataUrl);
+        assert_eq!(delegated.status, "delegated");
+        assert_eq!(delegated.response_status, None);
+        assert_eq!(delegated.content_type, None);
+        assert_eq!(delegated.bytes, None);
+        assert_eq!(delegated.sha256, None);
+        assert_eq!(
+            ResourceAccounting::from_evidence(&[loaded, delegated]),
+            ResourceAccounting {
+                requests: 2,
+                loaded: 1,
+                delegated: 1,
+                failed: 0,
+                body_bytes: 7,
+                unavailable_bodies: 1,
+            }
+        );
     }
 }

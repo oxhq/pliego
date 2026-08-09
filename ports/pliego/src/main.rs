@@ -944,7 +944,7 @@ fn render(request: RenderRequest) -> Result<RenderOutcome, RenderError> {
             &document_root,
             request,
         ) {
-            ResourcePolicyDecision::Allow => servoshell::WebResourcePolicyDecision::Allow,
+            ResourcePolicyDecision::Allow { .. } => servoshell::WebResourcePolicyDecision::Allow,
             ResourcePolicyDecision::FetchHttp => {
                 let client = controlled_http_client
                     .get_or_init(|| {
@@ -987,7 +987,7 @@ fn render(request: RenderRequest) -> Result<RenderOutcome, RenderError> {
                     },
                 }
             },
-            ResourcePolicyDecision::Synthesize { body, content_type } => {
+            ResourcePolicyDecision::Synthesize { body, content_type, .. } => {
                 let resource = ControlledResource {
                     status: 200,
                     content_type: Some(content_type.to_owned()),
@@ -3061,7 +3061,7 @@ mod tests {
                     false,
                 )
             ),
-            ResourcePolicyDecision::Allow
+            ResourcePolicyDecision::Allow { .. }
         ));
         for url in [
             url::Url::parse("data:text/plain,hello").unwrap(),
@@ -3079,7 +3079,7 @@ mod tests {
                 "only GET and HEAD resource requests are allowed"
             );
         }
-        let ResourcePolicyDecision::Synthesize { body, content_type } = decide_resource_policy(
+        let ResourcePolicyDecision::Synthesize { body, content_type, .. } = decide_resource_policy(
             &policy,
             &root,
             &request(url::Url::from_file_path(&inside).unwrap(), false),
@@ -3088,7 +3088,7 @@ mod tests {
         };
         assert_eq!(body, b"body {}");
         assert_eq!(content_type, "text/css");
-        let ResourcePolicyDecision::Synthesize { body, content_type } = decide_resource_policy(
+        let ResourcePolicyDecision::Synthesize { body, content_type, .. } = decide_resource_policy(
             &policy,
             &root,
             &request(url::Url::from_file_path(&font).unwrap(), false),
@@ -3159,7 +3159,7 @@ mod tests {
         };
         assert_eq!(redirect_failure.reason, "redirects are disabled");
 
-        let ResourcePolicyDecision::Synthesize { body, content_type } =
+        let ResourcePolicyDecision::Synthesize { body, content_type, .. } =
             decide_resource_policy(&policy, &root, &request(virtual_url.clone(), false))
         else {
             panic!("configured host resource should be synthesized")
