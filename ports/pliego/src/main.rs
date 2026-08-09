@@ -563,7 +563,7 @@ fn render(request: RenderRequest) -> Result<RenderOutcome, RenderError> {
             ),
         )
     })?;
-    let resource_policy = ResourcePolicy::resolve(&request.resources, document.root());
+    let resource_policy = Rc::new(ResourcePolicy::resolve(&request.resources, document.root()));
     let render_id = stable_render_id(
         &input_bytes,
         request.environment,
@@ -747,7 +747,7 @@ fn render(request: RenderRequest) -> Result<RenderOutcome, RenderError> {
     let captured_controlled_resources = Rc::clone(&controlled_resources);
     let captured_controlled_resource_bytes = Rc::new(Cell::new(resource_policy.resident_bytes));
     let document_root = document.root().to_owned();
-    let active_resource_policy = resource_policy.clone();
+    let active_resource_policy = Rc::clone(&resource_policy);
     let controlled_http_client = Rc::new(OnceCell::new());
     let _canvas_retention = servo_canvas::retained_canvas::start_retaining_canvas_commands();
     let controlled_runtime_started = Instant::now();
