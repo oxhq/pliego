@@ -6,6 +6,8 @@
 mod asset_cache;
 #[path = "../src/document_session.rs"]
 mod document_session;
+#[path = "../src/owned_resource_store.rs"]
+mod owned_resource_store;
 #[path = "../src/readiness.rs"]
 mod readiness;
 #[path = "../src/render_environment.rs"]

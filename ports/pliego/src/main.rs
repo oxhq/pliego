@@ -43,6 +43,11 @@ mod asset_cache;
 #[allow(dead_code)]
 mod document_session;
 mod engine;
+#[cfg(all(
+    feature = "document-session",
+    not(any(target_os = "android", target_env = "ohos"))
+))]
+mod owned_resource_store;
 mod readiness;
 mod render_environment;
 mod resource_policy;

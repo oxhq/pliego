@@ -137,6 +137,7 @@ pub(crate) struct ResourceEvidence {
     pub(crate) content_type: Option<String>,
     pub(crate) bytes: Option<u64>,
     pub(crate) sha256: Option<String>,
+    pub(crate) content_address: Option<String>,
 }
 
 #[cfg(all(
@@ -144,22 +145,35 @@ pub(crate) struct ResourceEvidence {
     not(any(target_os = "android", target_env = "ohos"))
 ))]
 impl ResourceEvidence {
+    #[cfg(test)]
     pub(crate) fn loaded(
         request: ResourceRequest,
         source: ResourceSource,
-        content_type: &'static str,
+        content_type: &str,
+        body: &[u8],
+    ) -> Self {
+        Self::loaded_response(request, source, 200, Some(content_type), body)
+    }
+
+    pub(crate) fn loaded_response(
+        request: ResourceRequest,
+        source: ResourceSource,
+        response_status: u16,
+        content_type: Option<&str>,
         body: &[u8],
     ) -> Self {
         let bytes = body.len() as u64;
         let sha256 = sha256_hex(&body);
+        let content_address = format!("sha256:{sha256}");
         Self {
             request,
             source,
             status: "loaded",
-            response_status: Some(200),
-            content_type: Some(content_type.into()),
+            response_status: Some(response_status),
+            content_type: content_type.map(str::to_owned),
             bytes: Some(bytes),
             sha256: Some(sha256),
+            content_address: Some(content_address),
         }
     }
 
@@ -172,25 +186,22 @@ impl ResourceEvidence {
             content_type: None,
             bytes: None,
             sha256: None,
+            content_address: None,
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn loaded_http(request: ResourceRequest, response: &ControlledHttpResponse) -> Self {
-        let bytes = response.body.len() as u64;
-        let sha256 = sha256_hex(&response.body);
-        Self {
+        Self::loaded_response(
             request,
-            source: ResourceSource::Http,
-            status: "loaded",
-            response_status: Some(response.status.as_u16()),
-            content_type: response
+            ResourceSource::Http,
+            response.status.as_u16(),
+            response
                 .headers
                 .get(http::header::CONTENT_TYPE)
-                .and_then(|value| value.to_str().ok())
-                .map(str::to_owned),
-            bytes: Some(bytes),
-            sha256: Some(sha256),
-        }
+                .and_then(|value| value.to_str().ok()),
+            &response.body,
+        )
     }
 }
 
@@ -824,7 +835,7 @@ fn resource_content_type(url: &url::Url) -> &'static str {
 }
 
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
-fn sha256_hex(bytes: &[u8]) -> String {
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
         .iter()
         .map(|byte| format!("{byte:02x}"))
@@ -1006,12 +1017,17 @@ mod tests {
             loaded.sha256.as_deref(),
             Some(sha256_hex(b"body {}").as_str())
         );
+        assert_eq!(
+            loaded.content_address.as_deref(),
+            Some(format!("sha256:{}", sha256_hex(b"body {}")).as_str())
+        );
         assert_eq!(delegated.source, ResourceSource::DataUrl);
         assert_eq!(delegated.status, "delegated");
         assert_eq!(delegated.response_status, None);
         assert_eq!(delegated.content_type, None);
         assert_eq!(delegated.bytes, None);
         assert_eq!(delegated.sha256, None);
+        assert_eq!(delegated.content_address, None);
         let accounting = ResourceAccounting::from_evidence(&[loaded, delegated]);
         assert_eq!(
             accounting,
@@ -1120,6 +1136,10 @@ mod tests {
         assert_eq!(
             evidence.sha256.as_deref(),
             Some("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+        );
+        assert_eq!(
+            evidence.content_address.as_deref(),
+            Some("sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
         );
     }
 }

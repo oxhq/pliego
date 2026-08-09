@@ -14,7 +14,7 @@ path = "src/scene.rs"
 
 [features]
 default = ["shell"]
-document-session = ["dep:dpi", "dep:layout", "dep:servo"]
+document-session = ["dep:data-url", "dep:dpi", "dep:layout", "dep:servo"]
 shell = ["dep:layout", "dep:servoshell"]
 
 [[bin]]
@@ -24,6 +24,7 @@ required-features = ["shell"]
 
 [dependencies]
 base64 = { workspace = true }
+data-url = { workspace = true, optional = true }
 dpi = { workspace = true, optional = true }
 http = { workspace = true }
 http-body-util = { workspace = true }
