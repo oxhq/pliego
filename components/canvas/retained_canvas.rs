@@ -17,11 +17,11 @@ use webrender_api::{IdNamespace, ImageKey};
 const MAX_RASTER_DIMENSION: u64 = 16_384;
 const MAX_RASTER_PIXELS: u64 = 100_000_000;
 const MAX_RASTER_BYTES: u64 = 256 * 1024 * 1024;
-// Retention is an opt-in document-capture side channel. Keep its cumulative raw-pixel footprint
-// within the same 64 MiB resident-resource envelope used by the document renderer, and bound the
-// vector transcript and registry independently so a script cannot replace byte pressure with
-// command or object pressure. All counters are cumulative for one guard: replacing a readback or
-// completing a Canvas does not refund its charge, so churn cannot evade the session limits.
+// Retention is an opt-in document-capture side channel with its own 64 MiB cumulative raw-pixel
+// envelope, separate from the document renderer's resident-resource budget. Bound the vector
+// transcript and registry independently so a script cannot replace byte pressure with command or
+// object pressure. All counters are cumulative for one guard: replacing a readback or completing a
+// Canvas does not refund its charge, so churn cannot evade the session limits.
 const MAX_RETAINED_RASTER_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_RETAINED_COMMANDS: u64 = 262_144;
 const MAX_RETAINED_OBJECTS: u64 = 65_536;

@@ -4,15 +4,17 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
+use std::sync::Arc;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use serde::{Deserialize, Serialize};
+use servo_canvas::retained_canvas::RetainedCanvasSnapshot;
 use sha2::{Digest, Sha256};
 use vello_cpu::kurbo::{BezPath, Shape};
 
 use crate::hybrid_canvas::{
-    CanvasDiagnostics, CanvasResource, CanvasTranscript, HybridCanvasCapture, adapt_canvas,
+    CanvasDiagnostics, CanvasResource, HybridCanvasCapture, adapt_canvas, transcript_from_retained,
 };
 use crate::{
     Color, DocumentScene, FillRule, Glyph, Operation, OperationMeta, Page, Rect, Semantics, Size,
@@ -495,7 +497,9 @@ pub fn capture_document_scene(
 pub fn capture_document_scene_with_canvas(
     snapshot_json: &[u8],
     mut resolve_image: impl FnMut(&str) -> Option<String>,
-    mut resolve_canvas: impl FnMut(CapturedCanvasImageKey) -> Result<CanvasTranscript, String>,
+    mut resolve_canvas: impl FnMut(
+        CapturedCanvasImageKey,
+    ) -> Result<Arc<RetainedCanvasSnapshot>, String>,
 ) -> Result<SceneCapture, CaptureError> {
     let capture: LayoutCapture = serde_json::from_slice(snapshot_json)
         .map_err(|error| CaptureError::InvalidJson(error.to_string()))?;
@@ -525,6 +529,7 @@ pub fn capture_document_scene_with_canvas(
     let mut canvas_resources = BTreeMap::<String, CanvasResource>::new();
     let mut embedded_image_resources = BTreeMap::<String, CanvasResource>::new();
     let mut canvas_diagnostics = Vec::new();
+    let mut adapted_canvases = HashMap::new();
     let mut stacking_context_depth = 0usize;
 
     for (expected_sequence, event) in capture.paint_events.iter().enumerate() {
@@ -704,16 +709,16 @@ pub fn capture_document_scene_with_canvas(
                     continue;
                 }
                 if let Some(key) = fragment.canvas_image_key {
-                    let transcript =
-                        resolve_canvas(key).map_err(|message| CaptureError::Canvas {
-                            sequence: event.sequence,
-                            message,
-                        })?;
-                    let canvas =
-                        adapt_canvas(transcript).map_err(|error| CaptureError::Canvas {
+                    let snapshot = resolve_canvas(key).map_err(|message| CaptureError::Canvas {
+                        sequence: event.sequence,
+                        message,
+                    })?;
+                    let canvas = adapt_retained_canvas(&mut adapted_canvases, snapshot).map_err(
+                        |error| CaptureError::Canvas {
                             sequence: event.sequence,
                             message: error.to_string(),
-                        })?;
+                        },
+                    )?;
                     append_canvas(
                         &mut operations,
                         &mut canvas_resources,
@@ -723,7 +728,7 @@ pub fn capture_document_scene_with_canvas(
                     )?;
                     canvas_diagnostics.push(CapturedCanvasDiagnostics {
                         sequence: event.sequence,
-                        diagnostics: canvas.diagnostics,
+                        diagnostics: canvas.diagnostics.clone(),
                     });
                     append_link(
                         &mut operations,
@@ -924,6 +929,36 @@ pub fn capture_document_scene_with_canvas(
         unsupported_events,
         text_mapping_gaps,
     })
+}
+
+struct CachedRetainedCanvas {
+    source: Arc<RetainedCanvasSnapshot>,
+    capture: Arc<HybridCanvasCapture>,
+}
+
+fn adapt_retained_canvas(
+    cache: &mut HashMap<usize, CachedRetainedCanvas>,
+    snapshot: Arc<RetainedCanvasSnapshot>,
+) -> Result<Arc<HybridCanvasCapture>, crate::hybrid_canvas::CanvasError> {
+    let identity = Arc::as_ptr(&snapshot) as usize;
+    if let Some(cached) = cache.get(&identity) &&
+        Arc::ptr_eq(&cached.source, &snapshot)
+    {
+        return Ok(Arc::clone(&cached.capture));
+    }
+
+    let capture = Arc::new(adapt_canvas(transcript_from_retained(Arc::clone(
+        &snapshot,
+    ))?)?);
+    // Pin the source allocation for the capture lifetime so its pointer remains a stable identity.
+    cache.insert(
+        identity,
+        CachedRetainedCanvas {
+            source: snapshot,
+            capture: Arc::clone(&capture),
+        },
+    );
+    Ok(capture)
 }
 
 fn append_canvas(
@@ -2513,6 +2548,34 @@ struct CaptureFontVariation {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retained_canvas_aliases_share_one_adapted_capture() {
+        let snapshot = Arc::new(RetainedCanvasSnapshot {
+            width: 1,
+            height: 1,
+            commands: vec![
+                servo_canvas::retained_canvas::RetainedCanvasCommand::RasterPatch {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 1,
+                    height: 1,
+                    premultiplied_rgba: vec![255, 0, 0, 255],
+                    reason:
+                        servo_canvas::retained_canvas::RetainedCanvasFallbackReason::PixelReadback,
+                },
+            ],
+            unsupported: None,
+        });
+        let mut cache = HashMap::new();
+
+        let first = adapt_retained_canvas(&mut cache, Arc::clone(&snapshot)).unwrap();
+        let alias = adapt_retained_canvas(&mut cache, snapshot).unwrap();
+
+        assert!(Arc::ptr_eq(&first, &alias));
+        assert_eq!(cache.len(), 1);
+        assert_eq!(first.resources.len(), 1);
+    }
 
     #[test]
     fn accepts_pagination_diagnostics_without_relaxing_the_capture_schema() {

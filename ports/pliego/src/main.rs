@@ -1023,16 +1023,13 @@ fn render(request: RenderRequest) -> Result<RenderOutcome, RenderError> {
             }
         },
         |key| {
-            let snapshot =
-                servo_canvas::retained_canvas::snapshot_for_image_key(key.namespace, key.key)
-                    .ok_or_else(|| {
-                        format!(
-                            "no retained command snapshot for image key {}:{}",
-                            key.namespace, key.key
-                        )
-                    })?;
-            pliego::hybrid_canvas::transcript_from_retained(snapshot)
-                .map_err(|error| error.to_string())
+            servo_canvas::retained_canvas::snapshot_for_image_key(key.namespace, key.key)
+                .ok_or_else(|| {
+                    format!(
+                        "no retained command snapshot for image key {}:{}",
+                        key.namespace, key.key
+                    )
+                })
         },
     );
     if let Some(error) = resource_resolution_error {
