@@ -194,7 +194,8 @@ impl ResourceAccounting {
 
     pub(crate) fn with_failure(mut self) -> Self {
         self.requests += 1;
-        self.failed = 1;
+        self.failed += 1;
+        self.unavailable_bodies += 1;
         self
     }
 }
@@ -662,8 +663,9 @@ mod tests {
         assert_eq!(delegated.content_type, None);
         assert_eq!(delegated.bytes, None);
         assert_eq!(delegated.sha256, None);
+        let accounting = ResourceAccounting::from_evidence(&[loaded, delegated]);
         assert_eq!(
-            ResourceAccounting::from_evidence(&[loaded, delegated]),
+            accounting,
             ResourceAccounting {
                 requests: 2,
                 loaded: 1,
@@ -673,5 +675,23 @@ mod tests {
                 unavailable_bodies: 1,
             }
         );
+        assert_eq!(
+            accounting.requests,
+            accounting.loaded + accounting.delegated + accounting.failed
+        );
+        assert_eq!(
+            accounting.unavailable_bodies,
+            accounting.delegated + accounting.failed
+        );
+
+        let failed = accounting.with_failure();
+        assert_eq!(failed.requests, 3);
+        assert_eq!(failed.failed, 1);
+        assert_eq!(failed.unavailable_bodies, 2);
+        assert_eq!(
+            failed.requests,
+            failed.loaded + failed.delegated + failed.failed
+        );
+        assert_eq!(failed.unavailable_bodies, failed.delegated + failed.failed);
     }
 }

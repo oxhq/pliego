@@ -728,6 +728,13 @@ mod tests {
                 assert_eq!(error.resource_accounting.requests, 2);
                 assert_eq!(error.resource_accounting.loaded, 1);
                 assert_eq!(error.resource_accounting.failed, 1);
+                assert_eq!(error.resource_accounting.unavailable_bodies, 1);
+                assert_eq!(
+                    error.resource_accounting.requests,
+                    error.resource_accounting.loaded
+                        + error.resource_accounting.delegated
+                        + error.resource_accounting.failed
+                );
                 assert_eq!(error.resources.len(), 1);
             },
             "explicit-fail" => {
