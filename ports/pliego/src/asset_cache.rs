@@ -94,13 +94,36 @@ impl AssetStore {
                 "asset manifest has no parent directory".into(),
             )
         })?;
-        let bytes = fs::read(&manifest).map_err(|error| {
+        let (file, metadata) = open_regular_file(&manifest).map_err(|error| {
             AssetError::new(
                 "ASSET_MANIFEST_INVALID",
                 None,
                 format!("cannot read asset manifest {}: {error}", manifest.display()),
             )
         })?;
+        if metadata.len() > MAX_CACHE_BYTES {
+            return Err(AssetError::new(
+                "ASSET_MANIFEST_INVALID",
+                None,
+                format!("asset manifest exceeds the {MAX_CACHE_BYTES}-byte limit"),
+            ));
+        }
+        let mut file = file.take(MAX_CACHE_BYTES + 1);
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).map_err(|error| {
+            AssetError::new(
+                "ASSET_MANIFEST_INVALID",
+                None,
+                format!("cannot read asset manifest {}: {error}", manifest.display()),
+            )
+        })?;
+        if bytes.len() as u64 > MAX_CACHE_BYTES {
+            return Err(AssetError::new(
+                "ASSET_MANIFEST_INVALID",
+                None,
+                format!("asset manifest exceeds the {MAX_CACHE_BYTES}-byte limit"),
+            ));
+        }
         let mut parsed: Manifest = serde_json::from_slice(&bytes).map_err(|error| {
             AssetError::new(
                 "ASSET_MANIFEST_INVALID",
@@ -554,6 +577,12 @@ mod tests {
     use std::fs;
     #[cfg(unix)]
     use std::os::unix::ffi::OsStrExt as _;
+    #[cfg(unix)]
+    use std::process::Command;
+    #[cfg(unix)]
+    use std::thread;
+    #[cfg(unix)]
+    use std::time::{Duration, Instant};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{AssetStore, CacheResult};
@@ -593,6 +622,52 @@ mod tests {
         assert!(cache_error.message.contains("not a regular file"));
 
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn fifo_manifest_is_rejected_under_a_process_watchdog() {
+        const CHILD_ENV: &str = "PLIEGO_FIFO_MANIFEST_TEST_CHILD";
+        if std::env::var_os(CHILD_ENV).is_some() {
+            let unique = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let root = std::env::temp_dir().join(format!(
+                "pliego-asset-manifest-fifo-{}-{unique}",
+                std::process::id()
+            ));
+            fs::create_dir(&root).unwrap();
+            let manifest = root.join("assets.json");
+            make_fifo(&manifest);
+
+            let error = AssetStore::load_with_budget(&manifest, super::MAX_CACHE_BYTES)
+                .expect_err("a FIFO must not be accepted as an asset manifest");
+            assert_eq!(error.code, "ASSET_MANIFEST_INVALID");
+            assert!(error.message.contains("not a regular file"));
+            fs::remove_dir_all(root).unwrap();
+            return;
+        }
+
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .arg("fifo_manifest_is_rejected_under_a_process_watchdog")
+            .arg("--nocapture")
+            .env(CHILD_ENV, "1")
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                assert!(status.success(), "FIFO-manifest child failed: {status}");
+                break;
+            }
+            if Instant::now() >= deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("asset-manifest read blocked past the process watchdog");
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
     }
 
     #[test]
