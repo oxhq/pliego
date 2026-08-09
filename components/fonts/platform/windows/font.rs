@@ -256,9 +256,9 @@ impl PlatformFontMethods for PlatformFont {
         let au_from_du = |du| -> Au { Au::from_f32_px(du as f32 * self.du_to_px) };
         let au_from_du_s = |du| -> Au { Au::from_f32_px(du as f32 * self.scaled_du_to_px) };
 
-        // anything that we calculate and don't just pull out of self.face.metrics
-        // is pulled out here for clarity
-        let leading = dm.ascent - dm.capHeight;
+        // DirectWrite line gap is signed, so widen every operand before composing line height.
+        let leading = i32::from(dm.lineGap);
+        let line_gap = i32::from(dm.ascent) + i32::from(dm.descent) + leading;
 
         let zero_horizontal_advance = self
             .glyph_index('0')
@@ -285,14 +285,14 @@ impl PlatformFontMethods for PlatformFont {
             underline_offset: au_from_du_s(dm.underlinePosition as i32),
             strikeout_size: au_from_du(dm.strikethroughThickness as i32),
             strikeout_offset: au_from_du_s(dm.strikethroughPosition as i32),
-            leading: au_from_du_s(leading as i32),
+            leading: au_from_du_s(leading),
             x_height: au_from_du_s(dm.xHeight as i32),
             em_size: au_from_em(self.em_size as f64),
             ascent: au_from_du_s(dm.ascent as i32),
             descent: au_from_du_s(dm.descent as i32),
             max_advance,
             average_advance,
-            line_gap: au_from_du_s((dm.ascent + dm.descent + dm.lineGap as u16) as i32),
+            line_gap: au_from_du_s(line_gap),
             zero_horizontal_advance,
             ic_horizontal_advance,
             space_advance,
