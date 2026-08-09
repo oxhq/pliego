@@ -595,12 +595,7 @@ impl FontContext {
         &self,
         target_rule: &ServoArc<Locked<FontFaceRule>>,
     ) -> bool {
-        self.known_font_face_rules
-            .lock()
-            .contents
-            .values()
-            .flat_map(|bucket| bucket.iter())
-            .any(|known_rule| ServoArc::ptr_eq(&known_rule.rule_with_origin.rule, target_rule))
+        self.known_font_face_rules.lock().contains_rule(target_rule)
     }
 
     fn load_single_font_face_rule(
@@ -1115,9 +1110,10 @@ impl RemoteWebFontDownloader {
         state: WebFontDownloadState,
     ) {
         // https://drafts.csswg.org/css-fonts/#font-fetching-requirements
-        let url = match url_source.url.url() {
-            Some(url) => url.clone(),
-            None => return,
+        let Some((url, state)) = resolve_url_source_or_continue(&url_source, state, |state| {
+            font_context.process_next_web_font_source(state);
+        }) else {
+            return;
         };
 
         let document_context = &state.document_context;
@@ -1245,6 +1241,19 @@ impl RemoteWebFontDownloader {
     }
 }
 
+fn resolve_url_source_or_continue<T>(
+    url_source: &UrlSource,
+    state: T,
+    continue_with: impl FnOnce(T),
+) -> Option<(ServoArc<Url>, T)> {
+    let Some(url) = url_source.url.url() else {
+        continue_with(state);
+        return None;
+    };
+
+    Some((url.clone(), state))
+}
+
 #[derive(Debug, Eq, Hash, MallocSizeOf, PartialEq)]
 struct FontCacheKey {
     font_identifier: FontIdentifier,
@@ -1324,6 +1333,13 @@ impl FontFaceRuleWithOrigin {
 }
 
 impl KnownFontFaceRules {
+    fn contains_rule(&self, target_rule: &ServoArc<Locked<FontFaceRule>>) -> bool {
+        self.contents
+            .values()
+            .flat_map(|bucket| bucket.iter())
+            .any(|known_rule| ServoArc::ptr_eq(&known_rule.rule_with_origin.rule, target_rule))
+    }
+
     /// Computes the difference between the `@font-face `rules that are currently in effect
     /// and the ones that the `Stylist` knows about.
     fn diff_old_and_new_font_face_rules(
@@ -1471,7 +1487,56 @@ fn font_face_rules_conflict(
 
 #[cfg(test)]
 mod tests {
-    use super::LoadingWebFontCount;
+    use std::cell::Cell;
+
+    use fonts_traits::WebFontLoadEvent;
+    use servo_arc::Arc as ServoArc;
+    use style::Atom;
+    use style::font_face::{FontFaceSourceTechFlags, Source, UrlSource};
+    use style::shared_lock::SharedRwLock;
+    use style::stylesheets::{FontFaceRule, Origin};
+    use style::url::SpecifiedUrl;
+    use style::values::computed::font::{FamilyName, FontFamilyNameSyntax};
+
+    use super::{
+        FontFaceRuleWithOrigin, KnownFontFaceRule, KnownFontFaceRules, LoadingWebFontCount,
+        resolve_url_source_or_continue,
+    };
+
+    fn url_source(url: &str) -> UrlSource {
+        UrlSource {
+            url: SpecifiedUrl::new_for_testing(url),
+            format_hint: None,
+            tech_flags: FontFaceSourceTechFlags::empty(),
+        }
+    }
+
+    fn local_source(family_name: &str) -> Source {
+        Source::Local(FamilyName {
+            name: Atom::from(family_name),
+            syntax: FontFamilyNameSyntax::Quoted,
+        })
+    }
+
+    fn locked_font_face_rule(
+        lock: &SharedRwLock,
+    ) -> ServoArc<style::shared_lock::Locked<FontFaceRule>> {
+        ServoArc::new(lock.wrap(FontFaceRule::empty(Default::default())))
+    }
+
+    fn known_rules_with(
+        rule: ServoArc<style::shared_lock::Locked<FontFaceRule>>,
+    ) -> KnownFontFaceRules {
+        let mut known_rules = KnownFontFaceRules::default();
+        known_rules.contents.insert(
+            Atom::from("Test"),
+            vec![KnownFontFaceRule {
+                rule_with_origin: FontFaceRuleWithOrigin::new(rule, Origin::Author),
+                generation: false,
+            }],
+        );
+        known_rules
+    }
 
     #[test]
     fn loading_web_fonts_only_unblock_ready_after_the_last_completion() {
@@ -1484,5 +1549,65 @@ mod tests {
         assert_eq!(count.get(), 1);
         assert!(count.decrement());
         assert_eq!(count.get(), 0);
+    }
+
+    #[test]
+    fn unresolved_url_source_continues_to_fallback() {
+        let fallback = local_source("Fallback");
+        let fallback_was_attempted = Cell::new(false);
+
+        let resolved = resolve_url_source_or_continue(
+            &url_source(""),
+            vec![fallback.clone()],
+            |mut remaining_sources| {
+                assert_eq!(remaining_sources.pop(), Some(fallback));
+                fallback_was_attempted.set(true);
+            },
+        );
+
+        assert!(resolved.is_none());
+        assert!(fallback_was_attempted.get());
+    }
+
+    #[test]
+    fn unresolved_only_url_source_reaches_terminal_state_and_unblocks_ready() {
+        let count = LoadingWebFontCount::default();
+        let event = Cell::new(None);
+        count.increment();
+
+        let resolved = resolve_url_source_or_continue(
+            &url_source(""),
+            Vec::<Source>::new(),
+            |mut remaining_sources| {
+                assert!(remaining_sources.pop().is_none());
+                if count.decrement() {
+                    event.set(Some(WebFontLoadEvent::UnblockedFontReadyPromise));
+                }
+            },
+        );
+
+        assert!(resolved.is_none());
+        assert_eq!(count.get(), 0);
+        assert_eq!(
+            event.get(),
+            Some(WebFontLoadEvent::UnblockedFontReadyPromise)
+        );
+    }
+
+    #[test]
+    fn rule_activity_uses_pointer_identity_for_descriptor_equal_rules() {
+        let lock = SharedRwLock::new();
+        let active_rule = locked_font_face_rule(&lock);
+        let completed_rule = locked_font_face_rule(&lock);
+        let guard = lock.read();
+        assert_eq!(
+            active_rule.read_with(&guard),
+            completed_rule.read_with(&guard)
+        );
+        drop(guard);
+
+        let known_rules = known_rules_with(active_rule.clone());
+        assert!(known_rules.contains_rule(&active_rule));
+        assert!(!known_rules.contains_rule(&completed_rule));
     }
 }
