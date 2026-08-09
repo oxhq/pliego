@@ -5,6 +5,9 @@
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
 use std::ffi::CString;
 
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+use pliego::capture::SceneCapture;
+
 pub(crate) const DEFAULT_LOCALE: &str = "en-US";
 pub(crate) const DEFAULT_TIMEZONE: &str = "UTC";
 
@@ -36,6 +39,19 @@ impl RenderEnvironment {
             },
         })
     }
+}
+
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+pub(crate) fn unexpected_host_font(capture: &SceneCapture, allow_host_fonts: bool) -> Option<&str> {
+    if allow_host_fonts {
+        return None;
+    }
+
+    capture
+        .font_selections
+        .iter()
+        .find(|selection| selection.source.is_host())
+        .map(|selection| selection.resource.as_str())
 }
 
 #[cfg(all(unix, not(any(target_os = "android", target_env = "ohos"))))]

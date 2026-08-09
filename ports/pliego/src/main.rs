@@ -53,7 +53,7 @@ use engine::{
     RenderRequest,
 };
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
-use render_environment::apply_timezone;
+use render_environment::{apply_timezone, unexpected_host_font};
 use render_environment::{DEFAULT_LOCALE, DEFAULT_TIMEZONE};
 use resource_policy::{
     DEFAULT_RESOURCE_TIMEOUT_MS, MAX_RESOURCE_TIMEOUT_MS, ResourcePolicyConfig,
@@ -1034,19 +1034,14 @@ fn render(request: RenderRequest) -> Result<RenderOutcome, RenderError> {
         )
     })?;
     let scene_capture_ms = elapsed_milliseconds(scene_capture_started);
-    if !request.allow_host_fonts &&
-        let Some(selection) = scene_capture
-            .font_selections
-            .iter()
-            .find(|selection| selection.source.is_host())
-    {
+    if let Some(resource) = unexpected_host_font(&scene_capture, request.allow_host_fonts) {
         return Err(fail_session(
             &artifacts,
             &document_pdf_path,
             "HOST_FONT_POLICY_VIOLATION",
             &format!(
                 "Servo selected host font {} while host fonts were disabled",
-                selection.resource
+                resource
             ),
         ));
     }

@@ -32,7 +32,7 @@ use url::Url;
 
 use super::engine::RenderEnvironment;
 use super::readiness::{self, Readiness, ReadinessPolicy};
-use super::render_environment::apply_timezone;
+use super::render_environment::{apply_timezone, unexpected_host_font};
 use super::resource_policy::{
     ControlledResource, MAX_RESOURCE_TIMEOUT_MS, ResourceAccounting, ResourceEvidence,
     ResourcePolicy, ResourcePolicyConfig, ResourcePolicyDecision, ResourcePolicyFailure,
@@ -266,6 +266,7 @@ impl DocumentSession {
             .scene
             .validate()
             .map_err(|message| SessionError::new("SCENE_CAPTURE_INVALID", message))?;
+        validate_host_font_policy(&capture, self.allow_host_fonts)?;
         if !capture.unsupported_events.is_empty() || !capture.text_mapping_gaps.is_empty() {
             return Err(SessionError::new(
                 "SCENE_CAPTURE_INCOMPLETE",
@@ -436,6 +437,20 @@ impl DocumentSession {
     }
 }
 
+fn validate_host_font_policy(
+    capture: &SceneCapture,
+    allow_host_fonts: bool,
+) -> Result<(), SessionError> {
+    let Some(resource) = unexpected_host_font(capture, allow_host_fonts) else {
+        return Ok(());
+    };
+
+    Err(SessionError::new(
+        "HOST_FONT_POLICY_VIOLATION",
+        format!("Servo selected host font {resource} while host fonts were disabled"),
+    ))
+}
+
 fn stable_render_timeout(readiness: ReadinessPolicy) -> Result<Duration, SessionError> {
     TIMEOUT
         .checked_add(Duration::from_millis(readiness.timeout_ms))
@@ -590,14 +605,14 @@ mod tests {
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     use layout::pages::{PageDefinition, PageMargins};
-    use pliego::Operation;
-    use pliego::capture::CapturedFontSource;
+    use pliego::capture::{CapturedFontSelection, CapturedFontSource, SceneCapture};
+    use pliego::{DocumentScene, Operation, Page, Size};
     use sha2::{Digest, Sha256};
 
     use super::super::resource_policy::{ResourceAccounting, ResourceSource, VirtualResourceSpec};
     use super::{
         DocumentSession, ReadinessPolicy, RenderEnvironment, ResourcePolicyConfig, SessionError,
-        stable_render_timeout,
+        stable_render_timeout, validate_host_font_policy,
     };
 
     const ISOLATED_CASE_ENV: &str = "PLIEGO_DOCUMENT_SESSION_FIXTURE";
@@ -630,6 +645,44 @@ mod tests {
     const PRE_SESSION_PDF: &str =
         "sha256:9873076c43b0c76dca8fc54ad5721e5cd20ccee5deca6905425d49df068d7af8";
     const EXPECTED_LINK: &str = "https://pliego.dev/docs";
+
+    #[test]
+    fn denied_host_font_fails_before_a_document_outcome() {
+        let capture = SceneCapture {
+            scene: DocumentScene::new(Page {
+                size: Size {
+                    width: 1.0,
+                    height: 1.0,
+                },
+                operations: vec![],
+            }),
+            canvas_resources: vec![],
+            embedded_image_resources: vec![],
+            canvas_diagnostics: vec![],
+            font_resources: vec![],
+            font_instances: vec![],
+            font_selections: vec![CapturedFontSelection {
+                instance: "fixture-instance".into(),
+                resource: "host:Fixture Sans".into(),
+                face_index: 0,
+                source: CapturedFontSource::Host,
+                requested_families: vec!["Fixture Sans".into()],
+                selected_family: Some("Fixture Sans".into()),
+            }],
+            font_warnings: vec![],
+            unsupported_events: vec![],
+            text_mapping_gaps: vec![],
+        };
+
+        let error = validate_host_font_policy(&capture, false)
+            .expect_err("a denied host font must not produce a DocumentOutcome");
+        assert_eq!(error.code, "HOST_FONT_POLICY_VIOLATION");
+        assert_eq!(
+            error.message,
+            "Servo selected host font host:Fixture Sans while host fonts were disabled"
+        );
+        assert!(validate_host_font_policy(&capture, true).is_ok());
+    }
 
     const INVOICE_INPUT: &str =
         "sha256:b0fa2d0b18e845e84c1229408622bd85e092ecf4d78b0878939006fb26926dce";
