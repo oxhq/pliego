@@ -38,7 +38,31 @@ jobs:
           python benchmarks/tools/test_resolve_release.py
           python benchmarks/tools/test_compare_parity.py
           python python/check_pliego_release_archive.py --self-test
+          python benchmarks/tools/test_process_tree_sampler.py
           python benchmarks/tools/generate_fixtures.py --check
           php -l benchmarks/runners/pliego.php
           php benchmarks/runners/pliego.php --self-test \
             --text-contains "Revenue, net" --text-contains " Total " --text-contains 0
+
+      - name: Check delegated cgroup-v2 accounting
+        run: |
+          if ! getent passwd pliego-benchmark-engine >/dev/null; then
+            sudo useradd --system --no-create-home --shell /usr/sbin/nologin pliego-benchmark-engine
+          fi
+          sudo systemd-run --quiet --wait --pipe --collect \
+            -p Type=exec \
+            -p Delegate=yes \
+            -p DelegateSubgroup=harness \
+            -p "WorkingDirectory=$GITHUB_WORKSPACE" \
+            /bin/bash -c '
+              set -euo pipefail
+              relative="$(cut -d: -f3 /proc/self/cgroup)"
+              case "$relative" in
+                */harness) ;;
+                *) echo "unexpected delegated cgroup: $relative" >&2; exit 1 ;;
+              esac
+              parent="/sys/fs/cgroup${relative%/harness}"
+              printf "+cpu +io +memory +pids" > "$parent/cgroup.subtree_control"
+              export PLIEGO_BENCHMARK_CGROUP_PARENT="$parent"
+              python3 benchmarks/tools/test_process_tree_sampler.py --live --php-integration
+            '

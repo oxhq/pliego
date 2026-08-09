@@ -59,6 +59,35 @@ def main() -> None:
     fragments = [command[index + 1] for index, value in enumerate(command) if value == "--text-contains"]
     assert fragments == ["Revenue, net", "Total"]
 
+    aggregate = benchmark.aggregates(
+        [
+            {
+                "ok": True,
+                "correctness": {"pass": True},
+                "wall_ms": 1,
+                "user_ms": 1,
+                "sys_ms": 0,
+                "memory_peak_bytes": 2048,
+                "sampled_peak_rss_kib_lower_bound": 2,
+                "sampled_peak_pss_kib_lower_bound": 1,
+                "read_bytes": 3,
+                "write_bytes": 4,
+                "read_operations": 5,
+                "write_operations": 6,
+                "output": {"pdf_bytes": 5, "pdf_sha256": "0" * 64},
+                "failure": {"code": None},
+            }
+        ],
+        1,
+    )
+    assert aggregate["memory"]["cgroup_peak_bytes"]["mean"] == 2048
+    assert aggregate["memory"]["sampled_peak_pss_kib_lower_bound"]["mean"] == 1
+    assert aggregate["io"]["read_bytes"]["mean"] == 3
+    assert aggregate["io"]["write_bytes"]["mean"] == 4
+    assert aggregate["io"]["read_operations"]["mean"] == 5
+    assert aggregate["io"]["write_operations"]["mean"] == 6
+    assert benchmark.validate_result.percentiles([1, 3])["p50"] == 1
+
     print("Pliego benchmark runner-count self-test passed")
 
 
