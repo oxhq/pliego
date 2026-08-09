@@ -92,9 +92,6 @@ final class CliRenderer
         }
 
         $runtimeResolutionNanoseconds = $this->runtimeResolutionNanoseconds;
-        if ($runtimeResolutionNanoseconds !== null) {
-            $this->runtimeResolutionNanoseconds = 0;
-        }
         $bundleStartedAt = hrtime(true);
         $this->writeInputBundle(
             $inputBundle,
@@ -290,6 +287,9 @@ final class CliRenderer
                 $metadata,
             ),
         );
+        if ($runtimeResolutionNanoseconds !== null) {
+            $this->runtimeResolutionNanoseconds = 0;
+        }
 
         return new RenderResult($output, $artifacts, $inputBundle, $metadata, $bridgeTimings);
     }
@@ -366,7 +366,7 @@ final class CliRenderer
                 'bytes' => filesize($destination),
                 'sha256' => 'sha256:'.hash_file('sha256', $destination),
             ];
-            $assetManifestHashNanoseconds += hrtime(true) - $manifestStartedAt;
+            $assetManifestHashNanoseconds += (int) (hrtime(true) - $manifestStartedAt);
         }
 
         $manifestStartedAt = hrtime(true);
@@ -397,7 +397,7 @@ final class CliRenderer
         if (file_put_contents("{$directory}/input-bundle.json", $json, LOCK_EX) === false) {
             throw new RuntimeException("cannot write {$directory}/input-bundle.json");
         }
-        $assetManifestHashNanoseconds += hrtime(true) - $manifestStartedAt;
+        $assetManifestHashNanoseconds += (int) (hrtime(true) - $manifestStartedAt);
     }
 
     /**
@@ -432,6 +432,9 @@ final class CliRenderer
                 $metadata,
             ),
         );
+        if ($runtimeResolutionNanoseconds !== null) {
+            $this->runtimeResolutionNanoseconds = 0;
+        }
 
         return new $exception(
             $code,

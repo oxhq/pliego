@@ -43,7 +43,7 @@ final class PliegoServiceProvider extends ServiceProvider
             return new CliRenderer(
                 [$binary],
                 (int) $app['config']->get('pliego.timeout_seconds'),
-                runtimeResolutionNanoseconds: hrtime(true) - $runtimeStartedAt,
+                runtimeResolutionNanoseconds: (int) (hrtime(true) - $runtimeStartedAt),
             );
         });
         $this->app->singleton(DocumentFactory::class, function ($app): DocumentFactory {

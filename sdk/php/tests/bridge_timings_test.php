@@ -120,6 +120,20 @@ $preResolved = new CliRenderer(
     [PHP_BINARY, __DIR__.'/fake_pliego.php'],
     runtimeResolutionNanoseconds: 50_000_000,
 );
+try {
+    $preResolved->render(
+        '<p>pre-resolved runtime</p>',
+        "{$root}/missing-parent/pre-resolved-input",
+        "{$root}/preflight-failure.pdf",
+        "{$root}/preflight-failure-artifacts",
+    );
+    throw new RuntimeException('expected input bundle preflight failure');
+} catch (RuntimeException $error) {
+    timingExpect(
+        str_contains($error->getMessage(), 'cannot create exclusive input bundle'),
+        'preflight failure preserved',
+    );
+}
 $separateSetup = $preResolved->render(
     '<p>pre-resolved runtime</p>',
     "{$root}/pre-resolved-input",
