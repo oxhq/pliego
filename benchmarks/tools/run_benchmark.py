@@ -317,9 +317,12 @@ def aggregates(samples: list[dict[str, Any]], page_count: int | None) -> dict[st
         "failures": {"count": len(failures), "codes": codes},
     }
     if pss and len(pss) == len(valid):
-        agg["memory"]["peak_pss_kib"] = percentiles(pss)
+        agg["memory"]["peak_pss_kib"] = validate_result.percentiles(pss)
     if reads and len(reads) == len(valid) and len(writes) == len(valid):
-        agg["io"] = {"read_bytes": percentiles(reads), "write_bytes": percentiles(writes)}
+        agg["io"] = {
+            "read_bytes": validate_result.percentiles(reads),
+            "write_bytes": validate_result.percentiles(writes),
+        }
     if page_count:
         agg["scaling"] = {
             "per_page_wall_ms": round(mean_wall / page_count, 3),
