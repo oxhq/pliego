@@ -12,6 +12,15 @@ description = "Native document rendering entrypoint built on Servo"
 [lib]
 path = "src/scene.rs"
 
+[features]
+default = ["shell"]
+shell = ["dep:layout", "dep:servoshell"]
+
+[[bin]]
+name = "pliego"
+path = "src/main.rs"
+required-features = ["shell"]
+
 [dependencies]
 base64 = { workspace = true }
 http = { workspace = true }
@@ -20,18 +29,23 @@ hyper = { workspace = true }
 imagesize = "0.14.0"
 libc = { workspace = true }
 krilla = { version = "0.8.2", default-features = false, features = ["raster-images"] }
-layout = { workspace = true }
+layout = { workspace = true, optional = true }
 net = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 servo-canvas = { workspace = true }
-servoshell = { workspace = true, features = ["baked-in-resources", "bundled_freetype"] }
+servoshell = { workspace = true, features = ["baked-in-resources", "bundled_freetype"], optional = true }
 tokio = { workspace = true, features = ["time"] }
 unicode-segmentation = { workspace = true }
 url = { workspace = true }
 vello_cpu = { workspace = true }
 
 [dev-dependencies]
+criterion = { workspace = true }
 flate2 = { workspace = true }
 ttf-parser = { workspace = true }
+
+[[bench]]
+name = "document_scene_pdf"
+harness = false
