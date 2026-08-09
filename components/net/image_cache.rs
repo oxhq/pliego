@@ -1188,6 +1188,16 @@ impl ImageCacheFactoryImpl {
         let mut fontdb = fontdb::Database::new();
         fontdb.load_system_fonts();
 
+        Self::new_with_fontdb(broken_image_icon_data, fontdb)
+    }
+
+    /// Creates an image cache factory without loading host fonts.
+    #[cfg(feature = "test-util")]
+    pub fn new_for_testing(broken_image_icon_data: Vec<u8>) -> Self {
+        Self::new_with_fontdb(broken_image_icon_data, fontdb::Database::new())
+    }
+
+    fn new_with_fontdb(broken_image_icon_data: Vec<u8>, fontdb: fontdb::Database) -> Self {
         Self {
             broken_image_icon_data: Arc::new(broken_image_icon_data),
             thread_pool: ThreadPool::global(),

@@ -50,7 +50,7 @@ fn create_test_image_cache() -> (Arc<dyn ImageCache>, Receiver<PipelineId>) {
     })));
     let dummy_resolver = Arc::new(DummyFontResolver);
 
-    let factory = ImageCacheFactoryImpl::new(vec![]);
+    let factory = ImageCacheFactoryImpl::new_for_testing(vec![]);
     let cache = factory.create(
         TEST_WEBVIEW_ID,
         TEST_PIPELINE_ID,
