@@ -48,6 +48,7 @@ vello_cpu = { workspace = true }
 [dev-dependencies]
 criterion = { workspace = true }
 flate2 = { workspace = true }
+servo-canvas = { workspace = true, features = ["document-session-testing"] }
 ttf-parser = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]

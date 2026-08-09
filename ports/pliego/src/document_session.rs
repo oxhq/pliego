@@ -176,6 +176,54 @@ impl DocumentSession {
         allow_host_fonts: bool,
         readiness: ReadinessPolicy,
     ) -> Result<Self, SessionError> {
+        Self::new_with_canvas_retention(
+            input,
+            environment,
+            page,
+            resources,
+            allow_host_fonts,
+            readiness,
+            servo_canvas::retained_canvas::start_retaining_canvas_commands,
+        )
+    }
+
+    #[cfg(test)]
+    fn new_with_canvas_retention_limits(
+        input: impl AsRef<Path>,
+        environment: RenderEnvironment,
+        page: PageDefinition,
+        resources: ResourcePolicyConfig,
+        allow_host_fonts: bool,
+        readiness: ReadinessPolicy,
+        canvas_retention_limits: (u64, u64, u64),
+    ) -> Result<Self, SessionError> {
+        let (max_commands, max_raster_bytes, max_objects) = canvas_retention_limits;
+        Self::new_with_canvas_retention(
+            input,
+            environment,
+            page,
+            resources,
+            allow_host_fonts,
+            readiness,
+            || {
+                servo_canvas::retained_canvas::start_retaining_canvas_commands_for_testing(
+                    max_commands,
+                    max_raster_bytes,
+                    max_objects,
+                )
+            },
+        )
+    }
+
+    fn new_with_canvas_retention(
+        input: impl AsRef<Path>,
+        environment: RenderEnvironment,
+        page: PageDefinition,
+        resources: ResourcePolicyConfig,
+        allow_host_fonts: bool,
+        readiness: ReadinessPolicy,
+        start_canvas_retention: impl FnOnce() -> servo_canvas::retained_canvas::CanvasRetentionGuard,
+    ) -> Result<Self, SessionError> {
         let stable_render_timeout = stable_render_timeout(readiness)?;
         if !(1..=MAX_RESOURCE_TIMEOUT_MS).contains(&resources.timeout_ms) {
             return Err(SessionError::new(
@@ -263,7 +311,7 @@ impl DocumentSession {
             resource_store,
             ..Default::default()
         });
-        let canvas_retention = servo_canvas::retained_canvas::start_retaining_canvas_commands();
+        let canvas_retention = start_canvas_retention();
         let webview = WebViewBuilder::new(&servo, rendering_context.clone())
             .delegate(delegate.clone())
             .user_content_manager(user_content_manager)
@@ -321,6 +369,12 @@ impl DocumentSession {
             ));
         }
         let readiness = self.evaluate_readiness()?;
+        if servo_canvas::retained_canvas::retention_budget_exceeded() {
+            return Err(SessionError::new(
+                "SCENE_CAPTURE_FAILED",
+                "live Canvas retention exceeded the session budget",
+            ));
+        }
 
         let snapshot = self.webview.debug_layout_snapshot().ok_or_else(|| {
             SessionError::new(
@@ -1374,6 +1428,7 @@ mod tests {
             "hybrid-canvas",
             "hybrid-canvas", // a fresh process must reproduce the exact oracle
             "unsupported-canvas",
+            "canvas-retention-budget",
             "state-seed",
             "state-clean",
         ] {
@@ -1538,6 +1593,7 @@ mod tests {
                     .unwrap()
             },
             "unsupported-canvas" => session_fixture("unsupported-canvas.html"),
+            "canvas-retention-budget" => session_fixture("canvas-retention-budget.html"),
             "chartjs-report" => {
                 readiness = ReadinessPolicy::default();
                 PathBuf::from(
@@ -1599,25 +1655,36 @@ mod tests {
             assert_eq!(outcome.readiness["payload"]["localHour"], 4);
             return;
         }
-        let result = DocumentSession::new(
-            &input,
-            environment,
-            match case.as_str() {
-                "hybrid-canvas" | "unsupported-canvas" => {
-                    PageDefinition::new(200.0, 160.0, PageMargins::new(10.0, 10.0, 10.0, 10.0))
-                        .unwrap()
-                },
-                "chartjs-report" => {
-                    PageDefinition::new(760.0, 840.0, PageMargins::new(28.0, 28.0, 28.0, 28.0))
-                        .unwrap()
-                },
-                _ => a4(),
+        let page = match case.as_str() {
+            "hybrid-canvas" | "unsupported-canvas" | "canvas-retention-budget" => {
+                PageDefinition::new(200.0, 160.0, PageMargins::new(10.0, 10.0, 10.0, 10.0)).unwrap()
             },
-            resources,
-            allow_host_fonts,
-            readiness,
-        )
-        .and_then(DocumentSession::render);
+            "chartjs-report" => {
+                PageDefinition::new(760.0, 840.0, PageMargins::new(28.0, 28.0, 28.0, 28.0)).unwrap()
+            },
+            _ => a4(),
+        };
+        let session = if case == "canvas-retention-budget" {
+            DocumentSession::new_with_canvas_retention_limits(
+                &input,
+                environment,
+                page,
+                resources,
+                allow_host_fonts,
+                readiness,
+                (64, 8, 64),
+            )
+        } else {
+            DocumentSession::new(
+                &input,
+                environment,
+                page,
+                resources,
+                allow_host_fonts,
+                readiness,
+            )
+        };
+        let result = session.and_then(DocumentSession::render);
 
         match case.as_str() {
             "local-success" => {
@@ -1996,6 +2063,18 @@ mod tests {
                 assert_eq!(error.code, "SCENE_CAPTURE_FAILED");
                 assert!(error.message.contains("fill_rect"), "{}", error.message);
                 assert!(error.message.contains("transform"), "{}", error.message);
+            },
+            "canvas-retention-budget" => {
+                let Err(error) = result else {
+                    panic!(
+                        "over-budget Canvas retention returned a DocumentOutcome containing PDF bytes"
+                    )
+                };
+                assert_eq!(error.code, "SCENE_CAPTURE_FAILED");
+                assert_eq!(
+                    error.message,
+                    "live Canvas retention exceeded the session budget"
+                );
             },
             "chartjs-report" => {
                 let outcome = result.expect("Chart.js fixture should render");

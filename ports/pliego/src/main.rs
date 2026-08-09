@@ -998,6 +998,14 @@ fn render(request: RenderRequest) -> Result<RenderOutcome, RenderError> {
             )
         })?;
     let layout_debug_path = artifacts.directory().join("layout-debug.json");
+    if servo_canvas::retained_canvas::retention_budget_exceeded() {
+        return Err(fail_session(
+            &artifacts,
+            &document_pdf_path,
+            "SCENE_CAPTURE_FAILED",
+            "live Canvas retention exceeded the session budget",
+        ));
+    }
     let mut resource_resolution_error = None;
     let scene_capture_started = Instant::now();
     let scene_capture = capture_document_scene_with_canvas(
