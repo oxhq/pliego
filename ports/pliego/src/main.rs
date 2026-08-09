@@ -52,22 +52,20 @@ use engine::{
     DocumentEngine, ExplicitRenderPaths, RenderEnvironment, RenderError, RenderOutcome,
     RenderRequest,
 };
+use render_environment::{DEFAULT_LOCALE, DEFAULT_TIMEZONE};
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
 use render_environment::{apply_timezone, unexpected_host_font};
-use render_environment::{DEFAULT_LOCALE, DEFAULT_TIMEZONE};
-use resource_policy::{
-    DEFAULT_RESOURCE_TIMEOUT_MS, MAX_RESOURCE_TIMEOUT_MS, ResourcePolicyConfig,
-    VirtualResourceSpec,
-};
+#[cfg(all(test, not(any(target_os = "android", target_env = "ohos"))))]
+use resource_policy::classify_controlled_http_status;
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
 use resource_policy::{
     ControlledResource, RESOURCE_POLICY_ID, ResourcePolicy, ResourcePolicyDecision,
     ResourcePolicyFailure, ResourceRequest, create_controlled_http_client, fetch_controlled_http,
-    http_root_allows,
-    retain_controlled_resource as retain_shared_controlled_resource,
+    http_root_allows, retain_controlled_resource as retain_shared_controlled_resource,
 };
-#[cfg(all(test, not(any(target_os = "android", target_env = "ohos"))))]
-use resource_policy::classify_controlled_http_status;
+use resource_policy::{
+    DEFAULT_RESOURCE_TIMEOUT_MS, MAX_RESOURCE_TIMEOUT_MS, ResourcePolicyConfig, VirtualResourceSpec,
+};
 
 const SERVO_BASE_SHA: &str = "313b6d5ecc113b08010ce434140db3ca5abcc71c";
 const PLIEGO_API_VERSION: u32 = 1;
@@ -80,9 +78,7 @@ const RENDER_ID_SCHEMA_MARKER: &[u8] = b"pliego.render-id.v1";
 const RESOLVED_INPUT_HASH_SCHEMA_MARKER: &[u8] = b"pliego.resolved-input.v1";
 
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
-fn resource_request(
-    request: &servoshell::WebResourceRequest,
-) -> ResourceRequest {
+fn resource_request(request: &servoshell::WebResourceRequest) -> ResourceRequest {
     ResourceRequest {
         method: request.method.to_string(),
         url: request.url.clone(),
@@ -325,12 +321,12 @@ fn parse_http_root(value: &OsString) -> Result<url::Url, String> {
         .to_str()
         .ok_or_else(|| "HTTP root must be valid UTF-8".to_owned())?;
     let mut root = url::Url::parse(value).map_err(|error| format!("invalid HTTP root: {error}"))?;
-    if !matches!(root.scheme(), "http" | "https") ||
-        root.host_str().is_none() ||
-        !root.username().is_empty() ||
-        root.password().is_some() ||
-        root.query().is_some() ||
-        root.fragment().is_some()
+    if !matches!(root.scheme(), "http" | "https")
+        || root.host_str().is_none()
+        || !root.username().is_empty()
+        || root.password().is_some()
+        || root.query().is_some()
+        || root.fragment().is_some()
     {
         return Err(
             "HTTP root must be an http(s) URL without credentials, query, or fragment".into(),
@@ -814,7 +810,9 @@ fn render(request: RenderRequest) -> Result<RenderOutcome, RenderError> {
                     },
                 }
             },
-            ResourcePolicyDecision::Synthesize { body, content_type, .. } => {
+            ResourcePolicyDecision::Synthesize {
+                body, content_type, ..
+            } => {
                 let resource = ControlledResource {
                     status: 200,
                     content_type: Some(content_type.to_owned()),
@@ -1287,10 +1285,10 @@ fn stable_render_id(
     if allow_host_fonts {
         update_hash_field(&mut hasher, b"pliego.host-fonts.v1");
     }
-    if !resource_policy.allowed_http_roots.is_empty() ||
-        !resource_policy.virtual_resources.is_empty() ||
-        resource_policy.asset_manifest.is_some() ||
-        resource_policy.timeout_ms != DEFAULT_RESOURCE_TIMEOUT_MS
+    if !resource_policy.allowed_http_roots.is_empty()
+        || !resource_policy.virtual_resources.is_empty()
+        || resource_policy.asset_manifest.is_some()
+        || resource_policy.timeout_ms != DEFAULT_RESOURCE_TIMEOUT_MS
     {
         update_hash_field(&mut hasher, RESOURCE_POLICY_ID.as_bytes());
         update_hash_field(&mut hasher, &resource_policy.timeout_ms.to_be_bytes());
@@ -1617,8 +1615,8 @@ fn record_resources(
 
     for resource in resources {
         match resource.event {
-            servoshell::NetworkEvent::HttpRequest(request) |
-            servoshell::NetworkEvent::HttpRequestUpdate(request) => {
+            servoshell::NetworkEvent::HttpRequest(request)
+            | servoshell::NetworkEvent::HttpRequestUpdate(request) => {
                 let method = request.method.to_string();
                 let url = request.url.into_string();
                 let pending_resource = pending.entry(resource.request_id.clone()).or_default();
@@ -1768,8 +1766,8 @@ fn record_resources(
         })
         .filter(|(url, _)| !capture.url_to_resource.contains_key(url))
         .filter(|(url, _)| {
-            url.starts_with("file:") ||
-                policy.allowed_http_roots.iter().any(|root| {
+            url.starts_with("file:")
+                || policy.allowed_http_roots.iter().any(|root| {
                     url::Url::parse(url).is_ok_and(|requested| http_root_allows(root, &requested))
                 })
         })
@@ -1803,8 +1801,8 @@ fn complete_resource(
     request_id: &str,
     body: Option<Vec<u8>>,
 ) -> Option<CompletedResource> {
-    if body.is_none() &&
-        !pending
+    if body.is_none()
+        && !pending
             .get(request_id)?
             .response_status
             .is_some_and(|status| (200..300).contains(&status))
@@ -2881,20 +2879,26 @@ mod tests {
                 "only GET and HEAD resource requests are allowed"
             );
         }
-        let ResourcePolicyDecision::Synthesize { body, content_type, .. } = decide_resource_policy(
+        let ResourcePolicyDecision::Synthesize {
+            body, content_type, ..
+        } = decide_resource_policy(
             &policy,
             &root,
             &request(url::Url::from_file_path(&inside).unwrap(), false),
-        ) else {
+        )
+        else {
             panic!("inside-root file should be synthesized")
         };
         assert_eq!(body, b"body {}");
         assert_eq!(content_type, "text/css");
-        let ResourcePolicyDecision::Synthesize { body, content_type, .. } = decide_resource_policy(
+        let ResourcePolicyDecision::Synthesize {
+            body, content_type, ..
+        } = decide_resource_policy(
             &policy,
             &root,
             &request(url::Url::from_file_path(&font).unwrap(), false),
-        ) else {
+        )
+        else {
             panic!("uppercase OTF should be synthesized")
         };
         assert_eq!(body, b"font");
@@ -2961,8 +2965,9 @@ mod tests {
         };
         assert_eq!(redirect_failure.reason, "redirects are disabled");
 
-        let ResourcePolicyDecision::Synthesize { body, content_type, .. } =
-            decide_resource_policy(&policy, &root, &request(virtual_url.clone(), false))
+        let ResourcePolicyDecision::Synthesize {
+            body, content_type, ..
+        } = decide_resource_policy(&policy, &root, &request(virtual_url.clone(), false))
         else {
             panic!("configured host resource should be synthesized")
         };
