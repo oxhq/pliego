@@ -270,6 +270,8 @@ jobs:
           node-version: 24
       - name: Pliego paged product gates
         run: |
+          export PATH="$PWD/.venv/bin:$PATH"
+          python -c "import sys; from PIL import Image; print(sys.executable, Image.__version__)"
           binary=target/${{ inputs.profile }}/pliego
           output=target/pliego-product-gates/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}
           mkdir -p "$output"
