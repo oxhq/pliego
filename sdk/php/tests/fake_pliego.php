@@ -2,6 +2,14 @@
 
 declare(strict_types=1);
 
+$engineStartedAt = hrtime(true);
+$engineTiming = static fn (int|float $totalMilliseconds): array => [
+    'schema' => 'pliego.engine-timings',
+    'version' => 1,
+    'unit' => 'milliseconds',
+    'measurement_boundary' => 'before_timings_artifact_write',
+    'total_ms' => $totalMilliseconds,
+];
 $mode = getenv('PLIEGO_DOCTOR_FAKE_MODE');
 
 if (($argv[1] ?? null) === '--version') {
@@ -41,6 +49,7 @@ if (str_contains($html, 'FAIL_ENGINE')) {
     fwrite(STDOUT, json_encode([
         'status' => 'failed',
         'error' => ['code' => 'RESOURCE_DENIED', 'message' => 'synthetic denial'],
+        'engine_timings' => $engineTiming((hrtime(true) - $engineStartedAt) / 1_000_000),
     ])."\n");
     fwrite(STDERR, "pliego: RESOURCE_DENIED: synthetic denial\n");
     exit(1);
@@ -108,7 +117,7 @@ file_put_contents("{$artifacts}/pdf-structure.json", json_encode([
     ]],
 ], JSON_PRETTY_PRINT)."\n");
 
-fwrite(STDOUT, json_encode([
+$summary = [
     'status' => 'rendered',
     'engine' => 'pliego',
     'scene' => [
@@ -119,4 +128,19 @@ fwrite(STDOUT, json_encode([
     'artifacts' => $artifacts,
     'scene_artifact' => "{$artifacts}/scene.json",
     'pdf_structure' => "{$artifacts}/pdf-structure.json",
-])."\n");
+];
+if (str_contains($html, 'INVALID_ENGINE_TIMING_CONTRACT')) {
+    $summary['engine_timings'] = $engineTiming((hrtime(true) - $engineStartedAt) / 1_000_000);
+    $summary['engine_timings']['version'] = 2;
+} elseif (str_contains($html, 'INVALID_ENGINE_TIMINGS')) {
+    $summary['engine_timings'] = $engineTiming(-1);
+} elseif (str_contains($html, 'OUT_OF_BOUND_ENGINE_TIMINGS')) {
+    $summary['engine_timings'] = $engineTiming(60_000);
+} elseif (str_contains($html, 'LEGACY_ENGINE_TIMINGS')) {
+    $summary['phase_timings_ms'] = [
+        'total_engine' => (hrtime(true) - $engineStartedAt) / 1_000_000,
+    ];
+} elseif (!str_contains($html, 'NO_ENGINE_TIMINGS')) {
+    $summary['engine_timings'] = $engineTiming((hrtime(true) - $engineStartedAt) / 1_000_000);
+}
+fwrite(STDOUT, json_encode($summary)."\n");

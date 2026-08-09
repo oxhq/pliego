@@ -219,6 +219,46 @@ def main() -> None:
     }
     assert not errors(bundle)
 
+    timed = deepcopy(valid)
+    timed["samples"][0]["bridge_timings"] = {
+        "schema": "pliego.php-bridge-timings",
+        "version": 1,
+        "measurement_boundary": "render-invocation-before-timing-diagnostics",
+        "total_ms": 1.0,
+        "native_engine_ms": 0.25,
+        "bridge_overhead_ms": 0.75,
+        "setup_ms": {
+            "runtime_resolution": None,
+            "runtime_install": None,
+        },
+        "phases_ms": {
+            "laravel_setup": None,
+            "view_render": None,
+            "bundle_staging": 0.1,
+            "asset_manifest_hash": 0.1,
+            "process_launch": 0.1,
+            "stdin_stdout": 0.1,
+            "native_wait": 0.3,
+            "result_parse": 0.1,
+            "publication_copy": None,
+            "cleanup": 0.1,
+            "unattributed": 0.1,
+        },
+        "unavailable": {
+            "laravel_setup": "outside-this-render-path",
+            "view_render": "outside-this-render-path",
+            "runtime_resolution": "outside-this-render-path",
+            "runtime_install": "explicit-artisan-command",
+            "publication_copy": "native-engine-publishes-directly",
+        },
+        "notes": {"native_engine_ms": "contained within native_wait"},
+        "diagnostics": {"retained": True},
+    }
+    assert not errors(timed)
+    legacy_timed = deepcopy(valid)
+    legacy_timed["samples"][0]["bridge_timings_ms"] = {"php_bridge": 1.0}
+    assert not errors(legacy_timed)
+
     must_fail([valid], "oneOf")
     for field in ("rss_method", "output", "correctness", "failure"):
         broken = deepcopy(valid)
@@ -236,6 +276,21 @@ def main() -> None:
     broken = deepcopy(valid)
     broken["fixture"]["input_sha256"] = "unknown"
     must_fail(broken, "pattern")
+    broken = deepcopy(timed)
+    broken["samples"][0]["bridge_timings"]["native_engine_ms"] = -1
+    must_fail(broken, "minimum")
+    broken = deepcopy(timed)
+    broken["samples"][0]["bridge_timings"]["phases_ms"]["bundle_staging"] = 99
+    must_fail(broken, "bridge_timings.total_ms")
+    broken = deepcopy(timed)
+    broken["samples"][0]["bridge_timings"]["bridge_overhead_ms"] = 999
+    must_fail(broken, "bridge_timings.bridge_overhead_ms")
+    broken = deepcopy(timed)
+    broken["samples"][0]["bridge_timings"]["native_engine_ms"] = None
+    must_fail(broken, "bridge_timings.bridge_overhead_ms")
+    broken = deepcopy(timed)
+    broken["samples"][0]["bridge_timings"]["phases_ms"]["invented"] = 0
+    must_fail(broken, "unexpected property")
     broken = deepcopy(not_applicable)
     broken["samples"] = []
     must_fail(broken, "samples")

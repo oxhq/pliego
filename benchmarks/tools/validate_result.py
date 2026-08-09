@@ -18,6 +18,7 @@ Usage:
 from __future__ import annotations
 
 import json
+import math
 import re
 import statistics
 import sys
@@ -202,6 +203,34 @@ def validate_semantics(data: dict[str, Any], path: str, violations: list[Violati
             )
         if sample["ok"] != correctness["pass"]:
             violations.append(Violation(f"{sample_path}.ok", "must equal correctness.pass"))
+        bridge_timings = sample.get("bridge_timings")
+        if bridge_timings is not None:
+            phase_total = math.fsum(value for value in bridge_timings["phases_ms"].values() if value is not None)
+            if abs(phase_total - bridge_timings["total_ms"]) >= 0.02:
+                violations.append(
+                    Violation(
+                        f"{sample_path}.bridge_timings.total_ms",
+                        f"must equal the additive phase total {phase_total!r}",
+                    )
+                )
+            native_engine = bridge_timings["native_engine_ms"]
+            bridge_overhead = bridge_timings["bridge_overhead_ms"]
+            if (native_engine is None) != (bridge_overhead is None):
+                violations.append(
+                    Violation(
+                        f"{sample_path}.bridge_timings.bridge_overhead_ms",
+                        "must be null exactly when native_engine_ms is null",
+                    )
+                )
+            elif (
+                native_engine is not None and abs(native_engine + bridge_overhead - bridge_timings["total_ms"]) >= 0.002
+            ):
+                violations.append(
+                    Violation(
+                        f"{sample_path}.bridge_timings.bridge_overhead_ms",
+                        "must reconcile native_engine_ms to total_ms",
+                    )
+                )
         if output["published_pdf"] != failure["published_pdf"]:
             violations.append(
                 Violation(
