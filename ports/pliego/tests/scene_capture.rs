@@ -454,9 +454,7 @@ fn repeated_header_anchor_snapshot(link_inside_header: bool) -> Value {
     for fragment in fragments {
         if fragment["kind"] == "text" {
             fragment["depth"] = json!(3);
-        } else if link_inside_header &&
-            fragment["kind"] == "box" &&
-            fragment["tag_id"] == link_tag
+        } else if link_inside_header && fragment["kind"] == "box" && fragment["tag_id"] == link_tag
         {
             fragment["depth"] = json!(2);
         }
@@ -979,7 +977,9 @@ fn repeats_synthetic_anchor_link_when_the_anchor_is_inside_the_table_header() {
         unreachable!();
     };
     assert_eq!(
-        meta.semantics.as_ref().and_then(|semantics| semantics.label.as_deref()),
+        meta.semantics
+            .as_ref()
+            .and_then(|semantics| semantics.label.as_deref()),
         Some("repeated-table-header")
     );
 }
