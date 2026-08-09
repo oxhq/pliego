@@ -1,5 +1,6 @@
 # Based on https://github.com/CrowdStrike/glide-core/pull/1113
 name: Change Mirror Priorities
+description: Prefer the main Ubuntu archive over the Azure mirror on hosted runners.
 runs:
   using: "composite"
   steps:
