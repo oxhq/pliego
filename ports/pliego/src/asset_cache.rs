@@ -3,8 +3,8 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 use std::collections::{BTreeMap, HashSet};
-use std::fs::{self, OpenOptions};
-use std::io::Write as _;
+use std::fs::{self, File, Metadata, OpenOptions};
+use std::io::{Read as _, Write as _};
 use std::path::{Component, Path, PathBuf};
 
 use serde::Deserialize;
@@ -15,6 +15,26 @@ pub const CACHE_SCOPE: &str = "pliego.asset-cache.v1";
 const CACHE_DIRECTORY: &str = ".pliego-asset-cache-v1";
 const MAX_CACHE_ENTRIES: usize = 128;
 pub(crate) const MAX_CACHE_BYTES: u64 = 64 * 1024 * 1024;
+
+pub(crate) fn open_regular_file(path: &Path) -> std::io::Result<(File, Metadata)> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+
+    let file = options.open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "path is not a regular file",
+        ));
+    }
+    Ok((file, metadata))
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CacheResult {
@@ -315,8 +335,8 @@ enum CacheRead {
 }
 
 fn read_verified(path: &Path, expected: &str) -> Result<CacheRead, AssetError> {
-    let body = match fs::read(path) {
-        Ok(body) => body,
+    let (file, metadata) = match open_regular_file(path) {
+        Ok(opened) => opened,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Ok(CacheRead::Missing);
         },
@@ -328,6 +348,18 @@ fn read_verified(path: &Path, expected: &str) -> Result<CacheRead, AssetError> {
             ));
         },
     };
+    if metadata.len() > MAX_CACHE_BYTES {
+        return Ok(CacheRead::Invalid);
+    }
+    let mut file = file.take(MAX_CACHE_BYTES + 1);
+    let mut body = Vec::new();
+    file.read_to_end(&mut body).map_err(|error| {
+        AssetError::new(
+            "ASSET_CACHE_FAILED",
+            None,
+            format!("cannot read cached asset {}: {error}", path.display()),
+        )
+    })?;
     if body.len() as u64 > MAX_CACHE_BYTES {
         return Ok(CacheRead::Invalid);
     }
@@ -339,7 +371,7 @@ fn read_verified(path: &Path, expected: &str) -> Result<CacheRead, AssetError> {
 }
 
 fn read_source(path: &Path, url: &url::Url, expected: &str) -> Result<Vec<u8>, AssetError> {
-    let metadata = fs::metadata(path).map_err(|error| {
+    let (file, metadata) = open_regular_file(path).map_err(|error| {
         AssetError::new(
             "ASSET_NOT_FOUND",
             Some(url.to_string()),
@@ -356,7 +388,9 @@ fn read_source(path: &Path, url: &url::Url, expected: &str) -> Result<Vec<u8>, A
             format!("manifest asset exceeds the {MAX_CACHE_BYTES}-byte cache bound"),
         ));
     }
-    let body = fs::read(path).map_err(|error| {
+    let mut file = file.take(MAX_CACHE_BYTES + 1);
+    let mut body = Vec::new();
+    file.read_to_end(&mut body).map_err(|error| {
         AssetError::new(
             "ASSET_NOT_FOUND",
             Some(url.to_string()),
@@ -491,10 +525,51 @@ fn sha256_hex(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use std::ffi::CString;
     use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::ffi::OsStrExt as _;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{AssetStore, CacheResult};
+
+    #[cfg(unix)]
+    #[allow(unsafe_code)]
+    fn make_fifo(path: &std::path::Path) {
+        let path = CString::new(path.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn source_and_cached_special_files_are_rejected_without_blocking() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "pliego-asset-special-file-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir(&root).unwrap();
+        let fifo = root.join("asset.fifo");
+        make_fifo(&fifo);
+        let url = url::Url::parse("https://assets.test/asset.fifo").unwrap();
+
+        let source_error = super::read_source(&fifo, &url, &super::sha256_hex(b""))
+            .expect_err("a FIFO must not be accepted as a manifest asset");
+        assert_eq!(source_error.code, "ASSET_NOT_FOUND");
+        assert!(source_error.message.contains("not a regular file"));
+        let cache_error = match super::read_verified(&fifo, &super::sha256_hex(b"")) {
+            Err(error) => error,
+            _ => panic!("a FIFO must not be accepted as a cached asset"),
+        };
+        assert_eq!(cache_error.code, "ASSET_CACHE_FAILED");
+        assert!(cache_error.message.contains("not a regular file"));
+
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn shares_content_by_hash_and_rejects_mismatches() {

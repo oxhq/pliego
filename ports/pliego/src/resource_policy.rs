@@ -708,15 +708,12 @@ fn nearest_existing_ancestor(path: &Path) -> Option<PathBuf> {
 
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
 fn read_bounded_local_resource(path: &Path) -> Result<Vec<u8>, LocalResourceReadError> {
-    let metadata = path
-        .metadata()
+    let (file, metadata) = asset_cache::open_regular_file(path)
         .map_err(|error| LocalResourceReadError::Unavailable(error.to_string()))?;
     if metadata.len() > asset_cache::MAX_CACHE_BYTES {
         return Err(LocalResourceReadError::TooLarge);
     }
 
-    let file = std::fs::File::open(path)
-        .map_err(|error| LocalResourceReadError::Unavailable(error.to_string()))?;
     let mut file = std::io::Read::take(file, asset_cache::MAX_CACHE_BYTES + 1);
     let mut body = Vec::new();
     std::io::Read::read_to_end(&mut file, &mut body)
@@ -758,10 +755,67 @@ fn sha256_hex(bytes: &[u8]) -> String {
 
 #[cfg(all(test, not(any(target_os = "android", target_env = "ohos"))))]
 mod tests {
+    #[cfg(unix)]
+    use std::ffi::CString;
     use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::ffi::OsStrExt as _;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
+
+    #[cfg(unix)]
+    #[allow(unsafe_code)]
+    fn make_fifo(path: &Path) {
+        let path = CString::new(path.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn local_and_virtual_special_files_are_rejected_without_blocking() {
+        let sandbox = std::env::temp_dir().join(format!(
+            "pliego-resource-special-file-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let root = sandbox.join("root");
+        fs::create_dir_all(&root).unwrap();
+        let fifo = root.join("asset.fifo");
+        make_fifo(&fifo);
+        let virtual_url = url::Url::parse("https://virtual.test/asset.fifo").unwrap();
+        let policy = ResourcePolicy::resolve(
+            &ResourcePolicyConfig {
+                virtual_resources: vec![VirtualResourceSpec {
+                    url: virtual_url.clone(),
+                    path: fifo.clone(),
+                }],
+                ..ResourcePolicyConfig::default()
+            },
+            &root,
+        );
+        let request = |url| ResourceRequest {
+            method: "GET".into(),
+            url,
+            destination: "Unknown".into(),
+            referrer_url: None,
+            is_for_main_frame: false,
+            is_redirect: false,
+        };
+
+        for url in [url::Url::from_file_path(&fifo).unwrap(), virtual_url] {
+            let ResourcePolicyDecision::Fail(error) = policy.decide(&root, &request(url)) else {
+                panic!("a special-file resource must fail closed")
+            };
+            assert_eq!(error.code, "RESOURCE_NOT_FOUND");
+            assert!(error.reason.contains("not a regular file"));
+        }
+
+        fs::remove_dir_all(sandbox).unwrap();
+    }
 
     #[test]
     fn preserves_fail_closed_request_and_budget_contract() {
