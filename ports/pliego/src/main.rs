@@ -3,7 +3,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
-use std::cell::{OnceCell, RefCell};
+use std::cell::{Cell, OnceCell, RefCell};
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsString;
@@ -651,6 +651,9 @@ fn render(request: RenderRequest) -> Result<RenderOutcome, RenderError> {
     });
     set_document_pdf_environment(&mut environment, &document_pdf_path, "pending", None);
     record_session_artifact(artifacts.write_environment(&environment))?;
+    if let Some((code, message)) = resource_policy.aggregate_limit_error() {
+        return Err(fail_session(&artifacts, &document_pdf_path, code, &message));
+    }
     if let (Some(error), Some(manifest)) = (
         resource_policy.asset_error.as_ref(),
         resource_policy.asset_manifest.as_deref(),
@@ -742,6 +745,7 @@ fn render(request: RenderRequest) -> Result<RenderOutcome, RenderError> {
     let captured_policy_failures = Rc::clone(&policy_failures);
     let controlled_resources = Rc::new(RefCell::new(BTreeMap::new()));
     let captured_controlled_resources = Rc::clone(&controlled_resources);
+    let captured_controlled_resource_bytes = Rc::new(Cell::new(resource_policy.resident_bytes));
     let document_root = document.root().to_owned();
     let active_resource_policy = resource_policy.clone();
     let controlled_http_client = Rc::new(OnceCell::new());
@@ -778,6 +782,7 @@ fn render(request: RenderRequest) -> Result<RenderOutcome, RenderError> {
                         };
                         match retain_controlled_resource(
                             &mut captured_controlled_resources.borrow_mut(),
+                            &captured_controlled_resource_bytes,
                             request,
                             fetched,
                         ) {
@@ -817,6 +822,7 @@ fn render(request: RenderRequest) -> Result<RenderOutcome, RenderError> {
                 };
                 if let Err(failure) = retain_controlled_resource(
                     &mut captured_controlled_resources.borrow_mut(),
+                    &captured_controlled_resource_bytes,
                     request,
                     resource,
                 ) {
@@ -1446,10 +1452,14 @@ struct CompletedResource {
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
 fn retain_controlled_resource(
     resources: &mut BTreeMap<(String, String), ControlledResource>,
+    resident_bytes: &Cell<u64>,
     request: &servoshell::WebResourceRequest,
     resource: ControlledResource,
 ) -> Result<(), ResourcePolicyFailure> {
-    retain_shared_controlled_resource(resources, &resource_request(request), resource)
+    let mut bytes = resident_bytes.get();
+    retain_shared_controlled_resource(resources, &mut bytes, &resource_request(request), resource)?;
+    resident_bytes.set(bytes);
+    Ok(())
 }
 
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
@@ -2453,6 +2463,7 @@ fn render(_request: RenderRequest) -> Result<RenderOutcome, RenderError> {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
     use std::collections::{BTreeMap, HashMap};
     use std::ffi::OsString;
     use std::fs;
@@ -3164,13 +3175,18 @@ mod tests {
         };
         let key = ("GET".to_owned(), request.url.to_string());
         let mut resources = BTreeMap::new();
+        let resident_bytes = Cell::new(0);
 
-        retain_controlled_resource(&mut resources, &request, original.clone()).unwrap();
-        retain_controlled_resource(&mut resources, &request, original.clone()).unwrap();
+        retain_controlled_resource(&mut resources, &resident_bytes, &request, original.clone())
+            .unwrap();
+        retain_controlled_resource(&mut resources, &resident_bytes, &request, original.clone())
+            .unwrap();
         assert_eq!(resources.get(&key), Some(&original));
+        assert_eq!(resident_bytes.get(), original.body.len() as u64);
 
         let failure = retain_controlled_resource(
             &mut resources,
+            &resident_bytes,
             &request,
             ControlledResource {
                 body: b"body { color: red; }".to_vec(),

@@ -73,7 +73,10 @@ pub struct AssetStore {
 }
 
 impl AssetStore {
-    pub fn load(path: &Path) -> Result<Self, AssetError> {
+    pub(crate) fn load_with_budget(
+        path: &Path,
+        max_resident_bytes: u64,
+    ) -> Result<Self, AssetError> {
         let manifest = path.canonicalize().map_err(|error| {
             AssetError::new(
                 "ASSET_MANIFEST_INVALID",
@@ -146,6 +149,7 @@ impl AssetStore {
         let mut hits = 0;
         let mut misses = 0;
         let mut invalidations = 0;
+        let mut resident_bytes = 0u64;
         for entry in parsed.assets {
             let url = url::Url::parse(&entry.url).map_err(|error| {
                 AssetError::new(
@@ -199,6 +203,18 @@ impl AssetStore {
                     (body, CacheResult::Invalidated)
                 },
             };
+            let next_resident_bytes = resident_bytes
+                .checked_add(body.len() as u64)
+                .filter(|bytes| *bytes <= max_resident_bytes)
+                .ok_or_else(|| {
+                    AssetError::new(
+                        "ASSET_CACHE_LIMIT",
+                        Some(url.to_string()),
+                        format!(
+                            "manifest assets exceed the {max_resident_bytes}-byte resident allowance"
+                        ),
+                    )
+                })?;
             match cache_result {
                 CacheResult::Hit => hits += 1,
                 CacheResult::Miss => misses += 1,
@@ -213,6 +229,7 @@ impl AssetStore {
                     cache_result,
                 },
             );
+            resident_bytes = next_resident_bytes;
         }
         let evictions = prune_cache(&cache_directory)?;
         Ok(Self {
@@ -260,6 +277,13 @@ impl AssetStore {
         self.assets
             .values()
             .map(|asset| (asset.url.as_str(), asset.content_hash.as_str()))
+    }
+
+    pub(crate) fn resident_bytes(&self) -> u64 {
+        self.assets
+            .values()
+            .map(|asset| asset.body.len() as u64)
+            .sum()
     }
 }
 
@@ -599,7 +623,7 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        let first = AssetStore::load(&manifest).unwrap();
+        let first = AssetStore::load_with_budget(&manifest, super::MAX_CACHE_BYTES).unwrap();
         assert_eq!(
             first
                 .get(&url::Url::parse("https://assets.test/a.svg").unwrap())
@@ -616,7 +640,7 @@ mod tests {
         );
         assert_eq!(first.artifact()["cache"]["hits"], 1);
         assert_eq!(first.artifact()["cache"]["misses"], 1);
-        let second = AssetStore::load(&manifest).unwrap();
+        let second = AssetStore::load_with_budget(&manifest, super::MAX_CACHE_BYTES).unwrap();
         assert!(
             second
                 .assets
@@ -627,7 +651,7 @@ mod tests {
         assert_eq!(second.artifact()["cache"]["misses"], 0);
 
         fs::write(root.join(super::CACHE_DIRECTORY).join(&digest), b"corrupt").unwrap();
-        let recovered = AssetStore::load(&manifest).unwrap();
+        let recovered = AssetStore::load_with_budget(&manifest, super::MAX_CACHE_BYTES).unwrap();
         assert_eq!(recovered.artifact()["cache"]["hits"], 1);
         assert_eq!(recovered.artifact()["cache"]["invalidations"], 1);
 
@@ -647,7 +671,7 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        let changed = AssetStore::load(&manifest).unwrap();
+        let changed = AssetStore::load_with_budget(&manifest, super::MAX_CACHE_BYTES).unwrap();
         assert_eq!(changed.artifact()["cache"]["hits"], 1);
         assert_eq!(changed.artifact()["cache"]["misses"], 1);
         assert!(
@@ -666,7 +690,7 @@ mod tests {
             ),
         )
         .unwrap();
-        let error = AssetStore::load(&manifest).unwrap_err();
+        let error = AssetStore::load_with_budget(&manifest, super::MAX_CACHE_BYTES).unwrap_err();
         assert_eq!(error.code, "ASSET_HASH_MISMATCH");
         assert_eq!(error.expected, Some(format!("sha256:{bad_digest}")));
         assert_ne!(error.expected, error.actual);

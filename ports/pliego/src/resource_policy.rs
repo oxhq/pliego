@@ -50,6 +50,8 @@ pub(crate) struct ResourcePolicy {
     pub(crate) asset_manifest: Option<PathBuf>,
     pub(crate) assets: Option<asset_cache::AssetStore>,
     pub(crate) asset_error: Option<asset_cache::AssetError>,
+    pub(crate) resident_bytes: u64,
+    aggregate_limit: Option<u64>,
     pub(crate) timeout_ms: u64,
 }
 
@@ -62,6 +64,8 @@ impl Default for ResourcePolicy {
             asset_manifest: None,
             assets: None,
             asset_error: None,
+            resident_bytes: 0,
+            aggregate_limit: None,
             timeout_ms: DEFAULT_RESOURCE_TIMEOUT_MS,
         }
     }
@@ -78,6 +82,7 @@ pub(crate) struct VirtualResource {
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
 #[derive(Clone, Debug)]
 pub(crate) enum LocalResourceReadError {
+    AggregateLimit,
     Unavailable(String),
     TooLarge,
 }
@@ -291,6 +296,16 @@ pub(crate) enum ResourcePolicyDecision {
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
 impl ResourcePolicy {
     pub(crate) fn resolve(config: &ResourcePolicyConfig, document_root: &Path) -> Self {
+        Self::resolve_with_budget(config, document_root, asset_cache::MAX_CACHE_BYTES)
+    }
+
+    pub(crate) fn resolve_with_budget(
+        config: &ResourcePolicyConfig,
+        document_root: &Path,
+        max_resident_bytes: u64,
+    ) -> Self {
+        let mut resident_bytes = 0u64;
+        let mut aggregate_limit_exceeded = false;
         let virtual_resources = config
             .virtual_resources
             .iter()
@@ -300,9 +315,24 @@ impl ResourcePolicy {
                 } else {
                     document_root.join(&resource.path)
                 };
+                let body = if aggregate_limit_exceeded {
+                    Err(LocalResourceReadError::AggregateLimit)
+                } else {
+                    read_bounded_local_resource(&path).and_then(|body| {
+                        let next = resident_bytes
+                            .checked_add(body.len() as u64)
+                            .filter(|bytes| *bytes <= max_resident_bytes)
+                            .ok_or(LocalResourceReadError::AggregateLimit)?;
+                        resident_bytes = next;
+                        Ok(body)
+                    })
+                };
+                if matches!(body, Err(LocalResourceReadError::AggregateLimit)) {
+                    aggregate_limit_exceeded = true;
+                }
                 VirtualResource {
                     url: resource.url.clone(),
-                    body: read_bounded_local_resource(&path),
+                    body,
                     content_type: resource_content_type(&resource.url),
                 }
             })
@@ -314,21 +344,38 @@ impl ResourcePolicy {
                 document_root.join(path)
             }
         });
-        let (assets, asset_error) = match asset_manifest.as_deref() {
-            Some(path) => match asset_cache::AssetStore::load(path) {
+        let (assets, asset_error) = match (aggregate_limit_exceeded, asset_manifest.as_deref()) {
+            (false, Some(path)) => match asset_cache::AssetStore::load_with_budget(
+                path,
+                max_resident_bytes.saturating_sub(resident_bytes),
+            ) {
                 Ok(assets) => (Some(assets), None),
                 Err(error) => (None, Some(error)),
             },
-            None => (None, None),
+            _ => (None, None),
         };
+        if let Some(assets) = &assets {
+            resident_bytes += assets.resident_bytes();
+        }
         Self {
             allowed_http_roots: config.allowed_http_roots.clone(),
             virtual_resources,
             asset_manifest,
             assets,
             asset_error,
+            resident_bytes,
+            aggregate_limit: aggregate_limit_exceeded.then_some(max_resident_bytes),
             timeout_ms: config.timeout_ms,
         }
+    }
+
+    pub(crate) fn aggregate_limit_error(&self) -> Option<(&'static str, String)> {
+        self.aggregate_limit.map(|max_resident_bytes| {
+            (
+                "RESOURCE_DENIED",
+                aggregate_limit_message(max_resident_bytes),
+            )
+        })
     }
 
     pub(crate) fn decide(
@@ -383,6 +430,13 @@ impl ResourcePolicy {
                 Ok(body) => {
                     synthesize(body, resource.content_type, ResourceSource::VirtualResource)
                 },
+                Err(LocalResourceReadError::AggregateLimit) => failure(
+                    "RESOURCE_DENIED",
+                    "denied",
+                    aggregate_limit_message(
+                        self.aggregate_limit.unwrap_or(asset_cache::MAX_CACHE_BYTES),
+                    ),
+                ),
                 Err(LocalResourceReadError::Unavailable(reason)) => failure(
                     "RESOURCE_NOT_FOUND",
                     "not_found",
@@ -418,6 +472,11 @@ impl ResourcePolicy {
                                 &body,
                                 resource_content_type(&request.url),
                                 ResourceSource::DocumentRoot,
+                            ),
+                            Err(LocalResourceReadError::AggregateLimit) => failure(
+                                "RESOURCE_DENIED",
+                                "denied",
+                                aggregate_limit_message(asset_cache::MAX_CACHE_BYTES),
                             ),
                             Err(LocalResourceReadError::Unavailable(error)) => failure(
                                 "RESOURCE_NOT_FOUND",
@@ -670,23 +729,42 @@ pub(crate) fn classify_controlled_http_status(
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
 pub(crate) fn retain_controlled_resource(
     resources: &mut std::collections::BTreeMap<(String, String), ControlledResource>,
+    resident_bytes: &mut u64,
     request: &ResourceRequest,
     resource: ControlledResource,
 ) -> Result<(), ResourcePolicyFailure> {
     let key = (request.method.clone(), request.url.to_string());
-    if resources
-        .get(&key)
-        .is_some_and(|existing| existing != &resource)
-    {
-        return Err(ResourcePolicyFailure::new(
-            request,
-            "RESOURCE_CHANGED_DURING_RENDER",
-            "changed",
-            "controlled URL returned different bytes during one render",
-        ));
+    if let Some(existing) = resources.get(&key) {
+        if existing != &resource {
+            return Err(ResourcePolicyFailure::new(
+                request,
+                "RESOURCE_CHANGED_DURING_RENDER",
+                "changed",
+                "controlled URL returned different bytes during one render",
+            ));
+        }
+        return Ok(());
     }
+
+    let next_resident_bytes = resident_bytes
+        .checked_add(resource.body.len() as u64)
+        .filter(|bytes| *bytes <= asset_cache::MAX_CACHE_BYTES)
+        .ok_or_else(|| {
+            ResourcePolicyFailure::new(
+                request,
+                "RESOURCE_DENIED",
+                "denied",
+                aggregate_limit_message(asset_cache::MAX_CACHE_BYTES),
+            )
+        })?;
     resources.insert(key, resource);
+    *resident_bytes = next_resident_bytes;
     Ok(())
+}
+
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+fn aggregate_limit_message(max_resident_bytes: u64) -> String {
+    format!("resident resources exceed the {max_resident_bytes}-byte aggregate bound")
 }
 
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
@@ -982,11 +1060,26 @@ mod tests {
             body: b"window.stable = true;".to_vec(),
         };
         let mut resources = std::collections::BTreeMap::new();
-        retain_controlled_resource(&mut resources, &request, original.clone()).unwrap();
-        retain_controlled_resource(&mut resources, &request, original.clone()).unwrap();
+        let mut resident_bytes = 0;
+        retain_controlled_resource(
+            &mut resources,
+            &mut resident_bytes,
+            &request,
+            original.clone(),
+        )
+        .unwrap();
+        retain_controlled_resource(
+            &mut resources,
+            &mut resident_bytes,
+            &request,
+            original.clone(),
+        )
+        .unwrap();
+        assert_eq!(resident_bytes, original.body.len() as u64);
 
         let error = retain_controlled_resource(
             &mut resources,
+            &mut resident_bytes,
             &request,
             ControlledResource {
                 body: b"window.stable = false;".to_vec(),

@@ -146,9 +146,7 @@ impl DocumentSession {
             .ok_or_else(|| SessionError::new("INVALID_REQUEST", "document has no bundle root"))?
             .to_path_buf();
         let resource_policy = ResourcePolicy::resolve(&resources, &bundle_root);
-        if let Some(error) = resource_policy.asset_error.as_ref() {
-            return Err(SessionError::new(error.code, error.message.clone()));
-        }
+        validate_resource_policy(&resource_policy)?;
         configure_for_process(page).map_err(|_| {
             SessionError::new(
                 "LAYOUT_CONFIGURATION_FAILED",
@@ -187,9 +185,11 @@ impl DocumentSession {
         let user_content_manager = Rc::new(UserContentManager::new(&servo));
         user_content_manager
             .add_script(Rc::new(UserScript::from(readiness.document_start_script())));
+        let controlled_resource_bytes = Cell::new(resource_policy.resident_bytes);
         let delegate = Rc::new(DocumentDelegate {
             bundle_root,
             resource_policy,
+            controlled_resource_bytes,
             ..Default::default()
         });
         let input_url = Url::from_file_path(&input).map_err(|_| {
@@ -451,6 +451,16 @@ fn validate_host_font_policy(
     ))
 }
 
+fn validate_resource_policy(policy: &ResourcePolicy) -> Result<(), SessionError> {
+    if let Some(error) = policy.asset_error.as_ref() {
+        return Err(SessionError::new(error.code, error.message.clone()));
+    }
+    if let Some((code, message)) = policy.aggregate_limit_error() {
+        return Err(SessionError::new(code, message));
+    }
+    Ok(())
+}
+
 fn stable_render_timeout(readiness: ReadinessPolicy) -> Result<Duration, SessionError> {
     TIMEOUT
         .checked_add(Duration::from_millis(readiness.timeout_ms))
@@ -463,6 +473,7 @@ struct DocumentDelegate {
     resource_policy: ResourcePolicy,
     controlled_http_client: OnceCell<net::connector::ServoClient>,
     controlled_resources: RefCell<BTreeMap<(String, String), ControlledResource>>,
+    controlled_resource_bytes: Cell<u64>,
     crashed: RefCell<Option<String>>,
     frame_ready: Cell<bool>,
     load_complete: Cell<bool>,
@@ -520,11 +531,7 @@ impl WebViewDelegate for DocumentDelegate {
                                 .map(str::to_owned),
                             body: response.body.clone(),
                         };
-                        if let Err(failure) = retain_controlled_resource(
-                            &mut self.controlled_resources.borrow_mut(),
-                            &request,
-                            retained,
-                        ) {
+                        if let Err(failure) = self.retain_controlled(&request, retained) {
                             self.cancel_resource(load, failure);
                             return;
                         }
@@ -559,11 +566,7 @@ impl WebViewDelegate for DocumentDelegate {
                     content_type: Some(content_type.to_owned()),
                     body: body.clone(),
                 };
-                if let Err(failure) = retain_controlled_resource(
-                    &mut self.controlled_resources.borrow_mut(),
-                    &request,
-                    retained,
-                ) {
+                if let Err(failure) = self.retain_controlled(&request, retained) {
                     self.cancel_resource(load, failure);
                     return;
                 }
@@ -583,6 +586,22 @@ impl WebViewDelegate for DocumentDelegate {
 }
 
 impl DocumentDelegate {
+    fn retain_controlled(
+        &self,
+        request: &ResourceRequest,
+        resource: ControlledResource,
+    ) -> Result<(), ResourcePolicyFailure> {
+        let mut bytes = self.controlled_resource_bytes.get();
+        retain_controlled_resource(
+            &mut self.controlled_resources.borrow_mut(),
+            &mut bytes,
+            request,
+            resource,
+        )?;
+        self.controlled_resource_bytes.set(bytes);
+        Ok(())
+    }
+
     fn cancel_resource(&self, load: WebResourceLoad, failure: ResourcePolicyFailure) {
         let url = load.request().url.clone();
         if self.resource_failure.borrow().is_none() {
@@ -594,6 +613,7 @@ impl DocumentDelegate {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
     use std::fs;
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
@@ -609,10 +629,14 @@ mod tests {
     use pliego::{DocumentScene, Operation, Page, Size};
     use sha2::{Digest, Sha256};
 
-    use super::super::resource_policy::{ResourceAccounting, ResourceSource, VirtualResourceSpec};
+    use super::super::resource_policy::{
+        ControlledResource, ResourceAccounting, ResourcePolicy, ResourceRequest, ResourceSource,
+        VirtualResourceSpec,
+    };
     use super::{
-        DocumentSession, ReadinessPolicy, RenderEnvironment, ResourcePolicyConfig, SessionError,
-        stable_render_timeout, validate_host_font_policy,
+        DocumentDelegate, DocumentSession, ReadinessPolicy, RenderEnvironment,
+        ResourcePolicyConfig, SessionError, stable_render_timeout, validate_host_font_policy,
+        validate_resource_policy,
     };
 
     const ISOLATED_CASE_ENV: &str = "PLIEGO_DOCUMENT_SESSION_FIXTURE";
@@ -682,6 +706,101 @@ mod tests {
             "Servo selected host font host:Fixture Sans while host fonts were disabled"
         );
         assert!(validate_host_font_policy(&capture, true).is_ok());
+    }
+
+    #[test]
+    fn virtual_and_asset_bodies_fail_before_a_document_outcome() {
+        let bundle = TempBundle::new("aggregate-limit");
+        bundle.write("virtual.js", b"one");
+        bundle.write("a.js", b"two");
+        bundle.write("b.js", b"tri");
+        let digest = |body: &[u8]| content_address(body)[7..].to_owned();
+        bundle.write(
+            "assets.json",
+            serde_json::to_vec(&serde_json::json!({
+                "schema": super::super::asset_cache::MANIFEST_SCHEMA,
+                "version": 1,
+                "assets": [
+                    {
+                        "url": "https://assets.test/a.js",
+                        "path": "a.js",
+                        "sha256": digest(b"two"),
+                    },
+                    {
+                        "url": "https://assets.test/b.js",
+                        "path": "b.js",
+                        "sha256": digest(b"tri"),
+                    },
+                ],
+            }))
+            .unwrap(),
+        );
+        let policy = ResourcePolicy::resolve_with_budget(
+            &ResourcePolicyConfig {
+                virtual_resources: vec![VirtualResourceSpec {
+                    url: url::Url::parse("pliego://host/virtual.js").unwrap(),
+                    path: PathBuf::from("virtual.js"),
+                }],
+                asset_manifest: Some(PathBuf::from("assets.json")),
+                ..ResourcePolicyConfig::default()
+            },
+            &bundle.0,
+            8,
+        );
+
+        let error = validate_resource_policy(&policy)
+            .expect_err("aggregate overflow must fail before a DocumentOutcome exists");
+        assert_eq!(error.code, "ASSET_CACHE_LIMIT");
+        assert!(error.message.contains("5-byte resident allowance"));
+        assert_eq!(policy.resident_bytes, 3);
+    }
+
+    #[test]
+    fn controlled_clone_fails_before_a_document_outcome_and_repeat_is_free() {
+        let preloaded_bytes = super::super::asset_cache::MAX_CACHE_BYTES - 2;
+        let delegate = DocumentDelegate {
+            controlled_resource_bytes: Cell::new(preloaded_bytes),
+            ..Default::default()
+        };
+        let request = |name: &str| ResourceRequest {
+            method: "GET".into(),
+            url: url::Url::parse(&format!("https://example.test/{name}.js")).unwrap(),
+            destination: "Script".into(),
+            referrer_url: None,
+            is_for_main_frame: false,
+            is_redirect: false,
+        };
+        let first = ControlledResource {
+            status: 200,
+            content_type: Some("text/javascript".into()),
+            body: vec![0],
+        };
+        delegate
+            .retain_controlled(&request("one"), first.clone())
+            .unwrap();
+        delegate.retain_controlled(&request("one"), first).unwrap();
+        assert_eq!(
+            delegate.controlled_resource_bytes.get(),
+            preloaded_bytes + 1
+        );
+
+        let error = delegate
+            .retain_controlled(
+                &request("two"),
+                ControlledResource {
+                    status: 200,
+                    content_type: Some("text/javascript".into()),
+                    body: vec![0; 2],
+                },
+            )
+            .expect_err("a retained clone must not cross the remaining aggregate budget");
+        assert_eq!(error.code, "RESOURCE_DENIED");
+        assert_eq!(error.status, "denied");
+        assert_eq!(delegate.controlled_resources.borrow().len(), 1);
+        assert_eq!(
+            delegate.controlled_resource_bytes.get(),
+            preloaded_bytes + 1
+        );
     }
 
     const INVOICE_INPUT: &str =
