@@ -98,6 +98,8 @@ timingExpect(
 foreach ([
     'INVALID_ENGINE_TIMINGS' => 'engine-total-invalid',
     'OUT_OF_BOUND_ENGINE_TIMINGS' => 'engine-total-exceeds-render-boundary',
+    'INVALID_ENGINE_TIMING_CONTRACT' => 'engine-timing-contract-invalid',
+    'LEGACY_ENGINE_TIMINGS' => 'engine-total-not-reported',
 ] as $marker => $reason) {
     $slug = strtolower($marker);
     $invalid = $renderer->render(

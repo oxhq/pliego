@@ -495,20 +495,23 @@ final class CliRenderer
         $attributedNanoseconds = array_sum($phaseNanoseconds)
             + ($context['laravel_setup_ns'] ?? 0)
             + ($context['view_render_ns'] ?? 0);
-        $nativePhaseTimings = is_array($metadata['phase_timings_ms'] ?? null)
-            ? $metadata['phase_timings_ms']
-            : [];
-        $nativeEngineTimings = is_array($metadata['engine_timings'] ?? null)
-            ? $metadata['engine_timings']
-            : [];
+        $nativeEngineTimings = $metadata['engine_timings'] ?? null;
         $nativeEngineUnavailable = null;
-        if (array_key_exists('total_ms', $nativeEngineTimings)) {
-            $nativeEngineMilliseconds = $nativeEngineTimings['total_ms'];
-        } elseif (array_key_exists('total_engine', $nativePhaseTimings)) {
-            $nativeEngineMilliseconds = $nativePhaseTimings['total_engine'];
-        } else {
+        if (!array_key_exists('engine_timings', $metadata)) {
             $nativeEngineMilliseconds = null;
             $nativeEngineUnavailable = 'engine-total-not-reported';
+        } elseif (
+            !is_array($nativeEngineTimings)
+            || ($nativeEngineTimings['schema'] ?? null) !== 'pliego.engine-timings'
+            || ($nativeEngineTimings['version'] ?? null) !== 1
+            || ($nativeEngineTimings['unit'] ?? null) !== 'milliseconds'
+            || ($nativeEngineTimings['measurement_boundary'] ?? null) !== 'before_timings_artifact_write'
+            || !array_key_exists('total_ms', $nativeEngineTimings)
+        ) {
+            $nativeEngineMilliseconds = null;
+            $nativeEngineUnavailable = 'engine-timing-contract-invalid';
+        } else {
+            $nativeEngineMilliseconds = $nativeEngineTimings['total_ms'];
         }
         if ($nativeEngineUnavailable === null) {
             if (

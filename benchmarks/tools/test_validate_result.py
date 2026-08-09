@@ -255,6 +255,9 @@ def main() -> None:
         "diagnostics": {"retained": True},
     }
     assert not errors(timed)
+    legacy_timed = deepcopy(valid)
+    legacy_timed["samples"][0]["bridge_timings_ms"] = {"php_bridge": 1.0}
+    assert not errors(legacy_timed)
 
     must_fail([valid], "oneOf")
     for field in ("rss_method", "output", "correctness", "failure"):
@@ -276,6 +279,15 @@ def main() -> None:
     broken = deepcopy(timed)
     broken["samples"][0]["bridge_timings"]["native_engine_ms"] = -1
     must_fail(broken, "minimum")
+    broken = deepcopy(timed)
+    broken["samples"][0]["bridge_timings"]["phases_ms"]["bundle_staging"] = 99
+    must_fail(broken, "bridge_timings.total_ms")
+    broken = deepcopy(timed)
+    broken["samples"][0]["bridge_timings"]["bridge_overhead_ms"] = 999
+    must_fail(broken, "bridge_timings.bridge_overhead_ms")
+    broken = deepcopy(timed)
+    broken["samples"][0]["bridge_timings"]["native_engine_ms"] = None
+    must_fail(broken, "bridge_timings.bridge_overhead_ms")
     broken = deepcopy(timed)
     broken["samples"][0]["bridge_timings"]["phases_ms"]["invented"] = 0
     must_fail(broken, "unexpected property")
