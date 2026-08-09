@@ -98,7 +98,12 @@ jobs:
 
       - name: Test unmodified Chart.js twice in fresh sessions
         run: |
-          fixture="$PWD/ports/pliego/tests/fixtures/chartjs-report"
+          source_fixture="$PWD/ports/pliego/tests/fixtures/chartjs-report"
+          fixture="$RUNNER_TEMP/pliego-document-session-chartjs"
+          font="$PWD/components/fonts/tests/support/dejavu-fonts-ttf-2.37/ttf/DejaVuSans.ttf"
+          test ! -e "$fixture"
+          cp -a "$source_fixture" "$fixture"
+          cp "$font" "$fixture/ReportSans.ttf"
           npm ci --prefix "$fixture" --ignore-scripts --no-audit --no-fund
           PLIEGO_DOCUMENT_SESSION_CHARTJS_INPUT="$fixture/index.html" \
             cargo test -p pliego --test document_session \
