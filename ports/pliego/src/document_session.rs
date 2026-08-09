@@ -31,13 +31,13 @@ use servo::{
 use url::Url;
 
 use super::engine::RenderEnvironment;
+use super::owned_resource_store::{OwnedResource, OwnedResourceStore, decode_bounded_data_url};
 use super::readiness::{self, Readiness, ReadinessPolicy};
 use super::render_environment::{apply_timezone, unexpected_host_font};
 use super::resource_policy::{
     ControlledResource, MAX_RESOURCE_TIMEOUT_MS, ResourceAccounting, ResourceEvidence,
     ResourcePolicy, ResourcePolicyConfig, ResourcePolicyDecision, ResourcePolicyFailure,
-    ResourceRequest, create_controlled_http_client, fetch_controlled_http,
-    retain_controlled_resource,
+    ResourceRequest, ResourceSource, create_controlled_http_client, fetch_controlled_http,
 };
 
 const TIMEOUT: Duration = Duration::from_secs(30);
@@ -49,6 +49,7 @@ pub(crate) struct SessionError {
     pub(crate) resource_failure: Option<ResourcePolicyFailure>,
     pub(crate) resources: Vec<ResourceEvidence>,
     pub(crate) resource_accounting: ResourceAccounting,
+    pub(crate) resource_store: OwnedResourceStore,
 }
 
 impl SessionError {
@@ -59,6 +60,7 @@ impl SessionError {
             resource_failure: None,
             resources: Vec::new(),
             resource_accounting: ResourceAccounting::default(),
+            resource_store: OwnedResourceStore::default(),
         }
     }
 
@@ -69,16 +71,22 @@ impl SessionError {
             resource_failure: Some(failure),
             resources: Vec::new(),
             resource_accounting: ResourceAccounting::default(),
+            resource_store: OwnedResourceStore::default(),
         }
     }
 
-    fn with_resources(mut self, resources: Vec<ResourceEvidence>) -> Self {
+    fn with_resources(
+        mut self,
+        resources: Vec<ResourceEvidence>,
+        resource_store: OwnedResourceStore,
+    ) -> Self {
         self.resource_accounting = ResourceAccounting::from_evidence(&resources);
         // Successful/delegated rows stay in `resources`; the separate first failure is one request.
         if self.resource_failure.is_some() {
             self.resource_accounting = self.resource_accounting.with_failure();
         }
         self.resources = resources;
+        self.resource_store = resource_store;
         self
     }
 }
@@ -99,6 +107,7 @@ pub(crate) struct DocumentOutcome {
     pub(crate) readiness: serde_json::Value,
     pub(crate) resources: Vec<ResourceEvidence>,
     pub(crate) resource_accounting: ResourceAccounting,
+    pub(crate) resource_store: OwnedResourceStore,
 }
 
 pub(crate) struct DocumentSession {
@@ -185,11 +194,11 @@ impl DocumentSession {
         let user_content_manager = Rc::new(UserContentManager::new(&servo));
         user_content_manager
             .add_script(Rc::new(UserScript::from(readiness.document_start_script())));
-        let controlled_resource_bytes = Cell::new(resource_policy.resident_bytes);
+        let resource_store = RefCell::new(OwnedResourceStore::new(resource_policy.resident_bytes));
         let delegate = Rc::new(DocumentDelegate {
             bundle_root,
             resource_policy,
-            controlled_resource_bytes,
+            resource_store,
             ..Default::default()
         });
         let input_url = Url::from_file_path(&input).map_err(|_| {
@@ -219,8 +228,12 @@ impl DocumentSession {
     }
 
     pub(crate) fn render(self) -> Result<DocumentOutcome, SessionError> {
-        self.render_inner()
-            .map_err(|error| error.with_resources(self.delegate.resources.borrow().clone()))
+        self.render_inner().map_err(|error| {
+            error.with_resources(
+                self.delegate.resources.borrow().clone(),
+                self.delegate.resource_store.borrow().clone(),
+            )
+        })
     }
 
     fn render_inner(&self) -> Result<DocumentOutcome, SessionError> {
@@ -260,8 +273,11 @@ impl DocumentSession {
                 "Servo did not expose a retained layout snapshot",
             )
         })?;
-        let capture = capture_document_scene(snapshot.as_bytes(), |_| None)
-            .map_err(|error| SessionError::new("SCENE_CAPTURE_FAILED", error.to_string()))?;
+        let capture = {
+            let resources = self.delegate.resource_store.borrow();
+            capture_document_scene(snapshot.as_bytes(), |url| resources.resolve_url(url))
+        }
+        .map_err(|error| SessionError::new("SCENE_CAPTURE_FAILED", error.to_string()))?;
         capture
             .scene
             .validate()
@@ -311,22 +327,36 @@ impl DocumentSession {
                 )
             })
             .collect::<BTreeMap<_, _>>();
-        let pdf = render_document_pdf(
-            &capture.scene,
-            |font| {
-                let instance = instances.get(font)?;
-                Some(PdfFontResource {
-                    bytes: decoded_resources.get(instance.resource.as_str())?,
-                    face_index: instance.face_index,
-                    variations: variations.get(font)?,
-                    synthetic_bold: instance.synthetic_bold,
-                })
-            },
-            |_| None,
-        )
+        let image_resources = capture
+            .embedded_image_resources
+            .iter()
+            .map(|resource| (resource.resource.as_str(), resource.png.as_slice()))
+            .collect::<BTreeMap<_, _>>();
+        let pdf = {
+            let resources = self.delegate.resource_store.borrow();
+            render_document_pdf(
+                &capture.scene,
+                |font| {
+                    let instance = instances.get(font)?;
+                    Some(PdfFontResource {
+                        bytes: decoded_resources.get(instance.resource.as_str())?,
+                        face_index: instance.face_index,
+                        variations: variations.get(font)?,
+                        synthetic_bold: instance.synthetic_bold,
+                    })
+                },
+                |image| {
+                    image_resources
+                        .get(image)
+                        .copied()
+                        .or_else(|| resources.resolve_content(image))
+                },
+            )
+        }
         .map_err(|error| SessionError::new("DOCUMENT_PDF_GENERATION_FAILED", error.to_string()))?;
 
         let resources = self.delegate.resources.borrow().clone();
+        let resource_store = self.delegate.resource_store.borrow().clone();
         Ok(DocumentOutcome {
             capture,
             pdf,
@@ -335,6 +365,7 @@ impl DocumentSession {
             readiness,
             resource_accounting: ResourceAccounting::from_evidence(&resources),
             resources,
+            resource_store,
         })
     }
 
@@ -472,8 +503,7 @@ struct DocumentDelegate {
     bundle_root: PathBuf,
     resource_policy: ResourcePolicy,
     controlled_http_client: OnceCell<net::connector::ServoClient>,
-    controlled_resources: RefCell<BTreeMap<(String, String), ControlledResource>>,
-    controlled_resource_bytes: Cell<u64>,
+    resource_store: RefCell<OwnedResourceStore>,
     crashed: RefCell<Option<String>>,
     frame_ready: Cell<bool>,
     load_complete: Cell<bool>,
@@ -507,10 +537,47 @@ impl WebViewDelegate for DocumentDelegate {
             is_redirect: load.request().is_redirect,
         };
         match self.resource_policy.decide(&self.bundle_root, &request) {
-            ResourcePolicyDecision::Allow { source } => self
-                .resources
-                .borrow_mut()
-                .push(ResourceEvidence::delegated(request, source)),
+            ResourcePolicyDecision::Allow { source } => {
+                if source != ResourceSource::DataUrl {
+                    self.resources
+                        .borrow_mut()
+                        .push(ResourceEvidence::delegated(request, source));
+                    return;
+                }
+                let resource = match decode_bounded_data_url(&request) {
+                    Ok(resource) => resource,
+                    Err(failure) => {
+                        self.cancel_resource(load, failure);
+                        return;
+                    },
+                };
+                let mut headers = HeaderMap::new();
+                let content_type = resource.content_type.as_deref().unwrap_or_default();
+                let content_type = match HeaderValue::from_str(content_type) {
+                    Ok(content_type) => content_type,
+                    Err(error) => {
+                        self.cancel_resource(
+                            load,
+                            ResourcePolicyFailure::new(
+                                &request,
+                                "RESOURCE_DATA_URL_INVALID",
+                                "invalid",
+                                format!("data URL has an invalid content type: {error}"),
+                            ),
+                        );
+                        return;
+                    },
+                };
+                headers.insert(CONTENT_TYPE, content_type);
+                self.serve_owned_resource(
+                    load,
+                    request,
+                    source,
+                    resource,
+                    headers,
+                    http::StatusCode::OK,
+                );
+            },
             ResourcePolicyDecision::FetchHttp => {
                 let client = self
                     .controlled_http_client
@@ -522,36 +589,23 @@ impl WebViewDelegate for DocumentDelegate {
                     self.resource_policy.timeout_ms,
                 ) {
                     Ok(response) => {
-                        let retained = ControlledResource {
+                        let resource = ControlledResource {
                             status: response.status.as_u16(),
                             content_type: response
                                 .headers
                                 .get(CONTENT_TYPE)
                                 .and_then(|value| value.to_str().ok())
                                 .map(str::to_owned),
-                            body: response.body.clone(),
+                            body: response.body,
                         };
-                        if let Err(failure) = self.retain_controlled(&request, retained) {
-                            self.cancel_resource(load, failure);
-                            return;
-                        }
-                        let evidence = ResourceEvidence::loaded_http(request.clone(), &response);
-                        let mut intercepted = load.intercept(
-                            WebResourceResponse::new(request.url)
-                                .headers(response.headers)
-                                .status_code(response.status)
-                                .status_message(
-                                    response
-                                        .status
-                                        .canonical_reason()
-                                        .unwrap_or_default()
-                                        .as_bytes()
-                                        .to_vec(),
-                                ),
+                        self.serve_owned_resource(
+                            load,
+                            request,
+                            ResourceSource::Http,
+                            resource,
+                            response.headers,
+                            response.status,
                         );
-                        intercepted.send_body_data(response.body);
-                        intercepted.finish();
-                        self.resources.borrow_mut().push(evidence);
                     },
                     Err(failure) => self.cancel_resource(load, failure),
                 }
@@ -561,24 +615,21 @@ impl WebViewDelegate for DocumentDelegate {
                 content_type,
                 source,
             } => {
-                let retained = ControlledResource {
+                let resource = ControlledResource {
                     status: 200,
                     content_type: Some(content_type.to_owned()),
-                    body: body.clone(),
+                    body,
                 };
-                if let Err(failure) = self.retain_controlled(&request, retained) {
-                    self.cancel_resource(load, failure);
-                    return;
-                }
-                let evidence =
-                    ResourceEvidence::loaded(request.clone(), source, content_type, &body);
                 let mut headers = HeaderMap::new();
                 headers.insert(CONTENT_TYPE, HeaderValue::from_static(content_type));
-                let mut intercepted =
-                    load.intercept(WebResourceResponse::new(request.url).headers(headers));
-                intercepted.send_body_data(body);
-                intercepted.finish();
-                self.resources.borrow_mut().push(evidence);
+                self.serve_owned_resource(
+                    load,
+                    request,
+                    source,
+                    resource,
+                    headers,
+                    http::StatusCode::OK,
+                );
             },
             ResourcePolicyDecision::Fail(failure) => self.cancel_resource(load, failure),
         }
@@ -590,16 +641,53 @@ impl DocumentDelegate {
         &self,
         request: &ResourceRequest,
         resource: ControlledResource,
-    ) -> Result<(), ResourcePolicyFailure> {
-        let mut bytes = self.controlled_resource_bytes.get();
-        retain_controlled_resource(
-            &mut self.controlled_resources.borrow_mut(),
-            &mut bytes,
-            request,
-            resource,
-        )?;
-        self.controlled_resource_bytes.set(bytes);
-        Ok(())
+    ) -> Result<OwnedResource, ResourcePolicyFailure> {
+        self.resource_store.borrow_mut().retain(request, resource)
+    }
+
+    fn serve_owned_resource(
+        &self,
+        load: WebResourceLoad,
+        request: ResourceRequest,
+        source: ResourceSource,
+        resource: ControlledResource,
+        headers: HeaderMap,
+        status: http::StatusCode,
+    ) {
+        let resource = match self.retain_controlled(&request, resource) {
+            Ok(resource) => resource,
+            Err(failure) => {
+                self.cancel_resource(load, failure);
+                return;
+            },
+        };
+        debug_assert_eq!(resource.status(), status.as_u16());
+        let evidence = ResourceEvidence::loaded_response(
+            request.clone(),
+            source,
+            resource.status(),
+            resource.content_type(),
+            resource.body(),
+        );
+        debug_assert_eq!(
+            evidence.content_address.as_deref(),
+            Some(resource.content_address())
+        );
+        let mut intercepted = load.intercept(
+            WebResourceResponse::new(request.url)
+                .headers(headers)
+                .status_code(status)
+                .status_message(
+                    status
+                        .canonical_reason()
+                        .unwrap_or_default()
+                        .as_bytes()
+                        .to_vec(),
+                ),
+        );
+        intercepted.send_body_data(resource.body().to_vec());
+        intercepted.finish();
+        self.resources.borrow_mut().push(evidence);
     }
 
     fn cancel_resource(&self, load: WebResourceLoad, failure: ResourcePolicyFailure) {
@@ -613,7 +701,6 @@ impl DocumentDelegate {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::Cell;
     use std::fs;
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
@@ -624,25 +711,26 @@ mod tests {
     use std::thread::JoinHandle;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
     use layout::pages::{PageDefinition, PageMargins};
     use pliego::capture::{CapturedFontSelection, CapturedFontSource, SceneCapture};
     use pliego::{DocumentScene, Operation, Page, Size};
     use sha2::{Digest, Sha256};
 
     use super::super::resource_policy::{
-        ControlledResource, ResourceAccounting, ResourcePolicy, ResourceRequest, ResourceSource,
-        VirtualResourceSpec,
+        ResourceAccounting, ResourcePolicy, ResourceSource, VirtualResourceSpec,
     };
     use super::{
-        DocumentDelegate, DocumentSession, ReadinessPolicy, RenderEnvironment,
-        ResourcePolicyConfig, SessionError, stable_render_timeout, validate_host_font_policy,
-        validate_resource_policy,
+        DocumentSession, ReadinessPolicy, RenderEnvironment, ResourcePolicyConfig, SessionError,
+        stable_render_timeout, validate_host_font_policy, validate_resource_policy,
     };
 
     const ISOLATED_CASE_ENV: &str = "PLIEGO_DOCUMENT_SESSION_FIXTURE";
     const HTTP_BASE_ENV: &str = "PLIEGO_DOCUMENT_SESSION_HTTP_BASE";
     const ISOLATED_TEST: &str = "document_session::tests::isolated_resource_and_readiness_fixture";
     const ALLOWED_HTTP_BODY: &[u8] = b"window.pliego.ready({ http_loaded: true });\n";
+    const FIXTURE_PNG_DATA_URL: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 
     const AHEM_SOURCE_RESOURCE: &str =
         "sha256:b719ecb31c5b21fc573c03f6421c74ac63c271a5a3ff841e34f9705fb94b8448";
@@ -753,54 +841,6 @@ mod tests {
         assert_eq!(error.code, "ASSET_CACHE_LIMIT");
         assert!(error.message.contains("5-byte resident allowance"));
         assert_eq!(policy.resident_bytes, 3);
-    }
-
-    #[test]
-    fn controlled_clone_fails_before_a_document_outcome_and_repeat_is_free() {
-        let preloaded_bytes = super::super::asset_cache::MAX_CACHE_BYTES - 2;
-        let delegate = DocumentDelegate {
-            controlled_resource_bytes: Cell::new(preloaded_bytes),
-            ..Default::default()
-        };
-        let request = |name: &str| ResourceRequest {
-            method: "GET".into(),
-            url: url::Url::parse(&format!("https://example.test/{name}.js")).unwrap(),
-            destination: "Script".into(),
-            referrer_url: None,
-            is_for_main_frame: false,
-            is_redirect: false,
-        };
-        let first = ControlledResource {
-            status: 200,
-            content_type: Some("text/javascript".into()),
-            body: vec![0],
-        };
-        delegate
-            .retain_controlled(&request("one"), first.clone())
-            .unwrap();
-        delegate.retain_controlled(&request("one"), first).unwrap();
-        assert_eq!(
-            delegate.controlled_resource_bytes.get(),
-            preloaded_bytes + 1
-        );
-
-        let error = delegate
-            .retain_controlled(
-                &request("two"),
-                ControlledResource {
-                    status: 200,
-                    content_type: Some("text/javascript".into()),
-                    body: vec![0; 2],
-                },
-            )
-            .expect_err("a retained clone must not cross the remaining aggregate budget");
-        assert_eq!(error.code, "RESOURCE_DENIED");
-        assert_eq!(error.status, "denied");
-        assert_eq!(delegate.controlled_resources.borrow().len(), 1);
-        assert_eq!(
-            delegate.controlled_resource_bytes.get(),
-            preloaded_bytes + 1
-        );
     }
 
     const INVOICE_INPUT: &str =
@@ -990,6 +1030,12 @@ mod tests {
         )
     }
 
+    fn fixture_png() -> Vec<u8> {
+        BASE64_STANDARD
+            .decode(FIXTURE_PNG_DATA_URL.split_once(',').unwrap().1)
+            .unwrap()
+    }
+
     fn session_fixture(name: &str) -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/document-session")
@@ -1057,6 +1103,10 @@ mod tests {
             "virtual-success",
             "asset-cache",
             "allowed-url",
+            "raster-local",
+            "raster-data",
+            "invalid-data-url",
+            "oversized-raster",
             "denied-url",
             "http-timeout",
             "explicit-fail",
@@ -1116,6 +1166,44 @@ mod tests {
                 }
                 resources.asset_manifest = Some(PathBuf::from("assets.json"));
                 let input = bundle.0.join("index.html");
+                _bundle = Some(bundle);
+                input
+            },
+            "raster-local" => {
+                let bundle = TempBundle::new(case.as_str());
+                bundle.write("pixel.png", fixture_png());
+                let input = bundle.write(
+                    "input.html",
+                    "<!doctype html><img src='pixel.png' alt=''><script>window.pliego?.ready({fixture:'raster-local'});</script>",
+                );
+                _bundle = Some(bundle);
+                input
+            },
+            "raster-data" => {
+                readiness = ReadinessPolicy::default();
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("tests/fixtures/text-scene/index.html")
+                    .canonicalize()
+                    .unwrap()
+            },
+            "invalid-data-url" => {
+                let bundle = TempBundle::new(case.as_str());
+                let input = bundle.write(
+                    "input.html",
+                    "<!doctype html><img src='data:image/png;base64,!'><script>window.pliego?.ready({fixture:'invalid-data-url'});</script>",
+                );
+                _bundle = Some(bundle);
+                input
+            },
+            "oversized-raster" => {
+                let bundle = TempBundle::new(case.as_str());
+                let mut png = fixture_png();
+                png[16..20].copy_from_slice(&16_385_u32.to_be_bytes());
+                bundle.write("oversized.png", png);
+                let input = bundle.write(
+                    "input.html",
+                    "<!doctype html><img src='oversized.png' alt=''><script>window.pliego?.ready({fixture:'oversized-raster'});</script>",
+                );
                 _bundle = Some(bundle);
                 input
             },
@@ -1296,6 +1384,86 @@ mod tests {
                 assert_eq!(outcome.resource_accounting.requests, 2);
                 assert_eq!(outcome.resource_accounting.loaded, 2);
                 assert_eq!(outcome.resource_accounting.failed, 0);
+            },
+            "raster-local" | "raster-data" => {
+                let outcome = result.expect("owned raster resource fixture should render");
+                assert!(outcome.pdf.starts_with(b"%PDF-"));
+                let expected = fixture_png();
+                let expected_address = content_address(&expected);
+                let scene_images = outcome
+                    .capture
+                    .scene
+                    .pages
+                    .iter()
+                    .flat_map(|page| &page.operations)
+                    .filter_map(|operation| match operation {
+                        Operation::Image { resource, .. } => Some(resource),
+                        _ => None,
+                    })
+                    .filter(|resource| outcome.resource_store.resolve_content(resource).is_some())
+                    .collect::<Vec<_>>();
+                assert_eq!(scene_images, vec![&expected_address]);
+                assert_eq!(
+                    outcome.resource_store.resolve_content(&expected_address),
+                    Some(expected.as_slice())
+                );
+                let source = if case == "raster-data" {
+                    ResourceSource::DataUrl
+                } else {
+                    ResourceSource::DocumentRoot
+                };
+                let evidence = outcome
+                    .resources
+                    .iter()
+                    .find(|resource| {
+                        resource.source == source
+                            && resource.content_address.as_deref()
+                                == Some(expected_address.as_str())
+                    })
+                    .expect("raster evidence should reference its owned exact bytes");
+                assert_eq!(evidence.status, "loaded");
+                assert_eq!(evidence.bytes, Some(expected.len() as u64));
+                assert_eq!(
+                    outcome
+                        .resource_store
+                        .resolve_url(evidence.request.url.as_str()),
+                    Some(expected_address)
+                );
+                assert_eq!(outcome.resource_accounting.delegated, 0);
+                assert!(outcome.resource_store.resident_bytes() >= expected.len() as u64);
+            },
+            "invalid-data-url" => {
+                let Err(error) = result else {
+                    panic!("invalid data URL returned a DocumentOutcome containing PDF bytes")
+                };
+                let failure = error
+                    .resource_failure
+                    .as_ref()
+                    .expect("invalid data URL should retain a structured resource failure");
+                assert_eq!(error.code, "RESOURCE_DATA_URL_INVALID");
+                assert_eq!(failure.status, "invalid");
+                assert_eq!(failure.destination, "Image");
+                assert_eq!(error.resource_accounting.failed, 1);
+                assert!(
+                    error
+                        .resource_store
+                        .resolve_url("data:image/png;base64,!")
+                        .is_none()
+                );
+            },
+            "oversized-raster" => {
+                let Err(error) = result else {
+                    panic!("oversized raster returned a DocumentOutcome containing PDF bytes")
+                };
+                let failure = error
+                    .resource_failure
+                    .as_ref()
+                    .expect("oversized raster should retain a structured resource failure");
+                assert_eq!(error.code, "RESOURCE_IMAGE_LIMIT_EXCEEDED");
+                assert_eq!(failure.status, "denied");
+                assert!(failure.reason.contains("declared-width"));
+                assert_eq!(error.resource_accounting.failed, 1);
+                assert!(error.resource_store.resolve_url(&failure.url).is_none());
             },
             "denied-url" => {
                 let Err(error) = result else {
