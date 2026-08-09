@@ -24,6 +24,7 @@ UNSUPPORTED_REASONS = {
     "collapsed-borders",
     "unsupported-layout",
 }
+UNSUPPORTED_CAPTURE_CODE = "SCENE_CAPTURE_UNSUPPORTED_PAINT_EVENTS"
 
 
 def fail(message: str, code: int = 1) -> None:
@@ -348,28 +349,74 @@ def self_test() -> None:
         }
     )
 
+    with tempfile.TemporaryDirectory(prefix="pliego-table-header-footer-self-test-") as temp:
+        artifacts = Path(temp) / "artifacts"
+        artifacts.mkdir()
+        layout_path = artifacts / "layout-debug.json"
+        layout_path.write_text(json.dumps(layout), encoding="utf-8")
+        result = subprocess.CompletedProcess(
+            args=[],
+            returncode=1,
+            stdout=json.dumps(
+                {
+                    "artifacts": str(artifacts),
+                    "document_pdf": str(Path(temp) / "document.pdf"),
+                    "error": {"code": UNSUPPORTED_CAPTURE_CODE},
+                    "status": "failed",
+                }
+            ),
+            stderr="",
+        )
+        require(read_unsupported_layout(result) == layout, "unsupported diagnostic layout differs")
+
+
+def invoke(binary: Path, fixture: Path, temp: str) -> subprocess.CompletedProcess[str]:
+    environment = os.environ.copy()
+    environment.update({"TMPDIR": temp, "TMP": temp, "TEMP": temp})
+    return subprocess.run(
+        [
+            str(binary),
+            "--allow-host-fonts",
+            "--page-size",
+            "240x140",
+            "--page-margins",
+            "10,10,10,10",
+            fixture.name,
+        ],
+        cwd=fixture.parent,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+
+
+def read_unsupported_layout(result: subprocess.CompletedProcess[str]) -> dict[str, Any]:
+    require(result.returncode != 0, "unsupported fixture did not fail closed")
+    summary = final_summary(result)
+    require(summary.get("status") == "failed", f"unsupported fixture status differs: {summary!r}")
+    error = summary.get("error")
+    require(
+        isinstance(error, dict) and error.get("code") == UNSUPPORTED_CAPTURE_CODE,
+        f"unsupported fixture error differs: {error!r}",
+    )
+    artifacts_value = summary.get("artifacts")
+    require(isinstance(artifacts_value, str), "unsupported fixture has no artifact directory")
+    artifacts = Path(artifacts_value)
+    require(artifacts.is_dir(), "unsupported fixture artifact directory does not exist")
+    document_value = summary.get("document_pdf")
+    require(isinstance(document_value, str), "unsupported fixture has no document PDF path")
+    require(not Path(document_value).exists(), "unsupported fixture published a PDF")
+    require(not any(artifacts.rglob("*.pdf")), "unsupported fixture retained a PDF artifact")
+    layout = artifacts / "layout-debug.json"
+    require(layout.is_file(), "unsupported fixture did not retain layout diagnostics")
+    return read_json(str(layout), "unsupported layout debug artifact")
+
 
 def run(binary: Path, fixture: Path) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="pliego-table-header-footer-") as temp:
-        environment = os.environ.copy()
-        environment.update({"TMPDIR": temp, "TMP": temp, "TEMP": temp})
-        result = subprocess.run(
-            [
-                str(binary),
-                "--allow-host-fonts",
-                "--page-size",
-                "240x140",
-                "--page-margins",
-                "10,10,10,10",
-                fixture.name,
-            ],
-            cwd=fixture.parent,
-            env=environment,
-            capture_output=True,
-            text=True,
-            timeout=60,
-            check=False,
-        )
+        result = invoke(binary, fixture, temp)
         require(result.returncode == 0, f"Pliego exited with {result.returncode}: {result.stderr[-4000:]}")
         summary = final_summary(result)
         require(summary.get("status") == "rendered", f"Pliego did not render: {summary!r}")
@@ -380,6 +427,11 @@ def run(binary: Path, fixture: Path) -> dict[str, Any]:
             "structure": read_json(summary.get("pdf_structure"), "PDF structure artifact"),
             "pdf_text": extract_pdf_text(Path(summary["document_pdf"])),
         }
+
+
+def run_unsupported(binary: Path, fixture: Path) -> dict[str, Any]:
+    with tempfile.TemporaryDirectory(prefix="pliego-table-header-footer-unsupported-") as temp:
+        return read_unsupported_layout(invoke(binary, fixture, temp))
 
 
 def main() -> int:
@@ -400,8 +452,7 @@ def main() -> int:
         supported["structure"],
         supported["pdf_text"],
     )
-    unsupported = run(binary, fixture / "unsupported.html")
-    verify_unsupported(unsupported["layout"])
+    verify_unsupported(run_unsupported(binary, fixture / "unsupported.html"))
     print("table header/footer check: ok")
     return 0
 
