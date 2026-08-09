@@ -321,9 +321,10 @@ fn image_cost(
     let media_type = content_type
         .and_then(|value| value.split(';').next())
         .map(str::trim);
-    let is_image = request.destination == "Image"
-        || media_type.is_some_and(|value| value.starts_with("image/"));
-    if !is_image || media_type.is_some_and(|value| value.eq_ignore_ascii_case("image/svg+xml")) {
+    let declares_image = media_type.is_some_and(|value| value.starts_with("image/"));
+    if (!declares_image && request.destination != "Image")
+        || media_type.is_some_and(|value| value.eq_ignore_ascii_case("image/svg+xml"))
+    {
         return Ok(None);
     }
 
@@ -337,6 +338,12 @@ fn image_cost(
     } else if body.starts_with(b"\xff\xd8\xff") {
         // Servo decodes the image before capture even though Krilla can retain JPEG bytes.
         4
+    } else if !declares_image && media_type.is_some() {
+        // Fetch destinations describe browser intent, not the response body. For example,
+        // `<link rel="icon" href="data:,">` is requested as Image but is an empty
+        // text/plain resource. Servo treats it as a broken, non-rendered image; retain its
+        // exact bytes and evidence, but do not invent raster decode cost for it.
+        return Ok(None);
     } else {
         return Err(resource_failure(
             request,
@@ -568,6 +575,24 @@ mod tests {
             decode_data_url_with_limit(&request("GET", "data:text/plain,12345", "Script"), 4)
                 .unwrap_err();
         assert_eq!(oversized.code, "RESOURCE_DENIED");
+    }
+
+    #[test]
+    fn non_image_response_to_image_destination_is_owned_without_raster_decode_cost() {
+        let mut store = OwnedResourceStore::default();
+        let favicon = request("GET", "data:,", "Image");
+        let owned = store
+            .retain(
+                &favicon,
+                resource("text/plain;charset=US-ASCII", Vec::new()),
+            )
+            .unwrap();
+
+        assert!(owned.body().is_empty());
+        assert_eq!(store.requests.len(), 1);
+        assert!(store.image_costs.is_empty());
+        assert_eq!(store.decoded_image_pixels, 0);
+        assert_eq!(store.decompressed_image_bytes, 0);
     }
 
     #[test]
