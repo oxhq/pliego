@@ -5,7 +5,8 @@
 The CLI adapter and the `DocumentEngine` boundary must behave identically. This
 script runs two binaries against the same fixtures with identical arguments and
 compares the *stable* outcome contract — status, typed failure, render id, scene
-identity and capture status, page count, and the published PDF (hash + bytes).
+identity and capture status, page and link evidence, and the published PDF
+(hash + bytes at the exact requested output path).
 
 Two modes:
 
@@ -57,6 +58,11 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def canonical_sha256(value: Any) -> str:
+    encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def binary_identity(path: Path) -> dict[str, Any]:
     resolved = path.resolve()
     result = subprocess.run([str(resolved), "--version"], capture_output=True, text=True, timeout=30)
@@ -92,6 +98,27 @@ def check_prep(fixture_id: str, fixture: dict[str, Any]) -> None:
     for generated in ("ledger-20-pages", "statement-100-pages", "font-image-heavy"):
         if fixture_id == generated and not (ROOT / fixture["input"]).is_file():
             fail(f"fixture {fixture_id!r} is not prepared; run python3 benchmarks/tools/generate_fixtures.py first")
+
+
+def fixture_identity(input_path: Path, fixture: dict[str, Any]) -> dict[str, Any]:
+    assets: dict[str, str] = {}
+    for asset in fixture.get("assets", []):
+        asset_path = input_path.parent / asset
+        if not asset_path.is_file():
+            fail(f"fixture asset not found: {asset_path}")
+        assets[asset] = sha256(asset_path)
+    return {
+        "input": str(input_path.relative_to(ROOT)),
+        "input_sha256": sha256(input_path),
+        "assets": assets,
+    }
+
+
+def reported_path(value: Any, cwd: Path) -> Path | None:
+    if not isinstance(value, str) or not value:
+        return None
+    path = Path(value)
+    return (path if path.is_absolute() else cwd / path).resolve()
 
 
 def stable_outcome(
@@ -137,24 +164,30 @@ def stable_outcome(
     if (summary.get("error") or {}).get("message"):
         summary["error"]["message"] = summary["error"]["message"].replace(str(run_dir), "<artifacts>")
 
-    pdf_hash = None
-    pdf_bytes = None
-    pdf_path = summary.get("document_pdf")
-    if pdf_path and Path(pdf_path).is_file():
-        pdf_hash = sha256(Path(pdf_path))
-        pdf_bytes = Path(pdf_path).stat().st_size
+    pdf_hash = sha256(output) if output.is_file() else None
+    pdf_bytes = output.stat().st_size if output.is_file() else None
+    reported_pdf = reported_path(summary.get("document_pdf"), input_path.parent)
 
     scene = summary.get("scene") or {}
     # Compare the evidence itself, not only the summary that points to it.
     artifact_hashes: dict[str, str] = {}
     page_count = len(summary.get("scene_previews") or [])
     text = ""
+    link_targets: list[str] = []
     for key in ("scene_artifact", "fonts_artifact", "pdf_structure"):
-        path = summary.get(key)
-        if path and Path(path).is_file():
-            artifact_hashes[key] = sha256(Path(path))
+        path = reported_path(summary.get(key), input_path.parent)
+        if path and path.is_file():
+            artifact_hashes[key] = sha256(path)
+            if key == "scene_artifact":
+                captured_scene = json.loads(path.read_text(encoding="utf-8"))
+                link_targets = sorted(
+                    operation["target"]
+                    for page in captured_scene.get("pages", [])
+                    for operation in page.get("operations", [])
+                    if operation.get("type") == "link" and isinstance(operation.get("target"), str)
+                )
             if key == "pdf_structure":
-                structure = json.loads(Path(path).read_text(encoding="utf-8"))
+                structure = json.loads(path.read_text(encoding="utf-8"))
                 page_count = structure.get("page_count", page_count)
                 text = "".join(page.get("expected_extracted_unicode", "") for page in structure.get("pages", []))
     return {
@@ -172,8 +205,13 @@ def stable_outcome(
         "scene_unsupported_event_count": scene.get("unsupported_event_count"),
         "scene_text_mapping_gap_count": scene.get("text_mapping_gap_count"),
         "document_pdf_status": summary.get("document_pdf_status"),
+        "requested_output_exists": output.is_file(),
+        "document_pdf_reported": reported_pdf is not None,
+        "document_pdf_matches_output": reported_pdf == output.resolve() if reported_pdf else None,
         "page_count": page_count,
         "text_contains": {expected: expected in text for expected in correctness.get("text_contains", [])},
+        "link_count": len(link_targets),
+        "link_targets_sha256": canonical_sha256(link_targets),
         "pdf_sha256": pdf_hash,
         "pdf_bytes": pdf_bytes,
         "artifact_hashes": artifact_hashes,
@@ -183,6 +221,8 @@ def stable_outcome(
 def correctness_problems(label: str, fixture: dict[str, Any], outcome: dict[str, Any]) -> list[str]:
     correctness = fixture.get("correctness", {})
     problems: list[str] = []
+    if outcome["document_pdf_reported"] and not outcome["document_pdf_matches_output"]:
+        problems.append(f"{label}: reported document_pdf does not match the requested output path")
     if fixture.get("expect_failure"):
         expected_code = correctness.get("failure_code")
         if outcome["exit_code"] == 0:
@@ -191,8 +231,8 @@ def correctness_problems(label: str, fixture: dict[str, Any], outcome: dict[str,
             problems.append(f"{label}: expected status='failed', got {outcome['status']!r}")
         if outcome["error_code"] != expected_code:
             problems.append(f"{label}: expected error_code={expected_code!r}, got {outcome['error_code']!r}")
-        if correctness.get("pdf_published") is False and outcome["pdf_sha256"] is not None:
-            problems.append(f"{label}: expected no published PDF")
+        if correctness.get("pdf_published") is False and outcome["requested_output_exists"]:
+            problems.append(f"{label}: expected the requested output path to remain absent")
         return problems
 
     if outcome["exit_code"] != 0:
@@ -201,14 +241,35 @@ def correctness_problems(label: str, fixture: dict[str, Any], outcome: dict[str,
         problems.append(f"{label}: expected status='rendered', got {outcome['status']!r}")
     if outcome["error_code"] is not None:
         problems.append(f"{label}: unexpected error_code={outcome['error_code']!r}")
-    if outcome["document_pdf_status"] != "rendered" or outcome["pdf_sha256"] is None:
+    if (
+        outcome["document_pdf_status"] != "rendered"
+        or not outcome["requested_output_exists"]
+        or outcome["pdf_sha256"] is None
+    ):
         problems.append(f"{label}: expected a rendered PDF")
+    if not outcome["document_pdf_reported"] or not outcome["document_pdf_matches_output"]:
+        problems.append(f"{label}: expected document_pdf to identify the requested output path")
+    required_artifacts = {"scene_artifact", "fonts_artifact", "pdf_structure"}
+    missing_artifacts = sorted(required_artifacts - outcome["artifact_hashes"].keys())
+    if missing_artifacts:
+        problems.append(f"{label}: missing required retained artifact(s): {', '.join(missing_artifacts)}")
     expected_pages = correctness.get("page_count")
     if expected_pages is not None and outcome["page_count"] != expected_pages:
         problems.append(f"{label}: expected page_count={expected_pages}, got {outcome['page_count']!r}")
     for expected, found in outcome["text_contains"].items():
         if not found:
             problems.append(f"{label}: expected document text {expected!r}")
+    expected_links = correctness.get("link_targets")
+    if expected_links is not None:
+        expected_links = sorted(expected_links)
+        if outcome["link_count"] != len(expected_links):
+            problems.append(f"{label}: expected link_count={len(expected_links)}, got {outcome['link_count']!r}")
+        expected_digest = canonical_sha256(expected_links)
+        if outcome["link_targets_sha256"] != expected_digest:
+            problems.append(
+                f"{label}: expected link_targets_sha256={expected_digest!r}, "
+                f"got {outcome['link_targets_sha256']!r}"
+            )
     return problems
 
 
@@ -274,6 +335,7 @@ def main() -> int:
         input_path = ROOT / fixture["input"]
         if not input_path.is_file():
             fail(f"fixture {fixture_id!r} input not found: {input_path}")
+        report["evidence_inputs"].setdefault("fixtures", {})[fixture_id] = fixture_identity(input_path, fixture)
 
         ran_count += 1
         run_root = Path(tempfile.mkdtemp(prefix=f"pliego-parity-{fixture_id}-"))

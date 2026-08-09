@@ -46,6 +46,7 @@ assets = ["Ahem.ttf"]
 [fixtures.minimal-static.correctness]
 page_count = 1
 text_contains = ["Minimal"]
+link_targets = ["https://pliego.dev/docs"]
 
 [fixtures.invoice-showcase]
 purpose = "two-page invoice: Ahem font, paged table, totals, authored page break"
