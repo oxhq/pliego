@@ -109,6 +109,11 @@ def document_pdf(summary: dict[str, object]) -> bytes:
 def verify_environment_artifact(summary: dict[str, object], requested_locale: str, requested_timezone: str) -> None:
     value = summary.get("environment_artifact")
     require(isinstance(value, str) and bool(value), "summary has no environment artifact")
+    resolved_input_hash = summary.get("resolved_input_hash")
+    require(
+        isinstance(resolved_input_hash, str) and resolved_input_hash.startswith("sha256:"),
+        f"summary has no content-addressed resolved input hash: {resolved_input_hash!r}",
+    )
     path = Path(value)
     require(path.is_file(), f"environment artifact does not exist: {path}")
     try:
@@ -158,6 +163,7 @@ def verify_environment_artifact(summary: dict[str, object], requested_locale: st
                 "status": "rendered",
                 "error": None,
             },
+            "resolved_input_hash": resolved_input_hash,
         },
         f"unexpected resolved environment artifact: {artifact!r}",
     )
