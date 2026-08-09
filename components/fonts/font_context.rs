@@ -629,6 +629,24 @@ impl FontContext {
     }
 }
 
+fn add_stylesheet_web_font_template_if_active(
+    known_font_face_rules: &Mutex<KnownFontFaceRules>,
+    web_fonts: &CrossThreadFontStore,
+    target_rule: &ServoArc<Locked<FontFaceRule>>,
+    family_name: LowercaseFontFamilyName,
+    new_template: FontTemplate,
+) -> bool {
+    let known_font_face_rules = known_font_face_rules.lock();
+    if !known_font_face_rules.contains_rule(target_rule) {
+        return false;
+    }
+
+    web_fonts
+        .write()
+        .add_new_template(family_name, new_template);
+    true
+}
+
 /// Tracks the progress of loading a single `@font-face` rule by trying all specified
 /// sources in order.
 #[derive(MallocSizeOf)]
@@ -668,10 +686,13 @@ impl WebFontDownloadState {
         let family_name = self.css_font_face_descriptors.family_name.clone();
         match self.initiator {
             WebFontLoadInitiator::Stylesheet(initiator) => {
-                if !self
-                    .font_context
-                    .is_font_face_rule_active(&initiator.created_by)
-                {
+                if !add_stylesheet_web_font_template_if_active(
+                    &self.font_context.known_font_face_rules,
+                    &self.font_context.web_fonts,
+                    &initiator.created_by,
+                    family_name,
+                    new_template,
+                ) {
                     // This font load was cancelled.
                     if self.font_context.decrement_count_of_loading_fonts_by_one() {
                         // This was the last loading font - we must inform the script thread that the load
@@ -681,10 +702,6 @@ impl WebFontDownloadState {
                     return;
                 }
 
-                self.font_context
-                    .web_fonts
-                    .write()
-                    .add_new_template(family_name, new_template);
                 self.font_context
                     .invalidate_font_groups_after_web_font_load();
 
@@ -1488,9 +1505,13 @@ fn font_face_rules_conflict(
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
+    use std::sync::Arc;
+    use std::thread;
+    use std::time::{Duration, Instant};
 
-    use fonts_traits::WebFontLoadEvent;
+    use fonts_traits::{FontIdentifier, FontTemplate, FontTemplateDescriptor, WebFontLoadEvent};
     use servo_arc::Arc as ServoArc;
+    use servo_url::ServoUrl;
     use style::Atom;
     use style::font_face::{FontFaceSourceTechFlags, Source, UrlSource};
     use style::shared_lock::SharedRwLock;
@@ -1499,7 +1520,8 @@ mod tests {
     use style::values::computed::font::{FamilyName, FontFamilyNameSyntax};
 
     use super::{
-        FontFaceRuleWithOrigin, KnownFontFaceRule, KnownFontFaceRules, LoadingWebFontCount,
+        CrossThreadFontStore, FontFaceRuleWithOrigin, KnownFontFaceRule, KnownFontFaceRules,
+        LoadingWebFontCount, LowercaseFontFamilyName, add_stylesheet_web_font_template_if_active,
         resolve_url_source_or_continue,
     };
 
@@ -1609,5 +1631,71 @@ mod tests {
         let known_rules = known_rules_with(active_rule.clone());
         assert!(known_rules.contains_rule(&active_rule));
         assert!(!known_rules.contains_rule(&completed_rule));
+    }
+
+    #[test]
+    fn stylesheet_removal_serializes_with_successful_download_commit() {
+        let lock = SharedRwLock::new();
+        let rule = locked_font_face_rule(&lock);
+        let known_rules = Arc::new(parking_lot::Mutex::new(known_rules_with(rule.clone())));
+        let web_fonts = Arc::new(CrossThreadFontStore::default());
+        let family_name: LowercaseFontFamilyName = Atom::from("Test").into();
+        let template = FontTemplate::new(
+            FontIdentifier::Web(ServoUrl::parse("https://example.test/font.woff2").unwrap()),
+            FontTemplateDescriptor::default(),
+            None,
+        );
+
+        // Stall the successful download after it locks the active-rule set but before it can
+        // commit the template. A stylesheet removal must wait and then remove that template.
+        let web_fonts_guard = web_fonts.write();
+        let completion = {
+            let known_rules = known_rules.clone();
+            let web_fonts = web_fonts.clone();
+            let rule = rule.clone();
+            let family_name = family_name.clone();
+            thread::spawn(move || {
+                add_stylesheet_web_font_template_if_active(
+                    &known_rules,
+                    &web_fonts,
+                    &rule,
+                    family_name,
+                    template,
+                )
+            })
+        };
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while known_rules.try_lock().is_some() {
+            assert!(
+                Instant::now() < deadline,
+                "font completion did not lock the active-rule set"
+            );
+            thread::yield_now();
+        }
+
+        let removal = {
+            let known_rules = known_rules.clone();
+            let web_fonts = web_fonts.clone();
+            let family_name = family_name.clone();
+            thread::spawn(move || {
+                known_rules.lock().contents.clear();
+                web_fonts.write().families.remove(&family_name);
+            })
+        };
+
+        drop(web_fonts_guard);
+        assert!(completion.join().unwrap());
+        removal.join().unwrap();
+
+        assert!(!known_rules.lock().contains_rule(&rule));
+        assert!(
+            web_fonts
+                .read()
+                .families
+                .get(&family_name)
+                .is_none_or(|templates| templates.find_for_descriptor(None).is_empty()),
+            "a removed stylesheet rule must not leave a selectable font template"
+        );
     }
 }
