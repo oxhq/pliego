@@ -146,7 +146,11 @@ impl std::error::Error for RenderError {}
 ))]
 impl From<super::document_session::SessionError> for RenderError {
     fn from(error: super::document_session::SessionError) -> Self {
-        Self::without_publication(error.code, error.message, 1)
+        if error.code == "INVALID_REQUEST" {
+            Self::request(error.code, error.message)
+        } else {
+            Self::without_publication(error.code, error.message, 1)
+        }
     }
 }
 
@@ -198,15 +202,27 @@ mod tests {
         not(any(target_os = "android", target_env = "ohos"))
     ))]
     #[test]
-    fn session_failures_map_once_into_the_engine_error_contract() {
-        let error: RenderError =
-            super::super::document_session::SessionError::new("RESOURCE_DENIED", "blocked")
-                .into();
+    fn session_failures_preserve_the_engine_error_classes() {
+        let request_error: RenderError = super::super::document_session::DocumentSession::new(
+            "__pliego_document_session_missing__.html",
+            crate::default_page(),
+        )
+        .err()
+        .expect("missing input should return a session error")
+        .into();
 
-        assert_eq!(error.code, "RESOURCE_DENIED");
-        assert_eq!(error.message, "blocked");
-        assert_eq!(error.exit_code, 1);
-        assert_eq!(error.artifacts, None);
-        assert_eq!(error.document_pdf, None);
+        assert_eq!(request_error.code, "INVALID_REQUEST");
+        assert_eq!(request_error.exit_code, 2);
+        assert_eq!(request_error.artifacts, None);
+        assert_eq!(request_error.document_pdf, None);
+
+        let session_error: RenderError =
+            super::super::document_session::SessionError::new("RESOURCE_DENIED", "blocked").into();
+
+        assert_eq!(session_error.code, "RESOURCE_DENIED");
+        assert_eq!(session_error.message, "blocked");
+        assert_eq!(session_error.exit_code, 1);
+        assert_eq!(session_error.artifacts, None);
+        assert_eq!(session_error.document_pdf, None);
     }
 }

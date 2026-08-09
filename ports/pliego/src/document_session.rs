@@ -68,10 +68,10 @@ pub(crate) struct DocumentOutcome {
 }
 
 pub(crate) struct DocumentSession {
-    servo: Servo,
     webview: WebView,
+    servo: Servo,
     delegate: Rc<DocumentDelegate>,
-    rendering_context: Rc<SoftwareRenderingContext>,
+    _rendering_context: Rc<SoftwareRenderingContext>,
 }
 
 impl DocumentSession {
@@ -145,23 +145,15 @@ impl DocumentSession {
             .build();
 
         Ok(Self {
-            servo,
             webview,
+            servo,
             delegate,
-            rendering_context,
+            _rendering_context: rendering_context,
         })
     }
 
     pub(crate) fn render(self) -> Result<DocumentOutcome, SessionError> {
-        let result = self.render_inner();
-
-        // The one-document owner tears down the view before Servo and keeps the
-        // rendering context alive until both have gone away.
-        drop(self.webview);
-        drop(self.servo);
-        drop(self.rendering_context);
-
-        result
+        self.render_inner()
     }
 
     fn render_inner(&self) -> Result<DocumentOutcome, SessionError> {
@@ -415,11 +407,20 @@ mod tests {
         "sha256:b719ecb31c5b21fc573c03f6421c74ac63c271a5a3ff841e34f9705fb94b8448";
     const AHEM_CAPTURED_RESOURCE: &str =
         "sha256:649a7613cfa59d415188415e1488eb40fc9953742338a793538380234a539869";
-    // These bind the direct path to the same-source servoshell oracle. The
-    // published 0.1.1 binary omitted the anchor link and intentionally differs.
-    const SAME_SOURCE_SCENE: &str =
+    const FIXTURE_INPUT: &str =
+        "sha256:5e55d09a14e3635cf446d563680b7aa9cdc4a29eb05779b999de8bf957f1bd98";
+    // Pre-DocumentSession servoshell oracle for the exact linked fixture above:
+    // source=34c55cf4c7723a4ce757556bab454dc6b6a6f212
+    // binary=6b46bcbbaf4ba59ea9c5536a1bb02ab63366a57df7c971ed27de440b988efa19
+    // harness=679b783420af1bfcfd2624d182e882b6051e65b521a2fe1a8350d28d9c323ec1
+    // manifest=6e9aef86890b5fb8b965c9ed269dae670bf1fdf66aa574d3efbdb674a73ea6ef
+    // report=report-seven-exact.json
+    // report-sha=9035533ede8e0b7585b5a4625cec5e2e6abe049d79b8a7a5f4edaad89e9aec32
+    // repeats=2. Published 0.1.1 binary 632ab7ca4ccd931b392593a9f0f5673cce543891d758fa7737bb859c8244ad27
+    // is a diagnostic non-oracle: it omitted the anchor link on this newer input.
+    const PRE_SESSION_SCENE: &str =
         "sha256:a2854099b0a11e766cad6eaeca8a76f45d2d77654fa02bb8504294c16cefc4f2";
-    const SAME_SOURCE_PDF: &str =
+    const PRE_SESSION_PDF: &str =
         "sha256:9873076c43b0c76dca8fc54ad5721e5cd20ccee5deca6905425d49df068d7af8";
     const EXPECTED_LINK: &str = "https://pliego.dev/docs";
 
@@ -453,7 +454,7 @@ mod tests {
     }
 
     #[test]
-    fn minimal_static_matches_same_source_servoshell() -> Result<(), SessionError> {
+    fn minimal_static_matches_pre_session_servoshell_oracle() -> Result<(), SessionError> {
         let input = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../benchmarks/fixtures/minimal-static/input.html")
             .canonicalize()
@@ -465,6 +466,10 @@ mod tests {
             .canonicalize()
             .expect("committed Ahem font should exist");
         assert_eq!(
+            content_address(&std::fs::read(&input).expect("fixture should be readable")),
+            FIXTURE_INPUT,
+        );
+        assert_eq!(
             content_address(&std::fs::read(&ahem).expect("Ahem should be readable")),
             AHEM_SOURCE_RESOURCE,
         );
@@ -473,9 +478,9 @@ mod tests {
         assert_eq!(outcome.capture.scene.pages.len(), 1);
         assert_eq!(
             content_address(&outcome.capture.scene.normalized_json().unwrap()),
-            SAME_SOURCE_SCENE,
+            PRE_SESSION_SCENE,
         );
-        assert_eq!(content_address(&outcome.pdf), SAME_SOURCE_PDF);
+        assert_eq!(content_address(&outcome.pdf), PRE_SESSION_PDF);
         let mut served_resources = outcome.served_resources.clone();
         served_resources.sort();
         let mut expected_resources = vec![input, ahem.clone()];
