@@ -11,8 +11,8 @@ Two modes:
 
 * Differential (default): `--baseline A --candidate B` — every fixture must
   produce the same stable outcome from both binaries, or the run fails.
-* Self-parity: omit `--candidate` (or pass the same path twice) — the same
-  binary is run `--repeat N` times and must be deterministic.
+* Self-parity: omit `--candidate` — the same binary is run `--repeat N` times
+  and must be deterministic. Differential mode rejects byte-identical inputs.
 
 Timing fields, artifact directory names, and absolute paths are deliberately
 excluded: they are environment, not outcome. A parity break exits non-zero so
@@ -57,6 +57,22 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def binary_identity(path: Path) -> dict[str, Any]:
+    resolved = path.resolve()
+    result = subprocess.run([str(resolved), "--version"], capture_output=True, text=True, timeout=30)
+    if result.returncode != 0:
+        fail(f"cannot identify binary {resolved}: exit {result.returncode}")
+    version = "\n".join(part.strip() for part in (result.stdout, result.stderr) if part.strip())
+    if not version:
+        fail(f"cannot identify binary {resolved}: empty --version output")
+    return {
+        "path": str(resolved),
+        "sha256": sha256(resolved),
+        "bytes": resolved.stat().st_size,
+        "version": version,
+    }
+
+
 def check_prep(fixture_id: str, fixture: dict[str, Any]) -> None:
     if fixture_id == "chartjs-showcase":
         base = ROOT / "ports" / "pliego" / "tests" / "fixtures" / "chartjs-report"
@@ -75,10 +91,7 @@ def check_prep(fixture_id: str, fixture: dict[str, Any]) -> None:
             )
     for generated in ("ledger-20-pages", "statement-100-pages", "font-image-heavy"):
         if fixture_id == generated and not (ROOT / fixture["input"]).is_file():
-            fail(
-                f"fixture {fixture_id!r} is not prepared; run "
-                "python3 benchmarks/tools/generate_fixtures.py first"
-            )
+            fail(f"fixture {fixture_id!r} is not prepared; run python3 benchmarks/tools/generate_fixtures.py first")
 
 
 def stable_outcome(
@@ -106,9 +119,7 @@ def stable_outcome(
         "--artifacts",
         str(artifacts),
     ]
-    result = subprocess.run(
-        command, capture_output=True, text=True, timeout=600, cwd=input_path.parent
-    )
+    result = subprocess.run(command, capture_output=True, text=True, timeout=600, cwd=input_path.parent)
     (run_dir / "stdout.log").write_text(result.stdout, encoding="utf-8")
     (run_dir / "stderr.log").write_text(result.stderr, encoding="utf-8")
     summary: dict[str, Any] = {}
@@ -124,9 +135,7 @@ def stable_outcome(
     # Error messages may embed the ephemeral artifact directory; normalize it
     # away so the comparison stays on the outcome, not the retained path.
     if (summary.get("error") or {}).get("message"):
-        summary["error"]["message"] = summary["error"]["message"].replace(
-            str(run_dir), "<artifacts>"
-        )
+        summary["error"]["message"] = summary["error"]["message"].replace(str(run_dir), "<artifacts>")
 
     pdf_hash = None
     pdf_bytes = None
@@ -147,10 +156,7 @@ def stable_outcome(
             if key == "pdf_structure":
                 structure = json.loads(Path(path).read_text(encoding="utf-8"))
                 page_count = structure.get("page_count", page_count)
-                text = "".join(
-                    page.get("expected_extracted_unicode", "")
-                    for page in structure.get("pages", [])
-                )
+                text = "".join(page.get("expected_extracted_unicode", "") for page in structure.get("pages", []))
     return {
         "exit_code": result.returncode,
         "status": summary.get("status"),
@@ -167,18 +173,14 @@ def stable_outcome(
         "scene_text_mapping_gap_count": scene.get("text_mapping_gap_count"),
         "document_pdf_status": summary.get("document_pdf_status"),
         "page_count": page_count,
-        "text_contains": {
-            expected: expected in text for expected in correctness.get("text_contains", [])
-        },
+        "text_contains": {expected: expected in text for expected in correctness.get("text_contains", [])},
         "pdf_sha256": pdf_hash,
         "pdf_bytes": pdf_bytes,
         "artifact_hashes": artifact_hashes,
     }
 
 
-def correctness_problems(
-    label: str, fixture: dict[str, Any], outcome: dict[str, Any]
-) -> list[str]:
+def correctness_problems(label: str, fixture: dict[str, Any], outcome: dict[str, Any]) -> list[str]:
     correctness = fixture.get("correctness", {})
     problems: list[str] = []
     if fixture.get("expect_failure"):
@@ -188,9 +190,7 @@ def correctness_problems(
         if outcome["status"] != "failed":
             problems.append(f"{label}: expected status='failed', got {outcome['status']!r}")
         if outcome["error_code"] != expected_code:
-            problems.append(
-                f"{label}: expected error_code={expected_code!r}, got {outcome['error_code']!r}"
-            )
+            problems.append(f"{label}: expected error_code={expected_code!r}, got {outcome['error_code']!r}")
         if correctness.get("pdf_published") is False and outcome["pdf_sha256"] is not None:
             problems.append(f"{label}: expected no published PDF")
         return problems
@@ -205,9 +205,7 @@ def correctness_problems(
         problems.append(f"{label}: expected a rendered PDF")
     expected_pages = correctness.get("page_count")
     if expected_pages is not None and outcome["page_count"] != expected_pages:
-        problems.append(
-            f"{label}: expected page_count={expected_pages}, got {outcome['page_count']!r}"
-        )
+        problems.append(f"{label}: expected page_count={expected_pages}, got {outcome['page_count']!r}")
     for expected, found in outcome["text_contains"].items():
         if not found:
             problems.append(f"{label}: expected document text {expected!r}")
@@ -218,9 +216,7 @@ def diff(label: str, baseline: dict[str, Any], candidate: dict[str, Any]) -> lis
     problems: list[str] = []
     for key in baseline:
         if baseline[key] != candidate[key]:
-            problems.append(
-                f"{label}: {key}: baseline={baseline[key]!r} candidate={candidate[key]!r}"
-            )
+            problems.append(f"{label}: {key}: baseline={baseline[key]!r} candidate={candidate[key]!r}")
     return problems
 
 
@@ -238,9 +234,15 @@ def main() -> int:
     baseline = Path(args.baseline)
     if not baseline.is_file():
         fail(f"baseline binary not found: {baseline}")
+    self_parity = args.candidate is None
     candidate = Path(args.candidate) if args.candidate else baseline
     if not candidate.is_file():
         fail(f"candidate binary not found: {candidate}")
+
+    baseline_identity = binary_identity(baseline)
+    candidate_identity = baseline_identity if self_parity else binary_identity(candidate)
+    if not self_parity and baseline_identity["sha256"] == candidate_identity["sha256"]:
+        fail("differential mode requires distinct binary bytes; omit --candidate for an explicit self-parity run")
 
     manifest = tomllib.loads(MANIFEST.read_text(encoding="utf-8"))
     fixture_ids = args.fixture or sorted(manifest["fixtures"].keys())
@@ -249,7 +251,15 @@ def main() -> int:
         "tool": "compare_parity",
         "baseline": str(baseline.resolve()),
         "candidate": str(candidate.resolve()),
-        "self_parity": candidate == baseline,
+        "self_parity": self_parity,
+        "binaries": {
+            "baseline": baseline_identity,
+            "candidate": candidate_identity,
+        },
+        "evidence_inputs": {
+            "harness_sha256": sha256(Path(__file__)),
+            "manifest_sha256": sha256(MANIFEST),
+        },
         "repeat": args.repeat,
         "results": {},
         "passed": True,
@@ -293,11 +303,7 @@ def main() -> int:
             ("candidate", candidate_outcomes),
         ):
             for run_index, outcome in enumerate(outcomes):
-                problems.extend(
-                    correctness_problems(
-                        f"{fixture_id}[{label} {run_index}]", fixture, outcome
-                    )
-                )
+                problems.extend(correctness_problems(f"{fixture_id}[{label} {run_index}]", fixture, outcome))
         # Cross-binary parity: every baseline run must match every candidate run.
         for index, baseline_outcome in enumerate(baseline_outcomes):
             for run_index, candidate_outcome in enumerate(candidate_outcomes):
@@ -340,10 +346,7 @@ def main() -> int:
             outcome = baseline_outcomes[0]
             state = outcome["status"]
             if state == "failed":
-                print(
-                    f"[{fixture_id}] parity ok (both failed, {outcome['error_code']}) "
-                    f"exit={outcome['exit_code']}"
-                )
+                print(f"[{fixture_id}] parity ok (both failed, {outcome['error_code']}) exit={outcome['exit_code']}")
             else:
                 print(
                     f"[{fixture_id}] parity ok: {outcome['page_count']} pages, "
