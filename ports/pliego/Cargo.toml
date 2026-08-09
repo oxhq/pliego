@@ -14,7 +14,7 @@ path = "src/scene.rs"
 
 [features]
 default = ["shell"]
-document-session-spike = ["dep:dpi", "dep:layout", "dep:servo"]
+document-session = ["dep:dpi", "dep:layout", "dep:servo"]
 shell = ["dep:layout", "dep:servoshell"]
 
 [[bin]]
@@ -54,5 +54,5 @@ name = "document_scene_pdf"
 harness = false
 
 [[test]]
-name = "document_session_spike"
-required-features = ["document-session-spike"]
+name = "document_session"
+required-features = ["document-session"]

@@ -140,6 +140,16 @@ impl std::fmt::Display for RenderError {
 
 impl std::error::Error for RenderError {}
 
+#[cfg(all(
+    feature = "document-session",
+    not(any(target_os = "android", target_env = "ohos"))
+))]
+impl From<super::document_session::SessionError> for RenderError {
+    fn from(error: super::document_session::SessionError) -> Self {
+        Self::without_publication(error.code, error.message, 1)
+    }
+}
+
 pub struct DocumentEngine;
 
 impl DocumentEngine {
@@ -181,5 +191,22 @@ mod tests {
         assert_eq!(error.document_pdf, None);
         assert_eq!(error.render_id, None);
         assert!(error.warnings.is_empty());
+    }
+
+    #[cfg(all(
+        feature = "document-session",
+        not(any(target_os = "android", target_env = "ohos"))
+    ))]
+    #[test]
+    fn session_failures_map_once_into_the_engine_error_contract() {
+        let error: RenderError =
+            super::super::document_session::SessionError::new("RESOURCE_DENIED", "blocked")
+                .into();
+
+        assert_eq!(error.code, "RESOURCE_DENIED");
+        assert_eq!(error.message, "blocked");
+        assert_eq!(error.exit_code, 1);
+        assert_eq!(error.artifacts, None);
+        assert_eq!(error.document_pdf, None);
     }
 }
