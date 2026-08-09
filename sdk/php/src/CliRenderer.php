@@ -138,8 +138,20 @@ final class CliRenderer
             if (is_resource($stderrFile)) {
                 fclose($stderrFile);
             }
-            JobRetention::mark($jobPath, 'failure');
-            throw new RuntimeException('cannot create Pliego process output streams');
+            throw $this->failure(
+                EngineRenderException::class,
+                'PLIEGO_PROCESS_FAILED',
+                -1,
+                '',
+                'cannot create Pliego process output streams',
+                $inputBundle,
+                $artifacts,
+                $jobPath,
+                $context,
+                $runtimeResolutionNanoseconds,
+                $phaseNanoseconds,
+                [],
+            );
         }
 
         $pipes = [];
@@ -156,10 +168,27 @@ final class CliRenderer
         );
         $phaseNanoseconds['process_launch'] = hrtime(true) - $launchStartedAt;
         if (!is_resource($process)) {
+            foreach ($pipes as $pipe) {
+                if (is_resource($pipe)) {
+                    fclose($pipe);
+                }
+            }
             fclose($stdoutFile);
             fclose($stderrFile);
-            JobRetention::mark($jobPath, 'failure');
-            throw new RuntimeException('cannot start the Pliego process');
+            throw $this->failure(
+                EngineRenderException::class,
+                'PLIEGO_PROCESS_FAILED',
+                -1,
+                '',
+                'cannot start the Pliego process',
+                $inputBundle,
+                $artifacts,
+                $jobPath,
+                $context,
+                $runtimeResolutionNanoseconds,
+                $phaseNanoseconds,
+                [],
+            );
         }
 
         $ioStartedAt = hrtime(true);
