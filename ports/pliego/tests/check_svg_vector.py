@@ -80,6 +80,10 @@ def mapped_rect(fragment: dict[str, Any], item: dict[str, Any]) -> dict[str, flo
     }
 
 
+def has_unsupported_svg_text(items: list[dict[str, Any]]) -> bool:
+    return any(item.get("kind") == "unsupported" and item.get("reason") == "text" for item in items)
+
+
 def run(binary: Path, fixture: Path, root: Path) -> tuple[bytes, bytes, bytes, bytes]:
     artifacts = root / "artifacts"
     output = root / "document.pdf"
@@ -139,6 +143,10 @@ def run(binary: Path, fixture: Path, root: Path) -> tuple[bytes, bytes, bytes, b
     require(kinds.count("path") == 1, repr(items))
     require(kinds.count("image") == 1, repr(items))
     require(kinds.count("text") >= 1, repr(items))
+    require(
+        not has_unsupported_svg_text(items),
+        f"SVG text was marked unsupported: {items!r}",
+    )
     require(
         any(item.get("kind") == "unsupported" and item.get("reason") == "compositing" for item in items),
         f"filtered SVG group was not diagnosed: {items!r}",
@@ -226,6 +234,10 @@ def self_test() -> None:
     require(graphic.is_file(), "SVG fixture is missing")
     require("<animate " in graphic.read_text(encoding="utf-8"), "SVG animation fixture is missing")
     require((fixture_root / "text-scene/Ahem.ttf").is_file(), "bundled Ahem fixture is missing")
+    require(
+        has_unsupported_svg_text([{"kind": "unsupported", "reason": "text"}]),
+        "unsupported SVG text predicate is broken",
+    )
     require(close(10.0, 10.01) and not close(10.0, 10.03), "geometry tolerance is broken")
     try:
         list(zip([0, 0, 150], [0, 0, 150, 90], strict=True))

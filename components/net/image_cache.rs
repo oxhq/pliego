@@ -98,6 +98,8 @@ fn parse_svg_document_in_memory(
 
     let has_unresolved_text = Arc::new(AtomicBool::new(false));
     let unresolved_text = has_unresolved_text.clone();
+    let unresolved_fallback = has_unresolved_text.clone();
+    let fallback_resolver = usvg::FontResolver::default_fallback_selector();
     let font_resolver = usvg::FontResolver {
         select_font: Box::new(move |font, database| {
             let resolved = font_resolver.resolve(font, database);
@@ -106,7 +108,13 @@ fn parse_svg_document_in_memory(
             }
             resolved
         }),
-        select_fallback: usvg::FontResolver::default_fallback_selector(),
+        select_fallback: Box::new(move |character, used_fonts, database| {
+            let resolved = fallback_resolver(character, used_fonts, database);
+            if resolved.is_none() {
+                unresolved_fallback.store(true, Ordering::Relaxed);
+            }
+            resolved
+        }),
     };
 
     let opt = usvg::Options {
