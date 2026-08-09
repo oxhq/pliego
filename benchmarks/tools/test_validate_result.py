@@ -21,6 +21,61 @@ PERCENTILES = {key: 1 for key in ("min", "p50", "p95", "p99", "max", "mean")}
 ZERO_PERCENTILES = {key: 0 for key in ("min", "p50", "p95", "p99", "max", "mean")}
 
 
+def process_tree() -> dict:
+    return {
+        "method": "linux-procfs-session-poll-v1",
+        "scope": "new-session-and-inherited-descendants",
+        "root_pid": 10,
+        "session_id": 10,
+        "sample_interval_ms": 75,
+        "pss_interval_ms": 250,
+        "max_sample_gap_ms": 51,
+        "clock_ticks_per_second": 100,
+        "page_size_bytes": 4096,
+        "wall_ms": 1,
+        "exit_code": 0,
+        "signal": None,
+        "peak_summed_rss_kib": 4,
+        "peak_summed_pss_kib": 3,
+        "pss_method": "procfs-smaps_rollup-summed",
+        "cpu_user_ticks": 1,
+        "cpu_sys_ticks": 0,
+        "cpu_user_ms": 10,
+        "cpu_sys_ms": 0,
+        "read_bytes": 0,
+        "write_bytes": 1,
+        "observed_pids": [10],
+        "tree_complete": True,
+        "lingering_pids": [],
+        "discovery": "test",
+        "sampler_cpu_user_ms": 0,
+        "sampler_cpu_sys_ms": 0,
+        "sampler_cpu_percent_of_wall": 0,
+        "processes": [
+            {
+                "pid": 10,
+                "start_ticks": 1,
+                "first_seen_ms": 0,
+                "last_seen_ms": 1,
+                "ppid": 1,
+                "process_group": 10,
+                "user_ticks": 1,
+                "sys_ticks": 0,
+                "read_bytes": 0,
+                "write_bytes": 1,
+            }
+        ],
+        "samples": [
+            {
+                "elapsed_ms": 0,
+                "summed_rss_kib": 4,
+                "summed_pss_kib": 3,
+                "processes": [{"pid": 10, "start_ticks": 1, "rss_pages": 1, "pss_kib": 3}],
+            }
+        ],
+    }
+
+
 def result() -> dict:
     return {
         "schema": "pliego.benchmark-result",
@@ -52,7 +107,7 @@ def result() -> dict:
             "sample_order": "sequential",
             "network": "disabled",
             "binary_profile": "checked-release",
-            "rss_method": "time-v",
+            "rss_method": "linux-procfs-session-poll-v1",
         },
         "target": {"id": "pliego-0.1.1", "label": "Pliego 0.1.1"},
         "fixture": {
@@ -74,7 +129,12 @@ def result() -> dict:
                 "user_ms": 1,
                 "sys_ms": 0,
                 "peak_rss_kib": 1,
-                "rss_method": "time-v",
+                "peak_pss_kib": 1,
+                "read_bytes": 0,
+                "write_bytes": 1,
+                "rss_method": "linux-procfs-session-poll-v1",
+                "signal": None,
+                "process_tree": process_tree(),
                 "phase_timings_ms": {"capture": 1},
                 "output": {
                     "pdf_bytes": 1,
@@ -97,7 +157,8 @@ def result() -> dict:
                 "sys_ms": ZERO_PERCENTILES,
                 "wall_ms": PERCENTILES,
             },
-            "memory": {"peak_rss_kib": PERCENTILES},
+            "memory": {"peak_rss_kib": PERCENTILES, "peak_pss_kib": PERCENTILES},
+            "io": {"read_bytes": PERCENTILES, "write_bytes": PERCENTILES},
             "scaling": {"per_page_wall_ms": 1, "per_page_peak_rss_kib": 1},
             "throughput": {"renders_per_minute": 60000, "concurrency": 1},
             "output": {"pdf_bytes": PERCENTILES, "page_count": 1},
@@ -267,6 +328,12 @@ def main() -> None:
     broken = deepcopy(valid)
     broken["samples"][0]["phase_timings_ms"]["capture"] = "fast"
     must_fail(broken, "phase_timings_ms.capture")
+    broken = deepcopy(valid)
+    broken["samples"][0]["process_tree"] = "opaque"
+    must_fail(broken, "process_tree")
+    broken = deepcopy(valid)
+    del broken["samples"][0]["process_tree"]["samples"]
+    must_fail(broken, "samples")
     broken = deepcopy(valid)
     broken["toolchain"]["competitors"] = {"dompdf": 3}
     must_fail(broken, "competitors.dompdf")

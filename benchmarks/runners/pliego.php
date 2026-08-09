@@ -18,8 +18,9 @@
  * file against that cwd. The requested output is placed in a sibling temp
  * directory, never inside the artifact directory.
  *
- * Timing: this foundation records process wall time only. The separate audited
- * Linux sampler owns summed process-tree RSS/PSS, CPU, I/O, and lifecycle data.
+ * Timing: Linux delegates the engine launch to process_tree_sampler.py, which
+ * creates one new session and polls every inherited member through procfs.
+ * Non-Linux runs retain wall/exit data and mark process-tree counters null.
  *
  * Publishable host contract: Linux x86_64, released `checked-release` bundle.
  */
@@ -127,7 +128,9 @@ if (!is_file($inputFull)) {
 /**
  * @param list<string> $command
  * @return array{error: string}|array{wall_ms: float, user_ms: float|null,
- *     sys_ms: float|null, peak_rss_kib: int|null, rss_method: string,
+ *     sys_ms: float|null, peak_rss_kib: int|null, peak_pss_kib: int|null,
+ *     read_bytes: int|null, write_bytes: int|null, rss_method: string,
+ *     signal: int|null, process_tree: array<string, mixed>|null,
  *     exit_code: int, stdout: string, stderr: string}
  */
 function run_engine(array $command, string $cwd): array
@@ -135,35 +138,114 @@ function run_engine(array $command, string $cwd): array
     $nullDevice = PHP_OS_FAMILY === 'Windows' ? 'NUL' : '/dev/null';
     $stdoutTmp = tempnam(sys_get_temp_dir(), 'pliego-bench-out-');
     $stderrTmp = tempnam(sys_get_temp_dir(), 'pliego-bench-err-');
+    if ($stdoutTmp === false || $stderrTmp === false) {
+        return ['error' => 'cannot create engine output files'];
+    }
+    $linux = PHP_OS_FAMILY === 'Linux';
+    $samplerResultTmp = $linux ? tempnam(sys_get_temp_dir(), 'pliego-bench-proc-') : null;
+    $samplerErrorTmp = $linux ? tempnam(sys_get_temp_dir(), 'pliego-bench-proc-err-') : null;
+    if ($linux && ($samplerResultTmp === false || $samplerErrorTmp === false)) {
+        @unlink($stdoutTmp);
+        @unlink($stderrTmp);
+        if (is_string($samplerResultTmp)) {
+            @unlink($samplerResultTmp);
+        }
+        if (is_string($samplerErrorTmp)) {
+            @unlink($samplerErrorTmp);
+        }
+        return ['error' => 'cannot create sampler output files'];
+    }
+
+    $launchedCommand = $command;
+    if ($linux) {
+        $sampler = dirname(__DIR__) . '/tools/process_tree_sampler.py';
+        if (!is_file($sampler)) {
+            @unlink($stdoutTmp);
+            @unlink($stderrTmp);
+            @unlink($samplerResultTmp);
+            @unlink($samplerErrorTmp);
+            return ['error' => "process-tree sampler not found: {$sampler}"];
+        }
+        $launchedCommand = [
+            'python3', $sampler,
+            '--cwd', $cwd,
+            '--stdout', $stdoutTmp,
+            '--stderr', $stderrTmp,
+            '--',
+            ...$command,
+        ];
+    }
     $descriptors = [
         0 => ['file', $nullDevice, 'r'],
-        1 => ['file', $stdoutTmp, 'w'],
-        2 => ['file', $stderrTmp, 'w'],
+        1 => ['file', $linux ? $samplerResultTmp : $stdoutTmp, 'w'],
+        2 => ['file', $linux ? $samplerErrorTmp : $stderrTmp, 'w'],
     ];
 
     $wallStart = microtime(true);
-    $process = proc_open($command, $descriptors, $pipes, $cwd);
+    $process = proc_open($launchedCommand, $descriptors, $pipes, $cwd);
     if (!is_resource($process)) {
         @unlink($stdoutTmp);
         @unlink($stderrTmp);
+        if (is_string($samplerResultTmp)) {
+            @unlink($samplerResultTmp);
+        }
+        if (is_string($samplerErrorTmp)) {
+            @unlink($samplerErrorTmp);
+        }
         return ['error' => 'proc_open failed for engine command'];
     }
 
-    $exitCode = proc_close($process);
+    $launcherExitCode = proc_close($process);
     $wallMs = (microtime(true) - $wallStart) * 1000.0;
-
     $stdout = (string) file_get_contents($stdoutTmp);
     $stderr = (string) file_get_contents($stderrTmp);
     @unlink($stdoutTmp);
     @unlink($stderrTmp);
+
+    if ($linux) {
+        $measurement = json_decode((string) file_get_contents($samplerResultTmp), true);
+        $samplerError = trim((string) file_get_contents($samplerErrorTmp));
+        @unlink($samplerResultTmp);
+        @unlink($samplerErrorTmp);
+        if ($launcherExitCode !== 0 || !is_array($measurement)) {
+            return ['error' => 'process-tree sampler failed: ' . ($samplerError ?: "exit {$launcherExitCode}")];
+        }
+        foreach (['wall_ms', 'cpu_user_ms', 'cpu_sys_ms', 'peak_summed_rss_kib', 'method', 'exit_code'] as $field) {
+            if (!array_key_exists($field, $measurement)) {
+                return ['error' => "process-tree sampler omitted {$field}"];
+            }
+        }
+        return [
+            'wall_ms' => (float) $measurement['wall_ms'],
+            'user_ms' => (float) $measurement['cpu_user_ms'],
+            'sys_ms' => (float) $measurement['cpu_sys_ms'],
+            'peak_rss_kib' => (int) $measurement['peak_summed_rss_kib'],
+            'peak_pss_kib' => isset($measurement['peak_summed_pss_kib'])
+                ? (int) $measurement['peak_summed_pss_kib']
+                : null,
+            'read_bytes' => isset($measurement['read_bytes']) ? (int) $measurement['read_bytes'] : null,
+            'write_bytes' => isset($measurement['write_bytes']) ? (int) $measurement['write_bytes'] : null,
+            'rss_method' => (string) $measurement['method'],
+            'signal' => isset($measurement['signal']) ? (int) $measurement['signal'] : null,
+            'process_tree' => $measurement,
+            'exit_code' => (int) $measurement['exit_code'],
+            'stdout' => $stdout,
+            'stderr' => $stderr,
+        ];
+    }
 
     return [
         'wall_ms' => round($wallMs, 3),
         'user_ms' => null,
         'sys_ms' => null,
         'peak_rss_kib' => null,
+        'peak_pss_kib' => null,
+        'read_bytes' => null,
+        'write_bytes' => null,
         'rss_method' => 'unavailable',
-        'exit_code' => $exitCode,
+        'signal' => null,
+        'process_tree' => null,
+        'exit_code' => $launcherExitCode,
         'stdout' => $stdout,
         'stderr' => $stderr,
     ];
@@ -240,6 +322,7 @@ function pdf_text(string $pdfPath): ?string
 
 /** @return array{index: int, ok: bool, exit_code: int, wall_ms: float,
  *     user_ms: float|null, sys_ms: float|null, peak_rss_kib: int|null,
+ *     peak_pss_kib: int|null, read_bytes: int|null, write_bytes: int|null,
  *     phase_timings_ms: array<string, float>|null, output: array<string, mixed>,
  *     correctness: array{pass: bool, checks: list<array{name: string, status: string, detail?: string}>},
  *     failure: array{code: string|null, message: string|null, published_pdf: bool},
@@ -330,6 +413,16 @@ function run_sample(array $state, int $index): array
     }
 
     $checks = [];
+    if (is_array($exec['process_tree'])) {
+        $treeComplete = $exec['process_tree']['tree_complete'] ?? false;
+        $observedPids = $exec['process_tree']['observed_pids'] ?? [];
+        $treeMeasured = $treeComplete && is_array($observedPids) && $observedPids !== [];
+        $checks[] = [
+            'name' => 'process_tree_complete',
+            'status' => $treeMeasured ? 'pass' : 'fail',
+            'detail' => 'observed_pids=' . implode(',', is_array($observedPids) ? $observedPids : []),
+        ];
+    }
     if ($state['expectFailure']) {
         $failed = $exec['exit_code'] !== 0 && !$pdfPublished;
         $checks[] = [
@@ -405,7 +498,12 @@ function run_sample(array $state, int $index): array
         'user_ms' => $exec['user_ms'],
         'sys_ms' => $exec['sys_ms'],
         'peak_rss_kib' => $exec['peak_rss_kib'],
+        'peak_pss_kib' => $exec['peak_pss_kib'],
+        'read_bytes' => $exec['read_bytes'],
+        'write_bytes' => $exec['write_bytes'],
         'rss_method' => $exec['rss_method'],
+        'signal' => $exec['signal'],
+        'process_tree' => $exec['process_tree'],
         'phase_timings_ms' => $phaseTimings,
         'output' => [
             'pdf_bytes' => $pdfBytes,

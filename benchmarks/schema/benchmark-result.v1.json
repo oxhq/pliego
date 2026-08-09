@@ -159,7 +159,7 @@
         "seed": { "type": "integer" },
         "network": { "const": "disabled" },
         "binary_profile": { "type": "string" },
-        "rss_method": { "type": "string", "enum": ["time-v", "ps-poll", "unavailable"] }
+        "rss_method": { "type": "string", "enum": ["linux-procfs-session-poll-v1", "time-v", "ps-poll", "unavailable"] }
       }
     },
     "not_applicable_protocol": {
@@ -221,7 +221,12 @@
         "user_ms",
         "sys_ms",
         "peak_rss_kib",
+        "peak_pss_kib",
+        "read_bytes",
+        "write_bytes",
         "rss_method",
+        "signal",
+        "process_tree",
         "output",
         "correctness",
         "failure"
@@ -234,7 +239,17 @@
         "user_ms": { "type": ["number", "null"], "minimum": 0 },
         "sys_ms": { "type": ["number", "null"], "minimum": 0 },
         "peak_rss_kib": { "type": ["integer", "null"], "minimum": 0 },
-        "rss_method": { "type": "string", "enum": ["time-v", "ps-poll", "unavailable"] },
+        "peak_pss_kib": { "type": ["integer", "null"], "minimum": 0 },
+        "read_bytes": { "type": ["integer", "null"], "minimum": 0 },
+        "write_bytes": { "type": ["integer", "null"], "minimum": 0 },
+        "rss_method": { "type": "string", "enum": ["linux-procfs-session-poll-v1", "time-v", "ps-poll", "unavailable"] },
+        "signal": { "type": ["integer", "null"], "minimum": 1 },
+        "process_tree": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/definitions/process_tree" }
+          ]
+        },
         "phase_timings_ms": {
           "type": ["object", "null"],
           "additionalProperties": { "type": "number", "minimum": 0 }
@@ -331,6 +346,142 @@
         }
       }
     },
+    "process_tree": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "method",
+        "scope",
+        "root_pid",
+        "session_id",
+        "sample_interval_ms",
+        "pss_interval_ms",
+        "max_sample_gap_ms",
+        "clock_ticks_per_second",
+        "page_size_bytes",
+        "wall_ms",
+        "exit_code",
+        "signal",
+        "peak_summed_rss_kib",
+        "peak_summed_pss_kib",
+        "pss_method",
+        "cpu_user_ticks",
+        "cpu_sys_ticks",
+        "cpu_user_ms",
+        "cpu_sys_ms",
+        "read_bytes",
+        "write_bytes",
+        "observed_pids",
+        "tree_complete",
+        "lingering_pids",
+        "discovery",
+        "sampler_cpu_user_ms",
+        "sampler_cpu_sys_ms",
+        "sampler_cpu_percent_of_wall",
+        "processes",
+        "samples"
+      ],
+      "properties": {
+        "method": { "const": "linux-procfs-session-poll-v1" },
+        "scope": { "const": "new-session-and-inherited-descendants" },
+        "root_pid": { "type": "integer", "minimum": 1 },
+        "session_id": { "type": "integer", "minimum": 1 },
+        "sample_interval_ms": { "type": "number", "minimum": 0 },
+        "pss_interval_ms": { "type": "number", "minimum": 0 },
+        "max_sample_gap_ms": { "type": "number", "minimum": 0 },
+        "clock_ticks_per_second": { "type": "integer", "minimum": 1 },
+        "page_size_bytes": { "type": "integer", "minimum": 1 },
+        "wall_ms": { "type": "number", "minimum": 0 },
+        "exit_code": { "type": "integer" },
+        "signal": { "type": ["integer", "null"], "minimum": 1 },
+        "peak_summed_rss_kib": { "type": "integer", "minimum": 0 },
+        "peak_summed_pss_kib": { "type": ["integer", "null"], "minimum": 0 },
+        "pss_method": { "type": "string", "enum": ["procfs-smaps_rollup-summed", "unavailable"] },
+        "cpu_user_ticks": { "type": "integer", "minimum": 0 },
+        "cpu_sys_ticks": { "type": "integer", "minimum": 0 },
+        "cpu_user_ms": { "type": "number", "minimum": 0 },
+        "cpu_sys_ms": { "type": "number", "minimum": 0 },
+        "read_bytes": { "type": ["integer", "null"], "minimum": 0 },
+        "write_bytes": { "type": ["integer", "null"], "minimum": 0 },
+        "observed_pids": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "integer", "minimum": 1 }
+        },
+        "tree_complete": { "type": "boolean" },
+        "lingering_pids": {
+          "type": "array",
+          "items": { "type": "integer", "minimum": 1 }
+        },
+        "discovery": { "type": "string" },
+        "sampler_cpu_user_ms": { "type": "number", "minimum": 0 },
+        "sampler_cpu_sys_ms": { "type": "number", "minimum": 0 },
+        "sampler_cpu_percent_of_wall": { "type": "number", "minimum": 0 },
+        "processes": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/definitions/process_tree_process" }
+        },
+        "samples": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/definitions/process_tree_sample" }
+        }
+      }
+    },
+    "process_tree_process": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "pid",
+        "start_ticks",
+        "first_seen_ms",
+        "last_seen_ms",
+        "ppid",
+        "process_group",
+        "user_ticks",
+        "sys_ticks",
+        "read_bytes",
+        "write_bytes"
+      ],
+      "properties": {
+        "pid": { "type": "integer", "minimum": 1 },
+        "start_ticks": { "type": "integer", "minimum": 0 },
+        "first_seen_ms": { "type": "number", "minimum": 0 },
+        "last_seen_ms": { "type": "number", "minimum": 0 },
+        "ppid": { "type": "integer", "minimum": 0 },
+        "process_group": { "type": "integer", "minimum": 1 },
+        "user_ticks": { "type": "integer", "minimum": 0 },
+        "sys_ticks": { "type": "integer", "minimum": 0 },
+        "read_bytes": { "type": ["integer", "null"], "minimum": 0 },
+        "write_bytes": { "type": ["integer", "null"], "minimum": 0 }
+      }
+    },
+    "process_tree_sample": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["elapsed_ms", "summed_rss_kib", "summed_pss_kib", "processes"],
+      "properties": {
+        "elapsed_ms": { "type": "number", "minimum": 0 },
+        "summed_rss_kib": { "type": "integer", "minimum": 0 },
+        "summed_pss_kib": { "type": ["integer", "null"], "minimum": 0 },
+        "processes": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/process_tree_sample_process" }
+        }
+      }
+    },
+    "process_tree_sample_process": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pid", "start_ticks", "rss_pages", "pss_kib"],
+      "properties": {
+        "pid": { "type": "integer", "minimum": 1 },
+        "start_ticks": { "type": "integer", "minimum": 0 },
+        "rss_pages": { "type": "integer", "minimum": 0 },
+        "pss_kib": { "type": ["integer", "null"], "minimum": 0 }
+      }
+    },
     "retained": {
       "type": "object",
       "additionalProperties": false,
@@ -405,7 +556,17 @@
           "additionalProperties": false,
           "required": ["peak_rss_kib"],
           "properties": {
-            "peak_rss_kib": { "$ref": "#/definitions/percentiles" }
+            "peak_rss_kib": { "$ref": "#/definitions/percentiles" },
+            "peak_pss_kib": { "$ref": "#/definitions/percentiles" }
+          }
+        },
+        "io": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["read_bytes", "write_bytes"],
+          "properties": {
+            "read_bytes": { "$ref": "#/definitions/percentiles" },
+            "write_bytes": { "$ref": "#/definitions/percentiles" }
           }
         },
         "scaling": {
