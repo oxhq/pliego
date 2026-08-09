@@ -43,6 +43,11 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
 MANIFEST = ROOT / "benchmarks" / "manifest.toml"
+ARTIFACT_FILES = {
+    "scene_artifact": "scene.json",
+    "fonts_artifact": "fonts.json",
+    "pdf_structure": "pdf-structure.json",
+}
 
 
 def fail(message: str) -> None:
@@ -118,7 +123,34 @@ def reported_path(value: Any, cwd: Path) -> Path | None:
     if not isinstance(value, str) or not value:
         return None
     path = Path(value)
-    return (path if path.is_absolute() else cwd / path).resolve()
+    try:
+        return (path if path.is_absolute() else cwd / path).resolve()
+    except (OSError, RuntimeError):
+        return None
+
+
+def json_object(path: Path) -> tuple[dict[str, Any], bool]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return {}, False
+    return (value, True) if isinstance(value, dict) else ({}, False)
+
+
+def has_pdf_envelope(path: Path) -> bool:
+    try:
+        size = path.stat().st_size
+        with path.open("rb") as handle:
+            header = handle.read(5)
+            handle.seek(max(0, size - 1024))
+            trailer = handle.read()
+    except OSError:
+        return False
+    return header == b"%PDF-" and b"%%EOF" in trailer
+
+
+def is_v1(value: Any) -> bool:
+    return type(value) is int and value == 1
 
 
 def stable_outcome(
@@ -161,41 +193,75 @@ def stable_outcome(
 
     # Error messages may embed the ephemeral artifact directory; normalize it
     # away so the comparison stays on the outcome, not the retained path.
-    if (summary.get("error") or {}).get("message"):
-        summary["error"]["message"] = summary["error"]["message"].replace(str(run_dir), "<artifacts>")
+    error = summary.get("error") if isinstance(summary.get("error"), dict) else {}
+    if isinstance(error.get("message"), str):
+        error["message"] = error["message"].replace(str(run_dir), "<artifacts>")
 
-    pdf_hash = sha256(output) if output.is_file() else None
-    pdf_bytes = output.stat().st_size if output.is_file() else None
+    output_exists = output.exists() or output.is_symlink()
+    output_is_regular = output.is_file() and not output.is_symlink()
+    pdf_hash = sha256(output) if output_is_regular else None
+    pdf_bytes = output.stat().st_size if output_is_regular else None
     reported_pdf = reported_path(summary.get("document_pdf"), input_path.parent)
+    reported_artifacts = reported_path(summary.get("artifacts"), input_path.parent)
 
-    scene = summary.get("scene") or {}
-    # Compare the evidence itself, not only the summary that points to it.
+    scene = summary.get("scene") if isinstance(summary.get("scene"), dict) else {}
+    # Read only the exact requested artifact files. Summary paths are evidence
+    # to cross-check, never authority for which files the harness consumes.
+    expected_paths = {key: artifacts / filename for key, filename in ARTIFACT_FILES.items()}
+    expected_artifact_root = run_dir.resolve() / "artifacts"
+    reported_paths = {key: reported_path(summary.get(key), input_path.parent) for key in ARTIFACT_FILES}
+    artifact_path_matches = {
+        key: reported == expected_artifact_root / ARTIFACT_FILES[key] if reported else None
+        for key, reported in reported_paths.items()
+    }
     artifact_hashes: dict[str, str] = {}
-    page_count = len(summary.get("scene_previews") or [])
-    text = ""
-    link_targets: list[str] = []
-    for key in ("scene_artifact", "fonts_artifact", "pdf_structure"):
-        path = reported_path(summary.get(key), input_path.parent)
-        if path and path.is_file():
+    for key, path in expected_paths.items():
+        if path.is_file() and not path.is_symlink():
             artifact_hashes[key] = sha256(path)
-            if key == "scene_artifact":
-                captured_scene = json.loads(path.read_text(encoding="utf-8"))
-                link_targets = sorted(
-                    operation["target"]
-                    for page in captured_scene.get("pages", [])
-                    for operation in page.get("operations", [])
-                    if operation.get("type") == "link" and isinstance(operation.get("target"), str)
-                )
-            if key == "pdf_structure":
-                structure = json.loads(path.read_text(encoding="utf-8"))
-                page_count = structure.get("page_count", page_count)
-                text = "".join(page.get("expected_extracted_unicode", "") for page in structure.get("pages", []))
+    retained_pdf = artifacts / "document.pdf"
+    retained_pdf_is_regular = retained_pdf.is_file() and not retained_pdf.is_symlink()
+    if retained_pdf_is_regular:
+        artifact_hashes["document_pdf_artifact"] = sha256(retained_pdf)
+
+    captured_scene, scene_json_valid = json_object(expected_paths["scene_artifact"])
+    fonts, fonts_json_valid = json_object(expected_paths["fonts_artifact"])
+    structure, structure_json_valid = json_object(expected_paths["pdf_structure"])
+    scene_pages = captured_scene.get("pages")
+    scene_pages = scene_pages if isinstance(scene_pages, list) else None
+    structure_pages = structure.get("pages")
+    structure_pages = structure_pages if isinstance(structure_pages, list) else None
+    summary_previews = summary.get("scene_previews")
+    summary_previews = summary_previews if isinstance(summary_previews, list) else None
+
+    link_targets = sorted(
+        operation["target"]
+        for page in scene_pages or []
+        if isinstance(page, dict) and isinstance(page.get("operations"), list)
+        for operation in page["operations"]
+        if isinstance(operation, dict) and operation.get("type") == "link" and isinstance(operation.get("target"), str)
+    )
+    text = "".join(
+        page.get("expected_extracted_unicode", "")
+        for page in structure_pages or []
+        if isinstance(page, dict) and isinstance(page.get("expected_extracted_unicode", ""), str)
+    )
+    structure_pdf = structure.get("pdf") if isinstance(structure.get("pdf"), dict) else {}
+    structure_page_count = structure.get("page_count")
+    structure_page_count = structure_page_count if type(structure_page_count) is int else None
     return {
         "exit_code": result.returncode,
         "status": summary.get("status"),
-        "error_code": (summary.get("error") or {}).get("code"),
-        "error_message": (summary.get("error") or {}).get("message"),
+        "error_code": error.get("code"),
+        "error_message": error.get("message"),
         "render_id": summary.get("render_id"),
+        "artifacts_reported": reported_artifacts is not None,
+        "artifacts_match_requested": reported_artifacts == expected_artifact_root if reported_artifacts else None,
+        "artifact_path_matches": artifact_path_matches,
+        "artifact_json_valid": {
+            "scene_artifact": scene_json_valid,
+            "fonts_artifact": fonts_json_valid,
+            "pdf_structure": structure_json_valid,
+        },
         "scene_schema": scene.get("schema"),
         "scene_version": scene.get("version"),
         "scene_hash": scene.get("hash"),
@@ -204,11 +270,27 @@ def stable_outcome(
         "scene_preview_status": scene.get("preview_status"),
         "scene_unsupported_event_count": scene.get("unsupported_event_count"),
         "scene_text_mapping_gap_count": scene.get("text_mapping_gap_count"),
+        "scene_artifact_schema": captured_scene.get("schema"),
+        "scene_artifact_version": captured_scene.get("version"),
+        "scene_artifact_page_count": len(scene_pages) if scene_pages is not None else None,
+        "fonts_artifact_schema": fonts.get("schema"),
+        "fonts_artifact_version": fonts.get("version"),
         "document_pdf_status": summary.get("document_pdf_status"),
-        "requested_output_exists": output.is_file(),
+        "pdf_structure_status": summary.get("pdf_structure_status"),
+        "requested_output_exists": output_exists,
+        "requested_output_is_regular": output_is_regular,
         "document_pdf_reported": reported_pdf is not None,
-        "document_pdf_matches_output": reported_pdf == output.resolve() if reported_pdf else None,
-        "page_count": page_count,
+        "document_pdf_matches_output": reported_pdf == run_dir.resolve() / "document.pdf" if reported_pdf else None,
+        "pdf_envelope_valid": has_pdf_envelope(output),
+        "retained_pdf_bytes": retained_pdf.stat().st_size if retained_pdf_is_regular else None,
+        "pdf_structure_schema": structure.get("schema"),
+        "pdf_structure_version": structure.get("version"),
+        "pdf_structure_pdf_artifact": structure_pdf.get("artifact"),
+        "pdf_structure_pdf_sha256": structure_pdf.get("sha256"),
+        "pdf_structure_pdf_bytes": structure_pdf.get("bytes"),
+        "pdf_structure_pages_count": len(structure_pages) if structure_pages is not None else None,
+        "summary_preview_page_count": len(summary_previews) if summary_previews is not None else None,
+        "page_count": structure_page_count,
         "text_contains": {expected: expected in text for expected in correctness.get("text_contains", [])},
         "link_count": len(link_targets),
         "link_targets_sha256": canonical_sha256(link_targets),
@@ -221,6 +303,10 @@ def stable_outcome(
 def correctness_problems(label: str, fixture: dict[str, Any], outcome: dict[str, Any]) -> list[str]:
     correctness = fixture.get("correctness", {})
     problems: list[str] = []
+    if not isinstance(outcome["render_id"], str) or not outcome["render_id"].strip():
+        problems.append(f"{label}: expected a non-empty render_id")
+    if not outcome["artifacts_reported"] or not outcome["artifacts_match_requested"]:
+        problems.append(f"{label}: expected artifacts to identify the requested artifact root")
     if outcome["document_pdf_reported"] and not outcome["document_pdf_matches_output"]:
         problems.append(f"{label}: reported document_pdf does not match the requested output path")
     if fixture.get("expect_failure"):
@@ -244,7 +330,9 @@ def correctness_problems(label: str, fixture: dict[str, Any], outcome: dict[str,
     if (
         outcome["document_pdf_status"] != "rendered"
         or not outcome["requested_output_exists"]
+        or not outcome["requested_output_is_regular"]
         or outcome["pdf_sha256"] is None
+        or not outcome["pdf_envelope_valid"]
     ):
         problems.append(f"{label}: expected a rendered PDF")
     if not outcome["document_pdf_reported"] or not outcome["document_pdf_matches_output"]:
@@ -253,6 +341,59 @@ def correctness_problems(label: str, fixture: dict[str, Any], outcome: dict[str,
     missing_artifacts = sorted(required_artifacts - outcome["artifact_hashes"].keys())
     if missing_artifacts:
         problems.append(f"{label}: missing required retained artifact(s): {', '.join(missing_artifacts)}")
+    mismatched_artifact_paths = sorted(
+        key for key in required_artifacts if outcome["artifact_path_matches"].get(key) is not True
+    )
+    if mismatched_artifact_paths:
+        problems.append(f"{label}: artifact path mismatch(es): {', '.join(mismatched_artifact_paths)}")
+    invalid_json = sorted(key for key in required_artifacts if outcome["artifact_json_valid"].get(key) is not True)
+    if invalid_json:
+        problems.append(f"{label}: invalid artifact JSON: {', '.join(invalid_json)}")
+
+    expected_scene_hash = outcome["artifact_hashes"].get("scene_artifact")
+    expected_scene_hash = f"sha256:{expected_scene_hash}" if expected_scene_hash else None
+    if (
+        outcome["scene_schema"] != "pliego.document-scene"
+        or not is_v1(outcome["scene_version"])
+        or outcome["scene_artifact_schema"] != "pliego.document-scene"
+        or not is_v1(outcome["scene_artifact_version"])
+        or outcome["scene_hash"] != expected_scene_hash
+    ):
+        problems.append(f"{label}: scene summary does not bind the exact scene artifact")
+    if (
+        outcome["scene_capture_status"] != "complete"
+        or outcome["scene_capture_code"] is not None
+        or outcome["scene_preview_status"] != "rendered"
+        or type(outcome["scene_unsupported_event_count"]) is not int
+        or outcome["scene_unsupported_event_count"] != 0
+        or type(outcome["scene_text_mapping_gap_count"]) is not int
+        or outcome["scene_text_mapping_gap_count"] != 0
+    ):
+        problems.append(f"{label}: scene capture is not complete and lossless")
+    if outcome["fonts_artifact_schema"] != "pliego.font-report" or not is_v1(outcome["fonts_artifact_version"]):
+        problems.append(f"{label}: expected pliego.font-report v1")
+
+    retained_pdf_hash = outcome["artifact_hashes"].get("document_pdf_artifact")
+    expected_pdf_hash = outcome["pdf_sha256"]
+    if (
+        outcome["pdf_structure_status"] != "rendered"
+        or outcome["pdf_structure_schema"] != "pliego.pdf-structure"
+        or not is_v1(outcome["pdf_structure_version"])
+        or outcome["pdf_structure_pdf_artifact"] != "document.pdf"
+        or outcome["pdf_structure_pdf_sha256"] != (f"sha256:{expected_pdf_hash}" if expected_pdf_hash else None)
+        or type(outcome["pdf_structure_pdf_bytes"]) is not int
+        or outcome["pdf_structure_pdf_bytes"] != outcome["pdf_bytes"]
+        or retained_pdf_hash != expected_pdf_hash
+        or outcome["retained_pdf_bytes"] != outcome["pdf_bytes"]
+    ):
+        problems.append(f"{label}: PDF structure does not bind the exact requested and retained PDF bytes")
+    if (
+        outcome["page_count"] is None
+        or outcome["page_count"] != outcome["pdf_structure_pages_count"]
+        or outcome["page_count"] != outcome["scene_artifact_page_count"]
+        or outcome["page_count"] != outcome["summary_preview_page_count"]
+    ):
+        problems.append(f"{label}: page counts are internally inconsistent")
     expected_pages = correctness.get("page_count")
     if expected_pages is not None and outcome["page_count"] != expected_pages:
         problems.append(f"{label}: expected page_count={expected_pages}, got {outcome['page_count']!r}")
@@ -267,8 +408,7 @@ def correctness_problems(label: str, fixture: dict[str, Any], outcome: dict[str,
         expected_digest = canonical_sha256(expected_links)
         if outcome["link_targets_sha256"] != expected_digest:
             problems.append(
-                f"{label}: expected link_targets_sha256={expected_digest!r}, "
-                f"got {outcome['link_targets_sha256']!r}"
+                f"{label}: expected link_targets_sha256={expected_digest!r}, got {outcome['link_targets_sha256']!r}"
             )
     return problems
 
