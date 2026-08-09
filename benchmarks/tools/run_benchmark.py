@@ -57,28 +57,6 @@ def fail(message: str) -> NoReturn:
     raise SystemExit(1)
 
 
-def percentile(values: list[float], p: float) -> float:
-    if not values:
-        return 0.0
-    ordered = sorted(values)
-    index = max(0, min(len(ordered) - 1, round(p / 100.0 * (len(ordered) - 1))))
-    return float(ordered[index])
-
-
-def percentiles(values: list[float]) -> dict[str, float]:
-    values = [v for v in values if v is not None]
-    if not values:
-        return {"min": 0.0, "p50": 0.0, "p95": 0.0, "p99": 0.0, "max": 0.0, "mean": 0.0}
-    return {
-        "min": min(values),
-        "p50": percentile(values, 50),
-        "p95": percentile(values, 95),
-        "p99": percentile(values, 99),
-        "max": max(values),
-        "mean": statistics.fmean(values),
-    }
-
-
 def windows_ram_bytes() -> int:
     try:
         import ctypes
@@ -298,15 +276,15 @@ def aggregates(samples: list[dict[str, Any]], page_count: int | None) -> dict[st
     variants = len(set(pdf_hashes))
     mean_wall = statistics.fmean(walls) if walls else 0.0
     agg: dict[str, Any] = {
-        "latency": percentiles(walls),
+        "latency": validate_result.percentiles(walls),
         "cpu": {
-            "user_ms": percentiles(users),
-            "sys_ms": percentiles(syss),
-            "wall_ms": percentiles(walls),
+            "user_ms": validate_result.percentiles(users),
+            "sys_ms": validate_result.percentiles(syss),
+            "wall_ms": validate_result.percentiles(walls),
         },
-        "memory": {"peak_rss_kib": percentiles(rss)},
+        "memory": {"peak_rss_kib": validate_result.percentiles(rss)},
         "output": {
-            "pdf_bytes": percentiles(pdfs),
+            "pdf_bytes": validate_result.percentiles(pdfs),
             "page_count": page_count,
         },
         "correctness": {
@@ -324,7 +302,7 @@ def aggregates(samples: list[dict[str, Any]], page_count: int | None) -> dict[st
     if page_count:
         agg["scaling"] = {
             "per_page_wall_ms": round(mean_wall / page_count, 3),
-            "per_page_peak_rss_kib": (round(percentiles(rss)["mean"] / page_count, 1) if rss else 0.0),
+            "per_page_peak_rss_kib": (round(validate_result.percentiles(rss)["mean"] / page_count, 1) if rss else 0.0),
         }
     if mean_wall > 0:
         agg["throughput"] = {"renders_per_minute": round(60_000 / mean_wall, 2), "concurrency": 1}
@@ -461,8 +439,7 @@ def main() -> int:
             "results": results,
         }
     )
-    violations: list[Any] = []
-    validate_result.validate(payload, json.loads(schema.read_text(encoding="utf-8")), "$", violations)
+    violations = validate_result.validate_document(payload, json.loads(schema.read_text(encoding="utf-8")))
     if violations:
         fail(f"benchmark output failed validation: {violations[0]}")
     out.parent.mkdir(parents=True, exist_ok=True)

@@ -18,12 +18,14 @@ SCHEMA = json.loads(
 )
 HASH = "0" * 64
 PERCENTILES = {key: 1 for key in ("min", "p50", "p95", "p99", "max", "mean")}
+ZERO_PERCENTILES = {key: 0 for key in ("min", "p50", "p95", "p99", "max", "mean")}
 
 
 def result() -> dict:
     return {
         "schema": "pliego.benchmark-result",
         "version": 1,
+        "status": "supported",
         "generated_at": "2026-08-08T00:00:00+00:00",
         "host": {
             "os": "Linux",
@@ -60,6 +62,8 @@ def result() -> dict:
             "input": "input.html",
             "input_sha256": HASH,
             "bundle_sha256": HASH,
+            "expected_page_count": 1,
+            "expected_failure_code": None,
         },
         "samples": [
             {
@@ -79,7 +83,10 @@ def result() -> dict:
                     "artifact_bytes": 0,
                     "published_pdf": True,
                 },
-                "correctness": {"pass": True, "checks": []},
+                "correctness": {
+                    "pass": True,
+                    "checks": [{"name": "pdf_published", "status": "pass"}],
+                },
                 "failure": {"code": None, "published_pdf": True},
             }
         ],
@@ -87,10 +94,12 @@ def result() -> dict:
             "latency": PERCENTILES,
             "cpu": {
                 "user_ms": PERCENTILES,
-                "sys_ms": PERCENTILES,
+                "sys_ms": ZERO_PERCENTILES,
                 "wall_ms": PERCENTILES,
             },
             "memory": {"peak_rss_kib": PERCENTILES},
+            "scaling": {"per_page_wall_ms": 1, "per_page_peak_rss_kib": 1},
+            "throughput": {"renders_per_minute": 60000, "concurrency": 1},
             "output": {"pdf_bytes": PERCENTILES, "page_count": 1},
             "correctness": {"pass_count": 1, "total": 1, "passed": True},
             "determinism": {
@@ -104,9 +113,7 @@ def result() -> dict:
 
 
 def errors(value: object) -> list[validate_result.Violation]:
-    found: list[validate_result.Violation] = []
-    validate_result.validate(value, SCHEMA, "$", found)
-    return found
+    return validate_result.validate_document(value, SCHEMA)
 
 
 def must_fail(value: object, expected: str) -> None:
@@ -115,24 +122,81 @@ def must_fail(value: object, expected: str) -> None:
 
 
 def main() -> None:
-    legacy = result()
+    valid = result()
+    assert not errors(valid)
+    legacy = deepcopy(valid)
+    del legacy["status"]
+    del legacy["aggregates"]["failures"]["codes"]
+    del legacy["fixture"]["expected_page_count"]
+    del legacy["fixture"]["expected_failure_code"]
     assert not errors(legacy)
 
-    supported = deepcopy(legacy)
-    supported["status"] = "supported"
+    supported = deepcopy(valid)
     supported["toolchain"]["engine"] = {
         "name": "dompdf",
         "version": "3.1.0",
         "package": "dompdf/dompdf",
     }
-    failed = deepcopy(legacy)
+    failed = deepcopy(valid)
     failed["status"] = "failed"
+    failed["samples"][0]["ok"] = False
+    failed["samples"][0]["correctness"] = {
+        "pass": False,
+        "checks": [{"name": "render", "status": "fail"}],
+    }
+    failed["samples"][0]["failure"]["code"] = "RENDER_FAILED"
+    failed["aggregates"]["correctness"] = {"pass_count": 0, "total": 1, "passed": False}
+    failed["aggregates"]["latency"] = ZERO_PERCENTILES
+    failed["aggregates"]["cpu"] = {
+        "user_ms": ZERO_PERCENTILES,
+        "sys_ms": ZERO_PERCENTILES,
+        "wall_ms": ZERO_PERCENTILES,
+    }
+    failed["aggregates"]["memory"] = {"peak_rss_kib": ZERO_PERCENTILES}
+    failed["aggregates"]["scaling"] = {"per_page_wall_ms": 0, "per_page_peak_rss_kib": 0}
+    del failed["aggregates"]["throughput"]
+    failed["aggregates"]["output"]["pdf_bytes"] = ZERO_PERCENTILES
+    failed["aggregates"]["determinism"] = {
+        "identical_pdf_sha256": 0,
+        "total": 0,
+        "pdf_sha256_variants": 0,
+    }
+    failed["aggregates"]["failures"] = {"count": 1, "codes": {"RENDER_FAILED": 1}}
     failed["samples"][0]["retained"] = {
         "output_dir": "/tmp/pliego-output",
         "artifacts_dir": "/tmp/pliego-artifacts",
     }
+    expected_failure = deepcopy(valid)
+    expected_failure["fixture"]["expected_page_count"] = None
+    expected_failure["fixture"]["expected_failure_code"] = "UNSUPPORTED_PAINT"
+    expected_failure["samples"][0]["exit_code"] = 1
+    expected_failure["samples"][0]["correctness"]["checks"] = [
+        {"name": "render_failed_closed", "status": "pass"},
+        {"name": "failure_code", "status": "pass"},
+        {"name": "pdf_not_published", "status": "pass"},
+    ]
+    expected_failure["samples"][0]["output"] = {
+        "pdf_bytes": None,
+        "pdf_sha256": None,
+        "page_count": None,
+        "artifact_bytes": 1,
+        "published_pdf": False,
+    }
+    expected_failure["samples"][0]["failure"] = {
+        "code": "UNSUPPORTED_PAINT",
+        "published_pdf": False,
+    }
+    expected_failure["aggregates"]["output"]["pdf_bytes"] = ZERO_PERCENTILES
+    expected_failure["aggregates"]["output"]["page_count"] = None
+    del expected_failure["aggregates"]["scaling"]
+    expected_failure["aggregates"]["determinism"] = {
+        "identical_pdf_sha256": 0,
+        "total": 0,
+        "pdf_sha256_variants": 0,
+    }
+    assert not errors(expected_failure)
     not_applicable = {
-        key: deepcopy(legacy[key])
+        key: deepcopy(valid[key])
         for key in ("schema", "version", "generated_at", "host", "toolchain", "target", "fixture")
     }
     not_applicable.update(
@@ -150,31 +214,107 @@ def main() -> None:
     bundle = {
         "schema": "pliego.benchmark-bundle",
         "version": 1,
-        "generated_at": legacy["generated_at"],
-        "results": [legacy, supported, failed, not_applicable],
+        "generated_at": valid["generated_at"],
+        "results": [legacy, supported, failed, expected_failure, not_applicable],
     }
     assert not errors(bundle)
 
-    must_fail([legacy], "oneOf")
+    must_fail([valid], "oneOf")
     for field in ("rss_method", "output", "correctness", "failure"):
-        broken = deepcopy(legacy)
+        broken = deepcopy(valid)
         del broken["samples"][0][field]
         must_fail(broken, field)
-    broken = deepcopy(legacy)
+    broken = deepcopy(valid)
     broken["samples"][0]["phase_timings_ms"]["capture"] = "fast"
     must_fail(broken, "phase_timings_ms.capture")
-    broken = deepcopy(legacy)
+    broken = deepcopy(valid)
     broken["toolchain"]["competitors"] = {"dompdf": 3}
     must_fail(broken, "competitors.dompdf")
-    broken = deepcopy(legacy)
+    broken = deepcopy(valid)
     broken["aggregates"]["failures"]["codes"]["TIMEOUT"] = 0
     must_fail(broken, "minimum")
-    broken = deepcopy(legacy)
+    broken = deepcopy(valid)
     broken["fixture"]["input_sha256"] = "unknown"
     must_fail(broken, "pattern")
     broken = deepcopy(not_applicable)
     broken["samples"] = []
     must_fail(broken, "samples")
+
+    broken = deepcopy(valid)
+    broken["protocol"]["sample_count"] = 2
+    must_fail(broken, "protocol.sample_count")
+    broken = deepcopy(valid)
+    broken["samples"][0]["ok"] = False
+    must_fail(broken, "samples[0].ok")
+    broken = deepcopy(valid)
+    broken["samples"][0]["correctness"]["pass"] = False
+    must_fail(broken, "samples[0].correctness.pass")
+    broken = deepcopy(valid)
+    broken["samples"][0]["failure"]["published_pdf"] = False
+    must_fail(broken, "samples[0].failure.published_pdf")
+    broken = deepcopy(valid)
+    broken["aggregates"]["correctness"]["total"] = 2
+    must_fail(broken, "aggregates.correctness.total")
+    broken = deepcopy(valid)
+    broken["status"] = "failed"
+    must_fail(broken, "$.status")
+    broken = deepcopy(valid)
+    broken["aggregates"]["failures"]["codes"] = {"GHOST": 1}
+    must_fail(broken, "aggregates.failures.codes")
+    broken = deepcopy(valid)
+    broken["aggregates"]["determinism"]["total"] = 0
+    must_fail(broken, "aggregates.determinism.total")
+    broken = deepcopy(valid)
+    broken["aggregates"]["latency"]["p50"] = 999
+    must_fail(broken, "aggregates.latency")
+    broken = deepcopy(valid)
+    broken["aggregates"]["memory"]["peak_rss_kib"]["max"] = 999
+    must_fail(broken, "aggregates.memory.peak_rss_kib")
+    broken = deepcopy(valid)
+    broken["aggregates"]["output"]["pdf_bytes"]["mean"] = 999
+    must_fail(broken, "aggregates.output.pdf_bytes")
+    broken = deepcopy(valid)
+    broken["aggregates"]["scaling"]["per_page_wall_ms"] = 999
+    must_fail(broken, "aggregates.scaling")
+    broken = deepcopy(valid)
+    broken["aggregates"]["throughput"]["renders_per_minute"] = 999
+    must_fail(broken, "aggregates.throughput")
+    broken = deepcopy(valid)
+    broken["samples"][0]["correctness"]["checks"][0]["status"] = "unverified"
+    must_fail(broken, "samples[0].correctness.pass")
+    broken = deepcopy(valid)
+    broken["samples"][0]["index"] = 1
+    must_fail(broken, "sample indices")
+    broken = deepcopy(valid)
+    broken["samples"][0]["rss_method"] = "unavailable"
+    must_fail(broken, "protocol rss_method")
+    broken = deepcopy(valid)
+    broken["samples"][0]["failure"]["code"] = "PANIC"
+    must_fail(broken, "cannot report a failure")
+    broken = deepcopy(valid)
+    broken["samples"][0]["output"]["page_count"] = 2
+    must_fail(broken, "expected page count 1")
+    broken = deepcopy(valid)
+    broken["aggregates"]["output"]["page_count"] = 2
+    must_fail(broken, "fixture expected_page_count 1")
+
+    no_pdf = deepcopy(valid)
+    no_pdf["samples"][0]["output"]["published_pdf"] = False
+    no_pdf["samples"][0]["failure"]["published_pdf"] = False
+    must_fail(no_pdf, "passing normal fixtures must publish a PDF")
+
+    missing_retained = deepcopy(failed)
+    del missing_retained["samples"][0]["retained"]
+    must_fail(missing_retained, "failed samples must retain")
+
+    contradiction = deepcopy(valid)
+    contradiction["samples"][0]["correctness"]["pass"] = False
+    contradiction["samples"][0]["correctness"]["checks"][0]["status"] = "fail"
+    must_fail(contradiction, "aggregates.correctness.pass_count")
+
+    nested = deepcopy(bundle)
+    nested["results"][1]["protocol"]["sample_count"] = 2
+    must_fail(nested, "$.results[1].protocol.sample_count")
     print("benchmark result validator self-check passed")
 
 
