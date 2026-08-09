@@ -19,8 +19,8 @@ Usage:
         [--php /usr/bin/php] [--dedicated]
 
 Design notes:
-* The PHP runner is the only component that spawns the engine; this script
-  never touches the binary directly except to read its version.
+* The PHP runner owns each engine launch and delegates Linux execution to the
+  cgroup-v2 sampler; this script only reads the binary version.
 * Results are validated against the schema before being written; a result
   that fails validation is not saved.
 * Throughput is serial renders/minute (concurrency 1); concurrent 2/4/8
@@ -271,9 +271,15 @@ def collect_samples(
 def aggregates(samples: list[dict[str, Any]], page_count: int | None) -> dict[str, Any]:
     valid = [s for s in samples if s.get("ok") and (s.get("correctness") or {}).get("pass")]
     walls = [s["wall_ms"] for s in valid]
-    users = [s.get("user_ms") for s in valid]
-    syss = [s.get("sys_ms") for s in valid]
-    rss = [s.get("peak_rss_kib") for s in valid]
+    users = [value for s in valid if (value := s.get("user_ms")) is not None]
+    syss = [value for s in valid if (value := s.get("sys_ms")) is not None]
+    memory_peaks = [value for s in valid if (value := s.get("memory_peak_bytes")) is not None]
+    rss = [value for s in valid if (value := s.get("sampled_peak_rss_kib_lower_bound")) is not None]
+    pss = [value for s in valid if (value := s.get("sampled_peak_pss_kib_lower_bound")) is not None]
+    reads = [value for s in valid if (value := s.get("read_bytes")) is not None]
+    writes = [value for s in valid if (value := s.get("write_bytes")) is not None]
+    read_operations = [value for s in valid if (value := s.get("read_operations")) is not None]
+    write_operations = [value for s in valid if (value := s.get("write_operations")) is not None]
     pdfs = [s.get("output", {}).get("pdf_bytes") for s in valid]
     sha256s = [s.get("output", {}).get("pdf_sha256") for s in valid]
     pdf_hashes = [h for h in sha256s if h]
@@ -296,7 +302,16 @@ def aggregates(samples: list[dict[str, Any]], page_count: int | None) -> dict[st
             "sys_ms": validate_result.percentiles(syss),
             "wall_ms": validate_result.percentiles(walls),
         },
-        "memory": {"peak_rss_kib": validate_result.percentiles(rss)},
+        "memory": {
+            "cgroup_peak_bytes": validate_result.percentiles(memory_peaks),
+            "sampled_peak_rss_kib_lower_bound": validate_result.percentiles(rss),
+        },
+        "io": {
+            "read_bytes": validate_result.percentiles(reads),
+            "write_bytes": validate_result.percentiles(writes),
+            "read_operations": validate_result.percentiles(read_operations),
+            "write_operations": validate_result.percentiles(write_operations),
+        },
         "output": {
             "pdf_bytes": validate_result.percentiles(pdfs),
             "page_count": page_count,
@@ -313,10 +328,14 @@ def aggregates(samples: list[dict[str, Any]], page_count: int | None) -> dict[st
         },
         "failures": {"count": len(failures), "codes": codes},
     }
+    if pss and len(pss) == len(valid):
+        agg["memory"]["sampled_peak_pss_kib_lower_bound"] = validate_result.percentiles(pss)
     if page_count:
         agg["scaling"] = {
             "per_page_wall_ms": round(mean_wall / page_count, 3),
-            "per_page_peak_rss_kib": (round(validate_result.percentiles(rss)["mean"] / page_count, 1) if rss else 0.0),
+            "per_page_memory_peak_bytes": (
+                round(validate_result.percentiles(memory_peaks)["mean"] / page_count, 1) if memory_peaks else 0.0
+            ),
         }
     if mean_wall > 0:
         agg["throughput"] = {"renders_per_minute": round(60_000 / mean_wall, 2), "concurrency": 1}
@@ -415,7 +434,8 @@ def main() -> int:
                 "seed": protocol.get("seed"),
                 "network": protocol["network"],
                 "binary_profile": protocol["binary_profile"],
-                "rss_method": samples[0].get("rss_method", "unavailable"),
+                "measurement_method": samples[0].get("measurement_method", "unavailable"),
+                "percentile_method": validate_result.PERCENTILE_METHOD,
             },
             "target": {"id": args.target, "label": target["label"]},
             "fixture": {
