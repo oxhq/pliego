@@ -53,11 +53,13 @@ use engine::{
     DocumentEngine, ExplicitRenderPaths, RenderEnvironment, RenderError, RenderOutcome,
     RenderRequest,
 };
+use resource_policy::{
+    DEFAULT_RESOURCE_TIMEOUT_MS, ResourcePolicyConfig, VirtualResourceSpec,
+};
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
 use resource_policy::{
-    DEFAULT_RESOURCE_TIMEOUT_MS, RESOURCE_POLICY_ID, ResourcePolicy, ResourcePolicyConfig,
-    ResourcePolicyDecision, ResourcePolicyFailure, ResourceRequest, VirtualResourceSpec,
-    http_root_allows,
+    RESOURCE_POLICY_ID, ResourcePolicy, ResourcePolicyDecision, ResourcePolicyFailure,
+    ResourceRequest, http_root_allows,
 };
 
 const SERVO_BASE_SHA: &str = "313b6d5ecc113b08010ce434140db3ca5abcc71c";
