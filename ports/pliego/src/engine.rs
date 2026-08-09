@@ -146,7 +146,10 @@ impl std::error::Error for RenderError {}
 ))]
 impl From<super::document_session::SessionError> for RenderError {
     fn from(error: super::document_session::SessionError) -> Self {
-        if error.code == "INVALID_REQUEST" {
+        if matches!(
+            error.code,
+            "INVALID_REQUEST" | "LAYOUT_CONFIGURATION_FAILED"
+        ) {
             Self::request(error.code, error.message)
         } else {
             Self::without_publication(error.code, error.message, 1)
@@ -215,6 +218,14 @@ mod tests {
         assert_eq!(request_error.exit_code, 2);
         assert_eq!(request_error.artifacts, None);
         assert_eq!(request_error.document_pdf, None);
+
+        let layout_error: RenderError = super::super::document_session::SessionError::new(
+            "LAYOUT_CONFIGURATION_FAILED",
+            "already configured",
+        )
+        .into();
+        assert_eq!(layout_error.code, "LAYOUT_CONFIGURATION_FAILED");
+        assert_eq!(layout_error.exit_code, 2);
 
         let session_error: RenderError =
             super::super::document_session::SessionError::new("RESOURCE_DENIED", "blocked").into();
