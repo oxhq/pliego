@@ -84,6 +84,15 @@ jobs:
       - name: Test the direct document session
         run: cargo test -p pliego --test document_session --no-default-features --features document-session --locked
 
+      - name: Test the shared resource policy
+        run: |
+          cargo test -p pliego --bin pliego --locked
+          python ports/pliego/tests/check_resource_policy.py --self-test
+          cargo build -p pliego --bin pliego --locked
+          xvfb-run python ports/pliego/tests/check_resource_policy.py \
+            "$PWD/target/debug/pliego" \
+            "$RUNNER_TEMP/pliego-resource-policy"
+
       - name: Test the CLI error boundary
         run: cargo test -p pliego --bin pliego --features document-session session_failures_preserve_the_engine_error_classes --locked
 
