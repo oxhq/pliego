@@ -1,0 +1,14 @@
+<!--
+  This Source Code Form is subject to the terms of the Mozilla Public
+  License, v. 2.0. If a copy of the MPL was not distributed with this
+  file, You can obtain one at https://mozilla.org/MPL/2.0/.
+-->
+<!doctype html>
+<meta charset="utf-8">
+<canvas id="chart" width="16" height="12"></canvas>
+<script>
+  const context = document.querySelector("#chart").getContext("2d");
+  context.translate(1, 0);
+  context.fillRect(1, 1, 5, 5);
+  window.pliego.ready({ fixture: "unsupported-canvas" });
+</script>
