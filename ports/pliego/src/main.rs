@@ -1142,8 +1142,7 @@ fn render(request: RenderRequest) -> Result<RenderOutcome, RenderError> {
         .as_ref()
         .map(|paths| paths.output.clone())
         .unwrap_or_else(|| artifacts.directory().join("document.pdf"));
-    let record_session_artifact =
-        |result| record_artifact(&artifacts, &document_pdf_path, result);
+    let record_session_artifact = |result| record_artifact(&artifacts, &document_pdf_path, result);
     let environment_path = artifacts.directory().join("environment.json");
     let mut environment = request.environment.artifact();
     environment["page"] = page_artifact(request.page);
