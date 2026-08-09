@@ -1,0 +1,399 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://pliego.dev/schema/benchmark-result.v1.json",
+  "title": "Pliego benchmark result",
+  "description": "One benchmark result, an explicit not-applicable record, or a validated multi-fixture bundle.",
+  "oneOf": [
+    { "$ref": "#/definitions/result" },
+    { "$ref": "#/definitions/not_applicable" },
+    { "$ref": "#/definitions/bundle" }
+  ],
+  "definitions": {
+    "result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "version",
+        "generated_at",
+        "host",
+        "toolchain",
+        "protocol",
+        "target",
+        "fixture",
+        "samples",
+        "aggregates"
+      ],
+      "properties": {
+        "schema": { "const": "pliego.benchmark-result" },
+        "version": { "const": 1 },
+        "generated_at": { "type": "string" },
+        "status": { "type": "string", "enum": ["supported", "failed"] },
+        "host": { "$ref": "#/definitions/host" },
+        "toolchain": { "$ref": "#/definitions/toolchain" },
+        "protocol": { "$ref": "#/definitions/protocol" },
+        "target": { "$ref": "#/definitions/target" },
+        "fixture": { "$ref": "#/definitions/fixture" },
+        "samples": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/definitions/sample" }
+        },
+        "aggregates": { "$ref": "#/definitions/aggregates" }
+      }
+    },
+    "not_applicable": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "version",
+        "generated_at",
+        "status",
+        "reason",
+        "host",
+        "toolchain",
+        "protocol",
+        "target",
+        "fixture"
+      ],
+      "properties": {
+        "schema": { "const": "pliego.benchmark-result" },
+        "version": { "const": 1 },
+        "generated_at": { "type": "string" },
+        "status": { "const": "not-applicable" },
+        "reason": { "type": "string", "pattern": ".+" },
+        "host": { "$ref": "#/definitions/host" },
+        "toolchain": { "$ref": "#/definitions/toolchain" },
+        "protocol": { "$ref": "#/definitions/not_applicable_protocol" },
+        "target": { "$ref": "#/definitions/target" },
+        "fixture": { "$ref": "#/definitions/fixture" }
+      }
+    },
+    "bundle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "version", "generated_at", "results"],
+      "properties": {
+        "schema": { "const": "pliego.benchmark-bundle" },
+        "version": { "const": 1 },
+        "generated_at": { "type": "string" },
+        "results": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "oneOf": [
+              { "$ref": "#/definitions/result" },
+              { "$ref": "#/definitions/not_applicable" }
+            ]
+          }
+        }
+      }
+    },
+    "host": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["os", "arch", "kernel", "cpu_model", "cores", "ram_bytes", "dedicated"],
+      "properties": {
+        "os": { "type": "string" },
+        "arch": { "type": "string" },
+        "kernel": { "type": "string" },
+        "cpu_model": { "type": "string" },
+        "cores": { "type": "integer", "minimum": 1 },
+        "ram_bytes": { "type": "integer", "minimum": 0 },
+        "dedicated": { "type": "boolean" },
+        "disk_free_bytes": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "toolchain": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["engine", "python_version", "php_version"],
+      "properties": {
+        "engine": { "$ref": "#/definitions/engine" },
+        "python_version": { "type": "string" },
+        "php_version": { "type": "string" },
+        "harness_revision": { "type": "string", "pattern": "^[0-9a-f]{7,64}$" },
+        "competitors": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        }
+      }
+    },
+    "engine": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {
+        "name": { "type": "string" },
+        "version": { "type": "string" },
+        "commit": { "type": "string" },
+        "package": { "type": "string" },
+        "binary_path": { "type": "string" },
+        "binary_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "binary_bytes": { "type": "integer", "minimum": 0 },
+        "bundle": { "type": "string" },
+        "bundle_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "profile": { "type": "string" }
+      }
+    },
+    "protocol": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "warmup_iterations",
+        "sample_count",
+        "sample_order",
+        "network",
+        "binary_profile",
+        "rss_method"
+      ],
+      "properties": {
+        "warmup_iterations": { "type": "integer", "minimum": 0 },
+        "sample_count": { "type": "integer", "minimum": 1 },
+        "sample_order": { "type": "string", "enum": ["random", "sequential"] },
+        "seed": { "type": "integer" },
+        "network": { "const": "disabled" },
+        "binary_profile": { "type": "string" },
+        "rss_method": { "type": "string", "enum": ["time-v", "ps-poll", "unavailable"] }
+      }
+    },
+    "not_applicable_protocol": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "warmup_iterations",
+        "sample_count",
+        "sample_order",
+        "network",
+        "binary_profile",
+        "rss_method"
+      ],
+      "properties": {
+        "warmup_iterations": { "type": "integer", "minimum": 0 },
+        "sample_count": { "const": 0 },
+        "sample_order": { "type": "string", "enum": ["random", "sequential"] },
+        "seed": { "type": "integer" },
+        "network": { "const": "disabled" },
+        "binary_profile": { "type": "string" },
+        "rss_method": { "const": "unavailable" }
+      }
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "label"],
+      "properties": {
+        "id": { "type": "string" },
+        "label": { "type": "string" }
+      }
+    },
+    "fixture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "purpose", "category", "input"],
+      "properties": {
+        "id": { "type": "string" },
+        "purpose": { "type": "string" },
+        "category": {
+          "type": "string",
+          "enum": ["static", "scripted", "scale", "resources", "failure"]
+        },
+        "input": { "type": "string" },
+        "input_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "bundle_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "expected_page_count": { "type": ["integer", "null"], "minimum": 1 },
+        "expected_failure_code": { "type": ["string", "null"] }
+      }
+    },
+    "sample": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "index",
+        "ok",
+        "exit_code",
+        "wall_ms",
+        "user_ms",
+        "sys_ms",
+        "peak_rss_kib",
+        "rss_method",
+        "output",
+        "correctness",
+        "failure"
+      ],
+      "properties": {
+        "index": { "type": "integer", "minimum": 0 },
+        "ok": { "type": "boolean" },
+        "exit_code": { "type": "integer" },
+        "wall_ms": { "type": "number", "minimum": 0 },
+        "user_ms": { "type": ["number", "null"], "minimum": 0 },
+        "sys_ms": { "type": ["number", "null"], "minimum": 0 },
+        "peak_rss_kib": { "type": ["integer", "null"], "minimum": 0 },
+        "rss_method": { "type": "string", "enum": ["time-v", "ps-poll", "unavailable"] },
+        "phase_timings_ms": {
+          "type": ["object", "null"],
+          "additionalProperties": { "type": "number", "minimum": 0 }
+        },
+        "bridge_timings_ms": {
+          "type": ["object", "null"],
+          "additionalProperties": { "type": "number", "minimum": 0 }
+        },
+        "retained": { "$ref": "#/definitions/retained" },
+        "output": { "$ref": "#/definitions/output" },
+        "correctness": { "$ref": "#/definitions/correctness" },
+        "failure": { "$ref": "#/definitions/failure" },
+        "summary": { "type": ["object", "null"] }
+      }
+    },
+    "retained": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["output_dir", "artifacts_dir"],
+      "properties": {
+        "output_dir": { "type": "string" },
+        "artifacts_dir": { "type": "string" }
+      }
+    },
+    "output": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pdf_bytes", "pdf_sha256", "page_count", "artifact_bytes", "published_pdf"],
+      "properties": {
+        "pdf_bytes": { "type": ["integer", "null"], "minimum": 0 },
+        "pdf_sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+        "page_count": { "type": ["integer", "null"], "minimum": 1 },
+        "artifact_bytes": { "type": ["integer", "null"], "minimum": 0 },
+        "published_pdf": { "type": "boolean" }
+      }
+    },
+    "correctness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pass", "checks"],
+      "properties": {
+        "pass": { "type": "boolean" },
+        "checks": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/check" }
+        }
+      }
+    },
+    "check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "status"],
+      "properties": {
+        "name": { "type": "string" },
+        "status": { "type": "string", "enum": ["pass", "fail", "unverified"] },
+        "detail": { "type": "string" }
+      }
+    },
+    "failure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "published_pdf"],
+      "properties": {
+        "code": { "type": ["string", "null"] },
+        "message": { "type": ["string", "null"] },
+        "published_pdf": { "type": "boolean" }
+      }
+    },
+    "aggregates": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["latency", "cpu", "memory", "output", "correctness", "determinism", "failures"],
+      "properties": {
+        "latency": { "$ref": "#/definitions/percentiles" },
+        "cpu": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["user_ms", "sys_ms", "wall_ms"],
+          "properties": {
+            "user_ms": { "$ref": "#/definitions/percentiles" },
+            "sys_ms": { "$ref": "#/definitions/percentiles" },
+            "wall_ms": { "$ref": "#/definitions/percentiles" }
+          }
+        },
+        "memory": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["peak_rss_kib"],
+          "properties": {
+            "peak_rss_kib": { "$ref": "#/definitions/percentiles" }
+          }
+        },
+        "scaling": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "per_page_wall_ms": { "type": "number", "minimum": 0 },
+            "per_page_peak_rss_kib": { "type": "number", "minimum": 0 }
+          }
+        },
+        "throughput": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "renders_per_minute": { "type": "number", "minimum": 0 },
+            "concurrency": { "type": "integer", "minimum": 1 }
+          }
+        },
+        "output": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["pdf_bytes", "page_count"],
+          "properties": {
+            "pdf_bytes": { "$ref": "#/definitions/percentiles" },
+            "page_count": { "type": ["integer", "null"], "minimum": 1 }
+          }
+        },
+        "correctness": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["pass_count", "total", "passed"],
+          "properties": {
+            "pass_count": { "type": "integer", "minimum": 0 },
+            "total": { "type": "integer", "minimum": 0 },
+            "passed": { "type": "boolean" }
+          }
+        },
+        "determinism": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["identical_pdf_sha256", "total", "pdf_sha256_variants"],
+          "properties": {
+            "identical_pdf_sha256": { "type": "integer", "minimum": 0 },
+            "total": { "type": "integer", "minimum": 0 },
+            "pdf_sha256_variants": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "failures": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["count"],
+          "properties": {
+            "count": { "type": "integer", "minimum": 0 },
+            "codes": {
+              "type": "object",
+              "additionalProperties": { "type": "integer", "minimum": 1 }
+            }
+          }
+        }
+      }
+    },
+    "percentiles": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["min", "p50", "p95", "p99", "max", "mean"],
+      "properties": {
+        "min": { "type": "number" },
+        "p50": { "type": "number" },
+        "p95": { "type": "number" },
+        "p99": { "type": "number" },
+        "max": { "type": "number" },
+        "mean": { "type": "number" }
+      }
+    }
+  }
+}

@@ -246,11 +246,8 @@ impl TextRunSegment {
         let text_content = ifc.ifc.text_content.clone();
         let mut character_range_start = self.character_range.start;
         debug_assert_eq!(self.runs.len(), self.run_byte_ranges.len());
-        for (run_index, (run, text_range)) in self
-            .runs
-            .iter()
-            .zip(&self.run_byte_ranges)
-            .enumerate()
+        for (run_index, (run, text_range)) in
+            self.runs.iter().zip(&self.run_byte_ranges).enumerate()
         {
             let source = TextFragmentSource {
                 inline_item_index,
@@ -690,15 +687,13 @@ impl TextRun {
                     ifc.defer_forced_line_break_at_character_offset(*character_index);
                 },
                 TextRunItem::Tab { bidi_level } => self.process_preserved_tab(ifc, *bidi_level),
-                TextRunItem::TextSegment(segment) => {
-                    segment.layout_into_line_items(
-                        self,
-                        soft_wrap_policy,
-                        ifc,
-                        inline_item_index,
-                        &mut shaping_result_index,
-                    )
-                },
+                TextRunItem::TextSegment(segment) => segment.layout_into_line_items(
+                    self,
+                    soft_wrap_policy,
+                    ifc,
+                    inline_item_index,
+                    &mut shaping_result_index,
+                ),
             }
             soft_wrap_policy = SegmentStartSoftWrapPolicy::FollowLinebreaker;
         }

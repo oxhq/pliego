@@ -182,7 +182,7 @@ impl PlatformWindow for HeadlessWindow {
     fn show_console_message(&self, level: servo::ConsoleLogLevel, message: &str) {
         if let Some(console_messages) = &self.console_messages {
             console_messages.borrow_mut().push(ConsoleMessage {
-                level: level.clone(),
+                level,
                 message: message.to_owned(),
             });
             return;

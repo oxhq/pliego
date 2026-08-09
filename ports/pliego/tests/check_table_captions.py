@@ -93,12 +93,8 @@ def verify_supported(
     require(flattened == EXPECTED_TEXT, f"caption or row text differs: {flattened!r}")
 
     occurrences: dict[str, list[int]] = {"TOP_CAPTION": [], "BOTTOM_CAPTION": []}
-    row_pages: dict[tuple[str, int], set[int]] = {
-        (table, row): set() for table in "TB" for row in range(ROW_COUNT)
-    }
-    column_x: dict[tuple[str, str], set[float]] = {
-        (table, column): set() for table in "TB" for column in "AB"
-    }
+    row_pages: dict[tuple[str, int], set[int]] = {(table, row): set() for table in "TB" for row in range(ROW_COUNT)}
+    column_x: dict[tuple[str, str], set[float]] = {(table, column): set() for table in "TB" for column in "AB"}
     for page_index, operations in enumerate(pages):
         for operation in operations:
             text = str(operation.get("text", ""))
@@ -139,9 +135,7 @@ def verify_supported(
     continuations = page_sequence.get("continuations")
     require(isinstance(continuations, list), "continuation trace is absent")
     table_continuations = [
-        item
-        for item in continuations
-        if isinstance(item, dict) and item.get("token", {}).get("kind") == "table"
+        item for item in continuations if isinstance(item, dict) and item.get("token", {}).get("kind") == "table"
     ]
     table_nodes = {item["token"].get("table_node") for item in table_continuations}
     require(len(table_nodes) == 2 and None not in table_nodes, f"table identity differs: {table_nodes!r}")
@@ -157,9 +151,7 @@ def verify_supported(
     require(isinstance(decisions, list), "table break decisions are absent")
     require({item.get("table_node") for item in decisions} == table_nodes, "decision identity differs")
     for node in table_nodes:
-        boundaries = [
-            item.get("next_row_index") for item in decisions if item.get("table_node") == node
-        ]
+        boundaries = [item.get("next_row_index") for item in decisions if item.get("table_node") == node]
         require(boundaries == list(range(1, ROW_COUNT)), f"row boundaries differ: {boundaries!r}")
     require(page_sequence.get("warnings") in (None, []), "supported captions emitted a warning")
 
@@ -173,11 +165,16 @@ def verify_supported(
 def verify_unsupported(layout: dict[str, Any]) -> None:
     warnings = layout.get("page_sequence", {}).get("warnings")
     require(isinstance(warnings, list), "unsupported fixture has no warning array")
+    require(len(warnings) == 2, f"unsupported caption warning count differs: {warnings!r}")
+    table_warning, caption_warning = warnings
     require(
-        len(warnings) == 1
-        and warnings[0].get("kind") == "unsupported-table-caption-pagination"
-        and warnings[0].get("child_index") == 1
-        and warnings[0].get("node") is not None,
+        table_warning.get("kind") == "unsupported-table-group-pagination"
+        and table_warning.get("child_index") == 1
+        and table_warning.get("table_node") is not None
+        and table_warning.get("reason") == "unsupported-layout"
+        and caption_warning.get("kind") == "unsupported-table-caption-pagination"
+        and caption_warning.get("child_index") == 1
+        and caption_warning.get("node") == table_warning.get("table_node"),
         f"unsupported caption warning differs: {warnings!r}",
     )
 
@@ -191,9 +188,7 @@ def self_test() -> None:
     pages[0]["operations"].append(operation("TOP_CAPTION", 10.0))
     for table, page_by_row in (("T", [0, 0, 0, 1, 1, 1]), ("B", [1, 2, 2, 2, 2, 3])):
         for row, page in enumerate(page_by_row):
-            pages[page]["operations"].extend(
-                [operation(f"{table}{row}A", 10.0), operation(f"{table}{row}B", 70.0)]
-            )
+            pages[page]["operations"].extend([operation(f"{table}{row}A", 10.0), operation(f"{table}{row}B", 70.0)])
     pages[3]["operations"].append(operation("BOTTOM_CAPTION", 10.0))
 
     decisions = []
@@ -238,10 +233,16 @@ def self_test() -> None:
             "page_sequence": {
                 "warnings": [
                     {
+                        "kind": "unsupported-table-group-pagination",
+                        "child_index": 1,
+                        "table_node": 33,
+                        "reason": "unsupported-layout",
+                    },
+                    {
                         "kind": "unsupported-table-caption-pagination",
                         "child_index": 1,
                         "node": 33,
-                    }
+                    },
                 ]
             }
         }

@@ -18,9 +18,7 @@ from typing import Any
 TIMEOUT_SECONDS = 60
 LINE_COUNT = 12
 EXPECTED_TOKENS = (
-    ["Lead."]
-    + [token for index in range(LINE_COUNT) for token in (f"A{index}", f"B{index}")]
-    + ["TailA", "TailB"]
+    ["Lead."] + [token for index in range(LINE_COUNT) for token in (f"A{index}", f"B{index}")] + ["TailA", "TailB"]
 )
 
 
@@ -210,10 +208,7 @@ def self_test() -> None:
         for page in (1, 2)
         for cell in (0, 1)
     ]
-    continuations = [
-        {"page_index": page - 1, "token": {"kind": "table", "next_row_index": 0}}
-        for page in (1, 2)
-    ]
+    continuations = [{"page_index": page - 1, "token": {"kind": "table", "next_row_index": 0}} for page in (1, 2)]
     layout = {
         "page_sequence": {
             "pages": [{}, {}, {}],

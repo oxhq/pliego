@@ -10,6 +10,7 @@ on:
     # pipeline for changes that can affect the upstream engine boundary.
     paths-ignore: &pliego-owned-paths
       - "ports/pliego/**"
+      - "benchmarks/**"
       - "sdk/php/**"
       - "sdk/laravel/**"
       - "tests/pliego/**"

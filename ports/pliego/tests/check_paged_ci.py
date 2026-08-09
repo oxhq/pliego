@@ -149,9 +149,7 @@ def normalize_continuations(layout: dict[str, Any]) -> list[dict[str, Any]]:
     tag_positions = {
         fragment["tag_id"]: index
         for index, fragment in reversed(list(enumerate(fragments)))
-        if isinstance(fragment, dict)
-        and fragment.get("kind") == "box"
-        and isinstance(fragment.get("tag_id"), int)
+        if isinstance(fragment, dict) and fragment.get("kind") == "box" and isinstance(fragment.get("tag_id"), int)
     }
     block_nodes = []
     for continuation in continuations:
@@ -231,17 +229,13 @@ def verify_run(run: dict[str, Any], expected: dict[str, Any]) -> dict[str, Any]:
     layout_pages = page_sequence.get("pages")
     reference_pages = expected["pages"]
     require(
-        isinstance(layout_pages, list)
-        and len(pages) == len(layout_pages) == len(reference_pages)
-        and len(pages) > 1,
+        isinstance(layout_pages, list) and len(pages) == len(layout_pages) == len(reference_pages) and len(pages) > 1,
         "layout/scene/reference page counts differ",
     )
 
     page_geometry = expected["page"]
     page_text = []
-    for index, (page, layout_page, reference_page) in enumerate(
-        zip(pages, layout_pages, reference_pages)
-    ):
+    for index, (page, layout_page, reference_page) in enumerate(zip(pages, layout_pages, reference_pages, strict=True)):
         require(isinstance(page, dict) and isinstance(layout_page, dict), f"invalid page {index}")
         require(page.get("size") == {"width": 180.0, "height": 80.0}, f"scene page {index} size differs")
         require(layout_page.get("index") == index, f"layout page {index} index differs")
@@ -320,11 +314,7 @@ def self_test(fixture: Path, reference_path: Path) -> None:
     node_index = 0
     continuations = []
     for row in expected["continuations"]:
-        token = {
-            key: value
-            for key, value in row.items()
-            if key not in ("page_index", "node_order")
-        }
+        token = {key: value for key, value in row.items() if key not in ("page_index", "node_order")}
         if row["kind"] == "block":
             token["next_node"] = node_ids[node_index]
             node_index += 1
@@ -332,10 +322,7 @@ def self_test(fixture: Path, reference_path: Path) -> None:
             token.update({"inline_item_index": 0, "shaping_result_index": 0})
         continuations.append({"page_index": row["page_index"], "token": token})
     synthetic_layout = {
-        "fragments": [
-            {"kind": "box", "tag_id": node_id}
-            for node_id in node_ids
-        ],
+        "fragments": [{"kind": "box", "tag_id": node_id} for node_id in node_ids],
         "page_sequence": {"continuations": continuations},
     }
     require(

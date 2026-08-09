@@ -348,7 +348,7 @@ fn web_resource_policy_is_optional_and_returns_typed_decisions() {
 
     let synthesize: WebResourcePolicyHandler =
         Rc::new(|request| WebResourcePolicyDecision::Synthesize {
-            response: WebResourceResponse::new(request.url.clone()),
+            response: Box::new(WebResourceResponse::new(request.url.clone())),
             body: b"fixture body".to_vec(),
         });
     let WebResourcePolicyDecision::Synthesize { response, body } =

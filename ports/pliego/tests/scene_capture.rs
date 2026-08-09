@@ -404,6 +404,80 @@ fn snapshot(local_id_base: usize, link_tag: u64) -> Vec<u8> {
     .unwrap()
 }
 
+fn unpainted_anchor_snapshot(link_tag: u64, text_tag: u64) -> Value {
+    let mut snapshot: Value = serde_json::from_slice(&snapshot(10, link_tag)).unwrap();
+
+    // Real inline anchors retain their own box fragment, while the painted text fragments carry
+    // the child text node's tag. The anchor box itself has no display-list paint event.
+    snapshot["fragments"].as_array_mut().unwrap().insert(
+        1,
+        json!({
+            "depth": 1,
+            "kind": "box",
+            "rect": { "x": 10.0, "y": 20.0, "width": 15.0, "height": 24.0 },
+            "tag_id": link_tag,
+            "paint_fragment_id": null,
+            "text_run": null,
+            "image_url": null
+        }),
+    );
+    for fragment in snapshot["fragments"].as_array_mut().unwrap() {
+        if fragment["kind"] == "text" {
+            fragment["depth"] = json!(2);
+            fragment["tag_id"] = json!(text_tag);
+        }
+    }
+    for event in snapshot["paint_events"].as_array_mut().unwrap() {
+        if event["tag_id"] == link_tag {
+            event["tag_id"] = json!(text_tag);
+        }
+    }
+    snapshot
+}
+
+fn repeated_header_anchor_snapshot(link_inside_header: bool) -> Value {
+    let link_tag = 1000;
+    let header_tag = 2000;
+    let mut snapshot = unpainted_anchor_snapshot(link_tag, 1001);
+    let header_depth = if link_inside_header { 1 } else { 2 };
+    let header = json!({
+        "depth": header_depth,
+        "kind": "box",
+        "rect": { "x": 8.0, "y": 18.0, "width": 20.0, "height": 28.0 },
+        "tag_id": header_tag,
+        "paint_fragment_id": null,
+        "text_run": null,
+        "image_url": null
+    });
+    let fragments = snapshot["fragments"].as_array_mut().unwrap();
+    fragments.insert(if link_inside_header { 1 } else { 2 }, header);
+    for fragment in fragments {
+        if fragment["kind"] == "text" {
+            fragment["depth"] = json!(3);
+        } else if link_inside_header && fragment["kind"] == "box" && fragment["tag_id"] == link_tag
+        {
+            fragment["depth"] = json!(2);
+        }
+    }
+
+    let mut second_page = snapshot["page_sequence"]["pages"][0].clone();
+    second_page["index"] = json!(1);
+    snapshot["page_sequence"]["pages"]
+        .as_array_mut()
+        .unwrap()
+        .push(second_page);
+    snapshot["page_sequence"]["table_group_repeats"] = json!([{
+        "page_index": 1,
+        "table_node": 3000,
+        "header_tag_id": header_tag,
+        "row_group_index": 0,
+        "source_block_start": 20.0,
+        "target_block_start": 812.0,
+        "block_size": 28.0
+    }]);
+    snapshot
+}
+
 fn two_page_snapshot(local_id_base: usize, link_tag: u64) -> Value {
     let mut capture: Value = serde_json::from_slice(&snapshot(local_id_base, link_tag)).unwrap();
     let mut second_page = capture["page_sequence"]["pages"][0].clone();
@@ -650,8 +724,8 @@ fn retains_svg_text_font_identity_and_embedded_png_for_both_backends() {
     let face = ttf_parser::Face::parse(FONT_BYTES, 0).unwrap();
     let glyph_id = face.glyph_index('A').unwrap();
     let font_size = 8.0_f32;
-    let advance = f32::from(face.glyph_hor_advance(glyph_id).unwrap()) * font_size
-        / f32::from(face.units_per_em());
+    let advance = f32::from(face.glyph_hor_advance(glyph_id).unwrap()) * font_size /
+        f32::from(face.units_per_em());
     let font_resource = content_address(FONT_BYTES);
     let font_instance = font_instance_address(FONT_BYTES, 0, &[], false);
 
@@ -793,6 +867,168 @@ fn retains_svg_text_font_identity_and_embedded_png_for_both_backends() {
         pdf.windows(b"/ToUnicode".len())
             .any(|window| window == b"/ToUnicode")
     );
+}
+
+#[test]
+fn captures_unpainted_anchor_box_around_text_node_paint_events() {
+    let link_tag = 1000;
+    let snapshot = unpainted_anchor_snapshot(link_tag, 1001);
+
+    let captured = convert(&serde_json::to_vec(&snapshot).unwrap());
+    let operations = &captured.scene.pages[0].operations;
+    let links = operations
+        .iter()
+        .filter_map(|operation| match operation {
+            Operation::Link { bounds, target, .. } => Some((bounds, target)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(links.len(), 1);
+    assert_eq!(
+        links[0].0,
+        &Rect {
+            x: 10.0,
+            y: 20.0,
+            width: 15.0,
+            height: 24.0,
+        }
+    );
+    assert_eq!(links[0].1, LINK_URL);
+    assert!(matches!(&operations[0], Operation::Text { text, .. } if text == "A"));
+    assert!(matches!(&operations[1], Operation::Link { .. }));
+    assert!(matches!(&operations[2], Operation::Text { text, .. } if text == "B"));
+}
+
+#[test]
+fn same_tag_painted_children_do_not_gain_an_overlapping_box_link() {
+    let link_tag = 1000;
+    let snapshot = unpainted_anchor_snapshot(link_tag, link_tag);
+
+    let captured = convert(&serde_json::to_vec(&snapshot).unwrap());
+    let links = captured.scene.pages[0]
+        .operations
+        .iter()
+        .filter_map(|operation| match operation {
+            Operation::Link { bounds, target, .. } => Some((bounds, target)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(links.len(), 2);
+    assert_eq!(
+        links[0].0,
+        &Rect {
+            x: 10.0,
+            y: 20.0,
+            width: 10.0,
+            height: 12.0,
+        }
+    );
+    assert_eq!(
+        links[1].0,
+        &Rect {
+            x: 10.0,
+            y: 32.0,
+            width: 15.0,
+            height: 12.0,
+        }
+    );
+    assert!(links.iter().all(|(_, target)| target.as_str() == LINK_URL));
+}
+
+#[test]
+fn ignores_unpainted_anchor_box_without_painted_descendants() {
+    let link_tag = 1000;
+    let mut snapshot = unpainted_anchor_snapshot(link_tag, 1001);
+    for fragment in snapshot["fragments"].as_array_mut().unwrap() {
+        if fragment["kind"] == "text" {
+            fragment["depth"] = json!(1);
+        }
+    }
+
+    let captured = convert(&serde_json::to_vec(&snapshot).unwrap());
+    assert!(
+        captured.scene.pages[0]
+            .operations
+            .iter()
+            .all(|operation| !matches!(operation, Operation::Link { .. }))
+    );
+}
+
+#[test]
+fn repeats_synthetic_anchor_link_when_the_anchor_is_inside_the_table_header() {
+    let snapshot = repeated_header_anchor_snapshot(true);
+    let captured = convert(&serde_json::to_vec(&snapshot).unwrap());
+
+    let source_links = captured.scene.pages[0]
+        .operations
+        .iter()
+        .filter(|operation| matches!(operation, Operation::Link { .. }))
+        .count();
+    let repeated_links = captured.scene.pages[1]
+        .operations
+        .iter()
+        .filter(|operation| matches!(operation, Operation::Link { .. }))
+        .collect::<Vec<_>>();
+    assert_eq!(source_links, 1);
+    assert_eq!(repeated_links.len(), 1);
+    let Operation::Link { meta, .. } = repeated_links[0] else {
+        unreachable!();
+    };
+    assert_eq!(
+        meta.semantics
+            .as_ref()
+            .and_then(|semantics| semantics.label.as_deref()),
+        Some("repeated-table-header")
+    );
+}
+
+#[test]
+fn does_not_repeat_ancestor_anchor_link_from_a_descendant_table_header_event() {
+    let snapshot = repeated_header_anchor_snapshot(false);
+    let captured = convert(&serde_json::to_vec(&snapshot).unwrap());
+
+    assert_eq!(
+        captured.scene.pages[0]
+            .operations
+            .iter()
+            .filter(|operation| matches!(operation, Operation::Link { .. }))
+            .count(),
+        1
+    );
+    assert!(
+        captured.scene.pages[1]
+            .operations
+            .iter()
+            .all(|operation| !matches!(operation, Operation::Link { .. }))
+    );
+    assert!(captured.scene.pages[1].operations.iter().any(|operation| {
+        matches!(
+            operation,
+            Operation::Text { meta, .. }
+                if meta.semantics.as_ref().and_then(|semantics| semantics.label.as_deref())
+                    == Some("repeated-table-header")
+        )
+    }));
+}
+
+#[test]
+fn ignores_dom_link_without_a_retained_layout_fragment() {
+    let hidden_tag = 9000;
+    let mut snapshot: Value = serde_json::from_slice(&snapshot(10, 1000)).unwrap();
+    snapshot["links"].as_array_mut().unwrap().push(json!({
+        "tag_id": hidden_tag,
+        "url": "https://example.test/hidden"
+    }));
+
+    let captured = convert(&serde_json::to_vec(&snapshot).unwrap());
+    let links = captured.scene.pages[0]
+        .operations
+        .iter()
+        .filter(|operation| matches!(operation, Operation::Link { .. }))
+        .count();
+    assert_eq!(links, 2);
 }
 
 #[test]

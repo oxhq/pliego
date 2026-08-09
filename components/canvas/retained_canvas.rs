@@ -229,9 +229,9 @@ pub(crate) fn retain_fill_rect(
         );
         return;
     }
-    if composition.alpha != 1.0
-        || composition.composition_operation
-            != CompositionOrBlending::Composition(CompositionStyle::SourceOver)
+    if composition.alpha != 1.0 ||
+        composition.composition_operation !=
+            CompositionOrBlending::Composition(CompositionStyle::SourceOver)
     {
         mark_unsupported(
             canvas_id,
@@ -268,7 +268,7 @@ pub(crate) fn retain_fill_rect(
     else {
         return;
     };
-    let srgb = color.clone().into_srgb_legacy();
+    let srgb = (*color).into_srgb_legacy();
     canvas.commands.push(RetainedCanvasCommand::FillRect {
         x: f64::from(rect.origin.x),
         y: f64::from(rect.origin.y),
@@ -292,10 +292,10 @@ pub(crate) fn retain_pixel_readback(
     let size = snapshot.size();
     let pixels = u64::from(size.width).saturating_mul(u64::from(size.height));
     let bytes = pixels.saturating_mul(4);
-    if u64::from(size.width) > MAX_RASTER_DIMENSION
-        || u64::from(size.height) > MAX_RASTER_DIMENSION
-        || pixels > MAX_RASTER_PIXELS
-        || bytes > MAX_RASTER_BYTES
+    if u64::from(size.width) > MAX_RASTER_DIMENSION ||
+        u64::from(size.height) > MAX_RASTER_DIMENSION ||
+        pixels > MAX_RASTER_PIXELS ||
+        bytes > MAX_RASTER_BYTES
     {
         mark_unsupported(
             canvas_id,

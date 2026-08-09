@@ -512,8 +512,10 @@ pub fn capture_document_scene_with_canvas(
 
     let mut font_resources = collect_font_resources(capture.font_resources)?;
     let mut font_instances = collect_font_instances(capture.font_instances, &font_resources)?;
-    let fragments = collect_fragments(capture.fragments)?;
     let links = collect_links(capture.links)?;
+    let box_link_placements =
+        collect_box_link_placements(&capture.fragments, &capture.paint_events, &links)?;
+    let fragments = collect_fragments(capture.fragments)?;
     let mut emitted_links = HashSet::new();
     let mut unsupported_events = Vec::new();
     let mut text_mapping_gaps = Vec::new();
@@ -626,6 +628,7 @@ pub fn capture_document_scene_with_canvas(
                     .into_scene_rect();
                 operations.push(PositionedOperation {
                     sequence: event.sequence,
+                    structural_fragment_index: None,
                     bounds,
                     operation: Operation::Text {
                         text: text_run.text.clone(),
@@ -693,6 +696,11 @@ pub fn capture_document_scene_with_canvas(
                         fragment,
                         event.sequence,
                     )?;
+                    append_box_links(
+                        &mut operations,
+                        box_link_placements.get(&event.sequence).map(Vec::as_slice),
+                        event.sequence,
+                    );
                     continue;
                 }
                 if let Some(key) = fragment.canvas_image_key {
@@ -725,6 +733,11 @@ pub fn capture_document_scene_with_canvas(
                         fragment,
                         event.sequence,
                     )?;
+                    append_box_links(
+                        &mut operations,
+                        box_link_placements.get(&event.sequence).map(Vec::as_slice),
+                        event.sequence,
+                    );
                     continue;
                 }
                 let bounds = rect.into_scene_rect();
@@ -741,6 +754,7 @@ pub fn capture_document_scene_with_canvas(
                 ensure_content_address(&resource)?;
                 operations.push(PositionedOperation {
                     sequence: event.sequence,
+                    structural_fragment_index: None,
                     bounds: bounds.clone(),
                     operation: Operation::Image {
                         bounds,
@@ -762,6 +776,7 @@ pub fn capture_document_scene_with_canvas(
                     let bounds = border.rect.into_scene_rect();
                     operations.push(PositionedOperation {
                         sequence: event.sequence,
+                        structural_fragment_index: None,
                         bounds: bounds.clone(),
                         operation: Operation::Path {
                             data: rectangle_path_data(&bounds),
@@ -790,12 +805,18 @@ pub fn capture_document_scene_with_canvas(
                     .fragment_id
                     .is_some_and(|fragment_id| unsupported_box_fragments.contains(&fragment_id))
                 {
+                    append_box_links(
+                        &mut operations,
+                        box_link_placements.get(&event.sequence).map(Vec::as_slice),
+                        event.sequence,
+                    );
                     continue;
                 }
                 for paint_rect in &event.paint_rects {
                     let bounds = paint_rect.rect.into_scene_rect();
                     operations.push(PositionedOperation {
                         sequence: event.sequence,
+                        structural_fragment_index: None,
                         bounds: bounds.clone(),
                         operation: Operation::Path {
                             data: rectangle_path_data(&bounds),
@@ -820,13 +841,13 @@ pub fn capture_document_scene_with_canvas(
                     });
                 }
             },
-            kind @ ("box"
-            | "root-background"
-            | "outline"
-            | "collapsed-table-borders"
-            | "iframe"
-            | "text-effects"
-            | "content-geometry") => {
+            kind @ ("box" |
+            "root-background" |
+            "outline" |
+            "collapsed-table-borders" |
+            "iframe" |
+            "text-effects" |
+            "content-geometry") => {
                 unsupported_events.push(UnsupportedPaintEvent {
                     sequence: event.sequence,
                     kind: match kind {
@@ -860,6 +881,11 @@ pub fn capture_document_scene_with_canvas(
                 });
             },
         }
+        append_box_links(
+            &mut operations,
+            box_link_placements.get(&event.sequence).map(Vec::as_slice),
+            event.sequence,
+        );
     }
 
     if stacking_context_depth != 0 {
@@ -903,10 +929,10 @@ fn append_canvas(
     sequence: usize,
 ) -> Result<(), CaptureError> {
     let source_page = &canvas.scene.pages[0];
-    if source_page.size.width <= 0.0
-        || source_page.size.height <= 0.0
-        || destination.width <= 0.0
-        || destination.height <= 0.0
+    if source_page.size.width <= 0.0 ||
+        source_page.size.height <= 0.0 ||
+        destination.width <= 0.0 ||
+        destination.height <= 0.0
     {
         return Err(CaptureError::Canvas {
             sequence,
@@ -914,8 +940,8 @@ fn append_canvas(
         });
     }
     for resource in &canvas.resources {
-        if let Some(existing) = resources.get(&resource.resource)
-            && existing.png != resource.png
+        if let Some(existing) = resources.get(&resource.resource) &&
+            existing.png != resource.png
         {
             return Err(CaptureError::Canvas {
                 sequence,
@@ -978,6 +1004,7 @@ fn append_canvas(
         };
         operations.push(PositionedOperation {
             sequence,
+            structural_fragment_index: None,
             bounds,
             operation,
         });
@@ -1015,10 +1042,15 @@ fn captured_font_source(identifier: &serde_json::Value) -> CapturedFontSource {
     }
 }
 
+struct RepeatedTableHeaderFragments {
+    fragment_indices: std::ops::Range<usize>,
+    paint_fragment_ids: HashSet<usize>,
+}
+
 fn repeated_table_header_fragments(
     fragments: &[CaptureFragment],
     repeats: &[CaptureTableGroupRepeat],
-) -> Result<HashMap<u64, HashSet<usize>>, CaptureError> {
+) -> Result<HashMap<u64, RepeatedTableHeaderFragments>, CaptureError> {
     let mut tags = repeats
         .iter()
         .map(|repeat| repeat.header_tag_id)
@@ -1042,16 +1074,25 @@ fn repeated_table_header_fragments(
             });
         };
         let root_depth = fragments[*root_index].depth;
-        let subtree = fragments[*root_index..]
+        let subtree_end = fragments[*root_index + 1..]
             .iter()
-            .enumerate()
-            .take_while(|(offset, fragment)| *offset == 0 || fragment.depth > root_depth)
-            .filter_map(|(_, fragment)| fragment.paint_fragment_id)
+            .position(|fragment| fragment.depth <= root_depth)
+            .map(|offset| *root_index + offset + 1)
+            .unwrap_or(fragments.len());
+        let paint_fragment_ids = fragments[*root_index..subtree_end]
+            .iter()
+            .filter_map(|fragment| fragment.paint_fragment_id)
             .collect::<HashSet<_>>();
-        if subtree.is_empty() {
+        if paint_fragment_ids.is_empty() {
             return Err(CaptureError::MissingRepeatedTableHeader { tag_id });
         }
-        subtrees.insert(tag_id, subtree);
+        subtrees.insert(
+            tag_id,
+            RepeatedTableHeaderFragments {
+                fragment_indices: *root_index..subtree_end,
+                paint_fragment_ids,
+            },
+        );
     }
     Ok(subtrees)
 }
@@ -1070,18 +1111,18 @@ fn capture_pages(capture: &LayoutCapture) -> Result<Vec<CapturePage>, CaptureErr
         if page.index != expected_index {
             return Err(CaptureError::InvalidPageIndex { actual: page.index });
         }
-        if !positive_finite(page.width)
-            || !positive_finite(page.height)
-            || !nonnegative_finite(page.margin_top)
-            || !nonnegative_finite(page.margin_right)
-            || !nonnegative_finite(page.margin_bottom)
-            || !nonnegative_finite(page.margin_left)
-            || !positive_finite(page.available_inline_size)
-            || !positive_finite(page.available_block_size)
-            || page.margin_left + page.margin_right >= page.width
-            || page.margin_top + page.margin_bottom >= page.height
-            || page.available_inline_size > page.width
-            || page.available_block_size > page.height
+        if !positive_finite(page.width) ||
+            !positive_finite(page.height) ||
+            !nonnegative_finite(page.margin_top) ||
+            !nonnegative_finite(page.margin_right) ||
+            !nonnegative_finite(page.margin_bottom) ||
+            !nonnegative_finite(page.margin_left) ||
+            !positive_finite(page.available_inline_size) ||
+            !positive_finite(page.available_block_size) ||
+            page.margin_left + page.margin_right >= page.width ||
+            page.margin_top + page.margin_bottom >= page.height ||
+            page.available_inline_size > page.width ||
+            page.available_block_size > page.height
         {
             return Err(CaptureError::InvalidPageGeometry);
         }
@@ -1092,6 +1133,9 @@ fn capture_pages(capture: &LayoutCapture) -> Result<Vec<CapturePage>, CaptureErr
 #[derive(Clone)]
 struct PositionedOperation {
     sequence: usize,
+    // Synthetic operations can use a descendant paint event for ordering without inheriting that
+    // descendant's repeated-header membership.
+    structural_fragment_index: Option<usize>,
     bounds: Rect,
     operation: Operation,
 }
@@ -1101,7 +1145,7 @@ fn distribute_operations(
     operations: Vec<PositionedOperation>,
     paint_events: &[CapturePaintEvent],
     repeats: &[CaptureTableGroupRepeat],
-    repeated_header_fragments: &HashMap<u64, HashSet<usize>>,
+    repeated_header_fragments: &HashMap<u64, RepeatedTableHeaderFragments>,
 ) -> Result<Vec<Page>, CaptureError> {
     let operations = split_solid_rect_operations(pages, operations)?;
     let mut scene_pages = pages
@@ -1117,11 +1161,11 @@ fn distribute_operations(
     let mut repeated_operations = vec![Vec::new(); pages.len()];
 
     for repeat in repeats {
-        if repeat.page_index == 0
-            || repeat.page_index >= pages.len()
-            || !nonnegative_finite(repeat.source_block_start)
-            || !nonnegative_finite(repeat.target_block_start)
-            || !positive_finite(repeat.block_size)
+        if repeat.page_index == 0 ||
+            repeat.page_index >= pages.len() ||
+            !nonnegative_finite(repeat.source_block_start) ||
+            !nonnegative_finite(repeat.target_block_start) ||
+            !positive_finite(repeat.block_size)
         {
             return Err(CaptureError::InvalidTableGroupRepeat {
                 page_index: repeat.page_index,
@@ -1135,13 +1179,16 @@ fn distribute_operations(
         let translation =
             f64::from(repeat.target_block_start) - f64::from(repeat.source_block_start);
         for operation in operations.iter().filter(|operation| {
+            if let Some(fragment_index) = operation.structural_fragment_index {
+                return fragments.fragment_indices.contains(&fragment_index);
+            }
             paint_events
                 .get(operation.sequence)
                 .and_then(|event| event.fragment_id)
-                .is_some_and(|fragment_id| fragments.contains(&fragment_id))
+                .is_some_and(|fragment_id| fragments.paint_fragment_ids.contains(&fragment_id))
         }) {
-            if matches!(&operation.operation, Operation::Path { .. })
-                && !is_splittable_rect_path(&operation.operation)
+            if matches!(&operation.operation, Operation::Path { .. }) &&
+                !is_splittable_rect_path(&operation.operation)
             {
                 return Err(CaptureError::RepeatedTableHeaderPathUnsupported {
                     sequence: operation.sequence,
@@ -1223,10 +1270,10 @@ fn split_solid_rect_operations(
 
 fn mark_repeated_table_header(operation: &mut Operation) {
     let meta = match operation {
-        Operation::Text { meta, .. }
-        | Operation::Image { meta, .. }
-        | Operation::Link { meta, .. }
-        | Operation::Path { meta, .. } => meta,
+        Operation::Text { meta, .. } |
+        Operation::Image { meta, .. } |
+        Operation::Link { meta, .. } |
+        Operation::Path { meta, .. } => meta,
     };
     meta.semantics = Some(Semantics {
         role: "artifact".into(),
@@ -1330,8 +1377,8 @@ fn is_page_spanning_rect_path(operation: &Operation) -> bool {
 
 fn is_splittable_rect_meta(meta: &OperationMeta) -> bool {
     meta.semantics.as_ref().is_some_and(|semantics| {
-        semantics.role == "artifact"
-            && matches!(
+        semantics.role == "artifact" &&
+            matches!(
                 semantics.label.as_deref(),
                 Some("table-border" | "background" | "border")
             )
@@ -1509,6 +1556,94 @@ fn collect_links(links: Vec<CaptureLink>) -> Result<HashMap<u64, String>, Captur
     Ok(by_tag)
 }
 
+struct BoxLinkPlacement {
+    fragment_index: usize,
+    bounds: Rect,
+    target: String,
+}
+
+fn collect_box_link_placements(
+    fragments: &[CaptureFragment],
+    paint_events: &[CapturePaintEvent],
+    links: &HashMap<u64, String>,
+) -> Result<BTreeMap<usize, Vec<BoxLinkPlacement>>, CaptureError> {
+    let mut first_sequence_by_fragment = HashMap::new();
+    for event in paint_events {
+        if let Some(fragment_id) = event.fragment_id {
+            first_sequence_by_fragment
+                .entry(fragment_id)
+                .or_insert(event.sequence);
+        }
+    }
+    let directly_linked_fragments = paint_events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event.kind.as_str(),
+                "text" |
+                    "image" |
+                    "box" |
+                    "root-background" |
+                    "outline" |
+                    "collapsed-table-borders" |
+                    "iframe" |
+                    "text-effects" |
+                    "content-geometry"
+            )
+        })
+        .filter_map(|event| event.fragment_id)
+        .collect::<HashSet<_>>();
+
+    let mut by_sequence = BTreeMap::<usize, Vec<BoxLinkPlacement>>::new();
+    for (fragment_index, fragment) in fragments.iter().enumerate() {
+        if fragment.kind != "box" {
+            continue;
+        }
+        let Some(tag_id) = fragment.tag_id else {
+            continue;
+        };
+        let Some(target) = links.get(&tag_id) else {
+            continue;
+        };
+        let subtree_end = fragments[fragment_index + 1..]
+            .iter()
+            .position(|descendant| descendant.depth <= fragment.depth)
+            .map(|offset| fragment_index + offset + 1)
+            .unwrap_or(fragments.len());
+        let subtree = &fragments[fragment_index..subtree_end];
+        if subtree
+            .iter()
+            .filter(|candidate| candidate.tag_id == Some(tag_id))
+            .filter_map(|candidate| candidate.paint_fragment_id)
+            .any(|fragment_id| directly_linked_fragments.contains(&fragment_id))
+        {
+            continue;
+        }
+        let sequence = subtree
+            .iter()
+            .filter_map(|candidate| candidate.paint_fragment_id)
+            .filter_map(|fragment_id| first_sequence_by_fragment.get(&fragment_id).copied())
+            .min();
+        let Some(sequence) = sequence else {
+            continue;
+        };
+        let bounds = fragment
+            .rect
+            .as_ref()
+            .ok_or(CaptureError::MissingLinkRect { sequence })?
+            .into_scene_rect();
+        by_sequence
+            .entry(sequence)
+            .or_default()
+            .push(BoxLinkPlacement {
+                fragment_index,
+                bounds,
+                target: target.clone(),
+            });
+    }
+    Ok(by_sequence)
+}
+
 fn joined_fragment<'a>(
     event: &CapturePaintEvent,
     fragments: &'a HashMap<usize, CaptureFragment>,
@@ -1567,6 +1702,7 @@ fn append_link(
         .into_scene_rect();
     operations.push(PositionedOperation {
         sequence,
+        structural_fragment_index: None,
         bounds: bounds.clone(),
         operation: Operation::Link {
             bounds,
@@ -1575,6 +1711,28 @@ fn append_link(
         },
     });
     Ok(())
+}
+
+fn append_box_links(
+    operations: &mut Vec<PositionedOperation>,
+    placements: Option<&[BoxLinkPlacement]>,
+    sequence: usize,
+) {
+    let Some(placements) = placements else {
+        return;
+    };
+    for placement in placements {
+        operations.push(PositionedOperation {
+            sequence,
+            structural_fragment_index: Some(placement.fragment_index),
+            bounds: placement.bounds.clone(),
+            operation: Operation::Link {
+                bounds: placement.bounds.clone(),
+                target: placement.target.clone(),
+                meta: OperationMeta::default(),
+            },
+        });
+    }
 }
 
 fn append_vector_image(
@@ -1591,8 +1749,8 @@ fn append_vector_image(
     rect: &CaptureRect,
     sequence: usize,
 ) -> Result<(), CaptureError> {
-    if !positive_finite(vector_image.viewport_width)
-        || !positive_finite(vector_image.viewport_height)
+    if !positive_finite(vector_image.viewport_width) ||
+        !positive_finite(vector_image.viewport_height)
     {
         return Err(CaptureError::InvalidVectorImageGeometry { sequence });
     }
@@ -1658,6 +1816,7 @@ fn append_vector_image(
                 };
                 operations.push(PositionedOperation {
                     sequence,
+                    structural_fragment_index: None,
                     bounds: bounds.clone(),
                     operation: Operation::Path {
                         bounds,
@@ -1684,8 +1843,8 @@ fn append_vector_image(
                     return Err(CaptureError::InvalidVectorImageGeometry { sequence });
                 }
                 let bytes = decode_vector_resource(resource, bytes_base64)?;
-                if let Some(existing) = embedded_image_resources.get(resource)
-                    && existing.png != bytes
+                if let Some(existing) = embedded_image_resources.get(resource) &&
+                    existing.png != bytes
                 {
                     return Err(CaptureError::ConflictingVectorResource(resource.clone()));
                 }
@@ -1704,6 +1863,7 @@ fn append_vector_image(
                 };
                 operations.push(PositionedOperation {
                     sequence,
+                    structural_fragment_index: None,
                     bounds: bounds.clone(),
                     operation: Operation::Image {
                         bounds,
@@ -1780,6 +1940,7 @@ fn append_vector_image(
                 let bounds = rect.into_scene_rect();
                 operations.push(PositionedOperation {
                     sequence,
+                    structural_fragment_index: None,
                     bounds,
                     operation: Operation::Text {
                         text: text.clone(),
@@ -2456,6 +2617,7 @@ mod tests {
             &[page(0), page(1), page(2)],
             vec![PositionedOperation {
                 sequence: 4,
+                structural_fragment_index: None,
                 bounds: bounds.clone(),
                 operation: Operation::Path {
                     data: rectangle_path_data(&bounds),
@@ -2506,6 +2668,7 @@ mod tests {
         };
         let mut positioned = PositionedOperation {
             sequence: 7,
+            structural_fragment_index: None,
             bounds: bounds.clone(),
             operation: Operation::Path {
                 data: rectangle_path_data(&bounds),

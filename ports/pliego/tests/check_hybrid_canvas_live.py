@@ -85,9 +85,7 @@ def run(binary: Path, fixture: Path, root: Path) -> tuple[bytes, bytes, bytes]:
     fragments = layout.get("fragments")
     require(isinstance(fragments, list), "layout snapshot has no fragments")
     canvas_fragments = [
-        item
-        for item in fragments
-        if isinstance(item, dict) and isinstance(item.get("canvas_image_key"), dict)
+        item for item in fragments if isinstance(item, dict) and isinstance(item.get("canvas_image_key"), dict)
     ]
     require(len(canvas_fragments) == 1, f"expected one retained Canvas join key: {canvas_fragments!r}")
 

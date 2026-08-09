@@ -792,19 +792,19 @@ impl FontGroup {
             return font_or_synthesized_small_caps(fallback.clone());
         }
 
-        if pref!(fonts_host_enabled) {
-            if let Some(font) = self.find_fallback_using_system_font_list(
+        if pref!(fonts_host_enabled) &&
+            let Some(font) = self.find_fallback_using_system_font_list(
                 font_context,
                 options.clone(),
                 &char_in_template,
                 &font_has_glyph_and_presentation,
-            ) {
-                let fallback = font_or_synthesized_small_caps(font);
-                if let Some(fallback) = fallback.clone() {
-                    self.fallbacks.write().insert(fallback_key, fallback);
-                }
-                return fallback;
+            )
+        {
+            let fallback = font_or_synthesized_small_caps(font);
+            if let Some(fallback) = fallback.clone() {
+                self.fallbacks.write().insert(fallback_key, fallback);
             }
+            return fallback;
         }
 
         let first_font = self.first(font_context);

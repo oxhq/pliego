@@ -409,7 +409,7 @@
             "min_y": 23.899999618530273,
             "sha256": "sha256:d6eb484eb858ced5f1aa3f7e1b40511b2fae83bc6e572b012304fd7f72047057"
           },
-          "preview_sha256": "sha256:0b72af141a20a527364686ed21b10e20d8bf86bd729d8ccad91222c639427e69",
+          "preview_sha256": "sha256:a31fff1455a87600b080a3548ca34d6f7513123513f904211a7eb8bec5793b0e",
           "text": [
             "स्थलों",
             " ",
@@ -572,7 +572,7 @@
             "min_y": 23.900001525878906,
             "sha256": "sha256:f770777d53e44a070f0318d7f5c47091f7c94b80997e9d76b323f6625ab849cd"
           },
-          "preview_sha256": "sha256:a46b756950c429387189547866e95bb16d90d26cd1d3b8ec298372e496603045",
+          "preview_sha256": "sha256:e520a468061cad38140bfaf2e2bed5d7d623bb9db2ab264a64d56d4f2ebc6c6b",
           "text": [
             " क्लब",
             " ",
@@ -588,8 +588,8 @@
           ]
         }
       ],
-      "pdf_sha256": "sha256:cb9bac270711457586c58aef15ab2d49239a8b559d2ee250e4ece772a8a6f0a8",
-      "scene_sha256": "sha256:03979f08c1996df97cf6a1e9cf9bd4757482d65a9142c4c18a1084af109a6bed"
+      "pdf_sha256": "sha256:57b7de85449adb28f6c231e715ad657e4c5a9e5b0c688225ec73a9274283b0cc",
+      "scene_sha256": "sha256:48dc0af1df43b601476f1f75ab3a66843cc6623a8d1fd1f0145a700ef08e1b89"
     },
     "latin": {
       "continuations": [
@@ -808,7 +808,7 @@
             "min_y": 24.799999237060547,
             "sha256": "sha256:2d0b35f41074f8867db8dc36fc21077abb9f7f46250fcd1f4b7436b21e80039d"
           },
-          "preview_sha256": "sha256:64ce3fcf0a8cfab77a0caff20213e43b60941d3e43f7118b3b857a02f47f5609",
+          "preview_sha256": "sha256:2a17f5c21a4ac4e8438a323bf2f41d5b6c4afb48cb3a669c58db62ce15e3aa1c",
           "text": [
             "LATIN",
             " ",
@@ -1007,7 +1007,7 @@
             "min_y": 24.800003051757812,
             "sha256": "sha256:b062d47ce13255c92dfa4de6da02617d25313476a58c3f1e9eb96402d7947a1b"
           },
-          "preview_sha256": "sha256:64ce3fcf0a8cfab77a0caff20213e43b60941d3e43f7118b3b857a02f47f5609",
+          "preview_sha256": "sha256:2a17f5c21a4ac4e8438a323bf2f41d5b6c4afb48cb3a669c58db62ce15e3aa1c",
           "text": [
             " LATIN",
             " ",
@@ -1148,7 +1148,7 @@
             "min_y": 24.800003051757812,
             "sha256": "sha256:6d0640c77dbe961beb594cc0f6ec900dadf24c2d0f7fad45a4a79e083892038a"
           },
-          "preview_sha256": "sha256:7d23267bc2fd9a5ac386ae4c1772afccb09707941c01eaf26106c9fe1e5ea4e6",
+          "preview_sha256": "sha256:6b254f8594f65f78fae534ac17f712db475f421437f1f293e1a2d7d4c639f660",
           "text": [
             " LATIN",
             " ",
@@ -1159,8 +1159,8 @@
           ]
         }
       ],
-      "pdf_sha256": "sha256:b6a232e93b099be2fa2a5c92a34bb92abc44accf4088c91bae8666a05c41d7e6",
-      "scene_sha256": "sha256:ff4781753ca8dadf26b589d65e050bded4d4b4139fd09d7e92b93392c65bfbf3"
+      "pdf_sha256": "sha256:3968eaa3b61d74332244a5e4367237b56ba36cb087e0942be8facb280492a194",
+      "scene_sha256": "sha256:6ea283c43083edd8b91e24e747a5d252e903bcc707e1a354e73b83976722772b"
     },
     "rtl-adlam": {
       "continuations": [
@@ -1439,7 +1439,7 @@
             "min_y": 25.883333206176758,
             "sha256": "sha256:9a17d9bb318d8779ad9217ba9301b4537c747d57f461b882173ec9a78051db10"
           },
-          "preview_sha256": "sha256:c803569005e3dbbcea2b792a5d5d5609d87bdc8ac68784a8670ccc703a5738fb",
+          "preview_sha256": "sha256:d54645ed695bbf0cce00615588eddc9f4f150f443f0fa3b32cbb0790a199b2a5",
           "text": [
             "𞤀𞤁𞤂𞤁𞤄",
             " ",
@@ -1704,7 +1704,7 @@
             "min_y": 25.883331298828125,
             "sha256": "sha256:b67e34ce76c4a0d9629795d93cd707acd4c3f025ef951880692b1728c591d9cb"
           },
-          "preview_sha256": "sha256:4d85fac85bd6f9b82ce331fd0132c29ba76aac6e02aac8a851719d6e3c8cf2b9",
+          "preview_sha256": "sha256:be79994479bd10d3544a4317f3465f0a08f0d22a8e46abaf57317937802df51e",
           "text": [
             " 𞤀𞤁𞤂𞤁𞤄",
             " ",
@@ -1785,7 +1785,7 @@
             "min_y": 25.883331298828125,
             "sha256": "sha256:72f57f88f3dad721f0ccb503e19bb16b2e304370db3827950e30022d76e95492"
           },
-          "preview_sha256": "sha256:f29a5377d22b5ffaed9754c6add140fe0e296630059d1d982280a5b385d7084f",
+          "preview_sha256": "sha256:1dbb3b5a5d1753b419516cc9ba93d9b96dcc24ee18f5ae17290b971ce0e1743c",
           "text": [
             " 𞤀𞤁𞤂𞤁𞤄",
             " ",
@@ -1793,8 +1793,8 @@
           ]
         }
       ],
-      "pdf_sha256": "sha256:c4523f1ee004992c97ab068444b71deb123c7eaa5f2ac99d5990df0e0bc22811",
-      "scene_sha256": "sha256:881dca6a23278c7c7346a9075789d9ed8e9156400a9b2b6a3ce11cc1eb92822e"
+      "pdf_sha256": "sha256:640e3e26b018875ee5de6b327bdcb4ddc51c80c1b580231cefc3bb8574be8f34",
+      "scene_sha256": "sha256:a9e1d30236dcec1ae03afaee09708326207dca72ba0e5405ebaa2c82a32ead04"
     }
   },
   "schema": "pliego.paged-typography-reference",

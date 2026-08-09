@@ -161,6 +161,12 @@ def render(binary: Path, repo: Path, case: Case, fixture: Path, destination: Pat
     require(result.returncode == 0, f"{case.fixture} failed: {result.stderr[-3000:]}")
     summary = final_json(result)
     require(summary.get("status") == "rendered", repr(summary))
+    readiness = summary.get("readiness")
+    expected_fixture = f"paged-typography-{Path(case.fixture).stem}"
+    require(
+        isinstance(readiness, dict) and readiness.get("fixture") == expected_fixture,
+        repr(summary),
+    )
     require(summary.get("document_pdf_status") == "rendered", repr(summary))
     require(summary.get("scene", {}).get("text_mapping_gap_count") == 0, repr(summary.get("scene")))
     return summary
@@ -249,8 +255,7 @@ def verify_font(repo: Path, case_name: str, case: Case, summary: dict[str, Any])
     require(bool(selected), f"{case_name} did not select {case.family}: {selections!r}")
     require(
         all(
-            selection.get("source") == "data"
-            and selection.get("requested_families") == [case.family]
+            selection.get("source") == "data" and selection.get("requested_families") == [case.family]
             for selection in selected
         ),
         f"{case_name} font identity differs: {selected!r}",
@@ -264,10 +269,10 @@ def verify_font(repo: Path, case_name: str, case: Case, summary: dict[str, Any])
     expected_resource = selected_resources.pop()
     resources = fonts.get("font_resources")
     require(
-        isinstance(resources, list) and any(
+        isinstance(resources, list)
+        and any(
             resource.get("resource") == expected_resource
-            and digest(base64.b64decode(resource.get("bytes_base64", ""), validate=True))
-            == expected_resource
+            and digest(base64.b64decode(resource.get("bytes_base64", ""), validate=True)) == expected_resource
             for resource in resources
         ),
         f"{case_name} font bytes are not retained",
@@ -305,9 +310,7 @@ def reference(repo: Path, case_name: str, case: Case, summary: dict[str, Any]) -
         page_references.append(
             {
                 "text": operation_text,
-                "clusters": [
-                    validate_clusters(case_name, page_index, operation) for operation in operations
-                ],
+                "clusters": [validate_clusters(case_name, page_index, operation) for operation in operations],
                 "geometry": geometry_reference(operations),
                 "preview_sha256": digest((Path(summary["artifacts"]) / preview["artifact"]).read_bytes()),
             }
@@ -395,7 +398,7 @@ def support_state(references: dict[str, Any]) -> dict[str, Any]:
                 "state": "blocked upstream",
                 "scope": "Fixtures load repository-pinned bytes through a generated CSS data URL, require the captured SHA-256 font identity, then wait two animation frames.",
                 "evidence": "The pinned Servo build does not implement document.fonts.load; relative @font-face URLs under file origins fail before selection, while data URLs settle through normal style and layout.",
-            }
+            },
         ],
     }
 
@@ -410,9 +413,7 @@ def run(binary: Path, output: Path, *, record: bool) -> None:
     output.mkdir(parents=True)
     references = {}
     for name, case in CASES.items():
-        fixture = materialize_fixture(
-            repo, case, fixture_dir / case.fixture, output / name / "input.html"
-        )
+        fixture = materialize_fixture(repo, case, fixture_dir / case.fixture, output / name / "input.html")
         first = render(binary, repo, case, fixture, output / name / "first")
         second = render(binary, repo, case, fixture, output / name / "second")
         verify_repeat(name, first, second)
@@ -453,7 +454,13 @@ def self_test() -> None:
         )
     sample = "क्ष"
     require(len(sample.encode()) == 9 and canonical_text("a\n b\f") == "a b", "Unicode helpers differ")
-    require(support_state({name: {"font_resource": "sha256:x", "page_count": 2} for name in CASES})["upstream_limits"][0]["state"] == "blocked upstream", "upstream limit state differs")
+    require(
+        support_state({name: {"font_resource": "sha256:x", "page_count": 2} for name in CASES})["upstream_limits"][0][
+            "state"
+        ]
+        == "blocked upstream",
+        "upstream limit state differs",
+    )
 
 
 def main() -> int:
@@ -464,7 +471,10 @@ def main() -> int:
         return 0
     record = len(arguments) == 3 and arguments[0] == "--record"
     if (record and len(arguments) != 3) or (not record and len(arguments) != 2):
-        fail(f"usage: {Path(sys.argv[0]).name} <pliego-binary> <output-directory> | --record <pliego-binary> <output-directory> | --self-test", 2)
+        fail(
+            f"usage: {Path(sys.argv[0]).name} <pliego-binary> <output-directory> | --record <pliego-binary> <output-directory> | --self-test",
+            2,
+        )
     binary = Path(arguments[-2]).expanduser().resolve()
     output = Path(arguments[-1]).expanduser().resolve()
     require(binary.is_file(), f"Pliego binary does not exist: {binary}")

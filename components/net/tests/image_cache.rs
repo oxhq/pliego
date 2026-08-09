@@ -30,8 +30,14 @@ use crate::mock_origin;
 
 struct DummyFontResolver;
 impl FontResolver for DummyFontResolver {
-    fn resolve(&self, _: &Font, _: &mut Arc<fontdb::Database>) -> Option<fontdb::ID> {
-        None
+    fn resolve(&self, _: &Font, database: &mut Arc<fontdb::Database>) -> Option<fontdb::ID> {
+        Arc::make_mut(database)
+            .load_font_source(fontdb::Source::Binary(Arc::new(
+                include_bytes!("../../fonts/tests/support/CSSTest/csstest-basic-regular.ttf")
+                    .to_vec(),
+            )))
+            .into_iter()
+            .next()
     }
 }
 
@@ -44,7 +50,7 @@ fn create_test_image_cache() -> (Arc<dyn ImageCache>, Receiver<PipelineId>) {
     })));
     let dummy_resolver = Arc::new(DummyFontResolver);
 
-    let factory = ImageCacheFactoryImpl::new(vec![]);
+    let factory = ImageCacheFactoryImpl::new_for_testing(vec![]);
     let cache = factory.create(
         TEST_WEBVIEW_ID,
         TEST_PIPELINE_ID,
@@ -90,6 +96,7 @@ fn svg_image_bytes() -> Vec<u8> {
 fn smil_svg_image_bytes() -> Vec<u8> {
     br#"<svg height="16" width="16" xmlns="http://www.w3.org/2000/svg">
     <path d="M1 1h14v14H1z"><animate attributeName="opacity" dur="1s" values="1;0"/></path>
+    <text x="1" y="12" font-family="Primary">&#x1F9D0;</text>
 </svg>"#
         .to_vec()
 }
@@ -537,7 +544,7 @@ fn test_cached_image_reuse() {
 }
 
 #[test]
-fn test_svg_rasterization() {
+fn test_svg_rasterization_marks_missing_glyph_unsupported() {
     let (cache, key_receiver) = create_test_image_cache();
     let url = ServoUrl::parse("http://example.com/image.svg").unwrap();
     let origin = mock_origin();
@@ -587,11 +594,17 @@ fn test_svg_rasterization() {
         (snapshot.viewport_width, snapshot.viewport_height),
         (16.0, 16.0)
     );
-    assert_eq!(snapshot.items.len(), 2);
+    assert_eq!(snapshot.items.len(), 4);
     assert_eq!(
         snapshot.items[0],
         VectorImageSnapshotItem::Unsupported {
             reason: VectorImageUnsupportedReason::Animation,
+        }
+    );
+    assert_eq!(
+        snapshot.items[1],
+        VectorImageSnapshotItem::Unsupported {
+            reason: VectorImageUnsupportedReason::Text,
         }
     );
     let VectorImageSnapshotItem::Path {
@@ -599,7 +612,7 @@ fn test_svg_rasterization() {
         fill,
         fill_rule,
         stroke,
-    } = &snapshot.items[1]
+    } = &snapshot.items[2]
     else {
         panic!("Expected retained SVG path");
     };
@@ -624,6 +637,10 @@ fn test_svg_rasterization() {
     );
     assert_eq!(*fill_rule, VectorImageFillRule::NonZero);
     assert_eq!(*stroke, None);
+    assert!(matches!(
+        snapshot.items[3],
+        VectorImageSnapshotItem::Text { .. }
+    ));
 
     let size = webrender_api::units::DeviceIntSize::new(100, 100);
     cache.rasterize_vector_image(vec_img.id, size, None);

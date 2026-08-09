@@ -120,16 +120,13 @@ def verify_scene(summary: dict[str, Any]) -> tuple[bytes, str, set[str]]:
     require(scene_summary.get("validation") == "valid", repr(scene_summary))
     require(scene_summary.get("preview_status") == "rendered", repr(scene_summary))
     require(
-        scene_summary.get("capture_status") == "partial",
+        scene_summary.get("capture_status") == "complete",
         repr(scene_summary),
     )
+    require(scene_summary.get("capture_code") is None, repr(scene_summary))
     require(
-        scene_summary.get("capture_code") == "SCENE_CAPTURE_UNSUPPORTED_PAINT_EVENTS",
-        repr(scene_summary),
-    )
-    require(
-        isinstance(scene_summary.get("unsupported_event_count"), int) and scene_summary["unsupported_event_count"] > 0,
-        "text fixture did not expose its unsupported paint events",
+        scene_summary.get("unsupported_event_count") == 0,
+        f"canonical scene has unsupported paint events: {scene_summary!r}",
     )
     require(
         scene_summary.get("text_mapping_gap_count") == 0,
@@ -252,9 +249,7 @@ def verify_paged_root(summary: dict[str, Any]) -> None:
     )
 
 
-def verify_fonts(
-    summary: dict[str, Any], referenced_fonts: set[str], fixture_font: Path
-) -> tuple[bytes, set[str]]:
+def verify_fonts(summary: dict[str, Any], referenced_fonts: set[str], fixture_font: Path) -> tuple[bytes, set[str]]:
     fonts_path = artifact_path(summary, "fonts_artifact")
     fonts_bytes = fonts_path.read_bytes()
     fonts = read_json(fonts_path)
@@ -309,6 +304,17 @@ def verify_fonts(
         if instance.get("resource") == fixture_resource and identifier in referenced_fonts
     }
     require(fixture_font_ids, "scene text does not reference the bundled fixture font")
+    require(fonts.get("policy") == {"host_fonts": "denied"}, repr(fonts.get("policy")))
+    selections = require_list(fonts.get("selections"), "font selections")
+    require(bool(selections), "canonical scene has no font selections")
+    typed_selections = [require_object(selection, "font selection") for selection in selections]
+    require(
+        all(
+            selection.get("source") == "data" and selection.get("resource") == fixture_resource
+            for selection in typed_selections
+        ),
+        f"canonical scene selected a non-pinned font: {selections!r}",
+    )
     return fonts_bytes, fixture_font_ids
 
 
@@ -338,14 +344,9 @@ def verify_report_and_preview(summary: dict[str, Any], scene_hash: str, scene_by
     require(report_scene.get("hash") == scene_hash, "report hash does not match compact bytes")
     capture = require_object(report.get("capture"), "capture report")
     require(capture.get("status") == scene_summary.get("capture_status"), repr(capture))
-    require(
-        capture.get("code") == "SCENE_CAPTURE_UNSUPPORTED_PAINT_EVENTS",
-        repr(capture),
-    )
+    require(capture.get("code") is None, repr(capture))
     unsupported_events = require_list(capture.get("unsupported_events"), "unsupported paint events")
-    require(bool(unsupported_events), "partial capture has no unsupported paint events")
-    unsupported_kinds = {require_object(event, "unsupported paint event").get("kind") for event in unsupported_events}
-    require("box" in unsupported_kinds, f"fixture did not report box paint: {unsupported_kinds!r}")
+    require(not unsupported_events, f"complete capture retained unsupported paint events: {unsupported_events!r}")
     require(capture.get("text_mapping_gaps") == [], repr(capture))
     preview = require_object(report.get("preview"), "preview report")
     require(preview.get("status") == "rendered", repr(preview))
@@ -382,9 +383,7 @@ def verify_report_and_preview(summary: dict[str, Any], scene_hash: str, scene_by
     return preview_bytes
 
 
-def verify_pdf_bundle(
-    summary: dict[str, Any], scene_bytes: bytes, fixture_font_ids: set[str]
-) -> dict[str, Any]:
+def verify_pdf_bundle(summary: dict[str, Any], scene_bytes: bytes, fixture_font_ids: set[str]) -> dict[str, Any]:
     pdf_path = artifact_path(summary, "document_pdf")
     require(summary.get("document_pdf_status") == "rendered", repr(summary))
     pdf_bytes = pdf_path.read_bytes()
@@ -505,11 +504,7 @@ def verify_artifact_bundle(summary: dict[str, Any]) -> None:
         if not artifact.is_file() or artifact == bundle_path:
             continue
         require(
-            not (
-                artifact.name.startswith(".")
-                and ".pliego-" in artifact.name
-                and artifact.name.endswith(".tmp")
-            ),
+            not (artifact.name.startswith(".") and ".pliego-" in artifact.name and artifact.name.endswith(".tmp")),
             f"temporary publication file survived: {artifact}",
         )
         actual_paths.append(artifact.relative_to(artifact_root).as_posix())
@@ -539,6 +534,18 @@ def materialize_fixture(source: Path, font: Path, destination: Path) -> Path:
     marker = 'url("Ahem.ttf")'
     document = source.read_text(encoding="utf-8")
     require(document.count(marker) == 1, "canonical fixture has no unique font URL marker")
+    require(
+        document.count('font-family: "Pliego Fixture";') == 3,
+        "canonical fixture must declare and use its pinned font for body and mutation text",
+    )
+    defer = "window.pliego?.defer();"
+    async_work = "queueMicrotask(async"
+    require(document.count(defer) == 1, "canonical fixture must defer asynchronous readiness exactly once")
+    require(document.count(async_work) == 1, "canonical fixture has no unique asynchronous work marker")
+    require(
+        document.index(defer) < document.index(async_work),
+        "canonical fixture must defer before starting asynchronous work",
+    )
     encoded_font = base64.b64encode(font.read_bytes()).decode("ascii")
     materialized = destination / source.name
     materialized.write_text(
@@ -546,6 +553,61 @@ def materialize_fixture(source: Path, font: Path, destination: Path) -> Path:
         encoding="utf-8",
     )
     return materialized
+
+
+def materialize_zero_config_fixture(font: Path, destination: Path) -> Path:
+    encoded_font = base64.b64encode(font.read_bytes()).decode("ascii")
+    materialized = destination / "zero-config.html"
+    materialized.write_text(
+        f"""<!doctype html>
+<meta charset="utf-8">
+<style>
+  @font-face {{ font-family: "Pliego Fixture"; src: url("data:font/ttf;base64,{encoded_font}"); }}
+  body {{ font-family: "Pliego Fixture"; }}
+</style>
+<p>ZERO CONFIG READY</p>
+""",
+        encoding="utf-8",
+    )
+    return materialized
+
+
+def verify_zero_config_readiness(
+    binary: Path,
+    fixture_font: Path,
+    temp_root: Path,
+    retained_run: Path,
+) -> None:
+    fixture = materialize_zero_config_fixture(fixture_font, temp_root)
+    result = subprocess.run(
+        [
+            str(binary),
+            "render",
+            fixture.name,
+            "--output",
+            str(temp_root / "document.pdf"),
+            "--artifacts",
+            str(temp_root / "artifacts"),
+        ],
+        cwd=temp_root,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    retain_process_output(result, retained_run)
+    retain_outputs(temp_root, retained_run)
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or "no process output"
+        fail(f"zero-config Pliego render exited with {result.returncode}: {detail[-4000:]}")
+    summary = final_json(result)
+    retain_summary(summary, retained_run)
+    require(summary.get("status") == "rendered", repr(summary))
+    require(summary.get("readiness") is None, f"zero-config summary has an explicit payload: {summary!r}")
+    readiness = read_json(Path(summary["artifacts"]) / "readiness.json")
+    require(readiness.get("status") == "ready", repr(readiness))
+    require(readiness.get("payload") is None, repr(readiness))
+    require(readiness.get("font_status") == "loaded", repr(readiness))
 
 
 def run_and_verify(
@@ -563,8 +625,6 @@ def run_and_verify(
             str(binary),
             "render",
             materialized_fixture.name,
-            "--allow-partial-scene",
-            "--allow-host-fonts",
             "--output",
             str(temp_root / "document.pdf"),
             "--artifacts",
@@ -625,6 +685,9 @@ def self_test() -> None:
     changed: RunResult = (b"scene", "sha256:changed", b"fonts", b"preview", {"page_count": 1})
     mismatch = comparison_report(first, changed)
     require(mismatch["comparisons"]["scene_hash"] is False, repr(mismatch))
+    fixture = Path(__file__).resolve().parent / "fixtures/text-scene/index.html"
+    with tempfile.TemporaryDirectory(prefix="pliego-canonical-scene-self-test-") as temp:
+        materialize_fixture(fixture, fixture.with_name("Ahem.ttf"), Path(temp))
 
 
 def main() -> int:
@@ -644,6 +707,7 @@ def main() -> int:
     require(fixture_font.is_file(), f"fixture font does not exist: {fixture_font}")
     require(not (output / "first").exists(), f"retained run already exists: {output / 'first'}")
     require(not (output / "second").exists(), f"retained run already exists: {output / 'second'}")
+    require(not (output / "zero-config").exists(), f"retained run already exists: {output / 'zero-config'}")
     require(not (output / "comparison.json").exists(), f"comparison report already exists: {output}")
     try:
         output.mkdir(parents=True, exist_ok=True)
@@ -654,8 +718,11 @@ def main() -> int:
         root = Path(temp)
         first_root = root / "first"
         second_root = root / "second"
+        zero_config_root = root / "zero-config"
         first_root.mkdir()
         second_root.mkdir()
+        zero_config_root.mkdir()
+        verify_zero_config_readiness(binary, fixture_font, zero_config_root, output / "zero-config")
         first = run_and_verify(binary, fixture, fixture_font, first_root, output / "first")
         second = run_and_verify(binary, fixture, fixture_font, second_root, output / "second")
         report = comparison_report(first, second)

@@ -1,0 +1,456 @@
+#!/usr/bin/env python3
+
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+"""Pliego benchmark orchestrator.
+
+Reads `benchmarks/manifest.toml`, drives `benchmarks/runners/pliego.php` for
+each enabled fixture against a published Pliego binary, aggregates raw samples
+into a result document, and validates it against
+`schema/benchmark-result.v1.json` before writing it.
+
+Usage:
+    python3 benchmarks/tools/run_benchmark.py \
+        --binary /path/to/pliego \
+        [--out benchmarks/baselines/pliego-0.1.1-linux-x86_64.json] \
+        [--fixture invoice-showcase] [--samples N] [--warmup N] \
+        [--php /usr/bin/php] [--dedicated]
+
+Design notes:
+* The PHP runner is the only component that spawns the engine; this script
+  never touches the binary directly except to read its version.
+* Results are validated against the schema before being written; a result
+  that fails validation is not saved.
+* Throughput is serial renders/minute (concurrency 1); concurrent 2/4/8
+  sampling is a later increment.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import platform
+import random
+import statistics
+import subprocess
+import sys
+import tomllib
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, NoReturn
+
+ROOT = Path(__file__).resolve().parents[2]
+MANIFEST = ROOT / "benchmarks" / "manifest.toml"
+RUNNER = ROOT / "benchmarks" / "runners" / "pliego.php"
+DEFAULT_SCHEMA = ROOT / "benchmarks" / "schema" / "benchmark-result.v1.json"
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import validate_result  # noqa: E402
+
+
+def fail(message: str) -> NoReturn:
+    print(f"run_benchmark: {message}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+def windows_ram_bytes() -> int:
+    try:
+        import ctypes
+
+        class MemoryStatusEx(ctypes.Structure):
+            _fields_ = [
+                ("dwLength", ctypes.c_ulong),
+                ("dwMemoryLoad", ctypes.c_ulong),
+                ("ullTotalPhys", ctypes.c_ulonglong),
+                ("ullAvailPhys", ctypes.c_ulonglong),
+                ("ullTotalPageFile", ctypes.c_ulonglong),
+                ("ullAvailPageFile", ctypes.c_ulonglong),
+                ("ullTotalVirtual", ctypes.c_ulonglong),
+                ("ullAvailVirtual", ctypes.c_ulonglong),
+                ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+            ]
+
+        status = MemoryStatusEx()
+        status.dwLength = ctypes.sizeof(MemoryStatusEx)
+        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+            return int(status.ullTotalPhys)
+    except Exception:
+        pass
+    return 0
+
+
+def host_info(dedicated: bool) -> dict[str, Any]:
+    info: dict[str, Any] = {
+        "os": platform.system(),
+        "arch": platform.machine(),
+        "kernel": platform.release(),
+        "cpu_model": platform.processor() or "",
+        "cores": os_cpu_count(),
+        "ram_bytes": 0,
+        "dedicated": dedicated,
+    }
+    if platform.system() == "Linux":
+        cpuinfo = Path("/proc/cpuinfo")
+        if cpuinfo.is_file():
+            for line in cpuinfo.read_text(encoding="utf-8", errors="replace").splitlines():
+                if line.startswith("model name"):
+                    info["cpu_model"] = line.split(":", 1)[1].strip()
+                    break
+        meminfo = Path("/proc/meminfo")
+        if meminfo.is_file():
+            for line in meminfo.read_text(encoding="utf-8", errors="replace").splitlines():
+                if line.startswith("MemTotal"):
+                    kib = int(line.split()[1])
+                    info["ram_bytes"] = kib * 1024
+                    break
+    elif platform.system() == "Windows":
+        info["ram_bytes"] = windows_ram_bytes()
+    return info
+
+
+def os_cpu_count() -> int:
+    try:
+        count = os.cpu_count()
+        return count if count and count > 0 else 1
+    except Exception:
+        return 1
+
+
+def run(command: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(command, cwd=cwd, capture_output=True, text=True, timeout=600)
+
+
+def engine_version(binary: Path) -> str:
+    result = run([str(binary), "--version"])
+    text = (result.stdout + result.stderr).strip()
+    return text.splitlines()[0] if text else "unknown"
+
+
+def engine_identity(binary: Path) -> dict[str, Any]:
+    identity: dict[str, Any] = {
+        "name": "pliego",
+        "version": engine_version(binary),
+        "binary_path": str(binary.resolve()),
+    }
+    digest = hashlib.sha256()
+    size = 0
+    with open(binary, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+            size += len(chunk)
+    identity["binary_sha256"] = digest.hexdigest()
+    identity["binary_bytes"] = size
+    return identity
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def harness_revision() -> str | None:
+    result = run(["git", "rev-parse", "HEAD"], ROOT)
+    revision = result.stdout.strip()
+    return revision if result.returncode == 0 and 7 <= len(revision) <= 64 else None
+
+
+def benchmark_tree_is_clean() -> bool:
+    result = run(["git", "status", "--porcelain", "--", "benchmarks"], ROOT)
+    return result.returncode == 0 and not result.stdout.strip()
+
+
+def fixture_identity(fixture: dict[str, Any]) -> tuple[str, str]:
+    input_path = (ROOT / fixture["input"]).resolve()
+    paths = [input_path, *(input_path.parent / asset for asset in fixture.get("assets", []))]
+    digest = hashlib.sha256()
+    for path in sorted(paths, key=lambda candidate: candidate.relative_to(input_path.parent).as_posix()):
+        relative = path.relative_to(input_path.parent).as_posix()
+        digest.update(relative.encode("utf-8") + b"\0")
+        digest.update(bytes.fromhex(file_sha256(path)))
+    return file_sha256(input_path), digest.hexdigest()
+
+
+def tool_version(command: list[str]) -> str:
+    try:
+        result = run(command)
+        text = (result.stdout + result.stderr).strip()
+        return text.splitlines()[0] if text else ""
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+
+
+def check_prep(fixture_id: str, fixture: dict[str, Any]) -> None:
+    fixture_input = (ROOT / fixture["input"]).resolve()
+    required = [fixture_input, *(fixture_input.parent / asset for asset in fixture.get("assets", []))]
+    missing = [path for path in required if not path.is_file()]
+    if missing:
+        fail(f"fixture {fixture_id!r} is not prepared; missing {missing}")
+
+
+def build_command(
+    php: Path, fixture_id: str, fixture: dict[str, Any], binary: Path, samples: int, warmup: int
+) -> list[str]:
+    # The engine resolves the input relative to the process cwd and rejects
+    # absolute or parent-traversing paths (mirroring the PHP SDK). Run with
+    # cwd = the input's own directory and pass the bare file name.
+    input_path = (ROOT / fixture["input"]).resolve()
+    command = [
+        str(php),
+        str(RUNNER),
+        "--binary",
+        str(binary.resolve()),
+        "--input",
+        input_path.name,
+        "--output",
+        "document.pdf",
+        "--artifacts",
+        "artifacts",
+        "--samples",
+        str(samples),
+        "--warmup",
+        str(warmup),
+        "--cwd",
+        str(input_path.parent),
+    ]
+    correctness = fixture.get("correctness", {})
+    if "page_count" in correctness:
+        command += ["--page-count", str(correctness["page_count"])]
+    if "text_contains" in correctness:
+        for fragment in correctness["text_contains"]:
+            command += ["--text-contains", fragment]
+    if fixture.get("expect_failure"):
+        command.append("--expect-failure")
+        if "failure_code" in correctness:
+            command += ["--expected-code", correctness["failure_code"]]
+    return command
+
+
+def collect_samples(
+    php: Path, fixture_id: str, fixture: dict[str, Any], binary: Path, samples: int, warmup: int
+) -> list[dict[str, Any]]:
+    command = build_command(php, fixture_id, fixture, binary, samples, warmup)
+    result = subprocess.run(command, capture_output=True, text=True, timeout=max(600, samples * 60))
+    lines = [line for line in result.stdout.splitlines() if line.strip()]
+    samples_out: list[dict[str, Any]] = []
+    for line in lines:
+        try:
+            parsed = json.loads(line)
+        except json.JSONDecodeError:
+            print(f"runner emitted a non-JSON line: {line[:200]}", file=sys.stderr)
+            continue
+        if isinstance(parsed, dict) and "wall_ms" in parsed:
+            samples_out.append(parsed)
+    if result.returncode != 0:
+        fail(f"runner failed for {fixture_id!r}: {result.stderr[-2000:]}")
+    if len(samples_out) != samples:
+        fail(f"runner produced {len(samples_out)} of {samples} samples for {fixture_id!r}: {result.stderr[-2000:]}")
+    return samples_out
+
+
+def aggregates(samples: list[dict[str, Any]], page_count: int | None) -> dict[str, Any]:
+    valid = [s for s in samples if s.get("ok") and (s.get("correctness") or {}).get("pass")]
+    walls = [s["wall_ms"] for s in valid]
+    users = [s.get("user_ms") for s in valid]
+    syss = [s.get("sys_ms") for s in valid]
+    rss = [s.get("peak_rss_kib") for s in valid]
+    pdfs = [s.get("output", {}).get("pdf_bytes") for s in valid]
+    sha256s = [s.get("output", {}).get("pdf_sha256") for s in valid]
+    pdf_hashes = [h for h in sha256s if h]
+    identical = max(
+        (sum(1 for h in pdf_hashes if h == candidate) for candidate in set(pdf_hashes)),
+        default=0,
+    )
+    failures = [s for s in samples if s.get("ok") is False]
+    codes: dict[str, int] = {}
+    for sample in failures:
+        code = (sample.get("failure") or {}).get("code") or "unknown"
+        codes[code] = codes.get(code, 0) + 1
+    passed = sum(1 for s in samples if (s.get("correctness") or {}).get("pass"))
+    variants = len(set(pdf_hashes))
+    mean_wall = statistics.fmean(walls) if walls else 0.0
+    agg: dict[str, Any] = {
+        "latency": validate_result.percentiles(walls),
+        "cpu": {
+            "user_ms": validate_result.percentiles(users),
+            "sys_ms": validate_result.percentiles(syss),
+            "wall_ms": validate_result.percentiles(walls),
+        },
+        "memory": {"peak_rss_kib": validate_result.percentiles(rss)},
+        "output": {
+            "pdf_bytes": validate_result.percentiles(pdfs),
+            "page_count": page_count,
+        },
+        "correctness": {
+            "pass_count": passed,
+            "total": len(samples),
+            "passed": passed == len(samples),
+        },
+        "determinism": {
+            "identical_pdf_sha256": identical,
+            "total": len(pdf_hashes),
+            "pdf_sha256_variants": variants,
+        },
+        "failures": {"count": len(failures), "codes": codes},
+    }
+    if page_count:
+        agg["scaling"] = {
+            "per_page_wall_ms": round(mean_wall / page_count, 3),
+            "per_page_peak_rss_kib": (round(validate_result.percentiles(rss)["mean"] / page_count, 1) if rss else 0.0),
+        }
+    if mean_wall > 0:
+        agg["throughput"] = {"renders_per_minute": round(60_000 / mean_wall, 2), "concurrency": 1}
+    return agg
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Pliego benchmark orchestrator")
+    parser.add_argument("--binary", required=True, help="path to the published pliego binary")
+    parser.add_argument("--out", help="result file path (default: baselines/pliego-<target>-<host>.json)")
+    parser.add_argument("--fixture", action="append", help="restrict to these fixture ids (repeatable)")
+    parser.add_argument("--samples", type=int, help="override samples per fixture")
+    parser.add_argument("--warmup", type=int, help="override warmup iterations")
+    parser.add_argument("--php", default="php", help="php-cli binary (default: php)")
+    parser.add_argument("--target", default="pliego-0.1.1", help="manifest target id")
+    parser.add_argument("--dedicated", action="store_true", help="host is dedicated to the run")
+    parser.add_argument("--schema", default=str(DEFAULT_SCHEMA), help="result schema path")
+    args = parser.parse_args()
+
+    if args.samples is not None and args.samples < 1:
+        fail("--samples must be at least 1")
+    if args.warmup is not None and args.warmup < 0:
+        fail("--warmup cannot be negative")
+    benchmark_clean = benchmark_tree_is_clean()
+    if args.dedicated and not benchmark_clean:
+        fail(
+            "--dedicated requires a clean benchmarks tree so the recorded revision identifies the harness and fixtures"
+        )
+
+    binary = Path(args.binary)
+    if not binary.is_file():
+        fail(f"binary not found: {binary}")
+
+    manifest = tomllib.loads(MANIFEST.read_text(encoding="utf-8"))
+    target = manifest["targets"].get(args.target)
+    if not target or not target.get("enabled", False):
+        fail(f"target {args.target!r} is not enabled in {MANIFEST}")
+    actual_version = engine_version(binary)
+    if actual_version != f"pliego {target['version']}":
+        fail(f"target {args.target!r} requires pliego {target['version']}, got {actual_version!r}")
+
+    protocol = manifest["protocol"]
+    php = Path(args.php)
+    schema = Path(args.schema)
+    fixture_ids = args.fixture or sorted(manifest["fixtures"].keys())
+    if args.fixture is None and protocol.get("seed") is not None:
+        random.Random(protocol["seed"]).shuffle(fixture_ids)
+
+    generated_at = datetime.now(timezone.utc).isoformat()
+    host = host_info(args.dedicated)
+    engine = engine_identity(binary)
+    revision = harness_revision() if benchmark_clean else None
+    toolchain = {
+        "engine": engine,
+        "python_version": platform.python_version(),
+        "php_version": tool_version([str(php), "--version"]),
+    }
+    if revision:
+        toolchain["harness_revision"] = revision
+
+    print(f"host: {platform.system()} {platform.machine()} ({os_cpu_count()} cores)")
+    print(f"engine: {actual_version}")
+
+    results: list[dict[str, Any]] = []
+    for fixture_id in fixture_ids:
+        fixture = manifest["fixtures"].get(fixture_id)
+        if fixture is None:
+            fail(f"unknown fixture {fixture_id!r}")
+        check_prep(fixture_id, fixture)
+        samples_n = args.samples if args.samples else fixture.get("samples", protocol["samples_short"])
+        warmup_n = args.warmup if args.warmup is not None else protocol["warmup_iterations"]
+        print(f"[{fixture_id}] {fixture['purpose']} ({samples_n} samples, {warmup_n} warmup)")
+        samples = collect_samples(php, fixture_id, fixture, binary, samples_n, warmup_n)
+        correctness = fixture.get("correctness", {})
+        page_count = correctness.get("page_count")
+        measured_pages = [
+            sample.get("output", {}).get("page_count")
+            for sample in samples
+            if sample.get("output", {}).get("page_count")
+        ]
+        if page_count is None and measured_pages:
+            page_count = int(statistics.median(measured_pages))
+        aggregate = aggregates(samples, page_count)
+        input_sha256, bundle_sha256 = fixture_identity(fixture)
+        result: dict[str, Any] = {
+            "schema": "pliego.benchmark-result",
+            "version": 1,
+            "status": "supported" if aggregate["correctness"]["passed"] else "failed",
+            "generated_at": generated_at,
+            "host": host,
+            "toolchain": toolchain,
+            "protocol": {
+                "warmup_iterations": warmup_n,
+                "sample_count": len(samples),
+                "sample_order": protocol["sample_order"],
+                "seed": protocol.get("seed"),
+                "network": protocol["network"],
+                "binary_profile": protocol["binary_profile"],
+                "rss_method": samples[0].get("rss_method", "unavailable"),
+            },
+            "target": {"id": args.target, "label": target["label"]},
+            "fixture": {
+                "id": fixture_id,
+                "purpose": fixture["purpose"],
+                "category": fixture["category"],
+                "input": fixture["input"],
+                "input_sha256": input_sha256,
+                "bundle_sha256": bundle_sha256,
+                "expected_page_count": page_count,
+                "expected_failure_code": correctness.get("failure_code"),
+            },
+            "samples": samples,
+            "aggregates": aggregate,
+        }
+        results.append(result)
+        print(
+            f"  -> p50 {result['aggregates']['latency']['p50']:.1f} ms, "
+            f"p95 {result['aggregates']['latency']['p95']:.1f} ms, "
+            f"correctness {result['aggregates']['correctness']['pass_count']}/{result['aggregates']['correctness']['total']}"
+        )
+
+    if args.out:
+        out = Path(args.out)
+    else:
+        safe_host = platform.system().lower().replace(" ", "-")
+        out = ROOT / "benchmarks" / "baselines" / f"{args.target}-{safe_host}-{platform.machine().lower()}.json"
+    payload = (
+        results[0]
+        if len(results) == 1
+        else {
+            "schema": "pliego.benchmark-bundle",
+            "version": 1,
+            "generated_at": generated_at,
+            "results": results,
+        }
+    )
+    violations = validate_result.validate_document(payload, json.loads(schema.read_text(encoding="utf-8")))
+    if violations:
+        fail(f"benchmark output failed validation: {violations[0]}")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    print(f"wrote {out}")
+    failed = [result["fixture"]["id"] for result in results if not result["aggregates"]["correctness"]["passed"]]
+    if failed:
+        print(f"correctness gate failed: {', '.join(failed)}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

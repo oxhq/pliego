@@ -444,11 +444,11 @@ fn pdf_text_ranges(text: &str, glyphs: &[crate::Glyph]) -> Vec<std::ops::Range<u
         })
         .collect::<Vec<_>>();
     // Poppler ignores ReversedChars, so a visual-order RTL run needs one logical ActualText span.
-    if expanded.len() > 1
-        && expanded
+    if expanded.len() > 1 &&
+        expanded
             .windows(2)
-            .all(|ranges| ranges[0].start >= ranges[1].start)
-        && expanded.first().unwrap().start > expanded.last().unwrap().start
+            .all(|ranges| ranges[0].start >= ranges[1].start) &&
+        expanded.first().unwrap().start > expanded.last().unwrap().start
     {
         return vec![0..text.len(); expanded.len()];
     }
@@ -457,8 +457,8 @@ fn pdf_text_ranges(text: &str, glyphs: &[crate::Glyph]) -> Vec<std::ops::Range<u
     sorted.sort_by_key(|range| range.start);
     let mut groups: Vec<std::ops::Range<usize>> = Vec::new();
     for range in sorted {
-        if let Some(group) = groups.last_mut()
-            && range.start < group.end
+        if let Some(group) = groups.last_mut() &&
+            range.start < group.end
         {
             group.end = group.end.max(range.end);
         } else {
@@ -498,10 +498,10 @@ fn validate_text_mappings(scene: &DocumentScene) -> Result<(), PdfError> {
                         glyph: glyph_index,
                     });
                 };
-                if start >= end
-                    || end > text.len()
-                    || !text.is_char_boundary(start)
-                    || !text.is_char_boundary(end)
+                if start >= end ||
+                    end > text.len() ||
+                    !text.is_char_boundary(start) ||
+                    !text.is_char_boundary(end)
                 {
                     return Err(PdfError::InvalidTextMapping {
                         operation: operation_index,

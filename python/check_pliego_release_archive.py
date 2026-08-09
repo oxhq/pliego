@@ -18,6 +18,7 @@ import sys
 import tarfile
 import tempfile
 import tomllib
+from typing import TypeVar
 import zipfile
 
 
@@ -32,6 +33,8 @@ MOZANGLE_FILES = (
     "licenses/mozangle-0.6.0/LICENSE",
     "licenses/mozangle-0.6.0/THIRD_PARTY_NOTICES.md",
 )
+
+ArchiveMember = TypeVar("ArchiveMember")
 ZLIB_FILES = ("licenses/zlib-1.3.2/LICENSE",)
 SOURCE_ASSETS = (
     "LICENSE",
@@ -114,9 +117,9 @@ def _member_parts(name: str) -> tuple[str, ...]:
 
 
 def _read_archive(archive: Path) -> tuple[str, dict[str, int], dict[str, bytes]]:
-    entries: list[tuple[str, int, object]] = []
     roots: set[str] = set()
     if archive.name.endswith(".tar.gz"):
+        tar_entries: list[tuple[str, int, tarfile.TarInfo]] = []
         with tarfile.open(archive, "r:gz") as source:
             for member in source.getmembers():
                 parts = _member_parts(member.name)
@@ -127,13 +130,14 @@ def _read_archive(archive: Path) -> tuple[str, dict[str, int], dict[str, bytes]]
                     continue
                 if not member.isfile():
                     raise ValueError(f"unsupported archive member: {member.name}")
-                entries.append((member.name, member.size, member))
+                tar_entries.append((member.name, member.size, member))
             return _collect_entries(
-                entries,
+                tar_entries,
                 lambda member: source.extractfile(member).read(),  # type: ignore[union-attr]
                 roots,
             )
     if archive.suffix == ".zip":
+        zip_entries: list[tuple[str, int, zipfile.ZipInfo]] = []
         with zipfile.ZipFile(archive) as source:
             for member in source.infolist():
                 parts = _member_parts(member.filename)
@@ -147,17 +151,19 @@ def _read_archive(archive: Path) -> tuple[str, dict[str, int], dict[str, bytes]]
                     continue
                 if kind == stat.S_IFDIR:
                     raise ValueError(f"unsupported archive member: {member.filename}")
-                entries.append((member.filename, member.file_size, member))
-            return _collect_entries(entries, source.read, roots)
+                zip_entries.append((member.filename, member.file_size, member))
+            return _collect_entries(zip_entries, source.read, roots)
     raise ValueError("archive must end in .tar.gz or .zip")
 
 
 def _collect_entries(
-    entries: list[tuple[str, int, object]], read: Callable[[object], bytes], roots: set[str]
+    entries: list[tuple[str, int, ArchiveMember]],
+    read: Callable[[ArchiveMember], bytes],
+    roots: set[str],
 ) -> tuple[str, dict[str, int], dict[str, bytes]]:
     sizes: dict[str, int] = {}
     payloads: dict[str, bytes] = {}
-    prepared: list[tuple[str, int, object]] = []
+    prepared: list[tuple[str, int, ArchiveMember]] = []
 
     for name, size, member in entries:
         parts = _member_parts(name)
@@ -416,16 +422,19 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.native_inventory is not None:
-        if any(
-            value is not None
-            for value in (
-                args.archive,
-                args.bundle,
-                args.version,
-                args.repository_url,
-                args.check_source_assets,
+        if (
+            any(
+                value is not None
+                for value in (
+                    args.archive,
+                    args.bundle,
+                    args.version,
+                    args.repository_url,
+                    args.check_source_assets,
+                )
             )
-        ) or args.self_test:
+            or args.self_test
+        ):
             parser.error("--native-inventory cannot be combined with validation inputs")
         sys.stdout.write(_native_libraries_text(args.native_inventory))
         return 0

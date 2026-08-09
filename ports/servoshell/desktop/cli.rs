@@ -9,12 +9,11 @@ use servo::{ChromeToDevtoolsControlMsg, DevtoolsControlMsg};
 
 use crate::desktop::app::App;
 use crate::desktop::event_loop::ServoShellEventLoop;
-use crate::panic_hook;
 use crate::prefs::{ArgumentParsingResult, parse_command_line_arguments};
 use crate::running_app_state::WebResourcePolicyHandler;
 use crate::{
     JSValue, ResourceEvent, StableJavaScriptError, StableJavaScriptEvaluation,
-    StableJavaScriptResult,
+    StableJavaScriptResult, panic_hook,
 };
 
 pub fn main() {

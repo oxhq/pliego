@@ -415,7 +415,9 @@ def main() -> int:
             first_results,
             {"hits": 1, "misses": 1},
         )
-        require(cache_objects(root) == {original_hash, changed_hash}, "changed bytes did not create one new cache object")
+        require(
+            cache_objects(root) == {original_hash, changed_hash}, "changed bytes did not create one new cache object"
+        )
         require(first["render_id"] != changed["render_id"], "changed asset bytes did not change render identity")
 
         write_bad_manifest(root)

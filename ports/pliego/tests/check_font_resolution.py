@@ -18,9 +18,7 @@ EXPECTED_TEXT = "PLIEGO FONT FALLBACK"
 FALLBACK_CHAIN = ["Missing Preferred", "Pliego Fixture"]
 FONT_PLACEHOLDER = "__PLIEGO_FONT_BASE64__"
 PINNED_FONT_SHA256 = "b719ecb31c5b21fc573c03f6421c74ac63c271a5a3ff841e34f9705fb94b8448"
-SANITIZED_FONT_RESOURCE = (
-    "sha256:649a7613cfa59d415188415e1488eb40fc9953742338a793538380234a539869"
-)
+SANITIZED_FONT_RESOURCE = "sha256:649a7613cfa59d415188415e1488eb40fc9953742338a793538380234a539869"
 
 
 def fail(message: str, code: int = 1) -> None:
@@ -63,8 +61,27 @@ def materialize_fixture(template: Path, font: Path, output: Path) -> Path:
     return output
 
 
+def materialize_host_fixture(output: Path) -> Path:
+    output.write_text(
+        """<!doctype html>
+<meta charset="utf-8">
+<style>body { font-family: serif; }</style>
+<p>HOST FONT OPT IN</p>
+<script>window.pliego.ready({ fixture: "host-opt-in" });</script>
+""",
+        encoding="utf-8",
+    )
+    return output
+
+
 def render(
-    binary: Path, fixture: Path, root: Path, host: str, *, allow_host_fonts: bool = False
+    binary: Path,
+    fixture: Path,
+    root: Path,
+    host: str,
+    expected_fixture: str,
+    *,
+    allow_host_fonts: bool = False,
 ) -> dict[str, Any]:
     home = root / f"home-{host}"
     home.mkdir()
@@ -99,6 +116,11 @@ def render(
     require(result.returncode == 0, f"{host} render failed: {result.stderr[-2000:]}")
     summary = final_json(result)
     require(summary.get("status") == "rendered", repr(summary))
+    readiness = summary.get("readiness")
+    require(
+        isinstance(readiness, dict) and readiness.get("fixture") == expected_fixture,
+        repr(summary),
+    )
     require(summary.get("document_pdf_status") == "rendered", repr(summary))
     return summary
 
@@ -112,8 +134,7 @@ def verify_fonts(summary: dict[str, Any]) -> bytes:
     require(isinstance(selections, list) and bool(selections), "no selected fonts")
     require(
         all(
-            selection.get("source") == "data"
-            and selection.get("resource") == SANITIZED_FONT_RESOURCE
+            selection.get("source") == "data" and selection.get("resource") == SANITIZED_FONT_RESOURCE
             for selection in selections
         ),
         f"selection did not use the pinned data font: {selections!r}",
@@ -144,11 +165,7 @@ def verify_fonts(summary: dict[str, Any]) -> bytes:
     entries = manifest.get("entries")
     require(isinstance(entries, list) and bool(entries), "font manifest is empty")
     require(
-        all(
-            entry.get("source") == "data"
-            and entry.get("resource") == SANITIZED_FONT_RESOURCE
-            for entry in entries
-        ),
+        all(entry.get("source") == "data" and entry.get("resource") == SANITIZED_FONT_RESOURCE for entry in entries),
         f"manifest contains an unpinned font: {entries!r}",
     )
 
@@ -161,8 +178,7 @@ def verify_fonts(summary: dict[str, Any]) -> bytes:
         decoded = base64.b64decode(encoded, validate=True)
         require(address == f"sha256:{hashlib.sha256(decoded).hexdigest()}", repr(resource))
     require(
-        {resource.get("resource") for resource in resources}
-        == {SANITIZED_FONT_RESOURCE},
+        {resource.get("resource") for resource in resources} == {SANITIZED_FONT_RESOURCE},
         f"unexpected font resources: {resources!r}",
     )
     return Path(summary["fonts_artifact"]).read_bytes()
@@ -208,19 +224,17 @@ def verify_pdf(summary: dict[str, Any]) -> bytes:
 def check(binary: Path) -> None:
     fixture_root = Path(__file__).resolve().parent / "fixtures/text-scene"
     fixture_template = fixture_root / "font-resolution.html"
-    host_fixture = fixture_root / "index.html"
     with tempfile.TemporaryDirectory(prefix="pliego-font-resolution-") as temp:
         root = Path(temp)
-        fixture = materialize_fixture(
-            fixture_template, fixture_root / "Ahem.ttf", root / "font-resolution.html"
-        )
-        first = render(binary, fixture, root, "first")
-        second = render(binary, fixture, root, "second")
+        fixture = materialize_fixture(fixture_template, fixture_root / "Ahem.ttf", root / "font-resolution.html")
+        host_fixture = materialize_host_fixture(root / "host-opt-in.html")
+        first = render(binary, fixture, root, "first", "font-resolution")
+        second = render(binary, fixture, root, "second", "font-resolution")
         require(first["render_id"] == second["render_id"], "render IDs differ across clean homes")
         require(first["scene"]["hash"] == second["scene"]["hash"], "scene hashes differ across clean homes")
         require(verify_fonts(first) == verify_fonts(second), "font reports differ across clean homes")
         require(verify_pdf(first) == verify_pdf(second), "PDF bytes differ across clean homes")
-        opted_in = render(binary, host_fixture, root, "host-opt-in", allow_host_fonts=True)
+        opted_in = render(binary, host_fixture, root, "host-opt-in", "host-opt-in", allow_host_fonts=True)
         verify_host_opt_in(opted_in)
 
 
@@ -228,6 +242,9 @@ def self_test() -> None:
     require(FALLBACK_CHAIN[0] != FALLBACK_CHAIN[1], "fallback fixture needs two families")
     sample = b"font"
     require(len(hashlib.sha256(sample).hexdigest()) == 64, "SHA-256 unavailable")
+    with tempfile.TemporaryDirectory(prefix="pliego-host-font-self-test-") as temp:
+        host_fixture = materialize_host_fixture(Path(temp) / "host.html").read_text(encoding="utf-8")
+        require("font-family: serif" in host_fixture, "host opt-in fixture does not request a host font")
 
 
 def main() -> int:

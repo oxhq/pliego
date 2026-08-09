@@ -9,6 +9,7 @@ use std::collections::hash_map::Entry::{Occupied, Vacant};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::{mem, thread_local};
 
 use base64::Engine as _;
@@ -89,15 +90,31 @@ fn parse_svg_document_in_memory(
     bytes: &[u8],
     fontdb: Arc<fontdb::Database>,
     font_resolver: Arc<dyn FontResolver>,
-) -> Result<(usvg::Tree, bool), &'static str> {
+) -> Result<(usvg::Tree, bool, bool), &'static str> {
     let image_string_href_resolver = Box::new(move |_: &str, _: &usvg::Options| {
         // Do not try to load `href` in <image> as local file path.
         None
     });
 
+    let has_unresolved_text = Arc::new(AtomicBool::new(false));
+    let unresolved_text = has_unresolved_text.clone();
+    let unresolved_fallback = has_unresolved_text.clone();
+    let fallback_resolver = usvg::FontResolver::default_fallback_selector();
     let font_resolver = usvg::FontResolver {
-        select_font: Box::new(move |font, database| font_resolver.resolve(font, database)),
-        select_fallback: usvg::FontResolver::default_fallback_selector(),
+        select_font: Box::new(move |font, database| {
+            let resolved = font_resolver.resolve(font, database);
+            if resolved.is_none() {
+                unresolved_text.store(true, Ordering::Relaxed);
+            }
+            resolved
+        }),
+        select_fallback: Box::new(move |character, used_fonts, database| {
+            let resolved = fallback_resolver(character, used_fonts, database);
+            if resolved.is_none() {
+                unresolved_fallback.store(true, Ordering::Relaxed);
+            }
+            resolved
+        }),
     };
 
     let opt = usvg::Options {
@@ -127,20 +144,21 @@ fn parse_svg_document_in_memory(
                 return false;
             }
             let tag = node.tag_name();
-            tag.namespace() == Some("http://www.w3.org/2000/svg")
-                && matches!(
+            tag.namespace() == Some("http://www.w3.org/2000/svg") &&
+                matches!(
                     tag.name(),
-                    "animate"
-                        | "animateColor"
-                        | "animateMotion"
-                        | "animateTransform"
-                        | "discard"
-                        | "set"
+                    "animate" |
+                        "animateColor" |
+                        "animateMotion" |
+                        "animateTransform" |
+                        "discard" |
+                        "set"
                 )
         });
         Ok((
             usvg::Tree::from_xmltree(&document, &opt)?,
             has_smil_animation,
+            has_unresolved_text.load(Ordering::Relaxed),
         ))
     })();
 
@@ -170,10 +188,11 @@ fn decode_bytes_sync(
     let image = if is_svg_document {
         parse_svg_document_in_memory(bytes, fontdb, font_resolver.clone())
             .ok()
-            .map(|(svg_tree, has_smil_animation)| {
+            .map(|(svg_tree, has_smil_animation, has_unresolved_text)| {
                 DecodedImage::Vector(VectorImageData {
                     svg_tree: Arc::new(svg_tree),
                     has_smil_animation,
+                    has_unresolved_text,
                     cors_status: cors,
                 })
             })
@@ -310,6 +329,7 @@ struct VectorImageData {
     #[conditional_malloc_size_of]
     svg_tree: Arc<usvg::Tree>,
     has_smil_animation: bool,
+    has_unresolved_text: bool,
     cors_status: CorsStatus,
 }
 
@@ -320,6 +340,11 @@ fn snapshot_vector_image(image: &VectorImageData) -> VectorImageSnapshot {
     if image.has_smil_animation {
         items.push(VectorImageSnapshotItem::Unsupported {
             reason: VectorImageUnsupportedReason::Animation,
+        });
+    }
+    if image.has_unresolved_text {
+        items.push(VectorImageSnapshotItem::Unsupported {
+            reason: VectorImageUnsupportedReason::Text,
         });
     }
     snapshot_vector_group(tree, tree.root(), &mut items);
@@ -375,11 +400,11 @@ fn snapshot_vector_path(path: &usvg::Path, items: &mut Vec<VectorImageSnapshotIt
     let stroke = path.stroke().and_then(|stroke| {
         let transform = path.abs_transform();
         let (scale_x, scale_y) = transform.get_scale();
-        let supported_style = stroke.dasharray().is_none()
-            && stroke.linecap() == usvg::LineCap::Butt
-            && stroke.linejoin() == usvg::LineJoin::Miter
-            && approximately_equal(stroke.miterlimit().get(), 4.0)
-            && approximately_equal(scale_x, scale_y);
+        let supported_style = stroke.dasharray().is_none() &&
+            stroke.linecap() == usvg::LineCap::Butt &&
+            stroke.linejoin() == usvg::LineJoin::Miter &&
+            approximately_equal(stroke.miterlimit().get(), 4.0) &&
+            approximately_equal(scale_x, scale_y);
         let usvg::Paint::Color(color) = stroke.paint() else {
             items.push(VectorImageSnapshotItem::Unsupported {
                 reason: VectorImageUnsupportedReason::Paint,
@@ -490,10 +515,10 @@ fn snapshot_vector_text(
     items: &mut Vec<VectorImageSnapshotItem>,
 ) {
     let transform = text.abs_transform();
-    if transform.has_skew()
-        || transform.sx <= 0.0
-        || transform.sy <= 0.0
-        || !approximately_equal(transform.sx, transform.sy)
+    if transform.has_skew() ||
+        transform.sx <= 0.0 ||
+        transform.sy <= 0.0 ||
+        !approximately_equal(transform.sx, transform.sy)
     {
         items.push(VectorImageSnapshotItem::Unsupported {
             reason: VectorImageUnsupportedReason::Text,
@@ -505,12 +530,12 @@ fn snapshot_vector_text(
         if !span.visible {
             continue;
         }
-        let supported_paint = span.stroke.is_none()
-            && span.underline.is_none()
-            && span.overline.is_none()
-            && span.line_through.is_none()
-            && span.variations.is_empty()
-            && matches!(
+        let supported_paint = span.stroke.is_none() &&
+            span.underline.is_none() &&
+            span.overline.is_none() &&
+            span.line_through.is_none() &&
+            span.variations.is_empty() &&
+            matches!(
                 span.fill.as_ref().map(|fill| (fill.paint(), fill.opacity().get())),
                 Some((usvg::Paint::Color(color), opacity))
                     if *color == usvg::Color::black() && approximately_equal(opacity, 1.0)
@@ -528,9 +553,9 @@ fn snapshot_vector_text(
             let font = glyphs[start].font;
             let font_size = glyphs[start].font_size();
             let mut end = start + 1;
-            while end < glyphs.len()
-                && glyphs[end].font == font
-                && approximately_equal(glyphs[end].font_size(), font_size)
+            while end < glyphs.len() &&
+                glyphs[end].font == font &&
+                approximately_equal(glyphs[end].font_size(), font_size)
             {
                 end += 1;
             }
@@ -549,9 +574,9 @@ fn snapshot_vector_text(
                 let mut captured_glyphs = Vec::with_capacity(run.len());
                 for glyph in run {
                     let glyph_transform = glyph.transform();
-                    if glyph_transform.has_skew()
-                        || !approximately_equal(glyph_transform.sx, expected_glyph_scale)
-                        || !approximately_equal(glyph_transform.sy, expected_glyph_scale)
+                    if glyph_transform.has_skew() ||
+                        !approximately_equal(glyph_transform.sx, expected_glyph_scale) ||
+                        !approximately_equal(glyph_transform.sy, expected_glyph_scale)
                     {
                         return None;
                     }
@@ -918,9 +943,8 @@ impl ImageCacheStore {
     /// If a key is available the image will be immediately loaded, otherwise it will load then the next batch of
     /// keys is received. Only call this if the image does not have a `LoadKey` yet.
     fn load_image_with_keycache(&mut self, pending_image: PendingKey) {
-        if let PendingKey::Svg((pending_id, ref _raster_image, requested_size)) = pending_image
-            && self
-                .key_cache
+        if let PendingKey::Svg((pending_id, ref _raster_image, requested_size)) = pending_image &&
+            self.key_cache
                 .evicted_images
                 .remove(&(pending_id, requested_size))
         {
@@ -1072,9 +1096,9 @@ impl ImageCacheStore {
     ) {
         if let Some(loaded_image) =
             self.completed_loads
-                .remove(&(url.clone(), origin.clone(), *cors_setting))
-            && let ImageResponse::Loaded(Image::Raster(image), _) = loaded_image.image_response
-            && let Some(id) = image.id
+                .remove(&(url.clone(), origin.clone(), *cors_setting)) &&
+            let ImageResponse::Loaded(Image::Raster(image), _) = loaded_image.image_response &&
+            let Some(id) = image.id
         {
             self.paint_api.update_images(
                 self.webview_id.into(),
@@ -1164,6 +1188,16 @@ impl ImageCacheFactoryImpl {
         let mut fontdb = fontdb::Database::new();
         fontdb.load_system_fonts();
 
+        Self::new_with_fontdb(broken_image_icon_data, fontdb)
+    }
+
+    /// Creates an image cache factory without loading host fonts.
+    #[cfg(feature = "test-util")]
+    pub fn new_for_testing(broken_image_icon_data: Vec<u8>) -> Self {
+        Self::new_with_fontdb(broken_image_icon_data, fontdb::Database::new())
+    }
+
+    fn new_with_fontdb(broken_image_icon_data: Vec<u8>, fontdb: fontdb::Database) -> Self {
         Self {
             broken_image_icon_data: Arc::new(broken_image_icon_data),
             thread_pool: ThreadPool::global(),
@@ -1383,10 +1417,10 @@ impl ImageCache for ImageCacheImpl {
             return Some(result.clone());
         }
 
-        if let Some(svg_id) = svg_id
-            && let Some(old_mapped_image_id) =
-                self.svg_id_image_id_map.lock().insert(svg_id, image_id)
-            && old_mapped_image_id != image_id
+        if let Some(svg_id) = svg_id &&
+            let Some(old_mapped_image_id) =
+                self.svg_id_image_id_map.lock().insert(svg_id, image_id) &&
+            old_mapped_image_id != image_id
         {
             store.vector_images.remove(&old_mapped_image_id);
             store
@@ -1547,8 +1581,8 @@ impl ImageCache for ImageCacheImpl {
     /// Inform the image cache about a response for a pending request.
     fn notify_pending_response(&self, id: PendingImageId, action: FetchResponseMsg) {
         match (action, id) {
-            (FetchResponseMsg::ProcessRequestBody(..), _)
-            | (FetchResponseMsg::ProcessCspViolations(..), _) => (),
+            (FetchResponseMsg::ProcessRequestBody(..), _) |
+            (FetchResponseMsg::ProcessCspViolations(..), _) => (),
             (FetchResponseMsg::ProcessResponse(_, response), _) => {
                 debug!("Received {:?} for {:?}", response.as_ref().map(|_| ()), id);
                 let mut store = self.store.lock();
@@ -1561,8 +1595,8 @@ impl ImageCache for ImageCacheImpl {
                                     FilteredMetadata::Basic(_) | FilteredMetadata::Cors(_) => {
                                         CorsStatus::Safe
                                     },
-                                    FilteredMetadata::Opaque
-                                    | FilteredMetadata::OpaqueRedirect(_) => CorsStatus::Unsafe,
+                                    FilteredMetadata::Opaque |
+                                    FilteredMetadata::OpaqueRedirect(_) => CorsStatus::Unsafe,
                                 },
                                 Some(unsafe_),
                             ),

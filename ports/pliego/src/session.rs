@@ -443,8 +443,8 @@ impl SessionArtifacts {
     }
 
     fn write_resource_digest(&self, digest: &str, body: &[u8]) -> io::Result<String> {
-        if digest.len() != 64
-            || !digest
+        if digest.len() != 64 ||
+            !digest
                 .bytes()
                 .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
         {

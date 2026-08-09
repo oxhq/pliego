@@ -518,11 +518,7 @@ def verify_scene_and_trace(
             object_value(operation, f"{fixture['name']} scene operation")
             for operation in list_value(page.get("operations"), f"{fixture['name']} scene operations")
         ]
-        raw_text_operations = [
-            operation
-            for operation in operations
-            if operation.get("type") == "text"
-        ]
+        raw_text_operations = [operation for operation in operations if operation.get("type") == "text"]
         for operation in raw_text_operations:
             font = operation.get("font")
             require(isinstance(font, str) and bool(font), f"{fixture['name']} text has no font identity")
@@ -834,8 +830,17 @@ def verify_previews(
             prefix = raster_directory / f"page-{page_index + 1:03d}"
             result = subprocess.run(
                 [
-                    pdftoppm, "-png", "-r", str(PDF_RASTER_DPI), "-f", str(page_index + 1),
-                    "-l", str(page_index + 1), "-singlefile", str(pdf), str(prefix),
+                    pdftoppm,
+                    "-png",
+                    "-r",
+                    str(PDF_RASTER_DPI),
+                    "-f",
+                    str(page_index + 1),
+                    "-l",
+                    str(page_index + 1),
+                    "-singlefile",
+                    str(pdf),
+                    str(prefix),
                 ],
                 capture_output=True,
                 text=True,

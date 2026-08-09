@@ -1498,10 +1498,9 @@ where
             ) => {
                 self.handle_evaluate_javascript(webview_id, evaluation_id, script);
             },
-            EmbedderToConstellationMessage::RequestLayoutDebugSnapshot(
-                webview_id,
-                response,
-            ) => self.handle_request_layout_debug_snapshot(webview_id, response),
+            EmbedderToConstellationMessage::RequestLayoutDebugSnapshot(webview_id, response) => {
+                self.handle_request_layout_debug_snapshot(webview_id, response)
+            },
             EmbedderToConstellationMessage::CreateMemoryReport(sender) => {
                 self.mem_profiler_chan.send(ProfilerMsg::Report(sender));
             },

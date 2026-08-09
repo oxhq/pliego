@@ -1067,6 +1067,7 @@ impl TextRunLineItem {
         self.text.is_empty()
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn merge_if_possible(
         &mut self,
         new_info: &Arc<FontAndScriptInfo>,
@@ -1077,10 +1078,10 @@ impl TextRunLineItem {
         new_offsets: &Option<TextRunOffsets>,
         new_inline_styles: &SharedInlineStyles,
     ) -> bool {
-        if !Arc::ptr_eq(&self.info.font, &new_info.font)
-            || !Arc::ptr_eq(&self.text_content, new_text_content)
-            || self.info.bidi_level != new_info.bidi_level
-            || !self.inline_styles.ptr_eq(new_inline_styles)
+        if !Arc::ptr_eq(&self.info.font, &new_info.font) ||
+            !Arc::ptr_eq(&self.text_content, new_text_content) ||
+            self.info.bidi_level != new_info.bidi_level ||
+            !self.inline_styles.ptr_eq(new_inline_styles)
         {
             return false;
         }

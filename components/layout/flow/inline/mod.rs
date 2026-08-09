@@ -1683,9 +1683,9 @@ impl InlineFormattingContextLayout<'_> {
 
         let current_inline_box_identifier = self.current_inline_box_identifier();
         if let Some(LineItem::TextRun(inline_box_identifier, line_item)) =
-            self.current_line_segment.line_items.last_mut()
-            && *inline_box_identifier == current_inline_box_identifier
-            && line_item.merge_if_possible(
+            self.current_line_segment.line_items.last_mut() &&
+            *inline_box_identifier == current_inline_box_identifier &&
+            line_item.merge_if_possible(
                 info,
                 &glyph_store,
                 &self.ifc.text_content,
