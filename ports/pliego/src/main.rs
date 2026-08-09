@@ -1142,6 +1142,8 @@ fn render(request: RenderRequest) -> Result<RenderOutcome, RenderError> {
         .as_ref()
         .map(|paths| paths.output.clone())
         .unwrap_or_else(|| artifacts.directory().join("document.pdf"));
+    let record_session_artifact =
+        |result| record_artifact(&artifacts, &document_pdf_path, result);
     let environment_path = artifacts.directory().join("environment.json");
     let mut environment = request.environment.artifact();
     environment["page"] = page_artifact(request.page);
@@ -1150,12 +1152,12 @@ fn render(request: RenderRequest) -> Result<RenderOutcome, RenderError> {
         "host_fonts": if request.allow_host_fonts { "allowed" } else { "denied" },
     });
     set_document_pdf_environment(&mut environment, &document_pdf_path, "pending", None);
-    record_artifact(artifacts.write_environment(&environment))?;
+    record_session_artifact(artifacts.write_environment(&environment))?;
     if let (Some(error), Some(manifest)) = (
         resource_policy.asset_error.as_ref(),
         resource_policy.asset_manifest.as_deref(),
     ) {
-        record_artifact(artifacts.record_asset_failure(
+        record_session_artifact(artifacts.record_asset_failure(
             error.code,
             manifest,
             error.url.as_deref(),
@@ -1206,13 +1208,13 @@ fn render(request: RenderRequest) -> Result<RenderOutcome, RenderError> {
         )
     })?;
     let userscripts = artifacts.directory().join("userscripts");
-    record_artifact(std::fs::create_dir_all(&userscripts))?;
-    record_artifact(std::fs::write(
+    record_session_artifact(std::fs::create_dir_all(&userscripts))?;
+    record_session_artifact(std::fs::write(
         userscripts.join("00-pliego-readiness.js"),
         readiness::document_start_script(READINESS_TIMEOUT_MS, true),
     ))?;
 
-    record_artifact(artifacts.record_state("started", None))?;
+    record_session_artifact(artifacts.record_state("started", None))?;
 
     let servo_args = [
         "--headless".into(),
@@ -1333,7 +1335,7 @@ fn render(request: RenderRequest) -> Result<RenderOutcome, RenderError> {
     let controlled_runtime_ms = elapsed_milliseconds(controlled_runtime_started);
     let policy_failures = std::mem::take(&mut *policy_failures.borrow_mut());
     for failure in &policy_failures {
-        record_artifact(artifacts.record_resource_failure(
+        record_session_artifact(artifacts.record_resource_failure(
             failure.code,
             failure.status,
             &failure.url,
@@ -1363,7 +1365,7 @@ fn render(request: RenderRequest) -> Result<RenderOutcome, RenderError> {
     })?;
 
     for message in result.console {
-        record_artifact(artifacts.record_console(
+        record_session_artifact(artifacts.record_console(
             &format!("{:?}", message.level).to_ascii_lowercase(),
             &message.message,
         ))?;
@@ -1379,7 +1381,7 @@ fn render(request: RenderRequest) -> Result<RenderOutcome, RenderError> {
         )
     }?;
     if let Some(failure) = &resource_capture.failure {
-        record_artifact(artifacts.record_resource_failure(
+        record_session_artifact(artifacts.record_resource_failure(
             failure.code,
             failure.status,
             &failure.url,
@@ -1399,7 +1401,7 @@ fn render(request: RenderRequest) -> Result<RenderOutcome, RenderError> {
     }
     let resolved_input_hash = resolved_input_hash(&render_id, &resource_capture.url_to_resource);
     environment["resolved_input_hash"] = serde_json::json!(resolved_input_hash);
-    record_artifact(artifacts.write_environment(&environment))?;
+    record_session_artifact(artifacts.write_environment(&environment))?;
 
     let snapshot_json = match result.value {
         servoshell::JSValue::String(json) => json,
@@ -1429,7 +1431,7 @@ fn render(request: RenderRequest) -> Result<RenderOutcome, RenderError> {
                 &error.to_string(),
             )
         })?;
-    record_artifact(artifacts.write_readiness(&readiness_json))?;
+    record_session_artifact(artifacts.write_readiness(&readiness_json))?;
     let readiness_payload = match readiness {
         Readiness::Ready { payload } => payload,
         Readiness::Failed { error } => {
@@ -1669,7 +1671,7 @@ fn render(request: RenderRequest) -> Result<RenderOutcome, RenderError> {
         .map(|path| path.to_string_lossy().into_owned())
         .collect::<Vec<_>>();
     let scene_preview = scene_previews.first().cloned();
-    record_artifact(artifacts.record_state("rendered", None))?;
+    record_session_artifact(artifacts.record_state("rendered", None))?;
     let bundle_path = artifacts
         .write_bundle(&document_pdf_path)
         .map_err(|error| {
@@ -2123,6 +2125,7 @@ fn record_resources(
 ) -> Result<ResourceCapture, RenderError> {
     let mut pending: HashMap<String, PendingResource> = HashMap::new();
     let mut capture = ResourceCapture::default();
+    let record_session_artifact = |result| record_artifact(artifacts, document_pdf, result);
 
     for resource in resources {
         match resource.event {
@@ -2133,7 +2136,9 @@ fn record_resources(
                 let pending_resource = pending.entry(resource.request_id.clone()).or_default();
                 pending_resource.method = Some(method);
                 if pending_resource.observe_url(url.clone()) {
-                    record_artifact(artifacts.record_resource_request(&resource.request_id, &url))?;
+                    record_session_artifact(
+                        artifacts.record_resource_request(&resource.request_id, &url),
+                    )?;
                 }
             },
             servoshell::NetworkEvent::HttpResponse(response) => {
@@ -2209,7 +2214,7 @@ fn record_resources(
                         completed.content_type.clone_from(&fetched.content_type);
                     }
                 }
-                record_artifact(artifacts.record_loaded_resource(
+                record_session_artifact(artifacts.record_loaded_resource(
                     &resource.request_id,
                     &completed.urls,
                     completed.response_status,
@@ -2244,8 +2249,8 @@ fn record_resources(
             body: fetched.body.clone(),
         };
         let request_id = format!("controlled-resource:{}", sha256_hex(url.as_bytes()));
-        record_artifact(artifacts.record_resource_request(&request_id, url))?;
-        record_artifact(artifacts.record_loaded_resource(
+        record_session_artifact(artifacts.record_resource_request(&request_id, url))?;
+        record_session_artifact(artifacts.record_loaded_resource(
             &request_id,
             &completed.urls,
             completed.response_status,
@@ -2910,12 +2915,17 @@ fn scene_operation_counts(operations: &[Operation]) -> serde_json::Value {
 }
 
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
-fn record_artifact(result: std::io::Result<()>) -> Result<(), RenderError> {
+fn record_artifact(
+    artifacts: &SessionArtifacts,
+    document_pdf: &std::path::Path,
+    result: std::io::Result<()>,
+) -> Result<(), RenderError> {
     result.map_err(|error| {
-        RenderError::without_publication(
+        fail_session(
+            artifacts,
+            document_pdf,
             "SESSION_ARTIFACT_WRITE_FAILED",
-            format!("cannot write session artifact: {error}"),
-            1,
+            &format!("cannot write session artifact: {error}"),
         )
     })
 }
@@ -4158,6 +4168,48 @@ mod tests {
                 },
             })
         );
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn artifact_write_failures_preserve_session_context_and_failure_evidence() {
+        let directory = temporary_artifacts("pliego-artifact-write-failure");
+        let artifacts = SessionArtifacts::create(&directory).unwrap();
+        let document_pdf = directory.join("document.pdf");
+        let render_id = artifacts.render_id();
+
+        let error = super::record_artifact(
+            &artifacts,
+            &document_pdf,
+            Err(std::io::Error::other("disk full")),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, "SESSION_ARTIFACT_WRITE_FAILED");
+        assert_eq!(error.message, "cannot write session artifact: disk full");
+        assert_eq!(error.exit_code, 1);
+        assert_eq!(error.artifacts, Some(directory.clone()));
+        assert_eq!(error.document_pdf, Some(document_pdf));
+        assert_eq!(error.render_id, Some(render_id.clone()));
+        assert!(error.warnings.is_empty());
+
+        let failure: serde_json::Value =
+            serde_json::from_slice(&fs::read(directory.join("failure.json")).unwrap()).unwrap();
+        assert_eq!(failure["status"], "failed");
+        assert_eq!(failure["render_id"], render_id);
+        assert_eq!(failure["error"]["code"], "SESSION_ARTIFACT_WRITE_FAILED");
+
+        let readiness: serde_json::Value =
+            serde_json::from_slice(&fs::read(directory.join("readiness.json")).unwrap()).unwrap();
+        assert_eq!(readiness["status"], "failed");
+        assert_eq!(readiness["error"]["code"], "SESSION_ARTIFACT_WRITE_FAILED");
+
+        let states = fs::read_to_string(directory.join("session-state.jsonl")).unwrap();
+        let state: serde_json::Value =
+            serde_json::from_str(states.lines().last().unwrap()).unwrap();
+        assert_eq!(state["state"], "failed");
+        assert_eq!(state["message"], "cannot write session artifact: disk full");
 
         fs::remove_dir_all(directory).unwrap();
     }
