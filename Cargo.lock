@@ -6598,6 +6598,7 @@ version = "0.1.1"
 dependencies = [
  "base64",
  "criterion",
+ "dpi",
  "flate2",
  "http 1.4.2",
  "http-body-util",
@@ -6607,6 +6608,7 @@ dependencies = [
  "libc",
  "serde",
  "serde_json",
+ "servo",
  "servo-canvas",
  "servo-layout",
  "servo-net",

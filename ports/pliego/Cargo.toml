@@ -14,6 +14,7 @@ path = "src/scene.rs"
 
 [features]
 default = ["shell"]
+document-session-spike = ["dep:dpi", "dep:layout", "dep:servo"]
 shell = ["dep:layout", "dep:servoshell"]
 
 [[bin]]
@@ -23,6 +24,7 @@ required-features = ["shell"]
 
 [dependencies]
 base64 = { workspace = true }
+dpi = { workspace = true, optional = true }
 http = { workspace = true }
 http-body-util = { workspace = true }
 hyper = { workspace = true }
@@ -35,6 +37,7 @@ serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 servo-canvas = { workspace = true }
+servo = { workspace = true, default-features = false, features = ["baked-in-resources", "bundled_freetype"], optional = true }
 servoshell = { workspace = true, features = ["baked-in-resources", "bundled_freetype"], optional = true }
 tokio = { workspace = true, features = ["time"] }
 unicode-segmentation = { workspace = true }
@@ -49,3 +52,7 @@ ttf-parser = { workspace = true }
 [[bench]]
 name = "document_scene_pdf"
 harness = false
+
+[[test]]
+name = "document_session_spike"
+required-features = ["document-session-spike"]
