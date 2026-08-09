@@ -165,11 +165,16 @@ def verify_supported(
 def verify_unsupported(layout: dict[str, Any]) -> None:
     warnings = layout.get("page_sequence", {}).get("warnings")
     require(isinstance(warnings, list), "unsupported fixture has no warning array")
+    require(len(warnings) == 2, f"unsupported caption warning count differs: {warnings!r}")
+    table_warning, caption_warning = warnings
     require(
-        len(warnings) == 1
-        and warnings[0].get("kind") == "unsupported-table-caption-pagination"
-        and warnings[0].get("child_index") == 1
-        and warnings[0].get("node") is not None,
+        table_warning.get("kind") == "unsupported-table-group-pagination"
+        and table_warning.get("child_index") == 1
+        and table_warning.get("table_node") is not None
+        and table_warning.get("reason") == "unsupported-layout"
+        and caption_warning.get("kind") == "unsupported-table-caption-pagination"
+        and caption_warning.get("child_index") == 1
+        and caption_warning.get("node") == table_warning.get("table_node"),
         f"unsupported caption warning differs: {warnings!r}",
     )
 
@@ -228,10 +233,16 @@ def self_test() -> None:
             "page_sequence": {
                 "warnings": [
                     {
+                        "kind": "unsupported-table-group-pagination",
+                        "child_index": 1,
+                        "table_node": 33,
+                        "reason": "unsupported-layout",
+                    },
+                    {
                         "kind": "unsupported-table-caption-pagination",
                         "child_index": 1,
                         "node": 33,
-                    }
+                    },
                 ]
             }
         }
