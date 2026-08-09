@@ -5,10 +5,12 @@ on:
     branches: ["main"]
     paths:
       - ".github/workflows/pliego-benchmark.yml"
+      - ".github/workflows/pliego-dedicated-benchmark.yml"
       - "benchmarks/**"
   pull_request:
     paths:
       - ".github/workflows/pliego-benchmark.yml"
+      - ".github/workflows/pliego-dedicated-benchmark.yml"
       - "benchmarks/**"
 
 permissions:
@@ -37,6 +39,7 @@ jobs:
           python benchmarks/tools/test_run_benchmark.py
           python benchmarks/tools/test_resolve_release.py
           python benchmarks/tools/test_compare_parity.py
+          python benchmarks/tools/test_benchmark_host_preflight.py
           python python/check_pliego_release_archive.py --self-test
           python benchmarks/tools/test_process_tree_sampler.py
           python benchmarks/tools/generate_fixtures.py --check

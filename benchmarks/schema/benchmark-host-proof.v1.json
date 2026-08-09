@@ -1,0 +1,175 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://pliego.dev/schema/benchmark-host-proof.v1.json",
+  "title": "Pliego dedicated benchmark host proof v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "version", "status", "mode", "generated_at", "evidence_source",
+    "identity", "runner", "host_config", "pre", "post", "drift", "command",
+    "checks", "failure", "authority"
+  ],
+  "properties": {
+    "schema": { "const": "pliego.benchmark-host-proof" },
+    "version": { "const": 1 },
+    "status": { "enum": ["accepted", "rejected", "failed"] },
+    "mode": { "enum": ["production", "negative-github-hosted", "negative-missing-thermal"] },
+    "generated_at": { "type": "string" },
+    "evidence_source": { "enum": ["live", "fixture"] },
+    "identity": { "$ref": "#/definitions/identity" },
+    "runner": { "$ref": "#/definitions/runner" },
+    "host_config": { "$ref": "#/definitions/hostConfig" },
+    "pre": { "$ref": "#/definitions/snapshot" },
+    "post": { "oneOf": [{ "type": "null" }, { "$ref": "#/definitions/snapshot" }] },
+    "drift": { "oneOf": [{ "type": "null" }, { "$ref": "#/definitions/drift" }] },
+    "command": { "$ref": "#/definitions/command" },
+    "checks": { "type": "array", "minItems": 1, "items": { "$ref": "#/definitions/check" } },
+    "failure": { "oneOf": [{ "type": "null" }, { "$ref": "#/definitions/failure" }] },
+    "authority": { "$ref": "#/definitions/authority" }
+  },
+  "definitions": {
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repository", "event", "ref", "ref_protected", "sha", "checkout_sha",
+        "default_branch_sha", "worktree_clean"
+      ],
+      "properties": {
+        "repository": { "type": ["string", "null"] },
+        "event": { "type": ["string", "null"] },
+        "ref": { "type": ["string", "null"] },
+        "ref_protected": { "type": "boolean" },
+        "sha": { "type": ["string", "null"], "pattern": "^[0-9a-f]{40}$" },
+        "checkout_sha": { "type": ["string", "null"], "pattern": "^[0-9a-f]{40}$" },
+        "default_branch_sha": { "type": ["string", "null"], "pattern": "^[0-9a-f]{40}$" },
+        "worktree_clean": { "type": "boolean" }
+      }
+    },
+    "runner": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "os", "arch", "id", "status", "busy", "group", "labels"],
+      "properties": {
+        "name": { "type": ["string", "null"] },
+        "os": { "type": ["string", "null"] },
+        "arch": { "type": ["string", "null"] },
+        "id": { "type": ["integer", "null"], "minimum": 1 },
+        "status": { "type": ["string", "null"] },
+        "busy": { "type": ["boolean", "null"] },
+        "group": { "type": ["string", "null"] },
+        "labels": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "hostConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "schema", "version"],
+      "properties": {
+        "path": { "type": "string" },
+        "sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+        "schema": { "type": ["string", "null"] },
+        "version": { "type": ["integer", "null"] }
+      }
+    },
+    "cpu": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "configured", "allowed", "online", "isolated", "topology",
+        "competing_processes", "process_scan_complete"
+      ],
+      "properties": {
+        "configured": { "type": ["string", "null"] },
+        "allowed": { "type": ["string", "null"] },
+        "online": { "type": ["string", "null"] },
+        "isolated": { "type": ["string", "null"] },
+        "topology": { "type": "object" },
+        "competing_processes": { "type": "array" },
+        "process_scan_complete": { "type": "boolean" }
+      }
+    },
+    "controls": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["governors", "boost", "smt", "aslr"],
+      "properties": {
+        "governors": { "type": "object", "additionalProperties": { "type": ["string", "null"] } },
+        "boost": { "type": ["string", "null"] },
+        "smt": { "type": ["string", "null"] },
+        "aslr": { "type": ["integer", "null"] }
+      }
+    },
+    "snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "captured_at", "load", "psi", "interrupts_total", "temperatures_millic",
+        "throttle_counters", "control_fingerprint", "cpu", "controls"
+      ],
+      "properties": {
+        "captured_at": { "type": "string" },
+        "load": { "type": "object" },
+        "psi": { "type": "object" },
+        "interrupts_total": { "type": ["integer", "null"], "minimum": 0 },
+        "temperatures_millic": { "type": "object", "additionalProperties": { "type": "integer" } },
+        "throttle_counters": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 0 } },
+        "control_fingerprint": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+        "cpu": { "$ref": "#/definitions/cpu" },
+        "controls": { "$ref": "#/definitions/controls" }
+      }
+    },
+    "drift": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["controls_equal", "throttle_delta", "temperature_delta_millic", "interrupt_delta"],
+      "properties": {
+        "controls_equal": { "type": "boolean" },
+        "throttle_delta": { "type": "object", "additionalProperties": { "type": "integer" } },
+        "temperature_delta_millic": { "type": "object", "additionalProperties": { "type": "integer" } },
+        "interrupt_delta": { "type": ["integer", "null"] }
+      }
+    },
+    "command": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["argv", "started", "exit_code"],
+      "properties": {
+        "argv": { "type": "array", "minItems": 1, "items": { "type": "string" } },
+        "started": { "type": "boolean" },
+        "exit_code": { "type": ["integer", "null"] }
+      }
+    },
+    "check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "passed", "observed", "expected"],
+      "properties": {
+        "id": { "type": "string" },
+        "passed": { "type": "boolean" },
+        "observed": {},
+        "expected": {}
+      }
+    },
+    "failure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message"],
+      "properties": {
+        "code": { "enum": ["HOST_PREFLIGHT_REJECTED", "HOST_POSTFLIGHT_REJECTED", "BENCHMARK_COMMAND_FAILED"] },
+        "message": { "type": "string" }
+      }
+    },
+    "authority": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["software_gate", "hardware_provisioning", "organization_runner_configuration", "roadmap_state"],
+      "properties": {
+        "software_gate": { "const": "implemented" },
+        "hardware_provisioning": { "const": "external" },
+        "organization_runner_configuration": { "const": "external" },
+        "roadmap_state": { "const": "incomplete-external-authority-required" }
+      }
+    }
+  }
+}

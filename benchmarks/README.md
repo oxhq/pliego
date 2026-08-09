@@ -24,7 +24,8 @@ benchmarks/
 ├── README.md
 ├── manifest.toml              Single source of truth for fixtures, targets, protocol
 ├── schema/
-│   └── benchmark-result.v1.json
+│   ├── benchmark-result.v1.json
+│   └── benchmark-host-proof.v1.json
 ├── fixtures/                  Seven frozen fixtures
 │   ├── minimal-static/        Pure startup
 │   ├── invoice-showcase/      Two-page invoice: fonts, table, totals, authored break
@@ -37,8 +38,10 @@ benchmarks/
 │   └── pliego.php             One process per sample; NDJSON on stdout
 ├── tools/
 │   ├── generate_fixtures.py   Deterministic generation of long/image fixtures
+│   ├── benchmark_host_preflight.py Dedicated-host gate and command wrapper
 │   ├── process_tree_sampler.py Linux cgroup-v2 containment and accounting
 │   ├── run_benchmark.py       Orchestrator: manifest → runner → aggregates → result file
+│   ├── validate_host_proof.py Validate host proof plus retained raw evidence
 │   ├── test_process_tree_sampler.py Fixture, live cgroup, bridge, and overhead proof
 │   └── validate_result.py     Stdlib-only JSON Schema check for result files
 ├── baselines/                 Released-runtime baselines
@@ -144,6 +147,74 @@ PHP-to-Python proof. On a dedicated benchmark host, add
 `--acceptance-overhead` for the 20-pair randomized on/off gate. It uses the
 protocol's `nearest-rank-v1` percentiles and requires p95 wall overhead below
 2%; sampler CPU share remains a separate diagnostic.
+
+## Dedicated-host proof
+
+Publishable timing runs must enter through the manual-only
+`Pliego dedicated benchmark host` workflow. Production dispatches select runner
+group `Pliego dedicated benchmarks` with labels `self-hosted`, `Linux`, `X64`,
+and `pliego-benchmark-pinned-v1`. The wrapper rejects before the chronology's
+`samples.started` event unless the run is on protected `main`, the workflow,
+checkout, and live branch all name one immutable SHA, and the GitHub API proves
+the exact online/busy runner, group, and labels.
+
+The host administrator owns `/etc/pliego-benchmark-host.v1.json`. Its pinned
+values must describe the real host; this abbreviated example shows the complete
+contract shape:
+
+```json
+{
+  "schema": "pliego.benchmark-host-config",
+  "version": 1,
+  "runner": {"name": "pliego-pinned-01", "group_id": 123},
+  "cpu": {
+    "set": "2-3",
+    "topology": {
+      "2": {"package": 0, "core": 1, "siblings": "2-3"},
+      "3": {"package": 0, "core": 1, "siblings": "2-3"}
+    }
+  },
+  "controls": {"boost": "disabled", "smt": "enabled", "aslr": 2},
+  "sensors": {
+    "thermal_paths": ["class/thermal/thermal_zone0/temp"],
+    "throttle_paths": ["devices/system/cpu/cpu2/thermal_throttle/core_throttle_count"]
+  },
+  "limits": {
+    "max_load_one_per_cpu": 0.25,
+    "max_cpu_psi_avg10": 0.1,
+    "max_memory_psi_avg10": 0.1,
+    "max_io_psi_avg10": 0.1,
+    "max_temperature_millic": 70000,
+    "max_temperature_drift_millic": 5000,
+    "max_interrupt_delta": 100000
+  },
+  "lock_path": "/var/lock/pliego-benchmark-host.lock"
+}
+```
+
+The wrapper holds the exclusive lock through the child command; requires the
+runner process affinity to equal the configured isolated whole-core set;
+rejects competing user workloads; checks topology, performance governors,
+boost, SMT, and ASLR; and captures load, CPU/memory/I/O PSI, interrupts,
+temperatures, and throttle counters before and after the command. Control drift,
+new throttle counts, or configured load/pressure/temperature drift makes the
+run non-publishable.
+
+Every attempt retains `benchmark-host-proof.v1.json`, raw NDJSON chronology,
+command stdout/stderr, diagnostics, and `SHA256SUMS`. The workflow's controlled
+`negative-github-hosted` and `negative-missing-thermal` modes must retain a
+valid rejection with no `samples.started` event.
+
+This repository supplies only the software gate. Hardware procurement and
+configuration, runner-group assignment, the read-only
+`OXHQ_BENCHMARK_PROOF_TOKEN`, sensor permissions, and a live production dispatch
+require external administrator authority. The token belongs only in the
+`Pliego dedicated benchmarks` GitHub Environment, whose deployment-branch
+policy must allow protected `main` and no other ref. Give it only the read-only
+organization `Self-hosted runners` permission, with no repository or mutation
+scopes. The collector never logs or persists the token and removes it from the
+child benchmark process. OXH-336 therefore remains incomplete until those
+external steps and their hosted proof exist.
 
 ## Protocol (from `manifest.toml`)
 
