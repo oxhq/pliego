@@ -8,7 +8,8 @@
 
 Implements the subset of draft-07 used by `schema/benchmark-result.v1.json`
 (no `jsonschema` required): type (including null unions), const, enum, oneOf,
-required, properties, additionalProperties, minimum, minItems, $ref
+required, properties, additionalProperties, minimum, minLength, minItems,
+maxItems, $ref
 resolution into `definitions`, and pattern.
 
 Usage:
@@ -23,11 +24,12 @@ import re
 import statistics
 import sys
 from collections import Counter
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_SCHEMA = ROOT / "benchmarks" / "schema" / "benchmark-result.v1.json"
+PERCENTILE_METHOD = "nearest-rank-v1"
 
 
 class Violation:
@@ -43,7 +45,7 @@ def percentile(values: list[int | float], p: float) -> float:
     if not values:
         return 0.0
     ordered = sorted(values)
-    index = max(0, min(len(ordered) - 1, round(p / 100.0 * (len(ordered) - 1))))
+    index = max(0, min(len(ordered) - 1, math.ceil(p / 100.0 * len(ordered)) - 1))
     return float(ordered[index])
 
 
@@ -110,7 +112,10 @@ def validate(
             branch_violations.append(failures)
         matches = sum(not failures for failures in branch_violations)
         if matches != 1:
-            closest = min(branch_violations, key=len)
+            closest = min(
+                branch_violations,
+                key=lambda failures: (len(failures), -max((len(failure.path) for failure in failures), default=0)),
+            )
             detail = f"; closest: {closest[0]}" if closest else ""
             violations.append(Violation(path, f"expected exactly one oneOf match, got {matches}{detail}"))
         return
@@ -130,6 +135,8 @@ def validate(
     if "pattern" in schema and isinstance(data, str):
         if re.fullmatch(schema["pattern"], data) is None:
             violations.append(Violation(path, f"does not match pattern {schema['pattern']!r}"))
+    if isinstance(data, str) and "minLength" in schema and len(data) < schema["minLength"]:
+        violations.append(Violation(path, f"expected >= {schema['minLength']} characters, got {len(data)}"))
 
     if isinstance(data, (int, float)) and not isinstance(data, bool):
         if "minimum" in schema and data < schema["minimum"]:
@@ -138,6 +145,8 @@ def validate(
     if isinstance(data, list):
         if "minItems" in schema and len(data) < schema["minItems"]:
             violations.append(Violation(path, f"expected >= {schema['minItems']} items, got {len(data)}"))
+        if "maxItems" in schema and len(data) > schema["maxItems"]:
+            violations.append(Violation(path, f"expected <= {schema['maxItems']} items, got {len(data)}"))
         if "items" in schema and isinstance(schema["items"], dict):
             for index, item in enumerate(data):
                 validate(item, schema["items"], f"{path}[{index}]", violations, root)
@@ -155,6 +164,300 @@ def validate(
                 violations.append(Violation(path, f"unexpected property {key!r}"))
             elif isinstance(schema.get("additionalProperties"), dict):
                 validate(value, schema["additionalProperties"], child, violations, root)
+
+
+def require_equal(path: str, actual: Any, expected: Any, violations: list[Violation]) -> None:
+    if actual != expected:
+        violations.append(Violation(path, f"must equal {expected!r}, got {actual!r}"))
+
+
+def io_total(io_stat: dict[str, dict[str, int]], field: str) -> int:
+    return sum(device.get(field, 0) for device in io_stat.values())
+
+
+def validate_zero_counters(
+    counters: dict[str, Any],
+    path: str,
+    populated: int,
+    pids_peak: int,
+    violations: list[Violation],
+) -> None:
+    for field in ("usage_usec", "user_usec", "system_usec"):
+        require_equal(f"{path}.cpu_stat.{field}", counters["cpu_stat"][field], 0, violations)
+    for device, values in counters["io_stat"].items():
+        for field, value in values.items():
+            require_equal(f"{path}.io_stat.{device}.{field}", value, 0, violations)
+    for field in (
+        "memory_current_bytes",
+        "memory_peak_bytes",
+        "memory_file_dirty_bytes",
+        "memory_file_writeback_bytes",
+    ):
+        require_equal(f"{path}.{field}", counters[field], 0, violations)
+    require_equal(f"{path}.pids_peak", counters["pids_peak"], pids_peak, violations)
+    require_equal(f"{path}.cgroup_events.populated", counters["cgroup_events"]["populated"], populated, violations)
+    require_equal(f"{path}.cgroup_events.frozen", counters["cgroup_events"]["frozen"], 0, violations)
+
+
+def validate_resource_usage(sample: dict[str, Any], path: str, violations: list[Violation]) -> None:
+    usage = sample["resource_usage"]
+    if not isinstance(usage, dict):
+        violations.append(Violation(f"{path}.resource_usage", "cgroup-v2 samples require retained resource usage"))
+        return
+
+    exact_fields = {
+        "exit_code": "exit_code",
+        "signal": "signal",
+        "wall_ms": "wall_ms",
+        "user_ms": "cpu_user_ms",
+        "sys_ms": "cpu_sys_ms",
+        "memory_current_bytes": "memory_current_bytes",
+        "memory_peak_bytes": "memory_peak_bytes",
+        "read_bytes": "read_bytes",
+        "write_bytes": "write_bytes",
+        "read_operations": "read_operations",
+        "write_operations": "write_operations",
+        "measurement_method": "method",
+    }
+    for sample_field, usage_field in exact_fields.items():
+        require_equal(f"{path}.{sample_field}", sample[sample_field], usage[usage_field], violations)
+
+    parent = PurePosixPath(usage["delegated_parent"])
+    cgroup = PurePosixPath(usage["cgroup_path"])
+    canonical_parent = parent.is_absolute() and ".." not in parent.parts and str(parent) == usage["delegated_parent"]
+    leaf_name = cgroup.name
+    if not canonical_parent:
+        violations.append(Violation(f"{path}.resource_usage.delegated_parent", "must be an absolute canonical path"))
+    if (
+        cgroup.parent != parent
+        or re.fullmatch(r"pliego-render-[1-9][0-9]*-[0-9a-f]{16}", leaf_name) is None
+        or str(cgroup) != usage["cgroup_path"]
+    ):
+        violations.append(Violation(f"{path}.resource_usage.cgroup_path", "must be the named fresh direct child"))
+    if usage["root_start_ticks"] <= 0:
+        violations.append(Violation(f"{path}.resource_usage.root_start_ticks", "must bind a positive Linux start time"))
+    if usage["signal"] is not None:
+        require_equal(f"{path}.resource_usage.exit_code", usage["exit_code"], 128 + usage["signal"], violations)
+
+    launch = usage["launch_security"]
+    status = launch["status"]
+    require_equal(f"{path}.resource_usage.launch_security.status.uid", status["uid"], [launch["uid"]] * 4, violations)
+    require_equal(f"{path}.resource_usage.launch_security.status.gid", status["gid"], [launch["gid"]] * 4, violations)
+    require_equal(
+        f"{path}.resource_usage.launch_security.status.supplementary_groups",
+        status["supplementary_groups"],
+        [],
+        violations,
+    )
+    for field in (
+        "cap_inheritable_hex",
+        "cap_permitted_hex",
+        "cap_effective_hex",
+        "cap_bounding_hex",
+        "cap_ambient_hex",
+    ):
+        if int(status[field], 16) != 0:
+            violations.append(Violation(f"{path}.resource_usage.launch_security.status.{field}", "must be zero"))
+    require_equal(
+        f"{path}.resource_usage.launch_security.status.no_new_privs",
+        status["no_new_privs"],
+        1,
+        violations,
+    )
+    for label, results in launch["migration_write_probes"].items():
+        for interface, result in results.items():
+            if result not in {"EACCES", "EPERM"}:
+                violations.append(
+                    Violation(
+                        f"{path}.resource_usage.launch_security.migration_write_probes.{label}.{interface}",
+                        "must prove a permission-denied write",
+                    )
+                )
+    executable = launch["executable"]
+    executable_path = PurePosixPath(executable["path"])
+    if not executable_path.is_absolute() or ".." in executable_path.parts or str(executable_path) != executable["path"]:
+        violations.append(
+            Violation(f"{path}.resource_usage.launch_security.executable.path", "must be an absolute canonical path")
+        )
+    require_equal(f"{path}.resource_usage.launch_security.argv[0]", launch["argv"][0], executable["path"], violations)
+    require_equal(f"{path}.resource_usage.launch_security.argv[1]", launch["argv"][1], "render", violations)
+
+    counters = usage["counters"]
+    empty = counters["empty"]
+    after_join = counters["after_join"]
+    final = counters["final"]
+    validate_zero_counters(empty, f"{path}.resource_usage.counters.empty", 0, 0, violations)
+    validate_zero_counters(after_join, f"{path}.resource_usage.counters.after_join", 1, 1, violations)
+    require_equal(
+        f"{path}.resource_usage.counters.final.cgroup_events.populated",
+        final["cgroup_events"]["populated"],
+        0,
+        violations,
+    )
+    require_equal(
+        f"{path}.resource_usage.counters.final.cgroup_events.frozen",
+        final["cgroup_events"]["frozen"],
+        0,
+        violations,
+    )
+    for field in ("memory_file_dirty_bytes", "memory_file_writeback_bytes"):
+        require_equal(f"{path}.resource_usage.counters.final.{field}", final[field], 0, violations)
+    if final["memory_peak_bytes"] < final["memory_current_bytes"]:
+        violations.append(
+            Violation(
+                f"{path}.resource_usage.counters.final.memory_peak_bytes",
+                "must be at least final memory_current_bytes",
+            )
+        )
+    if final["pids_peak"] < 1:
+        violations.append(Violation(f"{path}.resource_usage.counters.final.pids_peak", "must observe the root process"))
+
+    cpu = final["cpu_stat"]
+    if cpu["usage_usec"] + 2 < cpu["user_usec"] + cpu["system_usec"]:
+        violations.append(Violation(f"{path}.resource_usage.counters.final.cpu_stat.usage_usec", "must cover user plus system CPU"))
+    derived = {
+        "cpu_user_ms": round(cpu["user_usec"] / 1000.0, 3),
+        "cpu_sys_ms": round(cpu["system_usec"] / 1000.0, 3),
+        "memory_current_bytes": final["memory_current_bytes"],
+        "memory_peak_bytes": final["memory_peak_bytes"],
+        "read_bytes": io_total(final["io_stat"], "rbytes"),
+        "write_bytes": io_total(final["io_stat"], "wbytes"),
+        "read_operations": io_total(final["io_stat"], "rios"),
+        "write_operations": io_total(final["io_stat"], "wios"),
+    }
+    for field, expected in derived.items():
+        require_equal(f"{path}.resource_usage.{field}", usage[field], expected, violations)
+
+    settle = usage["accounting_settle"]
+    observations = settle["stable_observations"]
+    if len(observations) != 2:
+        violations.append(Violation(f"{path}.resource_usage.accounting_settle.stable_observations", "must retain exactly two stable reads"))
+    elif observations[0] != observations[1]:
+        violations.append(Violation(f"{path}.resource_usage.accounting_settle.stable_observations", "cpu.stat and io.stat reads must be identical"))
+    elif observations[1]["cpu_stat"] != final["cpu_stat"] or observations[1]["io_stat"] != final["io_stat"]:
+        violations.append(Violation(f"{path}.resource_usage.accounting_settle.stable_observations", "last stable read must equal final counters"))
+    if settle["duration_ms"] > settle["timeout_ms"] + settle["poll_interval_ms"]:
+        violations.append(Violation(f"{path}.resource_usage.accounting_settle.duration_ms", "exceeds bounded settle budget"))
+    if settle["duration_ms"] < settle["poll_interval_ms"]:
+        violations.append(Violation(f"{path}.resource_usage.accounting_settle.duration_ms", "two stable reads were not interval-separated"))
+
+    diagnostics = usage["sampled_diagnostics"]
+    require_equal(
+        f"{path}.resource_usage.accounting_settle.poll_interval_ms",
+        settle["poll_interval_ms"],
+        diagnostics["sample_interval_ms"],
+        violations,
+    )
+    if diagnostics["pss_interval_ms"] < diagnostics["sample_interval_ms"]:
+        violations.append(Violation(f"{path}.resource_usage.sampled_diagnostics.pss_interval_ms", "must cover the sample interval"))
+    elapsed = [float(row["elapsed_ms"]) for row in diagnostics["samples"]]
+    if elapsed != sorted(elapsed):
+        violations.append(Violation(f"{path}.resource_usage.sampled_diagnostics.samples", "elapsed_ms must be monotonic"))
+    gaps = [later - earlier for earlier, later in zip(elapsed, elapsed[1:])]
+    expected_drained_at = round(usage["wall_ms"] + usage["drain_ms"], 3)
+    if abs(elapsed[-1] - expected_drained_at) > 0.002:
+        violations.append(
+            Violation(
+                f"{path}.resource_usage.sampled_diagnostics.samples[-1].elapsed_ms",
+                f"must equal engine wall plus drain duration {expected_drained_at!r}",
+            )
+        )
+    require_equal(
+        f"{path}.resource_usage.sampled_diagnostics.max_sample_gap_ms",
+        diagnostics["max_sample_gap_ms"],
+        round(max(gaps, default=0.0), 3),
+        violations,
+    )
+
+    rss_peaks: list[int] = []
+    pss_peaks: list[int] = []
+    observed: dict[tuple[int, int], dict[str, int | float]] = {}
+    page_size = diagnostics["page_size_bytes"]
+    for index, raw_sample in enumerate(diagnostics["samples"]):
+        sample_path = f"{path}.resource_usage.sampled_diagnostics.samples[{index}]"
+        if raw_sample["cgroup_memory_current_bytes"] > final["memory_peak_bytes"]:
+            violations.append(Violation(f"{sample_path}.cgroup_memory_current_bytes", "must not exceed cgroup memory.peak"))
+        identities: set[tuple[int, int]] = set()
+        for process in raw_sample["processes"]:
+            identity = (process["pid"], process["start_ticks"])
+            if identity in identities:
+                violations.append(Violation(f"{sample_path}.processes", f"duplicate identity {identity!r}"))
+            identities.add(identity)
+            if process["pid"] == usage["root_pid"] and process["start_ticks"] != usage["root_start_ticks"]:
+                violations.append(Violation(f"{sample_path}.processes", "root PID has a different start time"))
+            aggregate = observed.setdefault(
+                identity,
+                {
+                    "pid": identity[0],
+                    "start_ticks": identity[1],
+                    "first_seen_ms": raw_sample["elapsed_ms"],
+                    "last_seen_ms": raw_sample["elapsed_ms"],
+                },
+            )
+            aggregate["last_seen_ms"] = raw_sample["elapsed_ms"]
+        rss = sum(process["rss_pages"] * page_size // 1024 for process in raw_sample["processes"])
+        require_equal(f"{sample_path}.sampled_summed_rss_kib_lower_bound", raw_sample["sampled_summed_rss_kib_lower_bound"], rss, violations)
+        rss_peaks.append(rss)
+        pss_values = [process["pss_kib"] for process in raw_sample["processes"]]
+        expected_pss = (
+            sum(pss_values)
+            if raw_sample["processes"] and all(value is not None for value in pss_values)
+            else None
+        )
+        require_equal(
+            f"{sample_path}.sampled_summed_pss_kib_lower_bound",
+            raw_sample["sampled_summed_pss_kib_lower_bound"],
+            expected_pss,
+            violations,
+        )
+        if expected_pss is not None:
+            pss_peaks.append(expected_pss)
+
+    expected_observed = sorted(observed.values(), key=lambda row: (int(row["pid"]), int(row["start_ticks"])))
+    require_equal(
+        f"{path}.resource_usage.sampled_diagnostics.observed_processes",
+        diagnostics["observed_processes"],
+        expected_observed,
+        violations,
+    )
+    require_equal(
+        f"{path}.sampled_peak_rss_kib_lower_bound",
+        sample["sampled_peak_rss_kib_lower_bound"],
+        max(rss_peaks, default=0),
+        violations,
+    )
+    require_equal(
+        f"{path}.sampled_peak_pss_kib_lower_bound",
+        sample["sampled_peak_pss_kib_lower_bound"],
+        max(pss_peaks) if pss_peaks else None,
+        violations,
+    )
+    require_equal(
+        f"{path}.resource_usage.sampled_diagnostics.sampled_peak_summed_rss_kib_lower_bound",
+        diagnostics["sampled_peak_summed_rss_kib_lower_bound"],
+        max(rss_peaks, default=0),
+        violations,
+    )
+    require_equal(
+        f"{path}.resource_usage.sampled_diagnostics.sampled_peak_summed_pss_kib_lower_bound",
+        diagnostics["sampled_peak_summed_pss_kib_lower_bound"],
+        max(pss_peaks) if pss_peaks else None,
+        violations,
+    )
+    cleanup = usage["cleanup"]
+    require_equal(f"{path}.resource_usage.cleanup.kill_grace_ms", cleanup["kill_grace_ms"], 1000.0, violations)
+    if not cleanup["kill_used"] and cleanup["lingering_before_kill"]:
+        violations.append(Violation(f"{path}.resource_usage.cleanup", "cannot retain lingering identities without cgroup.kill"))
+    if sample["ok"] and cleanup["kill_used"]:
+        violations.append(Violation(f"{path}.resource_usage.cleanup.kill_used", "passing samples must drain without cgroup.kill"))
+    sampler_cpu_ms = usage["sampler_cpu_user_ms"] + usage["sampler_cpu_sys_ms"]
+    sampler_cpu_percent = round(sampler_cpu_ms * 100.0 / usage["wall_ms"], 3) if usage["wall_ms"] else 0.0
+    require_equal(
+        f"{path}.resource_usage.sampler_cpu_percent_of_wall",
+        usage["sampler_cpu_percent_of_wall"],
+        sampler_cpu_percent,
+        violations,
+    )
 
 
 def validate_semantics(data: dict[str, Any], path: str, violations: list[Violation]) -> None:
@@ -178,16 +481,67 @@ def validate_semantics(data: dict[str, Any], path: str, violations: list[Violati
     if indices != list(range(len(samples))):
         violations.append(Violation(f"{path}.samples", "sample indices must be contiguous and ordered from zero"))
 
-    protocol_rss_method = data["protocol"]["rss_method"]
+    protocol_measurement_method = data["protocol"]["measurement_method"]
+    if protocol_measurement_method != "linux-cgroup-v2-v1":
+        violations.append(
+            Violation(
+                f"{path}.protocol.measurement_method",
+                "publishable benchmark results require linux-cgroup-v2-v1",
+            )
+        )
+    engine = data["toolchain"]["engine"]
+    for field in ("binary_path", "binary_sha256"):
+        if field not in engine:
+            violations.append(Violation(f"{path}.toolchain.engine.{field}", "is required for a publishable engine"))
+    cgroup_paths: list[str] = []
+    launch_accounts: list[tuple[int, int]] = []
+    executable_identities: list[tuple[int, int]] = []
     for index, sample in enumerate(samples):
         sample_path = f"{path}.samples[{index}]"
-        if sample["rss_method"] != protocol_rss_method:
+        if sample["measurement_method"] != protocol_measurement_method:
             violations.append(
                 Violation(
-                    f"{sample_path}.rss_method",
-                    f"must equal protocol rss_method {protocol_rss_method!r}",
+                    f"{sample_path}.measurement_method",
+                    f"must equal protocol measurement_method {protocol_measurement_method!r}",
                 )
             )
+        validate_resource_usage(sample, sample_path, violations)
+        if isinstance(sample["resource_usage"], dict):
+            usage = sample["resource_usage"]
+            cgroup_paths.append(usage["cgroup_path"])
+            launch = usage["launch_security"]
+            executable = launch["executable"]
+            launch_accounts.append((launch["uid"], launch["gid"]))
+            executable_identities.append((executable["device"], executable["inode"]))
+            if "binary_path" in engine:
+                require_equal(
+                    f"{sample_path}.resource_usage.launch_security.executable.path",
+                    executable["path"],
+                    engine["binary_path"],
+                    violations,
+                )
+            if "binary_sha256" in engine:
+                require_equal(
+                    f"{sample_path}.resource_usage.launch_security.executable.sha256",
+                    executable["sha256"],
+                    engine["binary_sha256"],
+                    violations,
+                )
+            argv = launch["argv"]
+            require_equal(
+                f"{sample_path}.resource_usage.launch_security.argv[2]",
+                argv[2],
+                data["fixture"]["input"],
+                violations,
+            )
+            for flag in ("--output", "--artifacts"):
+                if argv.count(flag) != 1:
+                    violations.append(
+                        Violation(
+                            f"{sample_path}.resource_usage.launch_security.argv",
+                            f"must contain exactly one {flag!r}",
+                        )
+                    )
         correctness = sample["correctness"]
         output = sample["output"]
         failure = sample["failure"]
@@ -297,6 +651,13 @@ def validate_semantics(data: dict[str, Any], path: str, violations: list[Violati
                         )
                     )
 
+    if len(cgroup_paths) != len(set(cgroup_paths)):
+        violations.append(Violation(f"{path}.samples", "each render must retain a unique fresh cgroup_path"))
+    if len(set(launch_accounts)) > 1:
+        violations.append(Violation(f"{path}.samples", "all renders must use the same dedicated engine UID and GID"))
+    if len(set(executable_identities)) > 1:
+        violations.append(Violation(f"{path}.samples", "engine executable device/inode identity changed between renders"))
+
     aggregates = data["aggregates"]
     passing_samples = [sample for sample in samples if sample["ok"] and sample["correctness"]["pass"]]
     walls = [sample["wall_ms"] for sample in passing_samples]
@@ -311,9 +672,29 @@ def validate_semantics(data: dict[str, Any], path: str, violations: list[Violati
             percentiles([sample["sys_ms"] for sample in passing_samples]),
         ),
         f"{path}.aggregates.cpu.wall_ms": (aggregates["cpu"]["wall_ms"], percentiles(walls)),
-        f"{path}.aggregates.memory.peak_rss_kib": (
-            aggregates["memory"]["peak_rss_kib"],
-            percentiles([sample["peak_rss_kib"] for sample in passing_samples]),
+        f"{path}.aggregates.memory.cgroup_peak_bytes": (
+            aggregates["memory"]["cgroup_peak_bytes"],
+            percentiles([sample["memory_peak_bytes"] for sample in passing_samples]),
+        ),
+        f"{path}.aggregates.memory.sampled_peak_rss_kib_lower_bound": (
+            aggregates["memory"]["sampled_peak_rss_kib_lower_bound"],
+            percentiles([sample["sampled_peak_rss_kib_lower_bound"] for sample in passing_samples]),
+        ),
+        f"{path}.aggregates.io.read_bytes": (
+            aggregates["io"]["read_bytes"],
+            percentiles([sample["read_bytes"] for sample in passing_samples]),
+        ),
+        f"{path}.aggregates.io.write_bytes": (
+            aggregates["io"]["write_bytes"],
+            percentiles([sample["write_bytes"] for sample in passing_samples]),
+        ),
+        f"{path}.aggregates.io.read_operations": (
+            aggregates["io"]["read_operations"],
+            percentiles([sample["read_operations"] for sample in passing_samples]),
+        ),
+        f"{path}.aggregates.io.write_operations": (
+            aggregates["io"]["write_operations"],
+            percentiles([sample["write_operations"] for sample in passing_samples]),
         ),
         f"{path}.aggregates.output.pdf_bytes": (
             aggregates["output"]["pdf_bytes"],
@@ -323,6 +704,21 @@ def validate_semantics(data: dict[str, Any], path: str, violations: list[Violati
     for aggregate_path, (actual, expected) in aggregate_series.items():
         if actual != expected:
             violations.append(Violation(aggregate_path, f"must equal aggregate of passing samples {expected!r}"))
+
+    pss_values = [
+        sample["sampled_peak_pss_kib_lower_bound"]
+        for sample in passing_samples
+        if sample["sampled_peak_pss_kib_lower_bound"] is not None
+    ]
+    expected_pss = percentiles(pss_values) if passing_samples and len(pss_values) == len(passing_samples) else None
+    actual_pss = aggregates["memory"].get("sampled_peak_pss_kib_lower_bound")
+    if actual_pss != expected_pss:
+        violations.append(
+            Violation(
+                f"{path}.aggregates.memory.sampled_peak_pss_kib_lower_bound",
+                f"must equal aggregate of passing samples {expected_pss!r}",
+            )
+        )
 
     if "expected_page_count" in data["fixture"]:
         expected_page_count = data["fixture"]["expected_page_count"]
@@ -337,10 +733,10 @@ def validate_semantics(data: dict[str, Any], path: str, violations: list[Violati
     mean_wall = statistics.fmean(walls) if walls else 0.0
     if "scaling" in aggregates:
         page_count = aggregates["output"]["page_count"]
-        rss = percentiles([sample["peak_rss_kib"] for sample in passing_samples])
+        memory_peak = percentiles([sample["memory_peak_bytes"] for sample in passing_samples])
         expected_scaling = {
             "per_page_wall_ms": round(mean_wall / page_count, 3) if page_count else 0.0,
-            "per_page_peak_rss_kib": round(rss["mean"] / page_count, 1) if page_count else 0.0,
+            "per_page_memory_peak_bytes": round(memory_peak["mean"] / page_count, 1) if page_count else 0.0,
         }
         if aggregates["scaling"] != expected_scaling:
             violations.append(
