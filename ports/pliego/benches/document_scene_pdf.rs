@@ -7,10 +7,11 @@
 
 use std::collections::BTreeSet;
 use std::fmt::Write;
-use std::fs;
-use std::io::Read;
+use std::fs::{self, OpenOptions};
+use std::io::{Read, Write as IoWrite};
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use flate2::read::ZlibDecoder;
@@ -34,6 +35,7 @@ const FONT_ID: &str = "sha256:dejavu-sans-core-benchmark";
 const IMAGE_ID: &str = "sha256:image-core-benchmark";
 const PAGE_WIDTH: f64 = 816.0;
 const PAGE_HEIGHT: f64 = 1056.0;
+static TEMPORARY_PDF_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 struct Case {
     name: &'static str,
@@ -394,10 +396,62 @@ fn check(case: &Case) -> (usize, String) {
 
 struct TemporaryPdf(PathBuf);
 
+impl TemporaryPdf {
+    fn create(case_name: &str, pdf: &[u8]) -> Self {
+        loop {
+            let sequence = TEMPORARY_PDF_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            let path = temporary_pdf_path(case_name, sequence);
+            // `create_new` atomically rejects occupied paths, including symbolic links.
+            match OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(mut file) => {
+                    if let Err(error) = file.write_all(pdf) {
+                        drop(file);
+                        let _ = fs::remove_file(&path);
+                        panic!("failed to write temporary PDF for {case_name}: {error}");
+                    }
+                    return Self(path);
+                },
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {},
+                Err(error) => panic!("failed to create temporary PDF for {case_name}: {error}"),
+            }
+        }
+    }
+}
+
 impl Drop for TemporaryPdf {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.0);
     }
+}
+
+fn temporary_pdf_path(case_name: &str, sequence: u64) -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "pliego-core-{case_name}-{}-{sequence}.pdf",
+        std::process::id()
+    ))
+}
+
+fn check_temporary_pdf_collision() {
+    const SENTINEL: &[u8] = b"occupied";
+    let case_name = "collision-check";
+    let (collision_path, mut collision_file) = loop {
+        let sequence = TEMPORARY_PDF_SEQUENCE.load(Ordering::Relaxed);
+        let path = temporary_pdf_path(case_name, sequence);
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(file) => break (path, file),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                TEMPORARY_PDF_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            },
+            Err(error) => panic!("failed to create collision fixture: {error}"),
+        }
+    };
+    collision_file.write_all(SENTINEL).unwrap();
+    drop(collision_file);
+    let _collision_guard = TemporaryPdf(collision_path.clone());
+
+    let temporary_pdf = TemporaryPdf::create(case_name, b"%PDF-1.7\n");
+    assert_ne!(temporary_pdf.0, collision_path);
+    assert_eq!(fs::read(collision_path).unwrap(), SENTINEL);
 }
 
 struct PdfInspection {
@@ -406,15 +460,10 @@ struct PdfInspection {
 }
 
 fn inspect_pdf(case_name: &str, pdf: &[u8]) -> PdfInspection {
-    let path = std::env::temp_dir().join(format!(
-        "pliego-core-{case_name}-{}.pdf",
-        std::process::id()
-    ));
-    fs::write(&path, pdf).unwrap();
-    let _temporary_pdf = TemporaryPdf(path.clone());
+    let temporary_pdf = TemporaryPdf::create(case_name, pdf);
     let output = Command::new("pdftotext")
         .args(["-enc", "UTF-8", "-raw"])
-        .arg(&path)
+        .arg(&temporary_pdf.0)
         .arg("-")
         .output()
         .expect("pdftotext is required for core benchmark correctness checks");
@@ -434,7 +483,7 @@ fn inspect_pdf(case_name: &str, pdf: &[u8]) -> PdfInspection {
 
     let output = Command::new("pdfimages")
         .arg("-list")
-        .arg(&path)
+        .arg(&temporary_pdf.0)
         .output()
         .expect("pdfimages is required for core benchmark correctness checks");
     assert!(
@@ -517,6 +566,7 @@ fn decode_stream(object: &[u8]) -> Option<Vec<u8>> {
 }
 
 fn benchmark(c: &mut Criterion) {
+    check_temporary_pdf_collision();
     let cases = cases();
     for case in &cases {
         let (bytes, hash) = check(case);
