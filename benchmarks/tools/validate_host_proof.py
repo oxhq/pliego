@@ -25,6 +25,11 @@ STDOUT_NAME = "benchmark-command.stdout"
 STDERR_NAME = "benchmark-command.stderr"
 MANIFEST_NAME = "SHA256SUMS"
 ARTIFACT_NAMES = {PROOF_NAME, CHRONOLOGY_NAME, DIAGNOSTICS_NAME, STDOUT_NAME, STDERR_NAME}
+EXPECTED_PRODUCTION_COMMAND = (
+    "python3",
+    "benchmarks/tools/test_process_tree_sampler.py",
+    "--acceptance-overhead",
+)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import validate_result  # noqa: E402
@@ -146,6 +151,8 @@ def validate_semantics(
             violations.append("accepted proof snapshot fingerprints differ")
         if proof.get("command", {}).get("started") is not True:
             violations.append("accepted proof did not start the benchmark command")
+        if proof.get("command", {}).get("argv") != list(EXPECTED_PRODUCTION_COMMAND):
+            violations.append("accepted proof did not run the dedicated acceptance workload")
         if proof.get("command", {}).get("exit_code") != 0:
             violations.append("accepted proof command did not exit zero")
         if proof.get("failure") is not None:

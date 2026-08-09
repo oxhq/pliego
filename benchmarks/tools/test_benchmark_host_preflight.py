@@ -23,6 +23,10 @@ WORKFLOW = TOOLS.parents[1] / ".github" / "workflows" / "pliego-dedicated-benchm
 SHA = "a" * 40
 LABELS = ["Linux", "X64", "pliego-benchmark-pinned-v1", "self-hosted"]
 SECRET = "must-not-reach-child"
+EXPECTED_COMMAND = ["python3", "benchmarks/tools/test_process_tree_sampler.py", "--acceptance-overhead"]
+
+sys.path.insert(0, str(TOOLS))
+import validate_host_proof  # noqa: E402
 
 
 def write(path: Path, content: str) -> None:
@@ -57,10 +61,13 @@ def make_fixture(root: Path) -> Path:
             "RUNNER_ARCH": "X64",
         },
     )
-    write_json(
-        fixture / "runtime.json",
-        {"checkout_sha": SHA, "worktree_clean": True, "self_pid": 999, "ancestor_pids": [999, 1]},
-    )
+    runtime = {"checkout_sha": SHA, "worktree_clean": True, "self_pid": 999, "ancestor_pids": [999, 1]}
+    runtime["fixture_command"] = [
+        sys.executable,
+        "-c",
+        "import os; print('PLIEGO_BENCHMARK_PROOF_TOKEN' in os.environ)",
+    ]
+    write_json(fixture / "runtime.json", runtime)
     write_json(
         fixture / "api.json",
         {
@@ -161,13 +168,7 @@ class BenchmarkHostPreflightTests(unittest.TestCase):
             root = Path(temporary)
             fixture = make_fixture(root)
             output = root / "out"
-            result = invoke(
-                fixture,
-                output,
-                sys.executable,
-                "-c",
-                "import os; print('PLIEGO_BENCHMARK_PROOF_TOKEN' in os.environ)",
-            )
+            result = invoke(fixture, output, *EXPECTED_COMMAND)
             self.assertEqual(result.returncode, 0, result.stderr)
             document = proof(output)
             self.assertEqual(document["status"], "accepted")
@@ -191,6 +192,27 @@ class BenchmarkHostPreflightTests(unittest.TestCase):
             self.assertEqual(validation.returncode, 0, validation.stderr)
             self.assertEqual(len((output / "SHA256SUMS").read_text(encoding="ascii").splitlines()), 5)
             self.assertNotIn(SECRET.encode(), b"".join(path.read_bytes() for path in output.iterdir()))
+            document["command"]["argv"] = ["true"]
+            violations = validate_host_proof.validate_semantics(
+                document, output, allow_fixture_evidence=True, forbidden_event=None
+            )
+            self.assertIn(
+                "accepted proof did not run the dedicated acceptance workload",
+                violations,
+            )
+
+    def test_noop_production_command_rejects_before_samples(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fixture = make_fixture(root)
+            output = root / "out"
+            result = invoke(fixture, output, "true")
+            self.assertEqual(result.returncode, 1, result.stderr)
+            document = proof(output)
+            self.assertEqual(document["status"], "rejected")
+            self.assertNotIn("samples.started", events(output))
+            command_check = next(check for check in document["checks"] if check["id"] == "command.identity")
+            self.assertFalse(command_check["passed"])
 
     def test_non_main_ref_rejects_before_samples(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -200,7 +222,7 @@ class BenchmarkHostPreflightTests(unittest.TestCase):
             env.update({"GITHUB_REF": "refs/heads/feature", "GITHUB_REF_PROTECTED": "false"})
             write_json(fixture / "env.json", env)
             output = root / "out"
-            result = invoke(fixture, output, sys.executable, "-c", "raise SystemExit('must not run')")
+            result = invoke(fixture, output, *EXPECTED_COMMAND)
             self.assertEqual(result.returncode, 1, result.stderr)
             self.assertEqual(proof(output)["status"], "rejected")
             self.assertNotIn("samples.started", events(output))
@@ -263,14 +285,15 @@ class BenchmarkHostPreflightTests(unittest.TestCase):
             root = Path(temporary)
             fixture = make_fixture(root)
             throttle = fixture / "sys/devices/system/cpu/cpu2/thermal_throttle/core_throttle_count"
-            output = root / "out"
-            result = invoke(
-                fixture,
-                output,
+            runtime = json.loads((fixture / "runtime.json").read_text(encoding="utf-8"))
+            runtime["fixture_command"] = [
                 sys.executable,
                 "-c",
                 f"from pathlib import Path; Path({str(throttle)!r}).write_text('1')",
-            )
+            ]
+            write_json(fixture / "runtime.json", runtime)
+            output = root / "out"
+            result = invoke(fixture, output, *EXPECTED_COMMAND)
             self.assertEqual(result.returncode, 1, result.stderr)
             document = proof(output)
             self.assertEqual(document["status"], "failed")
@@ -285,7 +308,7 @@ class BenchmarkHostPreflightTests(unittest.TestCase):
             lock = fixture / "benchmark.lock"
             write(lock, "owned elsewhere\n")
             output = root / "out"
-            result = invoke(fixture, output, sys.executable, "-c", "print('must not run')")
+            result = invoke(fixture, output, *EXPECTED_COMMAND)
             self.assertEqual(result.returncode, 1, result.stderr)
             self.assertTrue(lock.is_file())
             self.assertNotIn("samples.started", events(output))
@@ -296,7 +319,7 @@ class BenchmarkHostPreflightTests(unittest.TestCase):
             fixture = make_fixture(root)
             write(fixture / "proc/42/status", "Name:\tunknown\n")
             output = root / "out"
-            result = invoke(fixture, output, sys.executable, "-c", "print('must not run')")
+            result = invoke(fixture, output, *EXPECTED_COMMAND)
             self.assertEqual(result.returncode, 1, result.stderr)
             self.assertNotIn("samples.started", events(output))
             self.assertFalse(next(check for check in proof(output)["checks"] if check["id"] == "host.process_scan")["passed"])
@@ -317,7 +340,7 @@ class BenchmarkHostPreflightTests(unittest.TestCase):
             root = Path(temporary)
             fixture = make_fixture(root)
             output = root / "out"
-            result = invoke(fixture, output, sys.executable, "-c", "pass")
+            result = invoke(fixture, output, *EXPECTED_COMMAND)
             self.assertEqual(result.returncode, 0, result.stderr)
             with (output / "benchmark-host-chronology.ndjson").open("a", encoding="utf-8") as handle:
                 handle.write("{}\n")
@@ -349,6 +372,7 @@ class BenchmarkHostPreflightTests(unittest.TestCase):
         self.assertIn("negative-github-hosted", workflow)
         self.assertIn("negative-missing-thermal", workflow)
         self.assertIn("--forbid-event samples.started", workflow)
+        self.assertIn("-- python3 benchmarks/tools/test_process_tree_sampler.py --acceptance-overhead", workflow)
 
 
 if __name__ == "__main__":

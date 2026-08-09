@@ -804,6 +804,12 @@ def main() -> int:
     gate.check("identity.api_protected", branch.get("protected"), True)
     gate.check("identity.worktree_clean", identity["worktree_clean"], True)
     gate.check("command.secret_free", command_contains_token, False)
+    if args.mode == "production":
+        gate.check(
+            "command.identity",
+            retained_command,
+            list(validate_host_proof.EXPECTED_PRODUCTION_COMMAND),
+        )
     immutable = [identity["sha"], identity["checkout_sha"], identity["default_branch_sha"]]
     gate.check(
         "identity.immutable_sha",
@@ -924,10 +930,16 @@ def main() -> int:
             command_proof["started"] = True
             command_env = dict(os.environ)
             command_env.pop(args.token_env, None)
+            fixture_command = runtime.get("fixture_command")
+            execution_command = command
+            if fixture_root and isinstance(fixture_command, list) and fixture_command and all(
+                isinstance(argument, str) for argument in fixture_command
+            ):
+                execution_command = fixture_command
             with stdout_path.open("wb") as stdout, stderr_path.open("wb") as stderr:
                 try:
                     result = subprocess.run(
-                        command,
+                        execution_command,
                         cwd=ROOT,
                         env=command_env,
                         stdout=stdout,

@@ -156,7 +156,10 @@ group `Pliego dedicated benchmarks` with labels `self-hosted`, `Linux`, `X64`,
 and `pliego-benchmark-pinned-v1`. The wrapper rejects before the chronology's
 `samples.started` event unless the run is on protected `main`, the workflow,
 checkout, and live branch all name one immutable SHA, and the GitHub API proves
-the exact online/busy runner, group, and labels.
+the exact online/busy runner, group, and labels. Accepted production evidence
+also binds the exact
+`python3 benchmarks/tools/test_process_tree_sampler.py --acceptance-overhead`
+argv to that clean checkout.
 
 The host administrator owns `/etc/pliego-benchmark-host.v1.json`. Its pinned
 values must describe the real host; this abbreviated example shows the complete
