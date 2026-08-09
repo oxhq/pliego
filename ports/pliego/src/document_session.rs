@@ -24,10 +24,17 @@ use layout::pages::{PageDefinition, configure_for_process};
 use pliego::capture::{SceneCapture, capture_document_scene};
 use pliego::pdf::{PdfFontResource, PdfFontVariation, render_document_pdf};
 use servo::{
-    LoadStatus, Preferences, RenderingContext, Servo, ServoBuilder, SoftwareRenderingContext,
-    WebResourceLoad, WebResourceResponse, WebView, WebViewBuilder, WebViewDelegate,
+    JSValue, LoadStatus, Preferences, RenderingContext, Servo, ServoBuilder,
+    SoftwareRenderingContext, UserContentManager, UserScript, WebResourceLoad, WebResourceResponse,
+    WebView, WebViewBuilder, WebViewDelegate,
 };
 use url::Url;
+
+use super::readiness::{self, Readiness, ReadinessPolicy};
+use super::resource_policy::{
+    ResourcePolicy, ResourcePolicyConfig, ResourcePolicyDecision, ResourcePolicyFailure,
+    ResourceRequest,
+};
 
 const TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -39,15 +46,25 @@ unsafe extern "C" {
 
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) struct SessionError {
-    pub(crate) code: &'static str,
+    pub(crate) code: String,
     pub(crate) message: String,
+    pub(crate) resource_failure: Option<ResourcePolicyFailure>,
 }
 
 impl SessionError {
-    pub(crate) fn new(code: &'static str, message: impl Into<String>) -> Self {
+    pub(crate) fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
-            code,
+            code: code.into(),
             message: message.into(),
+            resource_failure: None,
+        }
+    }
+
+    fn from_resource_failure(failure: ResourcePolicyFailure) -> Self {
+        Self {
+            code: failure.code.into(),
+            message: format!("{}: {}", failure.reason, failure.url),
+            resource_failure: Some(failure),
         }
     }
 }
@@ -63,6 +80,7 @@ impl std::error::Error for SessionError {}
 pub(crate) struct DocumentOutcome {
     pub(crate) capture: SceneCapture,
     pub(crate) pdf: Vec<u8>,
+    pub(crate) readiness: serde_json::Value,
     pub(crate) served_resources: Vec<PathBuf>,
 }
 
@@ -70,11 +88,18 @@ pub(crate) struct DocumentSession {
     webview: WebView,
     servo: Servo,
     delegate: Rc<DocumentDelegate>,
+    stable_render_timeout: Duration,
     _rendering_context: Rc<SoftwareRenderingContext>,
 }
 
 impl DocumentSession {
-    pub(crate) fn new(input: impl AsRef<Path>, page: PageDefinition) -> Result<Self, SessionError> {
+    pub(crate) fn new(
+        input: impl AsRef<Path>,
+        page: PageDefinition,
+        resources: ResourcePolicyConfig,
+        readiness: ReadinessPolicy,
+    ) -> Result<Self, SessionError> {
+        let stable_render_timeout = stable_render_timeout(readiness)?;
         let input = input.as_ref().canonicalize().map_err(|error| {
             SessionError::new(
                 "INVALID_REQUEST",
@@ -91,6 +116,10 @@ impl DocumentSession {
             .parent()
             .ok_or_else(|| SessionError::new("INVALID_REQUEST", "document has no bundle root"))?
             .to_path_buf();
+        let resource_policy = ResourcePolicy::resolve(&resources, &bundle_root);
+        if let Some(error) = resource_policy.asset_error.as_ref() {
+            return Err(SessionError::new(error.code, error.message.clone()));
+        }
         configure_for_process(page).map_err(|_| {
             SessionError::new(
                 "LAYOUT_CONFIGURATION_FAILED",
@@ -125,8 +154,12 @@ impl DocumentSession {
         preferences.network_https_proxy_uri.clear();
 
         let servo = ServoBuilder::default().preferences(preferences).build();
+        let user_content_manager = Rc::new(UserContentManager::new(&servo));
+        user_content_manager
+            .add_script(Rc::new(UserScript::from(readiness.document_start_script())));
         let delegate = Rc::new(DocumentDelegate {
             bundle_root,
+            resource_policy,
             ..Default::default()
         });
         let input_url = Url::from_file_path(&input).map_err(|_| {
@@ -140,6 +173,7 @@ impl DocumentSession {
         })?;
         let webview = WebViewBuilder::new(&servo, rendering_context.clone())
             .delegate(delegate.clone())
+            .user_content_manager(user_content_manager)
             .url(input_url)
             .build();
 
@@ -147,6 +181,7 @@ impl DocumentSession {
             webview,
             servo,
             delegate,
+            stable_render_timeout,
             _rendering_context: rendering_context,
         })
     }
@@ -165,7 +200,9 @@ impl DocumentSession {
             *screenshot_result.borrow_mut() =
                 Some(result.map(|_| ()).map_err(|error| format!("{error:?}")));
         });
-        self.spin_until("stable render", || screenshot.borrow().is_some())?;
+        self.spin_until_for("stable render", self.stable_render_timeout, || {
+            screenshot.borrow().is_some()
+        })?;
         screenshot
             .borrow_mut()
             .take()
@@ -182,6 +219,7 @@ impl DocumentSession {
                 "Servo completed the barrier without producing a frame",
             ));
         }
+        let readiness = self.evaluate_readiness()?;
 
         let snapshot = self.webview.debug_layout_snapshot().ok_or_else(|| {
             SessionError::new(
@@ -257,12 +295,64 @@ impl DocumentSession {
         Ok(DocumentOutcome {
             capture,
             pdf,
+            readiness,
             served_resources: self.delegate.served_resources.borrow().clone(),
         })
     }
 
+    fn evaluate_readiness(&self) -> Result<serde_json::Value, SessionError> {
+        let result = Rc::new(RefCell::new(None));
+        let callback_result = result.clone();
+        self.webview
+            .evaluate_javascript(readiness::HOST_EVALUATION_EXPRESSION, move |value| {
+                *callback_result.borrow_mut() = Some(value)
+            });
+        self.spin_until("readiness evaluation", || result.borrow().is_some())?;
+        let value = result.borrow_mut().take().ok_or_else(|| {
+            SessionError::new(
+                "READINESS_EVALUATION_FAILED",
+                "readiness callback completed without a result",
+            )
+        })?;
+        let value = value.map_err(|error| {
+            SessionError::new("READINESS_EVALUATION_FAILED", format!("{error:?}"))
+        })?;
+        let snapshot = match value {
+            JSValue::String(snapshot) => snapshot,
+            value => {
+                return Err(SessionError::new(
+                    "READINESS_INVALID_RESULT",
+                    format!("expected readiness JSON string, got {value:?}"),
+                ));
+            },
+        };
+        let evidence = serde_json::from_str(&snapshot)
+            .map_err(|error| SessionError::new("READINESS_INVALID_RESULT", error.to_string()))?;
+        match readiness::parse_snapshot(&snapshot)
+            .map_err(|error| SessionError::new("READINESS_INVALID_RESULT", error))?
+        {
+            Readiness::Ready { .. } => Ok(evidence),
+            Readiness::Failed { error } => Err(SessionError::new(error.code, error.message)),
+            Readiness::Pending => Err(SessionError::new(
+                "READINESS_PENDING",
+                "document remained pending after stable capture",
+            )),
+        }
+    }
+
     fn spin_until(&self, label: &str, done: impl Fn() -> bool) -> Result<(), SessionError> {
-        let deadline = Instant::now() + TIMEOUT;
+        self.spin_until_for(label, TIMEOUT, done)
+    }
+
+    fn spin_until_for(
+        &self,
+        label: &str,
+        timeout: Duration,
+        done: impl Fn() -> bool,
+    ) -> Result<(), SessionError> {
+        let deadline = Instant::now()
+            .checked_add(timeout)
+            .ok_or_else(|| SessionError::new("INVALID_REQUEST", "timeout is too large"))?;
         while !done() {
             self.check_failure(label)?;
             if Instant::now() >= deadline {
@@ -284,11 +374,17 @@ impl DocumentSession {
                 format!("Servo crashed while waiting for {label}: {reason}"),
             ));
         }
-        if let Some(reason) = self.delegate.resource_failure.borrow().as_deref() {
-            return Err(SessionError::new("RESOURCE_DENIED", reason));
+        if let Some(reason) = self.delegate.resource_failure.borrow().as_ref() {
+            return Err(SessionError::from_resource_failure(reason.clone()));
         }
         Ok(())
     }
+}
+
+fn stable_render_timeout(readiness: ReadinessPolicy) -> Result<Duration, SessionError> {
+    TIMEOUT
+        .checked_add(Duration::from_millis(readiness.timeout_ms))
+        .ok_or_else(|| SessionError::new("INVALID_REQUEST", "readiness timeout is too large"))
 }
 
 fn configure_utc() -> Result<(), SessionError> {
@@ -325,10 +421,11 @@ fn configure_utc() -> Result<(), SessionError> {
 #[derive(Default)]
 struct DocumentDelegate {
     bundle_root: PathBuf,
+    resource_policy: ResourcePolicy,
     crashed: RefCell<Option<String>>,
     frame_ready: Cell<bool>,
     load_complete: Cell<bool>,
-    resource_failure: RefCell<Option<String>>,
+    resource_failure: RefCell<Option<ResourcePolicyFailure>>,
     served_resources: RefCell<Vec<PathBuf>>,
 }
 
@@ -349,44 +446,50 @@ impl WebViewDelegate for DocumentDelegate {
     }
 
     fn load_web_resource(&self, _webview: WebView, load: WebResourceLoad) {
-        let url = load.request().url.clone();
-        let resource = (|| {
-            if url.scheme() != "file" {
-                return Err(format!("non-file resource is disabled: {url}"));
-            }
-            let path = url
-                .to_file_path()
-                .map_err(|_| format!("resource is not a local file: {url}"))?
-                .canonicalize()
-                .map_err(|error| format!("resource is unavailable: {url}: {error}"))?;
-            if !path.starts_with(&self.bundle_root) {
-                return Err(format!("resource is outside the document bundle: {url}"));
-            }
-            let content_type = match path.extension().and_then(|extension| extension.to_str()) {
-                Some("html") => "text/html; charset=utf-8",
-                Some("ttf") => "font/ttf",
-                _ => return Err(format!("resource type is unsupported: {url}")),
-            };
-            let body = std::fs::read(&path)
-                .map_err(|error| format!("resource is unreadable: {url}: {error}"))?;
-            Ok((path, content_type, body))
-        })();
-
-        let Ok((path, content_type, body)) = resource else {
-            let error = resource.unwrap_err();
-            if self.resource_failure.borrow().is_none() {
-                *self.resource_failure.borrow_mut() = Some(error);
-            }
-            load.intercept(WebResourceResponse::new(url)).cancel();
-            return;
+        let request = ResourceRequest {
+            method: load.request().method.to_string(),
+            url: load.request().url.clone(),
+            destination: format!("{:?}", load.request().destination),
+            referrer_url: load.request().referrer_url.clone(),
+            is_for_main_frame: load.request().is_for_main_frame,
+            is_redirect: load.request().is_redirect,
         };
+        match self.resource_policy.decide(&self.bundle_root, &request) {
+            ResourcePolicyDecision::Allow => {},
+            ResourcePolicyDecision::FetchHttp => self.cancel_resource(
+                load,
+                ResourcePolicyFailure::new(
+                    &request,
+                    "RESOURCE_DENIED",
+                    "denied",
+                    "controlled HTTP fetching is not yet owned by DocumentSession",
+                ),
+            ),
+            ResourcePolicyDecision::Synthesize { body, content_type } => {
+                if let Ok(path) = request.url.to_file_path()
+                    && let Ok(path) = path.canonicalize()
+                {
+                    self.served_resources.borrow_mut().push(path);
+                }
+                let mut headers = HeaderMap::new();
+                headers.insert(CONTENT_TYPE, HeaderValue::from_static(content_type));
+                let mut intercepted =
+                    load.intercept(WebResourceResponse::new(request.url).headers(headers));
+                intercepted.send_body_data(body);
+                intercepted.finish();
+            },
+            ResourcePolicyDecision::Fail(failure) => self.cancel_resource(load, failure),
+        }
+    }
+}
 
-        self.served_resources.borrow_mut().push(path);
-        let mut headers = HeaderMap::new();
-        headers.insert(CONTENT_TYPE, HeaderValue::from_static(content_type));
-        let mut intercepted = load.intercept(WebResourceResponse::new(url).headers(headers));
-        intercepted.send_body_data(body);
-        intercepted.finish();
+impl DocumentDelegate {
+    fn cancel_resource(&self, load: WebResourceLoad, failure: ResourcePolicyFailure) {
+        let url = load.request().url.clone();
+        if self.resource_failure.borrow().is_none() {
+            *self.resource_failure.borrow_mut() = Some(failure);
+        }
+        load.intercept(WebResourceResponse::new(url)).cancel();
     }
 }
 
@@ -399,7 +502,10 @@ mod tests {
     use pliego::capture::CapturedFontSource;
     use sha2::{Digest, Sha256};
 
-    use super::{DocumentSession, SessionError};
+    use super::{
+        DocumentSession, ReadinessPolicy, ResourcePolicyConfig, SessionError,
+        stable_render_timeout,
+    };
 
     const AHEM_SOURCE_RESOURCE: &str =
         "sha256:b719ecb31c5b21fc573c03f6421c74ac63c271a5a3ff841e34f9705fb94b8448";
@@ -448,12 +554,29 @@ mod tests {
 
     #[test]
     fn missing_document_returns_session_error() {
-        let error = DocumentSession::new("__pliego_missing_document__.html", a4())
-            .err()
-            .expect("missing input should return a typed error");
+        let error = DocumentSession::new(
+            "__pliego_missing_document__.html",
+            a4(),
+            ResourcePolicyConfig::default(),
+            ReadinessPolicy::default(),
+        )
+        .err()
+        .expect("missing input should return a typed error");
 
         assert_eq!(error.code, "INVALID_REQUEST");
         assert!(error.message.contains("document is unavailable"));
+    }
+
+    #[test]
+    fn stable_render_timeout_covers_the_readiness_budget() {
+        let readiness = ReadinessPolicy {
+            timeout_ms: 60_000,
+            wait_for_fonts: true,
+        };
+        assert!(
+            stable_render_timeout(readiness).unwrap()
+                > std::time::Duration::from_millis(readiness.timeout_ms)
+        );
     }
 
     #[test]
@@ -477,7 +600,16 @@ mod tests {
             AHEM_SOURCE_RESOURCE,
         );
 
-        let outcome = DocumentSession::new(&input, a4())?.render()?;
+        let outcome = DocumentSession::new(
+            &input,
+            a4(),
+            ResourcePolicyConfig::default(),
+            ReadinessPolicy::default(),
+        )?
+        .render()?;
+        assert_eq!(outcome.readiness["status"], "ready");
+        assert_eq!(outcome.readiness["payload"], serde_json::Value::Null);
+        assert_eq!(outcome.readiness["font_status"], "loaded");
         assert_eq!(outcome.capture.scene.pages.len(), 1);
         assert_eq!(
             content_address(&outcome.capture.scene.normalized_json().unwrap()),

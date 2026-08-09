@@ -6,7 +6,8 @@ use std::path::PathBuf;
 
 use layout::pages::PageDefinition;
 
-use super::{DEFAULT_LOCALE, DEFAULT_TIMEZONE, READINESS_TIMEOUT_MS};
+use super::resource_policy::ResourcePolicyConfig;
+use super::{DEFAULT_LOCALE, DEFAULT_TIMEZONE};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RenderEnvironment {
@@ -42,31 +43,6 @@ impl RenderEnvironment {
 pub struct ExplicitRenderPaths {
     pub output: PathBuf,
     pub artifacts: PathBuf,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct ResourcePolicyConfig {
-    pub allowed_http_roots: Vec<url::Url>,
-    pub virtual_resources: Vec<VirtualResourceSpec>,
-    pub asset_manifest: Option<PathBuf>,
-    pub timeout_ms: u64,
-}
-
-impl Default for ResourcePolicyConfig {
-    fn default() -> Self {
-        Self {
-            allowed_http_roots: Vec::new(),
-            virtual_resources: Vec::new(),
-            asset_manifest: None,
-            timeout_ms: READINESS_TIMEOUT_MS,
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct VirtualResourceSpec {
-    pub url: url::Url,
-    pub path: PathBuf,
 }
 
 #[derive(Debug, PartialEq)]
@@ -147,9 +123,9 @@ impl std::error::Error for RenderError {}
 impl From<super::document_session::SessionError> for RenderError {
     fn from(error: super::document_session::SessionError) -> Self {
         if error.code == "INVALID_REQUEST" {
-            Self::request(error.code, error.message)
+            Self::request(&error.code, error.message)
         } else {
-            Self::without_publication(error.code, error.message, 1)
+            Self::without_publication(&error.code, error.message, 1)
         }
     }
 }
@@ -206,6 +182,8 @@ mod tests {
         let request_error = super::super::document_session::DocumentSession::new(
             "__pliego_document_session_missing__.html",
             crate::default_page(),
+            ResourcePolicyConfig::default(),
+            super::super::readiness::ReadinessPolicy::default(),
         )
         .err()
         .expect("missing input should return a session error");
