@@ -8,5 +8,10 @@ mod asset_cache;
 mod document_session;
 #[path = "../src/readiness.rs"]
 mod readiness;
+#[path = "../src/render_environment.rs"]
+mod render_environment;
+mod engine {
+    pub use super::render_environment::RenderEnvironment;
+}
 #[path = "../src/resource_policy.rs"]
 mod resource_policy;

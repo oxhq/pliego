@@ -6,38 +6,8 @@ use std::path::PathBuf;
 
 use layout::pages::PageDefinition;
 
+pub use super::render_environment::RenderEnvironment;
 use super::resource_policy::ResourcePolicyConfig;
-use super::{DEFAULT_LOCALE, DEFAULT_TIMEZONE};
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct RenderEnvironment {
-    pub locale: &'static str,
-    pub timezone: &'static str,
-}
-
-impl Default for RenderEnvironment {
-    fn default() -> Self {
-        Self {
-            locale: DEFAULT_LOCALE,
-            timezone: DEFAULT_TIMEZONE,
-        }
-    }
-}
-
-impl RenderEnvironment {
-    pub(crate) fn artifact(self) -> serde_json::Value {
-        serde_json::json!({
-            "locale": {
-                "requested": self.locale,
-                "resolved": self.locale,
-            },
-            "timezone": {
-                "requested": self.timezone,
-                "resolved": self.timezone,
-            },
-        })
-    }
-}
 
 #[derive(Debug, PartialEq)]
 pub struct ExplicitRenderPaths {
@@ -181,8 +151,10 @@ mod tests {
     fn session_failures_preserve_the_engine_error_classes() {
         let request_error = super::super::document_session::DocumentSession::new(
             "__pliego_document_session_missing__.html",
+            RenderEnvironment::default(),
             crate::default_page(),
             ResourcePolicyConfig::default(),
+            false,
             super::super::readiness::ReadinessPolicy::default(),
         )
         .err()

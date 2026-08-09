@@ -6,8 +6,6 @@
 use std::cell::{OnceCell, RefCell};
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
 use std::collections::{BTreeMap, HashMap};
-#[cfg(not(any(target_os = "android", target_env = "ohos")))]
-use std::ffi::CString;
 use std::ffi::OsString;
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
 use std::path::Path;
@@ -15,7 +13,7 @@ use std::path::PathBuf;
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
 use std::rc::Rc;
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
 use base64::Engine as _;
@@ -46,6 +44,7 @@ mod asset_cache;
 mod document_session;
 mod engine;
 mod readiness;
+mod render_environment;
 mod resource_policy;
 mod session;
 
@@ -53,20 +52,26 @@ use engine::{
     DocumentEngine, ExplicitRenderPaths, RenderEnvironment, RenderError, RenderOutcome,
     RenderRequest,
 };
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+use render_environment::apply_timezone;
+use render_environment::{DEFAULT_LOCALE, DEFAULT_TIMEZONE};
 use resource_policy::{
-    DEFAULT_RESOURCE_TIMEOUT_MS, ResourcePolicyConfig, VirtualResourceSpec,
+    DEFAULT_RESOURCE_TIMEOUT_MS, MAX_RESOURCE_TIMEOUT_MS, ResourcePolicyConfig,
+    VirtualResourceSpec,
 };
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
 use resource_policy::{
-    RESOURCE_POLICY_ID, ResourcePolicy, ResourcePolicyDecision, ResourcePolicyFailure,
-    ResourceRequest, http_root_allows,
+    ControlledResource, RESOURCE_POLICY_ID, ResourcePolicy, ResourcePolicyDecision,
+    ResourcePolicyFailure, ResourceRequest, create_controlled_http_client, fetch_controlled_http,
+    http_root_allows,
+    retain_controlled_resource as retain_shared_controlled_resource,
 };
+#[cfg(all(test, not(any(target_os = "android", target_env = "ohos"))))]
+use resource_policy::classify_controlled_http_status;
 
 const SERVO_BASE_SHA: &str = "313b6d5ecc113b08010ce434140db3ca5abcc71c";
 const PLIEGO_API_VERSION: u32 = 1;
 const SESSION_CREATE_ATTEMPTS: u32 = 32;
-const DEFAULT_LOCALE: &str = "en-US";
-const DEFAULT_TIMEZONE: &str = "UTC";
 const DEFAULT_PAGE_WIDTH_CSS_PX: f32 = 793.7008;
 const DEFAULT_PAGE_HEIGHT_CSS_PX: f32 = 1122.5197;
 const DEFAULT_PAGE_MARGIN_VERTICAL_CSS_PX: f32 = 45.3543;
@@ -74,13 +79,19 @@ const DEFAULT_PAGE_MARGIN_HORIZONTAL_CSS_PX: f32 = 60.4724;
 const RENDER_ID_SCHEMA_MARKER: &[u8] = b"pliego.render-id.v1";
 const RESOLVED_INPUT_HASH_SCHEMA_MARKER: &[u8] = b"pliego.resolved-input.v1";
 
-#[cfg(unix)]
-#[allow(unsafe_code)]
-unsafe extern "C" {
-    fn tzset();
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+fn resource_request(
+    request: &servoshell::WebResourceRequest,
+) -> ResourceRequest {
+    ResourceRequest {
+        method: request.method.to_string(),
+        url: request.url.clone(),
+        destination: format!("{:?}", request.destination),
+        referrer_url: request.referrer_url.clone(),
+        is_for_main_frame: request.is_for_main_frame,
+        is_redirect: request.is_redirect,
+    }
 }
-
-const MAX_RESOURCE_TIMEOUT_MS: u64 = 60_000;
 
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
 fn decide_resource_policy(
@@ -88,172 +99,7 @@ fn decide_resource_policy(
     document_root: &Path,
     request: &servoshell::WebResourceRequest,
 ) -> ResourcePolicyDecision {
-    policy.decide(
-        document_root,
-        &ResourceRequest {
-            method: request.method.to_string(),
-            url: request.url.clone(),
-            destination: format!("{:?}", request.destination),
-            referrer_url: request.referrer_url.clone(),
-            is_for_main_frame: request.is_for_main_frame,
-            is_redirect: request.is_redirect,
-        },
-    )
-}
-
-#[cfg(not(any(target_os = "android", target_env = "ohos")))]
-fn fetch_controlled_http(
-    client: &net::connector::ServoClient,
-    request: &servoshell::WebResourceRequest,
-    timeout_ms: u64,
-) -> Result<(servoshell::WebResourceResponse, Vec<u8>), ResourcePolicyFailure> {
-    use http_body_util::{BodyExt, Empty};
-    use hyper::body::Bytes;
-
-    let failure = |code, status, reason: String, is_redirect| ResourcePolicyFailure {
-        code,
-        status,
-        url: request.url.to_string(),
-        method: request.method.to_string(),
-        destination: format!("{:?}", request.destination),
-        referrer_url: request.referrer_url.as_ref().map(ToString::to_string),
-        is_for_main_frame: request.is_for_main_frame,
-        is_redirect,
-        reason,
-    };
-    let body = Empty::<Bytes>::new()
-        .map_err(|error: std::convert::Infallible| match error {})
-        .boxed();
-    let mut outbound = http::Request::builder()
-        .method(request.method.clone())
-        .uri(request.url.as_str())
-        .body(body)
-        .map_err(|error| {
-            failure(
-                "RESOURCE_DENIED",
-                "denied",
-                format!("controlled HTTP request is invalid: {error}"),
-                false,
-            )
-        })?;
-    *outbound.headers_mut() = request.headers.clone();
-
-    let client = client.clone();
-    let fetched = net::async_runtime::spawn_blocking_task::<_, ()>(async move {
-        tokio::time::timeout(Duration::from_millis(timeout_ms), async move {
-            let mut response = client
-                .request(outbound)
-                .await
-                .map_err(|error| (false, error.to_string()))?;
-            let status = response.status();
-            let mut headers = response.headers().clone();
-            headers.remove(http::header::CONNECTION);
-            headers.remove(http::header::TRANSFER_ENCODING);
-            if classify_controlled_http_status(status).is_some() {
-                return Ok((status, headers, Vec::new()));
-            }
-            if headers
-                .get(http::header::CONTENT_LENGTH)
-                .and_then(|value| value.to_str().ok())
-                .and_then(|value| value.parse::<u64>().ok())
-                .is_some_and(|bytes| bytes > asset_cache::MAX_CACHE_BYTES)
-            {
-                return Err((true, String::new()));
-            }
-            let mut body = Vec::new();
-            while let Some(frame) = response.body_mut().frame().await {
-                let frame = frame.map_err(|error| (false, error.to_string()))?;
-                let Ok(data) = frame.into_data() else {
-                    continue;
-                };
-                if body
-                    .len()
-                    .checked_add(data.len())
-                    .is_none_or(|bytes| bytes as u64 > asset_cache::MAX_CACHE_BYTES)
-                {
-                    return Err((true, String::new()));
-                }
-                body.extend_from_slice(&data);
-            }
-            Ok::<_, (bool, String)>((status, headers, body))
-        })
-        .await
-    });
-
-    let (status, headers, body) = match fetched {
-        Err(_) => {
-            return Err(failure(
-                "RESOURCE_TIMEOUT",
-                "timeout",
-                "controlled HTTP resource exceeded its configured deadline".into(),
-                false,
-            ));
-        },
-        Ok(Err((too_large, error))) => {
-            return Err(if too_large {
-                failure(
-                    "RESOURCE_DENIED",
-                    "denied",
-                    format!(
-                        "controlled HTTP resource exceeds the {}-byte limit",
-                        asset_cache::MAX_CACHE_BYTES
-                    ),
-                    false,
-                )
-            } else {
-                failure(
-                    "RESOURCE_NOT_FOUND",
-                    "not_found",
-                    format!("controlled HTTP resource is unavailable: {error}"),
-                    false,
-                )
-            });
-        },
-        Ok(Ok(response)) => response,
-    };
-
-    if let Some((code, failure_status, reason, is_redirect)) =
-        classify_controlled_http_status(status)
-    {
-        return Err(failure(code, failure_status, reason.into(), is_redirect));
-    }
-
-    let response = servoshell::WebResourceResponse::new(request.url.clone())
-        .headers(headers)
-        .status_code(status)
-        .status_message(
-            status
-                .canonical_reason()
-                .unwrap_or_default()
-                .as_bytes()
-                .to_vec(),
-        );
-    Ok((response, body))
-}
-
-#[cfg(not(any(target_os = "android", target_env = "ohos")))]
-fn classify_controlled_http_status(
-    status: http::StatusCode,
-) -> Option<(&'static str, &'static str, &'static str, bool)> {
-    if status.is_redirection() {
-        Some(("RESOURCE_DENIED", "denied", "redirects are disabled", true))
-    } else if matches!(status.as_u16(), 404 | 410) {
-        Some((
-            "RESOURCE_NOT_FOUND",
-            "not_found",
-            "controlled HTTP resource was not found",
-            false,
-        ))
-    } else if matches!(status.as_u16(), 408 | 504) {
-        Some((
-            "RESOURCE_TIMEOUT",
-            "timeout",
-            "controlled HTTP resource reported a timeout",
-            false,
-        ))
-    } else {
-        None
-    }
+    policy.decide(document_root, &resource_request(request))
 }
 
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
@@ -699,41 +545,6 @@ fn print_render_error(error: &RenderError) -> ! {
 }
 
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
-/// Sets the process-global timezone before Servo starts any worker threads.
-/// This is deliberately scoped to Pliego's one-render-per-process CLI model.
-fn apply_timezone(timezone: &str) -> Result<(), String> {
-    let variable = CString::new("TZ").map_err(|error| error.to_string())?;
-    let value = CString::new(timezone).map_err(|_| "timezone contains a null byte")?;
-
-    #[cfg(target_os = "windows")]
-    let result = unsafe { libc::putenv_s(variable.as_ptr(), value.as_ptr()) };
-    #[cfg(unix)]
-    let result = unsafe { libc::setenv(variable.as_ptr(), value.as_ptr(), 1) };
-    #[cfg(not(any(target_os = "windows", unix)))]
-    return Err("timezone overrides are unsupported on this desktop target".into());
-
-    #[cfg(any(target_os = "windows", unix))]
-    {
-        if result != 0 {
-            return Err(format!(
-                "cannot set process timezone to {timezone}: platform error {result}"
-            ));
-        }
-
-        // Keep the C runtime and SpiderMonkey's later cache reset on the same value.
-        #[cfg(target_os = "windows")]
-        unsafe {
-            libc::tzset()
-        };
-        #[cfg(unix)]
-        unsafe {
-            tzset()
-        };
-        Ok(())
-    }
-}
-
-#[cfg(not(any(target_os = "android", target_env = "ohos")))]
 fn render(request: RenderRequest) -> Result<RenderOutcome, RenderError> {
     layout::pages::configure_for_process(request.page).map_err(|_| {
         RenderError::request(
@@ -947,24 +758,23 @@ fn render(request: RenderRequest) -> Result<RenderOutcome, RenderError> {
             ResourcePolicyDecision::Allow { .. } => servoshell::WebResourcePolicyDecision::Allow,
             ResourcePolicyDecision::FetchHttp => {
                 let client = controlled_http_client
-                    .get_or_init(|| {
-                        net::connector::create_http_client(net::connector::create_tls_config(
-                            net::connector::CACertificates::Default,
-                            false,
-                            net::connector::CertificateErrorOverrideManager::new(),
-                        ))
-                    })
+                    .get_or_init(create_controlled_http_client)
                     .clone();
-                match fetch_controlled_http(&client, request, active_resource_policy.timeout_ms) {
-                    Ok((response, body)) => {
+                match fetch_controlled_http(
+                    &client,
+                    &resource_request(request),
+                    &request.headers,
+                    active_resource_policy.timeout_ms,
+                ) {
+                    Ok(response) => {
                         let fetched = ControlledResource {
-                            status: response.status_code.as_u16(),
+                            status: response.status.as_u16(),
                             content_type: response
                                 .headers
                                 .get(http::header::CONTENT_TYPE)
                                 .and_then(|value| value.to_str().ok())
                                 .map(str::to_owned),
-                            body: body.clone(),
+                            body: response.body.clone(),
                         };
                         match retain_controlled_resource(
                             &mut captured_controlled_resources.borrow_mut(),
@@ -972,8 +782,20 @@ fn render(request: RenderRequest) -> Result<RenderOutcome, RenderError> {
                             fetched,
                         ) {
                             Ok(()) => servoshell::WebResourcePolicyDecision::Synthesize {
-                                response: Box::new(response),
-                                body,
+                                response: Box::new(
+                                    servoshell::WebResourceResponse::new(request.url.clone())
+                                        .headers(response.headers)
+                                        .status_code(response.status)
+                                        .status_message(
+                                            response
+                                                .status
+                                                .canonical_reason()
+                                                .unwrap_or_default()
+                                                .as_bytes()
+                                                .to_vec(),
+                                        ),
+                                ),
+                                body: response.body,
                             },
                             Err(failure) => {
                                 captured_policy_failures.borrow_mut().push(failure);
@@ -1627,38 +1449,12 @@ struct CompletedResource {
 }
 
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
-#[derive(Clone, Debug, PartialEq)]
-struct ControlledResource {
-    status: u16,
-    content_type: Option<String>,
-    body: Vec<u8>,
-}
-
-#[cfg(not(any(target_os = "android", target_env = "ohos")))]
 fn retain_controlled_resource(
     resources: &mut BTreeMap<(String, String), ControlledResource>,
     request: &servoshell::WebResourceRequest,
     resource: ControlledResource,
 ) -> Result<(), ResourcePolicyFailure> {
-    let key = (request.method.to_string(), request.url.to_string());
-    if resources
-        .get(&key)
-        .is_some_and(|existing| existing != &resource)
-    {
-        return Err(ResourcePolicyFailure {
-            code: "RESOURCE_CHANGED_DURING_RENDER",
-            status: "changed",
-            url: request.url.to_string(),
-            method: request.method.to_string(),
-            destination: format!("{:?}", request.destination),
-            referrer_url: request.referrer_url.as_ref().map(ToString::to_string),
-            is_for_main_frame: request.is_for_main_frame,
-            is_redirect: request.is_redirect,
-            reason: "controlled URL returned different bytes during one render".into(),
-        });
-    }
-    resources.insert(key, resource);
-    Ok(())
+    retain_shared_controlled_resource(resources, &resource_request(request), resource)
 }
 
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]

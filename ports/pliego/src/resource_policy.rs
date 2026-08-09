@@ -15,6 +15,7 @@ use super::asset_cache;
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
 pub(crate) const RESOURCE_POLICY_ID: &str = "pliego.resource-policy.v1";
 pub(crate) const DEFAULT_RESOURCE_TIMEOUT_MS: u64 = 10_000;
+pub(crate) const MAX_RESOURCE_TIMEOUT_MS: u64 = 60_000;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ResourcePolicyConfig {
@@ -98,7 +99,24 @@ pub(crate) enum ResourceSource {
     AssetCache(&'static str),
     DataUrl,
     DocumentRoot,
+    #[cfg(feature = "document-session")]
+    Http,
     VirtualResource,
+}
+
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ControlledResource {
+    pub(crate) status: u16,
+    pub(crate) content_type: Option<String>,
+    pub(crate) body: Vec<u8>,
+}
+
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+pub(crate) struct ControlledHttpResponse {
+    pub(crate) status: http::StatusCode,
+    pub(crate) headers: http::HeaderMap,
+    pub(crate) body: Vec<u8>,
 }
 
 #[cfg(all(
@@ -149,6 +167,24 @@ impl ResourceEvidence {
             content_type: None,
             bytes: None,
             sha256: None,
+        }
+    }
+
+    pub(crate) fn loaded_http(request: ResourceRequest, response: &ControlledHttpResponse) -> Self {
+        let bytes = response.body.len() as u64;
+        let sha256 = sha256_hex(&response.body);
+        Self {
+            request,
+            source: ResourceSource::Http,
+            status: "loaded",
+            response_status: Some(response.status.as_u16()),
+            content_type: response
+                .headers
+                .get(http::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned),
+            bytes: Some(bytes),
+            sha256: Some(sha256),
         }
     }
 }
@@ -473,6 +509,187 @@ impl ResourcePolicy {
 }
 
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+pub(crate) fn create_controlled_http_client() -> net::connector::ServoClient {
+    net::connector::create_http_client(net::connector::create_tls_config(
+        net::connector::CACertificates::Default,
+        false,
+        net::connector::CertificateErrorOverrideManager::new(),
+    ))
+}
+
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+pub(crate) fn fetch_controlled_http(
+    client: &net::connector::ServoClient,
+    request: &ResourceRequest,
+    headers: &http::HeaderMap,
+    timeout_ms: u64,
+) -> Result<ControlledHttpResponse, ResourcePolicyFailure> {
+    use std::time::Duration;
+
+    use http_body_util::{BodyExt, Empty};
+    use hyper::body::Bytes;
+
+    let failure = |code, status, reason: String, is_redirect| {
+        let mut failure = ResourcePolicyFailure::new(request, code, status, reason);
+        failure.is_redirect = is_redirect;
+        failure
+    };
+    let body = Empty::<Bytes>::new()
+        .map_err(|error: std::convert::Infallible| match error {})
+        .boxed();
+    let mut outbound = http::Request::builder()
+        .method(request.method.as_str())
+        .uri(request.url.as_str())
+        .body(body)
+        .map_err(|error| {
+            failure(
+                "RESOURCE_DENIED",
+                "denied",
+                format!("controlled HTTP request is invalid: {error}"),
+                false,
+            )
+        })?;
+    *outbound.headers_mut() = headers.clone();
+
+    let client = client.clone();
+    let is_head = request.method == "HEAD";
+    let fetched = net::async_runtime::spawn_blocking_task::<_, ()>(async move {
+        tokio::time::timeout(Duration::from_millis(timeout_ms), async move {
+            let mut response = client
+                .request(outbound)
+                .await
+                .map_err(|error| (false, error.to_string()))?;
+            let status = response.status();
+            let mut headers = response.headers().clone();
+            headers.remove(http::header::CONNECTION);
+            headers.remove(http::header::TRANSFER_ENCODING);
+            if classify_controlled_http_status(status).is_some() {
+                return Ok((status, headers, Vec::new()));
+            }
+            if headers
+                .get(http::header::CONTENT_LENGTH)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.parse::<u64>().ok())
+                .is_some_and(|bytes| bytes > asset_cache::MAX_CACHE_BYTES)
+            {
+                return Err((true, String::new()));
+            }
+            if is_head {
+                return Ok((status, headers, Vec::new()));
+            }
+            let mut body = Vec::new();
+            while let Some(frame) = response.body_mut().frame().await {
+                let frame = frame.map_err(|error| (false, error.to_string()))?;
+                let Ok(data) = frame.into_data() else {
+                    continue;
+                };
+                if body
+                    .len()
+                    .checked_add(data.len())
+                    .is_none_or(|bytes| bytes as u64 > asset_cache::MAX_CACHE_BYTES)
+                {
+                    return Err((true, String::new()));
+                }
+                body.extend_from_slice(&data);
+            }
+            Ok::<_, (bool, String)>((status, headers, body))
+        })
+        .await
+    });
+
+    let (status, headers, body) = match fetched {
+        Err(_) => {
+            return Err(failure(
+                "RESOURCE_TIMEOUT",
+                "timeout",
+                "controlled HTTP resource exceeded its configured deadline".into(),
+                false,
+            ));
+        },
+        Ok(Err((too_large, error))) => {
+            return Err(if too_large {
+                failure(
+                    "RESOURCE_DENIED",
+                    "denied",
+                    format!(
+                        "controlled HTTP resource exceeds the {}-byte limit",
+                        asset_cache::MAX_CACHE_BYTES
+                    ),
+                    false,
+                )
+            } else {
+                failure(
+                    "RESOURCE_NOT_FOUND",
+                    "not_found",
+                    format!("controlled HTTP resource is unavailable: {error}"),
+                    false,
+                )
+            });
+        },
+        Ok(Ok(response)) => response,
+    };
+
+    if let Some((code, failure_status, reason, is_redirect)) =
+        classify_controlled_http_status(status)
+    {
+        return Err(failure(code, failure_status, reason.into(), is_redirect));
+    }
+
+    Ok(ControlledHttpResponse {
+        status,
+        headers,
+        body,
+    })
+}
+
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+pub(crate) fn classify_controlled_http_status(
+    status: http::StatusCode,
+) -> Option<(&'static str, &'static str, &'static str, bool)> {
+    if status.is_redirection() {
+        Some(("RESOURCE_DENIED", "denied", "redirects are disabled", true))
+    } else if matches!(status.as_u16(), 404 | 410) {
+        Some((
+            "RESOURCE_NOT_FOUND",
+            "not_found",
+            "controlled HTTP resource was not found",
+            false,
+        ))
+    } else if matches!(status.as_u16(), 408 | 504) {
+        Some((
+            "RESOURCE_TIMEOUT",
+            "timeout",
+            "controlled HTTP resource reported a timeout",
+            false,
+        ))
+    } else {
+        None
+    }
+}
+
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+pub(crate) fn retain_controlled_resource(
+    resources: &mut std::collections::BTreeMap<(String, String), ControlledResource>,
+    request: &ResourceRequest,
+    resource: ControlledResource,
+) -> Result<(), ResourcePolicyFailure> {
+    let key = (request.method.clone(), request.url.to_string());
+    if resources
+        .get(&key)
+        .is_some_and(|existing| existing != &resource)
+    {
+        return Err(ResourcePolicyFailure::new(
+            request,
+            "RESOURCE_CHANGED_DURING_RENDER",
+            "changed",
+            "controlled URL returned different bytes during one render",
+        ));
+    }
+    resources.insert(key, resource);
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
 pub(crate) fn http_root_allows(root: &url::Url, requested: &url::Url) -> bool {
     requested.username().is_empty()
         && requested.password().is_none()
@@ -693,5 +910,69 @@ mod tests {
             failed.loaded + failed.delegated + failed.failed
         );
         assert_eq!(failed.unavailable_bodies, failed.delegated + failed.failed);
+    }
+
+    #[test]
+    fn repeated_controlled_resource_must_not_change_during_one_render() {
+        let request = ResourceRequest {
+            method: "GET".into(),
+            url: url::Url::parse("https://example.test/stable.js").unwrap(),
+            destination: "Script".into(),
+            referrer_url: None,
+            is_for_main_frame: false,
+            is_redirect: false,
+        };
+        let original = ControlledResource {
+            status: 200,
+            content_type: Some("text/javascript".into()),
+            body: b"window.stable = true;".to_vec(),
+        };
+        let mut resources = std::collections::BTreeMap::new();
+        retain_controlled_resource(&mut resources, &request, original.clone()).unwrap();
+        retain_controlled_resource(&mut resources, &request, original.clone()).unwrap();
+
+        let error = retain_controlled_resource(
+            &mut resources,
+            &request,
+            ControlledResource {
+                body: b"window.stable = false;".to_vec(),
+                ..original
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "RESOURCE_CHANGED_DURING_RENDER");
+        assert_eq!(error.status, "changed");
+        assert_eq!(resources.len(), 1);
+    }
+
+    #[test]
+    #[cfg(feature = "document-session")]
+    fn head_evidence_hashes_the_exact_empty_response_body() {
+        let mut headers = http::HeaderMap::new();
+        headers.insert(
+            http::header::CONTENT_TYPE,
+            http::HeaderValue::from_static("text/css"),
+        );
+        let evidence = ResourceEvidence::loaded_http(
+            ResourceRequest {
+                method: "HEAD".into(),
+                url: url::Url::parse("https://example.test/style.css").unwrap(),
+                destination: "Style".into(),
+                referrer_url: None,
+                is_for_main_frame: false,
+                is_redirect: false,
+            },
+            &ControlledHttpResponse {
+                status: http::StatusCode::OK,
+                headers,
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(evidence.response_status, Some(200));
+        assert_eq!(evidence.bytes, Some(0));
+        assert_eq!(
+            evidence.sha256.as_deref(),
+            Some("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+        );
     }
 }
