@@ -11,6 +11,7 @@
 use std::fmt;
 use std::ops::Range;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use app_units::Au;
 use euclid::default::Size2D as UntypedSize2D;
@@ -32,6 +33,10 @@ use crate::fragment_tree::FragmentTree;
 use crate::geom::PhysicalSides;
 
 static PROCESS_PAGE_DEFINITION: OnceLock<PageDefinition> = OnceLock::new();
+static PROCESS_PAGE_CONFIGURATION_STATE: AtomicU8 = AtomicU8::new(PAGE_CONFIGURATION_AVAILABLE);
+const PAGE_CONFIGURATION_AVAILABLE: u8 = 0;
+const PAGE_CONFIGURATION_RESERVED: u8 = 1;
+const PAGE_CONFIGURATION_COMMITTED: u8 = 2;
 const TABLE_ROW_RETRY_LIMIT: u8 = 1;
 
 /// Physical page margins in CSS pixels.
@@ -147,12 +152,58 @@ impl fmt::Display for PageGeometryError {
 
 impl std::error::Error for PageGeometryError {}
 
-/// Configure the one page used by Pliego's one-render-per-process CLI.
+/// An exclusive, rollback-safe claim on Pliego's process page definition.
+pub struct ProcessPageReservation {
+    definition: PageDefinition,
+    committed: bool,
+}
+
+impl ProcessPageReservation {
+    /// Publish the reserved definition after the embedder's fallible local setup succeeds.
+    pub fn commit(mut self) -> Result<(), PageDefinition> {
+        let result = PROCESS_PAGE_DEFINITION.set(self.definition);
+        self.committed = true;
+        PROCESS_PAGE_CONFIGURATION_STATE.store(PAGE_CONFIGURATION_COMMITTED, Ordering::Release);
+        result
+    }
+}
+
+impl Drop for ProcessPageReservation {
+    fn drop(&mut self) {
+        if !self.committed {
+            PROCESS_PAGE_CONFIGURATION_STATE.store(PAGE_CONFIGURATION_AVAILABLE, Ordering::Release);
+        }
+    }
+}
+
+/// Reserve the one page used by Pliego's one-render-per-process CLI.
+///
+/// The reservation rejects concurrent or later sessions before they can mutate process-global
+/// embedder state. Dropping it before commit releases the claim so a failed local setup does not
+/// poison a later valid session.
+pub fn reserve_for_process(
+    definition: PageDefinition,
+) -> Result<ProcessPageReservation, PageDefinition> {
+    PROCESS_PAGE_CONFIGURATION_STATE
+        .compare_exchange(
+            PAGE_CONFIGURATION_AVAILABLE,
+            PAGE_CONFIGURATION_RESERVED,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        )
+        .map_err(|_| definition)?;
+    Ok(ProcessPageReservation {
+        definition,
+        committed: false,
+    })
+}
+
+/// Configure the one page used by Pliego's one-render-per-process CLI immediately.
 ///
 /// Servo embedders that do not call this retain continuous layout. This must be called before Servo
 /// starts worker threads; the immutable process value intentionally cannot be replaced mid-session.
 pub fn configure_for_process(definition: PageDefinition) -> Result<(), PageDefinition> {
-    PROCESS_PAGE_DEFINITION.set(definition)
+    reserve_for_process(definition)?.commit()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

@@ -20,7 +20,7 @@ use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use dpi::PhysicalSize;
 use http::header::CONTENT_TYPE;
 use http::{HeaderMap, HeaderValue};
-use layout::pages::{PageDefinition, configure_for_process};
+use layout::pages::{PageDefinition, reserve_for_process};
 use pliego::capture::{SceneCapture, capture_document_scene};
 use pliego::pdf::{PdfFontResource, PdfFontVariation, render_document_pdf};
 use servo::{
@@ -211,6 +211,12 @@ impl DocumentSession {
                 ),
             )
         })?;
+        let page_reservation = reserve_for_process(page).map_err(|_| {
+            SessionError::new(
+                "LAYOUT_CONFIGURATION_FAILED",
+                "paged layout was already configured for this process",
+            )
+        })?;
         apply_timezone(environment.timezone)
             .map_err(|error| SessionError::new("ENVIRONMENT_CONFIGURATION_FAILED", error))?;
 
@@ -232,7 +238,7 @@ impl DocumentSession {
                 format!("cannot activate software rendering context: {error:?}"),
             )
         })?;
-        configure_for_process(page).map_err(|_| {
+        page_reservation.commit().map_err(|_| {
             SessionError::new(
                 "LAYOUT_CONFIGURATION_FAILED",
                 "paged layout was already configured for this process",
@@ -1358,7 +1364,10 @@ mod tests {
         let mut allow_host_fonts = false;
         let mut _bundle = None;
         let input = match case.as_str() {
-            "constructor-recovery" => session_fixture("local-success.html"),
+            "constructor-recovery" => Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/deterministic-environment/index.html")
+                .canonicalize()
+                .unwrap(),
             "local-success" | "denied-url" | "explicit-fail" | "defer-timeout" => {
                 session_fixture(&format!("{case}.html"))
             },
@@ -1476,14 +1485,36 @@ mod tests {
 
             let session = DocumentSession::new(
                 &input,
-                RenderEnvironment::default(),
+                RenderEnvironment {
+                    locale: "en-US",
+                    timezone: "PST8PDT",
+                },
                 a4(),
-                resources,
+                resources.clone(),
                 false,
                 readiness,
             )
             .expect("a fallible setup failure must not consume layout configuration");
-            drop(session);
+
+            let different_page =
+                PageDefinition::new(816.0, 1056.0, PageMargins::new(48.0, 48.0, 48.0, 48.0))
+                    .unwrap();
+            let conflict = DocumentSession::new(
+                &input,
+                RenderEnvironment::default(),
+                different_page,
+                resources,
+                false,
+                readiness,
+            )
+            .err()
+            .expect("a second session must be rejected before mutating process state");
+            assert_eq!(conflict.code, "LAYOUT_CONFIGURATION_FAILED");
+
+            let outcome = session
+                .render()
+                .expect("the reserved session must still render after a rejected competitor");
+            assert_eq!(outcome.readiness["payload"]["localHour"], 4);
             return;
         }
         let result = DocumentSession::new(
