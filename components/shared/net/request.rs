@@ -5,6 +5,7 @@
 use std::sync::Arc;
 
 use content_security_policy::{self as csp};
+use embedder_traits::WebResourceLoadRole;
 use http::header::{AUTHORIZATION, HeaderName};
 use http::{HeaderMap, Method};
 use ipc_channel::ipc::{self, IpcReceiver, IpcSender};
@@ -461,6 +462,8 @@ pub struct RequestBuilder {
     pub client: Option<RequestClient>,
     /// <https://fetch.spec.whatwg.org/#concept-request-destination>
     pub destination: Destination,
+    #[serde(default)]
+    pub web_resource_load_role: WebResourceLoadRole,
     pub synchronous: bool,
     pub mode: RequestMode,
 
@@ -531,6 +534,7 @@ impl RequestBuilder {
             body: None,
             service_workers_mode: ServiceWorkersMode::All,
             destination: Destination::None,
+            web_resource_load_role: WebResourceLoadRole::default(),
             synchronous: false,
             mode: RequestMode::NoCors,
             cache_mode: CacheMode::Default,
@@ -595,6 +599,11 @@ impl RequestBuilder {
     /// <https://fetch.spec.whatwg.org/#concept-request-destination>
     pub fn destination(mut self, destination: Destination) -> RequestBuilder {
         self.destination = destination;
+        self
+    }
+
+    pub fn web_resource_load_role(mut self, role: WebResourceLoadRole) -> RequestBuilder {
+        self.web_resource_load_role = role;
         self
     }
 
@@ -737,6 +746,7 @@ impl RequestBuilder {
         request.body = self.body;
         request.service_workers_mode = self.service_workers_mode;
         request.destination = self.destination;
+        request.web_resource_load_role = self.web_resource_load_role;
         request.synchronous = self.synchronous;
         request.mode = self.mode;
         request.use_cors_preflight = self.use_cors_preflight;
@@ -806,6 +816,7 @@ pub struct Request {
     pub initiator: Initiator,
     /// <https://fetch.spec.whatwg.org/#concept-request-destination>
     pub destination: Destination,
+    pub web_resource_load_role: WebResourceLoadRole,
     // TODO: priority object
     /// <https://fetch.spec.whatwg.org/#concept-request-origin>
     pub origin: Origin,
@@ -871,6 +882,7 @@ impl Request {
             service_workers_mode: ServiceWorkersMode::All,
             initiator: Initiator::None,
             destination: Destination::None,
+            web_resource_load_role: WebResourceLoadRole::default(),
             origin: origin.unwrap_or(Origin::Client),
             referrer,
             referrer_policy: ReferrerPolicy::EmptyString,

@@ -672,6 +672,26 @@ pub enum GamepadHapticEffectType {
     DualRumble(DualRumbleEffectParams),
 }
 
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    Deserialize,
+    Eq,
+    Hash,
+    MallocSizeOf,
+    Ord,
+    PartialEq,
+    PartialOrd,
+    Serialize,
+)]
+pub enum WebResourceLoadRole {
+    #[default]
+    DocumentContent,
+    DocumentMetadata,
+}
+
 #[derive(Clone, Debug, Deserialize, MallocSizeOf, Serialize)]
 pub struct WebResourceRequest {
     #[serde(
@@ -686,6 +706,8 @@ pub struct WebResourceRequest {
     pub headers: HeaderMap,
     pub url: Url,
     pub destination: Destination,
+    #[serde(default)]
+    pub load_role: WebResourceLoadRole,
     pub referrer_url: Option<Url>,
     pub is_for_main_frame: bool,
     pub is_redirect: bool,

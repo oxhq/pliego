@@ -4,6 +4,7 @@
 
 use std::sync::Arc;
 
+use embedder_traits::WebResourceLoadRole;
 use log::debug;
 use malloc_size_of::MallocSizeOfOps;
 use malloc_size_of_derive::MallocSizeOf;
@@ -326,6 +327,21 @@ pub trait ImageCache: Sync + Send {
         url: ServoUrl,
         origin: ImmutableOrigin,
         cors_setting: Option<CorsSettings>,
+    ) -> ImageCacheResult {
+        self.get_cached_image_status_for_role(
+            url,
+            origin,
+            cors_setting,
+            WebResourceLoadRole::DocumentContent,
+        )
+    }
+
+    fn get_cached_image_status_for_role(
+        &self,
+        url: ServoUrl,
+        origin: ImmutableOrigin,
+        cors_setting: Option<CorsSettings>,
+        load_role: WebResourceLoadRole,
     ) -> ImageCacheResult;
 
     /// Returns `Some` if the given `image_id` has already been rasterized at the given `size`.

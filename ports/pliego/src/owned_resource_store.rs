@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use data_url::DataUrl;
 use data_url::forgiving_base64::DecodeError;
+use embedder_traits::WebResourceLoadRole;
 use pliego::{IMAGE_LIMITS, ImageLimit};
 
 use super::asset_cache;
@@ -25,6 +26,7 @@ struct RequestIdentity {
     method: String,
     url: String,
     destination: String,
+    load_role: WebResourceLoadRole,
 }
 
 impl RequestIdentity {
@@ -55,6 +57,7 @@ impl RequestIdentity {
             method: request.method.clone(),
             url: normalized_url(&request.url),
             destination: request.destination.clone(),
+            load_role: request.load_role,
         }
     }
 }
@@ -894,6 +897,7 @@ mod tests {
             method: method.into(),
             url: url::Url::parse(url).unwrap(),
             destination: destination.into(),
+            load_role: WebResourceLoadRole::DocumentContent,
             referrer_url: None,
             is_for_main_frame: false,
             is_redirect: false,

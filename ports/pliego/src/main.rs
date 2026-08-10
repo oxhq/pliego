@@ -19,6 +19,8 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use base64::Engine as _;
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+use embedder_traits::WebResourceLoadRole;
 use layout::pages::{PageDefinition, PageMargins};
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
 use pliego::Operation;
@@ -89,6 +91,7 @@ fn resource_request(request: &servoshell::WebResourceRequest) -> ResourceRequest
         method: request.method.to_string(),
         url: request.url.clone(),
         destination: format!("{:?}", request.destination),
+        load_role: request.load_role,
         referrer_url: request.referrer_url.clone(),
         is_for_main_frame: request.is_for_main_frame,
         is_redirect: request.is_redirect,
@@ -123,9 +126,11 @@ fn policy_failure_for_pending(url: String, response_status: Option<u16>) -> Reso
     ResourcePolicyFailure {
         code,
         status,
+        fatal: true,
         url,
         method: "GET".into(),
         destination: "Unknown".into(),
+        load_role: WebResourceLoadRole::DocumentContent,
         referrer_url: None,
         is_for_main_frame: false,
         is_redirect: false,
@@ -1671,9 +1676,11 @@ fn record_resources(
                             .get_or_insert_with(|| ResourcePolicyFailure {
                                 code: "ASSET_HASH_MISMATCH",
                                 status: "hash_mismatch",
+                                fatal: true,
                                 url: asset.url.to_string(),
                                 method: "GET".into(),
                                 destination: "Unknown".into(),
+                                load_role: WebResourceLoadRole::DocumentContent,
                                 referrer_url: None,
                                 is_for_main_frame: false,
                                 is_redirect: false,
@@ -1774,9 +1781,11 @@ fn record_resources(
                 ResourcePolicyFailure {
                     code: "RESOURCE_NOT_FOUND",
                     status: "not_found",
+                    fatal: true,
                     url,
                     method: "GET".into(),
                     destination: "Unknown".into(),
+                    load_role: WebResourceLoadRole::DocumentContent,
                     referrer_url: None,
                     is_for_main_frame: false,
                     is_redirect: false,
@@ -2478,9 +2487,9 @@ mod tests {
         Command, ControlledResource, DEFAULT_LOCALE, DEFAULT_TIMEZONE, ExplicitRenderPaths,
         PageDefinition, PageMargins, PendingResource, RenderEnvironment, RenderError,
         RenderRequest, ResourceCapture, ResourcePolicy, ResourcePolicyConfig,
-        ResourcePolicyDecision, classify_controlled_http_status, cli_render_error,
-        complete_resource, create_session_artifacts, decide_resource_policy, default_page,
-        page_artifact, parse_args, persist_scene_capture, resolve_scene_resource,
+        ResourcePolicyDecision, WebResourceLoadRole, classify_controlled_http_status,
+        cli_render_error, complete_resource, create_session_artifacts, decide_resource_policy,
+        default_page, page_artifact, parse_args, persist_scene_capture, resolve_scene_resource,
         retain_controlled_resource, set_document_pdf_environment, sha256_hex, stable_render_id,
     };
     use crate::session::SessionArtifacts;
@@ -2777,6 +2786,28 @@ mod tests {
                 "invalid page options were accepted"
             );
         }
+    }
+
+    #[test]
+    fn web_resource_load_roles_default_and_round_trip_through_serialization() {
+        let legacy: servoshell::WebResourceRequest = serde_json::from_value(serde_json::json!({
+            "method": "GET",
+            "headers": {},
+            "url": "https://example.test/icon.png",
+            "destination": "Image",
+            "referrer_url": null,
+            "is_for_main_frame": false,
+            "is_redirect": true,
+        }))
+        .unwrap();
+        assert_eq!(legacy.load_role, WebResourceLoadRole::DocumentContent);
+
+        let mut metadata = legacy;
+        metadata.load_role = WebResourceLoadRole::DocumentMetadata;
+        let round_trip: servoshell::WebResourceRequest =
+            serde_json::from_value(serde_json::to_value(metadata).unwrap()).unwrap();
+        assert_eq!(round_trip.load_role, WebResourceLoadRole::DocumentMetadata);
+        assert!(round_trip.is_redirect);
     }
 
     #[test]

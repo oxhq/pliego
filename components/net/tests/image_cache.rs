@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crossbeam_channel::{Receiver, Sender, unbounded};
+use embedder_traits::WebResourceLoadRole;
 use net::image_cache::ImageCacheFactoryImpl;
 use net_traits::image_cache::{
     FontResolver, ImageCache, ImageCacheFactory, ImageCacheResponseMessage, ImageCacheResult,
@@ -133,6 +134,42 @@ fn test_get_cached_image_status_before_request() {
         },
         _ => panic!("Expected ReadyForRequest"),
     }
+}
+
+#[test]
+fn document_metadata_and_content_do_not_share_pending_image_loads() {
+    let (cache, _key_receiver) = create_test_image_cache();
+    let url = ServoUrl::parse("http://example.com/shared.png").unwrap();
+    let origin = mock_origin();
+
+    let metadata_id = match cache.get_cached_image_status_for_role(
+        url.clone(),
+        origin.clone(),
+        None,
+        WebResourceLoadRole::DocumentMetadata,
+    ) {
+        ImageCacheResult::ReadyForRequest(id) => id,
+        _ => panic!("expected a new metadata request"),
+    };
+    let content_id = match cache.get_cached_image_status(url.clone(), origin.clone(), None) {
+        ImageCacheResult::ReadyForRequest(id) => id,
+        _ => panic!("expected a distinct content request"),
+    };
+
+    assert_ne!(metadata_id, content_id);
+    assert!(matches!(
+        cache.get_cached_image_status_for_role(
+            url.clone(),
+            origin.clone(),
+            None,
+            WebResourceLoadRole::DocumentMetadata,
+        ),
+        ImageCacheResult::Pending(id) if id == metadata_id
+    ));
+    assert!(matches!(
+        cache.get_cached_image_status(url, origin, None),
+        ImageCacheResult::Pending(id) if id == content_id
+    ));
 }
 
 #[test]

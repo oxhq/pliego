@@ -25,8 +25,8 @@ use pliego::capture::{SceneCapture, capture_document_scene_with_canvas};
 use pliego::pdf::{PdfFontResource, PdfFontVariation, render_document_pdf};
 use servo::{
     JSValue, LoadStatus, Preferences, RenderingContext, Servo, ServoBuilder,
-    SoftwareRenderingContext, UserContentManager, UserScript, WebResourceLoad, WebResourceResponse,
-    WebView, WebViewBuilder, WebViewDelegate,
+    SoftwareRenderingContext, UserContentManager, UserScript, WebResourceLoad, WebResourceLoadRole,
+    WebResourceResponse, WebView, WebViewBuilder, WebViewDelegate,
 };
 use url::Url;
 
@@ -118,7 +118,9 @@ pub(crate) struct DocumentOutcome {
 #[derive(Clone, Debug)]
 struct ResourceEvidenceLog {
     entries: Vec<ResourceEvidence>,
+    observed_events: usize,
     metadata_bytes: u64,
+    max_entries: usize,
     max_metadata_bytes: u64,
 }
 
@@ -126,13 +128,32 @@ impl Default for ResourceEvidenceLog {
     fn default() -> Self {
         Self {
             entries: Vec::new(),
+            observed_events: 0,
             metadata_bytes: 0,
+            max_entries: MAX_RESOURCE_EVENTS,
             max_metadata_bytes: MAX_RESOURCE_METADATA_BYTES,
         }
     }
 }
 
 impl ResourceEvidenceLog {
+    fn begin_event(&mut self, request: &ResourceRequest) -> Result<(), ResourcePolicyFailure> {
+        if self.observed_events < self.max_entries {
+            self.observed_events += 1;
+            return Ok(());
+        }
+
+        Err(ResourcePolicyFailure::new(
+            request,
+            "RESOURCE_METADATA_LIMIT_EXCEEDED",
+            "denied",
+            format!(
+                "document resource loads exceed the {}-event bound",
+                self.max_entries
+            ),
+        ))
+    }
+
     fn push(&mut self, evidence: ResourceEvidence) -> Result<(), ResourcePolicyFailure> {
         let next_metadata_bytes = self
             .metadata_bytes
@@ -639,7 +660,6 @@ struct DocumentDelegate {
     frame_ready: Cell<bool>,
     load_complete: Cell<bool>,
     resource_failure: RefCell<Option<ResourcePolicyFailure>>,
-    resource_events: Cell<usize>,
     delivered_body_bytes: Cell<u64>,
     resources: RefCell<ResourceEvidenceLog>,
 }
@@ -665,23 +685,15 @@ impl WebViewDelegate for DocumentDelegate {
             method: load.request().method.to_string(),
             url: load.request().url.clone(),
             destination: format!("{:?}", load.request().destination),
+            load_role: load.request().load_role,
             referrer_url: load.request().referrer_url.clone(),
             is_for_main_frame: load.request().is_for_main_frame,
             is_redirect: load.request().is_redirect,
         };
-        if self.resource_events.get() >= MAX_RESOURCE_EVENTS {
-            self.cancel_resource(
-                load,
-                ResourcePolicyFailure::new(
-                    &request,
-                    "RESOURCE_METADATA_LIMIT_EXCEEDED",
-                    "denied",
-                    format!("document resource loads exceed the {MAX_RESOURCE_EVENTS}-event bound"),
-                ),
-            );
+        if let Err(failure) = self.resources.borrow_mut().begin_event(&request) {
+            self.cancel_resource(load, failure);
             return;
         }
-        self.resource_events.set(self.resource_events.get() + 1);
         match self.resource_policy.decide(&self.bundle_root, &request) {
             ResourcePolicyDecision::Allow { source } => {
                 if source != ResourceSource::DataUrl {
@@ -763,7 +775,7 @@ impl WebViewDelegate for DocumentDelegate {
                 headers.insert(CONTENT_TYPE, HeaderValue::from_static(content_type));
                 self.serve_owned_resource(load, request, source, resource, headers);
             },
-            ResourcePolicyDecision::Fail(failure) => self.cancel_resource(load, failure),
+            ResourcePolicyDecision::Fail(failure) => self.deny_resource(load, request, failure),
         }
     }
 }
@@ -864,10 +876,36 @@ impl DocumentDelegate {
     }
 
     fn cancel_resource(&self, load: WebResourceLoad, failure: ResourcePolicyFailure) {
-        let url = load.request().url.clone();
         if self.resource_failure.borrow().is_none() {
             *self.resource_failure.borrow_mut() = Some(failure);
         }
+        Self::cancel_load(load);
+    }
+
+    fn deny_resource(
+        &self,
+        load: WebResourceLoad,
+        request: ResourceRequest,
+        failure: ResourcePolicyFailure,
+    ) {
+        if failure.fatal || request.load_role == WebResourceLoadRole::DocumentContent {
+            self.cancel_resource(load, failure);
+            return;
+        }
+
+        debug_assert_eq!(request.load_role, WebResourceLoadRole::DocumentMetadata);
+        if let Err(evidence_failure) =
+            self.record_resource_evidence(ResourceEvidence::cancelled(request, failure))
+        {
+            self.cancel_resource(load, evidence_failure);
+            return;
+        }
+
+        Self::cancel_load(load);
+    }
+
+    fn cancel_load(load: WebResourceLoad) {
+        let url = load.request().url.clone();
         load.intercept(WebResourceResponse::new(url)).cancel();
     }
 }
@@ -908,11 +946,12 @@ mod tests {
     use layout::pages::{PageDefinition, PageMargins};
     use pliego::capture::{CapturedFontSelection, CapturedFontSource, SceneCapture};
     use pliego::{DocumentScene, Operation, Page, Size};
+    use servo::WebResourceLoadRole;
     use sha2::{Digest, Sha256};
 
     use super::super::resource_policy::{
-        ResourceAccounting, ResourceEvidence, ResourcePolicy, ResourceRequest, ResourceSource,
-        ResponseHeaderEvidence, VirtualResourceSpec,
+        ResourceAccounting, ResourceEvidence, ResourcePolicy, ResourcePolicyFailure,
+        ResourceRequest, ResourceSource, ResponseHeaderEvidence, VirtualResourceSpec,
     };
     use super::{
         DocumentSession, RESOURCE_EVIDENCE_ENTRY_OVERHEAD_BYTES, ReadinessPolicy,
@@ -972,11 +1011,12 @@ mod tests {
         "sha256:3625ec653c27b9e1c8d0fa969acbd88cc161804eeea4cd3046795d411e8118c9";
 
     #[test]
-    fn repeated_body_delivery_is_bounded_before_interception() {
+    fn repeated_body_delivery_is_fatally_bounded_before_interception() {
         let request = ResourceRequest {
             method: "GET".into(),
             url: url::Url::parse("https://example.test/shared").unwrap(),
             destination: "Image".into(),
+            load_role: WebResourceLoadRole::DocumentMetadata,
             referrer_url: None,
             is_for_main_frame: false,
             is_redirect: false,
@@ -984,6 +1024,8 @@ mod tests {
         let delivered = super::checked_delivered_body_bytes(&request, 0, 3, 4).unwrap();
         let error = super::checked_delivered_body_bytes(&request, delivered, 3, 4).unwrap_err();
         assert_eq!(error.code, "RESOURCE_DELIVERY_LIMIT_EXCEEDED");
+        assert!(error.fatal);
+        assert_eq!(error.load_role, WebResourceLoadRole::DocumentMetadata);
         assert_eq!(delivered, 3);
     }
 
@@ -993,6 +1035,7 @@ mod tests {
             method: "GET".into(),
             url: url::Url::parse("https://example.test/resource").unwrap(),
             destination: "Script".into(),
+            load_role: WebResourceLoadRole::DocumentContent,
             referrer_url: None,
             is_for_main_frame: false,
             is_redirect: false,
@@ -1017,10 +1060,65 @@ mod tests {
                 .saturating_add(RESOURCE_EVIDENCE_ENTRY_OVERHEAD_BYTES - 1),
             ..ResourceEvidenceLog::default()
         };
+        log.begin_event(&evidence.request).unwrap();
         let error = log.push(evidence).unwrap_err();
         assert_eq!(error.code, "RESOURCE_METADATA_LIMIT_EXCEEDED");
         assert!(log.entries.is_empty());
         assert_eq!(log.metadata_bytes, 0);
+    }
+
+    #[test]
+    fn metadata_cancellations_are_evidenced_but_event_bounds_remain_fatal() {
+        let request = ResourceRequest {
+            method: "GET".into(),
+            url: url::Url::parse("https://denied.invalid/report.bin").unwrap(),
+            destination: "Image".into(),
+            load_role: WebResourceLoadRole::DocumentMetadata,
+            referrer_url: None,
+            is_for_main_frame: false,
+            is_redirect: false,
+        };
+        let cancellation = ResourceEvidence::cancelled(
+            request.clone(),
+            ResourcePolicyFailure::new(
+                &request,
+                "RESOURCE_DENIED",
+                "denied",
+                "network URL is outside the configured HTTP roots",
+            )
+            .nonfatal(),
+        );
+        assert_eq!(cancellation.status, "cancelled");
+        assert!(!cancellation.fatal);
+        assert_eq!(cancellation.source, None);
+        assert_eq!(
+            cancellation.failure.as_ref().unwrap().load_role,
+            WebResourceLoadRole::DocumentMetadata
+        );
+        assert!(!cancellation.failure.as_ref().unwrap().fatal);
+        assert_eq!(
+            ResourceAccounting::from_evidence(std::slice::from_ref(&cancellation)),
+            ResourceAccounting {
+                requests: 1,
+                loaded: 0,
+                delegated: 0,
+                failed: 1,
+                body_bytes: 0,
+                unavailable_bodies: 1,
+            }
+        );
+
+        let mut log = ResourceEvidenceLog {
+            max_entries: 1,
+            ..ResourceEvidenceLog::default()
+        };
+        log.begin_event(&cancellation.request).unwrap();
+        log.push(cancellation.clone()).unwrap();
+        let error = log.begin_event(&cancellation.request).unwrap_err();
+        assert_eq!(error.code, "RESOURCE_METADATA_LIMIT_EXCEEDED");
+        assert_eq!(error.load_role, WebResourceLoadRole::DocumentMetadata);
+        assert!(error.fatal);
+        assert_eq!(log.entries.len(), 1);
     }
 
     #[test]
@@ -1452,6 +1550,30 @@ mod tests {
     }
 
     #[test]
+    fn resource_load_roles_are_source_assigned_and_cache_isolated() {
+        for case in [
+            "metadata-denied-non-icon",
+            "content-favicon-name",
+            "same-url-role-split",
+            "preload-image-content",
+            "metadata-allowed-icon",
+        ] {
+            let output = run_isolated(case, "http://127.0.0.1:1/");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success(),
+                "isolated {case} fixture failed\nstdout:\n{}\nstderr:\n{}",
+                stdout,
+                String::from_utf8_lossy(&output.stderr),
+            );
+            assert!(
+                stdout.contains("running 1 test") && stdout.contains("1 passed; 0 failed"),
+                "isolated {case} filter did not execute exactly one passing child test:\n{stdout}",
+            );
+        }
+    }
+
+    #[test]
     #[ignore = "requires the lockfile-installed Chart.js fixture input"]
     fn installed_chartjs_fixture_matches_the_legacy_oracle_twice() {
         let input = std::env::var(CHARTJS_INPUT_ENV)
@@ -1531,6 +1653,53 @@ mod tests {
                     .join("tests/fixtures/text-scene/index.html")
                     .canonicalize()
                     .unwrap()
+            },
+            "metadata-denied-non-icon" => {
+                let bundle = TempBundle::new(case.as_str());
+                let input = bundle.write(
+                    "input.html",
+                    "<!doctype html><link rel='icon' href='https://denied.invalid/report.bin'><script>window.pliego?.defer();addEventListener('load',()=>setTimeout(()=>window.pliego?.ready({fixture:'metadata-denied-non-icon'}),25));</script>",
+                );
+                _bundle = Some(bundle);
+                input
+            },
+            "content-favicon-name" => {
+                let bundle = TempBundle::new(case.as_str());
+                let input = bundle.write(
+                    "input.html",
+                    "<!doctype html><img src='https://denied.invalid/favicon.ico' alt=''><script>window.pliego?.ready({fixture:'content-favicon-name'});</script>",
+                );
+                _bundle = Some(bundle);
+                input
+            },
+            "same-url-role-split" => {
+                let bundle = TempBundle::new(case.as_str());
+                bundle.write("shared.png", fixture_png());
+                let input = bundle.write(
+                    "input.html",
+                    "<!doctype html><link rel='icon' href='shared.png'><img src='shared.png' width='1' height='1' alt=''><script>window.pliego?.defer();addEventListener('load',()=>setTimeout(()=>window.pliego?.ready({fixture:'same-url-role-split'}),25));</script>",
+                );
+                _bundle = Some(bundle);
+                input
+            },
+            "preload-image-content" => {
+                let bundle = TempBundle::new(case.as_str());
+                let input = bundle.write(
+                    "input.html",
+                    "<!doctype html><link rel='preload' as='image' href='https://denied.invalid/preload.png'><script>window.pliego?.ready({fixture:'preload-image-content'});</script>",
+                );
+                _bundle = Some(bundle);
+                input
+            },
+            "metadata-allowed-icon" => {
+                let bundle = TempBundle::new(case.as_str());
+                bundle.write("icon.png", fixture_png());
+                let input = bundle.write(
+                    "input.html",
+                    "<!doctype html><link rel='icon' href='icon.png'><script>window.pliego?.defer();addEventListener('load',()=>setTimeout(()=>window.pliego?.ready({fixture:'metadata-allowed-icon'}),25));</script>",
+                );
+                _bundle = Some(bundle);
+                input
             },
             "invalid-data-url" => {
                 let bundle = TempBundle::new(case.as_str());
@@ -1729,7 +1898,7 @@ mod tests {
                         .find(|resource| resource.request.url == url)
                         .expect("local request should retain evidence");
                     let body = std::fs::read(path).unwrap();
-                    assert_eq!(resource.source, ResourceSource::DocumentRoot);
+                    assert_eq!(resource.source, Some(ResourceSource::DocumentRoot));
                     assert_eq!(resource.status, "loaded");
                     assert_eq!(resource.response_status, Some(200));
                     assert_eq!(resource.bytes, Some(body.len() as u64));
@@ -1749,7 +1918,7 @@ mod tests {
                         resource.request.url.as_str() == "https://virtual.invalid/local-success.js"
                     })
                     .expect("virtual resource should retain evidence");
-                assert_eq!(resource.source, ResourceSource::VirtualResource);
+                assert_eq!(resource.source, Some(ResourceSource::VirtualResource));
                 assert_eq!(resource.status, "loaded");
                 assert_eq!(resource.response_status, Some(200));
                 assert!(resource.bytes.is_some_and(|bytes| bytes > 0));
@@ -1763,7 +1932,7 @@ mod tests {
                 let document = outcome
                     .resources
                     .iter()
-                    .filter(|resource| resource.source == ResourceSource::DocumentRoot)
+                    .filter(|resource| resource.source == Some(ResourceSource::DocumentRoot))
                     .collect::<Vec<_>>();
                 assert_eq!(document.len(), 1);
                 assert_eq!(document[0].request.method, "GET");
@@ -1776,7 +1945,9 @@ mod tests {
                 let assets = outcome
                     .resources
                     .iter()
-                    .filter(|resource| matches!(resource.source, ResourceSource::AssetCache(_)))
+                    .filter(|resource| {
+                        matches!(resource.source, Some(ResourceSource::AssetCache(_)))
+                    })
                     .collect::<Vec<_>>();
                 assert_eq!(assets.len(), 3);
                 let asset_body = fs::read(input.parent().unwrap().join("first.js")).unwrap();
@@ -1795,17 +1966,15 @@ mod tests {
                     .filter(|resource| resource.request.url.path() == "/first.js")
                     .collect::<Vec<_>>();
                 assert_eq!(first.len(), 1);
-                assert_eq!(first[0].source, ResourceSource::AssetCache("miss"));
+                assert_eq!(first[0].source, Some(ResourceSource::AssetCache("miss")));
                 let renamed = assets
                     .iter()
                     .filter(|resource| resource.request.url.path() == "/renamed.js")
                     .collect::<Vec<_>>();
                 assert_eq!(renamed.len(), 2);
-                assert!(
-                    renamed
-                        .iter()
-                        .all(|resource| resource.source == ResourceSource::AssetCache("hit"))
-                );
+                assert!(renamed.iter().all(|resource| {
+                    resource.source == Some(ResourceSource::AssetCache("hit"))
+                }));
                 assert_eq!(outcome.resource_accounting.requests, 4);
                 assert_eq!(outcome.resource_accounting.loaded, 4);
                 assert_eq!(outcome.resource_accounting.failed, 0);
@@ -1820,7 +1989,7 @@ mod tests {
                     .iter()
                     .find(|resource| resource.request.url == url)
                     .expect("allowed HTTP request should retain evidence");
-                assert_eq!(resource.source, ResourceSource::Http);
+                assert_eq!(resource.source, Some(ResourceSource::Http));
                 assert_eq!(resource.status, "loaded");
                 assert_eq!(resource.response_status, Some(200));
                 assert_eq!(resource.content_type.as_deref(), Some("text/javascript"));
@@ -1864,7 +2033,7 @@ mod tests {
                     .resources
                     .iter()
                     .find(|resource| {
-                        resource.source == source &&
+                        resource.source == Some(source) &&
                             resource.content_address.as_deref() ==
                                 Some(expected_address.as_str())
                     })
@@ -1879,6 +2048,92 @@ mod tests {
                 );
                 assert_eq!(outcome.resource_accounting.delegated, 0);
                 assert!(outcome.resource_store.resident_bytes() >= expected.len() as u64);
+            },
+            "metadata-denied-non-icon" => {
+                let outcome = result.expect("denied document metadata must not abort rendering");
+                assert!(outcome.pdf.starts_with(b"%PDF-"));
+                assert_eq!(outcome.readiness["payload"]["fixture"], case);
+                let evidence = outcome
+                    .resources
+                    .iter()
+                    .find(|resource| {
+                        resource.request.url.as_str() == "https://denied.invalid/report.bin"
+                    })
+                    .expect("metadata cancellation should retain evidence");
+                assert_eq!(
+                    evidence.request.load_role,
+                    WebResourceLoadRole::DocumentMetadata
+                );
+                assert_eq!(evidence.request.destination, "Image");
+                assert_eq!(evidence.status, "cancelled");
+                assert!(!evidence.fatal);
+                assert_eq!(evidence.source, None);
+                let failure = evidence.failure.as_ref().unwrap();
+                assert_eq!(failure.code, "RESOURCE_DENIED");
+                assert_eq!(failure.status, "denied");
+                assert!(!failure.fatal);
+                assert_eq!(failure.load_role, WebResourceLoadRole::DocumentMetadata);
+                assert_eq!(outcome.resource_accounting.requests, 2);
+                assert_eq!(outcome.resource_accounting.loaded, 1);
+                assert_eq!(outcome.resource_accounting.failed, 1);
+            },
+            "content-favicon-name" => {
+                let Err(error) = result else {
+                    panic!("content became optional from its filename")
+                };
+                let failure = error.resource_failure.as_ref().unwrap();
+                assert_eq!(failure.code, "RESOURCE_DENIED");
+                assert_eq!(failure.url, "https://denied.invalid/favicon.ico");
+                assert_eq!(failure.destination, "Image");
+                assert!(failure.fatal);
+                assert_eq!(failure.load_role, WebResourceLoadRole::DocumentContent);
+            },
+            "same-url-role-split" => {
+                let outcome =
+                    result.expect("same-URL metadata and content loads should both render");
+                let shared =
+                    url::Url::from_file_path(input.parent().unwrap().join("shared.png")).unwrap();
+                let roles = outcome
+                    .resources
+                    .iter()
+                    .filter(|resource| resource.request.url == shared)
+                    .map(|resource| resource.request.load_role)
+                    .collect::<std::collections::HashSet<_>>();
+                assert_eq!(
+                    roles,
+                    std::collections::HashSet::from([
+                        WebResourceLoadRole::DocumentContent,
+                        WebResourceLoadRole::DocumentMetadata,
+                    ])
+                );
+            },
+            "preload-image-content" => {
+                let Err(error) = result else {
+                    panic!("an image preload denial became optional")
+                };
+                let failure = error.resource_failure.as_ref().unwrap();
+                assert_eq!(failure.code, "RESOURCE_DENIED");
+                assert_eq!(failure.url, "https://denied.invalid/preload.png");
+                assert_eq!(failure.destination, "Image");
+                assert!(failure.fatal);
+                assert_eq!(failure.load_role, WebResourceLoadRole::DocumentContent);
+            },
+            "metadata-allowed-icon" => {
+                let outcome = result.expect("an allowed icon should load normally");
+                let icon =
+                    url::Url::from_file_path(input.parent().unwrap().join("icon.png")).unwrap();
+                let evidence = outcome
+                    .resources
+                    .iter()
+                    .find(|resource| resource.request.url == icon)
+                    .expect("allowed icon should retain loaded evidence");
+                assert_eq!(
+                    evidence.request.load_role,
+                    WebResourceLoadRole::DocumentMetadata
+                );
+                assert_eq!(evidence.status, "loaded");
+                assert_eq!(evidence.source, Some(ResourceSource::DocumentRoot));
+                assert!(evidence.failure.is_none());
             },
             "invalid-data-url" => {
                 let Err(error) = result else {

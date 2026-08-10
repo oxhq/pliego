@@ -26,6 +26,7 @@ required-features = ["shell"]
 base64 = { workspace = true }
 data-url = { workspace = true, optional = true }
 dpi = { workspace = true, optional = true }
+embedder_traits = { workspace = true }
 http = { workspace = true }
 http-body-util = { workspace = true }
 hyper = { workspace = true }
