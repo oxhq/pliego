@@ -46,6 +46,7 @@ benchmarks/
 │   ├── run_benchmark.py       Unprivileged orchestrator: manifest → staged candidate
 │   ├── create_publication_attestation.py Protected-context publication MAC
 │   ├── publish_benchmark.py   Host-proof binding and atomic baseline replacement
+│   ├── publication_promotion.py Exact-run artifact verification and PR preparation
 │   ├── observer_ab.py         Host-bound full-record observer A/B proof
 │   ├── benchmark_setup_evidence.py Always-retained setup status
 │   ├── validate_host_proof.py Validate host proof plus retained raw evidence
@@ -168,12 +169,16 @@ Use `--offline` after the verified archive is cached. The orchestrator checks
 the binary digest again before starting a sample.
 
 `--operation bootstrap` is an explicit, MAC-bound authorization for the first
-creation only. It atomically refuses an existing basename; after the first
-artifact has been created, subsequent protected runs must use `replace`.
-Neither operation can escape the canonical `benchmarks/baselines` directory.
-The dedicated workflow exposes the HMAC key only to the attestation and
-publisher steps; each Python entry point consumes it from its environment
-before doing any work that could later gain a child process.
+creation only. It atomically refuses an existing basename. In the workflow that
+file is still ephemeral until its verified promotion PR is merged; only then can
+a later protected run use `replace`. Both operations are proposed through a PR,
+and neither can escape the one canonical `benchmarks/baselines` destination.
+The HMAC key reaches only the attestation, publisher, and clean verification
+step shells and their exact Python entry points
+(`create_publication_attestation.py`, `publish_benchmark.py`, and
+`publication_promotion.py verify`). Each process consumes the key from its
+environment before any possible child process; artifact staging, PR preparation,
+and repository mutation never receive it.
 
 Those commands describe the contract; publishable runs enter through the
 manual dedicated-host workflow, which supplies the exact paths. Local
@@ -215,6 +220,22 @@ old baseline; abrupt process death can leave its old bytes in the rollback
 journal for recovery, as can a best-effort journal cleanup failure after the
 new baseline is already durable. It never resolves the destination leaf or redirects a
 write through a swapped path.
+
+The dedicated/root-capable job keeps `contents: read` and uploads an immutable
+source artifact whose exact ID, archive digest, run, attempt, revision,
+operation, schema, basename, and subject digests are checked by a fresh
+GitHub-hosted verifier. That verifier has the HMAC but no repository-write token
+and emits a new two-file verified artifact. A separate promotion job has no HMAC
+or host proof token. It rechecks the verified artifact by exact ID and digest,
+checks bootstrap absence or the replacement's exact old mode-`100644` Git blob,
+and prepares only `benchmarks/baselines/pliego-0.1.1-linux-x86_64.json`.
+Its write token is exposed only to the final mutation step, which creates or
+reuses a run-specific branch based on the benchmarked `main` SHA and opens a
+reviewable PR; it never pushes `main`. Both bootstrap and replace follow this
+lifecycle. If `main` advances before a new PR is opened, the job refuses stale
+evidence and requires a new benchmark run. Exact open or merged retries are
+idempotent; a closed PR, divergent branch, extra path, or old-blob mismatch is a
+hard refusal.
 
 Each sample gets a fresh root-owned, non-delegated child cgroup. The narrow
 broker opens the canonical executable, copies its bytes to a sealed memfd, and
@@ -341,17 +362,27 @@ published baseline. The workflow's controlled
 valid rejection with no `samples.started` event.
 
 This repository supplies only the software gate; no dedicated-host publication
-was proved locally. Hardware procurement and
-configuration, runner-group assignment, the read-only
+or promotion was proved locally. Hardware procurement and configuration,
+runner-group assignment, the read-only
 `OXHQ_BENCHMARK_PROOF_TOKEN`, the 256-bit
 `PLIEGO_BENCHMARK_ATTESTATION_HMAC_KEY_HEX`, sensor permissions, and a live
-production dispatch require external administrator authority. Both secrets belong only in the
+production dispatch require external administrator authority. Both dedicated
+secrets belong only in the
 `Pliego dedicated benchmarks` GitHub Environment, whose deployment-branch
 policy must allow protected `main` and no other ref. Give it only the read-only
 organization `Self-hosted runners` permission, with no repository or mutation
 scopes. The collector never logs or persists either secret and removes both from
-the child benchmark process. OXH-336 therefore remains incomplete until those
-external steps and their hosted proof exist.
+the child benchmark process.
+
+Promotion additionally requires a separate `Pliego benchmark promotion`
+Environment containing `OXHQ_BENCHMARK_PROMOTION_TOKEN`, issued to a narrowly
+scoped, non-bypass automation identity with only the repository contents and
+pull-request permissions needed to create the proposal branch and PR. Restrict
+that Environment's deployment branch policy to protected `main`. `main` must
+have an administrator-enforced require-PR/no-force-push ruleset that the identity
+cannot bypass. Without that Environment, token, and ruleset the lifecycle is
+not operationally authorized and must stay fail-closed. OXH-336 therefore
+remains incomplete until all external steps and their hosted proof exist.
 
 ## Protocol (from `manifest.toml`)
 

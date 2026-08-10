@@ -39,6 +39,7 @@ jobs:
           python benchmarks/tools/test_run_benchmark.py
           python benchmarks/tools/test_benchmark_publication.py
           python benchmarks/tools/test_create_publication_attestation.py
+          python benchmarks/tools/test_publication_promotion.py
           python benchmarks/tools/test_benchmark_setup_evidence.py
           python benchmarks/tools/test_observer_ab.py
           python benchmarks/tools/test_resolve_release.py
@@ -132,6 +133,7 @@ jobs:
           python benchmarks/tools/test_run_benchmark.py
           python benchmarks/tools/test_benchmark_publication.py
           python benchmarks/tools/test_create_publication_attestation.py
+          python benchmarks/tools/test_publication_promotion.py
           python benchmarks/tools/test_benchmark_setup_evidence.py
           python benchmarks/tools/test_observer_ab.py
           python benchmarks/tools/test_benchmark_host_preflight.py

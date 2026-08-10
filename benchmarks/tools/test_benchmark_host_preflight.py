@@ -487,8 +487,9 @@ class BenchmarkHostPreflightTests(unittest.TestCase):
         self.assertIn("environment: Pliego dedicated benchmarks", workflow)
         self.assertIn("permissions:\n  contents: read", workflow)
         self.assertEqual(workflow.count("secrets.OXHQ_BENCHMARK_PROOF_TOKEN"), 1)
-        self.assertEqual(workflow.count("secrets.PLIEGO_BENCHMARK_ATTESTATION_HMAC_KEY_HEX"), 2)
-        self.assertNotIn("\n    env:\n", workflow)
+        self.assertEqual(workflow.count("secrets.PLIEGO_BENCHMARK_ATTESTATION_HMAC_KEY_HEX"), 3)
+        dedicated_header = workflow.split("  dedicated:", 1)[1].split("    steps:", 1)[0]
+        self.assertNotIn("\n    env:\n", dedicated_header)
         self.assertIn("negative-github-hosted", workflow)
         self.assertIn("negative-missing-thermal", workflow)
         self.assertIn("publication:\n        description:", workflow)
@@ -508,7 +509,13 @@ class BenchmarkHostPreflightTests(unittest.TestCase):
             "- name: Publish authenticated benchmark baseline", 1
         )[0]
         publisher_step = workflow.split("- name: Publish authenticated benchmark baseline", 1)[1].split(
+            "- name: Stage exact publication source artifact", 1
+        )[0]
+        source_stage_step = workflow.split("- name: Stage exact publication source artifact", 1)[1].split(
             "- name: Remove frozen fixture mirror", 1
+        )[0]
+        verifier_step = workflow.split("- name: Revalidate HMAC-bound publication source", 1)[1].split(
+            "- name: Retain newly verified baseline only", 1
         )[0]
         self.assertNotIn("PLIEGO_BENCHMARK_ATTESTATION_HMAC_KEY_HEX", evidence_step)
         self.assertIn("create_publication_attestation.py", attestation_step)
@@ -517,7 +524,9 @@ class BenchmarkHostPreflightTests(unittest.TestCase):
         self.assertNotIn("$(basename", attestation_step)
         self.assertIn("publish_benchmark.py", publisher_step)
         self.assertNotIn("create_publication_attestation.py", publisher_step)
-        for sensitive_step in (attestation_step, publisher_step):
+        self.assertNotIn("secrets.PLIEGO_BENCHMARK_ATTESTATION_HMAC_KEY_HEX", source_stage_step)
+        self.assertIn('test -z "${PLIEGO_BENCHMARK_ATTESTATION_HMAC_KEY_HEX:-}"', source_stage_step)
+        for sensitive_step in (attestation_step, publisher_step, verifier_step):
             self.assertEqual(sensitive_step.count("secrets.PLIEGO_BENCHMARK_ATTESTATION_HMAC_KEY_HEX"), 1)
             self.assertIn("unset PLIEGO_BENCHMARK_ATTESTATION_HMAC_KEY_HEX", sensitive_step)
         self.assertIn("Initialize setup diagnostics before checkout", workflow)
@@ -525,7 +534,7 @@ class BenchmarkHostPreflightTests(unittest.TestCase):
         self.assertIn("pliego-setup-evidence-${{ github.run_id }}-${{ github.run_attempt }}", workflow)
         self.assertIn("if: success() && inputs.mode == 'production'", workflow)
         always_upload = workflow.split("- name: Retain host proof and failure evidence", 1)[1].split(
-            "- name: Retain successful candidate and publication", 1
+            "- name: Retain exact publication source", 1
         )[0]
         self.assertNotIn("benchmarks/baselines/", always_upload)
         self.assertNotIn("pliego-candidate-", always_upload)

@@ -36,6 +36,9 @@ jobs:
       labels: [self-hosted, Linux, X64, pliego-benchmark-pinned-v1]
     environment: Pliego dedicated benchmarks
     timeout-minutes: 45
+    outputs:
+      publication_source_artifact_id: ${{ steps.publication_source.outputs.artifact-id }}
+      publication_source_artifact_digest: ${{ steps.publication_source.outputs.artifact-digest }}
     steps:
       - name: Initialize setup diagnostics before checkout
         env:
@@ -309,6 +312,34 @@ jobs:
           record_setup passed publication-complete 0
           SETUP_FINISHED=1
 
+      - name: Stage exact publication source artifact
+        if: success() && inputs.mode == 'production'
+        env:
+          PROOF_DIR: ${{ runner.temp }}/pliego-host-proof-${{ github.run_id }}-${{ github.run_attempt }}
+          CANDIDATE: ${{ runner.temp }}/pliego-candidate-${{ github.run_id }}-${{ github.run_attempt }}.json
+          OBSERVER_PROOF: ${{ runner.temp }}/pliego-observer-proof-${{ github.run_id }}-${{ github.run_attempt }}.json
+          ATTESTATION: /var/lib/pliego-benchmark-attestations/${{ github.run_id }}-${{ github.run_attempt }}.json
+          PUBLISHED_BASELINE: benchmarks/baselines/pliego-0.1.1-linux-x86_64.json
+          PUBLICATION_SOURCE: ${{ runner.temp }}/pliego-publication-source-${{ github.run_id }}-${{ github.run_attempt }}
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          set -euo pipefail
+          test -z "${PLIEGO_BENCHMARK_ATTESTATION_HMAC_KEY_HEX:-}"
+          python3 benchmarks/tools/publication_promotion.py stage \
+            --repository "$GITHUB_REPOSITORY" \
+            --repository-root "$GITHUB_WORKSPACE" \
+            --revision "$GITHUB_SHA" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --operation "${{ inputs.publication }}" \
+            --output-basename "${PUBLISHED_BASELINE##*/}" \
+            --candidate "$CANDIDATE" \
+            --host-proof-dir "$PROOF_DIR" \
+            --observer-proof "$OBSERVER_PROOF" \
+            --attestation "$ATTESTATION" \
+            --baseline "$PUBLISHED_BASELINE" \
+            --out "$PUBLICATION_SOURCE"
+
       - name: Remove frozen fixture mirror
         if: always() && inputs.mode == 'production'
         env:
@@ -347,18 +378,306 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Retain successful candidate and publication
+      - name: Retain exact publication source
+        id: publication_source
         if: success() && inputs.mode == 'production'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: benchmark-publication-${{ github.sha }}
-          path: |
-            ${{ runner.temp }}/pliego-candidate-${{ github.run_id }}-${{ github.run_attempt }}.json
-            ${{ runner.temp }}/pliego-observer-proof-${{ github.run_id }}-${{ github.run_attempt }}.json
-            /var/lib/pliego-benchmark-attestations/${{ github.run_id }}-${{ github.run_attempt }}.json
-            benchmarks/baselines/pliego-0.1.1-linux-x86_64.json
+          name: benchmark-publication-source-${{ github.sha }}-${{ inputs.publication }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/pliego-publication-source-${{ github.run_id }}-${{ github.run_attempt }}/
           if-no-files-found: error
+          overwrite: false
           retention-days: 30
+
+  verify-publication:
+    name: Revalidate exact publication artifact
+    needs: dedicated
+    if: inputs.mode == 'production' && needs.dedicated.result == 'success'
+    runs-on: ubuntu-24.04
+    environment: Pliego dedicated benchmarks
+    timeout-minutes: 10
+    outputs:
+      verified_baseline_artifact_id: ${{ steps.verified_baseline.outputs.artifact-id }}
+      verified_baseline_artifact_digest: ${{ steps.verified_baseline.outputs.artifact-digest }}
+    permissions:
+      actions: read
+      contents: read
+    env:
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+
+      - name: Bind source artifact ID, digest, and run identity
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ needs.dedicated.outputs.publication_source_artifact_id }}
+          ARTIFACT_DIGEST: ${{ needs.dedicated.outputs.publication_source_artifact_digest }}
+          EXPECTED_NAME: benchmark-publication-source-${{ github.sha }}-${{ inputs.publication }}-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          test "$DEFAULT_BRANCH" = main
+          [[ "$ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$ARTIFACT_DIGEST" =~ ^[0-9a-f]{64}$ ]]
+          artifact="$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID")"
+          jq -e \
+            --argjson artifact_id "$ARTIFACT_ID" \
+            --arg name "$EXPECTED_NAME" \
+            --arg digest "sha256:$ARTIFACT_DIGEST" \
+            --argjson run_id "$GITHUB_RUN_ID" \
+            --arg revision "$GITHUB_SHA" \
+            --arg branch "$DEFAULT_BRANCH" '
+              .id == $artifact_id
+              and .name == $name
+              and .expired == false
+              and .digest == $digest
+              and .workflow_run.id == $run_id
+              and .workflow_run.head_sha == $revision
+              and .workflow_run.head_branch == $branch
+            ' <<< "$artifact" >/dev/null
+
+      - name: Download only this run attempt publication source
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          artifact-ids: ${{ needs.dedicated.outputs.publication_source_artifact_id }}
+          path: ${{ runner.temp }}/publication-source
+          merge-multiple: true
+
+      - name: Revalidate HMAC-bound publication source
+        env:
+          SOURCE: ${{ runner.temp }}/publication-source
+          VERIFIED: ${{ runner.temp }}/verified-benchmark-baseline-${{ github.run_id }}-${{ github.run_attempt }}
+          PLIEGO_BENCHMARK_ATTESTATION_HMAC_KEY_HEX: ${{ secrets.PLIEGO_BENCHMARK_ATTESTATION_HMAC_KEY_HEX }}
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          set -euo pipefail
+          trap 'unset PLIEGO_BENCHMARK_ATTESTATION_HMAC_KEY_HEX' EXIT
+          test -n "$PLIEGO_BENCHMARK_ATTESTATION_HMAC_KEY_HEX"
+          python3 benchmarks/tools/publication_promotion.py verify \
+            --repository "$GITHUB_REPOSITORY" \
+            --revision "$GITHUB_SHA" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --operation "${{ inputs.publication }}" \
+            --output-basename pliego-0.1.1-linux-x86_64.json \
+            --bundle "$SOURCE" \
+            --out "$VERIFIED"
+          unset PLIEGO_BENCHMARK_ATTESTATION_HMAC_KEY_HEX
+          trap - EXIT
+
+      - name: Retain newly verified baseline only
+        id: verified_baseline
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: verified-benchmark-baseline-${{ github.sha }}-${{ inputs.publication }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/verified-benchmark-baseline-${{ github.run_id }}-${{ github.run_attempt }}/
+          if-no-files-found: error
+          overwrite: false
+          retention-days: 30
+
+  promote-publication:
+    name: Open exact baseline promotion PR
+    needs: verify-publication
+    if: inputs.mode == 'production' && needs.verify-publication.result == 'success'
+    runs-on: ubuntu-24.04
+    environment: Pliego benchmark promotion
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+    env:
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+          ref: ${{ github.sha }}
+
+      - name: Bind verified artifact ID, digest, and run identity
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ needs.verify-publication.outputs.verified_baseline_artifact_id }}
+          ARTIFACT_DIGEST: ${{ needs.verify-publication.outputs.verified_baseline_artifact_digest }}
+          EXPECTED_NAME: verified-benchmark-baseline-${{ github.sha }}-${{ inputs.publication }}-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          test "$DEFAULT_BRANCH" = main
+          [[ "$ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$ARTIFACT_DIGEST" =~ ^[0-9a-f]{64}$ ]]
+          artifact="$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID")"
+          jq -e \
+            --argjson artifact_id "$ARTIFACT_ID" \
+            --arg name "$EXPECTED_NAME" \
+            --arg digest "sha256:$ARTIFACT_DIGEST" \
+            --argjson run_id "$GITHUB_RUN_ID" \
+            --arg revision "$GITHUB_SHA" \
+            --arg branch "$DEFAULT_BRANCH" '
+              .id == $artifact_id
+              and .name == $name
+              and .expired == false
+              and .digest == $digest
+              and .workflow_run.id == $run_id
+              and .workflow_run.head_sha == $revision
+              and .workflow_run.head_branch == $branch
+            ' <<< "$artifact" >/dev/null
+
+      - name: Download only this run attempt verified baseline
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          artifact-ids: ${{ needs.verify-publication.outputs.verified_baseline_artifact_id }}
+          path: ${{ runner.temp }}/verified-baseline
+          merge-multiple: true
+
+      - name: Prepare exact old-blob-bound baseline change
+        env:
+          VERIFIED: ${{ runner.temp }}/verified-baseline
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          set -euo pipefail
+          test -z "${PLIEGO_BENCHMARK_ATTESTATION_HMAC_KEY_HEX:-}"
+          python3 benchmarks/tools/publication_promotion.py prepare \
+            --repository "$GITHUB_REPOSITORY" \
+            --repository-root "$GITHUB_WORKSPACE" \
+            --revision "$GITHUB_SHA" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --operation "${{ inputs.publication }}" \
+            --output-basename pliego-0.1.1-linux-x86_64.json \
+            --bundle "$VERIFIED"
+
+      - name: Create or reuse review-only promotion
+        env:
+          BASELINE_PATH: benchmarks/baselines/pliego-0.1.1-linux-x86_64.json
+          GH_TOKEN: ${{ secrets.OXHQ_BENCHMARK_PROMOTION_TOKEN }}
+          OPERATION: ${{ inputs.publication }}
+        run: |
+          set -euo pipefail
+          test -z "${PLIEGO_BENCHMARK_ATTESTATION_HMAC_KEY_HEX:-}"
+          test "$GITHUB_REF" = "refs/heads/$DEFAULT_BRANCH"
+          test "$DEFAULT_BRANCH" = main
+          test "$GITHUB_SHA" = "$(git rev-parse HEAD)"
+          test -n "$GH_TOKEN"
+          gh auth setup-git
+          branch="benchmark-baseline/$GITHUB_SHA/$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$OPERATION"
+          expected_status=modified
+          expected_worktree_status=" M $BASELINE_PATH"
+          if [[ "$OPERATION" == bootstrap ]]; then
+            expected_status=added
+            expected_worktree_status="?? $BASELINE_PATH"
+          fi
+          test "$(git status --short --untracked-files=all)" = "$expected_worktree_status"
+          expected_blob="$(git hash-object "$BASELINE_PATH")"
+
+          verify_commit() {
+            local commit=$1
+            local compare blob
+            compare="$(gh api "repos/$GITHUB_REPOSITORY/compare/$GITHUB_SHA...$commit")"
+            jq -e \
+              --arg base "$GITHUB_SHA" \
+              --arg head "$commit" \
+              --arg path "$BASELINE_PATH" \
+              --arg status "$expected_status" '
+                .base_commit.sha == $base
+                and .merge_base_commit.sha == $base
+                and .status == "ahead"
+                and .ahead_by == 1
+                and .behind_by == 0
+                and .total_commits == 1
+                and .commits[0].sha == $head
+                and (.files | length) == 1
+                and .files[0].filename == $path
+                and .files[0].status == $status
+              ' <<< "$compare" >/dev/null
+            blob="$(gh api "repos/$GITHUB_REPOSITORY/contents/$BASELINE_PATH?ref=$commit" --jq .sha)"
+            test "$blob" = "$expected_blob"
+          }
+
+          existing_pr="$(gh pr list \
+            --repo "$GITHUB_REPOSITORY" \
+            --state all \
+            --base "$DEFAULT_BRANCH" \
+            --head "$branch" \
+            --json number,url,state,headRefOid,baseRefName)"
+          count="$(jq 'length' <<< "$existing_pr")"
+          if [[ "$count" -gt 1 ]]; then
+            echo "multiple promotion PRs exist for $branch" >&2
+            exit 1
+          fi
+          if [[ "$count" == 1 ]]; then
+            state="$(jq -r '.[0].state' <<< "$existing_pr")"
+            commit="$(jq -r '.[0].headRefOid' <<< "$existing_pr")"
+            test "$(jq -r '.[0].baseRefName' <<< "$existing_pr")" = "$DEFAULT_BRANCH"
+            verify_commit "$commit"
+            case "$state" in
+              OPEN|MERGED)
+                jq -r '.[0].url' <<< "$existing_pr"
+                exit 0
+                ;;
+              CLOSED)
+                echo "existing exact promotion PR was closed without merge; refusing replacement" >&2
+                exit 1
+                ;;
+              *)
+                echo "existing promotion PR has an unknown state: $state" >&2
+                exit 1
+                ;;
+            esac
+          fi
+
+          current_main="$(gh api "repos/$GITHUB_REPOSITORY/branches/$DEFAULT_BRANCH" --jq .commit.sha)"
+          if [[ "$current_main" != "$GITHUB_SHA" ]]; then
+            echo "main advanced after the benchmark; rerun instead of proposing stale evidence" >&2
+            exit 1
+          fi
+
+          remote_commit="$(git ls-remote --heads origin "refs/heads/$branch" | awk '{print $1}')"
+          if [[ -n "$remote_commit" ]]; then
+            verify_commit "$remote_commit"
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git switch -c "$branch"
+            git add -- "$BASELINE_PATH"
+            test "$(git diff --cached --name-only)" = "$BASELINE_PATH"
+            git commit -m "benchmark: promote $OPERATION baseline from $GITHUB_SHA"
+            test "$(git rev-parse HEAD^)" = "$GITHUB_SHA"
+            remote_commit="$(git rev-parse HEAD)"
+            if ! git push origin "HEAD:refs/heads/$branch"; then
+              remote_commit="$(git ls-remote --heads origin "refs/heads/$branch" | awk '{print $1}')"
+              test -n "$remote_commit"
+              verify_commit "$remote_commit"
+            fi
+          fi
+
+          verify_commit "$remote_commit"
+          if ! created_pr="$(gh pr create \
+              --repo "$GITHUB_REPOSITORY" \
+              --base "$DEFAULT_BRANCH" \
+              --head "$branch" \
+              --title "benchmark: promote $OPERATION baseline from ${GITHUB_SHA::12}" \
+              --body "Review-only promotion of the HMAC-verified dedicated-host benchmark baseline from run $GITHUB_RUN_ID attempt $GITHUB_RUN_ATTEMPT at exact main revision $GITHUB_SHA. This workflow cannot push main directly.")"; then
+            # A retry racing another exact invocation is accepted only if that
+            # invocation opened the one exact PR we would have opened.
+            existing_pr="$(gh pr list \
+              --repo "$GITHUB_REPOSITORY" \
+              --state all \
+              --base "$DEFAULT_BRANCH" \
+              --head "$branch" \
+              --json number,url,state,headRefOid,baseRefName)"
+            test "$(jq 'length' <<< "$existing_pr")" = 1
+            state="$(jq -r '.[0].state' <<< "$existing_pr")"
+            [[ "$state" == OPEN || "$state" == MERGED ]]
+            test "$(jq -r '.[0].baseRefName' <<< "$existing_pr")" = "$DEFAULT_BRANCH"
+            verify_commit "$(jq -r '.[0].headRefOid' <<< "$existing_pr")"
+            jq -r '.[0].url' <<< "$existing_pr"
+            exit 0
+          fi
+          printf '%s\n' "$created_pr"
 
   github-hosted-negative:
     if: inputs.mode == 'negative-github-hosted'
