@@ -189,6 +189,7 @@ use crate::layout_image::fetch_image_for_layout;
 use crate::messaging::{MainThreadScriptMsg, ScriptEventLoopReceiver, ScriptEventLoopSender};
 use crate::microtask::{Microtask, UserMicrotask};
 use crate::network_listener::{ResourceTimingListener, submit_timing};
+use crate::producer_fence::{DocumentProducerEnvelope, fence_image_callback};
 use crate::realms::enter_auto_realm;
 use crate::script_runtime::Runtime;
 use crate::script_thread::ScriptThread;
@@ -291,7 +292,7 @@ pub(crate) struct Window {
     navigator: MutNullableDom<Navigator>,
     crypto: MutNullableDom<Crypto>,
     #[no_trace]
-    image_cache_sender: Sender<ImageCacheResponseMessage>,
+    image_cache_sender: Sender<DocumentProducerEnvelope<ImageCacheResponseMessage>>,
     window_proxy: MutNullableDom<WindowProxy>,
     document: MutNullableDom<Document>,
     location: MutNullableDom<Location>,
@@ -567,13 +568,19 @@ impl Window {
     pub(crate) fn new_script_pair(&self) -> (ScriptEventLoopSender, ScriptEventLoopReceiver) {
         let (sender, receiver) = unbounded();
         (
-            ScriptEventLoopSender::MainThread(sender),
+            ScriptEventLoopSender::MainThread {
+                sender,
+                producer_fence: self.script_thread().document_producer_fence(),
+            },
             ScriptEventLoopReceiver::MainThread(receiver),
         )
     }
 
     pub(crate) fn event_loop_sender(&self) -> ScriptEventLoopSender {
-        ScriptEventLoopSender::MainThread(self.script_chan.clone())
+        ScriptEventLoopSender::MainThread {
+            sender: self.script_chan.clone(),
+            producer_fence: self.script_thread().document_producer_fence(),
+        }
     }
 
     pub(crate) fn image_cache(&self) -> Arc<dyn ImageCache> {
@@ -707,9 +714,10 @@ impl Window {
             .push(PendingImageCallback(Box::new(callback)));
 
         let image_cache_sender = self.image_cache_sender.clone();
-        Box::new(move |message| {
+        let callback = Box::new(move |message| {
             let _ = image_cache_sender.send(message);
-        })
+        });
+        fence_image_callback(&self.script_thread().document_producer_fence(), callback)
     }
 
     fn pending_layout_image_notification(&self, response: PendingImageResponse) {
@@ -3647,13 +3655,16 @@ impl Window {
             let mut images = self.pending_images_for_rasterization.borrow_mut();
             if !images.contains_key(&(image.id, image.size)) {
                 let image_cache_sender = self.image_cache_sender.clone();
+                let callback = Box::new(move |response| {
+                    let _ = image_cache_sender.send(response);
+                });
+                let callback =
+                    fence_image_callback(&self.script_thread().document_producer_fence(), callback);
                 image_cache.add_rasterization_complete_listener(
                     pipeline_id,
                     image.id,
                     image.size,
-                    Box::new(move |response| {
-                        let _ = image_cache_sender.send(response);
-                    }),
+                    callback,
                 );
             }
 
@@ -3733,7 +3744,7 @@ impl Window {
         script_chan: Sender<MainThreadScriptMsg>,
         layout: Box<dyn Layout>,
         font_context: Arc<FontContext>,
-        image_cache_sender: Sender<ImageCacheResponseMessage>,
+        image_cache_sender: Sender<DocumentProducerEnvelope<ImageCacheResponseMessage>>,
         resource_threads: ResourceThreads,
         storage_threads: StorageThreads,
         #[cfg(feature = "bluetooth")] bluetooth_thread: GenericSender<BluetoothRequest>,

@@ -6556,8 +6556,9 @@ impl DocumentMethods<crate::DomTypeHolder> for Document {
         // document.close() before emitting an end-of-file token). The encoding confidence is
         // irrelevant.
         let resource_threads = self.window.as_global_scope().resource_threads().clone();
+        let producer_fence = self.loader().producer_fence();
         *self.loader.borrow_mut() =
-            DocumentLoader::new_with_threads(resource_threads, Some(self.url()));
+            DocumentLoader::new_with_threads(resource_threads, Some(self.url()), producer_fence);
         ServoParser::parse_html_script_input(cx, self, self.url());
 
         // Step 17. Set the insertion point to point at just before the end of the input stream

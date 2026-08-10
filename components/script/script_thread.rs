@@ -110,8 +110,10 @@ use style::stylesheets::{AllowImportRules, DocumentStyleSheet, Origin, Styleshee
 use style::thread_state::{self, ThreadState};
 use stylo_atoms::Atom;
 use timers::{
-    DocumentClock, DocumentClockError, DocumentTime, DocumentTimeSurface, TimerControlError,
-    TimerDeadlineSnapshot, TimerEventRequest, TimerId, TimerScheduler,
+    DocumentClock, DocumentClockError, DocumentProducerCheckpoint, DocumentProducerFence,
+    DocumentProducerFenceError, DocumentProducerObservation, DocumentProducerObserver,
+    DocumentTime, DocumentTimeSurface, TimerControlError, TimerDeadlineSnapshot, TimerEventRequest,
+    TimerId, TimerScheduler,
 };
 use url::Position;
 #[cfg(feature = "webgpu")]
@@ -163,6 +165,7 @@ use crate::microtask::{Microtask, MicrotaskQueue};
 use crate::mime::{APPLICATION, CHARSET, MimeExt, TEXT, XML};
 use crate::navigation::{InProgressLoad, NavigationListener};
 use crate::network_listener::{FetchResponseListener, submit_timing};
+use crate::producer_fence::DocumentProducerEnvelope;
 use crate::realms::enter_auto_realm;
 use crate::script_mutation_observers::ScriptMutationObservers;
 use crate::script_runtime::{
@@ -337,6 +340,14 @@ pub struct ScriptThread {
     /// The document-observable clock shared by this event loop's Window realms and timer queue.
     #[no_trace]
     document_clock: DocumentClock,
+
+    /// Linearizable watermarks for same-event-loop producers that can affect document visuals.
+    #[no_trace]
+    document_producer_fence: DocumentProducerFence,
+
+    /// Advances only after this ScriptThread finishes a Window microtask checkpoint.
+    #[no_trace]
+    document_producer_checkpoint: Cell<DocumentProducerCheckpoint>,
 
     /// A proxy to the `SystemFontService` to use for accessing system font lists.
     #[no_trace]
@@ -534,7 +545,10 @@ impl ScriptThreadFactory for ScriptThread {
                 memory_profiler_sender.run_with_memory_reporting(
                     || script_thread.start(&mut cx),
                     reporter_name,
-                    ScriptEventLoopSender::MainThread(script_thread.senders.self_sender.clone()),
+                    ScriptEventLoopSender::MainThread {
+                        sender: script_thread.senders.self_sender.clone(),
+                        producer_fence: script_thread.document_producer_fence.clone(),
+                    },
                     CommonScriptMsg::CollectReports,
                 );
 
@@ -629,6 +643,28 @@ impl ScriptThread {
     /// Return the document clock for the current ScriptThread.
     pub(crate) fn current_document_clock() -> DocumentClock {
         with_script_thread(|script_thread| script_thread.document_clock.clone())
+    }
+
+    /// Return the fence shared by every participating Window realm on this ScriptThread.
+    pub(crate) fn document_producer_fence(&self) -> DocumentProducerFence {
+        self.document_producer_fence.clone()
+    }
+
+    /// Return the latest token created after a completed Window microtask checkpoint.
+    pub(crate) fn document_producer_checkpoint(&self) -> DocumentProducerCheckpoint {
+        self.document_producer_checkpoint.get()
+    }
+
+    /// Mechanically observe producer watermarks at the latest completed microtask checkpoint.
+    #[expect(dead_code)]
+    pub(crate) fn observe_document_producers(
+        &self,
+        observer: &mut DocumentProducerObserver,
+    ) -> Result<DocumentProducerObservation, DocumentProducerFenceError> {
+        observer.observe(
+            &self.document_producer_fence,
+            self.document_producer_checkpoint(),
+        )
     }
 
     /// Observe the current finite timer deadline without activating it.
@@ -955,8 +991,11 @@ impl ScriptThread {
         background_hang_monitor_register: Box<dyn BackgroundHangMonitorRegister>,
     ) -> (Rc<ScriptThread>, js::context::JSContext) {
         let (self_sender, self_receiver) = unbounded();
-        let mut runtime =
-            Runtime::new(Some(ScriptEventLoopSender::MainThread(self_sender.clone())));
+        let document_producer_fence = DocumentProducerFence::default();
+        let mut runtime = Runtime::new(Some(ScriptEventLoopSender::MainThread {
+            sender: self_sender.clone(),
+            producer_fence: document_producer_fence.clone(),
+        }));
 
         // SAFETY: We ensure that only one JSContext exists in this thread.
         // This is the first one and the only one
@@ -1074,6 +1113,8 @@ impl ScriptThread {
                         document_clock.clone(),
                     )),
                     document_clock,
+                    document_producer_fence,
+                    document_producer_checkpoint: Cell::new(DocumentProducerCheckpoint::ZERO),
                     microtask_queue,
                     js_runtime: Rc::new(runtime),
                     closed_pipelines: DomRefCell::new(FxHashSet::default()),
@@ -1967,12 +2008,17 @@ impl ScriptThread {
             ScriptThreadMessage::WebDriverScriptCommand(pipeline_id, msg) => {
                 self.handle_webdriver_msg(pipeline_id, msg, cx)
             },
-            ScriptThreadMessage::WebFontLoadFinished(pipeline_id, event) => {
+            ScriptThreadMessage::WebFontLoadFinished(pipeline_id, acknowledgement) => {
                 // If the font load did not succeed then this message only serves to bump the script thread
                 // so it attempts to resolve the document.fonts.ready promise. This happens as a result
                 // of processing this message, so there's nothing more to do.
-                if event == WebFontLoadEvent::LoadedSuccessfully {
+                if acknowledgement.event() == Some(WebFontLoadEvent::LoadedSuccessfully) {
                     self.handle_web_font_loaded(pipeline_id)
+                }
+                if let Some(producer_lease_id) = acknowledgement.producer_lease_id() {
+                    self.document_producer_fence
+                        .complete_lease(producer_lease_id)
+                        .expect("web-font completion named an unknown producer lease");
                 }
             },
             ScriptThreadMessage::DispatchIFrameLoadEvent {
@@ -2205,9 +2251,11 @@ impl ScriptThread {
             },
             MainThreadScriptMsg::NavigationResponse {
                 pipeline_id,
-                message,
+                response,
             } => {
-                self.handle_navigation_response(cx, pipeline_id, *message);
+                let (message, producer_guard) = (*response).into_parts();
+                self.handle_navigation_response(cx, pipeline_id, message);
+                drop(producer_guard);
             },
             MainThreadScriptMsg::WorkletLoaded(pipeline_id) => {
                 self.handle_worklet_loaded(pipeline_id)
@@ -2436,9 +2484,10 @@ impl ScriptThread {
 
     fn handle_msg_from_image_cache(
         &self,
-        response: ImageCacheResponseMessage,
+        response: DocumentProducerEnvelope<ImageCacheResponseMessage>,
         cx: &mut js::context::JSContext,
     ) {
+        let (response, producer_guard) = response.into_parts();
         match response {
             ImageCacheResponseMessage::NotifyPendingImageLoadStatus(pending_image_response) => {
                 let window = self
@@ -2456,6 +2505,7 @@ impl ScriptThread {
                 }
             },
         };
+        drop(producer_guard);
     }
 
     fn handle_webdriver_msg(
@@ -3575,10 +3625,11 @@ impl ScriptThread {
             incomplete.load_data.url, incomplete.pipeline_id
         );
 
-        let font_context = Arc::new(FontContext::new(
+        let font_context = Arc::new(FontContext::new_with_document_producer_fence(
             self.system_font_service.clone(),
             self.paint_api.clone(),
             self.resource_threads.clone(),
+            self.document_producer_fence.clone(),
         ));
 
         let font_resolver = Arc::new(SvgFontResolver {
@@ -3699,6 +3750,7 @@ impl ScriptThread {
         let loader = DocumentLoader::new_with_threads(
             self.resource_threads.clone(),
             Some(final_url.clone()),
+            self.document_producer_fence.clone(),
         );
 
         let content_type: Option<Mime> = metadata
@@ -4060,8 +4112,11 @@ impl ScriptThread {
             false,
             self.resource_threads.core_thread.clone(),
         );
-        NavigationListener::new(request_builder, self.senders.self_sender.clone())
-            .initiate_fetch(&self.resource_threads.core_thread, None);
+        NavigationListener::new(request_builder, self.senders.self_sender.clone()).initiate_fetch(
+            &self.resource_threads.core_thread,
+            None,
+            &self.document_producer_fence,
+        );
         self.incomplete_loads.borrow_mut().push(incomplete);
     }
 
@@ -4251,8 +4306,11 @@ impl ScriptThread {
             false,
             self.resource_threads.core_thread.clone(),
         );
-        NavigationListener::new(request_builder, self.senders.self_sender.clone())
-            .initiate_fetch(&self.resource_threads.core_thread, response_init);
+        NavigationListener::new(request_builder, self.senders.self_sender.clone()).initiate_fetch(
+            &self.resource_threads.core_thread,
+            response_init,
+            &self.document_producer_fence,
+        );
     }
 
     /// Synchronously fetch a page with fixed content. Stores the `InProgressLoad`
@@ -4467,7 +4525,13 @@ impl ScriptThread {
                 cx,
                 |id| self.documents.borrow().find_global(id),
                 globals,
-            )
+            );
+            self.document_producer_checkpoint.set(
+                self.document_producer_checkpoint
+                    .get()
+                    .checked_next()
+                    .expect("document producer checkpoint sequence exhausted"),
+            );
         }
     }
 

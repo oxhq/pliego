@@ -20,6 +20,7 @@ use num_derive::{NumOps, One, Zero};
 use serde::{Deserialize, Serialize};
 use servo_base::generic_channel::GenericSharedMemory;
 pub use system_font_service_proxy::*;
+use timers::DocumentProducerLeaseId;
 use webrender_api::euclid::num::One;
 
 /// An index that refers to a byte offset in a text run. This could
@@ -131,8 +132,38 @@ pub enum WebFontLoadEvent {
     UnblockedFontReadyPromise,
 }
 
+/// Terminal acknowledgement for one logical web-font chain.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct WebFontLoadFinishedAck {
+    event: Option<WebFontLoadEvent>,
+    producer_lease_id: Option<DocumentProducerLeaseId>,
+}
+
+impl WebFontLoadFinishedAck {
+    /// Construct a terminal acknowledgement with an optional semantic event and producer lease.
+    pub fn new(
+        event: Option<WebFontLoadEvent>,
+        producer_lease_id: Option<DocumentProducerLeaseId>,
+    ) -> Self {
+        Self {
+            event,
+            producer_lease_id,
+        }
+    }
+
+    /// Return the existing web-font event, if this completion needs one.
+    pub const fn event(self) -> Option<WebFontLoadEvent> {
+        self.event
+    }
+
+    /// Return the document producer lease that ScriptThread must acknowledge after handling.
+    pub const fn producer_lease_id(self) -> Option<DocumentProducerLeaseId> {
+        self.producer_lease_id
+    }
+}
+
 pub type StylesheetWebFontLoadFinishedCallback =
-    Arc<dyn Fn(WebFontLoadEvent) + Send + Sync + 'static>;
+    Arc<dyn Fn(WebFontLoadFinishedAck) + Send + Sync + 'static>;
 
 /// A data structure to store data for fonts. Data is stored internally in an
 /// [`GenericSharedMemory`] handle, so that it can be sent without serialization

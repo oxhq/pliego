@@ -8,6 +8,7 @@ use std::rc::Rc;
 use cssparser::{Parser, ParserInput};
 use dom_struct::dom_struct;
 use fonts::{FontContext, FontContextWebFontMethods, FontTemplate, LowercaseFontFamilyName};
+use fonts_traits::WebFontLoadFinishedAck;
 use js::context::JSContext;
 use js::rust::HandleObject;
 use script_bindings::cell::DomRefCell;
@@ -605,7 +606,9 @@ impl FontFaceMethods<crate::DomTypeHolder> for FontFace {
             .to_sendable();
 
         let finished_callback = Box::new(
-            move |family_name: LowercaseFontFamilyName, load_result: Option<_>| {
+            move |family_name: LowercaseFontFamilyName,
+                  load_result: Option<_>,
+                  acknowledgement: WebFontLoadFinishedAck| {
                 let trusted = trusted.clone();
 
                 // Step 5. When the load operation completes, successfully or not, queue a task to
@@ -639,6 +642,16 @@ impl FontFaceMethods<crate::DomTypeHolder> for FontFace {
                         // take care of changing the status of the `FontFaceSet` in which this
                         // `FontFace` is a member, for both failed and successful load.
                         font_face_set.handle_font_face_status_changed(cx, &font_face);
+                    }
+
+                    if let Some(producer_lease_id) = acknowledgement.producer_lease_id() {
+                        font_face
+                            .global()
+                            .as_window()
+                            .script_thread()
+                            .document_producer_fence()
+                            .complete_lease(producer_lease_id)
+                            .expect("script font completion named an unknown producer lease");
                     }
                 }));
             },

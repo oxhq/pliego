@@ -147,6 +147,7 @@ use crate::fetch::{DeferredFetchRecordId, FetchGroup, QueuedDeferredFetchRecord}
 use crate::messaging::{CommonScriptMsg, ScriptEventLoopReceiver, ScriptEventLoopSender};
 use crate::microtask::Microtask;
 use crate::network_listener::{FetchResponseListener, NetworkListener};
+use crate::producer_fence::fence_fetch_until_eof;
 use crate::realms::enter_auto_realm;
 use crate::script_module::{
     ImportMap, ModuleRequest, ModuleStatus, ResolvedModule, ScriptFetchOptions,
@@ -3378,11 +3379,17 @@ impl GlobalScope {
         request_builder: RequestBuilder,
         network_listener: NetworkListener<Listener>,
     ) {
+        let callback = network_listener.into_callback();
+        let callback = if let Some(window) = self.downcast::<Window>() {
+            fence_fetch_until_eof(&window.script_thread().document_producer_fence(), callback)
+        } else {
+            callback
+        };
         fetch_async(
             &self.core_resource_thread(),
             request_builder,
             None,
-            network_listener.into_callback(),
+            callback,
         );
     }
 

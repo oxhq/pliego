@@ -29,7 +29,7 @@ use crate::dom::node::node::Node;
 use crate::dom::promise::Promise;
 use crate::dom::shadowroot::ShadowRoot;
 use crate::dom::types::HTMLDialogElement;
-use crate::messaging::{CommonScriptMsg, MainThreadScriptMsg};
+use crate::messaging::CommonScriptMsg;
 use crate::script_runtime::ScriptThreadEventCategory;
 use crate::task::TaskOnce;
 use crate::task_source::TaskSourceName;
@@ -142,8 +142,7 @@ impl Document {
             Some(pipeline_id),
             TaskSourceName::DOMManipulation,
         );
-        let msg = MainThreadScriptMsg::Common(script_msg);
-        self.window().main_thread_script_chan().send(msg).unwrap();
+        self.window().event_loop_sender().send(script_msg).unwrap();
 
         promise
     }
@@ -192,8 +191,7 @@ impl Document {
             pipeline_id,
             TaskSourceName::DOMManipulation,
         );
-        let msg = MainThreadScriptMsg::Common(script_msg);
-        window.main_thread_script_chan().send(msg).unwrap();
+        window.event_loop_sender().send(script_msg).unwrap();
 
         promise
     }

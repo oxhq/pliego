@@ -243,6 +243,7 @@ impl ServoParser {
         let loader = DocumentLoader::new_with_threads(
             context_document.loader().resource_threads().clone(),
             Some(url.clone()),
+            context_document.loader().producer_fence(),
         );
         let document = Document::new(
             cx,
