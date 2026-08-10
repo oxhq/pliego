@@ -194,11 +194,7 @@ impl ResponseHeaderEvidence {
 
         // Header names are case-insensitive and cross-name insertion order is not semantic.
         // Preserve the original order of repeated values for the same name.
-        entries.sort_by(|left, right| {
-            left.0
-                .cmp(right.0)
-                .then_with(|| left.2.cmp(&right.2))
-        });
+        entries.sort_by(|left, right| left.0.cmp(right.0).then_with(|| left.2.cmp(&right.2)));
         let mut names = entries
             .iter()
             .map(|(name, _, _)| String::from_utf8_lossy(name).into_owned())
@@ -221,10 +217,10 @@ impl ResponseHeaderEvidence {
     }
 
     pub(crate) fn retained_metadata_bytes(&self) -> u64 {
-        self.sha256.len() as u64
-            + self.names.iter().map(|name| name.len() as u64).sum::<u64>()
-            + self.names.len() as u64 * std::mem::size_of::<String>() as u64
-            + std::mem::size_of::<Self>() as u64
+        self.sha256.len() as u64 +
+            self.names.iter().map(|name| name.len() as u64).sum::<u64>() +
+            self.names.len() as u64 * std::mem::size_of::<String>() as u64 +
+            std::mem::size_of::<Self>() as u64
     }
 
     fn intercepted_metadata_bytes(&self) -> u64 {
@@ -661,8 +657,8 @@ impl ResourcePolicy {
                         "file is outside the document root".into(),
                     ),
                     Err(error)
-                        if error.kind() == std::io::ErrorKind::NotFound
-                            && nearest_existing_ancestor(&path)
+                        if error.kind() == std::io::ErrorKind::NotFound &&
+                            nearest_existing_ancestor(&path)
                                 .is_some_and(|ancestor| ancestor.starts_with(document_root)) =>
                     {
                         failure(
@@ -875,14 +871,18 @@ pub(crate) fn normalize_controlled_response_headers(
     mut headers: http::HeaderMap,
     body_bytes: usize,
 ) -> Result<http::HeaderMap, ResourcePolicyFailure> {
-    if headers.get_all(http::header::CONTENT_ENCODING).iter().any(|value| {
-        value.to_str().map_or(true, |value| {
-            value
-                .split(',')
-                .map(str::trim)
-                .any(|encoding| !encoding.eq_ignore_ascii_case("identity"))
+    if headers
+        .get_all(http::header::CONTENT_ENCODING)
+        .iter()
+        .any(|value| {
+            value.to_str().map_or(true, |value| {
+                value
+                    .split(',')
+                    .map(str::trim)
+                    .any(|encoding| !encoding.eq_ignore_ascii_case("identity"))
+            })
         })
-    }) {
+    {
         return Err(ResourcePolicyFailure::new(
             request,
             "RESOURCE_ENCODING_UNSUPPORTED",
@@ -974,12 +974,12 @@ fn aggregate_limit_message(max_resident_bytes: u64) -> String {
 
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
 pub(crate) fn http_root_allows(root: &url::Url, requested: &url::Url) -> bool {
-    requested.username().is_empty()
-        && requested.password().is_none()
-        && root.scheme() == requested.scheme()
-        && root.host_str() == requested.host_str()
-        && root.port_or_known_default() == requested.port_or_known_default()
-        && requested.path().starts_with(root.path())
+    requested.username().is_empty() &&
+        requested.password().is_none() &&
+        root.scheme() == requested.scheme() &&
+        root.host_str() == requested.host_str() &&
+        root.port_or_known_default() == requested.port_or_known_default() &&
+        requested.path().starts_with(root.path())
 }
 
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]

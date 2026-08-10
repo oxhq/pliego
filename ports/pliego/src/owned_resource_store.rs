@@ -13,8 +13,8 @@ use pliego::{IMAGE_LIMITS, ImageLimit};
 
 use super::asset_cache;
 use super::resource_policy::{
-    ControlledResource, MAX_RESOURCE_EVENTS, MAX_RESOURCE_METADATA_BYTES,
-    ResourcePolicyFailure, ResourceRequest, ResponseHeaderEvidence, sha256_hex,
+    ControlledResource, MAX_RESOURCE_EVENTS, MAX_RESOURCE_METADATA_BYTES, ResourcePolicyFailure,
+    ResourceRequest, ResponseHeaderEvidence, sha256_hex,
 };
 
 const MAX_DATA_URL_OVERHEAD_BYTES: u64 = 4 * 1024;
@@ -43,9 +43,9 @@ struct ResponseIdentity {
 
 impl ResponseIdentity {
     fn metadata_bytes(&self) -> u64 {
-        self.content_type.as_ref().map_or(0, String::len) as u64
-            + self.content_address.len() as u64
-            + self.response_headers.retained_metadata_bytes()
+        self.content_type.as_ref().map_or(0, String::len) as u64 +
+            self.content_address.len() as u64 +
+            self.response_headers.retained_metadata_bytes()
     }
 }
 
@@ -195,11 +195,11 @@ impl OwnedResourceStore {
         let content_address = format!("sha256:{}", sha256_hex(&body));
 
         if let Some(existing) = self.requests.get(&identity) {
-            return if existing.status == status
-                && existing.content_type.as_deref() == content_type.as_deref()
-                && existing.content_address == content_address
-                && existing.response_headers == response_headers
-                && existing.body() == body
+            return if existing.status == status &&
+                existing.content_type.as_deref() == content_type.as_deref() &&
+                existing.content_address == content_address &&
+                existing.response_headers == response_headers &&
+                existing.body() == body
             {
                 Ok(existing.clone())
             } else {
@@ -213,9 +213,8 @@ impl OwnedResourceStore {
             content_address: content_address.clone(),
             response_headers: response_headers.clone(),
         };
-        if request.method != "HEAD"
-            && self
-                .url_to_resource
+        if request.method != "HEAD" &&
+            self.url_to_resource
                 .get(&identity.url)
                 .is_some_and(|existing| existing != &response_identity)
         {
@@ -452,17 +451,17 @@ fn image_cost(
         .and_then(|value| value.split(';').next())
         .map(str::trim);
     let declares_image = media_type.is_some_and(|value| value.starts_with("image/"));
-    if (!declares_image && request.destination != "Image")
-        || media_type.is_some_and(|value| value.eq_ignore_ascii_case("image/svg+xml"))
+    if (!declares_image && request.destination != "Image") ||
+        media_type.is_some_and(|value| value.eq_ignore_ascii_case("image/svg+xml"))
     {
         return Ok(None);
     }
 
     let decompressed_bytes_per_pixel = if body.starts_with(b"\x89PNG\r\n\x1a\n") {
         if body.get(24) == Some(&16) { 8 } else { 4 }
-    } else if body.starts_with(b"GIF87a")
-        || body.starts_with(b"GIF89a")
-        || (body.len() >= 12 && &body[..4] == b"RIFF" && &body[8..12] == b"WEBP")
+    } else if body.starts_with(b"GIF87a") ||
+        body.starts_with(b"GIF89a") ||
+        (body.len() >= 12 && &body[..4] == b"RIFF" && &body[8..12] == b"WEBP")
     {
         4
     } else if body.starts_with(b"\xff\xd8\xff") {
@@ -642,18 +641,14 @@ fn gif_has_multiple_frames(body: &[u8]) -> Result<bool, &'static str> {
                         return Err("truncated GIF local color table");
                     }
                 }
-                offset = offset
-                    .checked_add(1)
-                    .ok_or("GIF image data overflow")?;
+                offset = offset.checked_add(1).ok_or("GIF image data overflow")?;
                 if offset > body.len() {
                     return Err("truncated GIF LZW code size");
                 }
                 offset = skip_gif_sub_blocks(body, offset)?;
             },
             0x21 => {
-                offset = offset
-                    .checked_add(1)
-                    .ok_or("GIF extension overflow")?;
+                offset = offset.checked_add(1).ok_or("GIF extension overflow")?;
                 if offset > body.len() {
                     return Err("truncated GIF extension label");
                 }
@@ -685,11 +680,8 @@ fn webp_has_multiple_frames(body: &[u8]) -> Result<bool, &'static str> {
     if body.len() < 12 {
         return Err("truncated WebP header");
     }
-    let declared = u32::from_le_bytes(
-        body[4..8]
-            .try_into()
-            .map_err(|_| "truncated WebP length")?,
-    ) as usize;
+    let declared =
+        u32::from_le_bytes(body[4..8].try_into().map_err(|_| "truncated WebP length")?) as usize;
     let end = declared
         .checked_add(8)
         .ok_or("WebP container length overflow")?;

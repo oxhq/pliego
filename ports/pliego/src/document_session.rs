@@ -35,11 +35,10 @@ use super::owned_resource_store::{OwnedResourceStore, decode_bounded_data_url};
 use super::readiness::{self, Readiness, ReadinessPolicy};
 use super::render_environment::{apply_timezone, unexpected_host_font};
 use super::resource_policy::{
-    ControlledResource, MAX_RESOURCE_EVENTS, MAX_RESOURCE_METADATA_BYTES,
-    MAX_RESOURCE_TIMEOUT_MS, ResourceAccounting, ResourceEvidence, ResourcePolicy,
-    ResourcePolicyConfig, ResourcePolicyDecision, ResourcePolicyFailure, ResourceRequest,
-    ResourceSource, create_controlled_http_client, fetch_controlled_http,
-    normalize_controlled_response_headers,
+    ControlledResource, MAX_RESOURCE_EVENTS, MAX_RESOURCE_METADATA_BYTES, MAX_RESOURCE_TIMEOUT_MS,
+    ResourceAccounting, ResourceEvidence, ResourcePolicy, ResourcePolicyConfig,
+    ResourcePolicyDecision, ResourcePolicyFailure, ResourceRequest, ResourceSource,
+    create_controlled_http_client, fetch_controlled_http, normalize_controlled_response_headers,
 };
 
 const RESOURCE_EVIDENCE_ENTRY_OVERHEAD_BYTES: u64 = 256;
@@ -153,7 +152,6 @@ impl ResourceEvidenceLog {
         self.entries.push(evidence);
         Ok(())
     }
-
 }
 
 pub(crate) struct DocumentSession {
@@ -590,9 +588,7 @@ impl WebViewDelegate for DocumentDelegate {
                     &request,
                     "RESOURCE_METADATA_LIMIT_EXCEEDED",
                     "denied",
-                    format!(
-                        "document resource loads exceed the {MAX_RESOURCE_EVENTS}-event bound"
-                    ),
+                    format!("document resource loads exceed the {MAX_RESOURCE_EVENTS}-event bound"),
                 ),
             );
             return;
@@ -632,13 +628,7 @@ impl WebViewDelegate for DocumentDelegate {
                     },
                 };
                 headers.insert(CONTENT_TYPE, content_type);
-                self.serve_owned_resource(
-                    load,
-                    request,
-                    source,
-                    resource,
-                    headers,
-                );
+                self.serve_owned_resource(load, request, source, resource, headers);
             },
             ResourcePolicyDecision::FetchHttp => {
                 let client = self
@@ -683,13 +673,7 @@ impl WebViewDelegate for DocumentDelegate {
                 };
                 let mut headers = HeaderMap::new();
                 headers.insert(CONTENT_TYPE, HeaderValue::from_static(content_type));
-                self.serve_owned_resource(
-                    load,
-                    request,
-                    source,
-                    resource,
-                    headers,
-                );
+                self.serve_owned_resource(load, request, source, resource, headers);
             },
             ResourcePolicyDecision::Fail(failure) => self.cancel_resource(load, failure),
         }
@@ -720,17 +704,14 @@ impl DocumentDelegate {
                 return;
             },
         };
-        let headers = match normalize_controlled_response_headers(
-            &request,
-            headers,
-            resource.body.len(),
-        ) {
-            Ok(headers) => headers,
-            Err(failure) => {
-                self.cancel_resource(load, failure);
-                return;
-            },
-        };
+        let headers =
+            match normalize_controlled_response_headers(&request, headers, resource.body.len()) {
+                Ok(headers) => headers,
+                Err(failure) => {
+                    self.cancel_resource(load, failure);
+                    return;
+                },
+            };
         let resource = match self
             .resource_store
             .borrow_mut()
@@ -814,8 +795,8 @@ mod tests {
         ResponseHeaderEvidence, VirtualResourceSpec,
     };
     use super::{
-        DocumentSession, ReadinessPolicy, RenderEnvironment, ResourceEvidenceLog,
-        ResourcePolicyConfig, SessionError, RESOURCE_EVIDENCE_ENTRY_OVERHEAD_BYTES,
+        DocumentSession, RESOURCE_EVIDENCE_ENTRY_OVERHEAD_BYTES, ReadinessPolicy,
+        RenderEnvironment, ResourceEvidenceLog, ResourcePolicyConfig, SessionError,
         stable_render_timeout, validate_host_font_policy, validate_resource_policy,
     };
 
@@ -1077,8 +1058,8 @@ mod tests {
             .and_then(|line| line.split_whitespace().nth(1))
             .unwrap_or("/");
         let cookie_seen = request.lines().any(|line| {
-            line.to_ascii_lowercase().starts_with("cookie:")
-                && line.contains("pliego_session_seed=1")
+            line.to_ascii_lowercase().starts_with("cookie:") &&
+                line.contains("pliego_session_seed=1")
         });
         let (status, content_type, body) = match path {
             "/allowed.js" => ("200 OK", "text/javascript", ALLOWED_HTTP_BODY.to_vec()),
@@ -1219,8 +1200,8 @@ mod tests {
             wait_for_fonts: true,
         };
         assert!(
-            stable_render_timeout(readiness).unwrap()
-                > std::time::Duration::from_millis(readiness.timeout_ms)
+            stable_render_timeout(readiness).unwrap() >
+                std::time::Duration::from_millis(readiness.timeout_ms)
         );
     }
 
@@ -1397,8 +1378,8 @@ mod tests {
                         loaded: 2,
                         delegated: 0,
                         failed: 0,
-                        body_bytes: (std::fs::metadata(&input).unwrap().len()
-                            + std::fs::metadata(&script).unwrap().len()),
+                        body_bytes: (std::fs::metadata(&input).unwrap().len() +
+                            std::fs::metadata(&script).unwrap().len()),
                         unavailable_bodies: 0,
                     }
                 );
@@ -1463,13 +1444,13 @@ mod tests {
                 let asset_body = fs::read(input.parent().unwrap().join("first.js")).unwrap();
                 let asset_sha = content_address(&asset_body);
                 assert!(assets.iter().all(|resource| {
-                    resource.request.method == "GET"
-                        && resource.request.destination == "Script"
-                        && !resource.request.is_for_main_frame
-                        && resource.status == "loaded"
-                        && resource.response_status == Some(200)
-                        && resource.bytes == Some(asset_body.len() as u64)
-                        && resource.sha256.as_deref() == Some(&asset_sha[7..])
+                    resource.request.method == "GET" &&
+                        resource.request.destination == "Script" &&
+                        !resource.request.is_for_main_frame &&
+                        resource.status == "loaded" &&
+                        resource.response_status == Some(200) &&
+                        resource.bytes == Some(asset_body.len() as u64) &&
+                        resource.sha256.as_deref() == Some(&asset_sha[7..])
                 }));
                 let first = assets
                     .iter()
@@ -1545,9 +1526,9 @@ mod tests {
                     .resources
                     .iter()
                     .find(|resource| {
-                        resource.source == source
-                            && resource.content_address.as_deref()
-                                == Some(expected_address.as_str())
+                        resource.source == source &&
+                            resource.content_address.as_deref() ==
+                                Some(expected_address.as_str())
                     })
                     .expect("raster evidence should reference its owned exact bytes");
                 assert_eq!(evidence.status, "loaded");
@@ -1615,9 +1596,9 @@ mod tests {
                 assert_eq!(error.resource_accounting.unavailable_bodies, 1);
                 assert_eq!(
                     error.resource_accounting.requests,
-                    error.resource_accounting.loaded
-                        + error.resource_accounting.delegated
-                        + error.resource_accounting.failed
+                    error.resource_accounting.loaded +
+                        error.resource_accounting.delegated +
+                        error.resource_accounting.failed
                 );
                 assert_eq!(error.resources.len(), 1);
             },
