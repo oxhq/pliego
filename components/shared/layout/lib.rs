@@ -1173,26 +1173,26 @@ impl From<Option<PseudoElement>> for FragmentType {
             Some(PseudoElement::After) => FragmentType::AfterPseudoContent,
             Some(PseudoElement::Before) => FragmentType::BeforePseudoContent,
             Some(PseudoElement::Marker) => FragmentType::MarkerPseudoContent,
-            None
-            | Some(
-                PseudoElement::Selection
-                | PseudoElement::FirstLetter
-                | PseudoElement::Backdrop
-                | PseudoElement::DetailsContent
-                | PseudoElement::ColorSwatch
-                | PseudoElement::FileSelectorButton
-                | PseudoElement::Placeholder
-                | PseudoElement::SliderFill
-                | PseudoElement::SliderThumb
-                | PseudoElement::SliderTrack
-                | PseudoElement::ServoTextControlInnerContainer
-                | PseudoElement::ServoTextControlInnerEditor
-                | PseudoElement::ServoAnonymousBox
-                | PseudoElement::ServoAnonymousTable
-                | PseudoElement::ServoAnonymousTableCell
-                | PseudoElement::ServoAnonymousTableRow
-                | PseudoElement::ServoTableGrid
-                | PseudoElement::ServoTableWrapper,
+            None |
+            Some(
+                PseudoElement::Selection |
+                PseudoElement::FirstLetter |
+                PseudoElement::Backdrop |
+                PseudoElement::DetailsContent |
+                PseudoElement::ColorSwatch |
+                PseudoElement::FileSelectorButton |
+                PseudoElement::Placeholder |
+                PseudoElement::SliderFill |
+                PseudoElement::SliderThumb |
+                PseudoElement::SliderTrack |
+                PseudoElement::ServoTextControlInnerContainer |
+                PseudoElement::ServoTextControlInnerEditor |
+                PseudoElement::ServoAnonymousBox |
+                PseudoElement::ServoAnonymousTable |
+                PseudoElement::ServoAnonymousTableCell |
+                PseudoElement::ServoAnonymousTableRow |
+                PseudoElement::ServoTableGrid |
+                PseudoElement::ServoTableWrapper,
             ) => FragmentType::FragmentBody,
         }
     }
@@ -1270,9 +1270,8 @@ impl ImageAnimationState {
             return false;
         }
         let time_interval_since_last_update = now - self.frame_start_time;
-        let mut remain_time_interval = time_interval_since_last_update
-            - self
-                .image
+        let mut remain_time_interval = time_interval_since_last_update -
+            self.image
                 .frames
                 .get(self.active_frame)
                 .unwrap()
@@ -1435,7 +1434,6 @@ mod test {
     use std::time::Duration;
 
     use pixels::{CorsStatus, ImageFrame, ImageMetadata, PixelFormat, RasterImage, Repeat};
-
     use style::selector_parser::PseudoElement;
 
     use crate::{
