@@ -1751,7 +1751,7 @@ window.pliego?.defer();
         let metadata_probe_base = _metadata_probe_server
             .as_ref()
             .map(|server| server.base_url.as_str())
-            .unwrap_or(http_base);
+            .unwrap_or(http_base.as_str());
         if let Some(server) = _metadata_probe_server.as_ref() {
             resources
                 .allowed_http_roots
