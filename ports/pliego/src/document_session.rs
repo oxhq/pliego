@@ -888,7 +888,9 @@ impl DocumentDelegate {
         request: ResourceRequest,
         failure: ResourcePolicyFailure,
     ) {
-        if failure.fatal || request.load_role == WebResourceLoadRole::DocumentContent {
+        if request.load_role != WebResourceLoadRole::DocumentMetadata ||
+            !failure.is_optional_metadata_failure()
+        {
             self.cancel_resource(load, failure);
             return;
         }
@@ -1035,7 +1037,7 @@ mod tests {
             method: "GET".into(),
             url: url::Url::parse("https://example.test/resource").unwrap(),
             destination: "Script".into(),
-            load_role: WebResourceLoadRole::DocumentContent,
+            load_role: WebResourceLoadRole::DocumentMetadata,
             referrer_url: None,
             is_for_main_frame: false,
             is_redirect: false,
@@ -1063,6 +1065,8 @@ mod tests {
         log.begin_event(&evidence.request).unwrap();
         let error = log.push(evidence).unwrap_err();
         assert_eq!(error.code, "RESOURCE_METADATA_LIMIT_EXCEEDED");
+        assert_eq!(error.load_role, WebResourceLoadRole::DocumentMetadata);
+        assert!(error.fatal);
         assert!(log.entries.is_empty());
         assert_eq!(log.metadata_bytes, 0);
     }

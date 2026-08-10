@@ -10,6 +10,7 @@ use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use embedder_traits::WebResourceLoadRole;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
@@ -200,11 +201,14 @@ impl SessionArtifacts {
         url: &str,
         method: &str,
         destination: &str,
+        load_role: WebResourceLoadRole,
+        fatal: bool,
         referrer_url: Option<&str>,
         is_for_main_frame: bool,
         is_redirect: bool,
         reason: &str,
     ) -> io::Result<()> {
+        let cancelled = !fatal && load_role == WebResourceLoadRole::DocumentMetadata;
         self.append(
             "resources.jsonl",
             serde_json::json!({
@@ -217,6 +221,9 @@ impl SessionArtifacts {
                 "code": code,
                 "method": method,
                 "destination": destination,
+                "load_role": load_role,
+                "fatal": !cancelled,
+                "cancelled": cancelled,
                 "referrer_url": referrer_url,
                 "is_for_main_frame": is_for_main_frame,
                 "is_redirect": is_redirect,
@@ -863,7 +870,7 @@ mod tests {
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use super::{LocalDocument, SessionArtifacts, SessionFailure};
+    use super::{LocalDocument, SessionArtifacts, SessionFailure, WebResourceLoadRole};
 
     #[test]
     fn resolves_a_local_file_and_rejects_escape_paths() {
@@ -933,6 +940,8 @@ mod tests {
                 "https://example.test/font.woff2",
                 "GET",
                 "Font",
+                WebResourceLoadRole::DocumentMetadata,
+                false,
                 Some("file:///index.html"),
                 false,
                 false,
@@ -1003,6 +1012,9 @@ mod tests {
         assert_eq!(resources[2]["request_id"], serde_json::Value::Null);
         assert_eq!(resources[2]["url"], "https://example.test/font.woff2");
         assert_eq!(resources[2]["destination"], "Font");
+        assert_eq!(resources[2]["load_role"], "DocumentMetadata");
+        assert_eq!(resources[2]["fatal"], false);
+        assert_eq!(resources[2]["cancelled"], true);
         assert_eq!(resources[2]["reason"], "network access is disabled");
         assert_eq!(
             fs::read(directory.join("resources").join(resource_hash)).unwrap(),

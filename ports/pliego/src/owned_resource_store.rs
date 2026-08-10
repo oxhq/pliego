@@ -982,14 +982,18 @@ mod tests {
         assert_eq!(changed.resident_bytes(), 3);
 
         let mut full = OwnedResourceStore::new(asset_cache::MAX_CACHE_BYTES - 1);
+        let mut metadata_request = request("GET", "https://example.test/two.bin", "Script");
+        metadata_request.load_role = WebResourceLoadRole::DocumentMetadata;
         let error = full
             .retain(
-                &request("GET", "https://example.test/two.bin", "Script"),
+                &metadata_request,
                 resource("application/octet-stream", b"12".to_vec()),
                 &headers("application/octet-stream"),
             )
             .unwrap_err();
         assert_eq!(error.code, "RESOURCE_DENIED");
+        assert_eq!(error.load_role, WebResourceLoadRole::DocumentMetadata);
+        assert!(error.fatal);
         assert!(full.requests.is_empty());
         assert!(full.resources.is_empty());
         assert_eq!(full.resident_bytes(), asset_cache::MAX_CACHE_BYTES - 1);

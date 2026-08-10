@@ -338,7 +338,8 @@ impl ResourceEvidence {
     }
 
     pub(crate) fn cancelled(request: ResourceRequest, failure: ResourcePolicyFailure) -> Self {
-        debug_assert!(!failure.fatal);
+        debug_assert!(failure.is_optional_metadata_failure());
+        debug_assert_eq!(request.load_role, WebResourceLoadRole::DocumentMetadata);
         Self {
             request,
             source: None,
@@ -488,6 +489,10 @@ impl ResourcePolicyFailure {
     pub(crate) fn nonfatal(mut self) -> Self {
         self.fatal = false;
         self
+    }
+
+    pub(crate) fn is_optional_metadata_failure(&self) -> bool {
+        !self.fatal && self.load_role == WebResourceLoadRole::DocumentMetadata
     }
 
     #[cfg(feature = "document-session")]
@@ -1337,10 +1342,48 @@ mod tests {
         std::os::unix::fs::symlink(&outside, root.join("escape.css")).unwrap();
         let root = root.canonicalize().unwrap();
 
+        let escape_path = root.join("escape.css");
         assert!(matches!(
-            read_bounded_document_resource(&root.join("escape.css"), &root),
+            read_bounded_document_resource(&escape_path, &root),
             Err(LocalResourceReadError::OutsideRoot)
         ));
+
+        #[cfg(feature = "document-session")]
+        {
+            let mut metadata_request = ResourceRequest {
+                method: "GET".into(),
+                url: url::Url::from_file_path(&escape_path).unwrap(),
+                destination: "Image".into(),
+                load_role: WebResourceLoadRole::DocumentMetadata,
+                referrer_url: None,
+                is_for_main_frame: false,
+                is_redirect: false,
+            };
+            let policy = ResourcePolicy::default();
+            let ResourcePolicyDecision::Fail(metadata_failure) =
+                policy.decide(&root, &metadata_request)
+            else {
+                panic!("metadata symlink escape must be denied")
+            };
+            assert!(!metadata_failure.fatal);
+            let cancellation =
+                ResourceEvidence::cancelled(metadata_request.clone(), metadata_failure);
+            assert_eq!(cancellation.status, "cancelled");
+            assert!(!cancellation.fatal);
+            assert_eq!(cancellation.source, None);
+            assert_eq!(
+                cancellation.failure.as_ref().unwrap().load_role,
+                WebResourceLoadRole::DocumentMetadata
+            );
+
+            metadata_request.load_role = WebResourceLoadRole::DocumentContent;
+            let ResourcePolicyDecision::Fail(content_failure) =
+                policy.decide(&root, &metadata_request)
+            else {
+                panic!("the identical content symlink escape must be fatal")
+            };
+            assert!(content_failure.fatal);
+        }
 
         fs::remove_dir_all(sandbox).unwrap();
     }
@@ -1487,17 +1530,28 @@ mod tests {
             ResourcePolicyDecision::FetchHttp
         ));
 
-        let mut metadata_denial = request(
+        let content_denial_request = request(
             "GET",
             url::Url::parse("https://denied.invalid/report.bin").unwrap(),
             false,
         );
-        metadata_denial.load_role = WebResourceLoadRole::DocumentMetadata;
-        let ResourcePolicyDecision::Fail(metadata_denial) = policy.decide(&root, &metadata_denial)
+        let mut metadata_denial_request = content_denial_request.clone();
+        metadata_denial_request.load_role = WebResourceLoadRole::DocumentMetadata;
+        let ResourcePolicyDecision::Fail(metadata_denial) =
+            policy.decide(&root, &metadata_denial_request)
         else {
             panic!("metadata outside the configured roots should be denied")
         };
         assert!(!metadata_denial.fatal);
+
+        let ResourcePolicyDecision::Fail(content_denial) =
+            policy.decide(&root, &content_denial_request)
+        else {
+            panic!("the identical content request must fail closed")
+        };
+        assert!(content_denial.fatal);
+        assert_eq!(content_denial.code, metadata_denial.code);
+        assert_eq!(content_denial.reason, metadata_denial.reason);
 
         let mut metadata_budget =
             request("GET", url::Url::from_file_path(oversized).unwrap(), false);
@@ -1508,6 +1562,28 @@ mod tests {
         };
         assert_eq!(metadata_budget.code, "RESOURCE_DENIED");
         assert!(metadata_budget.fatal);
+
+        let aggregate_url = url::Url::parse("https://virtual.test/inside.css").unwrap();
+        let aggregate_policy = ResourcePolicy::resolve_with_budget(
+            &ResourcePolicyConfig {
+                virtual_resources: vec![VirtualResourceSpec {
+                    url: aggregate_url.clone(),
+                    path: "inside.css".into(),
+                }],
+                ..ResourcePolicyConfig::default()
+            },
+            &root,
+            0,
+        );
+        let mut metadata_aggregate = request("GET", aggregate_url, false);
+        metadata_aggregate.load_role = WebResourceLoadRole::DocumentMetadata;
+        let ResourcePolicyDecision::Fail(metadata_aggregate) =
+            aggregate_policy.decide(&root, &metadata_aggregate)
+        else {
+            panic!("metadata must not bypass the aggregate body budget")
+        };
+        assert_eq!(metadata_aggregate.code, "RESOURCE_DENIED");
+        assert!(metadata_aggregate.fatal);
 
         let artifact = policy.artifact("sha256:test");
         assert_eq!(artifact["timeout_ms"], 321);
