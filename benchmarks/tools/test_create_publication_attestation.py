@@ -4,6 +4,9 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -13,6 +16,22 @@ import create_publication_attestation
 
 def main() -> None:
     key = "e" * 64
+    variable = benchmark_publication.TRUSTED_ATTESTATION_KEY_ENV
+    previous = os.environ.pop(variable, None)
+    try:
+        os.environ[variable] = key
+        assert benchmark_publication.consume_trusted_attestation_key() == key
+        assert variable not in os.environ
+        child = subprocess.run(
+            [sys.executable, "-c", f"import os; raise SystemExit({variable!r} in os.environ)"],
+            check=False,
+            env=os.environ.copy(),
+        )
+        assert child.returncode == 0
+    finally:
+        os.environ.pop(variable, None)
+        if previous is not None:
+            os.environ[variable] = previous
     with tempfile.TemporaryDirectory() as raw:
         root = Path(raw).resolve()
         candidate = root / "candidate.json"
@@ -45,6 +64,7 @@ def main() -> None:
             proof,
             observer,
             "fixture.json",
+            "bootstrap",
             key,
         )
         attestation = root / "123-1.json"
@@ -55,6 +75,7 @@ def main() -> None:
             allow_fixture_authority=True,
         )
         assert trusted.document["subject"]["candidate_sha256"] == benchmark_publication.sha256_file(candidate)
+        assert trusted.document["subject"]["operation"] == "bootstrap"
 
         forged_unsigned = {name: value for name, value in document.items() if name != "authentication"}
         forged_unsigned["subject"] = {**forged_unsigned["subject"], "candidate_sha256": "f" * 64}

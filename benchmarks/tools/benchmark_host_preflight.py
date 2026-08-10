@@ -23,7 +23,6 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
 SCHEMA = ROOT / "benchmarks" / "schema" / "benchmark-host-proof.v1.json"
-EXPECTED_REPOSITORY = "OxHQ/pliego"
 EXPECTED_GROUP = "Pliego dedicated benchmarks"
 EXPECTED_LABELS = {"self-hosted", "Linux", "X64", "pliego-benchmark-pinned-v1"}
 MODES = ("production", "negative-github-hosted", "negative-missing-thermal")
@@ -33,6 +32,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import benchmark_publication  # noqa: E402
 import validate_host_proof  # noqa: E402
 import observer_ab  # noqa: E402
+
+EXPECTED_REPOSITORY = benchmark_publication.CANONICAL_REPOSITORY
 
 
 def now() -> str:
@@ -569,10 +570,13 @@ def collect_api(config: dict[str, Any], token: str, fixture_root: Path | None, e
         return value
     runner = config.get("runner") if isinstance(config.get("runner"), dict) else {}
     group_id = runner.get("group_id", 0)
+    organization = EXPECTED_REPOSITORY.partition("/")[0]
     urls = {
-        "branch": "https://api.github.com/repos/OxHQ/pliego/branches/main",
-        "runner_group": f"https://api.github.com/orgs/OxHQ/actions/runner-groups/{group_id}",
-        "group_runners": f"https://api.github.com/orgs/OxHQ/actions/runner-groups/{group_id}/runners?per_page=100",
+        "branch": f"https://api.github.com/repos/{EXPECTED_REPOSITORY}/branches/main",
+        "runner_group": f"https://api.github.com/orgs/{organization}/actions/runner-groups/{group_id}",
+        "group_runners": (
+            f"https://api.github.com/orgs/{organization}/actions/runner-groups/{group_id}/runners?per_page=100"
+        ),
     }
     responses: dict[str, Any] = {}
     for name, url in urls.items():

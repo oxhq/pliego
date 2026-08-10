@@ -1340,6 +1340,7 @@ def main() -> int:
     parser.add_argument("--host-proof", type=Path)
     parser.add_argument("--attestation", type=Path)
     args = parser.parse_args()
+    trusted_attestation_key = benchmark_publication.consume_trusted_attestation_key()
 
     data = load_json(args.result)
     schema = load_json(args.schema)
@@ -1409,7 +1410,7 @@ def main() -> int:
             proof_digest = benchmark_publication.host_proof_bundle_digest(proof_path)
             trusted = benchmark_publication.load_trusted_publication_attestation(
                 args.attestation,
-                os.environ.get(benchmark_publication.TRUSTED_ATTESTATION_KEY_ENV, ""),
+                trusted_attestation_key,
             )
             attestation = trusted.document
             candidate_binding = proof.get("command", {}).get("candidate")
@@ -1420,6 +1421,7 @@ def main() -> int:
                 "host_proof_bundle_sha256": proof_digest,
                 "observer_proof_sha256": attestation["subject"]["observer_proof_sha256"],
                 "output_basename": args.result.name,
+                "operation": attestation["subject"]["operation"],
             }:
                 raise ValueError("protected attestation subject differs from the host proof/result")
             if (

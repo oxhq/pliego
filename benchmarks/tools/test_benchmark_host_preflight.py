@@ -52,7 +52,7 @@ def make_fixture(root: Path) -> Path:
     write_json(
         fixture / "env.json",
         {
-            "GITHUB_REPOSITORY": "OxHQ/pliego",
+            "GITHUB_REPOSITORY": benchmark_publication.CANONICAL_REPOSITORY,
             "GITHUB_EVENT_NAME": "workflow_dispatch",
             "GITHUB_REF": "refs/heads/main",
             "GITHUB_REF_PROTECTED": "true",
@@ -305,6 +305,38 @@ class BenchmarkHostPreflightTests(unittest.TestCase):
             self.assertEqual(proof(output)["status"], "rejected")
             self.assertNotIn("samples.started", events(output))
 
+    def test_noncanonical_repository_case_rejects_before_samples(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fixture = make_fixture(root)
+            env = json.loads((fixture / "env.json").read_text(encoding="utf-8"))
+            env["GITHUB_REPOSITORY"] = "OxHQ/pliego"
+            write_json(fixture / "env.json", env)
+            output = root / "out"
+            result = invoke(fixture, output, *EXPECTED_COMMAND)
+            self.assertEqual(result.returncode, 1, result.stderr)
+            document = proof(output)
+            self.assertEqual(document["status"], "rejected")
+            repository_check = next(check for check in document["checks"] if check["id"] == "identity.repository")
+            self.assertFalse(repository_check["passed"])
+            self.assertNotIn("samples.started", events(output))
+
+    def test_noncanonical_workflow_ref_case_rejects_before_samples(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fixture = make_fixture(root)
+            env = json.loads((fixture / "env.json").read_text(encoding="utf-8"))
+            env["GITHUB_WORKFLOW_REF"] = "OxHQ/pliego/.github/workflows/pliego-dedicated-benchmark.yml@refs/heads/main"
+            write_json(fixture / "env.json", env)
+            output = root / "out"
+            result = invoke(fixture, output, *EXPECTED_COMMAND)
+            self.assertEqual(result.returncode, 1, result.stderr)
+            document = proof(output)
+            self.assertEqual(document["status"], "rejected")
+            workflow_check = next(check for check in document["checks"] if check["id"] == "identity.workflow_ref")
+            self.assertFalse(workflow_check["passed"])
+            self.assertNotIn("samples.started", events(output))
+
     def test_wrong_architecture_rejects_before_samples(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -487,10 +519,14 @@ class BenchmarkHostPreflightTests(unittest.TestCase):
         self.assertIn("environment: Pliego dedicated benchmarks", workflow)
         self.assertIn("permissions:\n  contents: read", workflow)
         self.assertEqual(workflow.count("secrets.OXHQ_BENCHMARK_PROOF_TOKEN"), 1)
-        self.assertEqual(workflow.count("secrets.PLIEGO_BENCHMARK_ATTESTATION_HMAC_KEY_HEX"), 1)
-        self.assertNotIn("\n    env:\n", workflow)
+        self.assertEqual(workflow.count("secrets.PLIEGO_BENCHMARK_ATTESTATION_HMAC_KEY_HEX"), 3)
+        dedicated_header = workflow.split("  dedicated:", 1)[1].split("    steps:", 1)[0]
+        self.assertNotIn("\n    env:\n", dedicated_header)
         self.assertIn("negative-github-hosted", workflow)
         self.assertIn("negative-missing-thermal", workflow)
+        self.assertIn("publication:\n        description:", workflow)
+        self.assertIn("PUBLICATION_OPERATION: ${{ inputs.publication }}", workflow)
+        self.assertEqual(workflow.count('--operation "$PUBLICATION_OPERATION"'), 2)
         self.assertIn("--forbid-event samples.started", workflow)
         self.assertIn("-- python3 benchmarks/tools/test_process_tree_sampler.py --acceptance-overhead", workflow)
         self.assertIn('--observer-measurements-out "$OBSERVER_MEASUREMENTS"', workflow)
@@ -498,12 +534,39 @@ class BenchmarkHostPreflightTests(unittest.TestCase):
         self.assertIn("python3 benchmarks/tools/create_publication_attestation.py", workflow)
         self.assertIn('--observer-proof "$OBSERVER_PROOF"', workflow)
         self.assertIn('--attestation "$ATTESTATION"', workflow)
+        evidence_step = workflow.split("- name: Gate host and produce benchmark evidence", 1)[1].split(
+            "- name: Authenticate benchmark publication subject", 1
+        )[0]
+        attestation_step = workflow.split("- name: Authenticate benchmark publication subject", 1)[1].split(
+            "- name: Publish authenticated benchmark baseline", 1
+        )[0]
+        publisher_step = workflow.split("- name: Publish authenticated benchmark baseline", 1)[1].split(
+            "- name: Stage exact publication source artifact", 1
+        )[0]
+        source_stage_step = workflow.split("- name: Stage exact publication source artifact", 1)[1].split(
+            "- name: Remove frozen fixture mirror", 1
+        )[0]
+        verifier_step = workflow.split("- name: Revalidate HMAC-bound publication source", 1)[1].split(
+            "- name: Retain newly verified baseline only", 1
+        )[0]
+        self.assertNotIn("PLIEGO_BENCHMARK_ATTESTATION_HMAC_KEY_HEX", evidence_step)
+        self.assertIn("create_publication_attestation.py", attestation_step)
+        self.assertNotIn("publish_benchmark.py", attestation_step)
+        self.assertIn("${PUBLISHED_BASELINE##*/}", attestation_step)
+        self.assertNotIn("$(basename", attestation_step)
+        self.assertIn("publish_benchmark.py", publisher_step)
+        self.assertNotIn("create_publication_attestation.py", publisher_step)
+        self.assertNotIn("secrets.PLIEGO_BENCHMARK_ATTESTATION_HMAC_KEY_HEX", source_stage_step)
+        self.assertIn('test -z "${PLIEGO_BENCHMARK_ATTESTATION_HMAC_KEY_HEX:-}"', source_stage_step)
+        for sensitive_step in (attestation_step, publisher_step, verifier_step):
+            self.assertEqual(sensitive_step.count("secrets.PLIEGO_BENCHMARK_ATTESTATION_HMAC_KEY_HEX"), 1)
+            self.assertIn("unset PLIEGO_BENCHMARK_ATTESTATION_HMAC_KEY_HEX", sensitive_step)
         self.assertIn("Initialize setup diagnostics before checkout", workflow)
         self.assertIn("benchmark_setup_evidence.py", workflow)
         self.assertIn("pliego-setup-evidence-${{ github.run_id }}-${{ github.run_attempt }}", workflow)
         self.assertIn("if: success() && inputs.mode == 'production'", workflow)
         always_upload = workflow.split("- name: Retain host proof and failure evidence", 1)[1].split(
-            "- name: Retain successful candidate and publication", 1
+            "- name: Retain exact publication source", 1
         )[0]
         self.assertNotIn("benchmarks/baselines/", always_upload)
         self.assertNotIn("pliego-candidate-", always_upload)

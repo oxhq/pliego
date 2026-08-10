@@ -38,7 +38,7 @@ def attestation(candidate_sha256: str = "c" * 64) -> dict:
         "version": 1,
         "status": "authorized",
         "authority": "github-protected-environment-hmac-v1",
-        "repository": "OxHQ/pliego",
+        "repository": benchmark_publication.CANONICAL_REPOSITORY,
         "ref": "refs/heads/main",
         "revision": "a" * 40,
         "workflow_ref": benchmark_publication.TRUSTED_WORKFLOW_REF,
@@ -52,6 +52,7 @@ def attestation(candidate_sha256: str = "c" * 64) -> dict:
             "host_proof_bundle_sha256": "b" * 64,
             "observer_proof_sha256": "d" * 64,
             "output_basename": "fixture.json",
+            "operation": "replace",
         },
     }
     return benchmark_publication.authenticate_publication_attestation(unsigned, ATTESTATION_KEY)
@@ -245,12 +246,28 @@ def main() -> None:
                 "d" * 64,
                 "c" * 64,
                 "fixture.json",
+                "replace",
                 authorization,
             )
         except benchmark_publication.PublicationError:
             pass
         else:
             raise AssertionError("self-asserted dedicated candidate was accepted")
+        try:
+            benchmark_publication.bind_publication(
+                result(),
+                proof,
+                "b" * 64,
+                "d" * 64,
+                "c" * 64,
+                "fixture.json",
+                "bootstrap",
+                authorization,
+            )
+        except benchmark_publication.PublicationError as error:
+            assert "does not bind" in str(error)
+        else:
+            raise AssertionError("normal replacement authority silently authorized bootstrap")
         bound = benchmark_publication.bind_publication(
             result(),
             proof,
@@ -258,6 +275,7 @@ def main() -> None:
             "d" * 64,
             "c" * 64,
             "fixture.json",
+            "replace",
             authorization,
         )
         assert bound["publication"]["host_proof_bundle_sha256"] == "b" * 64
@@ -374,6 +392,78 @@ def main() -> None:
             assert not list(moved_late_parent.glob(".*.rollback"))
             assert not list(moved_late_parent.glob(".*.tmp"))
 
+            unlinked_parent = directory / "unlinked-after-journal-baselines"
+            unlinked_parent.mkdir()
+            unlinked_baseline = unlinked_parent / "fixture.json"
+            unlinked_baseline.write_bytes(original)
+            with benchmark_publication.bind_publication_directory(unlinked_parent.resolve()) as bound_directory:
+
+                def unlink_destination_after_backup() -> None:
+                    unlinked_baseline.unlink()
+
+                try:
+                    benchmark_publication.atomic_publish_bytes(
+                        bound_directory,
+                        unlinked_baseline.name,
+                        b'{"official":"must-not-survive-unlink-race"}\n',
+                        after_backup=unlink_destination_after_backup,
+                    )
+                except benchmark_publication.PublicationError as error:
+                    assert "must already exist" in str(error)
+                else:
+                    raise AssertionError("destination unlink after rollback creation was accepted")
+            assert unlinked_baseline.read_bytes() == original
+            assert not list(unlinked_parent.glob(".*.rollback"))
+            assert not list(unlinked_parent.glob(".*.tmp"))
+
+            swapped_parent = directory / "swapped-after-journal-baselines"
+            swapped_parent.mkdir()
+            swapped_baseline = swapped_parent / "fixture.json"
+            swapped_baseline.write_bytes(original)
+            with benchmark_publication.bind_publication_directory(swapped_parent.resolve()) as bound_directory:
+
+                def swap_destination_after_backup() -> None:
+                    replacement = swapped_parent / "replacement.json"
+                    replacement.write_bytes(b"raced destination\n")
+                    os.replace(replacement, swapped_baseline)
+
+                try:
+                    benchmark_publication.atomic_publish_bytes(
+                        bound_directory,
+                        swapped_baseline.name,
+                        b'{"official":"must-not-survive-swap-race"}\n',
+                        after_backup=swap_destination_after_backup,
+                    )
+                except benchmark_publication.PublicationError as error:
+                    assert "identity changed" in str(error)
+                else:
+                    raise AssertionError("destination swap after rollback creation was accepted")
+            assert swapped_baseline.read_bytes() == original
+            assert not list(swapped_parent.glob(".*.rollback"))
+            assert not list(swapped_parent.glob(".*.tmp"))
+
+            prepared_parent = directory / "interrupted-after-journal-baselines"
+            prepared_parent.mkdir()
+            prepared_baseline = prepared_parent / "fixture.json"
+            prepared_baseline.write_bytes(original)
+            with benchmark_publication.bind_publication_directory(prepared_parent.resolve()) as bound_directory:
+                try:
+                    benchmark_publication.atomic_publish_bytes(
+                        bound_directory,
+                        prepared_baseline.name,
+                        b'{"official":"must-not-survive-prepared-crash"}\n',
+                        after_backup=lambda: (_ for _ in ()).throw(
+                            benchmark_publication.PublicationInterrupted("simulated crash after rollback journal")
+                        ),
+                    )
+                except benchmark_publication.PublicationInterrupted:
+                    pass
+                else:
+                    raise AssertionError("post-journal interruption was accepted")
+            assert prepared_baseline.read_bytes() == original
+            assert not list(prepared_parent.glob(".*.rollback"))
+            assert not list(prepared_parent.glob(".*.tmp"))
+
             rollback_parent = directory / "rollback-baselines"
             rollback_parent.mkdir()
             rollback_baseline = rollback_parent / "fixture.json"
@@ -408,6 +498,139 @@ def main() -> None:
                 )
             assert successful_baseline.read_bytes() == b'{"official":"published"}\n'
             assert not list(successful_parent.glob(".*.tmp"))
+
+            bootstrap_parent = directory / "bootstrap-baselines"
+            bootstrap_parent.mkdir()
+            bootstrap_baseline = bootstrap_parent / "fixture.json"
+            with benchmark_publication.bind_publication_directory(bootstrap_parent.resolve()) as bound_directory:
+                benchmark_publication.atomic_bootstrap_bytes(
+                    bound_directory,
+                    bootstrap_baseline.name,
+                    b'{"official":"bootstrapped"}\n',
+                )
+                try:
+                    benchmark_publication.atomic_bootstrap_bytes(
+                        bound_directory,
+                        bootstrap_baseline.name,
+                        b'{"official":"bootstrapped-twice"}\n',
+                    )
+                except benchmark_publication.PublicationError as error:
+                    assert "must not already exist" in str(error)
+                else:
+                    raise AssertionError("one-time baseline bootstrap was repeated")
+                benchmark_publication.atomic_publish_bytes(
+                    bound_directory,
+                    bootstrap_baseline.name,
+                    b'{"official":"normal-replacement"}\n',
+                )
+            assert bootstrap_baseline.read_bytes() == b'{"official":"normal-replacement"}\n'
+            assert not list(bootstrap_parent.glob(".*.bootstrap"))
+
+            interrupted_bootstrap_parent = directory / "interrupted-bootstrap-baselines"
+            interrupted_bootstrap_parent.mkdir()
+            interrupted_bootstrap = interrupted_bootstrap_parent / "fixture.json"
+            with benchmark_publication.bind_publication_directory(
+                interrupted_bootstrap_parent.resolve()
+            ) as bound_directory:
+                try:
+                    benchmark_publication.atomic_bootstrap_bytes(
+                        bound_directory,
+                        interrupted_bootstrap.name,
+                        b'{"official":"must-not-survive-staged-bootstrap-crash"}\n',
+                        simulate_crash=True,
+                    )
+                except benchmark_publication.PublicationInterrupted:
+                    pass
+                else:
+                    raise AssertionError("pre-link bootstrap interruption was accepted")
+                assert not interrupted_bootstrap.exists()
+                try:
+                    benchmark_publication.atomic_bootstrap_bytes(
+                        bound_directory,
+                        interrupted_bootstrap.name,
+                        b'{"official":"must-not-survive-bootstrap-crash"}\n',
+                        after_create=lambda: (_ for _ in ()).throw(
+                            benchmark_publication.PublicationInterrupted("simulated crash after bootstrap link")
+                        ),
+                    )
+                except benchmark_publication.PublicationInterrupted:
+                    pass
+                else:
+                    raise AssertionError("post-link bootstrap interruption was accepted")
+            assert not interrupted_bootstrap.exists()
+            assert not list(interrupted_bootstrap_parent.glob(".*.bootstrap"))
+
+            bootstrap_outside = directory / "bootstrap-outside-sentinel.json"
+            bootstrap_outside.write_bytes(b"outside bootstrap sentinel\n")
+            symlink_bootstrap_parent = directory / "symlink-bootstrap-baselines"
+            symlink_bootstrap_parent.mkdir()
+            symlink_bootstrap = symlink_bootstrap_parent / "fixture.json"
+            symlink_bootstrap.symlink_to(bootstrap_outside)
+            with benchmark_publication.bind_publication_directory(
+                symlink_bootstrap_parent.resolve()
+            ) as bound_directory:
+                try:
+                    benchmark_publication.atomic_bootstrap_bytes(
+                        bound_directory,
+                        symlink_bootstrap.name,
+                        b'{"official":"escaped-bootstrap"}\n',
+                    )
+                except benchmark_publication.PublicationError as error:
+                    assert "must not already exist" in str(error)
+                else:
+                    raise AssertionError("symlink bootstrap destination was accepted")
+            assert bootstrap_outside.read_bytes() == b"outside bootstrap sentinel\n"
+
+            raced_bootstrap_parent = directory / "raced-bootstrap-baselines"
+            raced_bootstrap_parent.mkdir()
+            raced_bootstrap = raced_bootstrap_parent / "fixture.json"
+            with benchmark_publication.bind_publication_directory(raced_bootstrap_parent.resolve()) as bound_directory:
+
+                def race_bootstrap_destination() -> None:
+                    raced_bootstrap.symlink_to(bootstrap_outside)
+
+                try:
+                    benchmark_publication.atomic_bootstrap_bytes(
+                        bound_directory,
+                        raced_bootstrap.name,
+                        b'{"official":"raced-bootstrap"}\n',
+                        before_create=race_bootstrap_destination,
+                    )
+                except benchmark_publication.PublicationError as error:
+                    assert "must not already exist" in str(error)
+                else:
+                    raise AssertionError("bootstrap destination creation race was accepted")
+            assert raced_bootstrap.is_symlink()
+            assert bootstrap_outside.read_bytes() == b"outside bootstrap sentinel\n"
+            assert not list(raced_bootstrap_parent.glob(".*.bootstrap"))
+
+            detached_bootstrap_parent = directory / "detached-bootstrap-baselines"
+            detached_bootstrap_parent.mkdir()
+            moved_detached_bootstrap_parent = directory / "detached-bootstrap-baselines-original"
+            detached_bootstrap = detached_bootstrap_parent / "fixture.json"
+            with benchmark_publication.bind_publication_directory(
+                detached_bootstrap_parent.resolve()
+            ) as bound_directory:
+
+                def replace_bootstrap_parent() -> None:
+                    detached_bootstrap_parent.rename(moved_detached_bootstrap_parent)
+                    detached_bootstrap_parent.mkdir()
+                    (detached_bootstrap_parent / detached_bootstrap.name).write_bytes(replacement_sentinel)
+
+                try:
+                    benchmark_publication.atomic_bootstrap_bytes(
+                        bound_directory,
+                        detached_bootstrap.name,
+                        b'{"official":"detached-bootstrap"}\n',
+                        before_create=replace_bootstrap_parent,
+                    )
+                except benchmark_publication.PublicationError as error:
+                    assert "directory identity changed" in str(error)
+                else:
+                    raise AssertionError("bootstrap through a replaced parent was accepted")
+            assert not (moved_detached_bootstrap_parent / detached_bootstrap.name).exists()
+            assert (detached_bootstrap_parent / detached_bootstrap.name).read_bytes() == replacement_sentinel
+            assert not list(moved_detached_bootstrap_parent.glob(".*.bootstrap"))
         else:
             try:
                 benchmark_publication.bind_publication_directory(publication_parent.resolve())

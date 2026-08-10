@@ -137,7 +137,7 @@
         "github_run_attempt": { "type": "integer", "minimum": 1 },
         "github_job": { "const": "dedicated" },
         "github_workflow_ref": {
-          "const": "OxHQ/pliego/.github/workflows/pliego-dedicated-benchmark.yml@refs/heads/main"
+          "const": "oxhq/pliego/.github/workflows/pliego-dedicated-benchmark.yml@refs/heads/main"
         },
         "runner_id": { "type": "integer", "minimum": 1 },
         "runner_name": { "type": "string", "minLength": 1 }
