@@ -491,12 +491,33 @@ def atomic_publish_bytes(
         except BaseException:
             if backup_created:
                 try:
-                    os.rename(
+                    rollback_metadata = os.stat(
                         rollback,
-                        name,
-                        src_dir_fd=directory.descriptor,
-                        dst_dir_fd=directory.descriptor,
+                        dir_fd=directory.descriptor,
+                        follow_symlinks=False,
                     )
+                    try:
+                        current_metadata = os.stat(
+                            name,
+                            dir_fd=directory.descriptor,
+                            follow_symlinks=False,
+                        )
+                    except FileNotFoundError:
+                        current_metadata = None
+                    if current_metadata is not None and (
+                        current_metadata.st_dev,
+                        current_metadata.st_ino,
+                    ) == (rollback_metadata.st_dev, rollback_metadata.st_ino):
+                        # POSIX rename is a no-op when both hard-link names
+                        # identify the same file, so remove the journal name.
+                        os.unlink(rollback, dir_fd=directory.descriptor)
+                    else:
+                        os.rename(
+                            rollback,
+                            name,
+                            src_dir_fd=directory.descriptor,
+                            dst_dir_fd=directory.descriptor,
+                        )
                     backup_created = False
                     os.fsync(directory.descriptor)
                 except OSError as rollback_error:
