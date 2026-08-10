@@ -1128,8 +1128,8 @@ fn adapt_retained_canvas(
     diagnostics_index: usize,
 ) -> Result<(Arc<HybridCanvasCapture>, usize, bool), crate::hybrid_canvas::CanvasError> {
     let identity = Arc::as_ptr(&snapshot) as usize;
-    if let Some(cached) = cache.get(&identity)
-        && Arc::ptr_eq(&cached.source, &snapshot)
+    if let Some(cached) = cache.get(&identity) &&
+        Arc::ptr_eq(&cached.source, &snapshot)
     {
         return Ok((Arc::clone(&cached.capture), cached.diagnostics_index, false));
     }

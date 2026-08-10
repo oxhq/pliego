@@ -249,8 +249,8 @@ impl Registry {
             .unsupported
             .as_ref()
             .is_some_and(|unsupported| {
-                !can_replace_unsupported
-                    || unsupported.reason == RetainedCanvasUnsupportedReason::RetentionBudget
+                !can_replace_unsupported ||
+                    unsupported.reason == RetainedCanvasUnsupportedReason::RetentionBudget
             })
         {
             return false;
@@ -258,8 +258,8 @@ impl Registry {
         let next_command_count = self.retained_command_count.checked_add(1);
         let next_raster_bytes = self.retained_raster_bytes.checked_add(raster_bytes);
         let within_budget = next_command_count
-            .is_some_and(|count| count <= self.max_retained_commands)
-            && next_raster_bytes.is_some_and(|bytes| bytes <= self.max_retained_raster_bytes);
+            .is_some_and(|count| count <= self.max_retained_commands) &&
+            next_raster_bytes.is_some_and(|bytes| bytes <= self.max_retained_raster_bytes);
         if !within_budget {
             self.mark_retention_budget_exceeded(Some(canvas_id));
             return false;
@@ -330,8 +330,8 @@ pub(crate) fn recreate_canvas(canvas_id: CanvasId, size: Option<Size2D<u64>>) {
 pub(crate) fn associate_image_key(canvas_id: CanvasId, image_key: ImageKey) {
     if ENABLED.load(Ordering::Acquire) {
         let mut registry = registry();
-        let is_new = !registry.image_keys.contains_key(&image_key)
-            && !registry.completed.contains_key(&image_key);
+        let is_new = !registry.image_keys.contains_key(&image_key) &&
+            !registry.completed.contains_key(&image_key);
         if is_new && !registry.reserve_object(Some(canvas_id)) {
             return;
         }
@@ -386,9 +386,9 @@ pub(crate) fn retain_fill_rect(
         );
         return;
     }
-    if composition.alpha != 1.0
-        || composition.composition_operation
-            != CompositionOrBlending::Composition(CompositionStyle::SourceOver)
+    if composition.alpha != 1.0 ||
+        composition.composition_operation !=
+            CompositionOrBlending::Composition(CompositionStyle::SourceOver)
     {
         mark_unsupported(
             canvas_id,
@@ -453,10 +453,10 @@ pub(crate) fn retain_pixel_readback(
     let size = snapshot.size();
     let pixels = u64::from(size.width).saturating_mul(u64::from(size.height));
     let bytes = pixels.saturating_mul(4);
-    if u64::from(size.width) > MAX_RASTER_DIMENSION
-        || u64::from(size.height) > MAX_RASTER_DIMENSION
-        || pixels > MAX_RASTER_PIXELS
-        || bytes > MAX_RASTER_BYTES
+    if u64::from(size.width) > MAX_RASTER_DIMENSION ||
+        u64::from(size.height) > MAX_RASTER_DIMENSION ||
+        pixels > MAX_RASTER_PIXELS ||
+        bytes > MAX_RASTER_BYTES
     {
         mark_unsupported(
             canvas_id,
@@ -469,10 +469,10 @@ pub(crate) fn retain_pixel_readback(
     {
         let mut registry = registry();
         let can_replace_unsupported = registry.canvases.get(&canvas_id).is_some_and(|canvas| {
-            origin.x == 0
-                && origin.y == 0
-                && size.width == canvas.width
-                && size.height == canvas.height
+            origin.x == 0 &&
+                origin.y == 0 &&
+                size.width == canvas.width &&
+                size.height == canvas.height
         });
         if !registry.reserve_command(canvas_id, bytes, can_replace_unsupported) {
             return;
