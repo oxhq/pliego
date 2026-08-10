@@ -380,7 +380,7 @@
       "mutations": [
         { "operation": "replace", "path": "/navigation/items/0/language", "value": "sl-rozaj-rozaj" }
       ],
-      "expected": "language tag contains a repeated subtag"
+      "expected": "language tag contains a repeated variant subtag"
     }
   ]
 }

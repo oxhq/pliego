@@ -33,6 +33,7 @@
     "root": { "const": 0 },
     "nodes": {
       "type": "array",
+      "description": "Logical node references form one tree with a maximum depth of 1024 nodes, counting the root.",
       "minItems": 1,
       "maxItems": 1000000,
       "items": { "$ref": "#/definitions/node" }
@@ -46,6 +47,7 @@
     },
     "artifacts": {
       "type": "array",
+      "description": "Artifact references form a forest with a maximum depth of 1024 nodes, counting each root.",
       "maxItems": 1000000,
       "items": { "$ref": "#/definitions/artifact" }
     },
@@ -309,6 +311,7 @@
     },
     "table_semantics": {
       "type": "object",
+      "description": "The declared rows multiplied by columns must not exceed 1000000 table slots.",
       "additionalProperties": false,
       "required": ["kind", "rows", "columns"],
       "properties": {
@@ -484,6 +487,7 @@
         },
         "items": {
           "type": "array",
+          "description": "Outline references form a forest with a maximum depth of 1024 items, counting each root.",
           "minItems": 1,
           "maxItems": 1000000,
           "items": { "$ref": "#/definitions/outline_item" }

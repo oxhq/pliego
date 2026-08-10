@@ -37,6 +37,8 @@ RUNTIME_PATH = API2_ROOT / "goldens" / "accepted" / "runtime-contract.json"
 REQUEST_PATH = API2_ROOT / "goldens" / "accepted" / "render-request.a4.json"
 FRESH_PROCESS_COUNT = 100
 PDFUA1_PROFILE = {"schema": "pliego.profile.pdfua-1", "version": 1}
+MAX_STRUCTURE_DEPTH = 1024
+MAX_TABLE_SLOTS = 1_000_000
 
 PLAIN_ROLES = {
     "document",
@@ -112,21 +114,33 @@ def error(path: str, message: str) -> str:
 
 def canonical_text_errors(value: str, path: str) -> list[str]:
     errors: list[str] = []
+    first_control = next((character for character in value if unicodedata.category(character) == "Cc"), None)
+    first_surrogate = next((character for character in value if unicodedata.category(character) == "Cs"), None)
+    if first_control is not None:
+        errors.append(error(path, f"text contains a control character U+{ord(first_control):04X}"))
+    if first_surrogate is not None:
+        errors.append(error(path, f"text contains a surrogate code point U+{ord(first_surrogate):04X}"))
     if unicodedata.normalize("NFC", value) != value:
         errors.append(error(path, "text must use Unicode NFC"))
     if value != value.strip():
         errors.append(error(path, "text must not have leading or trailing whitespace"))
-    if len(value.encode("utf-8")) > 16384:
+    if first_surrogate is None and len(value.encode("utf-8")) > 16384:
         errors.append(error(path, "text exceeds the 16384-byte UTF-8 bound"))
-    if any(ord(character) < 0x20 or ord(character) == 0x7F for character in value):
-        errors.append(error(path, "text contains a control character"))
     return errors
 
 
 def canonical_language_errors(value: str, path: str) -> list[str]:
-    subtags = [subtag.lower() for subtag in value.split("-")]
-    if len(subtags) != len(set(subtags)):
-        return [error(path, "language tag contains a repeated subtag")]
+    subtags = value.split("-")
+    variant_start = 1
+    if variant_start < len(subtags) and len(subtags[variant_start]) == 4:
+        variant_start += 1
+    if variant_start < len(subtags) and (
+        len(subtags[variant_start]) == 2 or (len(subtags[variant_start]) == 3 and subtags[variant_start].isdigit())
+    ):
+        variant_start += 1
+    variants = [subtag.lower() for subtag in subtags[variant_start:]]
+    if len(variants) != len(set(variants)):
+        return [error(path, "language tag contains a repeated variant subtag")]
     return []
 
 
@@ -171,30 +185,43 @@ def graph_errors(document: dict[str, Any]) -> tuple[list[str], GraphState]:
     node_seen: set[int] = set()
     node_visiting: set[int] = set()
 
-    def walk_node(node_id: int, parent_id: int | None) -> None:
-        if node_id not in node_by_id:
-            errors.append(error("$.nodes", f"dangling logical node {node_id}"))
-            return
-        if node_id in node_visiting:
-            errors.append(error("$.nodes", f"logical node cycle at {node_id}"))
-            return
-        if node_id in node_seen:
-            errors.append(error("$.nodes", f"logical node {node_id} is referenced more than once"))
-            return
-        node_visiting.add(node_id)
-        node_seen.add(node_id)
-        node_order.append(node_id)
-        if parent_id is not None:
-            state.node_parent[node_id] = parent_id
-        for child in node_by_id[node_id]["children"]:
-            if child["kind"] == "node":
-                walk_node(child["id"], node_id)
-            else:
-                state.fragment_owners[child["id"]].append(("node", node_id))
-        node_visiting.remove(node_id)
-
     if document["root"] in node_by_id:
-        walk_node(document["root"], None)
+        node_stack: list[tuple[int, int | None, int, bool]] = [(document["root"], None, 1, False)]
+        while node_stack:
+            node_id, parent_id, depth, leaving = node_stack.pop()
+            if leaving:
+                node_visiting.remove(node_id)
+                continue
+            if node_id not in node_by_id:
+                errors.append(error("$.nodes", f"dangling logical node {node_id}"))
+                continue
+            if node_id in node_visiting:
+                errors.append(error("$.nodes", f"logical node cycle at {node_id}"))
+                continue
+            if node_id in node_seen:
+                errors.append(error("$.nodes", f"logical node {node_id} is referenced more than once"))
+                continue
+            if depth > MAX_STRUCTURE_DEPTH:
+                errors.append(
+                    error(
+                        f"$.nodes[{node_id}]",
+                        f"logical structure depth exceeds v1 maximum of {MAX_STRUCTURE_DEPTH}",
+                    )
+                )
+                continue
+            node_visiting.add(node_id)
+            node_seen.add(node_id)
+            node_order.append(node_id)
+            if parent_id is not None:
+                state.node_parent[node_id] = parent_id
+            children = node_by_id[node_id]["children"]
+            for child in children:
+                if child["kind"] == "fragment":
+                    state.fragment_owners[child["id"]].append(("node", node_id))
+            node_stack.append((node_id, parent_id, depth, True))
+            node_stack.extend(
+                (child["id"], node_id, depth + 1, False) for child in reversed(children) if child["kind"] == "node"
+            )
     else:
         errors.append(error("$.root", f"dangling logical root {document['root']}"))
     if node_order != list(range(len(nodes))):
@@ -208,30 +235,45 @@ def graph_errors(document: dict[str, Any]) -> tuple[list[str], GraphState]:
     artifact_seen: set[int] = set()
     artifact_visiting: set[int] = set()
 
-    def walk_artifact(artifact_id: int, parent_id: int | None) -> None:
-        if artifact_id not in artifact_by_id:
-            errors.append(error("$.artifacts", f"dangling artifact {artifact_id}"))
-            return
-        if artifact_id in artifact_visiting:
-            errors.append(error("$.artifacts", f"artifact cycle at {artifact_id}"))
-            return
-        if artifact_id in artifact_seen:
-            errors.append(error("$.artifacts", f"artifact {artifact_id} is referenced more than once"))
-            return
-        artifact_visiting.add(artifact_id)
-        artifact_seen.add(artifact_id)
-        artifact_order.append(artifact_id)
-        if parent_id is not None:
-            state.artifact_parent[artifact_id] = parent_id
-        for child in artifact_by_id[artifact_id]["children"]:
-            if child["kind"] == "artifact":
-                walk_artifact(child["id"], artifact_id)
-            else:
-                state.fragment_owners[child["id"]].append(("artifact", artifact_id))
-        artifact_visiting.remove(artifact_id)
-
     for root in roots:
-        walk_artifact(root, None)
+        artifact_stack: list[tuple[int, int | None, int, bool]] = [(root, None, 1, False)]
+        while artifact_stack:
+            artifact_id, parent_id, depth, leaving = artifact_stack.pop()
+            if leaving:
+                artifact_visiting.remove(artifact_id)
+                continue
+            if artifact_id not in artifact_by_id:
+                errors.append(error("$.artifacts", f"dangling artifact {artifact_id}"))
+                continue
+            if artifact_id in artifact_visiting:
+                errors.append(error("$.artifacts", f"artifact cycle at {artifact_id}"))
+                continue
+            if artifact_id in artifact_seen:
+                errors.append(error("$.artifacts", f"artifact {artifact_id} is referenced more than once"))
+                continue
+            if depth > MAX_STRUCTURE_DEPTH:
+                errors.append(
+                    error(
+                        f"$.artifacts[{artifact_id}]",
+                        f"artifact structure depth exceeds v1 maximum of {MAX_STRUCTURE_DEPTH}",
+                    )
+                )
+                continue
+            artifact_visiting.add(artifact_id)
+            artifact_seen.add(artifact_id)
+            artifact_order.append(artifact_id)
+            if parent_id is not None:
+                state.artifact_parent[artifact_id] = parent_id
+            children = artifact_by_id[artifact_id]["children"]
+            for child in children:
+                if child["kind"] == "fragment":
+                    state.fragment_owners[child["id"]].append(("artifact", artifact_id))
+            artifact_stack.append((artifact_id, parent_id, depth, True))
+            artifact_stack.extend(
+                (child["id"], artifact_id, depth + 1, False)
+                for child in reversed(children)
+                if child["kind"] == "artifact"
+            )
     if artifact_order != list(range(len(artifacts))):
         errors.append(error("$.artifacts", "depth-first artifact traversal must equal deterministic preorder IDs"))
 
@@ -417,11 +459,21 @@ def table_errors(document: dict[str, Any]) -> list[str]:
 
         rows = table["semantics"]["rows"]
         columns = table["semantics"]["columns"]
+        table_slots = rows * columns
+        if table_slots > MAX_TABLE_SLOTS:
+            errors.append(
+                error(
+                    f"{table_path}.semantics",
+                    f"table grid exceeds v1 maximum of {MAX_TABLE_SLOTS} slots",
+                )
+            )
+            continue
         if len(row_ids) != rows:
             errors.append(error(f"{table_path}.semantics.rows", "declared table row count does not match structure"))
             continue
 
-        occupancy: dict[tuple[int, int], int] = {}
+        occupancy: set[tuple[int, int]] = set()
+        expanded_slots = 0
         header_ids: set[int] = set()
         cell_ids: list[int] = []
         for expected_row, row_id in enumerate(row_ids):
@@ -452,6 +504,11 @@ def table_errors(document: dict[str, Any]) -> list[str]:
                         error(f"$.nodes[{cell_id}].semantics", "table cell span exceeds declared table bounds")
                     )
                     continue
+                span_slots = semantics["row_span"] * semantics["column_span"]
+                if expanded_slots + span_slots > table_slots:
+                    errors.append(error(table_path, "total table cell spans exceed the declared grid"))
+                    continue
+                expanded_slots += span_slots
                 if cell["role"] == "table-header-cell":
                     header_ids.add(cell_id)
                     if semantics["scope"] == "none":
@@ -470,10 +527,9 @@ def table_errors(document: dict[str, Any]) -> list[str]:
                         if position in occupancy:
                             errors.append(error(f"$.nodes[{cell_id}].semantics", f"table cell overlap at {position}"))
                         else:
-                            occupancy[position] = cell_id
+                            occupancy.add(position)
 
-        expected_positions = {(row, column) for row in range(rows) for column in range(columns)}
-        if set(occupancy) != expected_positions:
+        if len(occupancy) != table_slots:
             errors.append(error(table_path, "table cells must cover the declared grid exactly"))
         for cell_id in cell_ids:
             cell = nodes[cell_id]
@@ -502,22 +558,25 @@ def node_has_ancestor_role(document: dict[str, Any], state: GraphState, node_id:
     return None
 
 
-def subtree_fragment_ids(document: dict[str, Any], node_id: int) -> set[int]:
+def subtree_fragment_ids(document: dict[str, Any], node_id: int) -> tuple[set[int], bool]:
     fragments: set[int] = set()
     visited: set[int] = set()
-
-    def visit(current_id: int) -> None:
-        if current_id in visited or current_id >= len(document["nodes"]):
-            return
+    depth_exceeded = False
+    stack = [(node_id, 1)]
+    while stack:
+        current_id, depth = stack.pop()
+        if depth > MAX_STRUCTURE_DEPTH:
+            depth_exceeded = True
+            continue
+        if current_id in visited or not 0 <= current_id < len(document["nodes"]):
+            continue
         visited.add(current_id)
         for child in document["nodes"][current_id]["children"]:
             if child["kind"] == "node":
-                visit(child["id"])
+                stack.append((child["id"], depth + 1))
             else:
                 fragments.add(child["id"])
-
-    visit(node_id)
-    return fragments
+    return fragments, depth_exceeded
 
 
 def policy_errors(document: dict[str, Any], state: GraphState) -> list[str]:
@@ -562,25 +621,34 @@ def navigation_errors(document: dict[str, Any], scene: dict[str, Any]) -> list[s
     seen: set[int] = set()
     visiting: set[int] = set()
 
-    def walk(item_id: int) -> None:
+    outline_stack = [(root_id, 1, False) for root_id in reversed(navigation["roots"])]
+    while outline_stack:
+        item_id, depth, leaving = outline_stack.pop()
+        if leaving:
+            visiting.remove(item_id)
+            continue
         if item_id not in item_by_id:
             errors.append(error("$.navigation", f"dangling outline item {item_id}"))
-            return
+            continue
         if item_id in visiting:
             errors.append(error("$.navigation", f"outline cycle at {item_id}"))
-            return
+            continue
         if item_id in seen:
             errors.append(error("$.navigation", f"outline item {item_id} is referenced more than once"))
-            return
+            continue
+        if depth > MAX_STRUCTURE_DEPTH:
+            errors.append(
+                error(
+                    f"$.navigation.items[{item_id}]",
+                    f"outline structure depth exceeds v1 maximum of {MAX_STRUCTURE_DEPTH}",
+                )
+            )
+            continue
         visiting.add(item_id)
         seen.add(item_id)
         order.append(item_id)
-        for child_id in item_by_id[item_id]["children"]:
-            walk(child_id)
-        visiting.remove(item_id)
-
-    for root_id in navigation["roots"]:
-        walk(root_id)
+        outline_stack.append((item_id, depth, True))
+        outline_stack.extend((child_id, depth + 1, False) for child_id in reversed(item_by_id[item_id]["children"]))
     if order != list(range(len(items))):
         errors.append(error("$.navigation", "outline traversal must equal deterministic preorder IDs"))
 
@@ -608,10 +676,16 @@ def navigation_errors(document: dict[str, Any], scene: dict[str, Any]) -> list[s
         page_size = pages[page_number]["size_app_units"]
         if destination["x_app_units"] >= page_size["width"] or destination["y_app_units"] >= page_size["height"]:
             errors.append(error(f"{path}.destination", "outline destination is outside the page box"))
+        subtree_fragments, subtree_depth_exceeded = subtree_fragment_ids(document, target)
+        if subtree_depth_exceeded:
+            errors.append(
+                error(
+                    f"{path}.target_node",
+                    f"outline target subtree depth exceeds v1 maximum of {MAX_STRUCTURE_DEPTH}",
+                )
+            )
         fragment_pages = {
-            fragments[fragment_id]["paint"]["page"]
-            for fragment_id in subtree_fragment_ids(document, target)
-            if fragment_id < len(fragments)
+            fragments[fragment_id]["paint"]["page"] for fragment_id in subtree_fragments if fragment_id < len(fragments)
         }
         if page_number not in fragment_pages:
             errors.append(
@@ -869,6 +943,149 @@ def verify_rejection_corpus(
     return len(names)
 
 
+def verify_generated_adversaries(
+    base: dict[str, Any],
+    scene: dict[str, Any],
+    api2: ModuleType,
+    schema: dict[str, Any],
+) -> int:
+    rejection_count = 0
+
+    def require_rejection(candidate: dict[str, Any], expected: str, name: str) -> None:
+        nonlocal rejection_count
+        failures = contract_errors(candidate, scene, api2, schema)
+        rendered = "\n".join(failures)
+        if expected not in rendered:
+            raise AssertionError(f"generated adversary {name!r} did not report {expected!r}:\n{rendered}")
+        rejection_count += 1
+
+    regional_language = copy.deepcopy(base)
+    regional_language["language"] = "de-DE"
+    regional_failures = contract_errors(regional_language, scene, api2, schema)
+    if regional_failures:
+        raise AssertionError("canonical language de-DE was rejected:\n" + "\n".join(regional_failures))
+
+    repeated_variant = copy.deepcopy(base)
+    repeated_variant["language"] = "sl-rozaj-rozaj"
+    require_rejection(repeated_variant, "repeated variant subtag", "repeated BCP 47 variant")
+
+    c1_control = copy.deepcopy(base)
+    c1_control["metadata"]["title"] = "Invoice\u0085copy"
+    require_rejection(c1_control, "control character U+0085", "Unicode Cc")
+
+    lone_surrogate = copy.deepcopy(base)
+    lone_surrogate["metadata"]["title"] = "\ud800"
+    require_rejection(lone_surrogate, "surrogate code point U+D800", "lone surrogate")
+
+    table_explosion = copy.deepcopy(base)
+    table_explosion["nodes"][10]["semantics"]["rows"] = 65535
+    table_explosion["nodes"][10]["semantics"]["columns"] = 65535
+    require_rejection(
+        table_explosion,
+        f"table grid exceeds v1 maximum of {MAX_TABLE_SLOTS} slots",
+        "table slot explosion",
+    )
+
+    chain_length = 1050
+    logical_chain = copy.deepcopy(base)
+    logical_chain["policy"]["navigation"] = "explicit-none"
+    logical_chain["navigation"] = {"kind": "none"}
+    logical_chain["nodes"] = [
+        {
+            "id": node_id,
+            "role": "document" if node_id == 0 else "section",
+            "source": {"kind": "dom", "preorder": node_id},
+            "language": None,
+            "name": None,
+            "alternate_text": None,
+            "replacement_text": None,
+            "semantics": {"kind": "none"},
+            "children": (
+                [{"kind": "node", "id": node_id + 1}]
+                if node_id + 1 < chain_length
+                else [
+                    {"kind": "fragment", "id": 0},
+                    {"kind": "fragment", "id": 2},
+                    {"kind": "fragment", "id": 3},
+                ]
+            ),
+        }
+        for node_id in range(chain_length)
+    ]
+    require_rejection(
+        logical_chain,
+        f"logical structure depth exceeds v1 maximum of {MAX_STRUCTURE_DEPTH}",
+        "1050-node logical chain",
+    )
+
+    artifact_chain = copy.deepcopy(base)
+    artifact_chain["artifact_roots"] = [0]
+    artifact_chain["artifacts"] = [
+        {
+            "id": artifact_id,
+            "kind": "decoration",
+            "subtype": None,
+            "source": {"kind": "generated", "owner_preorder": 0, "slot": "after"},
+            "children": (
+                [{"kind": "artifact", "id": artifact_id + 1}]
+                if artifact_id + 1 < chain_length
+                else [{"kind": "fragment", "id": 1}]
+            ),
+        }
+        for artifact_id in range(chain_length)
+    ]
+    require_rejection(
+        artifact_chain,
+        f"artifact structure depth exceeds v1 maximum of {MAX_STRUCTURE_DEPTH}",
+        "1050-node artifact chain",
+    )
+
+    outline_chain = copy.deepcopy(base)
+    outline_chain["navigation"] = {
+        "kind": "outline",
+        "roots": [0],
+        "items": [
+            {
+                "id": item_id,
+                "title": "Invoice",
+                "language": None,
+                "target_node": 1,
+                "destination": {"page": 1, "x_app_units": 2880, "y_app_units": 4320},
+                "children": [item_id + 1] if item_id + 1 < chain_length else [],
+            }
+            for item_id in range(chain_length)
+        ],
+    }
+    require_rejection(
+        outline_chain,
+        f"outline structure depth exceeds v1 maximum of {MAX_STRUCTURE_DEPTH}",
+        "1050-item outline chain",
+    )
+
+    deep_subtree_target = copy.deepcopy(logical_chain)
+    deep_subtree_target["policy"]["navigation"] = "required"
+    deep_subtree_target["navigation"] = {
+        "kind": "outline",
+        "roots": [0],
+        "items": [
+            {
+                "id": 0,
+                "title": "Deep document",
+                "language": None,
+                "target_node": 0,
+                "destination": {"page": 1, "x_app_units": 0, "y_app_units": 0},
+                "children": [],
+            }
+        ],
+    }
+    require_rejection(
+        deep_subtree_target,
+        f"outline target subtree depth exceeds v1 maximum of {MAX_STRUCTURE_DEPTH}",
+        "deep outline target subtree",
+    )
+    return rejection_count
+
+
 def verify_api2_boundary(document: dict[str, Any], digest: str, api2: ModuleType) -> None:
     if document["profile"] != PDFUA1_PROFILE:
         raise AssertionError("accepted semantic fixture must bind the selected exact PDF/UA-1 profile reference")
@@ -923,7 +1140,7 @@ def emit_digest(path: Path) -> int:
 
 
 def verify_fresh_processes(expected: str) -> None:
-    command = [sys.executable, str(Path(__file__).resolve()), "--emit-digest", str(ACCEPTED_PATH)]
+    command = [sys.executable, "-I", str(Path(__file__).resolve()), "--emit-digest", str(ACCEPTED_PATH)]
     for index in range(FRESH_PROCESS_COUNT):
         completed = subprocess.run(command, check=False, capture_output=True, text=True, encoding="utf-8")
         actual = completed.stdout.strip()
@@ -953,6 +1170,7 @@ def main() -> int:
     digest = semantic_digest(document)
     verify_api2_boundary(document, digest, api2)
     rejected_count = verify_rejection_corpus(document, scene, api2, schema)
+    generated_count = verify_generated_adversaries(document, scene, api2, schema)
     try:
         api2.load_json(NEGATIVE_ZERO_PATH)
     except ValueError as exception:
@@ -986,6 +1204,7 @@ def main() -> int:
     print(
         "Pliego canonical document-semantics v1 self-test passed: "
         f"1 accepted semantic artifact, {rejected_count + 1} rejected cases, "
+        f"{generated_count} generated adversarial checks, "
         f"{FRESH_PROCESS_COUNT} fresh-process digests={digest}; API 2 runtime profiles remain empty"
     )
     return 0
