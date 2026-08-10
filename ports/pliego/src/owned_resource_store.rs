@@ -14,8 +14,9 @@ use pliego::{IMAGE_LIMITS, ImageLimit};
 
 use super::asset_cache;
 use super::resource_policy::{
-    ControlledResource, MAX_RESOURCE_EVENTS, MAX_RESOURCE_METADATA_BYTES, ResourcePolicyFailure,
-    ResourceRequest, ResponseHeaderEvidence, normalized_url, sha256_hex,
+    ControlledResource, MAX_RESOURCE_EVENTS, MAX_RESOURCE_METADATA_BYTES, ResourceEvidence,
+    ResourcePolicyFailure, ResourceRequest, ResourceSource, ResponseHeaderEvidence, normalized_url,
+    sha256_hex,
 };
 
 const MAX_DATA_URL_OVERHEAD_BYTES: u64 = 4 * 1024;
@@ -27,11 +28,24 @@ struct RequestIdentity {
     url: String,
     destination: String,
     load_role: WebResourceLoadRole,
+    referrer_url: Option<String>,
+    is_for_main_frame: bool,
+    is_redirect: bool,
 }
 
 impl RequestIdentity {
-    fn metadata_bytes(&self) -> u64 {
-        (self.method.len() + self.url.len() + self.destination.len()) as u64
+    fn metadata_bytes(&self) -> Option<u64> {
+        [
+            self.method.len(),
+            self.url.len(),
+            self.destination.len(),
+            self.referrer_url.as_ref().map_or(0, String::len),
+        ]
+        .into_iter()
+        .try_fold(0_u64, |bytes, length| {
+            bytes.checked_add(u64::try_from(length).ok()?)
+        })
+        .and_then(|bytes| bytes.checked_add(2))
     }
 }
 
@@ -41,13 +55,16 @@ struct ResponseIdentity {
     content_type: Option<String>,
     content_address: String,
     response_headers: ResponseHeaderEvidence,
+    source: ResourceSource,
 }
 
 impl ResponseIdentity {
-    fn metadata_bytes(&self) -> u64 {
-        self.content_type.as_ref().map_or(0, String::len) as u64 +
-            self.content_address.len() as u64 +
-            self.response_headers.retained_metadata_bytes()
+    fn metadata_bytes(&self) -> Option<u64> {
+        u64::try_from(self.content_type.as_ref().map_or(0, String::len))
+            .ok()?
+            .checked_add(u64::try_from(self.content_address.len()).ok()?)?
+            .checked_add(self.response_headers.retained_metadata_bytes())?
+            .checked_add(u64::try_from(resource_source_name(self.source).len()).ok()?)
     }
 }
 
@@ -55,9 +72,24 @@ impl RequestIdentity {
     fn new(request: &ResourceRequest) -> Self {
         Self {
             method: request.method.clone(),
-            url: normalized_url(&request.url),
+            url: request.url.to_string(),
             destination: request.destination.clone(),
             load_role: request.load_role,
+            referrer_url: request.referrer_url.as_ref().map(ToString::to_string),
+            is_for_main_frame: request.is_for_main_frame,
+            is_redirect: request.is_redirect,
+        }
+    }
+
+    fn from_failure(failure: &ResourcePolicyFailure) -> Self {
+        Self {
+            method: failure.method.clone(),
+            url: failure.url.clone(),
+            destination: failure.destination.clone(),
+            load_role: failure.load_role,
+            referrer_url: failure.referrer_url.clone(),
+            is_for_main_frame: failure.is_for_main_frame,
+            is_redirect: failure.is_redirect,
         }
     }
 }
@@ -68,7 +100,14 @@ pub(crate) struct OwnedResource {
     content_type: Option<String>,
     content_address: String,
     response_headers: ResponseHeaderEvidence,
+    source: ResourceSource,
     body: Arc<[u8]>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct OwnedRequestEntry {
+    resource: OwnedResource,
+    occurrences: usize,
 }
 
 impl OwnedResource {
@@ -86,6 +125,10 @@ impl OwnedResource {
 
     pub(crate) fn response_headers(&self) -> &ResponseHeaderEvidence {
         &self.response_headers
+    }
+
+    pub(crate) fn source(&self) -> ResourceSource {
+        self.source
     }
 
     pub(crate) fn body(&self) -> &[u8] {
@@ -112,7 +155,7 @@ struct GifInfo {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct OwnedResourceStore {
-    requests: BTreeMap<RequestIdentity, OwnedResource>,
+    requests: BTreeMap<RequestIdentity, OwnedRequestEntry>,
     url_to_resource: BTreeMap<String, ResponseIdentity>,
     resources: BTreeMap<String, Arc<[u8]>>,
     image_costs: BTreeMap<String, ImageCost>,
@@ -154,13 +197,15 @@ impl OwnedResourceStore {
         }
     }
 
-    pub(crate) fn retain(
+    pub(crate) fn retain_with_source(
         &mut self,
         request: &ResourceRequest,
+        source: ResourceSource,
         resource: ControlledResource,
         headers: &http::HeaderMap,
     ) -> Result<OwnedResource, ResourcePolicyFailure> {
         let identity = RequestIdentity::new(request);
+        let fetch_url = normalized_url(&request.url);
         let response_headers = ResponseHeaderEvidence::from_headers(headers).map_err(|reason| {
             resource_failure(
                 request,
@@ -208,17 +253,25 @@ impl OwnedResourceStore {
         }
         let content_address = format!("sha256:{}", sha256_hex(&body));
 
-        if let Some(existing) = self.requests.get(&identity) {
-            return if existing.status == status &&
-                existing.content_type.as_deref() == content_type.as_deref() &&
-                existing.content_address == content_address &&
-                existing.response_headers == response_headers &&
-                existing.body() == body
+        if let Some(existing) = self.requests.get_mut(&identity) {
+            if existing.resource.status != status ||
+                existing.resource.content_type.as_deref() != content_type.as_deref() ||
+                existing.resource.content_address != content_address ||
+                existing.resource.response_headers != response_headers ||
+                existing.resource.source != source ||
+                existing.resource.body() != body
             {
-                Ok(existing.clone())
-            } else {
-                Err(changed_resource_failure(request))
-            };
+                return Err(changed_resource_failure(request));
+            }
+            existing.occurrences = existing.occurrences.checked_add(1).ok_or_else(|| {
+                resource_failure(
+                    request,
+                    "RESOURCE_METADATA_LIMIT_EXCEEDED",
+                    "denied",
+                    "controlled resource occurrence count overflowed".into(),
+                )
+            })?;
+            return Ok(existing.resource.clone());
         }
 
         let response_identity = ResponseIdentity {
@@ -226,10 +279,11 @@ impl OwnedResourceStore {
             content_type: content_type.clone(),
             content_address: content_address.clone(),
             response_headers: response_headers.clone(),
+            source,
         };
         if request.method != "HEAD" &&
             self.url_to_resource
-                .get(&identity.url)
+                .get(&fetch_url)
                 .is_some_and(|existing| existing != &response_identity)
         {
             return Err(changed_resource_failure(request));
@@ -248,8 +302,7 @@ impl OwnedResourceStore {
             ));
         }
 
-        let image_cost = if request.method == "HEAD" || self.image_costs.contains_key(&identity.url)
-        {
+        let image_cost = if request.method == "HEAD" || self.image_costs.contains_key(&fetch_url) {
             None
         } else {
             image_cost(request, content_type.as_deref(), &body)?
@@ -302,42 +355,51 @@ impl OwnedResourceStore {
                 ),
             ));
         }
-        let response_metadata_bytes = response_identity.metadata_bytes();
+        let metadata_limit_failure = || {
+            resource_failure(
+                request,
+                "RESOURCE_METADATA_LIMIT_EXCEEDED",
+                "denied",
+                format!(
+                    "controlled resource metadata exceeds the {}-byte aggregate bound",
+                    self.max_metadata_bytes
+                ),
+            )
+        };
+        let response_metadata_bytes = response_identity
+            .metadata_bytes()
+            .ok_or_else(&metadata_limit_failure)?;
         let mut additional_metadata_bytes = identity
             .metadata_bytes()
-            .saturating_add(response_metadata_bytes)
-            .saturating_add(METADATA_ENTRY_OVERHEAD_BYTES);
-        if request.method != "HEAD" && !self.url_to_resource.contains_key(&identity.url) {
+            .and_then(|bytes| bytes.checked_add(response_metadata_bytes))
+            .and_then(|bytes| bytes.checked_add(METADATA_ENTRY_OVERHEAD_BYTES))
+            .ok_or_else(&metadata_limit_failure)?;
+        if request.method != "HEAD" && !self.url_to_resource.contains_key(&fetch_url) {
             additional_metadata_bytes = additional_metadata_bytes
-                .saturating_add(identity.url.len() as u64)
-                .saturating_add(response_metadata_bytes)
-                .saturating_add(METADATA_ENTRY_OVERHEAD_BYTES);
+                .checked_add(u64::try_from(fetch_url.len()).map_err(|_| metadata_limit_failure())?)
+                .and_then(|bytes| bytes.checked_add(response_metadata_bytes))
+                .and_then(|bytes| bytes.checked_add(METADATA_ENTRY_OVERHEAD_BYTES))
+                .ok_or_else(&metadata_limit_failure)?;
         }
         if !self.resources.contains_key(&content_address) {
             additional_metadata_bytes = additional_metadata_bytes
-                .saturating_add(content_address.len() as u64)
-                .saturating_add(METADATA_ENTRY_OVERHEAD_BYTES);
+                .checked_add(
+                    u64::try_from(content_address.len()).map_err(|_| metadata_limit_failure())?,
+                )
+                .and_then(|bytes| bytes.checked_add(METADATA_ENTRY_OVERHEAD_BYTES))
+                .ok_or_else(&metadata_limit_failure)?;
         }
         if image_cost.is_some() {
             additional_metadata_bytes = additional_metadata_bytes
-                .saturating_add(identity.url.len() as u64)
-                .saturating_add(METADATA_ENTRY_OVERHEAD_BYTES);
+                .checked_add(u64::try_from(fetch_url.len()).map_err(|_| metadata_limit_failure())?)
+                .and_then(|bytes| bytes.checked_add(METADATA_ENTRY_OVERHEAD_BYTES))
+                .ok_or_else(&metadata_limit_failure)?;
         }
         let next_metadata_bytes = self
             .metadata_bytes
             .checked_add(additional_metadata_bytes)
             .filter(|bytes| *bytes <= self.max_metadata_bytes)
-            .ok_or_else(|| {
-                resource_failure(
-                    request,
-                    "RESOURCE_METADATA_LIMIT_EXCEEDED",
-                    "denied",
-                    format!(
-                        "controlled resource metadata exceeds the {}-byte aggregate bound",
-                        self.max_metadata_bytes
-                    ),
-                )
-            })?;
+            .ok_or_else(metadata_limit_failure)?;
 
         self.resident_bytes = next_resident_bytes;
         self.decoded_image_pixels = next_pixels;
@@ -352,20 +414,26 @@ impl OwnedResourceStore {
             .entry(content_address.clone())
             .or_insert_with(|| Arc::clone(&body));
         if let Some(cost) = image_cost {
-            self.image_costs.insert(identity.url.clone(), cost);
+            self.image_costs.insert(fetch_url.clone(), cost);
         }
         if request.method != "HEAD" {
-            self.url_to_resource
-                .insert(identity.url.clone(), response_identity);
+            self.url_to_resource.insert(fetch_url, response_identity);
         }
         let owned = OwnedResource {
             status,
             content_type,
             content_address,
             response_headers,
+            source,
             body,
         };
-        self.requests.insert(identity, owned.clone());
+        self.requests.insert(
+            identity,
+            OwnedRequestEntry {
+                resource: owned.clone(),
+                occurrences: 1,
+            },
+        );
         Ok(owned)
     }
 
@@ -377,7 +445,62 @@ impl OwnedResourceStore {
     }
 
     pub(crate) fn resolve_request(&self, request: &ResourceRequest) -> Option<&OwnedResource> {
-        self.requests.get(&RequestIdentity::new(request))
+        self.requests
+            .get(&RequestIdentity::new(request))
+            .map(|entry| &entry.resource)
+    }
+
+    pub(crate) fn loaded_evidence_is_complete(
+        &self,
+        evidence: &[ResourceEvidence],
+        post_retain_failure: Option<&ResourcePolicyFailure>,
+    ) -> bool {
+        let mut observed = BTreeMap::<RequestIdentity, usize>::new();
+        for resource in evidence
+            .iter()
+            .filter(|resource| resource.status == "loaded")
+        {
+            let count = observed
+                .entry(RequestIdentity::new(&resource.request))
+                .or_default();
+            let Some(next) = count.checked_add(1) else {
+                return false;
+            };
+            *count = next;
+        }
+        let mut retained = self
+            .requests
+            .iter()
+            .map(|(identity, entry)| (identity.clone(), entry.occurrences))
+            .collect::<BTreeMap<_, _>>();
+        if observed == retained {
+            return true;
+        }
+        if let Some(failure) = post_retain_failure {
+            let identity = RequestIdentity::from_failure(failure);
+            let Some(occurrences) = retained.get_mut(&identity) else {
+                return false;
+            };
+            let Some(remaining) = occurrences.checked_sub(1) else {
+                return false;
+            };
+            if remaining == 0 {
+                retained.remove(&identity);
+            } else {
+                *occurrences = remaining;
+            }
+        }
+        observed == retained
+    }
+
+    #[cfg(test)]
+    fn retain(
+        &mut self,
+        request: &ResourceRequest,
+        resource: ControlledResource,
+        headers: &http::HeaderMap,
+    ) -> Result<OwnedResource, ResourcePolicyFailure> {
+        self.retain_with_source(request, ResourceSource::Http, resource, headers)
     }
 
     pub(crate) fn resolve_content(&self, resource: &str) -> Option<&[u8]> {
@@ -387,6 +510,16 @@ impl OwnedResourceStore {
     #[cfg(test)]
     pub(crate) fn resident_bytes(&self) -> u64 {
         self.resident_bytes
+    }
+}
+
+fn resource_source_name(source: ResourceSource) -> &'static str {
+    match source {
+        ResourceSource::AssetCache(result) => result,
+        ResourceSource::DataUrl => "data_url",
+        ResourceSource::DocumentRoot => "document_root",
+        ResourceSource::Http => "http",
+        ResourceSource::VirtualResource => "virtual_resource",
     }
 }
 
@@ -964,6 +1097,167 @@ mod tests {
     }
 
     #[test]
+    fn exact_request_identity_and_source_are_bound_without_changing_the_fetch_key() {
+        let mut store = OwnedResourceStore::default();
+        let mut exact = request("GET", "https://example.test/app.js#first", "Script");
+        exact.referrer_url = Some(url::Url::parse("https://example.test/report.html").unwrap());
+        let response = resource("text/javascript", b"window.ready = true;".to_vec());
+        let response_headers = headers("text/javascript");
+        let retained = store
+            .retain_with_source(
+                &exact,
+                ResourceSource::AssetCache("invalidated"),
+                response.clone(),
+                &response_headers,
+            )
+            .unwrap();
+        assert_eq!(retained.source(), ResourceSource::AssetCache("invalidated"));
+        assert_eq!(store.resolve_request(&exact), Some(&retained));
+        assert_eq!(
+            store.resolve_url("https://example.test/app.js#different"),
+            Some(retained.content_address().into())
+        );
+
+        let evidence = ResourceEvidence::loaded(
+            exact.clone(),
+            ResourceSource::AssetCache("invalidated"),
+            "text/javascript",
+            &response.body,
+        );
+        assert!(store.loaded_evidence_is_complete(std::slice::from_ref(&evidence), None));
+
+        let mut mutations = Vec::new();
+        let mut changed = exact.clone();
+        changed.referrer_url = None;
+        mutations.push(changed);
+        let mut changed = exact.clone();
+        changed.is_for_main_frame = true;
+        mutations.push(changed);
+        let mut changed = exact.clone();
+        changed.is_redirect = true;
+        mutations.push(changed);
+        let mut changed = exact.clone();
+        changed.url.set_fragment(Some("different"));
+        mutations.push(changed);
+        for changed in mutations {
+            assert!(store.resolve_request(&changed).is_none());
+            let mut changed_evidence = evidence.clone();
+            changed_evidence.request = changed;
+            assert!(!store.loaded_evidence_is_complete(&[changed_evidence], None));
+        }
+
+        let error = store
+            .retain_with_source(
+                &exact,
+                ResourceSource::AssetCache("hit"),
+                response,
+                &response_headers,
+            )
+            .unwrap_err();
+        assert_eq!(error.code, "RESOURCE_CHANGED_DURING_RENDER");
+        assert!(store.loaded_evidence_is_complete(&[evidence], None));
+    }
+
+    #[test]
+    fn exact_request_url_and_referrer_are_charged_before_insertion() {
+        let mut exact = request(
+            "GET",
+            "https://example.test/app.js#retained-fragment",
+            "Script",
+        );
+        exact.referrer_url =
+            Some(url::Url::parse("https://example.test/report.html?retained=true").unwrap());
+        exact.is_for_main_frame = true;
+        exact.is_redirect = true;
+        let identity = RequestIdentity::new(&exact);
+        let expected_identity_bytes = exact.method.len() as u64 +
+            exact.url.as_str().len() as u64 +
+            exact.destination.len() as u64 +
+            exact.referrer_url.as_ref().unwrap().as_str().len() as u64 +
+            2;
+        assert_eq!(identity.url, exact.url.to_string());
+        assert_eq!(identity.metadata_bytes(), Some(expected_identity_bytes));
+
+        let mut probe = OwnedResourceStore::default();
+        probe
+            .retain(
+                &exact,
+                resource("text/javascript", Vec::new()),
+                &headers("text/javascript"),
+            )
+            .unwrap();
+        let exact_limit = probe.metadata_bytes;
+
+        let mut too_small = OwnedResourceStore::with_limits(0, usize::MAX, exact_limit - 1);
+        let error = too_small
+            .retain(
+                &exact,
+                resource("text/javascript", Vec::new()),
+                &headers("text/javascript"),
+            )
+            .unwrap_err();
+        assert_eq!(error.code, "RESOURCE_METADATA_LIMIT_EXCEEDED");
+        assert!(too_small.requests.is_empty());
+        assert_eq!(too_small.metadata_bytes, 0);
+
+        let mut bounded = OwnedResourceStore::with_limits(0, usize::MAX, exact_limit);
+        bounded
+            .retain(
+                &exact,
+                resource("text/javascript", Vec::new()),
+                &headers("text/javascript"),
+            )
+            .unwrap();
+        assert_eq!(bounded.metadata_bytes, exact_limit);
+    }
+
+    #[test]
+    fn loaded_occurrences_allow_only_one_exact_post_retain_failure() {
+        let exact = request("GET", "https://example.test/app.js", "Script");
+        let mut store = OwnedResourceStore::default();
+        store
+            .retain(
+                &exact,
+                resource("text/javascript", b"window.ready = true;".to_vec()),
+                &headers("text/javascript"),
+            )
+            .unwrap();
+        let evidence = ResourceEvidence::loaded(
+            exact.clone(),
+            ResourceSource::Http,
+            "text/javascript",
+            b"window.ready = true;",
+        );
+        let failure = ResourcePolicyFailure::new(
+            &exact,
+            "RESOURCE_METADATA_LIMIT_EXCEEDED",
+            "denied",
+            "classified by the caller as a post-retain evidence failure",
+        );
+        assert!(store.loaded_evidence_is_complete(std::slice::from_ref(&evidence), Some(&failure)));
+        assert!(store.loaded_evidence_is_complete(&[], Some(&failure)));
+
+        let mut mismatched_request = exact.clone();
+        mismatched_request.destination = "Style".into();
+        let mismatched_failure = ResourcePolicyFailure::new(
+            &mismatched_request,
+            "RESOURCE_METADATA_LIMIT_EXCEEDED",
+            "denied",
+            "classified by the caller as a post-retain evidence failure",
+        );
+        assert!(!store.loaded_evidence_is_complete(&[], Some(&mismatched_failure)));
+
+        store
+            .retain(
+                &exact,
+                resource("text/javascript", b"window.ready = true;".to_vec()),
+                &headers("text/javascript"),
+            )
+            .unwrap();
+        assert!(!store.loaded_evidence_is_complete(&[], Some(&failure)));
+    }
+
+    #[test]
     fn changed_url_and_aggregate_overflow_fail_without_mutating_the_store() {
         let mut changed = OwnedResourceStore::default();
         let first_request = request("GET", "https://example.test/a.bin", "Script");
@@ -1059,6 +1353,7 @@ mod tests {
             content_type: Some("text/css".into()),
             content_address: format!("sha256:{}", sha256_hex(&body)),
             response_headers,
+            source: ResourceSource::Http,
         };
 
         let mut probe = OwnedResourceStore::default();
@@ -1071,8 +1366,12 @@ mod tests {
             .unwrap();
         let exact_limit = probe
             .metadata_bytes
-            .checked_add(RequestIdentity::new(&second_request).metadata_bytes())
-            .and_then(|bytes| bytes.checked_add(response_identity.metadata_bytes()))
+            .checked_add(
+                RequestIdentity::new(&second_request)
+                    .metadata_bytes()
+                    .unwrap(),
+            )
+            .and_then(|bytes| bytes.checked_add(response_identity.metadata_bytes().unwrap()))
             .and_then(|bytes| bytes.checked_add(METADATA_ENTRY_OVERHEAD_BYTES))
             .unwrap();
 
