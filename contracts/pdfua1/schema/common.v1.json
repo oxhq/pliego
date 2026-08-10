@@ -40,7 +40,7 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 240,
-          "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._/-]*[A-Za-z0-9_-])?$"
+          "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9_-])?(?:/[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9_-])?)*$"
         },
         "sha256": { "$ref": "#/definitions/content_address" },
         "bytes": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 }

@@ -31,7 +31,7 @@
     "verifier": { "$ref": "#/definitions/verifier" },
     "blockers": {
       "type": "array",
-      "maxItems": 16,
+      "maxItems": 15,
       "uniqueItems": true,
       "items": {
         "type": "string",
@@ -176,7 +176,10 @@
         "reference": {
           "oneOf": [
             { "type": "null" },
-            { "type": "string", "pattern": "^ghcr\\.io/[a-z0-9._/-]+:[A-Za-z0-9._-]+$" }
+            {
+              "type": "string",
+              "pattern": "^ghcr\\.io/[a-z0-9._/-]+:(?!latest$)[A-Za-z0-9._-]+$"
+            }
           ]
         },
         "image_digest": { "$ref": "#/definitions/nullable_content_address" }
@@ -189,6 +192,7 @@
         "name",
         "version",
         "flavour",
+        "source_repository",
         "source_tag",
         "source_tag_object",
         "source_commit",
@@ -202,12 +206,13 @@
         "name": { "const": "veraPDF" },
         "version": { "const": "1.30.2" },
         "flavour": { "const": "ua1" },
+        "source_repository": {
+          "const": "https://github.com/veraPDF/veraPDF-apps.git"
+        },
         "source_tag": { "const": "v1.30.2" },
         "source_tag_object": { "const": "91d810bac357ef114f1a178d247d61d0233f9472" },
         "source_commit": { "const": "7d9b5c3f709846ab83f86ca1a538b24eac2d3f72" },
-        "release_url": {
-          "const": "https://github.com/veraPDF/veraPDF-apps/releases/tag/v1.30.2"
-        },
+        "release_url": { "const": null },
         "distribution_url": { "$ref": "#/definitions/nullable_url" },
         "distribution_sha256": { "$ref": "#/definitions/nullable_content_address" },
         "signature": { "$ref": "#/definitions/signature" },

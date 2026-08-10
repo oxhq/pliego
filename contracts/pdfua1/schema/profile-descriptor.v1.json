@@ -37,21 +37,14 @@
       "required": ["order", "conflict_policy", "lock"],
       "properties": {
         "order": {
-          "type": "array",
-          "minItems": 6,
-          "maxItems": 6,
-          "uniqueItems": true,
-          "items": {
-            "type": "string",
-            "enum": [
-              "normative-pdfua-standard",
-              "normative-base-pdf-standard",
-              "test-protocol",
-              "implementation-guidance",
-              "reference-suite",
-              "machine-validator"
-            ]
-          }
+          "const": [
+            "normative-pdfua-standard",
+            "normative-base-pdf-standard",
+            "test-protocol",
+            "implementation-guidance",
+            "reference-suite",
+            "machine-validator"
+          ]
         },
         "conflict_policy": { "const": "earlier-authority-wins" },
         "lock": {

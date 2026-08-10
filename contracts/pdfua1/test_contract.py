@@ -68,10 +68,10 @@ def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return value
 
 
-def parse_integer(token: str) -> int:
-    if token == "-0":
+def parse_integer(number_text: str) -> int:
+    if number_text == "-0":
         raise ValueError("negative zero is not canonical")
-    return int(token)
+    return int(number_text)
 
 
 def reject_float(token: str) -> None:
@@ -337,49 +337,53 @@ def verify_author_assurance_ref(api2_contract: ModuleType) -> None:
 
 
 def verify_runtime_does_not_advertise_profile(api2_contract: ModuleType) -> None:
-    api2_contract.SCHEMAS = {}
-    api2_contract.load_schemas()
-    runtime_path = API2_ROOT / "goldens" / "accepted" / "runtime-contract.json"
-    runtime = load_json(runtime_path)
-    runtime_errors = api2_contract.validate(
-        runtime,
-        api2_contract.SCHEMAS["runtime-contract.v1.json"],
-        "runtime-contract.v1.json",
-    )
-    runtime_errors += api2_contract.runtime_semantics(runtime)
-    if runtime_errors:
-        raise AssertionError("API 2 runtime fixture unexpectedly failed:\n" + "\n".join(map(str, runtime_errors)))
-    if any(contract["profiles"] for contract in runtime["contracts"]):
-        raise AssertionError("the current API 2 runtime fixture must advertise no conformance profiles")
-
-    assurance_ref = load_json(GOLDEN_DIR / "accepted" / "author-assurance-ref.json")
-    candidate_manifest = load_json(API2_FIXTURE_ROOT / "input-manifest.json")
-    candidate_manifest["entries"].append(copy.deepcopy(assurance_ref))
-    candidate_manifest["entries"].sort(key=lambda entry: entry["path"].encode("ascii"))
-    manifest_errors = api2_contract.validate(
-        candidate_manifest,
-        api2_contract.SCHEMAS["input-manifest.v1.json"],
-        "input-manifest.v1.json",
-    )
-    manifest_errors += api2_contract.input_manifest_semantics(candidate_manifest)
-    if manifest_errors:
-        raise AssertionError(
-            "content-addressed author assurance is not a valid API 2 input entry:\n"
-            + "\n".join(map(str, manifest_errors))
+    pdfua_schemas = api2_contract.SCHEMAS
+    try:
+        api2_contract.SCHEMAS = {}
+        api2_contract.load_schemas()
+        runtime_path = API2_ROOT / "goldens" / "accepted" / "runtime-contract.json"
+        runtime = load_json(runtime_path)
+        runtime_errors = api2_contract.validate(
+            runtime,
+            api2_contract.SCHEMAS["runtime-contract.v1.json"],
+            "runtime-contract.v1.json",
         )
+        runtime_errors += api2_contract.runtime_semantics(runtime)
+        if runtime_errors:
+            raise AssertionError("API 2 runtime fixture unexpectedly failed:\n" + "\n".join(map(str, runtime_errors)))
+        if any(contract["profiles"] for contract in runtime["contracts"]):
+            raise AssertionError("the current API 2 runtime fixture must advertise no conformance profiles")
 
-    request = load_json(API2_ROOT / "goldens" / "accepted" / "render-request.a4.json")
-    request["profile"] = {"schema": "pliego.profile.pdfua-1", "version": 1}
-    request_schema_errors = api2_contract.validate(
-        request,
-        api2_contract.SCHEMAS["render-request.v1.json"],
-        "render-request.v1.json",
-    )
-    if request_schema_errors:
-        raise AssertionError("API 2 generic profile slot rejected the exact PDF/UA-1 reference")
-    negotiation_errors = api2_contract.request_runtime_semantics(request, runtime)
-    if not any("not advertised" in str(error) for error in negotiation_errors):
-        raise AssertionError("unadvertised PDF/UA-1 request did not fail before rendering")
+        assurance_ref = load_json(GOLDEN_DIR / "accepted" / "author-assurance-ref.json")
+        candidate_manifest = load_json(API2_FIXTURE_ROOT / "input-manifest.json")
+        candidate_manifest["entries"].append(copy.deepcopy(assurance_ref))
+        candidate_manifest["entries"].sort(key=lambda entry: entry["path"].encode("ascii"))
+        manifest_errors = api2_contract.validate(
+            candidate_manifest,
+            api2_contract.SCHEMAS["input-manifest.v1.json"],
+            "input-manifest.v1.json",
+        )
+        manifest_errors += api2_contract.input_manifest_semantics(candidate_manifest)
+        if manifest_errors:
+            raise AssertionError(
+                "content-addressed author assurance is not a valid API 2 input entry:\n"
+                + "\n".join(map(str, manifest_errors))
+            )
+
+        request = load_json(API2_ROOT / "goldens" / "accepted" / "render-request.a4.json")
+        request["profile"] = {"schema": "pliego.profile.pdfua-1", "version": 1}
+        request_schema_errors = api2_contract.validate(
+            request,
+            api2_contract.SCHEMAS["render-request.v1.json"],
+            "render-request.v1.json",
+        )
+        if request_schema_errors:
+            raise AssertionError("API 2 generic profile slot rejected the exact PDF/UA-1 reference")
+        negotiation_errors = api2_contract.request_runtime_semantics(request, runtime)
+        if not any("not advertised" in str(error) for error in negotiation_errors):
+            raise AssertionError("unadvertised PDF/UA-1 request did not fail before rendering")
+    finally:
+        api2_contract.SCHEMAS = pdfua_schemas
 
 
 def main() -> None:
@@ -439,7 +443,34 @@ def main() -> None:
         "reordered authority hierarchy",
         "profile",
         reordered_profile,
-        "authority order is not the accepted hierarchy",
+        "expected const",
+    )
+    unsafe_source_path = copy.deepcopy(accepted["assurance"])
+    unsafe_source_path["subject"]["entrypoint"]["path"] = "input/../input.html"
+    assert_rejected(
+        api2_contract,
+        "source path traversal",
+        "assurance",
+        unsafe_source_path,
+        "does not match pattern",
+    )
+    incomplete_review = copy.deepcopy(accepted["assurance"])
+    incomplete_review["assessment"] = {
+        "status": "failed",
+        "reviewer_id": "contract-reviewer",
+        "review_record": {
+            "resource": "sha256:" + "0" * 64,
+            "media_type": "application/json",
+            "bytes": 1,
+        },
+        "summary": {"total": 46, "passed": 45, "failed": 1, "not_evaluated": 0},
+    }
+    assert_rejected(
+        api2_contract,
+        "reviewed assurance with incomplete human inventory",
+        "assurance",
+        incomplete_review,
+        "expected const 47",
     )
     missing_revision_binding = copy.deepcopy(accepted["profile"])
     del missing_revision_binding["bindings"]["pdf_metadata"]["exact_revision_binding"]
@@ -483,8 +514,28 @@ def main() -> None:
         incomplete_lock,
         "enumerate every unresolved pin exactly",
     )
+    mutable_container = copy.deepcopy(accepted["lock"])
+    mutable_container["verifier"]["container"]["reference"] = "ghcr.io/verapdf/cli:latest"
+    assert_rejected(
+        api2_contract,
+        "mutable verifier container tag",
+        "lock",
+        mutable_container,
+        "expected exactly one oneOf match",
+    )
+    repositoryless_verifier = copy.deepcopy(accepted["lock"])
+    del repositoryless_verifier["verifier"]["source_repository"]
+    assert_rejected(
+        api2_contract,
+        "repositoryless verifier source objects",
+        "lock",
+        repositoryless_verifier,
+        "missing required property 'source_repository'",
+    )
 
     verify_runtime_does_not_advertise_profile(api2_contract)
+    if api2_contract.SCHEMAS is not SCHEMAS:
+        raise AssertionError("API 2 runtime validation did not restore the PDF/UA-1 schema context")
     rejected_count = len(list((GOLDEN_DIR / "rejected").glob("*.json")))
     print(
         "Pliego PDF/UA-1 contract self-test passed: "

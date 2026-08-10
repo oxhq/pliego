@@ -137,7 +137,8 @@ The validation lock pins identities and revisions now, while unresolved bytes re
 - Matterhorn Protocol 1.1;
 - Tagged PDF Best Practice Guide: Syntax, 2019 publication corrected 2023-07-26;
 - PDF/UA-1 Reference Suite 1.1;
-- veraPDF 1.30.2, annotated source tag `v1.30.2`, tag object
+- veraPDF 1.30.2 from `https://github.com/veraPDF/veraPDF-apps.git`, annotated source tag
+  `v1.30.2`, tag object
   `91d810bac357ef114f1a178d247d61d0233f9472`, peeled source commit
   `7d9b5c3f709846ab83f86ca1a538b24eac2d3f72`, and flavour `ua1`.
 
