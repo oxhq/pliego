@@ -86,10 +86,10 @@ jobs:
       - name: Test the direct document session
         run: cargo test -p pliego --test document_session --no-default-features --features document-session --locked
 
-      - name: Test Canvas retention accounting
+      - name: Test Canvas retention and capture accounting
         run: |
           cargo test -p servo-canvas --lib retained_canvas::tests --locked
-          cargo test -p pliego --lib --no-default-features retained_canvas_aliases_share_one_adapted_capture --locked
+          cargo test -p pliego --lib --no-default-features --locked
 
       - name: Set up Node for the locked Chart.js fixture
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6

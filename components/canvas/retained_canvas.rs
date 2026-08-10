@@ -2,7 +2,8 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
@@ -36,6 +37,58 @@ pub struct RetainedCanvasSnapshot {
     pub commands: Vec<RetainedCanvasCommand>,
     pub unsupported: Option<RetainedCanvasUnsupported>,
 }
+
+/// An immutable, single-generation view of every retained Canvas requested by document capture.
+#[derive(Debug)]
+pub struct FrozenCanvasSnapshots {
+    generation: u64,
+    retention_budget_exceeded: bool,
+    snapshots: HashMap<ImageKey, Arc<RetainedCanvasSnapshot>>,
+}
+
+impl FrozenCanvasSnapshots {
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    pub fn retention_budget_exceeded(&self) -> bool {
+        self.retention_budget_exceeded
+    }
+
+    pub fn get(&self, namespace: u32, key: u32) -> Option<Arc<RetainedCanvasSnapshot>> {
+        self.snapshots
+            .get(&ImageKey(IdNamespace(namespace), key))
+            .map(Arc::clone)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FreezeCanvasSnapshotsError {
+    RetentionDisabled,
+    MissingImageKey {
+        namespace: u32,
+        key: u32,
+        generation: u64,
+    },
+}
+
+impl fmt::Display for FreezeCanvasSnapshotsError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::RetentionDisabled => formatter.write_str("Canvas command retention is disabled"),
+            Self::MissingImageKey {
+                namespace,
+                key,
+                generation,
+            } => write!(
+                formatter,
+                "no retained command snapshot for image key {namespace}:{key} at Canvas registry generation {generation}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for FreezeCanvasSnapshotsError {}
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum RetainedCanvasCommand {
@@ -139,21 +192,78 @@ impl Drop for CanvasRetentionGuard {
     }
 }
 
-pub fn snapshot_for_image_key(namespace: u32, key: u32) -> Option<Arc<RetainedCanvasSnapshot>> {
-    if !ENABLED.load(Ordering::Acquire) {
-        return None;
-    }
-    let registry = registry();
-    let image_key = ImageKey(IdNamespace(namespace), key);
-    if let Some(canvas_id) = registry.image_keys.get(&image_key) {
-        return registry.canvases.get(canvas_id).map(Arc::clone);
-    }
-    registry.completed.get(&image_key).map(Arc::clone)
+/// Freezes all requested image keys while holding the registry lock once.
+///
+/// The returned map owns immutable snapshot handles and remains stable after the live registry
+/// advances. A missing key rejects the whole request; no partial bundle is returned. An exceeded
+/// retention budget returns a flagged bundle without resolving keys so the caller can preserve the
+/// producer-budget failure over any missing association caused by that budget.
+pub fn freeze_canvas_snapshots(
+    image_keys: &[(u32, u32)],
+) -> Result<FrozenCanvasSnapshots, FreezeCanvasSnapshotsError> {
+    freeze_canvas_snapshots_with_observer(image_keys, |_| {})
 }
 
-/// Reports whether the active capture guard exhausted any session-wide retention budget.
-pub fn retention_budget_exceeded() -> bool {
-    ENABLED.load(Ordering::Acquire) && registry().retention_budget_exceeded
+fn freeze_canvas_snapshots_with_observer(
+    image_keys: &[(u32, u32)],
+    mut after_snapshot: impl FnMut(usize),
+) -> Result<FrozenCanvasSnapshots, FreezeCanvasSnapshotsError> {
+    if image_keys.is_empty() {
+        return Ok(FrozenCanvasSnapshots {
+            generation: 0,
+            retention_budget_exceeded: false,
+            snapshots: HashMap::new(),
+        });
+    }
+    // Materialize and deduplicate the request before taking the global registry lock. Accepting a
+    // slice also prevents a custom iterator from re-entering retention while `next()` runs.
+    if !ENABLED.load(Ordering::Acquire) {
+        return Err(FreezeCanvasSnapshotsError::RetentionDisabled);
+    }
+    let mut unique_keys = Vec::with_capacity(image_keys.len());
+    let mut seen = HashSet::with_capacity(image_keys.len());
+    for &image_key in image_keys {
+        if seen.insert(image_key) {
+            unique_keys.push(image_key);
+        }
+    }
+    let mut snapshots = HashMap::with_capacity(unique_keys.len());
+    let registry = registry();
+    if !ENABLED.load(Ordering::Acquire) {
+        return Err(FreezeCanvasSnapshotsError::RetentionDisabled);
+    }
+    let generation = registry.generation;
+    let retention_budget_exceeded = registry.retention_budget_exceeded;
+    if retention_budget_exceeded {
+        // The capture boundary rejects this bundle before lookup. Preserve budget-failure
+        // precedence even when the object whose association crossed the budget has no image key.
+        return Ok(FrozenCanvasSnapshots {
+            generation,
+            retention_budget_exceeded,
+            snapshots,
+        });
+    }
+    for (namespace, key) in unique_keys {
+        let image_key = ImageKey(IdNamespace(namespace), key);
+        let snapshot = registry
+            .image_keys
+            .get(&image_key)
+            .and_then(|canvas_id| registry.canvases.get(canvas_id))
+            .or_else(|| registry.completed.get(&image_key))
+            .map(Arc::clone)
+            .ok_or(FreezeCanvasSnapshotsError::MissingImageKey {
+                namespace,
+                key,
+                generation,
+            })?;
+        snapshots.insert(image_key, snapshot);
+        after_snapshot(snapshots.len());
+    }
+    Ok(FrozenCanvasSnapshots {
+        generation,
+        retention_budget_exceeded,
+        snapshots,
+    })
 }
 
 struct Registry {
@@ -167,6 +277,7 @@ struct Registry {
     max_retained_raster_bytes: u64,
     max_retained_objects: u64,
     retention_budget_exceeded: bool,
+    generation: u64,
 }
 
 impl Default for Registry {
@@ -182,6 +293,7 @@ impl Default for Registry {
             max_retained_raster_bytes: MAX_RETAINED_RASTER_BYTES,
             max_retained_objects: MAX_RETAINED_OBJECTS,
             retention_budget_exceeded: false,
+            generation: 0,
         }
     }
 }
@@ -198,6 +310,14 @@ impl Registry {
         self.max_retained_raster_bytes = MAX_RETAINED_RASTER_BYTES;
         self.max_retained_objects = MAX_RETAINED_OBJECTS;
         self.retention_budget_exceeded = false;
+        self.advance_generation();
+    }
+
+    fn advance_generation(&mut self) {
+        self.generation = self
+            .generation
+            .checked_add(1)
+            .expect("retained Canvas registry generation exhausted");
     }
 
     fn mark_retention_budget_exceeded(&mut self, canvas_id: Option<CanvasId>) {
@@ -288,6 +408,7 @@ pub(crate) fn register_canvas(canvas_id: CanvasId, size: Size2D<u64>) {
         return;
     };
     let mut registry = registry();
+    registry.advance_generation();
     if !registry.canvases.contains_key(&canvas_id) && !registry.reserve_object(None) {
         return;
     }
@@ -307,6 +428,7 @@ pub(crate) fn recreate_canvas(canvas_id: CanvasId, size: Option<Size2D<u64>>) {
         return;
     }
     let mut registry = registry();
+    registry.advance_generation();
     let Some(canvas) = registry.canvases.get_mut(&canvas_id) else {
         return;
     };
@@ -330,6 +452,7 @@ pub(crate) fn recreate_canvas(canvas_id: CanvasId, size: Option<Size2D<u64>>) {
 pub(crate) fn associate_image_key(canvas_id: CanvasId, image_key: ImageKey) {
     if ENABLED.load(Ordering::Acquire) {
         let mut registry = registry();
+        registry.advance_generation();
         let is_new = !registry.image_keys.contains_key(&image_key) &&
             !registry.completed.contains_key(&image_key);
         if is_new && !registry.reserve_object(Some(canvas_id)) {
@@ -345,6 +468,7 @@ pub(crate) fn finish_canvas(canvas_id: CanvasId) {
         return;
     }
     let mut registry = registry();
+    registry.advance_generation();
     let Some(snapshot) = registry.canvases.remove(&canvas_id) else {
         return;
     };
@@ -415,6 +539,7 @@ pub(crate) fn retain_fill_rect(
     }
 
     let mut registry = registry();
+    registry.advance_generation();
     let Some(canvas) = registry.canvases.get(&canvas_id) else {
         return;
     };
@@ -468,6 +593,7 @@ pub(crate) fn retain_pixel_readback(
     let origin = bounds.map_or_else(Default::default, |bounds| bounds.origin);
     {
         let mut registry = registry();
+        registry.advance_generation();
         let can_replace_unsupported = registry.canvases.get(&canvas_id).is_some_and(|canvas| {
             origin.x == 0 &&
                 origin.y == 0 &&
@@ -486,6 +612,7 @@ pub(crate) fn retain_pixel_readback(
         SnapshotPixelFormat::RGBA,
     );
     let mut registry = registry();
+    registry.advance_generation();
     let Some(canvas) = registry.canvases.get_mut(&canvas_id) else {
         return;
     };
@@ -516,6 +643,7 @@ pub(crate) fn mark_unsupported(
         return;
     }
     let mut registry = registry();
+    registry.advance_generation();
     if let Some(canvas) = registry.canvases.get_mut(&canvas_id) {
         let canvas = Arc::make_mut(canvas);
         canvas
@@ -526,7 +654,9 @@ pub(crate) fn mark_unsupported(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
+    use std::sync::mpsc::sync_channel;
+    use std::sync::{Mutex, TryLockError};
+    use std::thread;
 
     use euclid::default::{Point2D, Rect, Size2D, Transform2D};
     use pixels::{Snapshot, SnapshotAlphaMode, SnapshotPixelFormat};
@@ -537,10 +667,12 @@ mod tests {
     use webrender_api::{IdNamespace, ImageKey};
 
     use super::{
-        Registry, RetainedCanvasCommand, RetainedCanvasSnapshot, RetainedCanvasUnsupportedReason,
-        associate_image_key, finish_canvas, mark_unsupported, register_canvas, registry,
-        retain_fill_rect, retain_pixel_readback, retention_budget_exceeded, snapshot_for_image_key,
-        start_retaining_canvas_commands, start_retaining_canvas_commands_with_limits,
+        FreezeCanvasSnapshotsError, REGISTRY, Registry, RetainedCanvasCommand,
+        RetainedCanvasSnapshot, RetainedCanvasUnsupportedReason, associate_image_key,
+        finish_canvas, freeze_canvas_snapshots, freeze_canvas_snapshots_with_observer,
+        mark_unsupported, recreate_canvas, register_canvas, registry, retain_fill_rect,
+        retain_pixel_readback, start_retaining_canvas_commands,
+        start_retaining_canvas_commands_with_limits,
     };
 
     static RETENTION_TEST_LOCK: Mutex<()> = Mutex::new(());
@@ -571,7 +703,10 @@ mod tests {
                 },
                 Transform2D::identity(),
             );
-            let snapshot = snapshot_for_image_key(7, 11).unwrap();
+            let snapshot = freeze_canvas_snapshots(&[(7, 11)])
+                .unwrap()
+                .get(7, 11)
+                .unwrap();
             assert_eq!((snapshot.width, snapshot.height), (20, 10));
             assert!(matches!(
                 snapshot.commands.as_slice(),
@@ -586,12 +721,97 @@ mod tests {
             finish_canvas(CanvasId(3));
             assert!(registry().canvases.is_empty());
             assert!(registry().image_keys.is_empty());
-            let first = snapshot_for_image_key(7, 11).unwrap();
-            let second = snapshot_for_image_key(7, 13).unwrap();
+            let frozen = freeze_canvas_snapshots(&[(7, 11), (7, 13)]).unwrap();
+            let first = frozen.get(7, 11).unwrap();
+            let second = frozen.get(7, 13).unwrap();
             assert!(std::sync::Arc::ptr_eq(&first, &second));
             assert_eq!(registry().retained_object_count, 3);
         }
-        assert!(snapshot_for_image_key(7, 11).is_none());
+        assert!(matches!(
+            freeze_canvas_snapshots(&[(7, 11)]),
+            Err(FreezeCanvasSnapshotsError::RetentionDisabled)
+        ));
+        let empty = freeze_canvas_snapshots(&[]).unwrap();
+        assert_eq!(empty.generation(), 0);
+        assert!(!empty.retention_budget_exceeded());
+        assert!(empty.get(7, 11).is_none());
+    }
+
+    #[test]
+    fn freezes_every_requested_key_before_a_waiting_mutation_can_advance_the_registry() {
+        let _serial = RETENTION_TEST_LOCK.lock().unwrap();
+        let first_key = ImageKey(IdNamespace(9), 1);
+        let second_key = ImageKey(IdNamespace(9), 2);
+        let _guard = start_retaining_canvas_commands();
+        register_canvas(CanvasId(40), Size2D::new(10, 10));
+        register_canvas(CanvasId(41), Size2D::new(20, 20));
+        associate_image_key(CanvasId(40), first_key);
+        associate_image_key(CanvasId(41), second_key);
+
+        let (first_snapshot_tx, first_snapshot_rx) = sync_channel(0);
+        let (mutation_attempted_tx, mutation_attempted_rx) = sync_channel(0);
+        let mutation = thread::spawn(move || {
+            first_snapshot_rx.recv().unwrap();
+            assert!(
+                matches!(
+                    REGISTRY.get().unwrap().try_lock(),
+                    Err(TryLockError::WouldBlock)
+                ),
+                "the freezer must retain registry authority between requested-key lookups"
+            );
+            mutation_attempted_tx.send(()).unwrap();
+            recreate_canvas(CanvasId(41), Some(Size2D::new(99, 99)));
+        });
+
+        let frozen = freeze_canvas_snapshots_with_observer(&[(9, 1), (9, 2)], |count| {
+            if count == 1 {
+                first_snapshot_tx.send(()).unwrap();
+                mutation_attempted_rx.recv().unwrap();
+            }
+        })
+        .unwrap();
+        mutation.join().unwrap();
+
+        assert_eq!(
+            frozen
+                .get(9, 1)
+                .map(|snapshot| (snapshot.width, snapshot.height)),
+            Some((10, 10))
+        );
+        assert_eq!(
+            frozen
+                .get(9, 2)
+                .map(|snapshot| (snapshot.width, snapshot.height)),
+            Some((20, 20)),
+            "the second lookup must not observe the mutation attempted after the first lookup"
+        );
+
+        let after_mutation = freeze_canvas_snapshots(&[(9, 1), (9, 2)]).unwrap();
+        assert!(after_mutation.generation() > frozen.generation());
+        assert_eq!(
+            after_mutation
+                .get(9, 2)
+                .map(|snapshot| (snapshot.width, snapshot.height)),
+            Some((99, 99))
+        );
+    }
+
+    #[test]
+    fn a_missing_requested_key_rejects_the_whole_frozen_bundle() {
+        let _serial = RETENTION_TEST_LOCK.lock().unwrap();
+        let _guard = start_retaining_canvas_commands();
+        register_canvas(CanvasId(42), Size2D::new(2, 2));
+        associate_image_key(CanvasId(42), ImageKey(IdNamespace(10), 1));
+
+        let error = freeze_canvas_snapshots(&[(10, 1), (10, 2)]).unwrap_err();
+        assert!(matches!(
+            error,
+            FreezeCanvasSnapshotsError::MissingImageKey {
+                namespace: 10,
+                key: 2,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -668,7 +888,10 @@ mod tests {
         assert!(registry.image_keys.contains_key(&first_key));
         assert!(!registry.image_keys.contains_key(&rejected_key));
         drop(registry);
-        assert!(retention_budget_exceeded());
+        let frozen = freeze_canvas_snapshots(&[(8, 2)])
+            .expect("budget failure must take precedence over a rejected image-key association");
+        assert!(frozen.retention_budget_exceeded());
+        assert!(frozen.get(8, 2).is_none());
     }
 
     #[test]
@@ -698,7 +921,10 @@ mod tests {
             &pixels,
         );
 
-        let snapshot = snapshot_for_image_key(7, 12).unwrap();
+        let snapshot = freeze_canvas_snapshots(&[(7, 12)])
+            .unwrap()
+            .get(7, 12)
+            .unwrap();
         assert!(snapshot.unsupported.is_none());
         assert!(matches!(
             snapshot.commands.as_slice(),

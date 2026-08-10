@@ -331,7 +331,21 @@ impl DocumentSession {
     }
 
     pub(crate) fn render(self) -> Result<DocumentOutcome, SessionError> {
-        self.render_inner().map_err(|error| {
+        self.render_with_canvas_freezer(|keys| {
+            servo_canvas::retained_canvas::freeze_canvas_snapshots(keys)
+        })
+    }
+
+    fn render_with_canvas_freezer(
+        self,
+        freeze_canvas: impl FnOnce(
+            &[(u32, u32)],
+        ) -> Result<
+            servo_canvas::retained_canvas::FrozenCanvasSnapshots,
+            servo_canvas::retained_canvas::FreezeCanvasSnapshotsError,
+        >,
+    ) -> Result<DocumentOutcome, SessionError> {
+        self.render_inner(freeze_canvas).map_err(|error| {
             error.with_resources(
                 self.delegate.resources.borrow().entries.clone(),
                 self.delegate.resource_store.borrow().clone(),
@@ -339,7 +353,15 @@ impl DocumentSession {
         })
     }
 
-    fn render_inner(&self) -> Result<DocumentOutcome, SessionError> {
+    fn render_inner(
+        &self,
+        freeze_canvas: impl FnOnce(
+            &[(u32, u32)],
+        ) -> Result<
+            servo_canvas::retained_canvas::FrozenCanvasSnapshots,
+            servo_canvas::retained_canvas::FreezeCanvasSnapshotsError,
+        >,
+    ) -> Result<DocumentOutcome, SessionError> {
         self.webview.show();
         self.spin_until("document load", || self.delegate.load_complete.get())?;
 
@@ -369,13 +391,6 @@ impl DocumentSession {
             ));
         }
         let readiness = self.evaluate_readiness()?;
-        if servo_canvas::retained_canvas::retention_budget_exceeded() {
-            return Err(SessionError::new(
-                "SCENE_CAPTURE_FAILED",
-                "live Canvas retention exceeded the session budget",
-            ));
-        }
-
         let snapshot = self.webview.debug_layout_snapshot().ok_or_else(|| {
             SessionError::new(
                 "SCENE_CAPTURE_UNAVAILABLE",
@@ -387,15 +402,7 @@ impl DocumentSession {
             capture_document_scene_with_canvas(
                 snapshot.as_bytes(),
                 |url| resources.resolve_url(url),
-                |key| {
-                    servo_canvas::retained_canvas::snapshot_for_image_key(key.namespace, key.key)
-                        .ok_or_else(|| {
-                            format!(
-                                "no retained command snapshot for image key {}:{}",
-                                key.namespace, key.key
-                            )
-                        })
-                },
+                freeze_canvas,
             )
         }
         .map_err(|error| SessionError::new("SCENE_CAPTURE_FAILED", error.to_string()))?;
@@ -1424,6 +1431,7 @@ mod tests {
             "hybrid-canvas", // a fresh process must reproduce the exact oracle
             "unsupported-canvas",
             "canvas-retention-budget",
+            "canvas-missing-snapshot",
             "state-seed",
             "state-clean",
         ] {
@@ -1580,7 +1588,7 @@ mod tests {
                     .canonicalize()
                     .unwrap()
             },
-            "hybrid-canvas" => {
+            "hybrid-canvas" | "canvas-missing-snapshot" => {
                 readiness = ReadinessPolicy::default();
                 Path::new(env!("CARGO_MANIFEST_DIR"))
                     .join("tests/fixtures/hybrid-canvas/live.html")
@@ -1651,7 +1659,10 @@ mod tests {
             return;
         }
         let page = match case.as_str() {
-            "hybrid-canvas" | "unsupported-canvas" | "canvas-retention-budget" => {
+            "hybrid-canvas" |
+            "unsupported-canvas" |
+            "canvas-retention-budget" |
+            "canvas-missing-snapshot" => {
                 PageDefinition::new(200.0, 160.0, PageMargins::new(10.0, 10.0, 10.0, 10.0)).unwrap()
             },
             "chartjs-report" => {
@@ -1679,7 +1690,17 @@ mod tests {
                 readiness,
             )
         };
-        let result = session.and_then(DocumentSession::render);
+        let result = session.and_then(|session| {
+            if case == "canvas-missing-snapshot" {
+                session.render_with_canvas_freezer(|keys| {
+                    let mut keys = keys.to_vec();
+                    keys.push((u32::MAX, u32::MAX));
+                    servo_canvas::retained_canvas::freeze_canvas_snapshots(&keys)
+                })
+            } else {
+                session.render()
+            }
+        });
 
         match case.as_str() {
             "local-success" => {
@@ -2069,6 +2090,19 @@ mod tests {
                 assert_eq!(
                     error.message,
                     "live Canvas retention exceeded the session budget"
+                );
+            },
+            "canvas-missing-snapshot" => {
+                let Err(error) = result else {
+                    panic!(
+                        "a missing retained Canvas key returned a DocumentOutcome containing PDF bytes"
+                    )
+                };
+                assert_eq!(error.code, "SCENE_CAPTURE_FAILED");
+                assert!(
+                    error.message.contains("4294967295:4294967295"),
+                    "{}",
+                    error.message
                 );
             },
             "chartjs-report" => {
