@@ -30,6 +30,7 @@ use servo::{
 };
 use url::Url;
 
+use super::asset_cache::MAX_CACHE_BYTES;
 use super::engine::RenderEnvironment;
 use super::owned_resource_store::{OwnedResourceStore, decode_bounded_data_url};
 use super::readiness::{self, Readiness, ReadinessPolicy};
@@ -553,6 +554,7 @@ struct DocumentDelegate {
     load_complete: Cell<bool>,
     resource_failure: RefCell<Option<ResourcePolicyFailure>>,
     resource_events: Cell<usize>,
+    delivered_body_bytes: Cell<u64>,
     resources: RefCell<ResourceEvidenceLog>,
 }
 
@@ -689,6 +691,18 @@ impl DocumentDelegate {
         resource: ControlledResource,
         headers: HeaderMap,
     ) {
+        let next_delivered_body_bytes = match checked_delivered_body_bytes(
+            &request,
+            self.delivered_body_bytes.get(),
+            resource.body.len() as u64,
+            MAX_CACHE_BYTES,
+        ) {
+            Ok(bytes) => bytes,
+            Err(failure) => {
+                self.cancel_resource(load, failure);
+                return;
+            },
+        };
         let status = match http::StatusCode::from_u16(resource.status) {
             Ok(status) => status,
             Err(error) => {
@@ -739,6 +753,7 @@ impl DocumentDelegate {
             self.cancel_resource(load, failure);
             return;
         }
+        self.delivered_body_bytes.set(next_delivered_body_bytes);
         let mut intercepted = load.intercept(
             WebResourceResponse::new(request.url)
                 .headers(headers)
@@ -769,6 +784,25 @@ impl DocumentDelegate {
         }
         load.intercept(WebResourceResponse::new(url)).cancel();
     }
+}
+
+fn checked_delivered_body_bytes(
+    request: &ResourceRequest,
+    delivered: u64,
+    additional: u64,
+    limit: u64,
+) -> Result<u64, ResourcePolicyFailure> {
+    delivered
+        .checked_add(additional)
+        .filter(|bytes| *bytes <= limit)
+        .ok_or_else(|| {
+            ResourcePolicyFailure::new(
+                request,
+                "RESOURCE_DELIVERY_LIMIT_EXCEEDED",
+                "denied",
+                format!("delivered resource bodies exceed the {limit}-byte aggregate bound"),
+            )
+        })
 }
 
 #[cfg(test)]
@@ -831,6 +865,22 @@ mod tests {
     const PRE_SESSION_PDF: &str =
         "sha256:9873076c43b0c76dca8fc54ad5721e5cd20ccee5deca6905425d49df068d7af8";
     const EXPECTED_LINK: &str = "https://pliego.dev/docs";
+
+    #[test]
+    fn repeated_body_delivery_is_bounded_before_interception() {
+        let request = ResourceRequest {
+            method: "GET".into(),
+            url: url::Url::parse("https://example.test/shared").unwrap(),
+            destination: "Image".into(),
+            referrer_url: None,
+            is_for_main_frame: false,
+            is_redirect: false,
+        };
+        let delivered = super::checked_delivered_body_bytes(&request, 0, 3, 4).unwrap();
+        let error = super::checked_delivered_body_bytes(&request, delivered, 3, 4).unwrap_err();
+        assert_eq!(error.code, "RESOURCE_DELIVERY_LIMIT_EXCEEDED");
+        assert_eq!(delivered, 3);
+    }
 
     #[test]
     fn evidence_metadata_limit_rejects_before_an_entry_is_retained() {
