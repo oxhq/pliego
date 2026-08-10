@@ -47,8 +47,10 @@ benchmarks/
 
 ## Prerequisites
 
-* Dedicated or self-hosted **Linux x86_64** — GitHub-hosted Actions are for
-  smoke checks only, never for publishable numbers.
+* Dedicated or self-hosted **Linux x86_64, kernel 6.1 or newer**, with unified
+  cgroup v2. GitHub-hosted Actions are for smoke checks only, never for
+  publishable numbers. Linux 6.1 is required because the retained accounting
+  contract requires both `memory.peak` and `pids.peak`.
 * The **published bundle** (`checked-release` profile) resolved by the pinned
   release verifier. Never `cargo run`.
 * `php-cli` ≥ 8.1 (runner), `python3` ≥ 3.11 (orchestrator/validator; stdlib only),
@@ -134,8 +136,9 @@ the stopped unprivileged launcher and zero CPU/I/O/memory counters before exec.
 
 Periodic `/proc` PID/start-time, summed RSS, and summed PSS observations are
 retained only as sampled lower-bound diagnostics; short-lived processes may be
-missed there without weakening cgroup accounting. Run
-`python3 benchmarks/tools/test_process_tree_sampler.py --live --php-integration`
+missed there without weakening cgroup accounting. As root, with
+`PLIEGO_BENCHMARK_CGROUP_PARENT` exported, run
+`/usr/bin/python3 benchmarks/tools/test_process_tree_sampler.py --live --php-integration`
 inside the delegated `harness` child for the containment, cleanup, counter, and
 PHP-to-Python proof. On a dedicated benchmark host, add
 `--acceptance-overhead` for the 20-pair randomized on/off gate. It uses the

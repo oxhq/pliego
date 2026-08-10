@@ -30,6 +30,7 @@
 declare(strict_types=1);
 
 const ENGINE_ACCOUNT = 'pliego-benchmark-engine';
+const SAMPLER_PYTHON = '/usr/bin/python3';
 
 const USAGE = <<<EOT
 Usage: php pliego.php --binary <path> --input <file.html> --output <file.pdf> --artifacts <dir>
@@ -65,6 +66,21 @@ function fail(string $message, int $code = 2): never
     exit($code);
 }
 
+function sampler_interpreter(): ?string
+{
+    if (PHP_OS_FAMILY !== 'Linux') {
+        return null;
+    }
+    $resolved = realpath(SAMPLER_PYTHON);
+    $mode = $resolved !== false ? fileperms($resolved) : false;
+    if ($resolved === false || !str_starts_with($resolved, DIRECTORY_SEPARATOR)
+        || !is_file($resolved) || !is_executable($resolved)
+        || fileowner($resolved) !== 0 || $mode === false || ($mode & 0022) !== 0) {
+        return null;
+    }
+    return $resolved;
+}
+
 $options = getopt('', [
     'binary:', 'input:', 'output:', 'artifacts:', 'samples:', 'warmup:',
     'page-count:', 'text-contains:', 'expect-failure', 'expected-code:',
@@ -89,6 +105,9 @@ if (array_key_exists('self-test', $options)) {
         || parse_stdout_summary("[]\n") !== null
         || parse_stdout_summary("{}\n") !== null) {
         fail('stdout summary self-test failed', 1);
+    }
+    if (PHP_OS_FAMILY === 'Linux' && sampler_interpreter() === null) {
+        fail('sampler interpreter self-test failed', 1);
     }
     fwrite(STDOUT, "Pliego PHP runner self-test passed\n");
     exit(0);
@@ -197,8 +216,16 @@ function run_engine(array $command, string $cwd): array
             @unlink($samplerErrorTmp);
             return ['error' => "cgroup-v2 sampler not found: {$sampler}"];
         }
+        $interpreter = sampler_interpreter();
+        if ($interpreter === null) {
+            @unlink($stdoutTmp);
+            @unlink($stderrTmp);
+            @unlink($samplerResultTmp);
+            @unlink($samplerErrorTmp);
+            return ['error' => 'sampler interpreter is not a canonical root-owned, non-writable executable: ' . SAMPLER_PYTHON];
+        }
         $launchedCommand = [
-            'python3', $sampler,
+            $interpreter, $sampler,
             '--cwd', $cwd,
             '--stdout', $stdoutTmp,
             '--stderr', $stderrTmp,
