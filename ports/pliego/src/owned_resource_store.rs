@@ -376,6 +376,10 @@ impl OwnedResourceStore {
             .map(|resource| resource.content_address.clone())
     }
 
+    pub(crate) fn resolve_request(&self, request: &ResourceRequest) -> Option<&OwnedResource> {
+        self.requests.get(&RequestIdentity::new(request))
+    }
+
     pub(crate) fn resolve_content(&self, resource: &str) -> Option<&[u8]> {
         self.resources.get(resource).map(AsRef::as_ref)
     }

@@ -779,7 +779,7 @@ fn render(request: RenderRequest) -> Result<RenderOutcome, RenderError> {
         userscripts,
         document_pdf_path,
         environment_path,
-        environment,
+        mut environment,
     } = begin_publication(&request, &resource_policy, &render_id)?;
     let record_session_artifact = |result| record_artifact(&artifacts, &document_pdf_path, result);
 
@@ -988,6 +988,8 @@ fn render(request: RenderRequest) -> Result<RenderOutcome, RenderError> {
         ));
     }
     let resolved_input_hash = resolved_input_hash(&render_id, &resource_capture.url_to_resource);
+    environment["resolved_input_hash"] = serde_json::json!(resolved_input_hash);
+    record_session_artifact(artifacts.write_environment(&environment))?;
 
     let snapshot_json = match result.value {
         servoshell::JSValue::String(json) => json,
@@ -1478,7 +1480,12 @@ fn finish_document_session_render(
     let outcome = match result {
         Ok(outcome) => outcome,
         Err(error) => {
-            return Err(fail_document_session(&mut publication, error));
+            return Err(fail_document_session(
+                &mut publication,
+                render_id,
+                expected_input,
+                error,
+            ));
         },
     };
     let DocumentCaptureOutcome {
@@ -1524,26 +1531,19 @@ fn finish_document_session_render(
             "direct capture environment does not match the prepared render identity",
         ));
     }
-    let input_binding =
-        match bind_document_session_input(expected_input, &resources, &resource_store) {
-            Ok(binding) => binding,
-            Err(error) => {
-                return Err(fail_document_session_publication(
-                    &publication,
-                    error.code,
-                    &error.message,
-                ));
-            },
-        };
-    publication.environment["input_resource"] = serde_json::json!({
-        "render_id": render_id,
-        "url": input_binding.url,
-        "sha256": input_binding.sha256,
-        "resource": input_binding.content_address,
-        "bytes": input_binding.bytes,
-        "source": "document_root",
-        "main_frame": true,
-    });
+    if let Err(error) = stage_document_session_input(
+        &mut publication,
+        render_id,
+        expected_input,
+        &resources,
+        &resource_store,
+    ) {
+        return Err(fail_document_session_publication(
+            &publication,
+            error.code,
+            &error.message,
+        ));
+    }
     let readiness_payload = match parse_snapshot(&readiness.to_string()) {
         Ok(Readiness::Ready { payload }) => payload,
         Ok(Readiness::Failed { error }) => {
@@ -1592,6 +1592,8 @@ fn finish_document_session_render(
 ))]
 fn fail_document_session(
     publication: &mut PublicationTransaction,
+    render_id: &str,
+    expected_input: &ExpectedInputIdentity,
     error: SessionError,
 ) -> RenderError {
     let SessionError {
@@ -1617,14 +1619,64 @@ fn fail_document_session(
         &resource_store,
         resource_failure.as_ref(),
     );
-    match evidence_result {
-        Ok(_) => fail_document_session_publication(publication, &code, &message),
-        Err(evidence_error) => fail_document_session_publication(
+    if let Err(evidence_error) = evidence_result {
+        return fail_document_session_publication(
             publication,
             evidence_error.code,
             &evidence_error.message,
-        ),
+        );
     }
+    if resources
+        .iter()
+        .any(|evidence| evidence.request.is_for_main_frame)
+    {
+        if let Err(binding_error) = stage_document_session_input(
+            publication,
+            render_id,
+            expected_input,
+            &resources,
+            &resource_store,
+        ) {
+            return fail_document_session_publication(
+                publication,
+                binding_error.code,
+                &binding_error.message,
+            );
+        }
+    }
+    fail_document_session_publication(publication, &code, &message)
+}
+
+#[cfg(all(
+    feature = "document-session",
+    not(any(target_os = "android", target_env = "ohos"))
+))]
+fn stage_document_session_input(
+    publication: &mut PublicationTransaction,
+    render_id: &str,
+    expected_input: &ExpectedInputIdentity,
+    resources: &[ResourceEvidence],
+    resource_store: &OwnedResourceStore,
+) -> Result<(), SceneArtifactError> {
+    let input_binding = bind_document_session_input(expected_input, resources, resource_store)?;
+    publication.environment["input_resource"] = serde_json::json!({
+        "render_id": render_id,
+        "url": input_binding.url,
+        "sha256": input_binding.sha256,
+        "resource": input_binding.content_address,
+        "bytes": input_binding.bytes,
+        "source": "document_root",
+        "main_frame": true,
+    });
+    publication
+        .artifacts
+        .write_environment(&publication.environment)
+        .map_err(|error| {
+            SceneArtifactError::new(
+                "SESSION_ARTIFACT_WRITE_FAILED",
+                format!("cannot persist direct-session input binding: {error}"),
+            )
+        })
 }
 
 #[cfg(all(
@@ -1719,6 +1771,16 @@ fn persist_document_session_evidence(
             )
             .map_err(|error| artifact_error("fatal resource evidence", error))?;
     }
+    let expected_resource_accounting = if resource_failure.is_some() {
+        ResourceAccounting::from_evidence(resources).with_failure()
+    } else {
+        ResourceAccounting::from_evidence(resources)
+    };
+    if resource_accounting != expected_resource_accounting {
+        return Err(invalid_resource_evidence(
+            "resource accounting does not match the persisted terminal evidence",
+        ));
+    }
     for (label, value) in [
         ("controlled runtime", controlled_runtime_ms),
         ("scene capture", scene_capture_ms),
@@ -1763,6 +1825,7 @@ fn persist_document_session_resources(
 ) -> Result<ResourceCapture, SceneArtifactError> {
     let mut capture = ResourceCapture::default();
     for (index, evidence) in resources.iter().enumerate() {
+        let body = validate_document_session_resource(evidence, resource_store)?;
         let request_id = format!("document-session:{index:06}");
         let url = evidence.request.url.to_string();
         artifacts
@@ -1791,26 +1854,11 @@ fn persist_document_session_resources(
             })
         });
         let artifact = if evidence.status == "loaded" {
-            let content_address = evidence.content_address.as_deref().ok_or_else(|| {
-                invalid_resource_evidence("loaded resource has no content address")
-            })?;
-            let digest = evidence
-                .sha256
+            let content_address = evidence
+                .content_address
                 .as_deref()
-                .ok_or_else(|| invalid_resource_evidence("loaded resource has no SHA-256"))?;
-            let body = resource_store
-                .resolve_content(content_address)
-                .ok_or_else(|| {
-                    invalid_resource_evidence("loaded resource body is absent from the owned store")
-                })?;
-            if evidence.bytes != Some(body.len() as u64) ||
-                sha256_hex(body) != digest ||
-                content_address != format!("sha256:{digest}")
-            {
-                return Err(invalid_resource_evidence(
-                    "loaded resource metadata does not match its owned body",
-                ));
-            }
+                .expect("validated loaded evidence has a content address");
+            let body = body.expect("validated loaded evidence has an owned body");
             let artifact = artifacts
                 .write_content_addressed_resource(content_address, body)
                 .map_err(|error| {
@@ -1824,21 +1872,6 @@ fn persist_document_session_resources(
             }
             Some(artifact)
         } else {
-            if evidence.status == "delegated" && evidence.source.is_none() {
-                return Err(invalid_resource_evidence(
-                    "delegated resource has no source identity",
-                ));
-            }
-            if evidence.status == "cancelled" && evidence.failure.is_none() {
-                return Err(invalid_resource_evidence(
-                    "cancelled resource has no failure evidence",
-                ));
-            }
-            if !matches!(evidence.status, "delegated" | "cancelled") {
-                return Err(invalid_resource_evidence(
-                    "resource evidence has an unknown terminal status",
-                ));
-            }
             None
         };
         artifacts
@@ -1876,6 +1909,120 @@ fn persist_document_session_resources(
             })?;
     }
     Ok(capture)
+}
+
+#[cfg(all(
+    feature = "document-session",
+    not(any(target_os = "android", target_env = "ohos"))
+))]
+fn validate_document_session_resource<'a>(
+    evidence: &ResourceEvidence,
+    resource_store: &'a OwnedResourceStore,
+) -> Result<Option<&'a [u8]>, SceneArtifactError> {
+    let has_response_metadata = evidence.response_status.is_some() ||
+        evidence.content_type.is_some() ||
+        evidence.bytes.is_some() ||
+        evidence.sha256.is_some() ||
+        evidence.content_address.is_some() ||
+        evidence.response_headers.is_some();
+    match evidence.status {
+        "loaded" => {
+            if !matches!(evidence.request.method.as_str(), "GET" | "HEAD") ||
+                evidence.request.is_redirect ||
+                evidence.source.is_none() ||
+                evidence.fatal ||
+                evidence.failure.is_some() ||
+                evidence.response_status.is_none() ||
+                evidence.bytes.is_none() ||
+                evidence.sha256.is_none() ||
+                evidence.content_address.is_none() ||
+                evidence.response_headers.is_none()
+            {
+                return Err(invalid_resource_evidence(
+                    "loaded resource has an invalid terminal evidence shape",
+                ));
+            }
+            let owned = resource_store
+                .resolve_request(&evidence.request)
+                .ok_or_else(|| {
+                    invalid_resource_evidence(
+                        "loaded resource request is absent from the owned store",
+                    )
+                })?;
+            let content_address = evidence
+                .content_address
+                .as_deref()
+                .expect("loaded shape checked above");
+            let digest = evidence
+                .sha256
+                .as_deref()
+                .expect("loaded shape checked above");
+            let body = owned.body();
+            if evidence.response_status != Some(owned.status()) ||
+                evidence.content_type.as_deref() != owned.content_type() ||
+                content_address != owned.content_address() ||
+                evidence.response_headers.as_ref() != Some(owned.response_headers()) ||
+                evidence.bytes != Some(body.len() as u64) ||
+                sha256_hex(body) != digest ||
+                content_address != format!("sha256:{digest}")
+            {
+                return Err(invalid_resource_evidence(
+                    "loaded resource metadata does not match its owned response",
+                ));
+            }
+            if evidence.request.method != "HEAD" &&
+                resource_store
+                    .resolve_url(evidence.request.url.as_str())
+                    .as_deref() !=
+                    Some(content_address)
+            {
+                return Err(invalid_resource_evidence(
+                    "loaded resource URL is not bound to its owned content address",
+                ));
+            }
+            Ok(Some(body))
+        },
+        "delegated" => {
+            if !matches!(evidence.request.method.as_str(), "GET" | "HEAD") ||
+                evidence.request.is_redirect ||
+                evidence.source.is_none() ||
+                evidence.fatal ||
+                evidence.failure.is_some() ||
+                has_response_metadata
+            {
+                return Err(invalid_resource_evidence(
+                    "delegated resource has an invalid terminal evidence shape",
+                ));
+            }
+            Ok(None)
+        },
+        "cancelled" => {
+            let failure = evidence.failure.as_ref().ok_or_else(|| {
+                invalid_resource_evidence("cancelled resource has no failure evidence")
+            })?;
+            let referrer = evidence.request.referrer_url.as_ref().map(url::Url::as_str);
+            if evidence.source.is_some() ||
+                evidence.fatal != failure.fatal ||
+                !failure.is_optional_metadata_failure() ||
+                failure.url != evidence.request.url.as_str() ||
+                failure.method != evidence.request.method ||
+                failure.destination != evidence.request.destination ||
+                failure.load_role != evidence.request.load_role ||
+                failure.referrer_url.as_deref() != referrer ||
+                failure.is_for_main_frame != evidence.request.is_for_main_frame ||
+                failure.is_redirect != evidence.request.is_redirect ||
+                has_response_metadata
+            {
+                return Err(invalid_resource_evidence(
+                    "cancelled resource has an invalid terminal evidence shape",
+                ));
+            }
+            Ok(None)
+        },
+        _ => Err(invalid_resource_evidence(
+            "resource evidence has an unknown terminal status",
+        )),
+    }
 }
 
 #[cfg(all(
@@ -4652,6 +4799,41 @@ mod tests {
         fs::remove_dir_all(directory).unwrap();
     }
 
+    #[test]
+    fn legacy_shell_failure_environment_keeps_the_resolved_input_hash() {
+        let directory = temporary_artifacts("pliego-shell-failure-input-hash");
+        let artifacts = SessionArtifacts::create(&directory).unwrap();
+        let document_pdf = directory.join("document.pdf");
+        let mut resources = BTreeMap::new();
+        resources.insert(
+            "file:///report.html".into(),
+            format!("sha256:{}", "1".repeat(64)),
+        );
+        let expected = super::resolved_input_hash(&artifacts.render_id(), &resources);
+        let mut environment = serde_json::json!({});
+        environment["resolved_input_hash"] = serde_json::json!(expected);
+        super::record_artifact(
+            &artifacts,
+            &document_pdf,
+            artifacts.write_environment(&environment),
+        )
+        .unwrap();
+
+        let error = super::fail_session(
+            &artifacts,
+            &document_pdf,
+            "READINESS_PENDING",
+            "document remained pending after stable capture",
+        );
+
+        assert_eq!(error.code, "READINESS_PENDING");
+        let persisted: serde_json::Value =
+            serde_json::from_slice(&fs::read(directory.join("environment.json")).unwrap()).unwrap();
+        assert_eq!(persisted["resolved_input_hash"], expected);
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
     #[cfg(feature = "document-session")]
     #[test]
     fn direct_publisher_binds_main_frame_identity_and_uses_the_existing_transaction() {
@@ -4729,6 +4911,241 @@ mod tests {
 
     #[cfg(feature = "document-session")]
     #[test]
+    fn direct_publisher_rejects_ambiguous_main_frame_evidence() {
+        let fixture =
+            direct_publication_fixture("pliego-direct-publisher-ambiguous-input", b"direct input");
+        let mut outcome = direct_capture_outcome(&fixture.document, b"direct input");
+        outcome.resources.push(outcome.resources[0].clone());
+        outcome.resource_accounting = ResourceAccounting::from_evidence(&outcome.resources);
+
+        let error = finish_document_session_render(
+            &fixture.request,
+            &fixture.document,
+            &fixture.render_id,
+            &fixture.expected_input,
+            fixture.publication,
+            Ok(outcome),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, "INPUT_RESOURCE_EVIDENCE_AMBIGUOUS");
+        assert_eq!(error.exit_code, 1);
+        assert!(!fixture.root.join("output.pdf").exists());
+        let resources = fs::read_to_string(fixture.root.join("artifacts/resources.jsonl")).unwrap();
+        assert_eq!(
+            resources
+                .lines()
+                .filter(|line| line.contains("\"status\":\"loaded\""))
+                .count(),
+            2
+        );
+
+        fs::remove_dir_all(fixture.root).unwrap();
+    }
+
+    #[cfg(feature = "document-session")]
+    #[test]
+    fn direct_publisher_rejects_resource_accounting_that_does_not_match_evidence() {
+        let fixture =
+            direct_publication_fixture("pliego-direct-publisher-accounting", b"direct input");
+        let mut outcome = direct_capture_outcome(&fixture.document, b"direct input");
+        outcome.resource_accounting.body_bytes += 1;
+
+        let error = finish_document_session_render(
+            &fixture.request,
+            &fixture.document,
+            &fixture.render_id,
+            &fixture.expected_input,
+            fixture.publication,
+            Ok(outcome),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, "RESOURCE_EVIDENCE_INVALID");
+        assert_eq!(error.exit_code, 1);
+        assert!(!fixture.root.join("output.pdf").exists());
+        assert!(fixture.root.join("artifacts/render.png").is_file());
+        let resources = fs::read_to_string(fixture.root.join("artifacts/resources.jsonl")).unwrap();
+        assert!(resources.contains("\"status\":\"loaded\""));
+
+        fs::remove_dir_all(fixture.root).unwrap();
+    }
+
+    #[cfg(feature = "document-session")]
+    #[test]
+    fn direct_publisher_rejects_a_non_main_loaded_row_absent_from_the_owned_store() {
+        let fixture =
+            direct_publication_fixture("pliego-direct-publisher-unowned-row", b"direct input");
+        let mut outcome = direct_capture_outcome(&fixture.document, b"direct input");
+        let mut unowned = outcome.resources[0].clone();
+        unowned.request.url =
+            url::Url::from_file_path(fixture.document.path().with_file_name("unowned.js")).unwrap();
+        unowned.request.destination = "Script".into();
+        unowned.request.is_for_main_frame = false;
+        outcome.resources.push(unowned);
+        outcome.resource_accounting = ResourceAccounting::from_evidence(&outcome.resources);
+
+        let error = finish_document_session_render(
+            &fixture.request,
+            &fixture.document,
+            &fixture.render_id,
+            &fixture.expected_input,
+            fixture.publication,
+            Ok(outcome),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, "RESOURCE_EVIDENCE_INVALID");
+        assert!(error.message.contains("absent from the owned store"));
+        assert!(!fixture.root.join("output.pdf").exists());
+
+        fs::remove_dir_all(fixture.root).unwrap();
+    }
+
+    #[cfg(feature = "document-session")]
+    #[test]
+    fn direct_resource_validator_rejects_contradictory_terminal_shapes() {
+        let request = ResourceRequest {
+            method: "GET".into(),
+            url: url::Url::parse("https://assets.example.test/report.js").unwrap(),
+            destination: "Script".into(),
+            load_role: WebResourceLoadRole::DocumentContent,
+            referrer_url: Some(url::Url::parse("https://assets.example.test/report.html").unwrap()),
+            is_for_main_frame: false,
+            is_redirect: false,
+        };
+        let body = b"console.log('owned');";
+        let mut headers = http::HeaderMap::new();
+        headers.insert(
+            http::header::CONTENT_TYPE,
+            http::HeaderValue::from_static("text/javascript"),
+        );
+        let mut store = OwnedResourceStore::new(0);
+        store
+            .retain(
+                &request,
+                ControlledResource {
+                    status: 200,
+                    content_type: Some("text/javascript".into()),
+                    body: body.to_vec(),
+                },
+                &headers,
+            )
+            .unwrap();
+        let loaded = ResourceEvidence::loaded(
+            request.clone(),
+            ResourceSource::Http,
+            "text/javascript",
+            body,
+        );
+        assert!(super::validate_document_session_resource(&loaded, &store).is_ok());
+
+        for malformed in [
+            {
+                let mut value = loaded.clone();
+                value.response_status = Some(201);
+                value
+            },
+            {
+                let mut value = loaded.clone();
+                value.source = None;
+                value
+            },
+            {
+                let mut value = loaded.clone();
+                value.response_headers = None;
+                value
+            },
+            {
+                let mut value = loaded.clone();
+                value.content_type = Some("text/css".into());
+                value
+            },
+            {
+                let mut value = loaded.clone();
+                value.request.destination = "Style".into();
+                value
+            },
+        ] {
+            assert_eq!(
+                super::validate_document_session_resource(&malformed, &store)
+                    .unwrap_err()
+                    .code,
+                "RESOURCE_EVIDENCE_INVALID"
+            );
+        }
+
+        let mut delegated = ResourceEvidence::delegated(request.clone(), ResourceSource::Http);
+        assert!(super::validate_document_session_resource(&delegated, &store).is_ok());
+        delegated.bytes = Some(1);
+        assert_eq!(
+            super::validate_document_session_resource(&delegated, &store)
+                .unwrap_err()
+                .code,
+            "RESOURCE_EVIDENCE_INVALID"
+        );
+
+        let mut metadata_request = request;
+        metadata_request.load_role = WebResourceLoadRole::DocumentMetadata;
+        let failure = ResourcePolicyFailure::new(
+            &metadata_request,
+            "RESOURCE_DENIED",
+            "denied",
+            "optional metadata was blocked",
+        )
+        .nonfatal();
+        let cancelled = ResourceEvidence::cancelled(metadata_request, failure);
+        assert!(super::validate_document_session_resource(&cancelled, &store).is_ok());
+        let mut contradictory = cancelled.clone();
+        contradictory.source = Some(ResourceSource::Http);
+        assert_eq!(
+            super::validate_document_session_resource(&contradictory, &store)
+                .unwrap_err()
+                .code,
+            "RESOURCE_EVIDENCE_INVALID"
+        );
+        let mut wrong_referrer = cancelled;
+        wrong_referrer.request.referrer_url =
+            Some(url::Url::parse("https://other.example.test/").unwrap());
+        assert_eq!(
+            super::validate_document_session_resource(&wrong_referrer, &store)
+                .unwrap_err()
+                .code,
+            "RESOURCE_EVIDENCE_INVALID"
+        );
+    }
+
+    #[cfg(feature = "document-session")]
+    #[test]
+    fn direct_publisher_preserves_partial_scene_opt_in_at_the_shared_publisher() {
+        let mut fixture =
+            direct_publication_fixture("pliego-direct-publisher-partial", b"direct input");
+        fixture.request.allow_partial_scene = true;
+        let mut outcome = direct_capture_outcome(&fixture.document, b"direct input");
+        outcome.capture.unsupported_events = vec![UnsupportedPaintEvent {
+            sequence: 0,
+            kind: UnsupportedPaintKind::Box,
+        }];
+
+        let rendered = finish_document_session_render(
+            &fixture.request,
+            &fixture.document,
+            &fixture.render_id,
+            &fixture.expected_input,
+            fixture.publication,
+            Ok(outcome),
+        )
+        .unwrap();
+
+        assert_eq!(rendered.summary["scene"]["capture_status"], "partial");
+        assert_eq!(rendered.summary["scene"]["unsupported_event_count"], 1);
+        assert!(fixture.root.join("output.pdf").is_file());
+
+        fs::remove_dir_all(fixture.root).unwrap();
+    }
+
+    #[cfg(feature = "document-session")]
+    #[test]
     fn direct_publisher_persists_staged_session_error_before_typed_cli_conversion() {
         let fixture = direct_publication_fixture("pliego-direct-publisher-error", b"direct input");
         let (resources, resource_store) =
@@ -4793,6 +5210,10 @@ mod tests {
         assert_eq!(environment["phase_timings_ms"]["controlled_runtime"], 12.5);
         assert_eq!(environment["phase_timings_ms"]["scene_capture"], 1.25);
         assert_eq!(environment["resource_accounting"]["loaded"], 1);
+        assert_eq!(
+            environment["input_resource"]["resource"],
+            fixture.expected_input.content_address
+        );
         let console = fs::read_to_string(fixture.root.join("artifacts/console.jsonl")).unwrap();
         let messages = console
             .lines()
@@ -4806,6 +5227,144 @@ mod tests {
             ]
         );
         assert!(!fixture.root.join("output.pdf").exists());
+
+        fs::remove_dir_all(fixture.root).unwrap();
+    }
+
+    #[cfg(feature = "document-session")]
+    #[test]
+    fn direct_session_error_prefers_changed_main_frame_identity_over_the_later_error() {
+        let fixture =
+            direct_publication_fixture("pliego-direct-error-input-race", b"pre-read input");
+        let (resources, resource_store) =
+            direct_resource_evidence(&fixture.document, b"changed before Servo load");
+        let mut session_error =
+            SessionError::new("READINESS_TIMEOUT", "readiness deadline elapsed");
+        session_error.capture_evidence.stable_image_png = Some(stable_png());
+        session_error.resource_accounting = ResourceAccounting::from_evidence(&resources);
+        session_error.resources = resources;
+        session_error.resource_store = resource_store;
+
+        let error = finish_document_session_render(
+            &fixture.request,
+            &fixture.document,
+            &fixture.render_id,
+            &fixture.expected_input,
+            fixture.publication,
+            Err(session_error),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, "INPUT_RESOURCE_IDENTITY_MISMATCH");
+        assert!(!fixture.root.join("output.pdf").exists());
+        assert!(fixture.root.join("artifacts/render.png").is_file());
+        let failure: serde_json::Value =
+            serde_json::from_slice(&fs::read(fixture.root.join("artifacts/failure.json")).unwrap())
+                .unwrap();
+        assert_eq!(failure["error"]["code"], "INPUT_RESOURCE_IDENTITY_MISMATCH");
+
+        fs::remove_dir_all(fixture.root).unwrap();
+    }
+
+    #[cfg(feature = "document-session")]
+    #[test]
+    fn direct_session_error_prefers_ambiguous_main_frame_identity_over_the_later_error() {
+        let fixture =
+            direct_publication_fixture("pliego-direct-error-ambiguous-input", b"direct input");
+        let (mut resources, resource_store) =
+            direct_resource_evidence(&fixture.document, b"direct input");
+        resources.push(resources[0].clone());
+        let mut session_error =
+            SessionError::new("READINESS_TIMEOUT", "readiness deadline elapsed");
+        session_error.resource_accounting = ResourceAccounting::from_evidence(&resources);
+        session_error.resources = resources;
+        session_error.resource_store = resource_store;
+
+        let error = finish_document_session_render(
+            &fixture.request,
+            &fixture.document,
+            &fixture.render_id,
+            &fixture.expected_input,
+            fixture.publication,
+            Err(session_error),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, "INPUT_RESOURCE_EVIDENCE_AMBIGUOUS");
+        assert!(!fixture.root.join("output.pdf").exists());
+
+        fs::remove_dir_all(fixture.root).unwrap();
+    }
+
+    #[cfg(feature = "document-session")]
+    #[test]
+    fn direct_preload_error_without_main_frame_evidence_keeps_its_original_code() {
+        let fixture = direct_publication_fixture("pliego-direct-preload-error", b"direct input");
+        let error = finish_document_session_render(
+            &fixture.request,
+            &fixture.document,
+            &fixture.render_id,
+            &fixture.expected_input,
+            fixture.publication,
+            Err(SessionError::new(
+                "RENDER_CONTEXT_FAILED",
+                "software context unavailable",
+            )),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, "RENDER_CONTEXT_FAILED");
+        assert!(!fixture.root.join("output.pdf").exists());
+
+        fs::remove_dir_all(fixture.root).unwrap();
+    }
+
+    #[cfg(feature = "document-session")]
+    #[test]
+    fn direct_publisher_keeps_artifact_write_failure_precedence_after_staging() {
+        let fixture =
+            direct_publication_fixture("pliego-direct-publisher-write-failure", b"direct input");
+        let (resources, resource_store) =
+            direct_resource_evidence(&fixture.document, b"direct input");
+        let digest = resources[0].sha256.as_deref().unwrap();
+        fs::create_dir(fixture.root.join("artifacts/resources").join(digest)).unwrap();
+        let mut session_error =
+            SessionError::new("READINESS_TIMEOUT", "readiness deadline elapsed");
+        session_error.capture_evidence.stable_image_png = Some(stable_png());
+        session_error.capture_evidence.readiness = Some(serde_json::json!({
+            "status": "pending",
+            "font_status": "loading",
+        }));
+        session_error.capture_evidence.layout_debug = Some(serde_json::json!({
+            "schema": "fixture-layout",
+        }));
+        session_error.resource_accounting = ResourceAccounting::from_evidence(&resources);
+        session_error.resources = resources;
+        session_error.resource_store = resource_store;
+
+        let error = finish_document_session_render(
+            &fixture.request,
+            &fixture.document,
+            &fixture.render_id,
+            &fixture.expected_input,
+            fixture.publication,
+            Err(session_error),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, "SESSION_ARTIFACT_WRITE_FAILED");
+        assert_eq!(error.exit_code, 1);
+        assert!(error.message.contains("direct-session resource body"));
+        assert!(!fixture.root.join("output.pdf").exists());
+        let readiness: serde_json::Value = serde_json::from_slice(
+            &fs::read(fixture.root.join("artifacts/readiness.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(readiness["status"], "pending");
+        let failure: serde_json::Value =
+            serde_json::from_slice(&fs::read(fixture.root.join("artifacts/failure.json")).unwrap())
+                .unwrap();
+        assert_eq!(failure["error"]["code"], "SESSION_ARTIFACT_WRITE_FAILED");
 
         fs::remove_dir_all(fixture.root).unwrap();
     }

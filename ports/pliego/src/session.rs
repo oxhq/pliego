@@ -272,6 +272,7 @@ impl SessionArtifacts {
     /// The caller supplies the runtime-specific evidence fields; this artifact
     /// boundary owns the timestamp, render identity, and policy identity so a
     /// runtime cannot accidentally publish evidence for a different session.
+    #[cfg(feature = "document-session")]
     pub fn record_resource_evidence(&self, evidence: serde_json::Value) -> io::Result<()> {
         let mut evidence = evidence.as_object().cloned().ok_or_else(|| {
             io::Error::new(
@@ -347,6 +348,7 @@ impl SessionArtifacts {
         self.write_bytes("scene-preview.png", png)
     }
 
+    #[cfg(feature = "document-session")]
     pub fn write_render_image(&self, png: &[u8]) -> io::Result<()> {
         self.write_bytes("render.png", png)
     }
