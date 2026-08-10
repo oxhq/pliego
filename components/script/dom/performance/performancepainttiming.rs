@@ -9,7 +9,9 @@ use script_traits::ProgressiveWebMetricType;
 use servo_base::cross_process_instant::CrossProcessInstant;
 use time::Duration;
 
-use super::performanceentry::{EntryType, PerformanceEntry};
+use super::performanceentry::{
+    EntryType, PerformanceEntry, PerformanceEntryDuration, PerformanceEntryTime,
+};
 use crate::dom::bindings::codegen::Bindings::PerformancePaintTimingBinding::PerformancePaintTimingMethods;
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::bindings::str::DOMString;
@@ -36,8 +38,8 @@ impl PerformancePaintTiming {
             entry: PerformanceEntry::new_inherited(
                 name,
                 EntryType::Paint,
-                Some(start_time),
-                Duration::ZERO,
+                Some(PerformanceEntryTime::Host(start_time)),
+                PerformanceEntryDuration::Host(Duration::ZERO),
             ),
         }
     }
