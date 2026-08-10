@@ -45,6 +45,7 @@
   "blockers": [
     "assistive-technology-matrix-not-run",
     "author-assurance-not-provided",
+    "evidence-proof-closure-not-implemented",
     "per-render-machine-not-run",
     "release-corpus-not-run",
     "validation-lock-not-ready"

@@ -45,6 +45,7 @@ EVIDENCE_GATES = (
     "author_assurance",
     "assistive_technology",
 )
+PROFILE_GATES = [name.replace("_", "-") for name in EVIDENCE_GATES]
 
 
 def load_api2_contract() -> ModuleType:
@@ -146,6 +147,8 @@ def profile_semantics(profile: dict[str, Any]) -> list[str]:
         errors.append("$.inventory: failure-condition classes do not close over the inventory")
     if inventory["no_specific_test"] != ["23-001", "27-001"]:
         errors.append("$.inventory.no_specific_test: unsupported Matterhorn 1.1 inventory")
+    if profile["result"]["gates"] != PROFILE_GATES:
+        errors.append("$.result.gates: evidence gates are not in the accepted order")
     return errors
 
 
@@ -212,6 +215,7 @@ def evidence_semantics(evidence: dict[str, Any]) -> list[str]:
     statuses = [evidence[name]["status"] for name in EVIDENCE_GATES]
     decision = evidence["decision"]
     if decision == "satisfied":
+        errors.append("$.decision: satisfied requires resolved proof closure from OXH-345 and OXH-346")
         if evidence["validation_lock"] is None:
             errors.append("$.decision: satisfied requires a content-addressed ready validation lock")
         if statuses != ["passed"] * len(EVIDENCE_GATES):
@@ -412,6 +416,13 @@ def main() -> None:
         "evidence",
         load_json(GOLDEN_DIR / "rejected" / "conformance-evidence.satisfied-with-missing-gates.json"),
         "satisfied requires",
+    )
+    assert_rejected(
+        api2_contract,
+        "satisfied evidence with forged artifact references",
+        "evidence",
+        load_json(GOLDEN_DIR / "rejected" / "conformance-evidence.satisfied-with-forged-artifacts.json"),
+        "satisfied requires resolved proof closure",
     )
     assert_rejected(
         api2_contract,

@@ -117,7 +117,7 @@
     "result": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["evidence", "satisfaction"],
+      "required": ["evidence", "gates", "satisfaction"],
       "properties": {
         "evidence": {
           "type": "object",
@@ -127,6 +127,21 @@
             "schema": { "const": "pliego.conformance-evidence.pdfua-1" },
             "version": { "const": 1 },
             "media_type": { "const": "application/vnd.pliego.conformance-evidence+json" }
+          }
+        },
+        "gates": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "enum": [
+              "per-render-machine",
+              "release-corpus",
+              "author-assurance",
+              "assistive-technology"
+            ]
           }
         },
         "satisfaction": { "const": "all-four-gates-pass" }
@@ -158,10 +173,16 @@
     "activation": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["gate", "runtime_advertisement", "descriptor_is_support_claim"],
+      "required": [
+        "gate",
+        "runtime_advertisement",
+        "satisfied_evidence",
+        "descriptor_is_support_claim"
+      ],
       "properties": {
         "gate": { "const": "r3.5-final" },
         "runtime_advertisement": { "const": "required-before-acceptance" },
+        "satisfied_evidence": { "const": "blocked-until-resolved-proof-closure" },
         "descriptor_is_support_claim": { "const": false }
       }
     }

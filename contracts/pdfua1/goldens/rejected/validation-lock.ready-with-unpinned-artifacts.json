@@ -50,6 +50,7 @@
     "version": "1.30.2",
     "flavour": "ua1",
     "source_tag": "v1.30.2",
+    "source_tag_object": "91d810bac357ef114f1a178d247d61d0233f9472",
     "source_commit": "7d9b5c3f709846ab83f86ca1a538b24eac2d3f72",
     "release_url": "https://github.com/veraPDF/veraPDF-apps/releases/tag/v1.30.2",
     "distribution_url": null,

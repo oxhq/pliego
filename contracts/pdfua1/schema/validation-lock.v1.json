@@ -190,6 +190,7 @@
         "version",
         "flavour",
         "source_tag",
+        "source_tag_object",
         "source_commit",
         "release_url",
         "distribution_url",
@@ -202,6 +203,7 @@
         "version": { "const": "1.30.2" },
         "flavour": { "const": "ua1" },
         "source_tag": { "const": "v1.30.2" },
+        "source_tag_object": { "const": "91d810bac357ef114f1a178d247d61d0233f9472" },
         "source_commit": { "const": "7d9b5c3f709846ab83f86ca1a538b24eac2d3f72" },
         "release_url": {
           "const": "https://github.com/veraPDF/veraPDF-apps/releases/tag/v1.30.2"

@@ -53,6 +53,12 @@
       "version": 1,
       "media_type": "application/vnd.pliego.conformance-evidence+json"
     },
+    "gates": [
+      "per-render-machine",
+      "release-corpus",
+      "author-assurance",
+      "assistive-technology"
+    ],
     "satisfaction": "all-four-gates-pass"
   },
   "bindings": {
@@ -71,6 +77,7 @@
   "activation": {
     "gate": "r3.5-final",
     "runtime_advertisement": "required-before-acceptance",
+    "satisfied_evidence": "blocked-until-resolved-proof-closure",
     "descriptor_is_support_claim": false
   }
 }

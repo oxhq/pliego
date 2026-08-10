@@ -38,13 +38,14 @@
     "assistive_technology": { "$ref": "#/definitions/assistive_technology" },
     "blockers": {
       "type": "array",
-      "maxItems": 5,
+      "maxItems": 6,
       "uniqueItems": true,
       "items": {
         "type": "string",
         "enum": [
           "assistive-technology-matrix-not-run",
           "author-assurance-not-provided",
+          "evidence-proof-closure-not-implemented",
           "per-render-machine-not-run",
           "release-corpus-not-run",
           "validation-lock-not-ready"
@@ -66,8 +67,12 @@
     "validation_lock_ref": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["resource", "media_type", "bytes"],
+      "required": ["schema", "version", "profile", "state", "resource", "media_type", "bytes"],
       "properties": {
+        "schema": { "const": "pliego.pdfua-validation-lock" },
+        "version": { "const": 1 },
+        "profile": { "$ref": "common.v1.json#/definitions/profile_ref" },
+        "state": { "const": "ready" },
         "resource": { "$ref": "common.v1.json#/definitions/content_address" },
         "media_type": { "const": "application/vnd.pliego.pdfua-validation-lock+json" },
         "bytes": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 }
