@@ -10,7 +10,7 @@
 use std::cmp::{self, Ord};
 use std::collections::{BTreeMap, BinaryHeap};
 use std::fmt;
-use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -136,6 +136,7 @@ impl DocumentRenderingTime {
 
 /// Document-observable surfaces that eventually need to share one controlled clock.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[repr(u8)]
 pub enum DocumentTimeSurface {
     /// Window timers on one script event loop.
     WindowTimers,
@@ -159,6 +160,35 @@ pub enum DocumentTimeSurface {
     Worklet,
     /// A nested browsing context hosted by another script event loop.
     CrossEventLoopIframe,
+    /// A navigation that would replace the controlled WebView's one event-loop authority.
+    CrossEventLoopNavigation,
+    /// An auxiliary WebView that would share or replace a controlled event-loop authority.
+    AuxiliaryWebView,
+}
+
+impl DocumentTimeSurface {
+    const fn latch_value(self) -> u8 {
+        self as u8 + 1
+    }
+
+    const fn from_latch_value(value: u8) -> Option<Self> {
+        match value {
+            1 => Some(Self::WindowTimers),
+            2 => Some(Self::SameEventLoopIframe),
+            3 => Some(Self::JavaScriptDate),
+            4 => Some(Self::Performance),
+            5 => Some(Self::HostTimestamp),
+            6 => Some(Self::UpdateRendering),
+            7 => Some(Self::AnimationFrame),
+            8 => Some(Self::DocumentTimeline),
+            9 => Some(Self::Worker),
+            10 => Some(Self::Worklet),
+            11 => Some(Self::CrossEventLoopIframe),
+            12 => Some(Self::CrossEventLoopNavigation),
+            13 => Some(Self::AuxiliaryWebView),
+            _ => None,
+        }
+    }
 }
 
 /// A checked document-clock failure.
@@ -209,6 +239,7 @@ enum DocumentClockInner {
     Controlled {
         now_ns: AtomicU64,
         unix_time_origin_ns: u64,
+        unsupported_surface: AtomicU8,
     },
 }
 
@@ -238,6 +269,7 @@ impl DocumentClock {
             } => DocumentClockInner::Controlled {
                 now_ns: AtomicU64::new(initial_time_ns),
                 unix_time_origin_ns,
+                unsupported_surface: AtomicU8::new(0),
             },
         };
         Self {
@@ -360,7 +392,36 @@ impl DocumentClock {
         {
             Ok(())
         } else {
+            if let DocumentClockInner::Controlled {
+                unsupported_surface,
+                ..
+            } = &*self.inner
+            {
+                let _ = unsupported_surface.compare_exchange(
+                    0,
+                    surface.latch_value(),
+                    AtomicOrdering::AcqRel,
+                    AtomicOrdering::Acquire,
+                );
+            }
             Err(DocumentClockError::UnsupportedSurface(surface))
+        }
+    }
+
+    /// Return the first unsupported observable surface touched by this controlled clock.
+    ///
+    /// The latch is monotonic: once an unsupported producer or host timestamp is observed, later
+    /// control-plane observations keep failing closed instead of allowing a subsequent quiet turn
+    /// to hide it.
+    pub fn unsupported_surface(&self) -> Option<DocumentTimeSurface> {
+        match &*self.inner {
+            DocumentClockInner::Realtime { .. } => None,
+            DocumentClockInner::Controlled {
+                unsupported_surface,
+                ..
+            } => DocumentTimeSurface::from_latch_value(
+                unsupported_surface.load(AtomicOrdering::Acquire),
+            ),
         }
     }
 
@@ -1048,6 +1109,28 @@ mod tests {
             initial_time_ns,
             unix_time_origin_ns: 0,
         })
+    }
+
+    #[test]
+    fn controlled_clock_latches_the_first_unsupported_surface() {
+        let clock = controlled_clock(0);
+        assert_eq!(clock.unsupported_surface(), None);
+        assert_eq!(
+            clock.require_surface(DocumentTimeSurface::HostTimestamp),
+            Err(DocumentClockError::UnsupportedSurface(
+                DocumentTimeSurface::HostTimestamp
+            ))
+        );
+        assert_eq!(
+            clock.require_surface(DocumentTimeSurface::Worker),
+            Err(DocumentClockError::UnsupportedSurface(
+                DocumentTimeSurface::Worker
+            ))
+        );
+        assert_eq!(
+            clock.unsupported_surface(),
+            Some(DocumentTimeSurface::HostTimestamp)
+        );
     }
 
     fn recording_request(

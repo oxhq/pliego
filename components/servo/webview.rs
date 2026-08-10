@@ -12,10 +12,11 @@ use accesskit::{
 };
 use dpi::PhysicalSize;
 use embedder_traits::{
-    ContextMenuAction, ContextMenuItem, Cursor, EmbedderControlId, EmbedderControlRequest, Image,
-    InputEvent, InputEventAndId, InputEventId, JSValue, JavaScriptEvaluationError, LoadStatus,
-    MediaSessionActionType, NewWebViewDetails, ScreenGeometry, ScreenshotCaptureError, Scroll,
-    Theme, TraversalId, UrlRequest, ViewportDetails, WebViewPoint, WebViewRect,
+    ContextMenuAction, ContextMenuItem, Cursor, DocumentClockConfiguration, EmbedderControlId,
+    EmbedderControlRequest, Image, InputEvent, InputEventAndId, InputEventId, JSValue,
+    JavaScriptEvaluationError, LoadStatus, MediaSessionActionType, NewWebViewDetails, ScreenGeometry,
+    ScreenshotCaptureError, Scroll, Theme, TraversalId, UrlRequest, ViewportDetails, WebViewPoint,
+    WebViewRect,
 };
 use euclid::{Scale, Size2D};
 use image::RgbaImage;
@@ -114,6 +115,7 @@ pub(crate) struct WebViewInner {
 
     rendering_context: Rc<dyn RenderingContext>,
     user_content_manager: Option<Rc<UserContentManager>>,
+    document_clock: DocumentClockConfiguration,
     hidpi_scale_factor: Scale<f32, DeviceIndependentPixel, DevicePixel>,
     load_status: LoadStatus,
     status_text: Option<String>,
@@ -173,6 +175,7 @@ impl WebView {
             back_forward_list: Default::default(),
             back_forward_list_index: 0,
             user_content_manager: builder.user_content_manager.clone(),
+            document_clock: builder.document_clock,
         })));
 
         let viewport_details = webview.viewport_details();
@@ -197,6 +200,7 @@ impl WebView {
             webview_id: webview.id(),
             viewport_details,
             user_content_manager_id,
+            document_clock: builder.document_clock,
         };
 
         // There are two possibilities here. Either the WebView is a new toplevel
@@ -241,6 +245,7 @@ impl WebView {
         let request = CreateNewWebViewRequest {
             servo: self.inner().servo.clone(),
             responder: IpcResponder::new(response_sender, None),
+            document_clock: self.inner().document_clock,
         };
         self.delegate().request_create_new(self.clone(), request);
     }
@@ -1045,6 +1050,8 @@ pub struct WebViewBuilder {
     hidpi_scale_factor: Scale<f32, DeviceIndependentPixel, DevicePixel>,
     create_new_webview_responder: Option<IpcResponder<Option<NewWebViewDetails>>>,
     user_content_manager: Option<Rc<UserContentManager>>,
+    document_clock: DocumentClockConfiguration,
+    document_clock_is_inherited: bool,
     clipboard_delegate: Option<Rc<dyn ClipboardDelegate>>,
     #[cfg(feature = "gamepad")]
     gamepad_delegate: Option<Rc<dyn GamepadDelegate>>,
@@ -1064,6 +1071,8 @@ impl WebViewBuilder {
             delegate: Rc::new(DefaultWebViewDelegate),
             create_new_webview_responder: None,
             user_content_manager: None,
+            document_clock: DocumentClockConfiguration::Realtime,
+            document_clock_is_inherited: false,
             clipboard_delegate: None,
             #[cfg(feature = "gamepad")]
             gamepad_delegate: None,
@@ -1074,9 +1083,12 @@ impl WebViewBuilder {
         servo: &Servo,
         rendering_context: Rc<dyn RenderingContext>,
         responder: IpcResponder<Option<NewWebViewDetails>>,
+        document_clock: DocumentClockConfiguration,
     ) -> Self {
         let mut builder = Self::new(servo, rendering_context);
         builder.create_new_webview_responder = Some(responder);
+        builder.document_clock = document_clock;
+        builder.document_clock_is_inherited = true;
         builder
     }
 
@@ -1107,6 +1119,19 @@ impl WebViewBuilder {
     /// to the `UserContentManager` will take effect only after the document is reloaded.
     pub fn user_content_manager(mut self, user_content_manager: Rc<UserContentManager>) -> Self {
         self.user_content_manager = Some(user_content_manager);
+        self
+    }
+
+    /// Install a document-observable clock before the WebView's initial navigation is sent.
+    ///
+    /// This is an internal deterministic-rendering seam. Interactive WebViews retain the realtime
+    /// default. Controlled mode is useful only together with the matching typed event-loop driver.
+    /// Auxiliary WebViews inherit their opener's authority and cannot override it here.
+    #[doc(hidden)]
+    pub fn document_clock(mut self, document_clock: DocumentClockConfiguration) -> Self {
+        if !self.document_clock_is_inherited {
+            self.document_clock = document_clock;
+        }
         self
     }
 

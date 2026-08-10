@@ -3,14 +3,15 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 use embedder_traits::user_contents::UserContentManagerId;
-use embedder_traits::{InputEvent, MouseLeftViewportEvent, Theme};
+use embedder_traits::{DocumentClockConfiguration, InputEvent, MouseLeftViewportEvent, Theme};
 use euclid::Point2D;
 use log::warn;
 use rustc_hash::FxHashMap;
 use script_traits::{ConstellationInputEvent, ScriptThreadMessage};
 use servo_base::Epoch;
-use servo_base::id::{BrowsingContextId, PipelineId, WebViewId};
+use servo_base::id::{BrowsingContextId, PipelineId, ScriptEventLoopId, WebViewId};
 use style_traits::CSSPixel;
+use timers::DocumentTimeSurface;
 
 use crate::browsingcontext::BrowsingContext;
 use crate::pipeline::Pipeline;
@@ -48,6 +49,15 @@ pub(crate) struct ConstellationWebView {
     /// it is `None` otherwise.
     pub user_content_manager_id: Option<UserContentManagerId>,
 
+    /// Clock mode selected before this WebView's initial navigation.
+    document_clock: DocumentClockConfiguration,
+
+    /// The one ScriptEventLoop that owns a controlled WebView's clock and producer fence.
+    controlled_event_loop_id: Option<ScriptEventLoopId>,
+
+    /// Sticky unsupported-surface failure for this controlled WebView.
+    document_time_failure: Option<DocumentTimeSurface>,
+
     /// The [`Theme`] that this [`ConstellationWebView`] uses. This is communicated to all
     /// `ScriptThread`s so that they know how to render the contents of a particular `WebView.
     theme: Theme,
@@ -66,10 +76,14 @@ impl ConstellationWebView {
         webview_id: WebViewId,
         focused_browsing_context_id: BrowsingContextId,
         user_content_manager_id: Option<UserContentManagerId>,
+        document_clock: DocumentClockConfiguration,
     ) -> Self {
         Self {
             webview_id,
             user_content_manager_id,
+            document_clock,
+            controlled_event_loop_id: None,
+            document_time_failure: None,
             active_top_level_pipeline_id: None,
             active_top_level_pipeline_epoch: Epoch::default(),
             focused_browsing_context_id,
@@ -78,6 +92,45 @@ impl ConstellationWebView {
             session_history: JointSessionHistory::new(),
             theme: Theme::Light,
             accessibility_active: false,
+        }
+    }
+
+    pub(crate) const fn document_clock(&self) -> DocumentClockConfiguration {
+        self.document_clock
+    }
+
+    pub(crate) const fn controlled_event_loop_id(&self) -> Option<ScriptEventLoopId> {
+        self.controlled_event_loop_id
+    }
+
+    pub(crate) fn bind_controlled_event_loop(
+        &mut self,
+        event_loop_id: ScriptEventLoopId,
+    ) -> Result<(), DocumentTimeSurface> {
+        if self.document_clock == DocumentClockConfiguration::Realtime {
+            return Ok(());
+        }
+        if let Some(failure) = self.document_time_failure {
+            return Err(failure);
+        }
+        match self.controlled_event_loop_id {
+            None => {
+                self.controlled_event_loop_id = Some(event_loop_id);
+                Ok(())
+            },
+            Some(bound) if bound == event_loop_id => Ok(()),
+            Some(_) => {
+                self.document_time_failure = Some(DocumentTimeSurface::CrossEventLoopIframe);
+                Err(DocumentTimeSurface::CrossEventLoopIframe)
+            },
+        }
+    }
+
+    pub(crate) fn fail_document_time(&mut self, surface: DocumentTimeSurface) {
+        if self.document_clock != DocumentClockConfiguration::Realtime &&
+            self.document_time_failure.is_none()
+        {
+            self.document_time_failure = Some(surface);
         }
     }
 
@@ -187,5 +240,61 @@ impl ConstellationWebView {
                 event,
             ));
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use servo_base::id::{
+        ScriptEventLoopId, TEST_BROWSING_CONTEXT_ID, TEST_SCRIPT_EVENT_LOOP_ID, TEST_WEBVIEW_ID,
+    };
+
+    use super::*;
+
+    fn controlled_webview() -> ConstellationWebView {
+        ConstellationWebView::new(
+            TEST_WEBVIEW_ID,
+            TEST_BROWSING_CONTEXT_ID,
+            None,
+            DocumentClockConfiguration::Controlled {
+                initial_time_ns: 7,
+                unix_time_origin_ns: 11,
+            },
+        )
+    }
+
+    #[test]
+    fn controlled_webview_binds_one_event_loop_and_latches_cross_loop_use() {
+        let mut webview = controlled_webview();
+        assert_eq!(webview.controlled_event_loop_id(), None);
+        assert!(
+            webview
+                .bind_controlled_event_loop(TEST_SCRIPT_EVENT_LOOP_ID)
+                .is_ok()
+        );
+        assert!(
+            webview
+                .bind_controlled_event_loop(TEST_SCRIPT_EVENT_LOOP_ID)
+                .is_ok()
+        );
+
+        let other_event_loop = ScriptEventLoopId::new();
+        assert_ne!(other_event_loop, TEST_SCRIPT_EVENT_LOOP_ID);
+        assert_eq!(
+            webview.bind_controlled_event_loop(other_event_loop),
+            Err(DocumentTimeSurface::CrossEventLoopIframe)
+        );
+        assert_eq!(
+            webview.document_time_failure,
+            Some(DocumentTimeSurface::CrossEventLoopIframe)
+        );
+        assert_eq!(
+            webview.controlled_event_loop_id(),
+            Some(TEST_SCRIPT_EVENT_LOOP_ID)
+        );
+        assert_eq!(
+            webview.bind_controlled_event_loop(TEST_SCRIPT_EVENT_LOOP_ID),
+            Err(DocumentTimeSurface::CrossEventLoopIframe)
+        );
     }
 }

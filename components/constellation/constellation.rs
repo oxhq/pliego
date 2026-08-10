@@ -174,6 +174,7 @@ use storage_traits::client_storage::ClientStorageThreadMessage;
 use storage_traits::indexeddb::{IndexedDBThreadMsg, SyncOperation};
 use storage_traits::webstorage_thread::{WebStorageThreadMsg, WebStorageType};
 use style::global_style_data::StyleThreadPool;
+use timers::{DocumentClockConfiguration, DocumentTimeSurface};
 #[cfg(feature = "webgpu")]
 use webgpu::canvas_context::WebGpuExternalImageMap;
 #[cfg(feature = "webgpu")]
@@ -199,6 +200,17 @@ struct PendingApprovalNavigation {
 }
 
 type PendingApprovalNavigations = FxHashMap<PipelineId, PendingApprovalNavigation>;
+
+enum EventLoopCreationError {
+    Ipc(IpcError),
+    UnsupportedDocumentTime(DocumentTimeSurface),
+}
+
+impl From<IpcError> for EventLoopCreationError {
+    fn from(error: IpcError) -> Self {
+        Self::Ipc(error)
+    }
+}
 
 #[derive(Debug)]
 /// The state used by MessagePortInfo to represent the various states the port can be in.
@@ -977,7 +989,19 @@ where
         parent_pipeline_id: Option<PipelineId>,
         load_data: &LoadData,
         is_private: bool,
-    ) -> Result<Rc<EventLoop>, IpcError> {
+    ) -> Result<Rc<EventLoop>, EventLoopCreationError> {
+        let unsupported_event_loop_surface = if opener.is_some() {
+            DocumentTimeSurface::AuxiliaryWebView
+        } else if parent_pipeline_id.is_some() {
+            DocumentTimeSurface::CrossEventLoopIframe
+        } else {
+            DocumentTimeSurface::CrossEventLoopNavigation
+        };
+        let document_clock = self
+            .webviews
+            .get(&webview_id)
+            .map(ConstellationWebView::document_clock)
+            .unwrap_or_default();
         let registered_domain_name = if load_data
             .creation_sandboxing_flag_set
             .contains(SandboxingFlagSet::SANDBOXED_ORIGIN_BROWSING_CONTEXT_FLAG)
@@ -994,10 +1018,47 @@ where
             parent_pipeline_id,
             &registered_domain_name,
         ) {
+            if event_loop.document_clock() != document_clock {
+                if let Some(webview) = self.webviews.get_mut(&webview_id) {
+                    webview.fail_document_time(unsupported_event_loop_surface);
+                }
+                return Err(EventLoopCreationError::UnsupportedDocumentTime(
+                    unsupported_event_loop_surface,
+                ));
+            }
+            if document_clock != DocumentClockConfiguration::Realtime {
+                let Some(webview) = self.webviews.get_mut(&webview_id) else {
+                    return Err(EventLoopCreationError::UnsupportedDocumentTime(
+                        unsupported_event_loop_surface,
+                    ));
+                };
+                webview
+                    .bind_controlled_event_loop(event_loop.id())
+                    .map_err(EventLoopCreationError::UnsupportedDocumentTime)?;
+            }
             return Ok(event_loop);
         }
 
-        let event_loop = EventLoop::spawn(self, is_private)?;
+        if document_clock != DocumentClockConfiguration::Realtime &&
+            self
+                .webviews
+                .get(&webview_id)
+                .is_some_and(|webview| webview.controlled_event_loop_id().is_some())
+        {
+            if let Some(webview) = self.webviews.get_mut(&webview_id) {
+                webview.fail_document_time(unsupported_event_loop_surface);
+            }
+            return Err(EventLoopCreationError::UnsupportedDocumentTime(
+                unsupported_event_loop_surface,
+            ));
+        }
+
+        let event_loop = EventLoop::spawn(self, is_private, document_clock)?;
+        if let Some(webview) = self.webviews.get_mut(&webview_id) {
+            webview
+                .bind_controlled_event_loop(event_loop.id())
+                .map_err(EventLoopCreationError::UnsupportedDocumentTime)?;
+        }
         if let Some(registered_domain_name) = registered_domain_name {
             self.set_event_loop(&event_loop, registered_domain_name, webview_id, opener);
         }
@@ -1022,9 +1083,9 @@ where
         is_private: bool,
         throttled: bool,
         target_snapshot_params: TargetSnapshotParams,
-    ) {
+    ) -> bool {
         if self.shutting_down {
-            return;
+            return false;
         }
 
         debug!("Creating new pipeline ({new_pipeline_id:?}) in {browsing_context_id}");
@@ -1034,7 +1095,7 @@ where
             .map(ConstellationWebView::theme)
         else {
             warn!("Tried to create Pipeline for uknown WebViewId: {webview_id:?}");
-            return;
+            return false;
         };
 
         let event_loop = match self.get_or_create_event_loop_for_new_pipeline(
@@ -1045,7 +1106,16 @@ where
             is_private,
         ) {
             Ok(event_loop) => event_loop,
-            Err(error) => return self.handle_send_error(new_pipeline_id, error.into()),
+            Err(EventLoopCreationError::Ipc(error)) => {
+                self.handle_send_error(new_pipeline_id, error.into());
+                return false;
+            },
+            Err(EventLoopCreationError::UnsupportedDocumentTime(surface)) => {
+                warn!(
+                    "{webview_id}: controlled document time rejected unsupported surface {surface:?}"
+                );
+                return false;
+            },
         };
 
         let user_content_manager_id = self
@@ -1067,11 +1137,15 @@ where
         };
         let pipeline = match Pipeline::spawn(new_pipeline_info, event_loop, self, throttled) {
             Ok(pipeline) => pipeline,
-            Err(error) => return self.handle_send_error(new_pipeline_id, error),
+            Err(error) => {
+                self.handle_send_error(new_pipeline_id, error);
+                return false;
+            },
         };
 
         assert!(!self.pipelines.contains_key(&new_pipeline_id));
         self.pipelines.insert(new_pipeline_id, pipeline);
+        true
     }
 
     /// Get an iterator for the fully active browsing contexts in a subtree.
@@ -3098,7 +3172,7 @@ where
         };
 
         let is_private = false;
-        self.new_pipeline(
+        if !self.new_pipeline(
             new_pipeline_id,
             browsing_context_id,
             webview_id,
@@ -3109,7 +3183,9 @@ where
             is_private,
             throttled,
             TargetSnapshotParams::default(),
-        );
+        ) {
+            return;
+        }
         self.add_pending_change(SessionHistoryChange {
             webview_id,
             browsing_context_id,
@@ -3297,6 +3373,7 @@ where
             webview_id,
             viewport_details,
             user_content_manager_id,
+            document_clock,
         }: NewWebViewDetails,
     ) {
         let pipeline_id = PipelineId::new();
@@ -3309,7 +3386,12 @@ where
         // its focused browsing context to be itself.
         self.webviews.insert(
             webview_id,
-            ConstellationWebView::new(webview_id, browsing_context_id, user_content_manager_id),
+            ConstellationWebView::new(
+                webview_id,
+                browsing_context_id,
+                user_content_manager_id,
+                document_clock,
+            ),
         );
 
         // https://html.spec.whatwg.org/multipage/#creating-a-new-browsing-context-group
@@ -3321,7 +3403,7 @@ where
         self.browsing_context_group_set
             .insert(new_bc_group_id, new_bc_group);
 
-        self.new_pipeline(
+        if !self.new_pipeline(
             pipeline_id,
             browsing_context_id,
             webview_id,
@@ -3332,7 +3414,9 @@ where
             is_private,
             throttled,
             TargetSnapshotParams::default(),
-        );
+        ) {
+            return;
+        }
         self.add_pending_change(SessionHistoryChange {
             webview_id,
             browsing_context_id,
@@ -3541,7 +3625,7 @@ where
         }
 
         // Create the new pipeline, attached to the parent and push to pending changes
-        self.new_pipeline(
+        if !self.new_pipeline(
             new_pipeline_id,
             browsing_context_id,
             webview_id,
@@ -3552,7 +3636,9 @@ where
             is_private,
             browsing_context_throttled,
             target_snapshot_params,
-        );
+        ) {
+            return;
+        }
         self.add_pending_change(SessionHistoryChange {
             webview_id,
             browsing_context_id,
@@ -3634,6 +3720,20 @@ where
             response_sender,
         } = load_info;
 
+        if self
+            .webviews
+            .get(&opener_webview_id)
+            .is_some_and(|webview| {
+                webview.document_clock() != DocumentClockConfiguration::Realtime
+            })
+        {
+            if let Some(opener_webview) = self.webviews.get_mut(&opener_webview_id) {
+                opener_webview.fail_document_time(DocumentTimeSurface::AuxiliaryWebView);
+            }
+            let _ = response_sender.send(None);
+            return;
+        }
+
         let Some((webview_id_sender, webview_id_receiver)) = generic_channel::channel() else {
             warn!("Failed to create channel");
             let _ = response_sender.send(None);
@@ -3648,6 +3748,7 @@ where
             webview_id: new_webview_id,
             viewport_details,
             user_content_manager_id,
+            document_clock,
         } = match webview_id_receiver.recv() {
             Ok(Some(new_webview_details)) => new_webview_details,
             Ok(None) | Err(_) => {
@@ -3667,6 +3768,16 @@ where
                     );
                 },
             };
+        if script_sender.document_clock() != document_clock {
+            if let Some(opener_webview) = self.webviews.get_mut(&opener_webview_id) {
+                opener_webview.fail_document_time(DocumentTimeSurface::CrossEventLoopIframe);
+            }
+            warn!(
+                "{new_webview_id}: auxiliary WebView clock does not match its opener's event loop"
+            );
+            let _ = response_sender.send(None);
+            return;
+        }
         let (is_opener_private, is_opener_throttled, is_opener_secure) =
             match self.browsing_contexts.get(&opener_browsing_context_id) {
                 Some(ctx) => (ctx.is_private, ctx.throttled, ctx.inherited_secure_context),
@@ -3678,6 +3789,19 @@ where
                 },
             };
         let new_pipeline_id = PipelineId::new();
+        let mut new_webview = ConstellationWebView::new(
+            new_webview_id,
+            new_browsing_context_id,
+            user_content_manager_id,
+            document_clock,
+        );
+        if let Err(surface) = new_webview.bind_controlled_event_loop(script_sender.id()) {
+            if let Some(opener_webview) = self.webviews.get_mut(&opener_webview_id) {
+                opener_webview.fail_document_time(surface);
+            }
+            let _ = response_sender.send(None);
+            return;
+        }
         let pipeline = Pipeline::new_already_spawned(
             new_pipeline_id,
             new_browsing_context_id,
@@ -3696,14 +3820,7 @@ where
 
         assert!(!self.pipelines.contains_key(&new_pipeline_id));
         self.pipelines.insert(new_pipeline_id, pipeline);
-        self.webviews.insert(
-            new_webview_id,
-            ConstellationWebView::new(
-                new_webview_id,
-                new_browsing_context_id,
-                user_content_manager_id,
-            ),
-        );
+        self.webviews.insert(new_webview_id, new_webview);
 
         // https://html.spec.whatwg.org/multipage/#bcg-append
         let Some(opener) = self.browsing_contexts.get(&opener_browsing_context_id) else {
@@ -3958,7 +4075,7 @@ where
                 };
 
                 let new_pipeline_id = PipelineId::new();
-                self.new_pipeline(
+                if !self.new_pipeline(
                     new_pipeline_id,
                     browsing_context_id,
                     webview_id,
@@ -3969,7 +4086,9 @@ where
                     is_private,
                     is_throttled,
                     target_snapshot_params,
-                );
+                ) {
+                    return None;
+                }
                 self.add_pending_change(SessionHistoryChange {
                     webview_id,
                     browsing_context_id,
@@ -4253,7 +4372,7 @@ where
                     None => None,
                 };
                 let new_pipeline_id = PipelineId::new();
-                self.new_pipeline(
+                if !self.new_pipeline(
                     new_pipeline_id,
                     browsing_context_id,
                     webview_id,
@@ -4267,7 +4386,9 @@ where
                     // with the pipeline when it's created, so we can support reloading
                     // a discarded document properly.
                     TargetSnapshotParams::default(),
-                );
+                ) {
+                    return;
+                }
                 self.add_pending_change(SessionHistoryChange {
                     webview_id,
                     browsing_context_id,
