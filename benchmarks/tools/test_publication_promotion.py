@@ -65,7 +65,7 @@ def source_args(root: Path, revision: str, run_id: int = 123, run_attempt: int =
     baseline = root / publication_promotion.OFFICIAL_OUTPUT
     baseline.write_text('{"official":"first"}\n', encoding="utf-8")
     return Namespace(
-        repository="OxHQ/pliego",
+        repository=benchmark_publication.CANONICAL_REPOSITORY,
         repository_root=root,
         revision=revision,
         run_id=run_id,
@@ -88,6 +88,155 @@ def expect_rejection(callable_object: Callable[[], object], contains: str) -> No
         assert contains in str(error), error
     else:
         raise AssertionError(f"expected publication rejection containing {contains!r}")
+
+
+def test_canonical_repository_identity() -> None:
+    assert benchmark_publication.CANONICAL_REPOSITORY == "oxhq/pliego"
+    assert benchmark_publication.TRUSTED_WORKFLOW_REF == (
+        "oxhq/pliego/.github/workflows/pliego-dedicated-benchmark.yml@refs/heads/main"
+    )
+    attestation_schema = json.loads(
+        (ROOT / "benchmarks" / "schema" / "benchmark-publication-attestation.v1.json").read_bytes()
+    )
+    result_schema = json.loads((ROOT / "benchmarks" / "schema" / "benchmark-result.v1.json").read_bytes())
+    assert attestation_schema["properties"]["repository"]["const"] == benchmark_publication.CANONICAL_REPOSITORY
+    assert attestation_schema["properties"]["workflow_ref"]["const"] == benchmark_publication.TRUSTED_WORKFLOW_REF
+    assert (
+        result_schema["definitions"]["publication"]["properties"]["github_workflow_ref"]["const"]
+        == benchmark_publication.TRUSTED_WORKFLOW_REF
+    )
+
+
+def test_fork_safe_pull_request_selection() -> None:
+    revision = "a" * 40
+    branch = f"benchmark-baseline/{revision}/123-1-bootstrap"
+    exact = {
+        "number": 3,
+        "url": "https://github.com/oxhq/pliego/pull/3",
+        "state": "OPEN",
+        "headRefOid": "b" * 40,
+        "baseRefName": "main",
+        "headRefName": branch,
+        "headRepository": {"nameWithOwner": benchmark_publication.CANONICAL_REPOSITORY},
+        "isCrossRepository": False,
+    }
+    public_fork = {
+        **exact,
+        "number": 1,
+        "url": "https://github.com/attacker/pliego/pull/1",
+        "headRepository": {"nameWithOwner": "attacker/pliego"},
+        "isCrossRepository": True,
+    }
+    case_substitution = {
+        **exact,
+        "number": 2,
+        "headRepository": {"nameWithOwner": "OxHQ/pliego"},
+    }
+    missing_cross_repository = dict(exact)
+    missing_cross_repository.pop("isCrossRepository")
+    wrong_branch = {**exact, "headRefName": f"{branch}-attacker"}
+    assert publication_promotion.select_promotion_pull_requests(
+        [public_fork, case_substitution, missing_cross_repository, wrong_branch, exact],
+        benchmark_publication.CANONICAL_REPOSITORY,
+        branch,
+    ) == [exact]
+    assert (
+        publication_promotion.select_promotion_pull_requests(
+            [public_fork], benchmark_publication.CANONICAL_REPOSITORY, branch
+        )
+        == []
+    )
+    expect_rejection(
+        lambda: publication_promotion.select_promotion_pull_requests([exact], "OxHQ/pliego", branch),
+        "noncanonical repository",
+    )
+
+
+def test_exact_github_commit_contract() -> None:
+    revision = "a" * 40
+    commit = "b" * 40
+    blob = "c" * 40
+    tree_sha = "d" * 40
+    benchmarks_tree_sha = "e" * 40
+    baselines_tree_sha = "f" * 40
+    path = publication_promotion.OFFICIAL_OUTPUT.as_posix()
+    compare = {
+        "base_commit": {"sha": revision},
+        "merge_base_commit": {"sha": revision},
+        "status": "ahead",
+        "ahead_by": 1,
+        "behind_by": 0,
+        "total_commits": 1,
+        "commits": [{"sha": commit}],
+        "files": [{"filename": path, "status": "added"}],
+    }
+    commit_record = {"sha": commit, "parents": [{"sha": revision}], "tree": {"sha": tree_sha}}
+    trees = [
+        {
+            "sha": tree_sha,
+            "truncated": False,
+            "tree": [{"path": "benchmarks", "mode": "040000", "type": "tree", "sha": benchmarks_tree_sha}],
+        },
+        {
+            "sha": benchmarks_tree_sha,
+            "truncated": False,
+            "tree": [{"path": "baselines", "mode": "040000", "type": "tree", "sha": baselines_tree_sha}],
+        },
+        {
+            "sha": baselines_tree_sha,
+            "truncated": False,
+            "tree": [
+                {
+                    "path": publication_promotion.OFFICIAL_OUTPUT.name,
+                    "mode": "100644",
+                    "type": "blob",
+                    "sha": blob,
+                }
+            ],
+        },
+    ]
+
+    def validate(candidate_compare: object, candidate_commit: object, candidate_tree: object) -> None:
+        publication_promotion.validate_github_commit(
+            candidate_compare,
+            candidate_commit,
+            candidate_tree,
+            revision=revision,
+            commit=commit,
+            expected_path=path,
+            expected_status="added",
+            expected_blob=blob,
+        )
+
+    validate(compare, commit_record, trees)
+
+    extra_parent = json.loads(json.dumps(commit_record))
+    extra_parent["parents"].append({"sha": "e" * 40})
+    expect_rejection(lambda: validate(compare, extra_parent, trees), "sole parent")
+
+    wrong_parent = json.loads(json.dumps(commit_record))
+    wrong_parent["parents"][0]["sha"] = "e" * 40
+    expect_rejection(lambda: validate(compare, wrong_parent, trees), "sole parent")
+
+    executable = json.loads(json.dumps(trees))
+    executable[-1]["tree"][0]["mode"] = "100755"
+    expect_rejection(lambda: validate(compare, commit_record, executable), "tree entry mode")
+
+    substituted_tree = json.loads(json.dumps(trees))
+    substituted_tree[-1]["tree"][0]["sha"] = "9" * 40
+    expect_rejection(lambda: validate(compare, commit_record, substituted_tree), "tree entry mode")
+
+    extra_path = json.loads(json.dumps(compare))
+    extra_path["files"].append({"filename": "README.md", "status": "modified"})
+    expect_rejection(lambda: validate(extra_path, commit_record, trees), "parent or path drift")
+
+    wrong_parent_tree = json.loads(json.dumps(trees))
+    wrong_parent_tree[0]["tree"][0]["sha"] = "9" * 40
+    expect_rejection(lambda: validate(compare, commit_record, wrong_parent_tree), "another tree")
+
+    truncated = json.loads(json.dumps(trees))
+    truncated[1]["truncated"] = True
+    expect_rejection(lambda: validate(compare, commit_record, truncated), "tree response is incomplete")
 
 
 def test_source_artifact_contract(root: Path) -> None:
@@ -151,7 +300,7 @@ def test_source_artifact_contract(root: Path) -> None:
     )
     expect_rejection(
         lambda: publication_promotion._identity(
-            repository="OxHQ/pliego",
+            repository=benchmark_publication.CANONICAL_REPOSITORY,
             revision=revision,
             run_id=123,
             run_attempt=1,
@@ -159,6 +308,17 @@ def test_source_artifact_contract(root: Path) -> None:
             output_basename="attacker.json",
         ),
         "not the one authorized baseline",
+    )
+    expect_rejection(
+        lambda: publication_promotion._identity(
+            repository="OxHQ/pliego",
+            revision=revision,
+            run_id=123,
+            run_attempt=1,
+            operation="bootstrap",
+            output_basename=publication_promotion.OFFICIAL_OUTPUT.name,
+        ),
+        "canonical oxhq/pliego repository",
     )
 
 
@@ -194,7 +354,7 @@ def test_verified_artifact_contract(root: Path) -> None:
     baseline = root / publication_promotion.OFFICIAL_OUTPUT.name
     baseline.write_bytes(b'{"official":"verified"}\n')
     expected = publication_promotion._identity(
-        repository="OxHQ/pliego",
+        repository=benchmark_publication.CANONICAL_REPOSITORY,
         revision="a" * 40,
         run_id=456,
         run_attempt=2,
@@ -279,7 +439,7 @@ def test_hmac_reverification_and_verified_emission(root: Path) -> None:
         "status": "accepted",
         "mode": "production",
         "identity": {
-            "repository": "OxHQ/pliego",
+            "repository": benchmark_publication.CANONICAL_REPOSITORY,
             "sha": revision,
             "run_id": args.run_id,
             "run_attempt": args.run_attempt,
@@ -317,7 +477,7 @@ def test_hmac_reverification_and_verified_emission(root: Path) -> None:
         "version": 1,
         "status": "authorized",
         "authority": "github-protected-environment-hmac-v1",
-        "repository": "OxHQ/pliego",
+        "repository": benchmark_publication.CANONICAL_REPOSITORY,
         "ref": "refs/heads/main",
         "revision": revision,
         "workflow_ref": benchmark_publication.TRUSTED_WORKFLOW_REF,
@@ -444,7 +604,7 @@ def test_exact_verifier_process_consumes_hmac_before_child(root: Path) -> None:
             "publication_promotion.py",
             "verify",
             "--repository",
-            "OxHQ/pliego",
+            benchmark_publication.CANONICAL_REPOSITORY,
             "--revision",
             "a" * 40,
             "--run-id",
@@ -480,6 +640,8 @@ def test_workflow_authority_split() -> None:
     verifier = workflow.split("  verify-publication:", 1)[1].split("  promote-publication:", 1)[0]
     promoter = workflow.split("  promote-publication:", 1)[1].split("  github-hosted-negative:", 1)[0]
 
+    assert "CANONICAL_REPOSITORY: oxhq/pliego" in workflow
+    assert "OxHQ/pliego" not in workflow
     assert "contents: write" not in dedicated
     assert "pull-requests: write" not in dedicated
     assert "publication_source_artifact_id" in dedicated
@@ -517,20 +679,25 @@ def test_workflow_authority_split() -> None:
     assert 'expected_worktree_status="?? $BASELINE_PATH"' in promoter
     assert "git status --short --untracked-files=all" in promoter
     assert "gh pr list" in promoter and "--state all" in promoter
+    assert "headRefName,headRepository,isCrossRepository" in promoter
+    assert "publication_promotion.py select-promotion-prs" in promoter
+    assert '--repository "$CANONICAL_REPOSITORY"' in promoter
     assert "gh pr create" in promoter and '--base "$DEFAULT_BRANCH"' in promoter
     assert 'git push origin "HEAD:refs/heads/$branch"' in promoter
     assert "git push origin main" not in promoter
     assert "HEAD:refs/heads/$DEFAULT_BRANCH" not in promoter
     assert "main advanced after the benchmark" in promoter
     assert 'test "$DEFAULT_BRANCH" = main' in verifier and 'test "$DEFAULT_BRANCH" = main' in promoter
-    assert ".base_commit.sha == $base" in promoter
-    assert ".merge_base_commit.sha == $base" in promoter
-    assert "and (.files | length) == 1" in promoter
-    assert "and .files[0].filename == $path" in promoter
+    assert "publication_promotion.py verify-github-commit" in promoter
     assert 'test "$(git rev-parse HEAD^)" = "$GITHUB_SHA"' in promoter
     assert "OPEN|MERGED" in promoter and "existing exact promotion PR was closed" in promoter
     assert "if ! git push origin" in promoter
     assert "if ! created_pr=" in promoter
+    assert promoter.count('existing_pr="$(list_exact_promotion_prs)"') == 3
+    post_create = promoter.split("# A successful create can still race", 1)[1]
+    assert 'existing_pr="$(list_exact_promotion_prs)"' in post_create
+    assert 'verified_pr="$(verify_single_pr "$existing_pr")"' in post_create
+    assert 'test "$created_pr" = "$verified_pr"' in post_create
     assert "artifact-ids:" in verifier and "artifact-ids:" in promoter
     assert '--arg digest "sha256:$ARTIFACT_DIGEST"' in promoter
     assert "expected_old_blob" not in workflow  # old-blob authority lives in the verified artifact, not shell input
@@ -553,6 +720,9 @@ def test_workflow_authority_split() -> None:
 def main() -> None:
     previous = os.environ.pop(benchmark_publication.TRUSTED_ATTESTATION_KEY_ENV, None)
     try:
+        test_canonical_repository_identity()
+        test_fork_safe_pull_request_selection()
+        test_exact_github_commit_contract()
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw).resolve()
             test_source_artifact_contract(root / "source")

@@ -154,7 +154,7 @@ def validate_semantics(
         if identity.get("worktree_clean") is not True:
             violations.append("accepted proof requires an unmodified checkout")
         if (
-            identity.get("repository") != "OxHQ/pliego"
+            identity.get("repository") != benchmark_publication.CANONICAL_REPOSITORY
             or identity.get("event") != "workflow_dispatch"
             or identity.get("ref") != "refs/heads/main"
         ):

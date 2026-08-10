@@ -28,6 +28,9 @@ concurrency:
   group: Pliego dedicated benchmarks
   cancel-in-progress: false
 
+env:
+  CANONICAL_REPOSITORY: oxhq/pliego
+
 jobs:
   dedicated:
     if: inputs.mode != 'negative-github-hosted'
@@ -419,10 +422,11 @@ jobs:
           EXPECTED_NAME: benchmark-publication-source-${{ github.sha }}-${{ inputs.publication }}-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           set -euo pipefail
+          test "$GITHUB_REPOSITORY" = "$CANONICAL_REPOSITORY"
           test "$DEFAULT_BRANCH" = main
           [[ "$ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]
           [[ "$ARTIFACT_DIGEST" =~ ^[0-9a-f]{64}$ ]]
-          artifact="$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID")"
+          artifact="$(gh api "repos/$CANONICAL_REPOSITORY/actions/artifacts/$ARTIFACT_ID")"
           jq -e \
             --argjson artifact_id "$ARTIFACT_ID" \
             --arg name "$EXPECTED_NAME" \
@@ -506,10 +510,11 @@ jobs:
           EXPECTED_NAME: verified-benchmark-baseline-${{ github.sha }}-${{ inputs.publication }}-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           set -euo pipefail
+          test "$GITHUB_REPOSITORY" = "$CANONICAL_REPOSITORY"
           test "$DEFAULT_BRANCH" = main
           [[ "$ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]
           [[ "$ARTIFACT_DIGEST" =~ ^[0-9a-f]{64}$ ]]
-          artifact="$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID")"
+          artifact="$(gh api "repos/$CANONICAL_REPOSITORY/actions/artifacts/$ARTIFACT_ID")"
           jq -e \
             --argjson artifact_id "$ARTIFACT_ID" \
             --arg name "$EXPECTED_NAME" \
@@ -558,6 +563,7 @@ jobs:
         run: |
           set -euo pipefail
           test -z "${PLIEGO_BENCHMARK_ATTESTATION_HMAC_KEY_HEX:-}"
+          test "$GITHUB_REPOSITORY" = "$CANONICAL_REPOSITORY"
           test "$GITHUB_REF" = "refs/heads/$DEFAULT_BRANCH"
           test "$DEFAULT_BRANCH" = main
           test "$GITHUB_SHA" = "$(git rev-parse HEAD)"
@@ -575,61 +581,60 @@ jobs:
 
           verify_commit() {
             local commit=$1
-            local compare blob
-            compare="$(gh api "repos/$GITHUB_REPOSITORY/compare/$GITHUB_SHA...$commit")"
-            jq -e \
-              --arg base "$GITHUB_SHA" \
-              --arg head "$commit" \
-              --arg path "$BASELINE_PATH" \
-              --arg status "$expected_status" '
-                .base_commit.sha == $base
-                and .merge_base_commit.sha == $base
-                and .status == "ahead"
-                and .ahead_by == 1
-                and .behind_by == 0
-                and .total_commits == 1
-                and .commits[0].sha == $head
-                and (.files | length) == 1
-                and .files[0].filename == $path
-                and .files[0].status == $status
-              ' <<< "$compare" >/dev/null
-            blob="$(gh api "repos/$GITHUB_REPOSITORY/contents/$BASELINE_PATH?ref=$commit" --jq .sha)"
-            test "$blob" = "$expected_blob"
+            python3 benchmarks/tools/publication_promotion.py verify-github-commit \
+              --repository "$CANONICAL_REPOSITORY" \
+              --revision "$GITHUB_SHA" \
+              --commit "$commit" \
+              --path "$BASELINE_PATH" \
+              --status "$expected_status" \
+              --blob "$expected_blob" >/dev/null
           }
 
-          existing_pr="$(gh pr list \
-            --repo "$GITHUB_REPOSITORY" \
-            --state all \
-            --base "$DEFAULT_BRANCH" \
-            --head "$branch" \
-            --json number,url,state,headRefOid,baseRefName)"
+          list_exact_promotion_prs() {
+            gh pr list \
+              --repo "$CANONICAL_REPOSITORY" \
+              --state all \
+              --base "$DEFAULT_BRANCH" \
+              --head "$branch" \
+              --json number,url,state,headRefOid,baseRefName,headRefName,headRepository,isCrossRepository | \
+              python3 benchmarks/tools/publication_promotion.py select-promotion-prs \
+                --repository "$CANONICAL_REPOSITORY" \
+                --branch "$branch"
+          }
+
+          verify_single_pr() {
+            local pull_requests=$1
+            local state commit
+            test "$(jq 'length' <<< "$pull_requests")" = 1
+            state="$(jq -r '.[0].state' <<< "$pull_requests")"
+            commit="$(jq -r '.[0].headRefOid' <<< "$pull_requests")"
+            test "$(jq -r '.[0].baseRefName' <<< "$pull_requests")" = "$DEFAULT_BRANCH"
+            verify_commit "$commit"
+            case "$state" in
+              OPEN|MERGED) jq -r '.[0].url' <<< "$pull_requests" ;;
+              CLOSED)
+                echo "existing exact promotion PR was closed without merge; refusing replacement" >&2
+                return 1
+                ;;
+              *)
+                echo "existing promotion PR has an unknown state: $state" >&2
+                return 1
+                ;;
+            esac
+          }
+
+          existing_pr="$(list_exact_promotion_prs)"
           count="$(jq 'length' <<< "$existing_pr")"
           if [[ "$count" -gt 1 ]]; then
             echo "multiple promotion PRs exist for $branch" >&2
             exit 1
           fi
           if [[ "$count" == 1 ]]; then
-            state="$(jq -r '.[0].state' <<< "$existing_pr")"
-            commit="$(jq -r '.[0].headRefOid' <<< "$existing_pr")"
-            test "$(jq -r '.[0].baseRefName' <<< "$existing_pr")" = "$DEFAULT_BRANCH"
-            verify_commit "$commit"
-            case "$state" in
-              OPEN|MERGED)
-                jq -r '.[0].url' <<< "$existing_pr"
-                exit 0
-                ;;
-              CLOSED)
-                echo "existing exact promotion PR was closed without merge; refusing replacement" >&2
-                exit 1
-                ;;
-              *)
-                echo "existing promotion PR has an unknown state: $state" >&2
-                exit 1
-                ;;
-            esac
+            verify_single_pr "$existing_pr"
+            exit 0
           fi
 
-          current_main="$(gh api "repos/$GITHUB_REPOSITORY/branches/$DEFAULT_BRANCH" --jq .commit.sha)"
+          current_main="$(gh api "repos/$CANONICAL_REPOSITORY/branches/$DEFAULT_BRANCH" --jq .commit.sha)"
           if [[ "$current_main" != "$GITHUB_SHA" ]]; then
             echo "main advanced after the benchmark; rerun instead of proposing stale evidence" >&2
             exit 1
@@ -656,28 +661,23 @@ jobs:
 
           verify_commit "$remote_commit"
           if ! created_pr="$(gh pr create \
-              --repo "$GITHUB_REPOSITORY" \
+              --repo "$CANONICAL_REPOSITORY" \
               --base "$DEFAULT_BRANCH" \
               --head "$branch" \
               --title "benchmark: promote $OPERATION baseline from ${GITHUB_SHA::12}" \
               --body "Review-only promotion of the HMAC-verified dedicated-host benchmark baseline from run $GITHUB_RUN_ID attempt $GITHUB_RUN_ATTEMPT at exact main revision $GITHUB_SHA. This workflow cannot push main directly.")"; then
             # A retry racing another exact invocation is accepted only if that
             # invocation opened the one exact PR we would have opened.
-            existing_pr="$(gh pr list \
-              --repo "$GITHUB_REPOSITORY" \
-              --state all \
-              --base "$DEFAULT_BRANCH" \
-              --head "$branch" \
-              --json number,url,state,headRefOid,baseRefName)"
-            test "$(jq 'length' <<< "$existing_pr")" = 1
-            state="$(jq -r '.[0].state' <<< "$existing_pr")"
-            [[ "$state" == OPEN || "$state" == MERGED ]]
-            test "$(jq -r '.[0].baseRefName' <<< "$existing_pr")" = "$DEFAULT_BRANCH"
-            verify_commit "$(jq -r '.[0].headRefOid' <<< "$existing_pr")"
-            jq -r '.[0].url' <<< "$existing_pr"
+            existing_pr="$(list_exact_promotion_prs)"
+            verify_single_pr "$existing_pr"
             exit 0
           fi
-          printf '%s\n' "$created_pr"
+          # A successful create can still race a head rewrite or response
+          # substitution; re-list the canonical repository and reverify it.
+          existing_pr="$(list_exact_promotion_prs)"
+          verified_pr="$(verify_single_pr "$existing_pr")"
+          test "$created_pr" = "$verified_pr"
+          printf '%s\n' "$verified_pr"
 
   github-hosted-negative:
     if: inputs.mode == 'negative-github-hosted'

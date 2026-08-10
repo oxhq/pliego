@@ -116,8 +116,10 @@ def _validate_schema(document: dict[str, Any], schema_path: Path, label: str) ->
 def _identity(
     *, repository: str, revision: str, run_id: int, run_attempt: int, operation: str, output_basename: str
 ) -> dict[str, Any]:
-    if repository != "OxHQ/pliego":
-        raise _error("publication promotion requires the canonical OxHQ/pliego repository")
+    if repository != benchmark_publication.CANONICAL_REPOSITORY:
+        raise _error(
+            f"publication promotion requires the canonical {benchmark_publication.CANONICAL_REPOSITORY} repository"
+        )
     if re.fullmatch(r"[0-9a-f]{40}", revision) is None:
         raise _error("publication promotion requires one exact 40-character revision")
     if type(run_id) is not int or run_id <= 0 or type(run_attempt) is not int or run_attempt <= 0:
@@ -582,6 +584,190 @@ def prepare(args: argparse.Namespace) -> None:
         raise _error(f"promotion prepared an unexpected worktree surface: {changed}")
 
 
+def select_promotion_pull_requests(document: Any, repository: str, branch: str) -> list[dict[str, Any]]:
+    """Return only same-repository PRs for the exact generated promotion branch."""
+
+    if benchmark_publication.TRUSTED_ATTESTATION_KEY_ENV in os.environ:
+        raise _error("repository-write promotion must not inherit publication HMAC authority")
+    if repository != benchmark_publication.CANONICAL_REPOSITORY:
+        raise _error("promotion PR lookup used a noncanonical repository")
+    if (
+        not isinstance(branch, str)
+        or re.fullmatch(r"benchmark-baseline/[0-9a-f]{40}/[1-9][0-9]*-[1-9][0-9]*-(bootstrap|replace)", branch) is None
+    ):
+        raise _error("promotion PR lookup used an invalid generated branch")
+    if not isinstance(document, list):
+        raise _error("promotion PR lookup response must be an array")
+    selected: list[dict[str, Any]] = []
+    for pull_request in document:
+        if not isinstance(pull_request, dict) or pull_request.get("headRefName") != branch:
+            continue
+        head_repository = pull_request.get("headRepository")
+        if (
+            pull_request.get("isCrossRepository") is False
+            and isinstance(head_repository, dict)
+            and head_repository.get("nameWithOwner") == repository
+        ):
+            selected.append(pull_request)
+    return selected
+
+
+def _github_commit_error(message: str) -> benchmark_publication.PublicationError:
+    return _error(f"promotion commit is not the exact authorized change: {message}")
+
+
+def _tree_path_entries(trees: Any, root_tree_sha: str, expected_path: str) -> list[dict[str, Any]]:
+    components = expected_path.split("/")
+    if not isinstance(trees, list) or len(trees) != len(components):
+        raise _github_commit_error("tree walk did not cover the exact baseline path")
+    selected: list[dict[str, Any]] = []
+    expected_tree_sha = root_tree_sha
+    for index, (tree, component) in enumerate(zip(trees, components, strict=True)):
+        if (
+            not isinstance(tree, dict)
+            or tree.get("sha") != expected_tree_sha
+            or tree.get("truncated") is not False
+            or not isinstance(tree.get("tree"), list)
+        ):
+            raise _github_commit_error("tree response is incomplete or belongs to another tree")
+        matching = [entry for entry in tree["tree"] if isinstance(entry, dict) and entry.get("path") == component]
+        if len(matching) != 1:
+            raise _github_commit_error("tree walk did not resolve one exact baseline path")
+        entry = matching[0]
+        selected.append(entry)
+        if index < len(components) - 1:
+            if (
+                entry.get("mode") != "040000"
+                or entry.get("type") != "tree"
+                or re.fullmatch(r"[0-9a-f]{40}", str(entry.get("sha", ""))) is None
+            ):
+                raise _github_commit_error("baseline parent path is not an exact Git tree")
+            expected_tree_sha = entry["sha"]
+    return selected
+
+
+def validate_github_commit(
+    compare: Any,
+    commit_record: Any,
+    trees: Any,
+    *,
+    revision: str,
+    commit: str,
+    expected_path: str,
+    expected_status: str,
+    expected_blob: str,
+) -> None:
+    """Validate one-parent/one-path GitHub commit and its exact baseline tree entry."""
+
+    if re.fullmatch(r"[0-9a-f]{40}", revision) is None or re.fullmatch(r"[0-9a-f]{40}", commit) is None:
+        raise _github_commit_error("revision or commit identity is invalid")
+    if expected_path != OFFICIAL_OUTPUT.as_posix() or expected_status not in {"added", "modified"}:
+        raise _github_commit_error("path or change status is invalid")
+    if re.fullmatch(r"[0-9a-f]{40}", expected_blob) is None:
+        raise _github_commit_error("expected blob identity is invalid")
+    if not isinstance(compare, dict) or not isinstance(commit_record, dict):
+        raise _github_commit_error("GitHub response shape is invalid")
+
+    commits = compare.get("commits")
+    files = compare.get("files")
+    if (
+        not isinstance(compare.get("base_commit"), dict)
+        or compare["base_commit"].get("sha") != revision
+        or not isinstance(compare.get("merge_base_commit"), dict)
+        or compare["merge_base_commit"].get("sha") != revision
+        or compare.get("status") != "ahead"
+        or compare.get("ahead_by") != 1
+        or compare.get("behind_by") != 0
+        or compare.get("total_commits") != 1
+        or not isinstance(commits, list)
+        or len(commits) != 1
+        or not isinstance(commits[0], dict)
+        or commits[0].get("sha") != commit
+        or not isinstance(files, list)
+        or len(files) != 1
+        or not isinstance(files[0], dict)
+        or files[0].get("filename") != expected_path
+        or files[0].get("status") != expected_status
+    ):
+        raise _github_commit_error("compare response contains parent or path drift")
+
+    parents = commit_record.get("parents")
+    git_tree = commit_record.get("tree")
+    if (
+        commit_record.get("sha") != commit
+        or not isinstance(parents, list)
+        or len(parents) != 1
+        or not isinstance(parents[0], dict)
+        or parents[0].get("sha") != revision
+        or not isinstance(git_tree, dict)
+        or re.fullmatch(r"[0-9a-f]{40}", str(git_tree.get("sha", ""))) is None
+    ):
+        raise _github_commit_error("commit does not have exactly the benchmarked revision as its sole parent")
+
+    path_entries = _tree_path_entries(trees, git_tree["sha"], expected_path)
+    baseline = path_entries[-1]
+    if baseline.get("mode") != "100644" or baseline.get("type") != "blob" or baseline.get("sha") != expected_blob:
+        raise _github_commit_error("baseline tree entry mode, type, or blob drifted")
+
+
+def _github_api(repository: str, endpoint: str) -> Any:
+    if benchmark_publication.TRUSTED_ATTESTATION_KEY_ENV in os.environ:
+        raise _error("repository-write promotion must not inherit publication HMAC authority")
+    result = subprocess.run(
+        ["gh", "api", f"repos/{repository}/{endpoint}"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise _error(f"GitHub API {endpoint} failed: {result.stderr.strip()}")
+    return benchmark_publication.strict_json_loads(result.stdout, f"GitHub API {endpoint}")
+
+
+def verify_github_commit(args: argparse.Namespace) -> None:
+    if args.repository != benchmark_publication.CANONICAL_REPOSITORY:
+        raise _error("promotion commit verification used a noncanonical repository")
+    if (
+        args.path != OFFICIAL_OUTPUT.as_posix()
+        or re.fullmatch(r"[0-9a-f]{40}", args.revision) is None
+        or re.fullmatch(r"[0-9a-f]{40}", args.commit) is None
+        or re.fullmatch(r"[0-9a-f]{40}", args.blob) is None
+    ):
+        raise _github_commit_error("revision, commit, path, or blob input is invalid")
+    compare = _github_api(args.repository, f"compare/{args.revision}...{args.commit}")
+    commit_record = _github_api(args.repository, f"git/commits/{args.commit}")
+    if not isinstance(commit_record, dict) or not isinstance(commit_record.get("tree"), dict):
+        raise _github_commit_error("commit response omitted its tree")
+    tree_sha = str(commit_record["tree"].get("sha", ""))
+    if re.fullmatch(r"[0-9a-f]{40}", tree_sha) is None:
+        raise _github_commit_error("commit response tree identity is invalid")
+    trees: list[Any] = []
+    current_tree_sha = tree_sha
+    components = args.path.split("/")
+    for index, component in enumerate(components):
+        tree = _github_api(args.repository, f"git/trees/{current_tree_sha}")
+        trees.append(tree)
+        if index < len(components) - 1:
+            entry = _tree_path_entries([tree], current_tree_sha, component)[0]
+            if (
+                entry.get("mode") != "040000"
+                or entry.get("type") != "tree"
+                or re.fullmatch(r"[0-9a-f]{40}", str(entry.get("sha", ""))) is None
+            ):
+                raise _github_commit_error("baseline parent path is not an exact Git tree")
+            current_tree_sha = str(entry.get("sha", ""))
+    validate_github_commit(
+        compare,
+        commit_record,
+        trees,
+        revision=args.revision,
+        commit=args.commit,
+        expected_path=args.path,
+        expected_status=args.status,
+        expected_blob=args.blob,
+    )
+
+
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(description=__doc__)
     commands = root.add_subparsers(dest="command", required=True)
@@ -613,6 +799,18 @@ def parser() -> argparse.ArgumentParser:
     identity_arguments(promotion)
     promotion.add_argument("--repository-root", required=True, type=Path)
     promotion.add_argument("--bundle", required=True, type=Path)
+
+    pull_requests = commands.add_parser("select-promotion-prs")
+    pull_requests.add_argument("--repository", required=True)
+    pull_requests.add_argument("--branch", required=True)
+
+    commit = commands.add_parser("verify-github-commit")
+    commit.add_argument("--repository", required=True)
+    commit.add_argument("--revision", required=True)
+    commit.add_argument("--commit", required=True)
+    commit.add_argument("--path", required=True)
+    commit.add_argument("--status", required=True, choices=("added", "modified"))
+    commit.add_argument("--blob", required=True)
     return root
 
 
@@ -624,8 +822,16 @@ def main() -> int:
             stage(args)
         elif args.command == "verify":
             verify(args, trusted_key)
-        else:
+        elif args.command == "prepare":
             prepare(args)
+        elif args.command == "select-promotion-prs":
+            document = benchmark_publication.strict_json_loads(sys.stdin.buffer.read(), "promotion PR lookup")
+            selected = select_promotion_pull_requests(document, args.repository, args.branch)
+            sys.stdout.buffer.write(benchmark_publication.json_bytes(selected))
+            return 0
+        else:
+            verify_github_commit(args)
+            return 0
     except (OSError, subprocess.SubprocessError, benchmark_publication.PublicationError) as error:
         print(f"publication_promotion: {error}", file=sys.stderr)
         return 1

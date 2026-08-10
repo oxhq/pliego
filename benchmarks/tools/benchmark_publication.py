@@ -30,7 +30,8 @@ class PublicationInterrupted(PublicationError):
 MAX_BOUND_JSON_BYTES = 512 * 1024 * 1024
 TRUSTED_ATTESTATION_KEY_ENV = "PLIEGO_BENCHMARK_ATTESTATION_HMAC_KEY_HEX"
 TRUSTED_ATTESTATION_ROOT = Path("/var/lib/pliego-benchmark-attestations")
-TRUSTED_WORKFLOW_REF = "OxHQ/pliego/.github/workflows/pliego-dedicated-benchmark.yml@refs/heads/main"
+CANONICAL_REPOSITORY = "oxhq/pliego"
+TRUSTED_WORKFLOW_REF = f"{CANONICAL_REPOSITORY}/.github/workflows/pliego-dedicated-benchmark.yml@refs/heads/main"
 
 
 @dataclass(frozen=True)
@@ -226,7 +227,7 @@ def load_trusted_publication_attestation(
         "version": 1,
         "status": "authorized",
         "authority": "github-protected-environment-hmac-v1",
-        "repository": "OxHQ/pliego",
+        "repository": CANONICAL_REPOSITORY,
         "ref": "refs/heads/main",
         "workflow_ref": TRUSTED_WORKFLOW_REF,
         "job": "dedicated",

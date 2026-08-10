@@ -52,7 +52,7 @@ def make_fixture(root: Path) -> Path:
     write_json(
         fixture / "env.json",
         {
-            "GITHUB_REPOSITORY": "OxHQ/pliego",
+            "GITHUB_REPOSITORY": benchmark_publication.CANONICAL_REPOSITORY,
             "GITHUB_EVENT_NAME": "workflow_dispatch",
             "GITHUB_REF": "refs/heads/main",
             "GITHUB_REF_PROTECTED": "true",
@@ -303,6 +303,38 @@ class BenchmarkHostPreflightTests(unittest.TestCase):
             result = invoke(fixture, output, *EXPECTED_COMMAND)
             self.assertEqual(result.returncode, 1, result.stderr)
             self.assertEqual(proof(output)["status"], "rejected")
+            self.assertNotIn("samples.started", events(output))
+
+    def test_noncanonical_repository_case_rejects_before_samples(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fixture = make_fixture(root)
+            env = json.loads((fixture / "env.json").read_text(encoding="utf-8"))
+            env["GITHUB_REPOSITORY"] = "OxHQ/pliego"
+            write_json(fixture / "env.json", env)
+            output = root / "out"
+            result = invoke(fixture, output, *EXPECTED_COMMAND)
+            self.assertEqual(result.returncode, 1, result.stderr)
+            document = proof(output)
+            self.assertEqual(document["status"], "rejected")
+            repository_check = next(check for check in document["checks"] if check["id"] == "identity.repository")
+            self.assertFalse(repository_check["passed"])
+            self.assertNotIn("samples.started", events(output))
+
+    def test_noncanonical_workflow_ref_case_rejects_before_samples(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fixture = make_fixture(root)
+            env = json.loads((fixture / "env.json").read_text(encoding="utf-8"))
+            env["GITHUB_WORKFLOW_REF"] = "OxHQ/pliego/.github/workflows/pliego-dedicated-benchmark.yml@refs/heads/main"
+            write_json(fixture / "env.json", env)
+            output = root / "out"
+            result = invoke(fixture, output, *EXPECTED_COMMAND)
+            self.assertEqual(result.returncode, 1, result.stderr)
+            document = proof(output)
+            self.assertEqual(document["status"], "rejected")
+            workflow_check = next(check for check in document["checks"] if check["id"] == "identity.workflow_ref")
+            self.assertFalse(workflow_check["passed"])
             self.assertNotIn("samples.started", events(output))
 
     def test_wrong_architecture_rejects_before_samples(self) -> None:

@@ -35,7 +35,7 @@ def build_attestation(
         "version": 1,
         "status": "authorized",
         "authority": "github-protected-environment-hmac-v1",
-        "repository": "OxHQ/pliego",
+        "repository": benchmark_publication.CANONICAL_REPOSITORY,
         "ref": "refs/heads/main",
         "revision": identity.get("sha"),
         "workflow_ref": identity.get("workflow_ref"),

@@ -38,7 +38,7 @@ def attestation(candidate_sha256: str = "c" * 64) -> dict:
         "version": 1,
         "status": "authorized",
         "authority": "github-protected-environment-hmac-v1",
-        "repository": "OxHQ/pliego",
+        "repository": benchmark_publication.CANONICAL_REPOSITORY,
         "ref": "refs/heads/main",
         "revision": "a" * 40,
         "workflow_ref": benchmark_publication.TRUSTED_WORKFLOW_REF,
