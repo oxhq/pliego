@@ -650,15 +650,27 @@ pub fn capture_document_scene_with_canvas(
 ) -> Result<SceneCapture, CaptureError> {
     let capture: LayoutCapture = serde_json::from_slice(snapshot_json)
         .map_err(|error| CaptureError::InvalidJson(error.to_string()))?;
-    let requests = canvas_freeze_requests(&capture);
+    let requests = canvas_freeze_requests(&capture, DEFAULT_CANVAS_CAPTURE_LIMITS.placements)?;
     let first_sequence = requests.first().map_or(0, |(sequence, _)| *sequence);
     let requested_keys = requests
         .iter()
         .map(|(_, key)| (key.namespace, key.key))
         .collect::<Vec<_>>();
-    let frozen_canvas = freeze_canvas(&requested_keys).map_err(|error| CaptureError::Canvas {
-        sequence: first_sequence,
-        message: error.to_string(),
+    let frozen_canvas = freeze_canvas(&requested_keys).map_err(|error| {
+        let sequence = match &error {
+            FreezeCanvasSnapshotsError::MissingImageKey { namespace, key, .. } => requests
+                .iter()
+                .find_map(|(sequence, requested)| {
+                    (requested.namespace == *namespace && requested.key == *key)
+                        .then_some(*sequence)
+                })
+                .unwrap_or(first_sequence),
+            FreezeCanvasSnapshotsError::RetentionDisabled => first_sequence,
+        };
+        CaptureError::Canvas {
+            sequence,
+            message: error.to_string(),
+        }
     })?;
     if frozen_canvas.retention_budget_exceeded() {
         return Err(CaptureError::CanvasRetentionBudgetExceeded);
@@ -678,19 +690,65 @@ pub fn capture_document_scene_with_canvas(
     )
 }
 
-fn canvas_freeze_requests(capture: &LayoutCapture) -> Vec<(usize, CapturedCanvasImageKey)> {
+fn canvas_freeze_requests(
+    capture: &LayoutCapture,
+    placement_limit: u64,
+) -> Result<Vec<(usize, CapturedCanvasImageKey)>, CaptureError> {
     let by_fragment = capture
         .fragments
         .iter()
         .filter(|fragment| fragment.kind == "image" && fragment.vector_image.is_none())
         .filter_map(|fragment| Some((fragment.paint_fragment_id?, fragment.canvas_image_key?)))
         .collect::<HashMap<_, _>>();
-    capture
-        .paint_events
-        .iter()
-        .filter(|event| event.kind == "image")
-        .filter_map(|event| Some((event.sequence, *by_fragment.get(&event.fragment_id?)?)))
-        .collect()
+    let mut placements = 0;
+    for (expected_sequence, event) in capture.paint_events.iter().enumerate() {
+        if event.sequence != expected_sequence {
+            return Err(CaptureError::NonDensePaintEvents {
+                expected: expected_sequence,
+                actual: event.sequence,
+            });
+        }
+        if event.kind != "image" {
+            continue;
+        }
+        if event
+            .fragment_id
+            .and_then(|fragment_id| by_fragment.get(&fragment_id))
+            .is_none()
+        {
+            continue;
+        }
+        placements = reserve_canvas_capture_cost(
+            placements,
+            1,
+            placement_limit,
+            event.sequence,
+            CanvasCaptureLimit::Placements,
+        )?;
+    }
+
+    // Only materialize unique freeze requests after every placement has passed the bound. The
+    // second pass preserves each key's first paint sequence and keeps all deduplication outside the
+    // Canvas registry lock.
+    let request_capacity = usize::try_from(placements).unwrap_or(capture.paint_events.len());
+    let mut unique_keys = HashSet::with_capacity(request_capacity);
+    let mut requests = Vec::with_capacity(request_capacity);
+    for event in &capture.paint_events {
+        if event.kind != "image" {
+            continue;
+        }
+        let Some(key) = event
+            .fragment_id
+            .and_then(|fragment_id| by_fragment.get(&fragment_id))
+            .copied()
+        else {
+            continue;
+        };
+        if unique_keys.insert((key.namespace, key.key)) {
+            requests.push((event.sequence, key));
+        }
+    }
+    Ok(requests)
 }
 
 fn capture_document_scene_with_canvas_limits(
@@ -2993,6 +3051,64 @@ mod tests {
             }
         );
         assert_eq!(resolver_calls.get(), 2);
+    }
+
+    #[test]
+    fn freeze_request_preflight_bounds_aliases_and_deduplicates_before_locking() {
+        let capture: LayoutCapture = serde_json::from_slice(&canvas_alias_layout(2, 1)).unwrap();
+        let requests = canvas_freeze_requests(&capture, 2).unwrap();
+        assert_eq!(
+            requests,
+            [(
+                0,
+                CapturedCanvasImageKey {
+                    namespace: 7,
+                    key: 9,
+                },
+            )]
+        );
+
+        assert_eq!(
+            canvas_freeze_requests(&capture, 1),
+            Err(CaptureError::CanvasCaptureLimitExceeded {
+                sequence: 1,
+                limit: CanvasCaptureLimit::Placements,
+                configured: 1,
+                observed: 2,
+            })
+        );
+    }
+
+    #[test]
+    fn a_missing_frozen_key_reports_its_first_paint_sequence() {
+        let mut layout: serde_json::Value =
+            serde_json::from_slice(&canvas_alias_layout(2, 1)).unwrap();
+        layout["fragments"][1]["canvas_image_key"]["key"] = serde_json::json!(10);
+        let snapshot_json = serde_json::to_vec(&layout).unwrap();
+
+        let error = capture_document_scene_with_canvas(
+            &snapshot_json,
+            |_| None,
+            |keys| {
+                assert_eq!(keys, &[(7, 9), (7, 10)]);
+                Err(FreezeCanvasSnapshotsError::MissingImageKey {
+                    namespace: 7,
+                    key: 10,
+                    generation: 17,
+                })
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            CaptureError::Canvas {
+                sequence: 1,
+                message:
+                    "no retained command snapshot for image key 7:10 at Canvas registry generation 17"
+                        .into(),
+            }
+        );
     }
 
     #[test]

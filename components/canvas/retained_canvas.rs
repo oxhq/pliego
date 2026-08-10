@@ -2,7 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
@@ -195,28 +195,49 @@ impl Drop for CanvasRetentionGuard {
 /// Freezes all requested image keys while holding the registry lock once.
 ///
 /// The returned map owns immutable snapshot handles and remains stable after the live registry
-/// advances. A missing key rejects the whole request; no partial bundle is returned.
+/// advances. A missing key rejects the whole request; no partial bundle is returned. An exceeded
+/// retention budget returns a flagged bundle without resolving keys so the caller can preserve the
+/// producer-budget failure over any missing association caused by that budget.
 pub fn freeze_canvas_snapshots(
-    image_keys: impl IntoIterator<Item = (u32, u32)>,
+    image_keys: &[(u32, u32)],
 ) -> Result<FrozenCanvasSnapshots, FreezeCanvasSnapshotsError> {
     freeze_canvas_snapshots_with_observer(image_keys, |_| {})
 }
 
 fn freeze_canvas_snapshots_with_observer(
-    image_keys: impl IntoIterator<Item = (u32, u32)>,
+    image_keys: &[(u32, u32)],
     mut after_snapshot: impl FnMut(usize),
 ) -> Result<FrozenCanvasSnapshots, FreezeCanvasSnapshotsError> {
+    // Materialize and deduplicate the request before taking the global registry lock. Accepting a
+    // slice also prevents a custom iterator from re-entering retention while `next()` runs.
+    if !ENABLED.load(Ordering::Acquire) {
+        return Err(FreezeCanvasSnapshotsError::RetentionDisabled);
+    }
+    let mut unique_keys = Vec::with_capacity(image_keys.len());
+    let mut seen = HashSet::with_capacity(image_keys.len());
+    for &image_key in image_keys {
+        if seen.insert(image_key) {
+            unique_keys.push(image_key);
+        }
+    }
+    let mut snapshots = HashMap::with_capacity(unique_keys.len());
     let registry = registry();
     if !ENABLED.load(Ordering::Acquire) {
         return Err(FreezeCanvasSnapshotsError::RetentionDisabled);
     }
     let generation = registry.generation;
-    let mut snapshots = HashMap::new();
-    for (namespace, key) in image_keys {
+    let retention_budget_exceeded = registry.retention_budget_exceeded;
+    if retention_budget_exceeded {
+        // The capture boundary rejects this bundle before lookup. Preserve budget-failure
+        // precedence even when the object whose association crossed the budget has no image key.
+        return Ok(FrozenCanvasSnapshots {
+            generation,
+            retention_budget_exceeded,
+            snapshots,
+        });
+    }
+    for (namespace, key) in unique_keys {
         let image_key = ImageKey(IdNamespace(namespace), key);
-        if snapshots.contains_key(&image_key) {
-            continue;
-        }
         let snapshot = registry
             .image_keys
             .get(&image_key)
@@ -233,7 +254,7 @@ fn freeze_canvas_snapshots_with_observer(
     }
     Ok(FrozenCanvasSnapshots {
         generation,
-        retention_budget_exceeded: registry.retention_budget_exceeded,
+        retention_budget_exceeded,
         snapshots,
     })
 }
@@ -675,7 +696,7 @@ mod tests {
                 },
                 Transform2D::identity(),
             );
-            let snapshot = freeze_canvas_snapshots([(7, 11)])
+            let snapshot = freeze_canvas_snapshots(&[(7, 11)])
                 .unwrap()
                 .get(7, 11)
                 .unwrap();
@@ -693,14 +714,14 @@ mod tests {
             finish_canvas(CanvasId(3));
             assert!(registry().canvases.is_empty());
             assert!(registry().image_keys.is_empty());
-            let frozen = freeze_canvas_snapshots([(7, 11), (7, 13)]).unwrap();
+            let frozen = freeze_canvas_snapshots(&[(7, 11), (7, 13)]).unwrap();
             let first = frozen.get(7, 11).unwrap();
             let second = frozen.get(7, 13).unwrap();
             assert!(std::sync::Arc::ptr_eq(&first, &second));
             assert_eq!(registry().retained_object_count, 3);
         }
         assert!(matches!(
-            freeze_canvas_snapshots([(7, 11)]),
+            freeze_canvas_snapshots(&[(7, 11)]),
             Err(FreezeCanvasSnapshotsError::RetentionDisabled)
         ));
     }
@@ -731,7 +752,7 @@ mod tests {
             recreate_canvas(CanvasId(41), Some(Size2D::new(99, 99)));
         });
 
-        let frozen = freeze_canvas_snapshots_with_observer([(9, 1), (9, 2)], |count| {
+        let frozen = freeze_canvas_snapshots_with_observer(&[(9, 1), (9, 2)], |count| {
             if count == 1 {
                 first_snapshot_tx.send(()).unwrap();
                 mutation_attempted_rx.recv().unwrap();
@@ -754,7 +775,7 @@ mod tests {
             "the second lookup must not observe the mutation attempted after the first lookup"
         );
 
-        let after_mutation = freeze_canvas_snapshots([(9, 1), (9, 2)]).unwrap();
+        let after_mutation = freeze_canvas_snapshots(&[(9, 1), (9, 2)]).unwrap();
         assert!(after_mutation.generation() > frozen.generation());
         assert_eq!(
             after_mutation
@@ -771,7 +792,7 @@ mod tests {
         register_canvas(CanvasId(42), Size2D::new(2, 2));
         associate_image_key(CanvasId(42), ImageKey(IdNamespace(10), 1));
 
-        let error = freeze_canvas_snapshots([(10, 1), (10, 2)]).unwrap_err();
+        let error = freeze_canvas_snapshots(&[(10, 1), (10, 2)]).unwrap_err();
         assert!(matches!(
             error,
             FreezeCanvasSnapshotsError::MissingImageKey {
@@ -856,11 +877,10 @@ mod tests {
         assert!(registry.image_keys.contains_key(&first_key));
         assert!(!registry.image_keys.contains_key(&rejected_key));
         drop(registry);
-        assert!(
-            freeze_canvas_snapshots([(8, 1)])
-                .unwrap()
-                .retention_budget_exceeded()
-        );
+        let frozen = freeze_canvas_snapshots(&[(8, 2)])
+            .expect("budget failure must take precedence over a rejected image-key association");
+        assert!(frozen.retention_budget_exceeded());
+        assert!(frozen.get(8, 2).is_none());
     }
 
     #[test]
@@ -890,7 +910,7 @@ mod tests {
             &pixels,
         );
 
-        let snapshot = freeze_canvas_snapshots([(7, 12)])
+        let snapshot = freeze_canvas_snapshots(&[(7, 12)])
             .unwrap()
             .get(7, 12)
             .unwrap();

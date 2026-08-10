@@ -332,7 +332,7 @@ impl DocumentSession {
 
     pub(crate) fn render(self) -> Result<DocumentOutcome, SessionError> {
         self.render_with_canvas_freezer(|keys| {
-            servo_canvas::retained_canvas::freeze_canvas_snapshots(keys.iter().copied())
+            servo_canvas::retained_canvas::freeze_canvas_snapshots(keys)
         })
     }
 
@@ -1693,9 +1693,9 @@ mod tests {
         let result = session.and_then(|session| {
             if case == "canvas-missing-snapshot" {
                 session.render_with_canvas_freezer(|keys| {
-                    servo_canvas::retained_canvas::freeze_canvas_snapshots(
-                        keys.iter().copied().chain([(u32::MAX, u32::MAX)]),
-                    )
+                    let mut keys = keys.to_vec();
+                    keys.push((u32::MAX, u32::MAX));
+                    servo_canvas::retained_canvas::freeze_canvas_snapshots(&keys)
                 })
             } else {
                 session.render()

@@ -1014,7 +1014,7 @@ fn render(request: RenderRequest) -> Result<RenderOutcome, RenderError> {
                 },
             }
         },
-        |keys| servo_canvas::retained_canvas::freeze_canvas_snapshots(keys.iter().copied()),
+        servo_canvas::retained_canvas::freeze_canvas_snapshots,
     );
     if let Some(error) = resource_resolution_error {
         return Err(fail_session(
