@@ -343,21 +343,11 @@ impl ResourceEvidenceLog {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 struct ConsoleEvidenceLog {
     entries: Vec<(String, String)>,
     bytes: u64,
     limit_exceeded: bool,
-}
-
-impl Default for ConsoleEvidenceLog {
-    fn default() -> Self {
-        Self {
-            entries: Vec::new(),
-            bytes: 0,
-            limit_exceeded: false,
-        }
-    }
 }
 
 impl ConsoleEvidenceLog {
@@ -367,16 +357,14 @@ impl ConsoleEvidenceLog {
         }
         let next_bytes = self
             .bytes
-            .checked_add(level.len() as u64)
-            .and_then(|bytes| bytes.checked_add(message.len() as u64))
-            .and_then(|bytes| bytes.checked_add(CONSOLE_EVIDENCE_ENTRY_OVERHEAD_BYTES));
-        if self.entries.len() >= MAX_CONSOLE_EVENTS ||
-            next_bytes.is_none_or(|bytes| bytes > MAX_CONSOLE_BYTES)
-        {
+            .saturating_add(level.len() as u64)
+            .saturating_add(message.len() as u64)
+            .saturating_add(CONSOLE_EVIDENCE_ENTRY_OVERHEAD_BYTES);
+        if self.entries.len() >= MAX_CONSOLE_EVENTS || next_bytes > MAX_CONSOLE_BYTES {
             self.limit_exceeded = true;
             return;
         }
-        self.bytes = next_bytes.expect("checked console evidence bytes");
+        self.bytes = next_bytes;
         self.entries.push((level, message));
     }
 }
@@ -762,24 +750,16 @@ impl DocumentSession {
             return Err(error.with_capture_evidence(capture_evidence));
         }
 
-        let stable_image_png = capture_evidence
-            .stable_image_png
-            .take()
-            .expect("completed capture has a stable frame");
-        let readiness = capture_evidence
-            .readiness
-            .take()
-            .expect("completed capture has readiness evidence");
-        let layout_debug = capture_evidence
-            .layout_debug
-            .take()
-            .expect("completed capture has parsed layout evidence");
-        let controlled_runtime_ms = capture_evidence
-            .controlled_runtime_ms
-            .expect("completed capture has controlled-runtime timing");
-        let scene_capture_ms = capture_evidence
-            .scene_capture_ms
-            .expect("completed capture has scene-capture timing");
+        let SessionCaptureEvidence {
+            stable_image_png: Some(stable_image_png),
+            readiness: Some(readiness),
+            layout_debug: Some(layout_debug),
+            controlled_runtime_ms: Some(controlled_runtime_ms),
+            scene_capture_ms: Some(scene_capture_ms),
+        } = capture_evidence
+        else {
+            unreachable!("completed capture has complete staged evidence")
+        };
 
         let resources = std::mem::take(&mut self.delegate.resources.borrow_mut().entries);
         let resource_store = self.delegate.resource_store.take();
