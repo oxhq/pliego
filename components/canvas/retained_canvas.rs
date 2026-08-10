@@ -22,9 +22,9 @@ const MAX_RASTER_BYTES: u64 = 256 * 1024 * 1024;
 // transcript and registry independently so a script cannot replace byte pressure with command or
 // object pressure. All counters are cumulative for one guard: replacing a readback or completing a
 // Canvas does not refund its charge, so churn cannot evade the session limits.
-const MAX_RETAINED_RASTER_BYTES: u64 = 64 * 1024 * 1024;
-const MAX_RETAINED_COMMANDS: u64 = 262_144;
-const MAX_RETAINED_OBJECTS: u64 = 65_536;
+pub const MAX_RETAINED_RASTER_BYTES: u64 = 64 * 1024 * 1024;
+pub const MAX_RETAINED_COMMANDS: u64 = 262_144;
+pub const MAX_RETAINED_OBJECTS: u64 = 65_536;
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
 static REGISTRY: OnceLock<Mutex<Registry>> = OnceLock::new();

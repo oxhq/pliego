@@ -39,7 +39,7 @@ pub struct SceneCapture {
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct CapturedCanvasDiagnostics {
-    pub sequence: usize,
+    pub sequences: Vec<usize>,
     pub diagnostics: CanvasDiagnostics,
 }
 
@@ -139,6 +139,13 @@ pub enum UnsupportedPaintKind {
     SvgInvalidPath,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CanvasCaptureLimit {
+    Placements,
+    PlacedOperations,
+    DiagnosticsBytes,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum CaptureError {
     InvalidJson(String),
@@ -233,6 +240,12 @@ pub enum CaptureError {
     Canvas {
         sequence: usize,
         message: String,
+    },
+    CanvasCaptureLimitExceeded {
+        sequence: usize,
+        limit: CanvasCaptureLimit,
+        configured: u64,
+        observed: u64,
     },
     MissingLinkRect {
         sequence: usize,
@@ -409,6 +422,23 @@ impl fmt::Display for CaptureError {
                     "Canvas paint event {sequence} cannot be retained: {message}"
                 )
             },
+            Self::CanvasCaptureLimitExceeded {
+                sequence,
+                limit,
+                configured,
+                observed,
+            } => {
+                let limit = match limit {
+                    CanvasCaptureLimit::Placements => "placement count",
+                    CanvasCaptureLimit::PlacedOperations => "placed operation count",
+                    CanvasCaptureLimit::DiagnosticsBytes => "diagnostics bytes",
+                };
+                write!(
+                    formatter,
+                    "Canvas paint event {sequence} cannot be retained: capture {limit} exceeds \
+                     the session limit of {configured} (observed {observed})"
+                )
+            },
             Self::MissingLinkRect { sequence } => write!(
                 formatter,
                 "linked paint event {sequence} has no retained rectangle"
@@ -477,6 +507,112 @@ impl fmt::Display for CaptureError {
 
 impl std::error::Error for CaptureError {}
 
+#[derive(Clone, Copy)]
+struct CanvasCaptureLimits {
+    placements: u64,
+    placed_operations: u64,
+    diagnostics_bytes: u64,
+}
+
+const DEFAULT_CANVAS_CAPTURE_LIMITS: CanvasCaptureLimits = CanvasCaptureLimits {
+    // Derived capture state must not be able to amplify the producer-side retention envelope.
+    placements: servo_canvas::retained_canvas::MAX_RETAINED_OBJECTS,
+    placed_operations: servo_canvas::retained_canvas::MAX_RETAINED_COMMANDS,
+    diagnostics_bytes: servo_canvas::retained_canvas::MAX_RETAINED_RASTER_BYTES,
+};
+
+#[derive(Clone, Copy, Default)]
+struct CanvasCaptureBudget {
+    placements: u64,
+    placed_operations: u64,
+    diagnostics_bytes: u64,
+}
+
+impl CanvasCaptureBudget {
+    fn preflight(
+        self,
+        limits: CanvasCaptureLimits,
+        sequence: usize,
+        placed_operations: usize,
+        diagnostics_bytes: u64,
+    ) -> Result<Self, CaptureError> {
+        Ok(Self {
+            placements: reserve_canvas_capture_cost(
+                self.placements,
+                1,
+                limits.placements,
+                sequence,
+                CanvasCaptureLimit::Placements,
+            )?,
+            placed_operations: reserve_canvas_capture_cost(
+                self.placed_operations,
+                u64::try_from(placed_operations).unwrap_or(u64::MAX),
+                limits.placed_operations,
+                sequence,
+                CanvasCaptureLimit::PlacedOperations,
+            )?,
+            diagnostics_bytes: reserve_canvas_capture_cost(
+                self.diagnostics_bytes,
+                diagnostics_bytes,
+                limits.diagnostics_bytes,
+                sequence,
+                CanvasCaptureLimit::DiagnosticsBytes,
+            )?,
+        })
+    }
+}
+
+#[derive(Default)]
+struct JsonByteCounter {
+    bytes: u64,
+}
+
+impl std::io::Write for JsonByteCounter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.bytes = self
+            .bytes
+            .saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn canvas_diagnostics_json_len(diagnostics: &CanvasDiagnostics) -> Result<u64, serde_json::Error> {
+    let mut counter = JsonByteCounter::default();
+    serde_json::to_writer(&mut counter, diagnostics)?;
+    Ok(counter.bytes)
+}
+
+fn reserve_canvas_capture_cost(
+    current: u64,
+    additional: u64,
+    configured: u64,
+    sequence: usize,
+    limit: CanvasCaptureLimit,
+) -> Result<u64, CaptureError> {
+    let observed =
+        current
+            .checked_add(additional)
+            .ok_or(CaptureError::CanvasCaptureLimitExceeded {
+                sequence,
+                limit,
+                configured,
+                observed: u64::MAX,
+            })?;
+    if observed > configured {
+        return Err(CaptureError::CanvasCaptureLimitExceeded {
+            sequence,
+            limit,
+            configured,
+            observed,
+        });
+    }
+    Ok(observed)
+}
+
 /// Convert the retained layout snapshot JSON into a canonical document scene.
 ///
 /// The converter consumes only retained capture data. Capture-local fragment, tag, spatial-node,
@@ -496,10 +632,24 @@ pub fn capture_document_scene(
 
 pub fn capture_document_scene_with_canvas(
     snapshot_json: &[u8],
+    resolve_image: impl FnMut(&str) -> Option<String>,
+    resolve_canvas: impl FnMut(CapturedCanvasImageKey) -> Result<Arc<RetainedCanvasSnapshot>, String>,
+) -> Result<SceneCapture, CaptureError> {
+    capture_document_scene_with_canvas_limits(
+        snapshot_json,
+        resolve_image,
+        resolve_canvas,
+        DEFAULT_CANVAS_CAPTURE_LIMITS,
+    )
+}
+
+fn capture_document_scene_with_canvas_limits(
+    snapshot_json: &[u8],
     mut resolve_image: impl FnMut(&str) -> Option<String>,
     mut resolve_canvas: impl FnMut(
         CapturedCanvasImageKey,
     ) -> Result<Arc<RetainedCanvasSnapshot>, String>,
+    canvas_limits: CanvasCaptureLimits,
 ) -> Result<SceneCapture, CaptureError> {
     let capture: LayoutCapture = serde_json::from_slice(snapshot_json)
         .map_err(|error| CaptureError::InvalidJson(error.to_string()))?;
@@ -530,6 +680,7 @@ pub fn capture_document_scene_with_canvas(
     let mut embedded_image_resources = BTreeMap::<String, CanvasResource>::new();
     let mut canvas_diagnostics = Vec::new();
     let mut adapted_canvases = HashMap::new();
+    let mut canvas_budget = CanvasCaptureBudget::default();
     let mut stacking_context_depth = 0usize;
 
     for (expected_sequence, event) in capture.paint_events.iter().enumerate() {
@@ -709,15 +860,42 @@ pub fn capture_document_scene_with_canvas(
                     continue;
                 }
                 if let Some(key) = fragment.canvas_image_key {
+                    // Reject an excess placement before resolving or adapting another snapshot.
+                    reserve_canvas_capture_cost(
+                        canvas_budget.placements,
+                        1,
+                        canvas_limits.placements,
+                        event.sequence,
+                        CanvasCaptureLimit::Placements,
+                    )?;
                     let snapshot = resolve_canvas(key).map_err(|message| CaptureError::Canvas {
                         sequence: event.sequence,
                         message,
                     })?;
-                    let canvas = adapt_retained_canvas(&mut adapted_canvases, snapshot).map_err(
-                        |error| CaptureError::Canvas {
-                            sequence: event.sequence,
-                            message: error.to_string(),
-                        },
+                    let (canvas, diagnostics_index, is_new) = adapt_retained_canvas(
+                        &mut adapted_canvases,
+                        snapshot,
+                        canvas_diagnostics.len(),
+                    )
+                    .map_err(|error| CaptureError::Canvas {
+                        sequence: event.sequence,
+                        message: error.to_string(),
+                    })?;
+                    let diagnostics_bytes = if is_new {
+                        canvas_diagnostics_json_len(&canvas.diagnostics).map_err(|error| {
+                            CaptureError::Canvas {
+                                sequence: event.sequence,
+                                message: format!("cannot measure Canvas diagnostics: {error}"),
+                            }
+                        })?
+                    } else {
+                        0
+                    };
+                    let next_canvas_budget = canvas_budget.preflight(
+                        canvas_limits,
+                        event.sequence,
+                        canvas.scene.pages[0].operations.len(),
+                        diagnostics_bytes,
                     )?;
                     append_canvas(
                         &mut operations,
@@ -726,10 +904,17 @@ pub fn capture_document_scene_with_canvas(
                         rect,
                         event.sequence,
                     )?;
-                    canvas_diagnostics.push(CapturedCanvasDiagnostics {
-                        sequence: event.sequence,
-                        diagnostics: canvas.diagnostics.clone(),
-                    });
+                    if is_new {
+                        debug_assert_eq!(diagnostics_index, canvas_diagnostics.len());
+                        canvas_diagnostics.push(CapturedCanvasDiagnostics {
+                            sequences: Vec::new(),
+                            diagnostics: canvas.diagnostics.clone(),
+                        });
+                    }
+                    canvas_diagnostics[diagnostics_index]
+                        .sequences
+                        .push(event.sequence);
+                    canvas_budget = next_canvas_budget;
                     append_link(
                         &mut operations,
                         &mut emitted_links,
@@ -934,17 +1119,19 @@ pub fn capture_document_scene_with_canvas(
 struct CachedRetainedCanvas {
     source: Arc<RetainedCanvasSnapshot>,
     capture: Arc<HybridCanvasCapture>,
+    diagnostics_index: usize,
 }
 
 fn adapt_retained_canvas(
     cache: &mut HashMap<usize, CachedRetainedCanvas>,
     snapshot: Arc<RetainedCanvasSnapshot>,
-) -> Result<Arc<HybridCanvasCapture>, crate::hybrid_canvas::CanvasError> {
+    diagnostics_index: usize,
+) -> Result<(Arc<HybridCanvasCapture>, usize, bool), crate::hybrid_canvas::CanvasError> {
     let identity = Arc::as_ptr(&snapshot) as usize;
     if let Some(cached) = cache.get(&identity)
         && Arc::ptr_eq(&cached.source, &snapshot)
     {
-        return Ok(Arc::clone(&cached.capture));
+        return Ok((Arc::clone(&cached.capture), cached.diagnostics_index, false));
     }
 
     let capture = Arc::new(adapt_canvas(transcript_from_retained(Arc::clone(
@@ -956,9 +1143,10 @@ fn adapt_retained_canvas(
         CachedRetainedCanvas {
             source: snapshot,
             capture: Arc::clone(&capture),
+            diagnostics_index,
         },
     );
-    Ok(capture)
+    Ok((capture, diagnostics_index, true))
 }
 
 fn append_canvas(
@@ -2569,12 +2757,252 @@ mod tests {
         });
         let mut cache = HashMap::new();
 
-        let first = adapt_retained_canvas(&mut cache, Arc::clone(&snapshot)).unwrap();
-        let alias = adapt_retained_canvas(&mut cache, snapshot).unwrap();
+        let (first, first_diagnostics, first_is_new) =
+            adapt_retained_canvas(&mut cache, Arc::clone(&snapshot), 3).unwrap();
+        let (alias, alias_diagnostics, alias_is_new) =
+            adapt_retained_canvas(&mut cache, snapshot, 4).unwrap();
 
         assert!(Arc::ptr_eq(&first, &alias));
+        assert_eq!(first_diagnostics, 3);
+        assert_eq!(alias_diagnostics, 3);
+        assert!(first_is_new);
+        assert!(!alias_is_new);
         assert_eq!(cache.len(), 1);
         assert_eq!(first.resources.len(), 1);
+    }
+
+    fn retained_canvas_with_fallbacks(count: u32) -> Arc<RetainedCanvasSnapshot> {
+        Arc::new(RetainedCanvasSnapshot {
+            width: count,
+            height: 1,
+            commands: (0..count)
+                .map(|index| {
+                    servo_canvas::retained_canvas::RetainedCanvasCommand::RasterPatch {
+                        x: f64::from(index),
+                        y: 0.0,
+                        width: 1,
+                        height: 1,
+                        premultiplied_rgba: vec![index as u8, 0, 0, 255],
+                        reason:
+                            servo_canvas::retained_canvas::RetainedCanvasFallbackReason::PixelReadback,
+                    }
+                })
+                .collect(),
+            unsupported: None,
+        })
+    }
+
+    fn canvas_alias_layout(placements: usize, width: u32) -> Vec<u8> {
+        let fragments = (0..placements)
+            .map(|sequence| {
+                serde_json::json!({
+                    "depth": 0,
+                    "kind": "image",
+                    "rect": {
+                        "x": 0.0,
+                        "y": 0.0,
+                        "width": width,
+                        "height": 1.0
+                    },
+                    "tag_id": null,
+                    "paint_fragment_id": sequence,
+                    "text_run": null,
+                    "image_url": null,
+                    "canvas_image_key": { "namespace": 7, "key": 9 }
+                })
+            })
+            .collect::<Vec<_>>();
+        let paint_events = (0..placements)
+            .map(|sequence| {
+                serde_json::json!({
+                    "sequence": sequence,
+                    "kind": "image",
+                    "fragment_id": sequence,
+                    "tag_id": null,
+                    "spatial_node_id": sequence,
+                    "clip_id": null
+                })
+            })
+            .collect::<Vec<_>>();
+        serde_json::to_vec(&serde_json::json!({
+            "boxes": [],
+            "fragments": fragments,
+            "font_resources": [],
+            "font_instances": [],
+            "page_sequence": {
+                "pages": [{
+                    "index": 0,
+                    "width": 100.0,
+                    "height": 100.0,
+                    "margin_top": 0.0,
+                    "margin_right": 0.0,
+                    "margin_bottom": 0.0,
+                    "margin_left": 0.0,
+                    "available_inline_size": 100.0,
+                    "available_block_size": 100.0
+                }]
+            },
+            "paint_events": paint_events,
+            "paint_epoch": 1,
+            "paint_content_width": 100.0,
+            "paint_content_height": 100.0,
+            "paint_scroll_node_count": placements,
+            "paintable": true,
+            "contentful": true,
+            "first_reflow": false,
+            "links": []
+        }))
+        .unwrap()
+    }
+
+    fn capture_canvas_aliases(
+        placements: usize,
+        snapshot: Arc<RetainedCanvasSnapshot>,
+        limits: CanvasCaptureLimits,
+    ) -> Result<SceneCapture, CaptureError> {
+        let width = snapshot.width;
+        capture_document_scene_with_canvas_limits(
+            &canvas_alias_layout(placements, width),
+            |_| None,
+            move |_| Ok(Arc::clone(&snapshot)),
+            limits,
+        )
+    }
+
+    fn retained_canvas_diagnostics_bytes(snapshot: Arc<RetainedCanvasSnapshot>) -> u64 {
+        let capture = adapt_canvas(transcript_from_retained(snapshot).unwrap()).unwrap();
+        let counted = canvas_diagnostics_json_len(&capture.diagnostics).unwrap();
+        assert_eq!(
+            counted,
+            u64::try_from(capture.diagnostics_json().unwrap().len()).unwrap()
+        );
+        counted
+    }
+
+    #[test]
+    fn aliases_store_diagnostics_once_and_keep_ordered_placement_references() {
+        let snapshot = retained_canvas_with_fallbacks(32);
+        let diagnostics_bytes = retained_canvas_diagnostics_bytes(Arc::clone(&snapshot));
+
+        let capture = capture_canvas_aliases(
+            2,
+            snapshot,
+            CanvasCaptureLimits {
+                placements: 2,
+                placed_operations: 64,
+                diagnostics_bytes,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(capture.canvas_diagnostics.len(), 1);
+        assert_eq!(capture.canvas_diagnostics[0].sequences, [0, 1]);
+        assert_eq!(
+            capture.canvas_diagnostics[0].diagnostics.fallbacks.len(),
+            32
+        );
+        assert_eq!(capture.canvas_resources.len(), 32);
+        assert_eq!(capture.scene.pages[0].operations.len(), 64);
+    }
+
+    #[test]
+    fn repeated_aliases_fail_at_the_first_excess_placement_before_capture_exists() {
+        let snapshot = retained_canvas_with_fallbacks(2);
+        let resolver_calls = std::cell::Cell::new(0);
+        let error = capture_document_scene_with_canvas_limits(
+            &canvas_alias_layout(3, snapshot.width),
+            |_| None,
+            |_| {
+                resolver_calls.set(resolver_calls.get() + 1);
+                Ok(Arc::clone(&snapshot))
+            },
+            CanvasCaptureLimits {
+                placements: 2,
+                placed_operations: u64::MAX,
+                diagnostics_bytes: u64::MAX,
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            CaptureError::CanvasCaptureLimitExceeded {
+                sequence: 2,
+                limit: CanvasCaptureLimit::Placements,
+                configured: 2,
+                observed: 3,
+            }
+        );
+        assert_eq!(resolver_calls.get(), 2);
+    }
+
+    #[test]
+    fn repeated_aliases_preflight_flattened_operations_before_appending_the_event() {
+        let error = capture_canvas_aliases(
+            2,
+            retained_canvas_with_fallbacks(2),
+            CanvasCaptureLimits {
+                placements: 2,
+                placed_operations: 3,
+                diagnostics_bytes: u64::MAX,
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            CaptureError::CanvasCaptureLimitExceeded {
+                sequence: 1,
+                limit: CanvasCaptureLimit::PlacedOperations,
+                configured: 3,
+                observed: 4,
+            }
+        );
+    }
+
+    #[test]
+    fn unique_diagnostics_use_an_exact_cumulative_serialized_byte_limit() {
+        let snapshot = retained_canvas_with_fallbacks(32);
+        let diagnostics_bytes = retained_canvas_diagnostics_bytes(Arc::clone(&snapshot));
+        let error = capture_canvas_aliases(
+            1,
+            snapshot,
+            CanvasCaptureLimits {
+                placements: 1,
+                placed_operations: 32,
+                diagnostics_bytes: diagnostics_bytes - 1,
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            CaptureError::CanvasCaptureLimitExceeded {
+                sequence: 0,
+                limit: CanvasCaptureLimit::DiagnosticsBytes,
+                configured: diagnostics_bytes - 1,
+                observed: diagnostics_bytes,
+            }
+        );
+    }
+
+    #[test]
+    fn canvas_capture_cost_overflow_fails_closed_even_at_the_maximum_limit() {
+        assert_eq!(
+            reserve_canvas_capture_cost(
+                u64::MAX - 1,
+                2,
+                u64::MAX,
+                7,
+                CanvasCaptureLimit::DiagnosticsBytes,
+            ),
+            Err(CaptureError::CanvasCaptureLimitExceeded {
+                sequence: 7,
+                limit: CanvasCaptureLimit::DiagnosticsBytes,
+                configured: u64::MAX,
+                observed: u64::MAX,
+            })
+        );
     }
 
     #[test]
