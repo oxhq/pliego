@@ -35,13 +35,65 @@ jobs:
           persist-credentials: false
           ref: ${{ github.sha }}
 
-      - name: Gate host and run sampler acceptance proof
+      - name: Gate host and produce benchmark evidence
         env:
           MODE: ${{ inputs.mode }}
           PROOF_DIR: ${{ runner.temp }}/pliego-host-proof-${{ github.run_id }}-${{ github.run_attempt }}
+          CANDIDATE: ${{ runner.temp }}/pliego-candidate-${{ github.run_id }}-${{ github.run_attempt }}.json
+          FAILURE_EVIDENCE: ${{ runner.temp }}/pliego-failures-${{ github.run_id }}-${{ github.run_attempt }}
+          PUBLISHED_BASELINE: benchmarks/baselines/pliego-0.1.1-linux-x86_64.json
           PLIEGO_BENCHMARK_PROOF_TOKEN: ${{ secrets.OXHQ_BENCHMARK_PROOF_TOKEN }}
           PYTHONDONTWRITEBYTECODE: "1"
         run: |
+          set -euo pipefail
+          if [[ "$MODE" == "production" ]]; then
+            test -n "${PLIEGO_BENCHMARK_CGROUP_PARENT:-}"
+            test "$(stat -c '%U:%G:%a' /usr/local/libexec/pliego-cgroup-broker)" = "root:root:555"
+            test "$(sha256sum /usr/local/libexec/pliego-cgroup-broker | cut -d' ' -f1)" = \
+              "$(sha256sum benchmarks/tools/process_tree_sampler.py | cut -d' ' -f1)"
+            engine_gid="$(getent group pliego-benchmark-engine | cut -d: -f3)"
+            id -G | tr ' ' '\n' | grep -Fx "$engine_gid"
+            test "$(id -u)" != "$(id -u pliego-benchmark-engine)"
+
+            npm --prefix ports/pliego/tests/fixtures/chartjs-report ci
+            cp components/fonts/tests/support/dejavu-fonts-ttf-2.37/ttf/DejaVuSans.ttf \
+              ports/pliego/tests/fixtures/chartjs-report/ReportSans.ttf
+            python3 benchmarks/tools/generate_fixtures.py --check
+            binary="$(python3 benchmarks/tools/resolve_release.py \
+              --cache "$RUNNER_TEMP/pliego-release-cache" \
+              --metadata-out "$RUNNER_TEMP/pliego-verified-release.json")"
+
+            frozen_root="$RUNNER_TEMP/pliego-frozen-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            test ! -e "$frozen_root"
+            sudo install -d -o root -g root -m 0555 \
+              "$frozen_root/benchmarks" \
+              "$frozen_root/ports/pliego/tests/fixtures"
+            sudo cp -a benchmarks/fixtures "$frozen_root/benchmarks/"
+            sudo cp -a ports/pliego/tests/fixtures/chartjs-report \
+              "$frozen_root/ports/pliego/tests/fixtures/"
+            sudo chown -R root:root "$frozen_root"
+            sudo find "$frozen_root" -type d -exec chmod 0555 {} +
+            sudo find "$frozen_root" -type f -exec chmod 0444 {} +
+
+            python3 benchmarks/tools/benchmark_host_preflight.py \
+              --mode production \
+              --output-dir "$PROOF_DIR" \
+              --config "${PLIEGO_BENCHMARK_HOST_CONFIG:-/etc/pliego-benchmark-host.v1.json}" \
+              -- python3 benchmarks/tools/run_benchmark.py \
+                --binary "$binary" \
+                --frozen-fixture-root "$frozen_root" \
+                --staging-out "$CANDIDATE" \
+                --failure-evidence-dir "$FAILURE_EVIDENCE/run"
+
+            python3 benchmarks/tools/publish_benchmark.py \
+              --candidate "$CANDIDATE" \
+              --host-proof "$PROOF_DIR/benchmark-host-proof.v1.json" \
+              --out "$PUBLISHED_BASELINE" \
+              --failure-evidence "$FAILURE_EVIDENCE/publish"
+
+            exit 0
+          fi
+
           set +e
           python3 benchmarks/tools/benchmark_host_preflight.py \
             --mode "$MODE" \
@@ -50,17 +102,35 @@ jobs:
             -- python3 benchmarks/tools/test_process_tree_sampler.py --acceptance-overhead
           status=$?
           set -e
-          if [[ "$MODE" == "production" ]]; then
-            test "$status" -eq 0
-            python3 benchmarks/tools/validate_host_proof.py \
-              "$PROOF_DIR/benchmark-host-proof.v1.json" \
-              --expect-status accepted
-          else
-            test "$status" -ne 0
-            python3 benchmarks/tools/validate_host_proof.py \
-              "$PROOF_DIR/benchmark-host-proof.v1.json" \
-              --expect-status rejected \
-              --forbid-event samples.started
+          test "$status" -ne 0
+          python3 benchmarks/tools/validate_host_proof.py \
+            "$PROOF_DIR/benchmark-host-proof.v1.json" \
+            --expect-status rejected \
+            --forbid-event samples.started
+
+      - name: Remove frozen fixture mirror
+        if: always() && inputs.mode == 'production'
+        env:
+          FROZEN_ROOT: ${{ runner.temp }}/pliego-frozen-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          case "$FROZEN_ROOT" in
+            "$RUNNER_TEMP"/pliego-frozen-*)
+              if [[ -e "$FROZEN_ROOT" ]]; then
+                sudo rm -rf --one-file-system -- "$FROZEN_ROOT"
+              fi
+              ;;
+            *) echo "refusing unsafe frozen-fixture cleanup: $FROZEN_ROOT" >&2; exit 1 ;;
+          esac
+
+      - name: Seal retained failure evidence
+        if: always() && inputs.mode == 'production'
+        env:
+          FAILURE_EVIDENCE: ${{ runner.temp }}/pliego-failures-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          if [[ -d "$FAILURE_EVIDENCE" ]]; then
+            sudo chown -R root:root "$FAILURE_EVIDENCE"
+            sudo find "$FAILURE_EVIDENCE" -type d -exec chmod 0555 {} +
+            sudo find "$FAILURE_EVIDENCE" -type f -exec chmod 0444 {} +
           fi
 
       - name: Retain dedicated-host evidence
@@ -68,7 +138,11 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: benchmark-host-proof-${{ inputs.mode }}-${{ github.sha }}
-          path: ${{ runner.temp }}/pliego-host-proof-${{ github.run_id }}-${{ github.run_attempt }}/
+          path: |
+            ${{ runner.temp }}/pliego-host-proof-${{ github.run_id }}-${{ github.run_attempt }}/
+            ${{ runner.temp }}/pliego-candidate-${{ github.run_id }}-${{ github.run_attempt }}.json
+            ${{ runner.temp }}/pliego-failures-${{ github.run_id }}-${{ github.run_attempt }}/
+            benchmarks/baselines/pliego-0.1.1-linux-x86_64.json
           if-no-files-found: error
           retention-days: 30
 

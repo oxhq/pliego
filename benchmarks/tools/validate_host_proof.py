@@ -30,9 +30,43 @@ EXPECTED_PRODUCTION_COMMAND = (
     "benchmarks/tools/test_process_tree_sampler.py",
     "--acceptance-overhead",
 )
+BENCHMARK_COMMAND_FLAGS = (
+    "--binary",
+    "--frozen-fixture-root",
+    "--staging-out",
+    "--failure-evidence-dir",
+)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import validate_result  # noqa: E402
+
+
+def canonical_benchmark_command(argv: list[str] | tuple[str, ...]) -> bool:
+    if len(argv) != 2 + len(BENCHMARK_COMMAND_FLAGS) * 2:
+        return False
+    if tuple(argv[:2]) != ("python3", "benchmarks/tools/run_benchmark.py"):
+        return False
+    for offset, flag in enumerate(BENCHMARK_COMMAND_FLAGS):
+        index = 2 + offset * 2
+        if argv[index] != flag:
+            return False
+        value = argv[index + 1]
+        if not isinstance(value, str) or not value or "\0" in value:
+            return False
+        path = Path(value)
+        try:
+            canonical = path.resolve(strict=False)
+        except OSError:
+            return False
+        if not path.is_absolute() or path != canonical:
+            return False
+    return True
+
+
+def benchmark_candidate_path(argv: list[str] | tuple[str, ...]) -> Path | None:
+    if not canonical_benchmark_command(argv):
+        return None
+    return Path(argv[argv.index("--staging-out") + 1])
 
 
 def sha256_file(path: Path) -> str:
@@ -90,6 +124,7 @@ def validate_semantics(
     *,
     allow_fixture_evidence: bool,
     forbidden_event: str | None,
+    expected_command: tuple[str, ...] = EXPECTED_PRODUCTION_COMMAND,
 ) -> list[str]:
     violations: list[str] = []
     checks = proof.get("checks", [])
@@ -151,8 +186,15 @@ def validate_semantics(
             violations.append("accepted proof snapshot fingerprints differ")
         if proof.get("command", {}).get("started") is not True:
             violations.append("accepted proof did not start the benchmark command")
-        if proof.get("command", {}).get("argv") != list(EXPECTED_PRODUCTION_COMMAND):
-            violations.append("accepted proof did not run the dedicated acceptance workload")
+        if proof.get("command", {}).get("argv") != list(expected_command):
+            violations.append("accepted proof did not run the expected canonical workload")
+        if canonical_benchmark_command(expected_command):
+            candidate = proof.get("command", {}).get("candidate")
+            expected_path = str(benchmark_candidate_path(expected_command))
+            if not isinstance(candidate, dict):
+                violations.append("accepted benchmark proof omitted the staged candidate digest")
+            elif candidate.get("path") != expected_path:
+                violations.append("accepted benchmark proof candidate path differs from its command")
         if proof.get("command", {}).get("exit_code") != 0:
             violations.append("accepted proof command did not exit zero")
         if proof.get("failure") is not None:
@@ -223,6 +265,7 @@ def validate_document(
     *,
     allow_fixture_evidence: bool = False,
     forbidden_event: str | None = None,
+    expected_command: tuple[str, ...] = EXPECTED_PRODUCTION_COMMAND,
 ) -> list[str]:
     schema_violations: list[validate_result.Violation] = []
     validate_result.validate(proof, schema, "$", schema_violations)
@@ -233,6 +276,7 @@ def validate_document(
         root,
         allow_fixture_evidence=allow_fixture_evidence,
         forbidden_event=forbidden_event,
+        expected_command=expected_command,
     )
 
 
@@ -254,12 +298,21 @@ def main() -> int:
     if not isinstance(proof, dict) or not isinstance(schema, dict):
         print("validate_host_proof: proof and schema must be JSON objects", file=sys.stderr)
         return 1
+    retained_command = proof.get("command", {}).get("argv")
+    expected_command = (
+        tuple(retained_command)
+        if isinstance(retained_command, list)
+        and all(isinstance(value, str) for value in retained_command)
+        and canonical_benchmark_command(retained_command)
+        else EXPECTED_PRODUCTION_COMMAND
+    )
     violations = validate_document(
         proof,
         schema,
         args.proof.parent,
         allow_fixture_evidence=args.allow_fixture_evidence,
         forbidden_event=args.forbid_event,
+        expected_command=expected_command,
     )
     if args.expect_status and proof.get("status") != args.expect_status:
         violations.append(f"expected status {args.expect_status!r}, got {proof.get('status')!r}")

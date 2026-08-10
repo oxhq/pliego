@@ -40,7 +40,8 @@ benchmarks/
 │   ├── generate_fixtures.py   Deterministic generation of long/image fixtures
 │   ├── benchmark_host_preflight.py Dedicated-host gate and command wrapper
 │   ├── process_tree_sampler.py Linux cgroup-v2 containment and accounting
-│   ├── run_benchmark.py       Orchestrator: manifest → runner → aggregates → result file
+│   ├── run_benchmark.py       Unprivileged orchestrator: manifest → staged candidate
+│   ├── publish_benchmark.py   Host-proof binding and atomic baseline replacement
 │   ├── validate_host_proof.py Validate host proof plus retained raw evidence
 │   ├── test_process_tree_sampler.py Fixture, live cgroup, bridge, and overhead proof
 │   └── validate_result.py     Stdlib-only JSON Schema check for result files
@@ -58,11 +59,19 @@ benchmarks/
   release verifier. Never `cargo run`.
 * `php-cli` ≥ 8.1 (runner), `python3` ≥ 3.11 (orchestrator/validator; stdlib only),
   and `poppler-utils` (`pdftotext` for text correctness checks).
-* A root broker in a cgroup-v2 domain parent delegated by the host service with
+* A fixed root-owned broker at `/usr/local/libexec/pliego-cgroup-broker`, whose
+  mode and SHA-256 match the checked-out broker source, in a cgroup-v2 domain
+  parent delegated by the host service with
   `cpu`, `io`, `memory`, and `pids` enabled, plus a fixed non-root account named
   `pliego-benchmark-engine`. The broker must run in the parent's sole direct
   child, `harness`; set `PLIEGO_BENCHMARK_CGROUP_PARENT` to the canonical,
-  empty root-owned parent. The sampler does not provision the service/account.
+  empty root-owned parent. The runner must be a supplementary member of the
+  engine group but have a different UID. The sampler does not provision the
+  service/account. Its fixed `/usr/bin/python3 -I` entrypoint ignores Python
+  environment injection before privileged code loads.
+* A repository-shaped fixture mirror whose directories and files are root-owned
+  and not group/other writable. Candidate input and cwd are opened from this
+  mirror before launch; an unprivileged orchestrator cannot replace them.
 * All resources local, network disabled, same fonts and assets for every run.
 
 ## Freezing and generating fixtures
@@ -94,15 +103,29 @@ cp ../../../../../components/fonts/tests/support/dejavu-fonts-ttf-2.37/ttf/DejaV
 
 The orchestrator refuses to run it until both files exist.
 
-## Running a baseline
+## Staging and publishing a baseline
 
 ```sh
 cache="$HOME/.cache/pliego-benchmarks"
 binary="$(python3 benchmarks/tools/resolve_release.py \
   --cache "$cache" --metadata-out "$cache/verified-release.json")"
-python3 benchmarks/tools/run_benchmark.py \
-  --binary "$binary" \
-  --out benchmarks/baselines/pliego-0.1.1-linux-x86_64.json
+candidate="$(realpath /var/tmp/pliego-benchmark/candidate.json)"
+frozen="$(realpath /var/lib/pliego-benchmark-fixtures/current)"
+proof="$(realpath /var/tmp/pliego-benchmark/host-proof)"
+
+python3 benchmarks/tools/benchmark_host_preflight.py \
+  --mode production --output-dir "$proof" \
+  -- python3 benchmarks/tools/run_benchmark.py \
+    --binary "$binary" \
+    --frozen-fixture-root "$frozen" \
+    --staging-out "$candidate" \
+    --failure-evidence-dir /var/tmp/pliego-benchmark/failures/run
+
+python3 benchmarks/tools/publish_benchmark.py \
+  --candidate "$candidate" \
+  --host-proof "$proof/benchmark-host-proof.v1.json" \
+  --out benchmarks/baselines/pliego-0.1.1-linux-x86_64.json \
+  --failure-evidence /var/tmp/pliego-benchmark/failures/publish
 ```
 
 The resolver accepts only the committed Linux x86_64 release name, size,
@@ -110,25 +133,54 @@ archive SHA-256, exact file set, binary SHA-256, native commit, and Servo build.
 Use `--offline` after the verified archive is cached. The orchestrator checks
 the binary digest again before starting a sample.
 
-Subset or override with `--fixture invoice-showcase`, `--samples 50`,
-`--warmup 10`, `--php /usr/bin/php`. The orchestrator:
+Those commands describe the contract; publishable runs enter through the
+manual dedicated-host workflow, which supplies the exact paths. Local
+diagnostics may subset or override with `--fixture invoice-showcase`,
+`--samples 50`, `--warmup 10`, `--php /usr/bin/php`, but that is not the
+canonical publishable command. The orchestrator:
 
 1. checks the fixture surface (inputs, fonts, chartjs prep) and the binary;
 2. runs `runners/pliego.php` per fixture — warmup discarded, then samples;
 3. aggregates p50/p95/p99/min/max/mean, determinism, correctness, failures;
 4. validates the result against `schema/benchmark-result.v1.json`;
-5. writes the result file (raw samples kept, not just averages).
+5. atomically stages a supported candidate outside `benchmarks/baselines`
+   (raw samples kept, not just averages).
 
-Each sample gets a fresh root-owned, non-delegated child cgroup. A root launcher
-first stops in a staging cgroup, drops supplementary groups, all real/effective/
-saved IDs, every capability set, and its bounding capabilities, then sets
-`no_new_privs`. The broker verifies those `/proc` fields, PID/start identity,
-executable hash/argv, and denied migration-interface writes before moving the
-stopped launcher into the clean measurement leaf and starting engine wall time.
-All later descendants, including new sessions, remain contained. The retained
-final `cpu.stat`, `io.stat`, `memory.current`, `memory.peak`, and `pids.peak`
-counters are the accounting source. Engine wall time ends with the root process;
-descendant drain and accounting-settle durations are recorded separately.
+It never runs the release binary with `--version`; version, commit, Servo build,
+archive digest, and binary digest come from the pinned manifest and verified
+release metadata. The orchestrator, PHP correctness verifier, PDF tools, and
+candidate runtime all refuse root. Failed correctness is retained under a
+separate attempt directory and cannot replace an official baseline. Its sample
+outputs are moved into that attempt, rejected if they contain links or special
+files, and covered by a SHA-256 manifest. The runner makes every entry it owns
+read-only; the dedicated workflow then seals the full attempt root-owned.
+The
+publisher revalidates the candidate and host-proof bundle, requires the exact
+host-bound candidate digest, injects dedicated-host provenance, fsyncs a
+same-directory temporary, then performs one atomic replacement. A crash before
+replacement leaves the previous baseline byte-for-byte unchanged.
+
+Each sample gets a fresh root-owned, non-delegated child cgroup. The narrow
+broker opens the canonical executable, copies its bytes to a sealed memfd, and
+binds cwd, input, output directory, and artifact directory by file descriptor.
+It never executes candidate/version/PDF inspection while privileged. A stopped
+launcher enters a staging cgroup, creates a private network namespace, drops
+supplementary groups, all real/effective/saved IDs, every capability set and
+bounding capability, sets `no_new_privs`, and proves both path-based and
+inherited-FD cgroup migration writes fail. The broker then moves that exact
+PID/start identity into an empty measurement leaf and starts it with
+`execveat(AT_EMPTY_PATH)` from the sealed bytes. Output arguments are rewritten
+to inherited `/proc/self/fd/...` handles; stdout/stderr use bounded anonymous
+captures. `SIGKILL`-on-parent-death is re-armed and verified after the identity
+drop. All descendants, including new sessions, remain contained.
+
+`root_wall_ms` ends when the root process exits. `tree_wall_ms`, the latency
+published as sample `wall_ms`, ends only when `cgroup.events` reports
+`populated=0`. After that boundary, the broker flushes the already-bound output
+filesystem and retains `measurement_complete_ms` only after dirty/writeback are
+zero and two interval-separated `cpu.stat`/`io.stat` reads match. The final
+`cpu.stat`, `io.stat`, `memory.current`, `memory.peak`, and `pids.peak` values
+are the authoritative tree counters.
 
 Publication fails unless `cgroup.events` drains recursively. After it empties,
 `memory.stat` dirty/writeback must reach zero and two interval-separated
@@ -137,14 +189,17 @@ descendants, but its use fails a passing sample. Launcher setup and privilege
 removal happen in the staging leaf, so the measurement leaf starts with only
 the stopped unprivileged launcher and zero CPU/I/O/memory counters before exec.
 
-Periodic `/proc` PID/start-time, summed RSS, and summed PSS observations are
-retained only as sampled lower-bound diagnostics; short-lived processes may be
-missed there without weakening cgroup accounting. As root, with
-`PLIEGO_BENCHMARK_CGROUP_PARENT` exported, run
+Periodic `/proc` PID/start-time, membership, RSS, and PSS observations are
+retained only as sequential time-smeared diagnostics. They are neither
+simultaneous bounds nor authoritative accounting, and their field names say so.
+Short-lived processes may be missed there without weakening cgroup accounting.
+As root, with `PLIEGO_BENCHMARK_CGROUP_PARENT` exported, run
 `/usr/bin/python3 benchmarks/tools/test_process_tree_sampler.py --live --php-integration`
 inside the delegated `harness` child for the containment, cleanup, counter, and
 PHP-to-Python proof. On a dedicated benchmark host, add
-`--acceptance-overhead` for the 20-pair randomized on/off gate. It uses the
+`--acceptance-overhead` for the 20-pair randomized observation-off/on gate. Both
+lanes use the same broker, authority drop, cgroup boundary, and sealed
+executable; only procfs observation changes. It uses the
 protocol's `nearest-rank-v1` percentiles and requires p95 wall overhead below
 2%; sampler CPU share remains a separate diagnostic.
 
@@ -158,12 +213,15 @@ and `pliego-benchmark-pinned-v1`. The wrapper rejects before the chronology's
 checkout, and live branch all name one immutable SHA, and the GitHub API proves
 the exact online/busy runner, group, and labels. Accepted production evidence
 also binds the exact
-`python3 benchmarks/tools/test_process_tree_sampler.py --acceptance-overhead`
-argv to that clean checkout.
+canonical full `run_benchmark.py` argv, its staged-candidate SHA-256 and byte
+count, and the host chronology to that clean checkout. The separate randomized
+sampler-overhead proof remains a contract/adversarial gate, not a substitute
+for timing the candidate itself.
 
-The host administrator owns `/etc/pliego-benchmark-host.v1.json`. Its pinned
-values must describe the real host; this abbreviated example shows the complete
-contract shape:
+The host administrator owns `/etc/pliego-benchmark-host.v1.json`; the live gate
+requires its canonical file to be `root:root` and not group/other writable. Its
+pinned values must describe the real host; this abbreviated example shows the
+complete contract shape:
 
 ```json
 {
@@ -204,7 +262,9 @@ new throttle counts, or configured load/pressure/temperature drift makes the
 run non-publishable.
 
 Every attempt retains `benchmark-host-proof.v1.json`, raw NDJSON chronology,
-command stdout/stderr, diagnostics, and `SHA256SUMS`. The workflow's controlled
+command stdout/stderr, diagnostics, and `SHA256SUMS`; successful production
+attempts additionally retain the digest-bound staged candidate and atomically
+published baseline. The workflow's controlled
 `negative-github-hosted` and `negative-missing-thermal` modes must retain a
 valid rejection with no `samples.started` event.
 
@@ -232,8 +292,8 @@ external steps and their hosted proof exist.
 This foundation records wall latency (p50/p95/p99/min/max/mean), serial
 throughput, per-page wall time, PDF and artifact bytes, page count, required
 text, capture status, PDF hash variation, and typed failure publication state.
-CPU, cgroup memory, and cgroup I/O are exact retained counters. Sampled summed
-RSS/PSS are explicitly lower bounds. Runtime archive size and deeper document
+CPU, cgroup memory, and cgroup I/O are exact retained counters. Sequential
+sampled summed RSS/PSS remain explicitly non-authoritative diagnostics. Runtime archive size and deeper document
 checks remain separate audited increments before a signed baseline is published.
 
 ## Fixtures and correctness gates
@@ -258,6 +318,8 @@ renderer.
 * Concurrency >1 throughput sampling is not implemented yet (serial only).
 * Core (Criterion) and Laravel e2e levels live outside this directory.
 * Page-count expectations for generated fixtures are pinned by the first signed baseline.
-* A multi-fixture `--out` file bundles one validated result object per fixture
-  as a JSON array; each element conforms to `benchmark-result.v1.json`, the
-  bundle itself is a container. Single-fixture runs write one result object.
+* A full staged candidate bundles one validated result object per fixture.
+  `run_benchmark.py` cannot write inside `benchmarks/baselines`; only
+  `publish_benchmark.py` can atomically replace an official baseline after
+  correctness, host identity, command identity, candidate digest, and retained
+  host-proof evidence all validate.

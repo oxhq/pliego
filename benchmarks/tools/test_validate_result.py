@@ -53,7 +53,7 @@ def resource_usage() -> dict:
         "memory_file_writeback_bytes": 0,
     }
     return {
-        "method": "linux-cgroup-v2-v1",
+        "method": "linux-cgroup-v2-v2",
         "scope": "fresh-root-owned-cgroup-subtree",
         "delegated_parent": "/sys/fs/cgroup/pliego",
         "cgroup_path": "/sys/fs/cgroup/pliego/pliego-render-10-0000000000000000",
@@ -72,7 +72,22 @@ def resource_usage() -> dict:
                 "--artifacts",
                 "/tmp/artifacts",
             ],
-            "executable": {"path": "/tmp/pliego", "sha256": HASH, "device": 1, "inode": 2},
+            "executable": {"path": "/tmp/pliego", "sha256": HASH, "device": 1, "inode": 2, "bytes": 1},
+            "command_identity": {
+                "cwd": {"path": "/tmp", "device": 1, "inode": 3},
+                "input": {
+                    "manifest_path": "/tmp/input.html",
+                    "argv_relative_path": "input.html",
+                    "sha256": HASH,
+                    "device": 1,
+                    "inode": 4,
+                },
+                "output_directory": {"path": "/tmp", "device": 1, "inode": 3},
+                "artifact_directory": {"path": "/tmp/artifacts", "device": 1, "inode": 5},
+            },
+            "execution_binding": "sealed-memfd-execveat",
+            "parent_death_signal": 9,
+            "network_namespace_isolated": True,
             "status": {
                 "uid": [991, 991, 991, 991],
                 "gid": [991, 991, 991, 991],
@@ -88,8 +103,14 @@ def resource_usage() -> dict:
                 label: {"cgroup.procs": "EACCES", "cgroup.threads": "EACCES"}
                 for label in ("parent", "harness", "staging", "measurement")
             },
+            "migration_fd_probes": {
+                label: {"cgroup.procs": "EACCES", "cgroup.threads": "EACCES"}
+                for label in ("parent", "harness", "staging", "measurement")
+            },
         },
-        "wall_ms": 1,
+        "root_wall_ms": 1,
+        "tree_wall_ms": 1,
+        "measurement_complete_ms": 2,
         "exit_code": 0,
         "signal": None,
         "cpu_user_ms": 1,
@@ -100,14 +121,12 @@ def resource_usage() -> dict:
         "write_bytes": 1,
         "read_operations": 0,
         "write_operations": 1,
-        "cgroup_drained": True,
         "drain_ms": 0,
         "accounting_settle": {
             "poll_interval_ms": 1,
             "timeout_ms": 10,
             "duration_ms": 1,
             "reads": 2,
-            "stable_reads": 2,
             "stable_observations": [deepcopy(stable), deepcopy(stable)],
         },
         "cleanup": {"kill_used": False, "kill_grace_ms": 1000, "lingering_before_kill": []},
@@ -118,36 +137,38 @@ def resource_usage() -> dict:
         },
         "sampled_diagnostics": {
             "coverage": (
-                "periodic post-exec cgroup membership snapshots; RSS and PSS peaks are lower bounds "
-                "and may miss processes shorter than the interval"
+                "sequential pidfd-identity and membership-verified procfs diagnostics; values are "
+                "time-smeared observations, not simultaneous bounds or authoritative accounting"
             ),
+            "observation_enabled": True,
             "sample_interval_ms": 1,
             "pss_interval_ms": 2,
             "page_size_bytes": 4096,
             "max_sample_gap_ms": 1,
-            "sampled_peak_summed_rss_kib_lower_bound": 4,
-            "sampled_peak_summed_pss_kib_lower_bound": 3,
+            "sequential_sampled_peak_summed_rss_kib_diagnostic": 4,
+            "sequential_sampled_peak_summed_pss_kib_diagnostic": 3,
             "observed_processes": [{"pid": 10, "start_ticks": 100, "first_seen_ms": 0, "last_seen_ms": 0}],
             "samples": [
                 {
                     "elapsed_ms": 0,
                     "cgroup_memory_current_bytes": 4096,
-                    "sampled_summed_rss_kib_lower_bound": 4,
-                    "sampled_summed_pss_kib_lower_bound": 3,
+                    "sequential_sampled_summed_rss_kib_diagnostic": 4,
+                    "sequential_sampled_summed_pss_kib_diagnostic": 3,
                     "processes": [{"pid": 10, "start_ticks": 100, "rss_pages": 1, "pss_kib": 3}],
                 },
                 {
                     "elapsed_ms": 1,
                     "cgroup_memory_current_bytes": 0,
-                    "sampled_summed_rss_kib_lower_bound": 0,
-                    "sampled_summed_pss_kib_lower_bound": None,
+                    "sequential_sampled_summed_rss_kib_diagnostic": 0,
+                    "sequential_sampled_summed_pss_kib_diagnostic": None,
                     "processes": [],
                 },
             ],
         },
+        "engine_stdout": "",
+        "engine_stderr": "",
         "sampler_cpu_user_ms": 0,
         "sampler_cpu_sys_ms": 0,
-        "sampler_cpu_percent_of_wall": 0,
     }
 
 
@@ -165,7 +186,7 @@ def result() -> dict:
             "cpu_model": "test",
             "cores": 1,
             "ram_bytes": 1,
-            "dedicated": True,
+            "dedicated": False,
         },
         "toolchain": {
             "engine": {
@@ -176,7 +197,7 @@ def result() -> dict:
             },
             "python_version": "3.11",
             "php_version": "8.3",
-            "harness_revision": "4f0beb41a4d",
+            "harness_revision": "4f0beb41a4d00000000000000000000000000000",
         },
         "protocol": {
             "warmup_iterations": 1,
@@ -184,7 +205,7 @@ def result() -> dict:
             "sample_order": "sequential",
             "network": "disabled",
             "binary_profile": "checked-release",
-            "measurement_method": "linux-cgroup-v2-v1",
+            "measurement_method": "linux-cgroup-v2-v2",
             "percentile_method": "nearest-rank-v1",
         },
         "target": {"id": "pliego-0.1.1", "label": "Pliego 0.1.1"},
@@ -208,13 +229,13 @@ def result() -> dict:
                 "sys_ms": 0,
                 "memory_current_bytes": 0,
                 "memory_peak_bytes": 4096,
-                "sampled_peak_rss_kib_lower_bound": 4,
-                "sampled_peak_pss_kib_lower_bound": 3,
+                "sequential_sampled_peak_rss_kib_diagnostic": 4,
+                "sequential_sampled_peak_pss_kib_diagnostic": 3,
                 "read_bytes": 0,
                 "write_bytes": 1,
                 "read_operations": 0,
                 "write_operations": 1,
-                "measurement_method": "linux-cgroup-v2-v1",
+                "measurement_method": "linux-cgroup-v2-v2",
                 "signal": None,
                 "resource_usage": usage,
                 "phase_timings_ms": {"capture": 1},
@@ -234,8 +255,8 @@ def result() -> dict:
             "cpu": {"user_ms": pct(1), "sys_ms": pct(0), "wall_ms": pct(1)},
             "memory": {
                 "cgroup_peak_bytes": pct(4096),
-                "sampled_peak_rss_kib_lower_bound": pct(4),
-                "sampled_peak_pss_kib_lower_bound": pct(3),
+                "sequential_sampled_peak_rss_kib_diagnostic": pct(4),
+                "sequential_sampled_peak_pss_kib_diagnostic": pct(3),
             },
             "io": {
                 "read_bytes": pct(0),
@@ -333,6 +354,7 @@ def main() -> None:
     }
     assert not errors(timed)
 
+    changed(valid, lambda value: value["host"].update(dedicated=True), "atomic publication provenance")
     changed(valid, lambda value: value["samples"][0].update(resource_usage=None), "resource_usage")
     changed(valid, lambda value: value["samples"][0].update(user_ms=99), "samples[0].user_ms")
     changed(valid, lambda value: value["samples"][0].update(memory_peak_bytes=99), "memory_peak_bytes")
@@ -360,16 +382,14 @@ def main() -> None:
     )
     changed(
         valid,
-        lambda value: value["samples"][0]["resource_usage"]["launch_security"][
-            "migration_write_probes"
-        ]["parent"].update({"cgroup.procs": "WRITABLE"}),
+        lambda value: value["samples"][0]["resource_usage"]["launch_security"]["migration_write_probes"][
+            "parent"
+        ].update({"cgroup.procs": "WRITABLE"}),
         "migration_write_probes.parent.cgroup.procs",
     )
     changed(
         valid,
-        lambda value: value["samples"][0]["resource_usage"]["launch_security"]["executable"].update(
-            sha256="1" * 64
-        ),
+        lambda value: value["samples"][0]["resource_usage"]["launch_security"]["executable"].update(sha256="1" * 64),
         "launch_security.executable.sha256",
     )
     changed(
@@ -396,15 +416,18 @@ def main() -> None:
     )
     changed(
         valid,
-        lambda value: value["samples"][0]["resource_usage"]["counters"]["final"]["cpu_stat"].update(
-            usage_usec=1
-        ),
+        lambda value: value["samples"][0]["resource_usage"]["counters"]["final"]["cpu_stat"].update(usage_usec=1),
         "cover user plus system CPU",
     )
     changed(
         valid,
         lambda value: value["samples"][0]["resource_usage"]["accounting_settle"].update(duration_ms=0),
         "interval-separated",
+    )
+    changed(
+        valid,
+        lambda value: value["samples"][0]["resource_usage"].update(measurement_complete_ms=1.5),
+        "full post-drain accounting settle interval",
     )
     changed(
         valid,
@@ -415,24 +438,22 @@ def main() -> None:
     )
     changed(
         valid,
-        lambda value: value["samples"][0]["resource_usage"]["sampled_diagnostics"]["samples"][0]["processes"][
-            0
-        ].update(start_ticks=101),
+        lambda value: value["samples"][0]["resource_usage"]["sampled_diagnostics"]["samples"][0]["processes"][0].update(
+            start_ticks=101
+        ),
         "root PID has a different start time",
     )
     changed(
         valid,
         lambda value: value["samples"][0]["resource_usage"]["sampled_diagnostics"].update(
-            sampled_peak_summed_rss_kib_lower_bound=99
+            sequential_sampled_peak_summed_rss_kib_diagnostic=99
         ),
-        "sampled_peak_summed_rss_kib_lower_bound",
+        "sequential_sampled_peak_summed_rss_kib_diagnostic",
     )
     changed(
         valid,
-        lambda value: value["samples"][0]["resource_usage"]["sampled_diagnostics"]["samples"][-1].update(
-            elapsed_ms=2
-        ),
-        "engine wall plus drain duration",
+        lambda value: value["samples"][0]["resource_usage"]["sampled_diagnostics"]["samples"][-1].update(elapsed_ms=2),
+        "tree wall",
     )
     changed(
         valid,
@@ -453,8 +474,27 @@ def main() -> None:
     )
     changed(
         valid,
-        lambda value: value["samples"][0]["resource_usage"].update(sampler_cpu_percent_of_wall=1),
-        "sampler_cpu_percent_of_wall",
+        lambda value: value["samples"][0]["resource_usage"].update(tree_wall_ms=0.5),
+        "must include root lifetime",
+    )
+    changed(
+        valid,
+        lambda value: value["samples"][0]["resource_usage"]["launch_security"]["migration_fd_probes"][
+            "measurement"
+        ].update({"cgroup.procs": "WRITABLE"}),
+        "migration_fd_probes.measurement.cgroup.procs",
+    )
+    changed(
+        valid,
+        lambda value: value["samples"][0]["resource_usage"]["launch_security"].update(parent_death_signal=0),
+        "parent_death_signal",
+    )
+    changed(
+        valid,
+        lambda value: value["samples"][0]["resource_usage"]["launch_security"]["command_identity"]["input"].update(
+            sha256="1" * 64
+        ),
+        "command_identity.input.sha256",
     )
     changed(valid, lambda value: value["protocol"].update(percentile_method="linear"), "percentile_method")
     changed(
@@ -471,8 +511,12 @@ def main() -> None:
     changed(valid, lambda value: value["samples"][0]["correctness"].update({"pass": False}), "correctness.pass")
     changed(valid, lambda value: value["samples"][0]["failure"].update(published_pdf=False), "failure.published_pdf")
     changed(valid, lambda value: value["samples"][0]["output"].update(page_count=2), "expected page count 1")
-    changed(timed, lambda value: value["samples"][0]["bridge_timings"].update(bridge_overhead_ms=99), "bridge_overhead_ms")
-    changed(bundle, lambda value: value["results"][0]["protocol"].update(sample_count=2), "results[0].protocol.sample_count")
+    changed(
+        timed, lambda value: value["samples"][0]["bridge_timings"].update(bridge_overhead_ms=99), "bridge_overhead_ms"
+    )
+    changed(
+        bundle, lambda value: value["results"][0]["protocol"].update(sample_count=2), "results[0].protocol.sample_count"
+    )
 
     print("benchmark result validator self-check passed")
 

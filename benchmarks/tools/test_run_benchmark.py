@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import importlib.util
 import subprocess
+import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -30,6 +31,8 @@ def main() -> None:
                 "minimal-static",
                 {"input": "benchmarks/fixtures/minimal-static/input.html"},
                 Path("pliego"),
+                Path("/frozen"),
+                Path("/retained"),
                 2,
                 0,
             )
@@ -53,6 +56,8 @@ def main() -> None:
             "correctness": {"text_contains": ["Revenue, net", "Total"]},
         },
         Path("pliego"),
+        Path("/frozen"),
+        Path("/retained"),
         1,
         0,
     )
@@ -68,8 +73,8 @@ def main() -> None:
                 "user_ms": 1,
                 "sys_ms": 0,
                 "memory_peak_bytes": 2048,
-                "sampled_peak_rss_kib_lower_bound": 2,
-                "sampled_peak_pss_kib_lower_bound": 1,
+                "sequential_sampled_peak_rss_kib_diagnostic": 2,
+                "sequential_sampled_peak_pss_kib_diagnostic": 1,
                 "read_bytes": 3,
                 "write_bytes": 4,
                 "read_operations": 5,
@@ -81,12 +86,40 @@ def main() -> None:
         1,
     )
     assert aggregate["memory"]["cgroup_peak_bytes"]["mean"] == 2048
-    assert aggregate["memory"]["sampled_peak_pss_kib_lower_bound"]["mean"] == 1
+    assert aggregate["memory"]["sequential_sampled_peak_pss_kib_diagnostic"]["mean"] == 1
     assert aggregate["io"]["read_bytes"]["mean"] == 3
     assert aggregate["io"]["write_bytes"]["mean"] == 4
     assert aggregate["io"]["read_operations"]["mean"] == 5
     assert aggregate["io"]["write_operations"]["mean"] == 6
     assert benchmark.validate_result.percentiles([1, 3])["p50"] == 1
+
+    try:
+        benchmark.benchmark_publication.require_unprivileged(0, 0)
+    except benchmark.benchmark_publication.PublicationError:
+        pass
+    else:
+        raise AssertionError("root benchmark orchestration was accepted")
+
+    with tempfile.TemporaryDirectory() as raw:
+        binary = Path(raw) / "candidate"
+        binary.write_bytes(b"candidate bytes that must never execute --version")
+        target = {
+            "version": "9.9.9",
+            "binary_sha256": benchmark.file_sha256(binary),
+            "binary_bytes": binary.stat().st_size,
+            "commit": "a" * 40,
+            "release_tag": "v9.9.9",
+            "servo_build": "fixture",
+            "servo_base": "b" * 40,
+            "archive": "fixture.tar.gz",
+            "archive_sha256": "c" * 64,
+            "archive_bytes": 1,
+            "profile": "checked-release",
+        }
+        with patch.object(benchmark.subprocess, "run", side_effect=AssertionError("candidate executed")):
+            identity = benchmark.engine_identity(binary, target)
+        assert identity["version"] == "pliego 9.9.9"
+        assert identity["binary_sha256"] == target["binary_sha256"]
 
     print("Pliego benchmark runner-count self-test passed")
 

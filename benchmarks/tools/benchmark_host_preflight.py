@@ -28,6 +28,7 @@ EXPECTED_REPOSITORY = "OxHQ/pliego"
 EXPECTED_GROUP = "Pliego dedicated benchmarks"
 EXPECTED_LABELS = {"self-hosted", "Linux", "X64", "pliego-benchmark-pinned-v1"}
 MODES = ("production", "negative-github-hosted", "negative-missing-thermal")
+MAX_CANDIDATE_BYTES = 512 * 1024 * 1024
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import validate_host_proof  # noqa: E402
@@ -40,6 +41,40 @@ def now() -> str:
 def canonical_sha256(value: Any) -> str:
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def bind_candidate(path: Path) -> dict[str, Any]:
+    if not path.is_absolute():
+        raise OSError("staged candidate path is not absolute")
+    resolved = path.resolve(strict=True)
+    if resolved != path:
+        raise OSError("staged candidate path is not canonical")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+    descriptor = os.open(path, flags)
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode) or before.st_size <= 0 or before.st_size > MAX_CANDIDATE_BYTES:
+            raise OSError("staged candidate is not a bounded nonempty regular file")
+        digest = hashlib.sha256()
+        offset = 0
+        while offset < before.st_size:
+            chunk = os.read(descriptor, min(1024 * 1024, before.st_size - offset))
+            if not chunk:
+                raise OSError("staged candidate shortened while hashing")
+            digest.update(chunk)
+            offset += len(chunk)
+        after = os.fstat(descriptor)
+        current = os.stat(path, follow_symlinks=False)
+        identity = (before.st_dev, before.st_ino, before.st_size)
+        if identity != (after.st_dev, after.st_ino, after.st_size) or identity != (
+            current.st_dev,
+            current.st_ino,
+            current.st_size,
+        ):
+            raise OSError("staged candidate identity changed while hashing")
+        return {"path": str(path), "sha256": digest.hexdigest(), "bytes": before.st_size}
+    finally:
+        os.close(descriptor)
 
 
 def read_text(path: Path) -> str | None:
@@ -65,15 +100,22 @@ def read_json(path: Path) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def read_config(path: Path) -> tuple[dict[str, Any], str | None, str | None]:
+def read_config(path: Path, *, require_host_owned: bool = False) -> tuple[dict[str, Any], str | None, str | None]:
     descriptor: int | None = None
     try:
+        if require_host_owned:
+            if not path.is_absolute() or path.resolve(strict=True) != path:
+                raise OSError("host config path must be absolute and canonical")
         flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NONBLOCK", 0)
         flags |= getattr(os, "O_NOFOLLOW", 0)
         descriptor = os.open(path, flags)
         metadata = os.fstat(descriptor)
         if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > 64 * 1024:
             raise OSError("config must be a regular file no larger than 64 KiB")
+        if require_host_owned and (
+            metadata.st_uid != 0 or metadata.st_gid != 0 or stat.S_IMODE(metadata.st_mode) & 0o022
+        ):
+            raise OSError("host config must be root-owned and not group/other writable")
         with os.fdopen(descriptor, "rb") as handle:
             descriptor = None
             raw = handle.read(64 * 1024 + 1)
@@ -223,10 +265,7 @@ def status_fields(path: Path) -> dict[str, str]:
     if raw is None:
         return {}
     return {
-        key.strip(): value.strip()
-        for line in raw.splitlines()
-        if ":" in line
-        for key, value in [line.split(":", 1)]
+        key.strip(): value.strip() for line in raw.splitlines() if ":" in line for key, value in [line.split(":", 1)]
     }
 
 
@@ -273,9 +312,7 @@ def ancestors(proc_root: Path, self_pid: int, injected: list[int] | None) -> set
     return found
 
 
-def competing_processes(
-    proc_root: Path, cpus: set[int], exempt_pids: set[int]
-) -> tuple[list[dict[str, Any]], bool]:
+def competing_processes(proc_root: Path, cpus: set[int], exempt_pids: set[int]) -> tuple[list[dict[str, Any]], bool]:
     competing: list[dict[str, Any]] = []
     try:
         entries = list(proc_root.iterdir())
@@ -374,15 +411,7 @@ def canonical_cpu_set(raw: str | None) -> str | None:
 
 def observe_controls(proc_root: Path, sys_root: Path, cpus: set[int]) -> dict[str, Any]:
     governors = {
-        str(cpu): read_text(
-            sys_root
-            / "devices"
-            / "system"
-            / "cpu"
-            / f"cpu{cpu}"
-            / "cpufreq"
-            / "scaling_governor"
-        )
+        str(cpu): read_text(sys_root / "devices" / "system" / "cpu" / f"cpu{cpu}" / "cpufreq" / "scaling_governor")
         for cpu in sorted(cpus)
     }
     boost_raw = read_text(sys_root / "devices" / "system" / "cpu" / "cpufreq" / "boost")
@@ -394,9 +423,7 @@ def observe_controls(proc_root: Path, sys_root: Path, cpus: set[int]) -> dict[st
     else:
         boost = None
     smt_raw = read_text(sys_root / "devices" / "system" / "cpu" / "smt" / "control")
-    smt = {"on": "enabled", "forceon": "enabled", "off": "disabled", "notsupported": "not-supported"}.get(
-        smt_raw or ""
-    )
+    smt = {"on": "enabled", "forceon": "enabled", "off": "disabled", "notsupported": "not-supported"}.get(smt_raw or "")
     return {
         "governors": governors,
         "boost": boost,
@@ -704,6 +731,7 @@ def write_artifacts(
     recorder: Recorder,
     gate: Gate,
     collection_errors: list[str],
+    expected_command: tuple[str, ...],
 ) -> list[str]:
     chronology = output / validate_host_proof.CHRONOLOGY_NAME
     diagnostics = output / validate_host_proof.DIAGNOSTICS_NAME
@@ -735,6 +763,7 @@ def write_artifacts(
         schema,
         output,
         allow_fixture_evidence=proof["evidence_source"] == "fixture",
+        expected_command=expected_command,
     )
 
 
@@ -768,7 +797,7 @@ def main() -> int:
     sys_root = fixture_root / "sys" if fixture_root else Path("/sys")
     runtime = read_json(fixture_root / "runtime.json") if fixture_root else {}
     config_path = fixture_root / "config.json" if fixture_root else args.config
-    config, config_hash, config_read_error = read_config(config_path)
+    config, config_hash, config_read_error = read_config(config_path, require_host_owned=fixture_root is None)
     env = normalized_env(fixture_root)
     proof_token = env.get(args.token_env) or os.environ.get(args.token_env, "")
     command_contains_token = bool(proof_token) and any(proof_token in argument for argument in command)
@@ -805,17 +834,23 @@ def main() -> int:
     gate.check("identity.worktree_clean", identity["worktree_clean"], True)
     gate.check("command.secret_free", command_contains_token, False)
     if args.mode == "production":
+        allowed_command = retained_command == list(validate_host_proof.EXPECTED_PRODUCTION_COMMAND) or (
+            validate_host_proof.canonical_benchmark_command(retained_command)
+        )
         gate.check(
             "command.identity",
             retained_command,
-            list(validate_host_proof.EXPECTED_PRODUCTION_COMMAND),
+            "dedicated acceptance proof or canonical full benchmark command",
+            allowed_command,
         )
     immutable = [identity["sha"], identity["checkout_sha"], identity["default_branch_sha"]]
     gate.check(
         "identity.immutable_sha",
         immutable,
         "three identical 40-character lowercase SHAs",
-        len(set(immutable)) == 1 and isinstance(immutable[0], str) and re.fullmatch(r"[0-9a-f]{40}", immutable[0]) is not None,
+        len(set(immutable)) == 1
+        and isinstance(immutable[0], str)
+        and re.fullmatch(r"[0-9a-f]{40}", immutable[0]) is not None,
     )
 
     group_runner = find_runner(api.get("group_runners"), runner["name"])
@@ -876,11 +911,15 @@ def main() -> int:
         )
         gate.check("cpu.isolation", cpu["isolated"], cpu["configured"])
         gate.check("cpu.topology", cpu["topology"], expected_topology)
-        whole_cores = bool(configured_cpus) and all(
-            parse_cpu_set(entry.get("siblings")) <= configured_cpus
-            for entry in cpu["topology"].values()
-            if entry.get("siblings") is not None
-        ) and all(entry.get("siblings") is not None for entry in cpu["topology"].values())
+        whole_cores = (
+            bool(configured_cpus)
+            and all(
+                parse_cpu_set(entry.get("siblings")) <= configured_cpus
+                for entry in cpu["topology"].values()
+                if entry.get("siblings") is not None
+            )
+            and all(entry.get("siblings") is not None for entry in cpu["topology"].values())
+        )
         gate.check("cpu.sibling_policy", whole_cores, True)
         gate.check("host.process_scan", cpu["process_scan_complete"], True)
         gate.check("host.no_competing_workload", cpu["competing_processes"], [])
@@ -891,16 +930,12 @@ def main() -> int:
             "controls.governor",
             controls["governors"],
             "performance on every configured CPU",
-            bool(controls["governors"])
-            and all(value == "performance" for value in controls["governors"].values()),
+            bool(controls["governors"]) and all(value == "performance" for value in controls["governors"].values()),
         )
         gate.check("controls.boost", controls["boost"], expected_controls.get("boost"))
         gate.check("controls.smt", controls["smt"], expected_controls.get("smt"))
         gate.check("controls.aslr", controls["aslr"], expected_controls.get("aslr"))
-        control_cpu = {
-            key: cpu[key]
-            for key in ("configured", "allowed", "online", "isolated", "topology")
-        }
+        control_cpu = {key: cpu[key] for key in ("configured", "allowed", "online", "isolated", "topology")}
         fingerprint = canonical_sha256({"cpu": control_cpu, "controls": controls}) if configured_cpus else None
         pre = snapshot(
             proc_root,
@@ -917,11 +952,14 @@ def main() -> int:
             "argv": retained_command,
             "started": False,
             "exit_code": None,
+            "candidate": None,
         }
         post: dict[str, Any] | None = None
         drift: dict[str, Any] | None = None
         if not gate.passed():
-            recorder.add("preflight.rejected", failed_checks=[check["id"] for check in gate.checks if not check["passed"]])
+            recorder.add(
+                "preflight.rejected", failed_checks=[check["id"] for check in gate.checks if not check["passed"]]
+            )
             status = "rejected"
             failure = {"code": "HOST_PREFLIGHT_REJECTED", "message": "dedicated host preflight rejected"}
         else:
@@ -932,8 +970,11 @@ def main() -> int:
             command_env.pop(args.token_env, None)
             fixture_command = runtime.get("fixture_command")
             execution_command = command
-            if fixture_root and isinstance(fixture_command, list) and fixture_command and all(
-                isinstance(argument, str) for argument in fixture_command
+            if (
+                fixture_root
+                and isinstance(fixture_command, list)
+                and fixture_command
+                and all(isinstance(argument, str) for argument in fixture_command)
             ):
                 execution_command = fixture_command
             with stdout_path.open("wb") as stdout, stderr_path.open("wb") as stderr:
@@ -954,13 +995,24 @@ def main() -> int:
                     command_exit = 127
                     stderr.write(f"benchmark command could not start: {error}\n".encode("utf-8", errors="replace"))
             command_proof["exit_code"] = command_exit
+            candidate_path = validate_host_proof.benchmark_candidate_path(retained_command)
+            if candidate_path is not None:
+                try:
+                    command_proof["candidate"] = bind_candidate(candidate_path)
+                except OSError as error:
+                    collection_errors.append(f"staged candidate: {error}")
+                gate.check(
+                    "command.candidate",
+                    command_proof["candidate"],
+                    "bound nonempty staged candidate digest",
+                    command_proof["candidate"] is not None,
+                )
             recorder.add("samples.finished", exit_code=command_exit)
 
             post_cpu = observe_cpu(proc_root, sys_root, config, runtime)
             post_controls = observe_controls(proc_root, sys_root, configured_cpus)
             post_control_cpu = {
-                key: post_cpu[key]
-                for key in ("configured", "allowed", "online", "isolated", "topology")
+                key: post_cpu[key] for key in ("configured", "allowed", "online", "isolated", "topology")
             }
             post_fingerprint = canonical_sha256({"cpu": post_control_cpu, "controls": post_controls})
             post = snapshot(proc_root, sys_root, config, post_fingerprint, post_cpu, post_controls)
@@ -986,7 +1038,10 @@ def main() -> int:
                 "interrupt_delta": interrupt_delta,
             }
             threshold_checks(gate, "post", post, config, len(configured_cpus))
-            _, post_config_hash, post_config_error = read_config(config_path)
+            _, post_config_hash, post_config_error = read_config(
+                config_path,
+                require_host_owned=fixture_root is None,
+            )
             if post_config_error:
                 collection_errors.append(f"postflight host config: {post_config_error}")
             gate.check("post.config", post_config_hash, config_hash)
@@ -1059,7 +1114,7 @@ def main() -> int:
                 "roadmap_state": "incomplete-external-authority-required",
             },
         }
-        violations = write_artifacts(output, proof, recorder, gate, collection_errors)
+        violations = write_artifacts(output, proof, recorder, gate, collection_errors, tuple(retained_command))
         if violations:
             for violation in violations:
                 print(f"benchmark_host_preflight: internal proof validation failed: {violation}", file=sys.stderr)

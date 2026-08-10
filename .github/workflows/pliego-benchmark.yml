@@ -37,6 +37,7 @@ jobs:
           python -m compileall -q benchmarks/tools
           python benchmarks/tools/test_validate_result.py
           python benchmarks/tools/test_run_benchmark.py
+          python benchmarks/tools/test_benchmark_publication.py
           python benchmarks/tools/test_resolve_release.py
           python benchmarks/tools/test_compare_parity.py
           python benchmarks/tools/test_benchmark_host_preflight.py
@@ -46,3 +47,53 @@ jobs:
           php -l benchmarks/runners/pliego.php
           php benchmarks/runners/pliego.php --self-test \
             --text-contains "Revenue, net" --text-contains " Total " --text-contains 0
+
+      - name: Check delegated cgroup-v2 accounting
+        run: |
+          set -euo pipefail
+          if ! getent passwd pliego-benchmark-engine >/dev/null; then
+            sudo useradd --system --no-create-home \
+              --home-dir /nonexistent/pliego-benchmark-engine \
+              --shell /usr/sbin/nologin pliego-benchmark-engine
+          fi
+          test ! -e "$(getent passwd pliego-benchmark-engine | cut -d: -f6)"
+          sudo usermod -a -G pliego-benchmark-engine "$USER"
+          engine_gid="$(getent group pliego-benchmark-engine | cut -d: -f3)"
+          runner_uid="$(id -u)"
+          runner_gid="$(id -g)"
+          runner_groups="$(id -G "$USER" | tr ' ' ',')"
+          sudo install -d -o root -g root -m 0755 \
+            /usr/local/libexec /var/lib/pliego-benchmark-fixture
+          sudo install -o root -g root -m 0555 \
+            benchmarks/tools/process_tree_sampler.py \
+            /usr/local/libexec/pliego-cgroup-broker
+          sudo install -o root -g root -m 0444 \
+            benchmarks/fixtures/minimal-static/input.html \
+            /var/lib/pliego-benchmark-fixture/fixture.html
+          sudo install -o root -g root -m 0400 /dev/null \
+            /var/lib/pliego-benchmark-root-sentinel
+          sudo systemd-run --quiet --wait --pipe --collect --expand-environment=no \
+            -p Type=exec \
+            -p Delegate=yes \
+            -p DelegateSubgroup=harness \
+            -p KillMode=control-group \
+            -p TimeoutStopSec=5s \
+            -p RuntimeMaxSec=3min \
+            -p "WorkingDirectory=$GITHUB_WORKSPACE" \
+            /bin/bash -c '
+              set -euo pipefail
+              relative="$(cut -d: -f3 /proc/self/cgroup)"
+              case "$relative" in
+                */harness) ;;
+                *) echo "unexpected delegated cgroup: $relative" >&2; exit 1 ;;
+              esac
+              parent="/sys/fs/cgroup${relative%/harness}"
+              printf "+cpu +io +memory +pids" > "$parent/cgroup.subtree_control"
+              exec setpriv --reuid="$1" --regid="$2" --groups="$3" \
+                env PLIEGO_BENCHMARK_CGROUP_PARENT="$parent" \
+                    PLIEGO_BENCHMARK_FIXTURE_CWD=/var/lib/pliego-benchmark-fixture \
+                    PLIEGO_BENCHMARK_ROOT_SENTINEL=/var/lib/pliego-benchmark-root-sentinel \
+                    PLIEGO_BENCHMARK_BROKER=/usr/local/libexec/pliego-cgroup-broker \
+                    python3 benchmarks/tools/test_process_tree_sampler.py --live --php-integration
+           ' benchmark-live "$runner_uid" "$runner_gid" "$runner_groups"
+         test "$engine_gid" != "$runner_gid"

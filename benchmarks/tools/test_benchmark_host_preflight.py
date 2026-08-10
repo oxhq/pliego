@@ -163,6 +163,68 @@ def events(output: Path) -> list[str]:
 
 
 class BenchmarkHostPreflightTests(unittest.TestCase):
+    def test_full_benchmark_proof_binds_staged_candidate_digest(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fixture = make_fixture(root)
+            output = root / "out"
+            candidate = (root / "candidate.json").resolve()
+            runtime_path = fixture / "runtime.json"
+            runtime = json.loads(runtime_path.read_text(encoding="utf-8"))
+            runtime["fixture_command"] = [
+                sys.executable,
+                "-c",
+                "import pathlib,sys; pathlib.Path(sys.argv[1]).write_text('{\"candidate\":true}\\n')",
+                str(candidate),
+            ]
+            write_json(runtime_path, runtime)
+            command = [
+                "python3",
+                "benchmarks/tools/run_benchmark.py",
+                "--binary",
+                str((root / "pliego").resolve()),
+                "--frozen-fixture-root",
+                str((root / "frozen").resolve()),
+                "--staging-out",
+                str(candidate),
+                "--failure-evidence-dir",
+                str((root / "failures").resolve()),
+            ]
+            result = invoke(fixture, output, *command)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            document = proof(output)
+            self.assertEqual(document["status"], "accepted")
+            self.assertEqual(document["command"]["candidate"]["path"], str(candidate))
+            self.assertEqual(
+                document["command"]["candidate"]["sha256"],
+                validate_host_proof.sha256_file(candidate),
+            )
+            schema = json.loads((TOOLS.parent / "schema" / "benchmark-host-proof.v1.json").read_text(encoding="utf-8"))
+            self.assertEqual(
+                validate_host_proof.validate_document(
+                    document,
+                    schema,
+                    output,
+                    allow_fixture_evidence=True,
+                    expected_command=tuple(command),
+                ),
+                [],
+            )
+            validation = subprocess.run(
+                [
+                    sys.executable,
+                    str(VALIDATOR),
+                    str(output / "benchmark-host-proof.v1.json"),
+                    "--allow-fixture-evidence",
+                    "--expect-status",
+                    "accepted",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            self.assertEqual(validation.returncode, 0, validation.stderr)
+
     def test_fixture_host_is_accepted_and_retained(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -197,7 +259,7 @@ class BenchmarkHostPreflightTests(unittest.TestCase):
                 document, output, allow_fixture_evidence=True, forbidden_event=None
             )
             self.assertIn(
-                "accepted proof did not run the dedicated acceptance workload",
+                "accepted proof did not run the expected canonical workload",
                 violations,
             )
 
@@ -221,6 +283,45 @@ class BenchmarkHostPreflightTests(unittest.TestCase):
             env = json.loads((fixture / "env.json").read_text(encoding="utf-8"))
             env.update({"GITHUB_REF": "refs/heads/feature", "GITHUB_REF_PROTECTED": "false"})
             write_json(fixture / "env.json", env)
+            output = root / "out"
+            result = invoke(fixture, output, *EXPECTED_COMMAND)
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertEqual(proof(output)["status"], "rejected")
+            self.assertNotIn("samples.started", events(output))
+
+    def test_wrong_architecture_rejects_before_samples(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fixture = make_fixture(root)
+            env = json.loads((fixture / "env.json").read_text(encoding="utf-8"))
+            env["RUNNER_ARCH"] = "ARM64"
+            write_json(fixture / "env.json", env)
+            output = root / "out"
+            result = invoke(fixture, output, *EXPECTED_COMMAND)
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertEqual(proof(output)["status"], "rejected")
+            self.assertNotIn("samples.started", events(output))
+
+    def test_missing_revision_rejects_before_samples(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fixture = make_fixture(root)
+            runtime = json.loads((fixture / "runtime.json").read_text(encoding="utf-8"))
+            runtime["checkout_sha"] = None
+            write_json(fixture / "runtime.json", runtime)
+            output = root / "out"
+            result = invoke(fixture, output, *EXPECTED_COMMAND)
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertEqual(proof(output)["status"], "rejected")
+            self.assertNotIn("samples.started", events(output))
+
+    def test_shared_runner_rejects_before_samples(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fixture = make_fixture(root)
+            api = json.loads((fixture / "api.json").read_text(encoding="utf-8"))
+            api["group_runners"]["runners"][0]["busy"] = False
+            write_json(fixture / "api.json", api)
             output = root / "out"
             result = invoke(fixture, output, *EXPECTED_COMMAND)
             self.assertEqual(result.returncode, 1, result.stderr)
@@ -322,7 +423,9 @@ class BenchmarkHostPreflightTests(unittest.TestCase):
             result = invoke(fixture, output, *EXPECTED_COMMAND)
             self.assertEqual(result.returncode, 1, result.stderr)
             self.assertNotIn("samples.started", events(output))
-            self.assertFalse(next(check for check in proof(output)["checks"] if check["id"] == "host.process_scan")["passed"])
+            self.assertFalse(
+                next(check for check in proof(output)["checks"] if check["id"] == "host.process_scan")["passed"]
+            )
 
     def test_secret_in_command_is_redacted_and_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
