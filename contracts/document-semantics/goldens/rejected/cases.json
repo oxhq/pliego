@@ -1,0 +1,304 @@
+{
+  "schema": "pliego.document-semantics-rejection-corpus",
+  "version": 1,
+  "base": "../accepted/representative.json",
+  "cases": [
+    {
+      "name": "unknown-role",
+      "mutations": [
+        { "operation": "replace", "path": "/nodes/1/role", "value": "custom-heading" }
+      ],
+      "expected": "expected one of"
+    },
+    {
+      "name": "role-semantics-mismatch",
+      "mutations": [
+        { "operation": "replace", "path": "/nodes/1/semantics", "value": { "kind": "none" } }
+      ],
+      "expected": "requires semantics kind 'heading'"
+    },
+    {
+      "name": "duplicate-node-id",
+      "mutations": [
+        { "operation": "replace", "path": "/nodes/2/id", "value": 1 }
+      ],
+      "expected": "node IDs must equal contiguous preorder array positions"
+    },
+    {
+      "name": "logical-cycle",
+      "mutations": [
+        { "operation": "replace", "path": "/nodes/2/children/0/kind", "value": "node" },
+        { "operation": "replace", "path": "/nodes/2/children/0/id", "value": 1 }
+      ],
+      "expected": "logical node cycle"
+    },
+    {
+      "name": "dangling-fragment",
+      "mutations": [
+        { "operation": "replace", "path": "/nodes/2/children/0/id", "value": 99 }
+      ],
+      "expected": "dangling fragment 99"
+    },
+    {
+      "name": "duplicate-fragment-owner",
+      "mutations": [
+        { "operation": "replace", "path": "/artifacts/0/children/0/id", "value": 0 }
+      ],
+      "expected": "fragment 0 must have exactly one logical or artifact owner"
+    },
+    {
+      "name": "noncanonical-language",
+      "mutations": [
+        { "operation": "replace", "path": "/language", "value": "en-us" }
+      ],
+      "expected": "does not match pattern"
+    },
+    {
+      "name": "unbounded-metadata",
+      "mutations": [
+        { "operation": "add", "path": "/nodes/1/metadata", "value": { "anything": true } }
+      ],
+      "expected": "unexpected property 'metadata'"
+    },
+    {
+      "name": "artifact-in-logical-tree",
+      "mutations": [
+        { "operation": "replace", "path": "/nodes/2/children/0/kind", "value": "artifact" }
+      ],
+      "expected": "expected exactly one oneOf match"
+    },
+    {
+      "name": "list-ordinal-drift",
+      "mutations": [
+        { "operation": "replace", "path": "/nodes/7/semantics/ordinal", "value": 3 }
+      ],
+      "expected": "list-item ordinals must follow canonical list order"
+    },
+    {
+      "name": "unordered-list-retains-start",
+      "mutations": [
+        { "operation": "replace", "path": "/nodes/3/semantics/ordered", "value": false }
+      ],
+      "expected": "unordered lists require null start"
+    },
+    {
+      "name": "table-cell-overlap",
+      "mutations": [
+        { "operation": "replace", "path": "/nodes/17/semantics/column", "value": 0 }
+      ],
+      "expected": "table cell overlap"
+    },
+    {
+      "name": "dangling-table-header",
+      "mutations": [
+        { "operation": "replace", "path": "/nodes/16/semantics/headers/0", "value": 99 }
+      ],
+      "expected": "header reference 99 is not a header cell in this table"
+    },
+    {
+      "name": "noncanonical-link-target",
+      "mutations": [
+        { "operation": "replace", "path": "/nodes/20/semantics/target", "value": "https://EXAMPLE.test/invoices/42" }
+      ],
+      "expected": "target is not a canonical absolute URL"
+    },
+    {
+      "name": "link-name-missing",
+      "mutations": [
+        { "operation": "replace", "path": "/nodes/20/name", "value": null }
+      ],
+      "expected": "tagged annotations require a non-null title"
+    },
+    {
+      "name": "figure-alt-missing",
+      "mutations": [
+        { "operation": "replace", "path": "/nodes/18/alternate_text", "value": null }
+      ],
+      "expected": "meaningful figures require alternate text"
+    },
+    {
+      "name": "fragment-array-reordered",
+      "mutations": [
+        { "operation": "swap", "path": "/fragments/0", "other": "/fragments/1" }
+      ],
+      "expected": "fragment IDs must equal contiguous locator-table positions"
+    },
+    {
+      "name": "dangling-paint-locator",
+      "mutations": [
+        { "operation": "replace", "path": "/fragments/3/paint/operation", "value": 99 }
+      ],
+      "expected": "paint operation 99 does not exist"
+    },
+    {
+      "name": "fragment-kind-mismatch",
+      "mutations": [
+        { "operation": "replace", "path": "/fragments/2/kind", "value": "path" }
+      ],
+      "expected": "fragment kind 'path' does not match paint operation 'image'"
+    },
+    {
+      "name": "text-range-overflow",
+      "mutations": [
+        { "operation": "replace", "path": "/fragments/0/text_utf8/end", "value": 8 }
+      ],
+      "expected": "text UTF-8 range is outside the paint operation"
+    },
+    {
+      "name": "artifact-logical-mix",
+      "mutations": [
+        { "operation": "replace", "path": "/nodes/18/children/0/id", "value": 1 }
+      ],
+      "expected": "fragment 1 must have exactly one logical or artifact owner"
+    },
+    {
+      "name": "unknown-role-semantics-member",
+      "mutations": [
+        { "operation": "add", "path": "/nodes/1/semantics/pdf_tag", "value": "H1" }
+      ],
+      "expected": "unexpected property 'pdf_tag'"
+    },
+    {
+      "name": "control-character-replacement",
+      "mutations": [
+        { "operation": "replace", "path": "/nodes/2/replacement_text", "value": "Invoice\u0001" }
+      ],
+      "expected": "contains a control character"
+    },
+    {
+      "name": "nonportable-source-entrypoint",
+      "mutations": [
+        { "operation": "replace", "path": "/source/entrypoint", "value": "../document.html" }
+      ],
+      "expected": "entrypoint is not a portable relative path"
+    },
+    {
+      "name": "dangling-artifact-root",
+      "mutations": [
+        { "operation": "replace", "path": "/artifact_roots/0", "value": 99 }
+      ],
+      "expected": "dangling artifact 99"
+    },
+    {
+      "name": "artifact-cycle",
+      "mutations": [
+        { "operation": "replace", "path": "/artifacts/0/children/0/kind", "value": "artifact" },
+        { "operation": "replace", "path": "/artifacts/0/children/0/id", "value": 0 }
+      ],
+      "expected": "artifact cycle"
+    },
+    {
+      "name": "missing-document-metadata",
+      "mutations": [
+        { "operation": "remove", "path": "/metadata" }
+      ],
+      "expected": "missing required property 'metadata'"
+    },
+    {
+      "name": "empty-document-title",
+      "mutations": [
+        { "operation": "replace", "path": "/metadata/title", "value": "" }
+      ],
+      "expected": "shorter than 1"
+    },
+    {
+      "name": "heading-title-missing",
+      "mutations": [
+        { "operation": "replace", "path": "/nodes/1/name", "value": null }
+      ],
+      "expected": "headings require a canonical title"
+    },
+    {
+      "name": "annotation-alt-missing",
+      "mutations": [
+        { "operation": "replace", "path": "/nodes/20/alternate_text", "value": null }
+      ],
+      "expected": "tagged annotations require alternate text"
+    },
+    {
+      "name": "formula-alt-missing",
+      "mutations": [
+        { "operation": "replace", "path": "/nodes/21/alternate_text", "value": null }
+      ],
+      "expected": "meaningful formulas require alternate text"
+    },
+    {
+      "name": "missing-navigation",
+      "mutations": [
+        { "operation": "remove", "path": "/navigation" }
+      ],
+      "expected": "missing required property 'navigation'"
+    },
+    {
+      "name": "empty-outline",
+      "mutations": [
+        { "operation": "replace", "path": "/navigation/roots", "value": [] },
+        { "operation": "replace", "path": "/navigation/items", "value": [] }
+      ],
+      "expected": "expected exactly one oneOf match"
+    },
+    {
+      "name": "required-outline-replaced-by-none",
+      "mutations": [
+        { "operation": "replace", "path": "/navigation", "value": { "kind": "none" } }
+      ],
+      "expected": "required navigation needs a nonempty outline"
+    },
+    {
+      "name": "dangling-outline-node",
+      "mutations": [
+        { "operation": "replace", "path": "/navigation/items/1/target_node", "value": 99 }
+      ],
+      "expected": "outline target node 99 does not exist"
+    },
+    {
+      "name": "dangling-outline-page",
+      "mutations": [
+        { "operation": "replace", "path": "/navigation/items/1/destination/page", "value": 2 }
+      ],
+      "expected": "outline destination page 2 does not exist"
+    },
+    {
+      "name": "reordered-outline-roots",
+      "mutations": [
+        { "operation": "swap", "path": "/navigation/roots/0", "other": "/navigation/roots/1" }
+      ],
+      "expected": "outline traversal must equal deterministic preorder IDs"
+    },
+    {
+      "name": "reordered-outline-items",
+      "mutations": [
+        { "operation": "swap", "path": "/navigation/items/0", "other": "/navigation/items/1" }
+      ],
+      "expected": "outline IDs must equal contiguous preorder array positions"
+    },
+    {
+      "name": "outline-heading-title-drift",
+      "mutations": [
+        { "operation": "replace", "path": "/navigation/items/0/title", "value": "Different title" }
+      ],
+      "expected": "heading outline title must equal the canonical heading title"
+    },
+    {
+      "name": "outline-language-noncanonical",
+      "mutations": [
+        { "operation": "replace", "path": "/navigation/items/0/language", "value": "en-us" }
+      ],
+      "expected": "expected exactly one oneOf match"
+    },
+    {
+      "name": "duplicate-outline-target",
+      "mutations": [
+        { "operation": "replace", "path": "/navigation/items/1/target_node", "value": 1 }
+      ],
+      "expected": "outline target nodes must be unique"
+    },
+    {
+      "name": "empty-logical-tree",
+      "mutations": [
+        { "operation": "replace", "path": "/nodes/0/children", "value": [] }
+      ],
+      "expected": "required logical content rejects an empty semantic tree"
+    }
+  ]
+}

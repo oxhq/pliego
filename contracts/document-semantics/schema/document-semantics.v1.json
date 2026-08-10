@@ -1,0 +1,520 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://pliego.dev/schema/document-semantics.v1.json",
+  "title": "Pliego canonical document semantics",
+  "description": "Profile-neutral logical reading order and stable associations into one containing DocumentScene.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "version",
+    "profile",
+    "policy",
+    "scene",
+    "source",
+    "metadata",
+    "language",
+    "root",
+    "nodes",
+    "navigation",
+    "artifact_roots",
+    "artifacts",
+    "fragments"
+  ],
+  "properties": {
+    "schema": { "const": "pliego.document-semantics.canonical" },
+    "version": { "const": 1 },
+    "profile": { "$ref": "#/definitions/profile_ref" },
+    "policy": { "$ref": "#/definitions/semantic_policy" },
+    "scene": { "$ref": "#/definitions/scene_ref" },
+    "source": { "$ref": "#/definitions/source_document" },
+    "metadata": { "$ref": "#/definitions/document_metadata" },
+    "language": { "$ref": "#/definitions/language" },
+    "root": { "const": 0 },
+    "nodes": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 1000000,
+      "items": { "$ref": "#/definitions/node" }
+    },
+    "navigation": { "$ref": "#/definitions/navigation" },
+    "artifact_roots": {
+      "type": "array",
+      "maxItems": 1000000,
+      "uniqueItems": true,
+      "items": { "$ref": "#/definitions/u32" }
+    },
+    "artifacts": {
+      "type": "array",
+      "maxItems": 1000000,
+      "items": { "$ref": "#/definitions/artifact" }
+    },
+    "fragments": {
+      "type": "array",
+      "maxItems": 4000000,
+      "items": { "$ref": "#/definitions/fragment" }
+    }
+  },
+  "definitions": {
+    "u32": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    "positive_u32": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 4294967295
+    },
+    "profile_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "version"],
+      "properties": {
+        "schema": {
+          "type": "string",
+          "pattern": "^pliego\\.profile\\.[a-z0-9][a-z0-9.-]{0,127}$"
+        },
+        "version": { "$ref": "#/definitions/positive_u32" }
+      }
+    },
+    "semantic_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["logical_content", "navigation", "paint_coverage"],
+      "properties": {
+        "logical_content": { "type": "string", "enum": ["required", "allow-empty"] },
+        "navigation": { "type": "string", "enum": ["required", "explicit-none"] },
+        "paint_coverage": { "const": "complete" }
+      }
+    },
+    "scene_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "version"],
+      "properties": {
+        "schema": { "const": "pliego.document-scene" },
+        "version": { "const": 1 }
+      }
+    },
+    "source_document": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["root", "entrypoint", "tree_order"],
+      "properties": {
+        "root": { "const": "pliego-input:///" },
+        "entrypoint": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240,
+          "pattern": "^[A-Za-z0-9._/-]+$"
+        },
+        "tree_order": { "const": "composed-dom-preorder-v1" }
+      }
+    },
+    "document_metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["title", "language"],
+      "properties": {
+        "title": { "$ref": "#/definitions/accessible_text" },
+        "language": { "$ref": "#/definitions/nullable_language" }
+      }
+    },
+    "language": {
+      "type": "string",
+      "minLength": 2,
+      "maxLength": 63,
+      "pattern": "^[a-z]{2,3}(?:-[A-Z][a-z]{3})?(?:-(?:[A-Z]{2}|[0-9]{3}))?(?:-(?:[a-z0-9]{5,8}|[0-9][a-z0-9]{3}))*$"
+    },
+    "nullable_language": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "#/definitions/language" }
+      ]
+    },
+    "accessible_text": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096
+    },
+    "nullable_text": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "#/definitions/accessible_text" }
+      ]
+    },
+    "source_locator": {
+      "oneOf": [
+        { "$ref": "#/definitions/dom_source" },
+        { "$ref": "#/definitions/generated_source" }
+      ]
+    },
+    "dom_source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "preorder"],
+      "properties": {
+        "kind": { "const": "dom" },
+        "preorder": { "$ref": "#/definitions/u32" }
+      }
+    },
+    "generated_source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "owner_preorder", "slot"],
+      "properties": {
+        "kind": { "const": "generated" },
+        "owner_preorder": { "$ref": "#/definitions/u32" },
+        "slot": { "type": "string", "enum": ["before", "after", "marker"] }
+      }
+    },
+    "role": {
+      "type": "string",
+      "enum": [
+        "document",
+        "section",
+        "heading",
+        "paragraph",
+        "span",
+        "list",
+        "list-item",
+        "list-label",
+        "list-body",
+        "table",
+        "table-head",
+        "table-body",
+        "table-foot",
+        "table-row",
+        "table-header-cell",
+        "table-cell",
+        "figure",
+        "formula",
+        "caption",
+        "link",
+        "quote",
+        "code",
+        "note"
+      ]
+    },
+    "node": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "role",
+        "source",
+        "language",
+        "name",
+        "alternate_text",
+        "replacement_text",
+        "semantics",
+        "children"
+      ],
+      "properties": {
+        "id": { "$ref": "#/definitions/u32" },
+        "role": { "$ref": "#/definitions/role" },
+        "source": { "$ref": "#/definitions/source_locator" },
+        "language": { "$ref": "#/definitions/nullable_language" },
+        "name": { "$ref": "#/definitions/nullable_text" },
+        "alternate_text": { "$ref": "#/definitions/nullable_text" },
+        "replacement_text": { "$ref": "#/definitions/nullable_text" },
+        "semantics": { "$ref": "#/definitions/role_semantics" },
+        "children": {
+          "type": "array",
+          "maxItems": 1000000,
+          "items": { "$ref": "#/definitions/node_child" }
+        }
+      }
+    },
+    "node_child": {
+      "oneOf": [
+        { "$ref": "#/definitions/node_child_node" },
+        { "$ref": "#/definitions/node_child_fragment" }
+      ]
+    },
+    "node_child_node": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "id"],
+      "properties": {
+        "kind": { "const": "node" },
+        "id": { "$ref": "#/definitions/u32" }
+      }
+    },
+    "node_child_fragment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "id"],
+      "properties": {
+        "kind": { "const": "fragment" },
+        "id": { "$ref": "#/definitions/u32" }
+      }
+    },
+    "role_semantics": {
+      "oneOf": [
+        { "$ref": "#/definitions/no_role_semantics" },
+        { "$ref": "#/definitions/heading_semantics" },
+        { "$ref": "#/definitions/list_semantics" },
+        { "$ref": "#/definitions/list_item_semantics" },
+        { "$ref": "#/definitions/table_semantics" },
+        { "$ref": "#/definitions/table_cell_semantics" },
+        { "$ref": "#/definitions/link_semantics" }
+      ]
+    },
+    "no_role_semantics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {
+        "kind": { "const": "none" }
+      }
+    },
+    "heading_semantics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "level"],
+      "properties": {
+        "kind": { "const": "heading" },
+        "level": { "type": "integer", "minimum": 1, "maximum": 6 }
+      }
+    },
+    "list_semantics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "ordered", "start"],
+      "properties": {
+        "kind": { "const": "list" },
+        "ordered": { "type": "boolean" },
+        "start": {
+          "oneOf": [
+            { "type": "null" },
+            { "type": "integer", "minimum": -2147483648, "maximum": 2147483647 }
+          ]
+        }
+      }
+    },
+    "list_item_semantics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "ordinal"],
+      "properties": {
+        "kind": { "const": "list-item" },
+        "ordinal": { "type": "integer", "minimum": -2147483648, "maximum": 2147483647 }
+      }
+    },
+    "table_semantics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "rows", "columns"],
+      "properties": {
+        "kind": { "const": "table" },
+        "rows": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "columns": { "type": "integer", "minimum": 1, "maximum": 65535 }
+      }
+    },
+    "table_cell_semantics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "row", "column", "row_span", "column_span", "scope", "headers"],
+      "properties": {
+        "kind": { "const": "table-cell" },
+        "row": { "type": "integer", "minimum": 0, "maximum": 65534 },
+        "column": { "type": "integer", "minimum": 0, "maximum": 65534 },
+        "row_span": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "column_span": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "scope": { "type": "string", "enum": ["none", "row", "column", "both"] },
+        "headers": {
+          "type": "array",
+          "maxItems": 65535,
+          "uniqueItems": true,
+          "items": { "$ref": "#/definitions/u32" }
+        }
+      }
+    },
+    "link_semantics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "target"],
+      "properties": {
+        "kind": { "const": "link" },
+        "target": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8192,
+          "pattern": "^(?:https?://|mailto:)[^\\s]+$"
+        }
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "source", "children"],
+      "properties": {
+        "id": { "$ref": "#/definitions/u32" },
+        "kind": { "type": "string", "enum": ["pagination", "layout", "decoration", "background"] },
+        "source": { "$ref": "#/definitions/source_locator" },
+        "children": {
+          "type": "array",
+          "maxItems": 1000000,
+          "items": { "$ref": "#/definitions/artifact_child" }
+        }
+      }
+    },
+    "artifact_child": {
+      "oneOf": [
+        { "$ref": "#/definitions/artifact_child_artifact" },
+        { "$ref": "#/definitions/artifact_child_fragment" }
+      ]
+    },
+    "artifact_child_artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "id"],
+      "properties": {
+        "kind": { "const": "artifact" },
+        "id": { "$ref": "#/definitions/u32" }
+      }
+    },
+    "artifact_child_fragment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "id"],
+      "properties": {
+        "kind": { "const": "fragment" },
+        "id": { "$ref": "#/definitions/u32" }
+      }
+    },
+    "paint_locator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["page", "operation"],
+      "properties": {
+        "page": { "$ref": "#/definitions/positive_u32" },
+        "operation": { "$ref": "#/definitions/u32" }
+      }
+    },
+    "half_open_range": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["start", "end"],
+      "properties": {
+        "start": { "$ref": "#/definitions/u32" },
+        "end": { "$ref": "#/definitions/positive_u32" }
+      }
+    },
+    "fragment": {
+      "oneOf": [
+        { "$ref": "#/definitions/text_fragment" },
+        { "$ref": "#/definitions/image_fragment" },
+        { "$ref": "#/definitions/path_fragment" },
+        { "$ref": "#/definitions/annotation_fragment" }
+      ]
+    },
+    "text_fragment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "paint", "glyphs", "text_utf8"],
+      "properties": {
+        "id": { "$ref": "#/definitions/u32" },
+        "kind": { "const": "text" },
+        "paint": { "$ref": "#/definitions/paint_locator" },
+        "glyphs": { "$ref": "#/definitions/half_open_range" },
+        "text_utf8": { "$ref": "#/definitions/half_open_range" }
+      }
+    },
+    "image_fragment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "paint"],
+      "properties": {
+        "id": { "$ref": "#/definitions/u32" },
+        "kind": { "const": "image" },
+        "paint": { "$ref": "#/definitions/paint_locator" }
+      }
+    },
+    "path_fragment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "paint"],
+      "properties": {
+        "id": { "$ref": "#/definitions/u32" },
+        "kind": { "const": "path" },
+        "paint": { "$ref": "#/definitions/paint_locator" }
+      }
+    },
+    "annotation_fragment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "paint"],
+      "properties": {
+        "id": { "$ref": "#/definitions/u32" },
+        "kind": { "const": "annotation" },
+        "paint": { "$ref": "#/definitions/paint_locator" }
+      }
+    },
+    "navigation": {
+      "oneOf": [
+        { "$ref": "#/definitions/outline_navigation" },
+        { "$ref": "#/definitions/no_navigation" }
+      ]
+    },
+    "outline_navigation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "roots", "items"],
+      "properties": {
+        "kind": { "const": "outline" },
+        "roots": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1000000,
+          "uniqueItems": true,
+          "items": { "$ref": "#/definitions/u32" }
+        },
+        "items": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1000000,
+          "items": { "$ref": "#/definitions/outline_item" }
+        }
+      }
+    },
+    "no_navigation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {
+        "kind": { "const": "none" }
+      }
+    },
+    "outline_item": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "title", "language", "target_node", "destination", "children"],
+      "properties": {
+        "id": { "$ref": "#/definitions/u32" },
+        "title": { "$ref": "#/definitions/accessible_text" },
+        "language": { "$ref": "#/definitions/nullable_language" },
+        "target_node": { "$ref": "#/definitions/u32" },
+        "destination": { "$ref": "#/definitions/page_destination" },
+        "children": {
+          "type": "array",
+          "maxItems": 1000000,
+          "uniqueItems": true,
+          "items": { "$ref": "#/definitions/u32" }
+        }
+      }
+    },
+    "page_destination": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["page", "x_app_units", "y_app_units"],
+      "properties": {
+        "page": { "$ref": "#/definitions/positive_u32" },
+        "x_app_units": { "$ref": "#/definitions/u32" },
+        "y_app_units": { "$ref": "#/definitions/u32" }
+      }
+    }
+  }
+}
