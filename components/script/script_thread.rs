@@ -238,8 +238,8 @@ impl ControlledDocumentProducerObserver {
             self.target = Some(target.clone());
             self.observer = DocumentProducerObserver::default();
         }
-        if let Some(previous) = self.last_checkpoint
-            && checkpoint <= previous
+        if let Some(previous) = self.last_checkpoint &&
+            checkpoint <= previous
         {
             return Err(DocumentProducerFenceError::StaleCheckpoint {
                 previous,
@@ -2545,10 +2545,10 @@ impl ScriptThread {
                     document.handle_no_longer_waiting_on_asynchronous_image_updates();
                 }
             },
-            msg @ ScriptThreadMessage::SpawnPipeline(..)
-            | msg @ ScriptThreadMessage::ControlDocumentTime(..)
-            | msg @ ScriptThreadMessage::ExitFullScreen(..)
-            | msg @ ScriptThreadMessage::ExitScriptThread => {
+            msg @ ScriptThreadMessage::SpawnPipeline(..) |
+            msg @ ScriptThreadMessage::ControlDocumentTime(..) |
+            msg @ ScriptThreadMessage::ExitFullScreen(..) |
+            msg @ ScriptThreadMessage::ExitScriptThread => {
                 panic!("should have handled {:?} already", msg)
             },
             ScriptThreadMessage::SetScrollStates(pipeline_id, scroll_states) => {
@@ -5158,7 +5158,6 @@ mod tests {
     use std::collections::VecDeque;
     use std::time::Duration;
 
-    use crate::messaging::MainThreadScriptMsg;
     use embedder_traits::{
         DocumentTimeControlCommand, DocumentTimeControlRequestId, DocumentTimeControlTarget,
     };
@@ -5178,6 +5177,7 @@ mod tests {
         enqueue_controlled_input, remaining_rendering_opportunity_delay,
         renderer_may_drive_rendering, take_controlled_exit, take_controlled_turn,
     };
+    use crate::messaging::MainThreadScriptMsg;
 
     fn control_target() -> DocumentTimeControlTarget {
         DocumentTimeControlTarget {

@@ -861,8 +861,8 @@ impl DocumentProducerObserver {
         if checkpoint == DocumentProducerCheckpoint::ZERO {
             return Err(DocumentProducerFenceError::CheckpointNotCompleted);
         }
-        if let Some(previous) = self.last_checkpoint
-            && checkpoint <= previous
+        if let Some(previous) = self.last_checkpoint &&
+            checkpoint <= previous
         {
             return Err(DocumentProducerFenceError::StaleCheckpoint {
                 previous,

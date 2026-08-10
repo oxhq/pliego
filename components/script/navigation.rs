@@ -70,8 +70,8 @@ impl NavigationListener {
                 .expect("document navigation producer sequence exhausted"),
         );
         Box::new(move |response_msg| {
-            let terminal = matches!(response_msg, FetchResponseMsg::ProcessResponseEOF(..))
-                || Self::http_redirect_metadata(&response_msg).is_some();
+            let terminal = matches!(response_msg, FetchResponseMsg::ProcessResponseEOF(..)) ||
+                Self::http_redirect_metadata(&response_msg).is_some();
             let message_guard = if terminal {
                 producer_guard.take()
             } else {

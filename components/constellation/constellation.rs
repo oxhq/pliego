@@ -1056,8 +1056,7 @@ where
         }
 
         if document_clock != DocumentClockConfiguration::Realtime &&
-            self
-                .webviews
+            self.webviews
                 .get(&webview_id)
                 .is_some_and(|webview| webview.controlled_event_loop_id().is_some())
         {
@@ -1929,8 +1928,8 @@ where
             .send(ScriptThreadMessage::ControlDocumentTime(
                 request_id, target, command,
             ))
-            .is_err()
-            && let Some(pending) = self.pending_document_time_controls.remove(&request_id)
+            .is_err() &&
+            let Some(pending) = self.pending_document_time_controls.remove(&request_id)
         {
             let _ = pending
                 .response
@@ -3679,8 +3678,8 @@ where
             return;
         };
 
-        let response = if source_webview_id != pending.target.webview_id
-            || !pending.target.pipelines.contains(&source_pipeline_id)
+        let response = if source_webview_id != pending.target.webview_id ||
+            !pending.target.pipelines.contains(&source_pipeline_id)
         {
             Err(DocumentTimeControlError::ResponseSourceMismatch {
                 webview_id: source_webview_id,
@@ -3954,9 +3953,7 @@ where
         if self
             .webviews
             .get(&opener_webview_id)
-            .is_some_and(|webview| {
-                webview.document_clock() != DocumentClockConfiguration::Realtime
-            })
+            .is_some_and(|webview| webview.document_clock() != DocumentClockConfiguration::Realtime)
         {
             if let Some(opener_webview) = self.webviews.get_mut(&opener_webview_id) {
                 opener_webview.fail_document_time(DocumentTimeSurface::AuxiliaryWebView);

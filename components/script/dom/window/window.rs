@@ -2809,8 +2809,8 @@ impl Window {
             blockers.push(DocumentTimeReadinessBlocker::RenderBlocked);
         }
         if document.GetDocumentElement().is_some_and(|element| {
-            element.has_class(&atom!("reftest-wait"), CaseSensitivity::CaseSensitive)
-                || element.has_class(&Atom::from("test-wait"), CaseSensitivity::CaseSensitive)
+            element.has_class(&atom!("reftest-wait"), CaseSensitivity::CaseSensitive) ||
+                element.has_class(&Atom::from("test-wait"), CaseSensitivity::CaseSensitive)
         }) {
             blockers.push(DocumentTimeReadinessBlocker::WaitMarker);
         }
