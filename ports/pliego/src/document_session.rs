@@ -21,7 +21,7 @@ use dpi::PhysicalSize;
 use http::header::CONTENT_TYPE;
 use http::{HeaderMap, HeaderValue};
 use layout::pages::{PageDefinition, reserve_for_process};
-use pliego::capture::{SceneCapture, capture_document_scene};
+use pliego::capture::{SceneCapture, capture_document_scene_with_canvas};
 use pliego::pdf::{PdfFontResource, PdfFontVariation, render_document_pdf};
 use servo::{
     JSValue, LoadStatus, Preferences, RenderingContext, Servo, ServoBuilder,
@@ -163,6 +163,7 @@ pub(crate) struct DocumentSession {
     environment: RenderEnvironment,
     allow_host_fonts: bool,
     stable_render_timeout: Duration,
+    _canvas_retention: servo_canvas::retained_canvas::CanvasRetentionGuard,
     _rendering_context: Rc<SoftwareRenderingContext>,
 }
 
@@ -174,6 +175,54 @@ impl DocumentSession {
         resources: ResourcePolicyConfig,
         allow_host_fonts: bool,
         readiness: ReadinessPolicy,
+    ) -> Result<Self, SessionError> {
+        Self::new_with_canvas_retention(
+            input,
+            environment,
+            page,
+            resources,
+            allow_host_fonts,
+            readiness,
+            servo_canvas::retained_canvas::start_retaining_canvas_commands,
+        )
+    }
+
+    #[cfg(test)]
+    fn new_with_canvas_retention_limits(
+        input: impl AsRef<Path>,
+        environment: RenderEnvironment,
+        page: PageDefinition,
+        resources: ResourcePolicyConfig,
+        allow_host_fonts: bool,
+        readiness: ReadinessPolicy,
+        canvas_retention_limits: (u64, u64, u64),
+    ) -> Result<Self, SessionError> {
+        let (max_commands, max_raster_bytes, max_objects) = canvas_retention_limits;
+        Self::new_with_canvas_retention(
+            input,
+            environment,
+            page,
+            resources,
+            allow_host_fonts,
+            readiness,
+            || {
+                servo_canvas::retained_canvas::start_retaining_canvas_commands_for_testing(
+                    max_commands,
+                    max_raster_bytes,
+                    max_objects,
+                )
+            },
+        )
+    }
+
+    fn new_with_canvas_retention(
+        input: impl AsRef<Path>,
+        environment: RenderEnvironment,
+        page: PageDefinition,
+        resources: ResourcePolicyConfig,
+        allow_host_fonts: bool,
+        readiness: ReadinessPolicy,
+        start_canvas_retention: impl FnOnce() -> servo_canvas::retained_canvas::CanvasRetentionGuard,
     ) -> Result<Self, SessionError> {
         let stable_render_timeout = stable_render_timeout(readiness)?;
         if !(1..=MAX_RESOURCE_TIMEOUT_MS).contains(&resources.timeout_ms) {
@@ -262,6 +311,7 @@ impl DocumentSession {
             resource_store,
             ..Default::default()
         });
+        let canvas_retention = start_canvas_retention();
         let webview = WebViewBuilder::new(&servo, rendering_context.clone())
             .delegate(delegate.clone())
             .user_content_manager(user_content_manager)
@@ -275,6 +325,7 @@ impl DocumentSession {
             environment,
             allow_host_fonts,
             stable_render_timeout,
+            _canvas_retention: canvas_retention,
             _rendering_context: rendering_context,
         })
     }
@@ -318,6 +369,12 @@ impl DocumentSession {
             ));
         }
         let readiness = self.evaluate_readiness()?;
+        if servo_canvas::retained_canvas::retention_budget_exceeded() {
+            return Err(SessionError::new(
+                "SCENE_CAPTURE_FAILED",
+                "live Canvas retention exceeded the session budget",
+            ));
+        }
 
         let snapshot = self.webview.debug_layout_snapshot().ok_or_else(|| {
             SessionError::new(
@@ -327,7 +384,19 @@ impl DocumentSession {
         })?;
         let capture = {
             let resources = self.delegate.resource_store.borrow();
-            capture_document_scene(snapshot.as_bytes(), |url| resources.resolve_url(url))
+            capture_document_scene_with_canvas(
+                snapshot.as_bytes(),
+                |url| resources.resolve_url(url),
+                |key| {
+                    servo_canvas::retained_canvas::snapshot_for_image_key(key.namespace, key.key)
+                        .ok_or_else(|| {
+                            format!(
+                                "no retained command snapshot for image key {}:{}",
+                                key.namespace, key.key
+                            )
+                        })
+                },
+            )
         }
         .map_err(|error| SessionError::new("SCENE_CAPTURE_FAILED", error.to_string()))?;
         capture
@@ -380,8 +449,9 @@ impl DocumentSession {
             })
             .collect::<BTreeMap<_, _>>();
         let image_resources = capture
-            .embedded_image_resources
+            .canvas_resources
             .iter()
+            .chain(capture.embedded_image_resources.iter())
             .map(|resource| (resource.resource.as_str(), resource.png.as_slice()))
             .collect::<BTreeMap<_, _>>();
         let pdf = {
@@ -844,6 +914,7 @@ mod tests {
     };
 
     const ISOLATED_CASE_ENV: &str = "PLIEGO_DOCUMENT_SESSION_FIXTURE";
+    const CHARTJS_INPUT_ENV: &str = "PLIEGO_DOCUMENT_SESSION_CHARTJS_INPUT";
     const HTTP_BASE_ENV: &str = "PLIEGO_DOCUMENT_SESSION_HTTP_BASE";
     const ISOLATED_TEST: &str = "document_session::tests::isolated_resource_and_readiness_fixture";
     const ALLOWED_HTTP_BODY: &[u8] = b"window.pliego.ready({ http_loaded: true });\n";
@@ -874,6 +945,24 @@ mod tests {
     const PRE_SESSION_PDF: &str =
         "sha256:9873076c43b0c76dca8fc54ad5721e5cd20ccee5deca6905425d49df068d7af8";
     const EXPECTED_LINK: &str = "https://pliego.dev/docs";
+
+    // Exact pre-OXH-304 servoshell oracle: source=e2ad2c930d243b8a84a63503a1d3e73f35e7875e,
+    // Linux binary=sha256:4c64919c959a712b28b4e6b5280fa74d742291b90e381b2c2dc1c014c2ecd4ab.
+    const HYBRID_INPUT: &str =
+        "sha256:57554089f5f96b3403ece0419869a71acb6c986ef1cd6c2633d284e63bf853e5";
+    const PRE_SESSION_HYBRID_SCENE: &str =
+        "sha256:bb176eb5db6433edba8edcdba7f1ff64b9f1784dad84b04f39296d1c4d5a41f8";
+    const PRE_SESSION_HYBRID_PDF: &str =
+        "sha256:fb58e9bea7d81dd047b79fa2a54173c730a30967cd9902b1f9b8ce82a4fe11a9";
+    const CHARTJS_INPUT: &str =
+        "sha256:2c5d37327bbde05b8369fcb5ea75cfec7fba437b1232848f1c2e20d5f2978995";
+    const CHARTJS_UMD: &str = "ecc3cd1eeb8c34d2178e3f59fd63ec5a3d84358c11730af0b9958dc886d7652a";
+    const PRE_SESSION_CHARTJS_SCENE: &str =
+        "sha256:7649335813f3638eecfb8836e04374f98d5b62bfcea530c1787bfdee60964fde";
+    const PRE_SESSION_CHARTJS_PDF: &str =
+        "sha256:c6f00765c85aace6cc6f2eacbb7c314ea579a4de66b6c2fe43793fc3ef546c9f";
+    const PRE_SESSION_CHARTJS_CANVAS: &str =
+        "sha256:3625ec653c27b9e1c8d0fa969acbd88cc161804eeea4cd3046795d411e8118c9";
 
     #[test]
     fn repeated_body_delivery_is_bounded_before_interception() {
@@ -1331,6 +1420,10 @@ mod tests {
             "defer-timeout",
             "environment",
             "invoice-oracle",
+            "hybrid-canvas",
+            "hybrid-canvas", // a fresh process must reproduce the exact oracle
+            "unsupported-canvas",
+            "canvas-retention-budget",
             "state-seed",
             "state-clean",
         ] {
@@ -1348,6 +1441,28 @@ mod tests {
             );
         }
         server.shutdown().unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires the lockfile-installed Chart.js fixture input"]
+    fn installed_chartjs_fixture_matches_the_legacy_oracle_twice() {
+        let input = std::env::var(CHARTJS_INPUT_ENV)
+            .expect("PLIEGO_DOCUMENT_SESSION_CHARTJS_INPUT should name the installed fixture");
+        assert!(Path::new(&input).is_file());
+        for _ in 0..2 {
+            let output = run_isolated("chartjs-report", "http://127.0.0.1:1/");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success(),
+                "isolated Chart.js fixture failed\nstdout:\n{}\nstderr:\n{}",
+                stdout,
+                String::from_utf8_lossy(&output.stderr),
+            );
+            assert!(
+                stdout.contains("running 1 test") && stdout.contains("1 passed; 0 failed"),
+                "isolated Chart.js filter did not execute exactly one passing child test:\n{stdout}",
+            );
+        }
     }
 
     #[test]
@@ -1465,6 +1580,24 @@ mod tests {
                     .canonicalize()
                     .unwrap()
             },
+            "hybrid-canvas" => {
+                readiness = ReadinessPolicy::default();
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("tests/fixtures/hybrid-canvas/live.html")
+                    .canonicalize()
+                    .unwrap()
+            },
+            "unsupported-canvas" => session_fixture("unsupported-canvas.html"),
+            "canvas-retention-budget" => session_fixture("canvas-retention-budget.html"),
+            "chartjs-report" => {
+                readiness = ReadinessPolicy::default();
+                PathBuf::from(
+                    std::env::var(CHARTJS_INPUT_ENV)
+                        .expect("installed Chart.js fixture input should be set"),
+                )
+                .canonicalize()
+                .expect("installed Chart.js fixture input should exist")
+            },
             other => panic!("unknown isolated fixture case: {other}"),
         };
         if case == "constructor-recovery" {
@@ -1517,15 +1650,36 @@ mod tests {
             assert_eq!(outcome.readiness["payload"]["localHour"], 4);
             return;
         }
-        let result = DocumentSession::new(
-            &input,
-            environment,
-            a4(),
-            resources,
-            allow_host_fonts,
-            readiness,
-        )
-        .and_then(DocumentSession::render);
+        let page = match case.as_str() {
+            "hybrid-canvas" | "unsupported-canvas" | "canvas-retention-budget" => {
+                PageDefinition::new(200.0, 160.0, PageMargins::new(10.0, 10.0, 10.0, 10.0)).unwrap()
+            },
+            "chartjs-report" => {
+                PageDefinition::new(760.0, 840.0, PageMargins::new(28.0, 28.0, 28.0, 28.0)).unwrap()
+            },
+            _ => a4(),
+        };
+        let session = if case == "canvas-retention-budget" {
+            DocumentSession::new_with_canvas_retention_limits(
+                &input,
+                environment,
+                page,
+                resources,
+                allow_host_fonts,
+                readiness,
+                (64, 8, 64),
+            )
+        } else {
+            DocumentSession::new(
+                &input,
+                environment,
+                page,
+                resources,
+                allow_host_fonts,
+                readiness,
+            )
+        };
+        let result = session.and_then(DocumentSession::render);
 
         match case.as_str() {
             "local-success" => {
@@ -1849,6 +2003,131 @@ mod tests {
                 );
                 assert_eq!(outcome.environment, RenderEnvironment::default());
                 assert!(!outcome.allow_host_fonts);
+            },
+            "hybrid-canvas" => {
+                let outcome = result.expect("hybrid Canvas fixture should render");
+                assert_eq!(content_address(&fs::read(&input).unwrap()), HYBRID_INPUT);
+                assert_eq!(
+                    outcome.readiness["payload"]["fixture"],
+                    "live-hybrid-canvas"
+                );
+                assert_eq!(outcome.readiness["payload"]["readbackBytes"], 16);
+                assert!(outcome.capture.unsupported_events.is_empty());
+                assert!(outcome.capture.text_mapping_gaps.is_empty());
+                assert_eq!(outcome.capture.canvas_resources.len(), 1);
+                assert!(outcome.capture.embedded_image_resources.is_empty());
+                assert_eq!(outcome.capture.canvas_diagnostics.len(), 1);
+                let diagnostics = &outcome.capture.canvas_diagnostics[0].diagnostics;
+                assert_eq!(diagnostics.vector_operation_count, 3);
+                assert_eq!(diagnostics.rasterized_area_px, 4);
+                assert_eq!(diagnostics.fallbacks.len(), 1);
+                assert_eq!(diagnostics.fallbacks[0].area_px, 4);
+                assert_eq!(
+                    diagnostics.fallbacks[0].reason,
+                    pliego::hybrid_canvas::CanvasFallbackReason::PixelReadback
+                );
+                let paths = outcome.capture.scene.pages[0]
+                    .operations
+                    .iter()
+                    .filter(|operation| matches!(operation, Operation::Path { .. }))
+                    .count();
+                let images = outcome.capture.scene.pages[0]
+                    .operations
+                    .iter()
+                    .filter_map(|operation| match operation {
+                        Operation::Image { resource, .. } => Some(resource),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(paths, 3);
+                assert_eq!(images.len(), 1);
+                let resource = &outcome.capture.canvas_resources[0];
+                assert_eq!(images[0], &resource.resource);
+                assert_eq!(content_address(&resource.png), resource.resource);
+                assert!(resource.png.starts_with(b"\x89PNG\r\n\x1a\n"));
+                assert_eq!(
+                    content_address(&outcome.capture.scene.normalized_json().unwrap()),
+                    PRE_SESSION_HYBRID_SCENE
+                );
+                assert_eq!(content_address(&outcome.pdf), PRE_SESSION_HYBRID_PDF);
+            },
+            "unsupported-canvas" => {
+                let Err(error) = result else {
+                    panic!("unsupported Canvas returned a DocumentOutcome containing PDF bytes")
+                };
+                assert_eq!(error.code, "SCENE_CAPTURE_FAILED");
+                assert!(error.message.contains("fill_rect"), "{}", error.message);
+                assert!(error.message.contains("transform"), "{}", error.message);
+            },
+            "canvas-retention-budget" => {
+                let Err(error) = result else {
+                    panic!(
+                        "over-budget Canvas retention returned a DocumentOutcome containing PDF bytes"
+                    )
+                };
+                assert_eq!(error.code, "SCENE_CAPTURE_FAILED");
+                assert_eq!(
+                    error.message,
+                    "live Canvas retention exceeded the session budget"
+                );
+            },
+            "chartjs-report" => {
+                let outcome = result.expect("Chart.js fixture should render");
+                assert_eq!(content_address(&fs::read(&input).unwrap()), CHARTJS_INPUT);
+                assert_eq!(outcome.readiness["payload"]["fixture"], "chartjs-report");
+                assert_eq!(outcome.readiness["payload"]["chartVersion"], "4.5.1");
+                assert_eq!(outcome.readiness["payload"]["canvasWidth"], 678);
+                assert_eq!(outcome.readiness["payload"]["canvasHeight"], 250);
+                assert_eq!(outcome.readiness["payload"]["datasetCount"], 2);
+                assert_eq!(outcome.readiness["payload"]["dataPointCount"], 6);
+                assert_eq!(outcome.readiness["payload"]["readbackBytes"], 678 * 250 * 4);
+                assert!(outcome.capture.unsupported_events.is_empty());
+                assert!(outcome.capture.text_mapping_gaps.is_empty());
+                assert_eq!(outcome.capture.canvas_resources.len(), 1);
+                assert!(outcome.capture.embedded_image_resources.is_empty());
+                assert_eq!(outcome.capture.canvas_diagnostics.len(), 1);
+                let diagnostics = &outcome.capture.canvas_diagnostics[0].diagnostics;
+                assert_eq!(diagnostics.rasterized_area_px, 678 * 250);
+                assert_eq!(diagnostics.fallbacks.len(), 1);
+                assert_eq!(
+                    diagnostics.fallbacks[0].reason,
+                    pliego::hybrid_canvas::CanvasFallbackReason::PixelReadback
+                );
+                let images = outcome.capture.scene.pages[0]
+                    .operations
+                    .iter()
+                    .filter_map(|operation| match operation {
+                        Operation::Image { resource, .. } => Some(resource),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(images.len(), 1);
+                let resource = &outcome.capture.canvas_resources[0];
+                assert_eq!(images[0], &resource.resource);
+                assert_eq!(content_address(&resource.png), resource.resource);
+                assert!(resource.png.starts_with(b"\x89PNG\r\n\x1a\n"));
+                assert_eq!(
+                    u32::from_be_bytes(resource.png[16..20].try_into().unwrap()),
+                    678
+                );
+                assert_eq!(
+                    u32::from_be_bytes(resource.png[20..24].try_into().unwrap()),
+                    250
+                );
+                assert_eq!(resource.resource, PRE_SESSION_CHARTJS_CANVAS);
+                assert_eq!(
+                    content_address(&outcome.capture.scene.normalized_json().unwrap()),
+                    PRE_SESSION_CHARTJS_SCENE
+                );
+                assert_eq!(content_address(&outcome.pdf), PRE_SESSION_CHARTJS_PDF);
+                let chartjs = outcome
+                    .resources
+                    .iter()
+                    .find(|resource| resource.request.url.path().ends_with("/chart.umd.js"))
+                    .expect("the controlled resource evidence should include Chart.js");
+                assert_eq!(chartjs.status, "loaded");
+                assert_eq!(chartjs.sha256.as_deref(), Some(CHARTJS_UMD));
+                assert_eq!(outcome.resource_accounting.failed, 0);
             },
             "state-seed" => {
                 let outcome = result.expect("state seed fixture should render");

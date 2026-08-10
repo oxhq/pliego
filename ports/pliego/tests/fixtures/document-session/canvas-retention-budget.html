@@ -1,0 +1,19 @@
+<!--
+  This Source Code Form is subject to the terms of the Mozilla Public
+  License, v. 2.0. If a copy of the MPL was not distributed with this
+  file, You can obtain one at https://mozilla.org/MPL/2.0/.
+-->
+<!doctype html>
+<meta charset="utf-8">
+<style>canvas { width: 10px; height: 10px; }</style>
+<canvas id="target" width="2" height="2"></canvas>
+<canvas id="donor" width="2" height="2"></canvas>
+<script>
+  const donor = document.querySelector("#donor").getContext("2d");
+  const target = document.querySelector("#target").getContext("2d");
+  for (let index = 0; index < 2; index += 1) {
+    donor.getImageData(0, 0, 1, 1);
+  }
+  target.getImageData(0, 0, 1, 1);
+  window.pliego.ready({ fixture: "canvas-retention-budget" });
+</script>

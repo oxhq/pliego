@@ -14,6 +14,7 @@ name = "servo_canvas"
 path = "lib.rs"
 
 [features]
+document-session-testing = []
 tracing = ["dep:tracing"]
 vello = ["dep:vello", "dep:pollster", "dep:futures-intrusive"]
 
