@@ -1,0 +1,97 @@
+{
+  "schema": "pliego.document-scene",
+  "version": 1,
+  "app_units_per_css_px": 60,
+  "request_page": {
+    "size": {
+      "name": "A4"
+    },
+    "margins_app_units": {
+      "top": 2880,
+      "right": 2880,
+      "bottom": 2880,
+      "left": 2880
+    },
+    "css_page_precedence": "css-page-over-request-defaults"
+  },
+  "semantic_layer": null,
+  "pages": [
+    {
+      "number": 1,
+      "style_source": "request-defaults",
+      "size_app_units": {
+        "width": 47622,
+        "height": 67351
+      },
+      "margins_app_units": {
+        "top": 2880,
+        "right": 2880,
+        "bottom": 2880,
+        "left": 2880
+      },
+      "operations": [
+        {
+          "type": "text",
+          "text": "Invoice",
+          "font": "sha256:bf0cf8c8fff21d37f18617edb5677ed60cd2ea9dae07bfc8571d9f11da706a00",
+          "font_size_app_units": 1080,
+          "color": {
+            "r": 0,
+            "g": 0,
+            "b": 0,
+            "a": 255
+          },
+          "glyphs": [
+            {
+              "id": 42,
+              "x": 2880,
+              "y": 4320,
+              "advance": 3240,
+              "text_range": {
+                "start": 0,
+                "end": 7
+              }
+            }
+          ]
+        },
+        {
+          "type": "path",
+          "bounds": {
+            "x": 2880,
+            "y": 5760,
+            "width": 41862,
+            "height": 60
+          },
+          "data": "M 2880 5760 L 44742 5760 L 44742 5820 L 2880 5820 Z",
+          "fill": {
+            "r": 64,
+            "g": 64,
+            "b": 64,
+            "a": 255
+          },
+          "fill_rule": "non-zero"
+        },
+        {
+          "type": "image",
+          "bounds": {
+            "x": 2880,
+            "y": 7200,
+            "width": 3840,
+            "height": 3840
+          },
+          "resource": "sha256:83ee8b728ac4d73ac6454bd63f58ef28f97d40d38ad6ddfd499e3f890b4a8ca4"
+        },
+        {
+          "type": "link",
+          "bounds": {
+            "x": 2880,
+            "y": 12000,
+            "width": 7200,
+            "height": 1080
+          },
+          "target": "https://example.test/invoices/42"
+        }
+      ]
+    }
+  ]
+}

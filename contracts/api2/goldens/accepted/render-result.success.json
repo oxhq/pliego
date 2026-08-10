@@ -1,0 +1,113 @@
+{
+  "schema": "pliego.render-result",
+  "version": 1,
+  "api": 2,
+  "status": "success",
+  "request": {
+    "schema": "pliego.render-request",
+    "version": 1,
+    "api": 2,
+    "profile": null,
+    "input": {
+      "entrypoint": "document.html",
+      "manifest": {
+        "path": "input-manifest.json",
+        "media_type": "application/vnd.pliego.input-manifest+json",
+        "sha256": "sha256:65fb0708211a8786d538d1940dd924f8e60e9cc875d6f3fde552b763f3f71907",
+        "bytes": 723
+      }
+    },
+    "environment": {
+      "locale": "en-US",
+      "timezone": "UTC"
+    },
+    "page": {
+      "size": {
+        "name": "A4"
+      },
+      "margins_app_units": {
+        "top": 2880,
+        "right": 2880,
+        "bottom": 2880,
+        "left": 2880
+      },
+      "css_page_precedence": "css-page-over-request-defaults"
+    },
+    "resources": {
+      "network": "deny",
+      "host_fonts": "deny"
+    },
+    "time": {
+      "policy_version": 1,
+      "epoch_unix_ms": 946684800000,
+      "initial_offset_ns": 0
+    },
+    "settlement": {
+      "policy_version": 1,
+      "infinite_source_policy": "fail",
+      "empty_checkpoints": 2,
+      "limits": {
+        "virtual_span_ms": 86400000,
+        "ordinary_tasks": 100000,
+        "microtasks": 1000000,
+        "rendering_opportunities": 10000,
+        "mutations": 1000000,
+        "post_readiness_resources": 1024,
+        "process_cpu_ms": 30000,
+        "host_wall_ms": 60000
+      }
+    },
+    "diagnostics": {
+      "retention": "always"
+    }
+  },
+  "engine": {
+    "name": "pliego",
+    "version": "1.0.0-rc.1",
+    "api": 2,
+    "source_commit": "1be31eab71ecf95c39928343f1f36e805f6754b8",
+    "runtime": {
+      "mode": "one-shot",
+      "target": "x86_64-unknown-linux-gnu",
+      "binary_sha256": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "servo_base": "313b6d5ecc113b08010ce434140db3ca5abcc71c"
+    }
+  },
+  "delivery": {
+    "pdf": {
+      "path": "document.pdf",
+      "media_type": "application/pdf",
+      "sha256": "sha256:3b78bf3f4499aa5729f9a387b5ce6082d27b990742dda784c57fa7fe3e73be79",
+      "bytes": 435
+    },
+    "scene": {
+      "path": "scene.json",
+      "media_type": "application/vnd.pliego.document-scene+json",
+      "sha256": "sha256:a61a60177fe7f72eea028c3a4f8453a90eee4e801cb131b63bffcb4f0dff9e9e",
+      "bytes": 1184
+    },
+    "bundle": {
+      "path": "bundle.json",
+      "media_type": "application/vnd.pliego.bundle-manifest+json",
+      "sha256": "sha256:26a30d1e6ca7b19dec015a7debd5fd43d25b648367633d5b89961df57eb3c92c",
+      "bytes": 816
+    }
+  },
+  "conformance": {
+    "requested": null,
+    "status": "not-requested",
+    "evidence": null
+  },
+  "diagnostics": {
+    "retained": true,
+    "artifacts": [
+      {
+        "path": "diagnostics/environment.json",
+        "media_type": "application/json",
+        "sha256": "sha256:bfa3ada71c5cd6cc907d8112236eea1b4ca89187132dd1ad6c1ca223f14cb020",
+        "bytes": 49
+      }
+    ]
+  },
+  "error": null
+}

@@ -1,0 +1,96 @@
+{
+  "schema": "pliego.render-result",
+  "version": 1,
+  "api": 2,
+  "status": "failed",
+  "request": {
+    "schema": "pliego.render-request",
+    "version": 1,
+    "api": 2,
+    "profile": null,
+    "input": {
+      "entrypoint": "document.html",
+      "manifest": {
+        "path": "input-manifest.json",
+        "media_type": "application/vnd.pliego.input-manifest+json",
+        "sha256": "sha256:65fb0708211a8786d538d1940dd924f8e60e9cc875d6f3fde552b763f3f71907",
+        "bytes": 723
+      }
+    },
+    "environment": {
+      "locale": "en-US",
+      "timezone": "UTC"
+    },
+    "page": {
+      "size": {
+        "name": "A4"
+      },
+      "margins_app_units": {
+        "top": 2880,
+        "right": 2880,
+        "bottom": 2880,
+        "left": 2880
+      },
+      "css_page_precedence": "css-page-over-request-defaults"
+    },
+    "resources": {
+      "network": "deny",
+      "host_fonts": "deny"
+    },
+    "time": {
+      "policy_version": 1,
+      "epoch_unix_ms": 946684800000,
+      "initial_offset_ns": 0
+    },
+    "settlement": {
+      "policy_version": 1,
+      "infinite_source_policy": "fail",
+      "empty_checkpoints": 2,
+      "limits": {
+        "virtual_span_ms": 86400000,
+        "ordinary_tasks": 100000,
+        "microtasks": 1000000,
+        "rendering_opportunities": 10000,
+        "mutations": 1000000,
+        "post_readiness_resources": 1024,
+        "process_cpu_ms": 30000,
+        "host_wall_ms": 60000
+      }
+    },
+    "diagnostics": {
+      "retention": "always"
+    }
+  },
+  "engine": {
+    "name": "pliego",
+    "version": "1.0.0-rc.1",
+    "api": 2,
+    "source_commit": "1be31eab71ecf95c39928343f1f36e805f6754b8",
+    "runtime": {
+      "mode": "one-shot",
+      "target": "x86_64-unknown-linux-gnu",
+      "binary_sha256": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "servo_base": "313b6d5ecc113b08010ce434140db3ca5abcc71c"
+    }
+  },
+  "delivery": null,
+  "conformance": {
+    "requested": null,
+    "status": "not-requested",
+    "evidence": null
+  },
+  "diagnostics": {
+    "retained": true,
+    "artifacts": [
+      {
+        "path": "diagnostics/failure.json",
+        "media_type": "application/json",
+        "sha256": "sha256:25e8f8a2b47c00b819ef738ee69ba6e68a59e791b8bd3015cf61038acfd9fd34",
+        "bytes": 65
+      }
+    ]
+  },
+  "error": {
+    "kind": "resource"
+  }
+}

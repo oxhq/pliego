@@ -1,0 +1,110 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://pliego.dev/schema/runtime-contract.v1.json",
+  "title": "Pliego runtime contract probe",
+  "description": "The exact protocol tuple and one-shot transport supported by one Pliego executable.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "version", "engine", "contracts", "invocation"],
+  "properties": {
+    "schema": { "const": "pliego.runtime-contract" },
+    "version": { "const": 1 },
+    "engine": { "$ref": "render-result.v1.json#/definitions/engine" },
+    "contracts": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 32,
+      "items": { "$ref": "#/definitions/api2_contract" }
+    },
+    "invocation": { "$ref": "#/definitions/invocation" }
+  },
+  "definitions": {
+    "api2_contract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "api",
+        "input_manifest",
+        "request",
+        "result",
+        "document_scene",
+        "bundle_manifest",
+        "profiles"
+      ],
+      "properties": {
+        "api": { "const": 2 },
+        "input_manifest": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["schema", "version"],
+          "properties": {
+            "schema": { "const": "pliego.input-manifest" },
+            "version": { "const": 1 }
+          }
+        },
+        "request": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["schema", "version"],
+          "properties": {
+            "schema": { "const": "pliego.render-request" },
+            "version": { "const": 1 }
+          }
+        },
+        "result": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["schema", "version"],
+          "properties": {
+            "schema": { "const": "pliego.render-result" },
+            "version": { "const": 1 }
+          }
+        },
+        "document_scene": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["schema", "version"],
+          "properties": {
+            "schema": { "const": "pliego.document-scene" },
+            "version": { "const": 1 }
+          }
+        },
+        "bundle_manifest": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["schema", "version"],
+          "properties": {
+            "schema": { "const": "pliego.bundle-manifest" },
+            "version": { "const": 1 }
+          }
+        },
+        "profiles": {
+          "type": "array",
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": { "$ref": "render-request.v1.json#/definitions/profile_ref" }
+        }
+      }
+    },
+    "invocation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "request_transport",
+        "result_transport",
+        "invocation_error_transport",
+        "success_exit_code",
+        "failed_exit_code",
+        "invocation_error_exit_code"
+      ],
+      "properties": {
+        "request_transport": { "const": "stdin-single-json" },
+        "result_transport": { "const": "stdout-single-json" },
+        "invocation_error_transport": { "const": "stderr-utf8-line" },
+        "success_exit_code": { "const": 0 },
+        "failed_exit_code": { "const": 1 },
+        "invocation_error_exit_code": { "const": 64 }
+      }
+    }
+  }
+}
