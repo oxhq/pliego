@@ -17,3 +17,5 @@ mod engine {
 }
 #[path = "../src/resource_policy.rs"]
 mod resource_policy;
+#[path = "../src/session.rs"]
+mod session;

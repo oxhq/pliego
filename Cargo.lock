@@ -6604,6 +6604,7 @@ dependencies = [
  "http 1.4.2",
  "http-body-util",
  "hyper",
+ "image",
  "imagesize",
  "krilla",
  "libc",

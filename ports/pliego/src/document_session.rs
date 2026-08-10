@@ -5,12 +5,13 @@
 //! Pliego's minimal one-document Servo owner.
 //!
 //! This remains an internal migration seam while the published binary uses the
-//! shell adapter. The screenshot is only a stable-render barrier. Retained
-//! layout still comes through Servo's temporary, doc-hidden
+//! shell adapter. The screenshot is both the stable-render barrier and a
+//! retained diagnostic. Layout still comes through Servo's temporary, doc-hidden
 //! `debug_layout_snapshot` hook until that upstream seam is made stable.
 
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::BTreeMap;
+use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -24,7 +25,7 @@ use layout::pages::{PageDefinition, reserve_for_process};
 use pliego::capture::{SceneCapture, capture_document_scene_with_canvas};
 use pliego::pdf::{PdfFontResource, PdfFontVariation, render_document_pdf};
 use servo::{
-    JSValue, LoadStatus, Preferences, RenderingContext, Servo, ServoBuilder,
+    ConsoleLogLevel, JSValue, LoadStatus, Preferences, RenderingContext, Servo, ServoBuilder,
     SoftwareRenderingContext, UserContentManager, UserScript, WebResourceLoad, WebResourceLoadRole,
     WebResourceResponse, WebView, WebViewBuilder, WebViewDelegate,
 };
@@ -42,15 +43,28 @@ use super::resource_policy::{
     ResourceSource, create_controlled_http_client, fetch_controlled_http,
     normalize_controlled_response_headers,
 };
+use super::session::LocalDocument;
 
 const RESOURCE_EVIDENCE_ENTRY_OVERHEAD_BYTES: u64 = 256;
+const CONSOLE_EVIDENCE_ENTRY_OVERHEAD_BYTES: u64 = 64;
+const MAX_CONSOLE_EVENTS: usize = 4_096;
+const MAX_CONSOLE_BYTES: u64 = 1024 * 1024;
 
 const TIMEOUT: Duration = Duration::from_secs(30);
 
 #[cfg(test)]
 type ResourceEvidenceObserver = Rc<dyn Fn(&ResourceEvidence)>;
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Default, PartialEq)]
+pub(crate) struct SessionCaptureEvidence {
+    pub(crate) stable_image_png: Option<Vec<u8>>,
+    pub(crate) readiness: Option<serde_json::Value>,
+    pub(crate) layout_debug: Option<serde_json::Value>,
+    pub(crate) controlled_runtime_ms: Option<f64>,
+    pub(crate) scene_capture_ms: Option<f64>,
+}
+
+#[derive(Debug, PartialEq)]
 pub(crate) struct SessionError {
     pub(crate) code: String,
     pub(crate) message: String,
@@ -58,6 +72,8 @@ pub(crate) struct SessionError {
     pub(crate) resources: Vec<ResourceEvidence>,
     pub(crate) resource_accounting: ResourceAccounting,
     pub(crate) resource_store: OwnedResourceStore,
+    pub(crate) console: Vec<(String, String)>,
+    pub(crate) capture_evidence: SessionCaptureEvidence,
 }
 
 impl SessionError {
@@ -69,6 +85,8 @@ impl SessionError {
             resources: Vec::new(),
             resource_accounting: ResourceAccounting::default(),
             resource_store: OwnedResourceStore::default(),
+            console: Vec::new(),
+            capture_evidence: SessionCaptureEvidence::default(),
         }
     }
 
@@ -80,13 +98,16 @@ impl SessionError {
             resources: Vec::new(),
             resource_accounting: ResourceAccounting::default(),
             resource_store: OwnedResourceStore::default(),
+            console: Vec::new(),
+            capture_evidence: SessionCaptureEvidence::default(),
         }
     }
 
-    fn with_resources(
+    fn with_evidence(
         mut self,
         resources: Vec<ResourceEvidence>,
         resource_store: OwnedResourceStore,
+        console: Vec<(String, String)>,
     ) -> Self {
         self.resource_accounting = ResourceAccounting::from_evidence(&resources);
         // Successful/delegated rows stay in `resources`; the separate first failure is one request.
@@ -95,6 +116,26 @@ impl SessionError {
         }
         self.resources = resources;
         self.resource_store = resource_store;
+        self.console = console;
+        self
+    }
+
+    fn with_capture_evidence(mut self, capture_evidence: SessionCaptureEvidence) -> Self {
+        if self.capture_evidence.stable_image_png.is_none() {
+            self.capture_evidence.stable_image_png = capture_evidence.stable_image_png;
+        }
+        if self.capture_evidence.readiness.is_none() {
+            self.capture_evidence.readiness = capture_evidence.readiness;
+        }
+        if self.capture_evidence.layout_debug.is_none() {
+            self.capture_evidence.layout_debug = capture_evidence.layout_debug;
+        }
+        if self.capture_evidence.controlled_runtime_ms.is_none() {
+            self.capture_evidence.controlled_runtime_ms = capture_evidence.controlled_runtime_ms;
+        }
+        if self.capture_evidence.scene_capture_ms.is_none() {
+            self.capture_evidence.scene_capture_ms = capture_evidence.scene_capture_ms;
+        }
         self
     }
 }
@@ -116,6 +157,128 @@ pub(crate) struct DocumentOutcome {
     pub(crate) resources: Vec<ResourceEvidence>,
     pub(crate) resource_accounting: ResourceAccounting,
     pub(crate) resource_store: OwnedResourceStore,
+}
+
+pub(crate) struct DocumentCaptureOutcome {
+    pub(crate) capture: SceneCapture,
+    pub(crate) stable_image_png: Vec<u8>,
+    pub(crate) layout_debug: serde_json::Value,
+    pub(crate) environment: RenderEnvironment,
+    pub(crate) allow_host_fonts: bool,
+    pub(crate) readiness: serde_json::Value,
+    pub(crate) console: Vec<(String, String)>,
+    pub(crate) resources: Vec<ResourceEvidence>,
+    pub(crate) resource_accounting: ResourceAccounting,
+    pub(crate) resource_store: OwnedResourceStore,
+    pub(crate) controlled_runtime_ms: f64,
+    pub(crate) scene_capture_ms: f64,
+}
+
+impl DocumentCaptureOutcome {
+    fn render(self) -> Result<DocumentOutcome, SessionError> {
+        let pdf = match self.render_pdf() {
+            Ok(pdf) => pdf,
+            Err(error) => {
+                return Err(error
+                    .with_capture_evidence(SessionCaptureEvidence {
+                        stable_image_png: Some(self.stable_image_png),
+                        readiness: Some(self.readiness),
+                        layout_debug: Some(self.layout_debug),
+                        controlled_runtime_ms: Some(self.controlled_runtime_ms),
+                        scene_capture_ms: Some(self.scene_capture_ms),
+                    })
+                    .with_evidence(self.resources, self.resource_store, self.console));
+            },
+        };
+
+        Ok(DocumentOutcome {
+            capture: self.capture,
+            pdf,
+            environment: self.environment,
+            allow_host_fonts: self.allow_host_fonts,
+            readiness: self.readiness,
+            resource_accounting: self.resource_accounting,
+            resources: self.resources,
+            resource_store: self.resource_store,
+        })
+    }
+
+    fn render_pdf(&self) -> Result<Vec<u8>, SessionError> {
+        if !self.capture.unsupported_events.is_empty() || !self.capture.text_mapping_gaps.is_empty()
+        {
+            return Err(SessionError::new(
+                "SCENE_CAPTURE_INCOMPLETE",
+                "captured scene contains unsupported paint or text mapping gaps",
+            ));
+        }
+
+        let decoded_resources = self
+            .capture
+            .font_resources
+            .iter()
+            .map(|resource| {
+                BASE64_STANDARD
+                    .decode(&resource.bytes_base64)
+                    .map(|bytes| (resource.resource.as_str(), bytes))
+                    .map_err(|error| {
+                        SessionError::new(
+                            "FONT_RESOURCE_INVALID",
+                            format!("cannot decode {}: {error}", resource.resource),
+                        )
+                    })
+            })
+            .collect::<Result<BTreeMap<_, _>, _>>()?;
+        let instances = self
+            .capture
+            .font_instances
+            .iter()
+            .map(|instance| (instance.id.as_str(), instance))
+            .collect::<BTreeMap<_, _>>();
+        let variations = self
+            .capture
+            .font_instances
+            .iter()
+            .map(|instance| {
+                (
+                    instance.id.as_str(),
+                    instance
+                        .variations
+                        .iter()
+                        .map(|variation| PdfFontVariation {
+                            tag: variation.tag,
+                            value: variation.value,
+                        })
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let image_resources = self
+            .capture
+            .canvas_resources
+            .iter()
+            .chain(self.capture.embedded_image_resources.iter())
+            .map(|resource| (resource.resource.as_str(), resource.png.as_slice()))
+            .collect::<BTreeMap<_, _>>();
+        render_document_pdf(
+            &self.capture.scene,
+            |font| {
+                let instance = instances.get(font)?;
+                Some(PdfFontResource {
+                    bytes: decoded_resources.get(instance.resource.as_str())?,
+                    face_index: instance.face_index,
+                    variations: variations.get(font)?,
+                    synthetic_bold: instance.synthetic_bold,
+                })
+            },
+            |image| {
+                image_resources
+                    .get(image)
+                    .copied()
+                    .or_else(|| self.resource_store.resolve_content(image))
+            },
+        )
+        .map_err(|error| SessionError::new("DOCUMENT_PDF_GENERATION_FAILED", error.to_string()))
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -180,6 +343,44 @@ impl ResourceEvidenceLog {
     }
 }
 
+#[derive(Clone, Debug)]
+struct ConsoleEvidenceLog {
+    entries: Vec<(String, String)>,
+    bytes: u64,
+    limit_exceeded: bool,
+}
+
+impl Default for ConsoleEvidenceLog {
+    fn default() -> Self {
+        Self {
+            entries: Vec::new(),
+            bytes: 0,
+            limit_exceeded: false,
+        }
+    }
+}
+
+impl ConsoleEvidenceLog {
+    fn push(&mut self, level: String, message: String) {
+        if self.limit_exceeded {
+            return;
+        }
+        let next_bytes = self
+            .bytes
+            .checked_add(level.len() as u64)
+            .and_then(|bytes| bytes.checked_add(message.len() as u64))
+            .and_then(|bytes| bytes.checked_add(CONSOLE_EVIDENCE_ENTRY_OVERHEAD_BYTES));
+        if self.entries.len() >= MAX_CONSOLE_EVENTS ||
+            next_bytes.is_none_or(|bytes| bytes > MAX_CONSOLE_BYTES)
+        {
+            self.limit_exceeded = true;
+            return;
+        }
+        self.bytes = next_bytes.expect("checked console evidence bytes");
+        self.entries.push((level, message));
+    }
+}
+
 pub(crate) struct DocumentSession {
     webview: WebView,
     servo: Servo,
@@ -187,6 +388,7 @@ pub(crate) struct DocumentSession {
     environment: RenderEnvironment,
     allow_host_fonts: bool,
     stable_render_timeout: Duration,
+    controlled_runtime_started: Instant,
     _canvas_retention: servo_canvas::retained_canvas::CanvasRetentionGuard,
     _rendering_context: Rc<SoftwareRenderingContext>,
 }
@@ -207,6 +409,29 @@ impl DocumentSession {
             resources,
             allow_host_fonts,
             readiness,
+            servo_canvas::retained_canvas::start_retaining_canvas_commands,
+        )
+    }
+
+    pub(crate) fn from_resolved(
+        document: &LocalDocument,
+        resource_policy: ResourcePolicy,
+        environment: RenderEnvironment,
+        page: PageDefinition,
+        allow_host_fonts: bool,
+        readiness: ReadinessPolicy,
+    ) -> Result<Self, SessionError> {
+        let stable_render_timeout =
+            validate_session_timeouts(readiness, resource_policy.timeout_ms)?;
+        Self::new_resolved_with_canvas_retention(
+            document.path().to_owned(),
+            document.root().to_owned(),
+            resource_policy,
+            environment,
+            page,
+            allow_host_fonts,
+            readiness,
+            stable_render_timeout,
             servo_canvas::retained_canvas::start_retaining_canvas_commands,
         )
     }
@@ -261,15 +486,7 @@ impl DocumentSession {
         readiness: ReadinessPolicy,
         start_canvas_retention: impl FnOnce() -> servo_canvas::retained_canvas::CanvasRetentionGuard,
     ) -> Result<Self, SessionError> {
-        let stable_render_timeout = stable_render_timeout(readiness)?;
-        if !(1..=MAX_RESOURCE_TIMEOUT_MS).contains(&resources.timeout_ms) {
-            return Err(SessionError::new(
-                "INVALID_REQUEST",
-                format!(
-                    "resource timeout must be between 1 and {MAX_RESOURCE_TIMEOUT_MS} milliseconds"
-                ),
-            ));
-        }
+        let stable_render_timeout = validate_session_timeouts(readiness, resources.timeout_ms)?;
         let input = input.as_ref().canonicalize().map_err(|error| {
             SessionError::new(
                 "INVALID_REQUEST",
@@ -287,6 +504,31 @@ impl DocumentSession {
             .ok_or_else(|| SessionError::new("INVALID_REQUEST", "document has no bundle root"))?
             .to_path_buf();
         let resource_policy = ResourcePolicy::resolve(&resources, &bundle_root);
+        Self::new_resolved_with_canvas_retention(
+            input,
+            bundle_root,
+            resource_policy,
+            environment,
+            page,
+            allow_host_fonts,
+            readiness,
+            stable_render_timeout,
+            start_canvas_retention,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_resolved_with_canvas_retention(
+        input: PathBuf,
+        bundle_root: PathBuf,
+        resource_policy: ResourcePolicy,
+        environment: RenderEnvironment,
+        page: PageDefinition,
+        allow_host_fonts: bool,
+        readiness: ReadinessPolicy,
+        stable_render_timeout: Duration,
+        start_canvas_retention: impl FnOnce() -> servo_canvas::retained_canvas::CanvasRetentionGuard,
+    ) -> Result<Self, SessionError> {
         validate_resource_policy(&resource_policy)?;
         let input_url = Url::from_file_path(&input).map_err(|_| {
             SessionError::new(
@@ -305,6 +547,7 @@ impl DocumentSession {
         })?;
         apply_timezone(environment.timezone)
             .map_err(|error| SessionError::new("ENVIRONMENT_CONFIGURATION_FAILED", error))?;
+        let controlled_runtime_started = Instant::now();
 
         let rendering_context = Rc::new(
             SoftwareRenderingContext::new(PhysicalSize::new(
@@ -362,6 +605,7 @@ impl DocumentSession {
             environment,
             allow_host_fonts,
             stable_render_timeout,
+            controlled_runtime_started,
             _canvas_retention: canvas_retention,
             _rendering_context: rendering_context,
         })
@@ -369,6 +613,12 @@ impl DocumentSession {
 
     pub(crate) fn render(self) -> Result<DocumentOutcome, SessionError> {
         self.render_with_canvas_freezer(|keys| {
+            servo_canvas::retained_canvas::freeze_canvas_snapshots(keys)
+        })
+    }
+
+    pub(crate) fn capture(self) -> Result<DocumentCaptureOutcome, SessionError> {
+        self.capture_with_canvas_freezer(|keys| {
             servo_canvas::retained_canvas::freeze_canvas_snapshots(keys)
         })
     }
@@ -382,15 +632,32 @@ impl DocumentSession {
             servo_canvas::retained_canvas::FreezeCanvasSnapshotsError,
         >,
     ) -> Result<DocumentOutcome, SessionError> {
-        self.render_inner(freeze_canvas).map_err(|error| {
-            error.with_resources(
-                self.delegate.resources.borrow().entries.clone(),
-                self.delegate.resource_store.borrow().clone(),
+        self.capture_with_canvas_freezer(freeze_canvas)?.render()
+    }
+
+    fn capture_with_canvas_freezer(
+        self,
+        freeze_canvas: impl FnOnce(
+            &[(u32, u32)],
+        ) -> Result<
+            servo_canvas::retained_canvas::FrozenCanvasSnapshots,
+            servo_canvas::retained_canvas::FreezeCanvasSnapshotsError,
+        >,
+    ) -> Result<DocumentCaptureOutcome, SessionError> {
+        self.capture_inner(freeze_canvas).map_err(|mut error| {
+            error
+                .capture_evidence
+                .controlled_runtime_ms
+                .get_or_insert(self.controlled_runtime_started.elapsed().as_secs_f64() * 1000.0);
+            error.with_evidence(
+                std::mem::take(&mut self.delegate.resources.borrow_mut().entries),
+                self.delegate.resource_store.take(),
+                std::mem::take(&mut self.delegate.console.borrow_mut().entries),
             )
         })
     }
 
-    fn render_inner(
+    fn capture_inner(
         &self,
         freeze_canvas: impl FnOnce(
             &[(u32, u32)],
@@ -398,20 +665,20 @@ impl DocumentSession {
             servo_canvas::retained_canvas::FrozenCanvasSnapshots,
             servo_canvas::retained_canvas::FreezeCanvasSnapshotsError,
         >,
-    ) -> Result<DocumentOutcome, SessionError> {
+    ) -> Result<DocumentCaptureOutcome, SessionError> {
+        let mut capture_evidence = SessionCaptureEvidence::default();
         self.webview.show();
         self.spin_until("document load", || self.delegate.load_complete.get())?;
 
         let screenshot = Rc::new(RefCell::new(None));
         let screenshot_result = screenshot.clone();
         self.webview.take_screenshot(None, move |result| {
-            *screenshot_result.borrow_mut() =
-                Some(result.map(|_| ()).map_err(|error| format!("{error:?}")));
+            *screenshot_result.borrow_mut() = Some(result.map_err(|error| format!("{error:?}")));
         });
         self.spin_until_for("stable render", self.stable_render_timeout, || {
             screenshot.borrow().is_some()
         })?;
-        screenshot
+        let screenshot = screenshot
             .borrow_mut()
             .take()
             .ok_or_else(|| {
@@ -421,19 +688,52 @@ impl DocumentSession {
                 )
             })?
             .map_err(|message| SessionError::new("STABLE_RENDER_FAILED", message))?;
+        let mut stable_image_png = Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(screenshot)
+            .write_to(&mut stable_image_png, image::ImageFormat::Png)
+            .map_err(|error| {
+                SessionError::new(
+                    "STABLE_RENDER_ENCODE_FAILED",
+                    format!("cannot encode the stable Servo frame: {error}"),
+                )
+            })?;
+        capture_evidence.stable_image_png = Some(stable_image_png.into_inner());
         if !self.delegate.frame_ready.get() {
             return Err(SessionError::new(
                 "STABLE_RENDER_FAILED",
                 "Servo completed the barrier without producing a frame",
-            ));
-        }
-        let readiness = self.evaluate_readiness()?;
-        let snapshot = self.webview.debug_layout_snapshot().ok_or_else(|| {
-            SessionError::new(
-                "SCENE_CAPTURE_UNAVAILABLE",
-                "Servo did not expose a retained layout snapshot",
             )
-        })?;
+            .with_capture_evidence(capture_evidence));
+        }
+        let readiness = match self.evaluate_readiness() {
+            Ok(readiness) => readiness,
+            Err(error) => return Err(error.with_capture_evidence(capture_evidence)),
+        };
+        capture_evidence.readiness = Some(readiness);
+        let snapshot = match self.webview.debug_layout_snapshot() {
+            Some(snapshot) => snapshot,
+            None => {
+                return Err(SessionError::new(
+                    "SCENE_CAPTURE_UNAVAILABLE",
+                    "Servo did not expose a retained layout snapshot",
+                )
+                .with_capture_evidence(capture_evidence));
+            },
+        };
+        let layout_debug = match serde_json::from_str(&snapshot) {
+            Ok(layout_debug) => layout_debug,
+            Err(error) => {
+                return Err(SessionError::new(
+                    "SCENE_CAPTURE_LAYOUT_JSON_INVALID",
+                    error.to_string(),
+                )
+                .with_capture_evidence(capture_evidence));
+            },
+        };
+        capture_evidence.layout_debug = Some(layout_debug);
+        capture_evidence.controlled_runtime_ms =
+            Some(self.controlled_runtime_started.elapsed().as_secs_f64() * 1000.0);
+        let scene_capture_started = Instant::now();
         let capture = {
             let resources = self.delegate.resource_store.borrow();
             capture_document_scene_with_canvas(
@@ -441,97 +741,62 @@ impl DocumentSession {
                 |url| resources.resolve_url(url),
                 freeze_canvas,
             )
+        };
+        capture_evidence.scene_capture_ms =
+            Some(scene_capture_started.elapsed().as_secs_f64() * 1000.0);
+        let capture = match capture {
+            Ok(capture) => capture,
+            Err(error) => {
+                return Err(SessionError::new("SCENE_CAPTURE_FAILED", error.to_string())
+                    .with_capture_evidence(capture_evidence));
+            },
+        };
+        if let Err(message) = capture.scene.validate() {
+            return Err(SessionError::new("SCENE_CAPTURE_INVALID", message)
+                .with_capture_evidence(capture_evidence));
         }
-        .map_err(|error| SessionError::new("SCENE_CAPTURE_FAILED", error.to_string()))?;
-        capture
-            .scene
-            .validate()
-            .map_err(|message| SessionError::new("SCENE_CAPTURE_INVALID", message))?;
-        validate_host_font_policy(&capture, self.allow_host_fonts)?;
-        if !capture.unsupported_events.is_empty() || !capture.text_mapping_gaps.is_empty() {
-            return Err(SessionError::new(
-                "SCENE_CAPTURE_INCOMPLETE",
-                "captured scene contains unsupported paint or text mapping gaps",
-            ));
+        if let Err(error) = validate_host_font_policy(&capture, self.allow_host_fonts) {
+            return Err(error.with_capture_evidence(capture_evidence));
+        }
+        if let Err(error) = self.check_failure("document capture") {
+            return Err(error.with_capture_evidence(capture_evidence));
         }
 
-        let decoded_resources = capture
-            .font_resources
-            .iter()
-            .map(|resource| {
-                BASE64_STANDARD
-                    .decode(&resource.bytes_base64)
-                    .map(|bytes| (resource.resource.as_str(), bytes))
-                    .map_err(|error| {
-                        SessionError::new(
-                            "FONT_RESOURCE_INVALID",
-                            format!("cannot decode {}: {error}", resource.resource),
-                        )
-                    })
-            })
-            .collect::<Result<BTreeMap<_, _>, _>>()?;
-        let instances = capture
-            .font_instances
-            .iter()
-            .map(|instance| (instance.id.as_str(), instance))
-            .collect::<BTreeMap<_, _>>();
-        let variations = capture
-            .font_instances
-            .iter()
-            .map(|instance| {
-                (
-                    instance.id.as_str(),
-                    instance
-                        .variations
-                        .iter()
-                        .map(|variation| PdfFontVariation {
-                            tag: variation.tag,
-                            value: variation.value,
-                        })
-                        .collect::<Vec<_>>(),
-                )
-            })
-            .collect::<BTreeMap<_, _>>();
-        let image_resources = capture
-            .canvas_resources
-            .iter()
-            .chain(capture.embedded_image_resources.iter())
-            .map(|resource| (resource.resource.as_str(), resource.png.as_slice()))
-            .collect::<BTreeMap<_, _>>();
-        let pdf = {
-            let resources = self.delegate.resource_store.borrow();
-            render_document_pdf(
-                &capture.scene,
-                |font| {
-                    let instance = instances.get(font)?;
-                    Some(PdfFontResource {
-                        bytes: decoded_resources.get(instance.resource.as_str())?,
-                        face_index: instance.face_index,
-                        variations: variations.get(font)?,
-                        synthetic_bold: instance.synthetic_bold,
-                    })
-                },
-                |image| {
-                    image_resources
-                        .get(image)
-                        .copied()
-                        .or_else(|| resources.resolve_content(image))
-                },
-            )
-        }
-        .map_err(|error| SessionError::new("DOCUMENT_PDF_GENERATION_FAILED", error.to_string()))?;
+        let stable_image_png = capture_evidence
+            .stable_image_png
+            .take()
+            .expect("completed capture has a stable frame");
+        let readiness = capture_evidence
+            .readiness
+            .take()
+            .expect("completed capture has readiness evidence");
+        let layout_debug = capture_evidence
+            .layout_debug
+            .take()
+            .expect("completed capture has parsed layout evidence");
+        let controlled_runtime_ms = capture_evidence
+            .controlled_runtime_ms
+            .expect("completed capture has controlled-runtime timing");
+        let scene_capture_ms = capture_evidence
+            .scene_capture_ms
+            .expect("completed capture has scene-capture timing");
 
-        let resources = self.delegate.resources.borrow().entries.clone();
-        let resource_store = self.delegate.resource_store.borrow().clone();
-        Ok(DocumentOutcome {
+        let resources = std::mem::take(&mut self.delegate.resources.borrow_mut().entries);
+        let resource_store = self.delegate.resource_store.take();
+        let console = std::mem::take(&mut self.delegate.console.borrow_mut().entries);
+        Ok(DocumentCaptureOutcome {
             capture,
-            pdf,
+            stable_image_png,
+            layout_debug,
             environment: self.environment,
             allow_host_fonts: self.allow_host_fonts,
             readiness,
+            console,
             resource_accounting: ResourceAccounting::from_evidence(&resources),
             resources,
             resource_store,
+            controlled_runtime_ms,
+            scene_capture_ms,
         })
     }
 
@@ -572,18 +837,34 @@ impl DocumentSession {
             let evidence = serde_json::from_str(&snapshot).map_err(|error| {
                 SessionError::new("READINESS_INVALID_RESULT", error.to_string())
             })?;
-            match readiness::parse_snapshot(&snapshot)
-                .map_err(|error| SessionError::new("READINESS_INVALID_RESULT", error))?
-            {
+            let readiness = match readiness::parse_snapshot(&snapshot) {
+                Ok(readiness) => readiness,
+                Err(error) => {
+                    return Err(SessionError::new("READINESS_INVALID_RESULT", error)
+                        .with_capture_evidence(SessionCaptureEvidence {
+                            readiness: Some(evidence),
+                            ..Default::default()
+                        }));
+                },
+            };
+            match readiness {
                 Readiness::Ready { .. } => return Ok(evidence),
                 Readiness::Failed { error } => {
-                    return Err(SessionError::new(error.code, error.message));
+                    return Err(SessionError::new(error.code, error.message)
+                        .with_capture_evidence(SessionCaptureEvidence {
+                            readiness: Some(evidence),
+                            ..Default::default()
+                        }));
                 },
                 Readiness::Pending if Instant::now() >= deadline => {
                     return Err(SessionError::new(
                         "READINESS_TIMEOUT",
                         "document readiness did not settle before the host deadline",
-                    ));
+                    )
+                    .with_capture_evidence(SessionCaptureEvidence {
+                        readiness: Some(evidence),
+                        ..Default::default()
+                    }));
                 },
                 Readiness::Pending => {
                     self.servo.spin_event_loop();
@@ -630,6 +911,14 @@ impl DocumentSession {
         if let Some(reason) = self.delegate.resource_failure.borrow().as_ref() {
             return Err(SessionError::from_resource_failure(reason.clone()));
         }
+        if self.delegate.console.borrow().limit_exceeded {
+            return Err(SessionError::new(
+                "CONSOLE_OUTPUT_LIMIT_EXCEEDED",
+                format!(
+                    "document console exceeds the {MAX_CONSOLE_EVENTS}-event or {MAX_CONSOLE_BYTES}-byte evidence bound"
+                ),
+            ));
+        }
         Ok(())
     }
 }
@@ -666,12 +955,29 @@ fn stable_render_timeout(readiness: ReadinessPolicy) -> Result<Duration, Session
         .ok_or_else(|| SessionError::new("INVALID_REQUEST", "readiness timeout is too large"))
 }
 
+fn validate_session_timeouts(
+    readiness: ReadinessPolicy,
+    resource_timeout_ms: u64,
+) -> Result<Duration, SessionError> {
+    let stable_render_timeout = stable_render_timeout(readiness)?;
+    if !(1..=MAX_RESOURCE_TIMEOUT_MS).contains(&resource_timeout_ms) {
+        return Err(SessionError::new(
+            "INVALID_REQUEST",
+            format!(
+                "resource timeout must be between 1 and {MAX_RESOURCE_TIMEOUT_MS} milliseconds"
+            ),
+        ));
+    }
+    Ok(stable_render_timeout)
+}
+
 #[derive(Default)]
 struct DocumentDelegate {
     bundle_root: PathBuf,
     resource_policy: ResourcePolicy,
     controlled_http_client: OnceCell<net::connector::ServoClient>,
     resource_store: RefCell<OwnedResourceStore>,
+    console: RefCell<ConsoleEvidenceLog>,
     crashed: RefCell<Option<String>>,
     frame_ready: Cell<bool>,
     load_complete: Cell<bool>,
@@ -683,6 +989,12 @@ struct DocumentDelegate {
 }
 
 impl WebViewDelegate for DocumentDelegate {
+    fn show_console_message(&self, _webview: WebView, level: ConsoleLogLevel, message: String) {
+        self.console
+            .borrow_mut()
+            .push(format!("{level:?}").to_ascii_lowercase(), message);
+    }
+
     fn notify_new_frame_ready(&self, webview: WebView) {
         self.frame_ready.set(true);
         webview.paint();
@@ -983,10 +1295,12 @@ mod tests {
         ResourceAccounting, ResourceEvidence, ResourcePolicy, ResourcePolicyFailure,
         ResourceRequest, ResourceSource, ResponseHeaderEvidence, VirtualResourceSpec,
     };
+    use super::super::session::LocalDocument;
     use super::{
-        DocumentSession, RESOURCE_EVIDENCE_ENTRY_OVERHEAD_BYTES, ReadinessPolicy,
-        RenderEnvironment, ResourceEvidenceLog, ResourcePolicyConfig, SessionError,
-        stable_render_timeout, validate_host_font_policy, validate_resource_policy,
+        ConsoleEvidenceLog, DocumentSession, MAX_CONSOLE_BYTES, MAX_CONSOLE_EVENTS,
+        RESOURCE_EVIDENCE_ENTRY_OVERHEAD_BYTES, ReadinessPolicy, RenderEnvironment,
+        ResourceEvidenceLog, ResourcePolicyConfig, SessionError, stable_render_timeout,
+        validate_host_font_policy, validate_resource_policy,
     };
 
     const ISOLATED_CASE_ENV: &str = "PLIEGO_DOCUMENT_SESSION_FIXTURE";
@@ -1582,6 +1896,13 @@ window.pliego?.defer();
             .unwrap()
     }
 
+    fn png_dimensions(bytes: &[u8]) -> (u32, u32) {
+        image::load_from_memory(bytes)
+            .expect("retained stable frame should decode as an image")
+            .to_rgba8()
+            .dimensions()
+    }
+
     fn session_fixture(name: &str) -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/document-session")
@@ -1642,11 +1963,31 @@ window.pliego?.defer();
     }
 
     #[test]
+    fn console_evidence_is_bounded_before_retention() {
+        let mut events = ConsoleEvidenceLog::default();
+        for index in 0..MAX_CONSOLE_EVENTS {
+            events.push("info".into(), index.to_string());
+        }
+        assert_eq!(events.entries.len(), MAX_CONSOLE_EVENTS);
+        assert!(!events.limit_exceeded);
+        events.push("info".into(), "excess".into());
+        assert_eq!(events.entries.len(), MAX_CONSOLE_EVENTS);
+        assert!(events.limit_exceeded);
+
+        let mut bytes = ConsoleEvidenceLog::default();
+        bytes.push("info".into(), "x".repeat(MAX_CONSOLE_BYTES as usize));
+        assert!(bytes.entries.is_empty());
+        assert!(bytes.limit_exceeded);
+    }
+
+    #[test]
     fn resource_and_readiness_fixtures_are_evidenced_and_fail_closed() {
         let mut server = FixtureServer::start();
         for case in [
             "constructor-recovery",
+            "console-evidence",
             "local-success",
+            "resolved-root",
             "virtual-success",
             "asset-cache",
             "allowed-url",
@@ -1767,6 +2108,29 @@ window.pliego?.defer();
                 .unwrap(),
             "local-success" | "denied-url" | "explicit-fail" | "defer-timeout" => {
                 session_fixture(&format!("{case}.html"))
+            },
+            "console-evidence" => {
+                let bundle = TempBundle::new(case.as_str());
+                let input = bundle.write(
+                    "input.html",
+                    "<!doctype html><script>console.info('capture-first');console.error('capture-second');window.pliego?.ready({fixture:'console-evidence'});</script>",
+                );
+                _bundle = Some(bundle);
+                input
+            },
+            "resolved-root" => {
+                let bundle = TempBundle::new(case.as_str());
+                fs::create_dir_all(bundle.0.join("sub")).unwrap();
+                bundle.write(
+                    "sibling.js",
+                    "window.pliego?.ready({fixture:'resolved-root'});",
+                );
+                let input = bundle.write(
+                    "sub/input.html",
+                    "<!doctype html><script src='../sibling.js'></script>",
+                );
+                _bundle = Some(bundle);
+                input
             },
             "virtual-success" => {
                 resources.virtual_resources.push(VirtualResourceSpec {
@@ -2016,7 +2380,22 @@ window.pliego?.defer();
             )),
             _ => None,
         };
-        let session = if case == "canvas-retention-budget" {
+        let session = if case == "resolved-root" {
+            let root = input
+                .parent()
+                .and_then(Path::parent)
+                .expect("resolved-root fixture should have a nested input");
+            let document = LocalDocument::resolve(root, "sub/input.html").unwrap();
+            let resource_policy = ResourcePolicy::resolve(&resources, document.root());
+            DocumentSession::from_resolved(
+                &document,
+                resource_policy,
+                environment,
+                page,
+                allow_host_fonts,
+                readiness,
+            )
+        } else if case == "canvas-retention-budget" {
             DocumentSession::new_with_canvas_retention_limits(
                 &input,
                 environment,
@@ -2051,6 +2430,27 @@ window.pliego?.defer();
                     observed.store(true, Ordering::SeqCst);
                 }
             }));
+        }
+        if case == "console-evidence" {
+            let capture = session
+                .expect("console evidence fixture should construct")
+                .capture()
+                .expect("console evidence fixture should capture");
+            let console = capture
+                .console
+                .iter()
+                .filter(|(_, message)| message.starts_with("capture-"))
+                .cloned()
+                .collect::<Vec<_>>();
+            assert_eq!(
+                console,
+                vec![
+                    ("info".into(), "capture-first".into()),
+                    ("error".into(), "capture-second".into()),
+                ]
+            );
+            assert_eq!(capture.readiness["payload"]["fixture"], "console-evidence");
+            return;
         }
         let result = session.and_then(|session| {
             if case == "canvas-missing-snapshot" {
@@ -2100,6 +2500,23 @@ window.pliego?.defer();
                         Some(&content_address(&body)[7..])
                     );
                 }
+            },
+            "resolved-root" => {
+                let outcome = result.expect("resolved root fixture should render");
+                assert_eq!(outcome.readiness["payload"]["fixture"], "resolved-root");
+                let sibling = input
+                    .parent()
+                    .and_then(Path::parent)
+                    .unwrap()
+                    .join("sibling.js");
+                let sibling_url = url::Url::from_file_path(&sibling).unwrap();
+                let evidence = outcome
+                    .resources
+                    .iter()
+                    .find(|resource| resource.request.url == sibling_url)
+                    .expect("sibling resource under the resolved document root should load");
+                assert_eq!(evidence.source, Some(ResourceSource::DocumentRoot));
+                assert_eq!(evidence.status, "loaded");
             },
             "virtual-success" => {
                 let outcome = result.expect("virtual resource fixture should render");
@@ -2425,6 +2842,28 @@ window.pliego?.defer();
                 assert_eq!(error.resource_accounting.requests, 1);
                 assert_eq!(error.resource_accounting.loaded, 1);
                 assert_eq!(error.resource_accounting.failed, 0);
+                assert_eq!(
+                    png_dimensions(
+                        error
+                            .capture_evidence
+                            .stable_image_png
+                            .as_deref()
+                            .expect("failed readiness should retain the stable frame")
+                    ),
+                    (794, 1123)
+                );
+                assert_eq!(
+                    error.capture_evidence.readiness.as_ref().unwrap()["status"],
+                    "failed"
+                );
+                assert!(error.capture_evidence.layout_debug.is_none());
+                assert!(
+                    error
+                        .capture_evidence
+                        .controlled_runtime_ms
+                        .is_some_and(|milliseconds| milliseconds.is_finite() && milliseconds >= 0.0)
+                );
+                assert!(error.capture_evidence.scene_capture_ms.is_none());
             },
             "defer-timeout" => {
                 let Err(error) = result else {
@@ -2534,6 +2973,39 @@ window.pliego?.defer();
                 assert_eq!(error.code, "SCENE_CAPTURE_FAILED");
                 assert!(error.message.contains("fill_rect"), "{}", error.message);
                 assert!(error.message.contains("transform"), "{}", error.message);
+                assert_eq!(
+                    png_dimensions(
+                        error
+                            .capture_evidence
+                            .stable_image_png
+                            .as_deref()
+                            .expect("scene failure should retain the stable frame")
+                    ),
+                    (200, 160)
+                );
+                assert_eq!(
+                    error.capture_evidence.readiness.as_ref().unwrap()["status"],
+                    "ready"
+                );
+                assert!(
+                    error
+                        .capture_evidence
+                        .layout_debug
+                        .as_ref()
+                        .is_some_and(serde_json::Value::is_object)
+                );
+                assert!(
+                    error
+                        .capture_evidence
+                        .controlled_runtime_ms
+                        .is_some_and(|milliseconds| milliseconds.is_finite() && milliseconds >= 0.0)
+                );
+                assert!(
+                    error
+                        .capture_evidence
+                        .scene_capture_ms
+                        .is_some_and(|milliseconds| milliseconds.is_finite() && milliseconds >= 0.0)
+                );
             },
             "canvas-retention-budget" => {
                 let Err(error) = result else {
@@ -2660,7 +3132,7 @@ window.pliego?.defer();
             AHEM_SOURCE_RESOURCE,
         );
 
-        let outcome = DocumentSession::new(
+        let capture = DocumentSession::new(
             &input,
             RenderEnvironment::default(),
             a4(),
@@ -2668,7 +3140,14 @@ window.pliego?.defer();
             false,
             ReadinessPolicy::default(),
         )?
-        .render()?;
+        .capture()?;
+        assert_eq!(png_dimensions(&capture.stable_image_png), (794, 1123));
+        assert!(capture.layout_debug.is_object());
+        assert!(capture.controlled_runtime_ms.is_finite());
+        assert!(capture.controlled_runtime_ms >= 0.0);
+        assert!(capture.scene_capture_ms.is_finite());
+        assert!(capture.scene_capture_ms >= 0.0);
+        let outcome = capture.render()?;
         assert_eq!(outcome.readiness["status"], "ready");
         assert_eq!(outcome.readiness["payload"], serde_json::Value::Null);
         assert_eq!(outcome.readiness["font_status"], "loaded");

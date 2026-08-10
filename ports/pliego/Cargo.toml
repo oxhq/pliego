@@ -14,7 +14,7 @@ path = "src/scene.rs"
 
 [features]
 default = ["shell"]
-document-session = ["dep:data-url", "dep:dpi", "dep:layout", "dep:servo"]
+document-session = ["dep:data-url", "dep:dpi", "dep:image", "dep:layout", "dep:servo"]
 shell = ["dep:layout", "dep:servoshell"]
 
 [[bin]]
@@ -31,6 +31,7 @@ http = { workspace = true }
 http-body-util = { workspace = true }
 hyper = { workspace = true }
 imagesize = "0.14.0"
+image = { workspace = true, default-features = false, features = ["png"], optional = true }
 libc = { workspace = true }
 krilla = { version = "0.8.2", default-features = false, features = ["raster-images"] }
 layout = { workspace = true, optional = true }
