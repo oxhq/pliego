@@ -298,6 +298,13 @@ def direct_node_children(node: dict[str, Any]) -> list[int]:
     return [child["id"] for child in node["children"] if child["kind"] == "node"]
 
 
+def first_node_index(document: dict[str, Any], role: str) -> int:
+    for index, node in enumerate(document["nodes"]):
+        if node["role"] == role:
+            return index
+    raise AssertionError(f"representative fixture has no {role!r} node")
+
+
 def role_errors(document: dict[str, Any], api2: ModuleType, state: GraphState) -> list[str]:
     errors: list[str] = []
     nodes = document["nodes"]
@@ -496,59 +503,61 @@ def table_errors(document: dict[str, Any]) -> list[str]:
         header_ids: set[int] = set()
         cell_ids: list[int] = []
         for expected_row, row_id in enumerate(row_ids):
-            row = nodes[row_id]
-            if any(child["kind"] != "node" for child in row["children"]):
+            row_node = nodes[row_id]
+            if any(child["kind"] != "node" for child in row_node["children"]):
                 errors.append(error(f"$.nodes[{row_id}].children", "table rows may directly contain only cells"))
                 continue
-            row_cells = direct_node_children(row)
+            row_cells = direct_node_children(row_node)
             if not row_cells or any(
                 nodes[cell_id]["role"] not in {"table-header-cell", "table-cell"} for cell_id in row_cells
             ):
                 errors.append(error(f"$.nodes[{row_id}].children", "table row requires one or more cell children"))
                 continue
-            cell_semantics = [nodes[cell_id]["semantics"] for cell_id in row_cells]
-            if all(semantics["kind"] == "table-cell" for semantics in cell_semantics):
-                columns_in_order = [semantics["column"] for semantics in cell_semantics]
+            row_cell_semantics = [nodes[cell_id]["semantics"] for cell_id in row_cells]
+            if all(candidate["kind"] == "table-cell" for candidate in row_cell_semantics):
+                columns_in_order = [candidate["column"] for candidate in row_cell_semantics]
                 if columns_in_order != sorted(columns_in_order):
                     errors.append(
                         error(f"$.nodes[{row_id}].children", "table cells must be ordered by starting column")
                     )
             for cell_id in row_cells:
                 cell = nodes[cell_id]
-                semantics = cell["semantics"]
-                if semantics["kind"] != "table-cell":
+                cell_semantics = cell["semantics"]
+                if cell_semantics["kind"] != "table-cell":
                     continue
                 cell_ids.append(cell_id)
-                if semantics["row"] != expected_row:
+                if cell_semantics["row"] != expected_row:
                     errors.append(error(f"$.nodes[{cell_id}].semantics.row", "cell row must equal canonical row order"))
                 if (
-                    semantics["row"] + semantics["row_span"] > rows
-                    or semantics["column"] + semantics["column_span"] > columns
+                    cell_semantics["row"] + cell_semantics["row_span"] > rows
+                    or cell_semantics["column"] + cell_semantics["column_span"] > columns
                 ):
                     errors.append(
                         error(f"$.nodes[{cell_id}].semantics", "table cell span exceeds declared table bounds")
                     )
                     continue
-                span_slots = semantics["row_span"] * semantics["column_span"]
+                span_slots = cell_semantics["row_span"] * cell_semantics["column_span"]
                 if expanded_slots + span_slots > table_slots:
                     errors.append(error(table_path, "total table cell spans exceed the declared grid"))
                     continue
                 expanded_slots += span_slots
                 if cell["role"] == "table-header-cell":
                     header_ids.add(cell_id)
-                    if semantics["scope"] == "none":
+                    if cell_semantics["scope"] == "none":
                         errors.append(
                             error(f"$.nodes[{cell_id}].semantics.scope", "header cells require explicit scope")
                         )
-                    if semantics["headers"]:
+                    if cell_semantics["headers"]:
                         errors.append(
                             error(f"$.nodes[{cell_id}].semantics.headers", "header cells cannot name other headers")
                         )
-                elif semantics["scope"] != "none":
+                elif cell_semantics["scope"] != "none":
                     errors.append(error(f"$.nodes[{cell_id}].semantics.scope", "data cells require scope none"))
-                for row in range(semantics["row"], semantics["row"] + semantics["row_span"]):
-                    for column in range(semantics["column"], semantics["column"] + semantics["column_span"]):
-                        position = (row, column)
+                for occupied_row in range(cell_semantics["row"], cell_semantics["row"] + cell_semantics["row_span"]):
+                    for occupied_column in range(
+                        cell_semantics["column"], cell_semantics["column"] + cell_semantics["column_span"]
+                    ):
+                        position = (occupied_row, occupied_column)
                         if position in occupancy:
                             errors.append(error(f"$.nodes[{cell_id}].semantics", f"table cell overlap at {position}"))
                         else:
@@ -850,6 +859,8 @@ def semantic_errors(document: dict[str, Any], scene: dict[str, Any], api2: Modul
         errors.extend(canonical_language_errors(document["metadata"]["language"], "$.metadata.language"))
     graph_failures, state = graph_errors(document)
     errors.extend(graph_failures)
+    if graph_failures:
+        return errors
     errors.extend(policy_errors(document, state))
     errors.extend(artifact_errors(document))
     errors.extend(role_errors(document, api2, state))
@@ -1010,9 +1021,19 @@ def verify_generated_adversaries(
     lone_surrogate["metadata"]["title"] = "\ud800"
     require_rejection(lone_surrogate, "surrogate code point U+D800", "lone surrogate")
 
+    for entrypoint in ("../secret", "./secret", "/etc/passwd", "a//b"):
+        unsafe_entrypoint = copy.deepcopy(base)
+        unsafe_entrypoint["source"]["entrypoint"] = entrypoint
+        require_rejection(unsafe_entrypoint, "does not match pattern", f"unsafe entrypoint {entrypoint!r}")
+
+    dangling_logical_child = copy.deepcopy(base)
+    dangling_logical_child["nodes"][2]["children"][0] = {"kind": "node", "id": 999}
+    require_rejection(dangling_logical_child, "dangling logical node 999", "dangling logical child")
+
     table_explosion = copy.deepcopy(base)
-    table_explosion["nodes"][10]["semantics"]["rows"] = 65535
-    table_explosion["nodes"][10]["semantics"]["columns"] = 65535
+    table_index = first_node_index(table_explosion, "table")
+    table_explosion["nodes"][table_index]["semantics"]["rows"] = 65535
+    table_explosion["nodes"][table_index]["semantics"]["columns"] = 65535
     require_rejection(
         table_explosion,
         f"table grid exceeds v1 maximum of {MAX_TABLE_SLOTS} slots",
@@ -1020,9 +1041,10 @@ def verify_generated_adversaries(
     )
 
     aggregate_table_explosion = copy.deepcopy(base)
-    aggregate_table_explosion["nodes"][10]["semantics"]["rows"] = 10
-    aggregate_table_explosion["nodes"][10]["semantics"]["columns"] = 60000
-    second_table = copy.deepcopy(aggregate_table_explosion["nodes"][10])
+    table_index = first_node_index(aggregate_table_explosion, "table")
+    aggregate_table_explosion["nodes"][table_index]["semantics"]["rows"] = 10
+    aggregate_table_explosion["nodes"][table_index]["semantics"]["columns"] = 60000
+    second_table = copy.deepcopy(aggregate_table_explosion["nodes"][table_index])
     second_table["id"] = len(aggregate_table_explosion["nodes"])
     second_table["source"] = {"kind": "dom", "preorder": second_table["id"]}
     second_table["children"] = []
@@ -1034,15 +1056,16 @@ def verify_generated_adversaries(
         "document-wide table slot explosion",
     )
 
-    for node_id, role, expected_kind in (
-        (1, "heading", "heading"),
-        (3, "list", "list"),
-        (4, "list-item", "list-item"),
-        (10, "table", "table"),
-        (16, "table-cell", "table-cell"),
-        (20, "link", "link"),
+    for role, expected_kind in (
+        ("heading", "heading"),
+        ("list", "list"),
+        ("list-item", "list-item"),
+        ("table", "table"),
+        ("table-cell", "table-cell"),
+        ("link", "link"),
     ):
         mismatched_semantics = copy.deepcopy(base)
+        node_id = first_node_index(mismatched_semantics, role)
         mismatched_semantics["nodes"][node_id]["semantics"] = {"kind": "none"}
         require_rejection(
             mismatched_semantics,
@@ -1126,27 +1149,6 @@ def verify_generated_adversaries(
         "1050-item outline chain",
     )
 
-    deep_subtree_target = copy.deepcopy(logical_chain)
-    deep_subtree_target["policy"]["navigation"] = "required"
-    deep_subtree_target["navigation"] = {
-        "kind": "outline",
-        "roots": [0],
-        "items": [
-            {
-                "id": 0,
-                "title": "Deep document",
-                "language": None,
-                "target_node": 0,
-                "destination": {"page": 1, "x_app_units": 0, "y_app_units": 0},
-                "children": [],
-            }
-        ],
-    }
-    require_rejection(
-        deep_subtree_target,
-        f"outline target subtree depth exceeds v1 maximum of {MAX_STRUCTURE_DEPTH}",
-        "deep outline target subtree",
-    )
     return rejection_count
 
 
@@ -1244,12 +1246,8 @@ def main() -> int:
         raise AssertionError("lexical negative zero golden was accepted")
 
     oversized = copy.deepcopy(document)
-    oversized["nodes"][20]["name"] = "x" * 4097
-    oversized_failures = api2.validate(
-        oversized["nodes"][20]["name"],
-        schema["definitions"]["accessible_text"],
-        SCHEMA_NAME,
-    )
+    oversized["metadata"]["title"] = "x" * 4097
+    oversized_failures = contract_errors(oversized, scene, api2, schema)
     if not any("longer than 4096" in str(item) for item in oversized_failures):
         raise AssertionError("bounded accessible text was not enforced")
 

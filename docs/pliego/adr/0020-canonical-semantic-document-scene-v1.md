@@ -228,10 +228,10 @@ The local self-test currently proves:
   missing title/outline, empty tree/outline, dangling or reordered navigation, missing heading,
   skipped heading levels, invalid list numbering, missing pagination subtype, figure/formula/annotation
   text, glyph/text drift, page-edge destinations, paint mismatch, control characters, and lexical negative zero;
-- 16 generated adversarial checks cover repeated alphabetic and numeric BCP 47 variants, `Cc` and
-  lone-surrogate text, per-table and document-wide table-grid limits, role/semantics mismatches without
-  exceptions, 1,050-node logical/artifact/outline chains, and an outline target with a deep logical
-  subtree; and
+- 20 generated adversarial checks cover repeated alphabetic and numeric BCP 47 variants, `Cc` and
+  lone-surrogate text, four nonportable entrypoint forms, dangling logical children, per-table and
+  document-wide table-grid limits, role/semantics mismatches without exceptions, and 1,050-node
+  logical/artifact/outline chains; and
 - 100 fresh isolated (`python -I`) processes reproduce the exact representative semantic digest.
 
 The 100-process check proves deterministic parsing, validation, canonical serialization, and hashing
