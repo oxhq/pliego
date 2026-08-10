@@ -17,6 +17,7 @@ on:
       - "components/servo/**"
       - "components/shared/fonts/**"
       - "components/shared/script/**"
+      - "benchmarks/fixtures/minimal-static/**"
   pull_request:
     paths: *document-session-paths
   workflow_dispatch:

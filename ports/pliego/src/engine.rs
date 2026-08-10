@@ -203,18 +203,22 @@ mod tests {
     ))]
     #[test]
     fn session_failures_preserve_the_engine_error_classes() {
-        let request_error: RenderError = super::super::document_session::DocumentSession::new(
+        let request_error = super::super::document_session::DocumentSession::new(
             "__pliego_document_session_missing__.html",
             crate::default_page(),
         )
         .err()
-        .expect("missing input should return a session error")
-        .into();
+        .expect("missing input should return a session error");
+        let expected_request_message = request_error.message.clone();
+        let request_error: RenderError = request_error.into();
 
         assert_eq!(request_error.code, "INVALID_REQUEST");
+        assert_eq!(request_error.message, expected_request_message);
         assert_eq!(request_error.exit_code, 2);
         assert_eq!(request_error.artifacts, None);
         assert_eq!(request_error.document_pdf, None);
+        assert_eq!(request_error.render_id, None);
+        assert!(request_error.warnings.is_empty());
 
         let layout_error: RenderError = super::super::document_session::SessionError::new(
             "LAYOUT_CONFIGURATION_FAILED",
@@ -222,7 +226,12 @@ mod tests {
         )
         .into();
         assert_eq!(layout_error.code, "LAYOUT_CONFIGURATION_FAILED");
+        assert_eq!(layout_error.message, "already configured");
         assert_eq!(layout_error.exit_code, 1);
+        assert_eq!(layout_error.artifacts, None);
+        assert_eq!(layout_error.document_pdf, None);
+        assert_eq!(layout_error.render_id, None);
+        assert!(layout_error.warnings.is_empty());
 
         let session_error: RenderError =
             super::super::document_session::SessionError::new("RESOURCE_DENIED", "blocked").into();
@@ -232,5 +241,7 @@ mod tests {
         assert_eq!(session_error.exit_code, 1);
         assert_eq!(session_error.artifacts, None);
         assert_eq!(session_error.document_pdf, None);
+        assert_eq!(session_error.render_id, None);
+        assert!(session_error.warnings.is_empty());
     }
 }

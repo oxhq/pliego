@@ -416,6 +416,11 @@ mod tests {
     // report-sha=9035533ede8e0b7585b5a4625cec5e2e6abe049d79b8a7a5f4edaad89e9aec32
     // repeats=2. Published 0.1.1 binary 632ab7ca4ccd931b392593a9f0f5673cce543891d758fa7737bb859c8244ad27
     // is a diagnostic non-oracle: it omitted the anchor link on this newer input.
+    // Regenerate only from a retained same-input differential proof, never from this test alone:
+    // python3 benchmarks/tools/compare_parity.py --baseline <pre-session-servoshell-binary>
+    //   --candidate <candidate-binary> --fixture minimal-static --repeat 2
+    //   --out report-seven-exact.json
+    // Copy new digests only after the report has zero problems, then update all provenance above.
     const PRE_SESSION_SCENE: &str =
         "sha256:a2854099b0a11e766cad6eaeca8a76f45d2d77654fa02bb8504294c16cefc4f2";
     const PRE_SESSION_PDF: &str =
