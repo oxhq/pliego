@@ -9,7 +9,9 @@ use std::sync::Arc;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use serde::{Deserialize, Serialize};
-use servo_canvas::retained_canvas::RetainedCanvasSnapshot;
+use servo_canvas::retained_canvas::{
+    FreezeCanvasSnapshotsError, FrozenCanvasSnapshots, RetainedCanvasSnapshot,
+};
 use sha2::{Digest, Sha256};
 use vello_cpu::kurbo::{BezPath, Shape};
 
@@ -241,6 +243,7 @@ pub enum CaptureError {
         sequence: usize,
         message: String,
     },
+    CanvasRetentionBudgetExceeded,
     CanvasCaptureLimitExceeded {
         sequence: usize,
         limit: CanvasCaptureLimit,
@@ -421,6 +424,9 @@ impl fmt::Display for CaptureError {
                     formatter,
                     "Canvas paint event {sequence} cannot be retained: {message}"
                 )
+            },
+            Self::CanvasRetentionBudgetExceeded => {
+                formatter.write_str("live Canvas retention exceeded the session budget")
             },
             Self::CanvasCaptureLimitExceeded {
                 sequence,
@@ -622,37 +628,90 @@ pub fn capture_document_scene(
     snapshot_json: &[u8],
     resolve_image: impl FnMut(&str) -> Option<String>,
 ) -> Result<SceneCapture, CaptureError> {
-    capture_document_scene_with_canvas(snapshot_json, resolve_image, |key| {
-        Err(format!(
-            "no live snapshot resolver for image key {}:{}",
-            key.namespace, key.key
-        ))
-    })
+    capture_document_scene_with_canvas_limits(
+        snapshot_json,
+        resolve_image,
+        |key| {
+            Err(format!(
+                "no live snapshot resolver for image key {}:{}",
+                key.namespace, key.key
+            ))
+        },
+        DEFAULT_CANVAS_CAPTURE_LIMITS,
+    )
 }
 
 pub fn capture_document_scene_with_canvas(
     snapshot_json: &[u8],
     resolve_image: impl FnMut(&str) -> Option<String>,
-    resolve_canvas: impl FnMut(CapturedCanvasImageKey) -> Result<Arc<RetainedCanvasSnapshot>, String>,
+    freeze_canvas: impl FnOnce(
+        &[(u32, u32)],
+    ) -> Result<FrozenCanvasSnapshots, FreezeCanvasSnapshotsError>,
 ) -> Result<SceneCapture, CaptureError> {
-    capture_document_scene_with_canvas_limits(
-        snapshot_json,
+    let capture: LayoutCapture = serde_json::from_slice(snapshot_json)
+        .map_err(|error| CaptureError::InvalidJson(error.to_string()))?;
+    let requests = canvas_freeze_requests(&capture);
+    let first_sequence = requests.first().map_or(0, |(sequence, _)| *sequence);
+    let requested_keys = requests
+        .iter()
+        .map(|(_, key)| (key.namespace, key.key))
+        .collect::<Vec<_>>();
+    let frozen_canvas = freeze_canvas(&requested_keys).map_err(|error| CaptureError::Canvas {
+        sequence: first_sequence,
+        message: error.to_string(),
+    })?;
+    if frozen_canvas.retention_budget_exceeded() {
+        return Err(CaptureError::CanvasRetentionBudgetExceeded);
+    }
+    capture_layout_with_canvas_limits(
+        capture,
         resolve_image,
-        resolve_canvas,
+        move |key| {
+            frozen_canvas.get(key.namespace, key.key).ok_or_else(|| {
+                format!(
+                    "frozen Canvas snapshot bundle omitted requested image key {}:{}",
+                    key.namespace, key.key
+                )
+            })
+        },
         DEFAULT_CANVAS_CAPTURE_LIMITS,
     )
 }
 
+fn canvas_freeze_requests(capture: &LayoutCapture) -> Vec<(usize, CapturedCanvasImageKey)> {
+    let by_fragment = capture
+        .fragments
+        .iter()
+        .filter(|fragment| fragment.kind == "image" && fragment.vector_image.is_none())
+        .filter_map(|fragment| Some((fragment.paint_fragment_id?, fragment.canvas_image_key?)))
+        .collect::<HashMap<_, _>>();
+    capture
+        .paint_events
+        .iter()
+        .filter(|event| event.kind == "image")
+        .filter_map(|event| Some((event.sequence, *by_fragment.get(&event.fragment_id?)?)))
+        .collect()
+}
+
 fn capture_document_scene_with_canvas_limits(
     snapshot_json: &[u8],
+    resolve_image: impl FnMut(&str) -> Option<String>,
+    resolve_canvas: impl FnMut(CapturedCanvasImageKey) -> Result<Arc<RetainedCanvasSnapshot>, String>,
+    canvas_limits: CanvasCaptureLimits,
+) -> Result<SceneCapture, CaptureError> {
+    let capture: LayoutCapture = serde_json::from_slice(snapshot_json)
+        .map_err(|error| CaptureError::InvalidJson(error.to_string()))?;
+    capture_layout_with_canvas_limits(capture, resolve_image, resolve_canvas, canvas_limits)
+}
+
+fn capture_layout_with_canvas_limits(
+    capture: LayoutCapture,
     mut resolve_image: impl FnMut(&str) -> Option<String>,
     mut resolve_canvas: impl FnMut(
         CapturedCanvasImageKey,
     ) -> Result<Arc<RetainedCanvasSnapshot>, String>,
     canvas_limits: CanvasCaptureLimits,
 ) -> Result<SceneCapture, CaptureError> {
-    let capture: LayoutCapture = serde_json::from_slice(snapshot_json)
-        .map_err(|error| CaptureError::InvalidJson(error.to_string()))?;
     let pages = capture_pages(&capture)?;
     let table_group_repeats = capture
         .page_sequence

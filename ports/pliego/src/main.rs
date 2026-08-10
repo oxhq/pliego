@@ -998,14 +998,6 @@ fn render(request: RenderRequest) -> Result<RenderOutcome, RenderError> {
             )
         })?;
     let layout_debug_path = artifacts.directory().join("layout-debug.json");
-    if servo_canvas::retained_canvas::retention_budget_exceeded() {
-        return Err(fail_session(
-            &artifacts,
-            &document_pdf_path,
-            "SCENE_CAPTURE_FAILED",
-            "live Canvas retention exceeded the session budget",
-        ));
-    }
     let mut resource_resolution_error = None;
     let scene_capture_started = Instant::now();
     let scene_capture = capture_document_scene_with_canvas(
@@ -1022,15 +1014,7 @@ fn render(request: RenderRequest) -> Result<RenderOutcome, RenderError> {
                 },
             }
         },
-        |key| {
-            servo_canvas::retained_canvas::snapshot_for_image_key(key.namespace, key.key)
-                .ok_or_else(|| {
-                    format!(
-                        "no retained command snapshot for image key {}:{}",
-                        key.namespace, key.key
-                    )
-                })
-        },
+        |keys| servo_canvas::retained_canvas::freeze_canvas_snapshots(keys.iter().copied()),
     );
     if let Some(error) = resource_resolution_error {
         return Err(fail_session(
