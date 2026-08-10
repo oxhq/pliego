@@ -46,7 +46,16 @@ pub enum DocumentClockConfiguration {
     #[default]
     Realtime,
     /// Start a controlled clock at the supplied integer nanosecond offset.
-    Controlled { initial_time_ns: u64 },
+    Controlled {
+        /// Initial monotonic time in this document-clock domain.
+        initial_time_ns: u64,
+        /// Unix time, in nanoseconds, corresponding to [`DocumentTime::ZERO`].
+        ///
+        /// This is deliberately configuration rather than host time so JavaScript wall time and
+        /// monotonic DOM time advance together without consulting the host clock.
+        #[serde(default)]
+        unix_time_origin_ns: u64,
+    },
 }
 
 /// An integer nanosecond offset in one document clock domain.
@@ -98,6 +107,17 @@ impl DocumentTime {
     pub fn saturating_duration_since(self, earlier: Self) -> Duration {
         Duration::from_nanos(self.0.saturating_sub(earlier.0))
     }
+
+    /// Return the duration since an earlier offset without hiding a mismatched or future origin.
+    pub fn checked_duration_since(self, earlier: Self) -> Result<Duration, DocumentClockError> {
+        self.0
+            .checked_sub(earlier.0)
+            .map(Duration::from_nanos)
+            .ok_or(DocumentClockError::TimeMovedBackwards {
+                current: earlier,
+                requested: self,
+            })
+    }
 }
 
 /// Document-observable surfaces that eventually need to share one controlled clock.
@@ -107,16 +127,20 @@ pub enum DocumentTimeSurface {
     WindowTimers,
     /// A same-event-loop nested browsing context.
     SameEventLoopIframe,
-    /// JavaScript `Date`.
+    /// JavaScript `Date` in a Window realm.
     JavaScriptDate,
-    /// The Performance API.
+    /// `performance.now()` and `performance.timeOrigin` in a Window realm.
     Performance,
+    /// A DOM high-resolution timestamp supplied by a host or another process.
+    HostTimestamp,
     /// Animation-frame timestamps and scheduling.
     AnimationFrame,
     /// CSS and Web Animations document timelines.
     DocumentTimeline,
     /// Dedicated, shared, or service workers.
     Worker,
+    /// A worklet running on another event loop.
+    Worklet,
     /// A nested browsing context hosted by another script event loop.
     CrossEventLoopIframe,
 }
@@ -135,7 +159,7 @@ pub enum DocumentClockError {
     },
     /// An integer nanosecond conversion or calculation overflowed.
     Overflow,
-    /// This U1 clock slice does not yet control the requested observable surface.
+    /// The current clock slices do not yet control the requested observable surface.
     UnsupportedSurface(DocumentTimeSurface),
 }
 
@@ -164,7 +188,10 @@ impl std::error::Error for DocumentClockError {}
 
 enum DocumentClockInner {
     Realtime { origin: Instant },
-    Controlled { now_ns: AtomicU64 },
+    Controlled {
+        now_ns: AtomicU64,
+        unix_time_origin_ns: u64,
+    },
 }
 
 /// One clonable clock shared by the timer scheduler and every same-event-loop Window realm.
@@ -187,10 +214,12 @@ impl DocumentClock {
             DocumentClockConfiguration::Realtime => DocumentClockInner::Realtime {
                 origin: Instant::now(),
             },
-            DocumentClockConfiguration::Controlled { initial_time_ns } => {
-                DocumentClockInner::Controlled {
-                    now_ns: AtomicU64::new(initial_time_ns),
-                }
+            DocumentClockConfiguration::Controlled {
+                initial_time_ns,
+                unix_time_origin_ns,
+            } => DocumentClockInner::Controlled {
+                now_ns: AtomicU64::new(initial_time_ns),
+                unix_time_origin_ns,
             },
         };
         Self {
@@ -209,7 +238,7 @@ impl DocumentClock {
             DocumentClockInner::Realtime { origin } => {
                 DocumentTime::checked_from_duration(origin.elapsed())
             },
-            DocumentClockInner::Controlled { now_ns } => Ok(DocumentTime::from_nanos(
+            DocumentClockInner::Controlled { now_ns, .. } => Ok(DocumentTime::from_nanos(
                 now_ns.load(AtomicOrdering::Acquire),
             )),
         }
@@ -225,7 +254,7 @@ impl DocumentClock {
 
     /// Advance a controlled clock monotonically without sleeping.
     pub fn advance_to(&self, requested: DocumentTime) -> Result<(), DocumentClockError> {
-        let DocumentClockInner::Controlled { now_ns } = &*self.inner else {
+        let DocumentClockInner::Controlled { now_ns, .. } = &*self.inner else {
             return Err(DocumentClockError::RealtimeClock);
         };
 
@@ -249,15 +278,37 @@ impl DocumentClock {
         }
     }
 
+    /// Return Unix time at a point in a controlled clock domain, checking integer overflow.
+    pub fn unix_time_ns_at(&self, time: DocumentTime) -> Result<u64, DocumentClockError> {
+        let DocumentClockInner::Controlled {
+            unix_time_origin_ns,
+            ..
+        } = &*self.inner
+        else {
+            return Err(DocumentClockError::RealtimeClock);
+        };
+        unix_time_origin_ns
+            .checked_add(time.as_nanos())
+            .ok_or(DocumentClockError::Overflow)
+    }
+
+    /// Return current Unix time in a controlled clock domain, checking integer overflow.
+    pub fn unix_time_ns(&self) -> Result<u64, DocumentClockError> {
+        self.unix_time_ns_at(self.try_now()?)
+    }
+
     /// Check whether this slice controls an observable surface.
     ///
-    /// U1 intentionally controls only Window timers and same-event-loop iframe timers. Later
-    /// slices must remove the typed blockers as they install the same clock in those subsystems.
+    /// Only surfaces routed in the current upstream slices are accepted. Later slices must remove
+    /// the remaining typed blockers as they install the same clock in those subsystems.
     pub fn require_surface(&self, surface: DocumentTimeSurface) -> Result<(), DocumentClockError> {
         if !self.is_controlled()
             || matches!(
                 surface,
-                DocumentTimeSurface::WindowTimers | DocumentTimeSurface::SameEventLoopIframe
+                DocumentTimeSurface::WindowTimers
+                    | DocumentTimeSurface::SameEventLoopIframe
+                    | DocumentTimeSurface::JavaScriptDate
+                    | DocumentTimeSurface::Performance
             )
         {
             Ok(())
@@ -528,7 +579,10 @@ mod tests {
     use super::*;
 
     fn controlled_clock(initial_time_ns: u64) -> DocumentClock {
-        DocumentClock::new(DocumentClockConfiguration::Controlled { initial_time_ns })
+        DocumentClock::new(DocumentClockConfiguration::Controlled {
+            initial_time_ns,
+            unix_time_origin_ns: 0,
+        })
     }
 
     fn recording_request(
@@ -681,22 +735,22 @@ mod tests {
     }
 
     #[test]
-    fn controlled_clock_exposes_the_u1_surface_boundary() {
+    fn controlled_clock_exposes_the_current_surface_boundary() {
         let clock = controlled_clock(0);
-        assert_eq!(
-            clock.require_surface(DocumentTimeSurface::WindowTimers),
-            Ok(())
-        );
-        assert_eq!(
-            clock.require_surface(DocumentTimeSurface::SameEventLoopIframe),
-            Ok(())
-        );
         for surface in [
+            DocumentTimeSurface::WindowTimers,
+            DocumentTimeSurface::SameEventLoopIframe,
             DocumentTimeSurface::JavaScriptDate,
             DocumentTimeSurface::Performance,
+        ] {
+            assert_eq!(clock.require_surface(surface), Ok(()));
+        }
+        for surface in [
+            DocumentTimeSurface::HostTimestamp,
             DocumentTimeSurface::AnimationFrame,
             DocumentTimeSurface::DocumentTimeline,
             DocumentTimeSurface::Worker,
+            DocumentTimeSurface::Worklet,
             DocumentTimeSurface::CrossEventLoopIframe,
         ] {
             assert_eq!(
@@ -704,5 +758,60 @@ mod tests {
                 Err(DocumentClockError::UnsupportedSurface(surface))
             );
         }
+    }
+
+    #[test]
+    fn controlled_wall_and_monotonic_time_advance_in_exact_order() {
+        let clock = DocumentClock::new(DocumentClockConfiguration::Controlled {
+            initial_time_ns: 7_000_000,
+            unix_time_origin_ns: 1_700_000_000_000_000_000,
+        });
+        let navigation_origin = clock.now();
+
+        assert_eq!(
+            clock.unix_time_ns_at(navigation_origin),
+            Ok(1_700_000_000_007_000_000)
+        );
+        assert_eq!(clock.unix_time_ns(), Ok(1_700_000_000_007_000_000));
+
+        clock
+            .advance_to(DocumentTime::from_nanos(12_000_000))
+            .unwrap();
+        assert_eq!(
+            clock
+                .now()
+                .checked_duration_since(navigation_origin)
+                .unwrap(),
+            Duration::from_millis(5)
+        );
+        assert_eq!(clock.unix_time_ns(), Ok(1_700_000_000_012_000_000));
+    }
+
+    #[test]
+    fn controlled_wall_time_overflow_is_checked_without_corrupting_monotonic_time() {
+        let clock = DocumentClock::new(DocumentClockConfiguration::Controlled {
+            initial_time_ns: 1,
+            unix_time_origin_ns: u64::MAX,
+        });
+
+        assert_eq!(clock.unix_time_ns(), Err(DocumentClockError::Overflow));
+        assert_eq!(clock.now(), DocumentTime::from_nanos(1));
+        assert_eq!(
+            DocumentTime::from_nanos(1).checked_duration_since(DocumentTime::from_nanos(2)),
+            Err(DocumentClockError::TimeMovedBackwards {
+                current: DocumentTime::from_nanos(2),
+                requested: DocumentTime::from_nanos(1),
+            })
+        );
+    }
+
+    #[test]
+    fn realtime_clock_rejects_controlled_wall_time_mapping() {
+        let clock = DocumentClock::default();
+        assert_eq!(clock.unix_time_ns(), Err(DocumentClockError::RealtimeClock));
+        assert_eq!(
+            clock.unix_time_ns_at(DocumentTime::ZERO),
+            Err(DocumentClockError::RealtimeClock)
+        );
     }
 }

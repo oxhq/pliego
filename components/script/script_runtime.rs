@@ -29,6 +29,7 @@ use js::glue::{
     RunScriptEnvironmentPreparerClosure, SetBuildId, StreamConsumerConsumeChunk,
     StreamConsumerNoteResponseURLs, StreamConsumerStreamEnd, StreamConsumerStreamError,
 };
+use js::jsapi::JS::{RTPCallerTypeToken, SetReduceMicrosecondTimePrecisionCallback};
 use js::jsapi::{
     AsmJSOption, BuildIdCharVector, CompilationType, Dispatchable_MaybeShuttingDown, GCDescription,
     GCOptions, GCProgress, GCReason, GetPromiseUserInputEventHandlingState, Handle as RawHandle,
@@ -67,6 +68,7 @@ use script_bindings::settings_stack::run_a_script;
 use servo_config::opts::{self, DiagnosticsLoggingOption};
 use servo_config::pref;
 use style::thread_state::{self, ThreadState};
+use timers::{DocumentClock, DocumentTimeSurface};
 
 use crate::dom::bindings::codegen::Bindings::PromiseBinding::PromiseJobCallback;
 use crate::dom::bindings::codegen::Bindings::ResponseBinding::Response_Binding::ResponseMethods;
@@ -94,6 +96,7 @@ use crate::dom::promise::Promise;
 use crate::dom::promiserejectionevent::PromiseRejectionEvent;
 use crate::dom::response::Response;
 use crate::dom::trustedtypes::trustedscript::TrustedScript;
+use crate::dom::window::Window;
 use crate::messaging::{CommonScriptMsg, ScriptEventLoopSender};
 use crate::microtask::{EnqueuedPromiseCallback, Microtask, MicrotaskQueue};
 use crate::realms::enter_auto_realm;
@@ -139,6 +142,53 @@ static SECURITY_CALLBACKS: JSSecurityCallbacks = JSSecurityCallbacks {
     codeForEvalGets: Some(code_for_eval_gets),
     subsumes: Some(principals::subsumes),
 };
+
+fn window_date_time_microseconds(host_time: f64, clock: &DocumentClock) -> f64 {
+    if !clock.is_controlled() {
+        return host_time;
+    }
+    if clock
+        .require_surface(DocumentTimeSurface::JavaScriptDate)
+        .is_err()
+    {
+        return f64::NAN;
+    }
+    clock
+        .unix_time_ns()
+        .map_or(f64::NAN, |nanoseconds| {
+            let whole_microseconds = nanoseconds / 1000;
+            let sub_microsecond_nanoseconds = nanoseconds % 1000;
+            whole_microseconds as f64 + sub_microsecond_nanoseconds as f64 / 1000.0
+        })
+}
+
+/// SpiderMonkey obtains JavaScript Date wall time before invoking this process-wide hook. Only a
+/// controlled Window realm replaces that value; independent realtime realms preserve it exactly.
+#[expect(unsafe_code)]
+unsafe extern "C" fn reduce_microsecond_time_precision(
+    host_time: f64,
+    _caller_type: RTPCallerTypeToken,
+    cx: *mut RawJSContext,
+) -> f64 {
+    let Some(cx) = NonNull::new(cx) else {
+        return f64::NAN;
+    };
+    // SAFETY: SpiderMonkey calls this hook with its currently-entered JSContext.
+    let mut cx = unsafe { JSContext::from_ptr(cx) };
+    let mut realm = CurrentRealm::assert(&mut cx);
+    let global_object = realm.global().get();
+    // SAFETY: the current realm roots a valid, non-null global object.
+    if unsafe { get_dom_class(global_object) }.is_err() {
+        return host_time;
+    }
+    let global = GlobalScope::from_current_realm(&mut realm);
+    let Some(window) = global.downcast::<Window>() else {
+        // Controlled worker/worklet event loops are separately blocked. Their existing realtime
+        // realms must retain SpiderMonkey's host wall time.
+        return host_time;
+    };
+    window_date_time_microseconds(host_time, &window.as_global_scope().document_clock())
+}
 
 #[derive(Clone, Copy, Debug, Eq, Hash, JSTraceable, MallocSizeOf, PartialEq)]
 pub(crate) enum ScriptThreadEventCategory {
@@ -1118,15 +1168,24 @@ impl DerefMut for Runtime {
 pub struct JSEngineSetup(JSEngine);
 
 impl Default for JSEngineSetup {
+    #[expect(unsafe_code)]
     fn default() -> Self {
         let engine = JSEngine::init().unwrap();
+        // Every Servo-created realm receives the required caller token in create_global_object.
+        unsafe {
+            SetReduceMicrosecondTimePrecisionCallback(Some(reduce_microsecond_time_precision));
+        }
         *JS_ENGINE.lock().unwrap() = Some(engine.handle());
         Self(engine)
     }
 }
 
 impl Drop for JSEngineSetup {
+    #[expect(unsafe_code)]
     fn drop(&mut self) {
+        unsafe {
+            SetReduceMicrosecondTimePrecisionCallback(None);
+        }
         *JS_ENGINE.lock().unwrap() = None;
 
         while !self.0.can_shutdown() {
@@ -1576,4 +1635,41 @@ impl IntroductionType {
     /// <https://firefox-source-docs.mozilla.org/devtools-user/debugger-api/debugger.source/index.html>
     pub const WORKER: &CStr = c"Worker";
     pub const WORKER_STR: &str = "Worker";
+}
+
+#[cfg(test)]
+mod tests {
+    use timers::{DocumentClockConfiguration, DocumentTime};
+
+    use super::*;
+
+    #[test]
+    fn controlled_window_date_uses_checked_clock_wall_time_in_exact_order() {
+        let clock = DocumentClock::new(DocumentClockConfiguration::Controlled {
+            initial_time_ns: 2_000,
+            unix_time_origin_ns: 5_000,
+        });
+
+        assert_eq!(window_date_time_microseconds(99.0, &clock), 7.0);
+        clock.advance_to(DocumentTime::from_nanos(3_000)).unwrap();
+        assert_eq!(window_date_time_microseconds(1.0, &clock), 8.0);
+        assert_eq!(window_date_time_microseconds(2.0, &clock), 8.0);
+    }
+
+    #[test]
+    fn controlled_window_date_fails_closed_on_wall_time_overflow() {
+        let clock = DocumentClock::new(DocumentClockConfiguration::Controlled {
+            initial_time_ns: 1,
+            unix_time_origin_ns: u64::MAX,
+        });
+
+        assert!(window_date_time_microseconds(123.0, &clock).is_nan());
+    }
+
+    #[test]
+    fn realtime_window_date_preserves_spidermonkey_host_time_exactly() {
+        let clock = DocumentClock::default();
+        let host_time = 1_725_555_123_456_789.0;
+        assert_eq!(window_date_time_microseconds(host_time, &clock), host_time);
+    }
 }

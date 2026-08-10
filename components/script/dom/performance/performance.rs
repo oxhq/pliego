@@ -18,6 +18,7 @@ use script_bindings::codegen::GenericUnionTypes::StringOrPerformanceMeasureOptio
 use script_bindings::reflector::reflect_dom_object_with_cx;
 use servo_base::cross_process_instant::CrossProcessInstant;
 use time::Duration;
+use timers::{DocumentClock, DocumentClockError, DocumentTime, DocumentTimeSurface};
 
 use super::performanceentry::{EntryType, PerformanceEntry};
 use super::performancemark::PerformanceMark;
@@ -118,6 +119,39 @@ struct PerformanceObserver {
     entry_types: Vec<EntryType>,
 }
 
+#[derive(MallocSizeOf)]
+struct WindowPerformanceClock {
+    clock: DocumentClock,
+    origin: DocumentTime,
+}
+
+impl WindowPerformanceClock {
+    fn new(clock: DocumentClock, origin: DocumentTime) -> Self {
+        clock
+            .require_surface(DocumentTimeSurface::Performance)
+            .expect("Window performance must use a supported document-clock surface");
+        Self { clock, origin }
+    }
+
+    fn now(&self) -> Result<DOMHighResTimeStamp, DocumentClockError> {
+        let elapsed = self.clock.try_now()?.checked_duration_since(self.origin)?;
+        Ok(Duration::nanoseconds_i128(elapsed.as_nanos() as i128).to_dom_high_res_time_stamp())
+    }
+
+    fn time_origin(&self) -> Result<DOMHighResTimeStamp, DocumentClockError> {
+        Ok(
+            Duration::nanoseconds_i128(self.clock.unix_time_ns_at(self.origin)? as i128)
+                .to_dom_high_res_time_stamp(),
+        )
+    }
+
+    fn accepts_host_timestamp(&self) -> bool {
+        self.clock
+            .require_surface(DocumentTimeSurface::HostTimestamp)
+            .is_ok()
+    }
+}
+
 #[dom_struct]
 pub(crate) struct Performance {
     eventtarget: EventTarget,
@@ -128,6 +162,9 @@ pub(crate) struct Performance {
     /// The `timeOrigin` as described in
     /// <https://html.spec.whatwg.org/multipage/#concept-settings-object-time-origin>.
     time_origin: CrossProcessInstant,
+    /// Window-only monotonic time domain. Workers retain their existing realtime Performance path.
+    #[no_trace]
+    window_clock: Option<WindowPerformanceClock>,
     /// <https://w3c.github.io/resource-timing/#performance-resource-timing-buffer-size-limit>
     /// The max-size of the buffer, set to 0 once the pipeline exits.
     /// TODO: have one max-size per entry type.
@@ -141,13 +178,17 @@ pub(crate) struct Performance {
 }
 
 impl Performance {
-    fn new_inherited(time_origin: CrossProcessInstant) -> Performance {
+    fn new_inherited(
+        time_origin: CrossProcessInstant,
+        window_clock: Option<WindowPerformanceClock>,
+    ) -> Performance {
         Performance {
             eventtarget: EventTarget::new_inherited(),
             buffer: DomRefCell::new(PerformanceEntryList::new(Vec::new())),
             observers: DomRefCell::new(Vec::new()),
             pending_notification_observers_task: Cell::new(false),
             time_origin,
+            window_clock,
             resource_timing_buffer_size_limit: Cell::new(250),
             resource_timing_buffer_current_size: Cell::new(0),
             resource_timing_buffer_pending_full_event: Cell::new(false),
@@ -159,9 +200,12 @@ impl Performance {
         cx: &mut JSContext,
         global: &GlobalScope,
         navigation_start: CrossProcessInstant,
+        document_time_origin: Option<DocumentTime>,
     ) -> DomRoot<Performance> {
+        let window_clock = document_time_origin
+            .map(|origin| WindowPerformanceClock::new(global.document_clock(), origin));
         reflect_dom_object_with_cx(
-            Box::new(Performance::new_inherited(navigation_start)),
+            Box::new(Performance::new_inherited(navigation_start, window_clock)),
             global,
             cx,
         )
@@ -175,6 +219,16 @@ impl Performance {
         &self,
         instant: CrossProcessInstant,
     ) -> DOMHighResTimeStamp {
+        if self
+            .window_clock
+            .as_ref()
+            .is_some_and(|clock| !clock.accepts_host_timestamp())
+        {
+            // Host- and cross-process-stamped entries need a producer-side document timestamp.
+            // Until that upstream slice lands, do not expose nondeterministic host time through a
+            // controlled Window realm.
+            return Finite::wrap(0.0);
+        }
         (instant - self.time_origin).to_dom_high_res_time_stamp()
     }
 
@@ -182,7 +236,10 @@ impl Performance {
         &self,
         instant: Option<CrossProcessInstant>,
     ) -> DOMHighResTimeStamp {
-        self.to_dom_high_res_time_stamp(instant.unwrap_or(self.time_origin))
+        instant.map_or_else(
+            || Finite::wrap(0.0),
+            |instant| self.to_dom_high_res_time_stamp(instant),
+        )
     }
 
     /// Clear all buffered performance entries, and disable the buffer.
@@ -539,11 +596,23 @@ impl PerformanceMethods<crate::DomTypeHolder> for Performance {
 
     /// <https://w3c.github.io/hr-time/#dom-performance-now>
     fn Now(&self) -> DOMHighResTimeStamp {
-        self.to_dom_high_res_time_stamp(CrossProcessInstant::now())
+        self.window_clock.as_ref().map_or_else(
+            || self.to_dom_high_res_time_stamp(CrossProcessInstant::now()),
+            |clock| {
+                clock
+                    .now()
+                    .expect("Window document time cannot precede its navigation origin")
+            },
+        )
     }
 
     /// <https://www.w3.org/TR/hr-time-2/#dom-performance-timeorigin>
     fn TimeOrigin(&self) -> DOMHighResTimeStamp {
+        if let Some(clock) = &self.window_clock
+            && clock.clock.is_controlled()
+        {
+            return clock.time_origin().unwrap_or_else(|_| Finite::wrap(0.0));
+        }
         (self.time_origin - CrossProcessInstant::epoch()).to_dom_high_res_time_stamp()
     }
 
@@ -816,5 +885,69 @@ impl ToDOMHighResTimeStamp for Duration {
         // microseconds; the next divisor of milliseconds up from 5 microseconds is 10.
         let microseconds_rounded = (self.whole_microseconds() as f64 / 10.).floor() * 10.;
         Finite::wrap(microseconds_rounded / 1000.)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use timers::DocumentClockConfiguration;
+
+    use super::*;
+
+    #[test]
+    fn controlled_window_performance_is_monotonic_and_exactly_ordered() {
+        let clock = DocumentClock::new(DocumentClockConfiguration::Controlled {
+            initial_time_ns: 7_000_000,
+            unix_time_origin_ns: 1_700_000_000_000_000_000,
+        });
+        let performance_clock = WindowPerformanceClock::new(clock.clone(), clock.now());
+
+        assert_eq!(performance_clock.now(), Ok(Finite::wrap(0.0)));
+        assert_eq!(
+            performance_clock.time_origin(),
+            Ok(Finite::wrap(1_700_000_000_007.0))
+        );
+
+        clock
+            .advance_to(DocumentTime::from_nanos(12_000_000))
+            .unwrap();
+        assert_eq!(performance_clock.now(), Ok(Finite::wrap(5.0)));
+        assert_eq!(performance_clock.now(), Ok(Finite::wrap(5.0)));
+        assert!(!performance_clock.accepts_host_timestamp());
+    }
+
+    #[test]
+    fn controlled_window_performance_checks_origin_and_wall_overflow() {
+        let clock = DocumentClock::new(DocumentClockConfiguration::Controlled {
+            initial_time_ns: 1,
+            unix_time_origin_ns: u64::MAX,
+        });
+        let future_origin = WindowPerformanceClock::new(clock.clone(), DocumentTime::from_nanos(2));
+
+        assert_eq!(
+            future_origin.now(),
+            Err(DocumentClockError::TimeMovedBackwards {
+                current: DocumentTime::from_nanos(2),
+                requested: DocumentTime::from_nanos(1),
+            })
+        );
+        assert_eq!(
+            future_origin.time_origin(),
+            Err(DocumentClockError::Overflow)
+        );
+    }
+
+    #[test]
+    fn realtime_window_performance_retains_host_timestamp_compatibility() {
+        let clock = DocumentClock::default();
+        let origin = clock.now();
+        let performance_clock = WindowPerformanceClock::new(clock, origin);
+
+        assert!(*performance_clock.now().unwrap() >= 0.0);
+        assert!(performance_clock.accepts_host_timestamp());
+        assert_eq!(
+            performance_clock.time_origin(),
+            Err(DocumentClockError::RealtimeClock)
+        );
     }
 }

@@ -33,6 +33,7 @@ use servo_constellation_traits::{
     TargetSnapshotParams,
 };
 use servo_url::{ImmutableOrigin, MutableOrigin, ServoUrl};
+use timers::DocumentTime;
 use url::Position;
 
 use crate::dom::bindings::codegen::Bindings::HTMLIFrameElementBinding::HTMLIFrameElementMethods;
@@ -166,6 +167,9 @@ pub(crate) struct InProgressLoad {
     /// Timestamp reporting the time when the browser started this load.
     #[no_trace]
     pub(crate) navigation_start: CrossProcessInstant,
+    /// Navigation start in the owning script event loop's document-clock domain.
+    #[no_trace]
+    pub(crate) document_time_origin: DocumentTime,
     /// For cancelling the fetch
     pub(crate) canceller: FetchCanceller,
     /// The [`LoadData`] associated with this load.
@@ -188,7 +192,10 @@ pub(crate) struct InProgressLoad {
 
 impl InProgressLoad {
     /// Create a new InProgressLoad object.
-    pub(crate) fn new(new_pipeline_info: NewPipelineInfo) -> InProgressLoad {
+    pub(crate) fn new(
+        new_pipeline_info: NewPipelineInfo,
+        document_time_origin: DocumentTime,
+    ) -> InProgressLoad {
         let url = new_pipeline_info.load_data.url.clone();
         InProgressLoad {
             pipeline_id: new_pipeline_info.new_pipeline_id,
@@ -200,6 +207,7 @@ impl InProgressLoad {
             activity: DocumentActivity::FullyActive,
             throttled: false,
             navigation_start: CrossProcessInstant::now(),
+            document_time_origin,
             canceller: Default::default(),
             load_data: new_pipeline_info.load_data,
             url_list: vec![url],

@@ -95,6 +95,7 @@ use style::stylesheets::UrlExtraData;
 use style_traits::CSSPixel;
 use stylo_atoms::Atom;
 use time::Duration as TimeDuration;
+use timers::DocumentTime;
 use webrender_api::ExternalScrollId;
 use webrender_api::units::{DeviceIntSize, DevicePixel, LayoutPixel, LayoutPoint};
 
@@ -297,6 +298,8 @@ pub(crate) struct Window {
     performance: MutNullableDom<Performance>,
     #[no_trace]
     navigation_start: Cell<CrossProcessInstant>,
+    #[no_trace]
+    document_time_origin: Cell<DocumentTime>,
     screen: MutNullableDom<Screen>,
     session_storage: MutNullableDom<Storage>,
     local_storage: MutNullableDom<Storage>,
@@ -1758,8 +1761,14 @@ impl WindowMethods<crate::DomTypeHolder> for Window {
     // https://dvcs.w3.org/hg/webperf/raw-file/tip/specs/
     // NavigationTiming/Overview.html#sec-window.performance-attribute
     fn Performance(&self, cx: &mut JSContext) -> DomRoot<Performance> {
-        self.performance
-            .or_init(|| Performance::new(cx, self.as_global_scope(), self.navigation_start.get()))
+        self.performance.or_init(|| {
+            Performance::new(
+                cx,
+                self.as_global_scope(),
+                self.navigation_start.get(),
+                Some(self.document_time_origin.get()),
+            )
+        })
     }
 
     // https://html.spec.whatwg.org/multipage/#globaleventhandlers
@@ -3536,6 +3545,8 @@ impl Window {
 
     pub(crate) fn set_navigation_start(&self) {
         self.navigation_start.set(CrossProcessInstant::now());
+        self.document_time_origin
+            .set(self.as_global_scope().document_clock().now());
     }
 
     pub(crate) fn navigation_start(&self) -> CrossProcessInstant {
@@ -3729,6 +3740,7 @@ impl Window {
         creation_url: ServoUrl,
         top_level_creation_url: ServoUrl,
         navigation_start: CrossProcessInstant,
+        document_time_origin: DocumentTime,
         webgl_chan: Option<WebGLChan>,
         #[cfg(feature = "webxr")] webxr_registry: Option<webxr_api::Registry>,
         paint_api: CrossProcessPaintApi,
@@ -3776,6 +3788,7 @@ impl Window {
             document: Default::default(),
             performance: Default::default(),
             navigation_start: Cell::new(navigation_start),
+            document_time_origin: Cell::new(document_time_origin),
             screen: Default::default(),
             session_storage: Default::default(),
             local_storage: Default::default(),

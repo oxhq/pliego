@@ -1055,6 +1055,7 @@ mod tests {
     fn suspension_freezes_dom_timer_time_and_resume_excludes_the_pause() {
         let clock = DocumentClock::new(DocumentClockConfiguration::Controlled {
             initial_time_ns: 10,
+            unix_time_origin_ns: 0,
         });
         let mut timebase = TimerTimebase::default();
         assert_eq!(timebase.now(&clock).unwrap(), DocumentTime::from_nanos(10));

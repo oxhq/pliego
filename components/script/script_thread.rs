@@ -2900,7 +2900,11 @@ impl ScriptThread {
                     .notify_pipeline_created(new_pipeline_info.new_pipeline_id);
 
                 // Kick off the fetch for the new resource.
-                self.pre_page_load(cx, InProgressLoad::new(new_pipeline_info));
+                let document_time_origin = self.document_clock.now();
+                self.pre_page_load(
+                    cx,
+                    InProgressLoad::new(new_pipeline_info, document_time_origin),
+                );
             },
         );
     }
@@ -3636,6 +3640,7 @@ impl ScriptThread {
             // is another nested iframe in a frame).
             final_url.clone(),
             incomplete.navigation_start,
+            incomplete.document_time_origin,
             self.webgl_chan.as_ref().map(|chan| chan.channel()),
             #[cfg(feature = "webxr")]
             self.webxr_registry.clone(),
