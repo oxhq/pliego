@@ -21,14 +21,13 @@ use dpi::PhysicalSize;
 use http::header::CONTENT_TYPE;
 use http::{HeaderMap, HeaderValue};
 use layout::pages::{PageDefinition, configure_for_process};
+use pliego::capture::{SceneCapture, capture_document_scene};
+use pliego::pdf::{PdfFontResource, PdfFontVariation, render_document_pdf};
 use servo::{
     LoadStatus, Preferences, RenderingContext, Servo, ServoBuilder, SoftwareRenderingContext,
     WebResourceLoad, WebResourceResponse, WebView, WebViewBuilder, WebViewDelegate,
 };
 use url::Url;
-
-use pliego::capture::{SceneCapture, capture_document_scene};
-use pliego::pdf::{PdfFontResource, PdfFontVariation, render_document_pdf};
 
 const TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -396,10 +395,9 @@ mod tests {
     use std::path::Path;
 
     use layout::pages::{PageDefinition, PageMargins};
-    use sha2::{Digest, Sha256};
-
     use pliego::Operation;
     use pliego::capture::CapturedFontSource;
+    use sha2::{Digest, Sha256};
 
     use super::{DocumentSession, SessionError};
 
