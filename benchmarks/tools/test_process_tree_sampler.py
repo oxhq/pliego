@@ -703,7 +703,7 @@ def live_cgroup_proofs() -> dict:
             assert not version_marker.exists(), "candidate --version executed inside the root broker"
             parent = os.environ["PLIEGO_BENCHMARK_CGROUP_PARENT"]
             attacked = sampled([engine, "render", "fixture.html", "--workload-migration-attack", parent])
-            assert attacked["exit_code"] == 0
+            assert attacked["exit_code"] == 0, json.dumps(attacked, sort_keys=True)
             assert attacked["counters"]["final"]["pids_peak"] >= 3
             assert set(attacked["launch_security"]["migration_write_probes"]["parent"].values()) <= {
                 "EACCES",
