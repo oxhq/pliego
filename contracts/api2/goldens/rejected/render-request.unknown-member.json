@@ -1,0 +1,36 @@
+{
+  "schema": "pliego.render-request",
+  "version": 1,
+  "api": 2,
+  "input": {
+    "entrypoint": "document.html",
+    "bundle_sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "environment": {
+    "locale": "en-US",
+    "timezone": "UTC"
+  },
+  "page": {
+    "size": {
+      "name": "A4"
+    },
+    "margins_css_px": {
+      "top": 48,
+      "right": 48,
+      "bottom": 48,
+      "left": 48
+    }
+  },
+  "resources": {
+    "network": {
+      "mode": "deny",
+      "allowed_http_roots": []
+    },
+    "host_fonts": "deny",
+    "timeout_ms": 10000
+  },
+  "diagnostics": {
+    "retention": "always"
+  },
+  "trace": true
+}

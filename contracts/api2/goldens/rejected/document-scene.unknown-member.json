@@ -1,0 +1,26 @@
+{
+  "schema": "pliego.document-scene",
+  "version": 1,
+  "pages": [
+    {
+      "size": {
+        "width": 793.7008,
+        "height": 1122.5197
+      },
+      "operations": [
+        {
+          "type": "image",
+          "bounds": {
+            "x": 48,
+            "y": 120,
+            "width": 64,
+            "height": 64
+          },
+          "resource": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "meta": {},
+          "source_url": "https://example.test/logo.png"
+        }
+      ]
+    }
+  ]
+}

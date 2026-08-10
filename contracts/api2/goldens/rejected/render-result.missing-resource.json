@@ -1,0 +1,98 @@
+{
+  "schema": "pliego.render-result",
+  "version": 1,
+  "api": 2,
+  "status": "success",
+  "request": {
+    "schema": "pliego.render-request",
+    "version": 1,
+    "api": 2,
+    "input": {
+      "entrypoint": "document.html",
+      "bundle_sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    "environment": {
+      "locale": "en-US",
+      "timezone": "UTC"
+    },
+    "page": {
+      "size": {
+        "name": "A4"
+      },
+      "margins_css_px": {
+        "top": 48,
+        "right": 48,
+        "bottom": 48,
+        "left": 48
+      }
+    },
+    "resources": {
+      "network": {
+        "mode": "deny",
+        "allowed_http_roots": []
+      },
+      "host_fonts": "deny",
+      "timeout_ms": 10000
+    },
+    "diagnostics": {
+      "retention": "none"
+    }
+  },
+  "engine": {
+    "name": "pliego",
+    "version": "1.0.0-rc.1",
+    "api": 2,
+    "source_commit": "1be31eab71ecf95c39928343f1f36e805f6754b8",
+    "runtime": {
+      "mode": "one-shot",
+      "target": "x86_64-unknown-linux-gnu",
+      "binary_sha256": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "servo_base": "313b6d5ecc113b08010ce434140db3ca5abcc71c"
+    }
+  },
+  "delivery": {
+    "pdf": {
+      "path": "document.pdf",
+      "media_type": "application/pdf",
+      "sha256": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "bytes": 4096
+    },
+    "scene": {
+      "path": "scene.json",
+      "media_type": "application/vnd.pliego.document-scene+json",
+      "sha256": "sha256:aa7241a42de8607fd7a531199f5ce412e2b446f07c006ad2dbc1d40014693345",
+      "bytes": 972
+    },
+    "bundle": {
+      "path": "bundle.json",
+      "media_type": "application/vnd.pliego.bundle+json",
+      "sha256": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "bytes": 768,
+      "entries": [
+        {
+          "path": "document.pdf",
+          "media_type": "application/pdf",
+          "sha256": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "bytes": 4096
+        },
+        {
+          "path": "resources/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "media_type": "font/woff2",
+          "sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "bytes": 2048
+        },
+        {
+          "path": "scene.json",
+          "media_type": "application/vnd.pliego.document-scene+json",
+          "sha256": "sha256:aa7241a42de8607fd7a531199f5ce412e2b446f07c006ad2dbc1d40014693345",
+          "bytes": 972
+        }
+      ]
+    }
+  },
+  "diagnostics": {
+    "retained": false,
+    "artifacts": []
+  },
+  "error": null
+}
