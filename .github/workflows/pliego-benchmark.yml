@@ -66,10 +66,24 @@ jobs:
           runner_gid="$(id -g)"
           runner_groups="$(id -G "$USER" | tr ' ' ',')"
           sudo install -d -o root -g root -m 0755 \
-            /usr/local/libexec /var/lib/pliego-benchmark-fixture
+            /usr/local/libexec \
+            /usr/local/libexec/pliego-benchmark-tools \
+            /usr/local/libexec/runners \
+            /var/lib/pliego-benchmark-fixture
           sudo install -o root -g root -m 0555 \
             benchmarks/tools/process_tree_sampler.py \
             /usr/local/libexec/pliego-cgroup-broker
+          sudo install -o root -g root -m 0444 \
+            benchmarks/tools/benchmark_publication.py \
+            benchmarks/tools/observer_ab.py \
+            benchmarks/tools/process_tree_sampler.py \
+            benchmarks/tools/test_process_tree_sampler.py \
+            benchmarks/tools/validate_host_proof.py \
+            benchmarks/tools/validate_result.py \
+            /usr/local/libexec/pliego-benchmark-tools/
+          sudo install -o root -g root -m 0444 \
+            benchmarks/runners/pliego.php \
+            /usr/local/libexec/runners/pliego.php
           sudo install -o root -g root -m 0444 \
             benchmarks/fixtures/minimal-static/input.html \
             /var/lib/pliego-benchmark-fixture/fixture.html
@@ -97,7 +111,8 @@ jobs:
                     PLIEGO_BENCHMARK_FIXTURE_CWD=/var/lib/pliego-benchmark-fixture \
                     PLIEGO_BENCHMARK_ROOT_SENTINEL=/var/lib/pliego-benchmark-root-sentinel \
                     PLIEGO_BENCHMARK_BROKER=/usr/local/libexec/pliego-cgroup-broker \
-                    python3 benchmarks/tools/test_process_tree_sampler.py --live --php-integration
+                    python3 /usr/local/libexec/pliego-benchmark-tools/test_process_tree_sampler.py \
+                      --live --php-integration
             ' benchmark-live "$runner_uid" "$runner_gid" "$runner_groups"
           test "$engine_gid" != "$runner_gid"
 
