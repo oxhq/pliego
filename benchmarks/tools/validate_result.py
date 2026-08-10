@@ -314,7 +314,9 @@ def validate_resource_usage(sample: dict[str, Any], path: str, violations: list[
 
     cpu = final["cpu_stat"]
     if cpu["usage_usec"] + 2 < cpu["user_usec"] + cpu["system_usec"]:
-        violations.append(Violation(f"{path}.resource_usage.counters.final.cpu_stat.usage_usec", "must cover user plus system CPU"))
+        violations.append(
+            Violation(f"{path}.resource_usage.counters.final.cpu_stat.usage_usec", "must cover user plus system CPU")
+        )
     derived = {
         "cpu_user_ms": round(cpu["user_usec"] / 1000.0, 3),
         "cpu_sys_ms": round(cpu["system_usec"] / 1000.0, 3),
@@ -331,15 +333,35 @@ def validate_resource_usage(sample: dict[str, Any], path: str, violations: list[
     settle = usage["accounting_settle"]
     observations = settle["stable_observations"]
     if len(observations) != 2:
-        violations.append(Violation(f"{path}.resource_usage.accounting_settle.stable_observations", "must retain exactly two stable reads"))
+        violations.append(
+            Violation(
+                f"{path}.resource_usage.accounting_settle.stable_observations", "must retain exactly two stable reads"
+            )
+        )
     elif observations[0] != observations[1]:
-        violations.append(Violation(f"{path}.resource_usage.accounting_settle.stable_observations", "cpu.stat and io.stat reads must be identical"))
+        violations.append(
+            Violation(
+                f"{path}.resource_usage.accounting_settle.stable_observations",
+                "cpu.stat and io.stat reads must be identical",
+            )
+        )
     elif observations[1]["cpu_stat"] != final["cpu_stat"] or observations[1]["io_stat"] != final["io_stat"]:
-        violations.append(Violation(f"{path}.resource_usage.accounting_settle.stable_observations", "last stable read must equal final counters"))
+        violations.append(
+            Violation(
+                f"{path}.resource_usage.accounting_settle.stable_observations",
+                "last stable read must equal final counters",
+            )
+        )
     if settle["duration_ms"] > settle["timeout_ms"] + settle["poll_interval_ms"]:
-        violations.append(Violation(f"{path}.resource_usage.accounting_settle.duration_ms", "exceeds bounded settle budget"))
+        violations.append(
+            Violation(f"{path}.resource_usage.accounting_settle.duration_ms", "exceeds bounded settle budget")
+        )
     if settle["duration_ms"] < settle["poll_interval_ms"]:
-        violations.append(Violation(f"{path}.resource_usage.accounting_settle.duration_ms", "two stable reads were not interval-separated"))
+        violations.append(
+            Violation(
+                f"{path}.resource_usage.accounting_settle.duration_ms", "two stable reads were not interval-separated"
+            )
+        )
 
     diagnostics = usage["sampled_diagnostics"]
     require_equal(
@@ -349,10 +371,14 @@ def validate_resource_usage(sample: dict[str, Any], path: str, violations: list[
         violations,
     )
     if diagnostics["pss_interval_ms"] < diagnostics["sample_interval_ms"]:
-        violations.append(Violation(f"{path}.resource_usage.sampled_diagnostics.pss_interval_ms", "must cover the sample interval"))
+        violations.append(
+            Violation(f"{path}.resource_usage.sampled_diagnostics.pss_interval_ms", "must cover the sample interval")
+        )
     elapsed = [float(row["elapsed_ms"]) for row in diagnostics["samples"]]
     if elapsed != sorted(elapsed):
-        violations.append(Violation(f"{path}.resource_usage.sampled_diagnostics.samples", "elapsed_ms must be monotonic"))
+        violations.append(
+            Violation(f"{path}.resource_usage.sampled_diagnostics.samples", "elapsed_ms must be monotonic")
+        )
     gaps = [later - earlier for earlier, later in zip(elapsed, elapsed[1:])]
     expected_drained_at = round(usage["wall_ms"] + usage["drain_ms"], 3)
     if abs(elapsed[-1] - expected_drained_at) > 0.002:
@@ -376,7 +402,9 @@ def validate_resource_usage(sample: dict[str, Any], path: str, violations: list[
     for index, raw_sample in enumerate(diagnostics["samples"]):
         sample_path = f"{path}.resource_usage.sampled_diagnostics.samples[{index}]"
         if raw_sample["cgroup_memory_current_bytes"] > final["memory_peak_bytes"]:
-            violations.append(Violation(f"{sample_path}.cgroup_memory_current_bytes", "must not exceed cgroup memory.peak"))
+            violations.append(
+                Violation(f"{sample_path}.cgroup_memory_current_bytes", "must not exceed cgroup memory.peak")
+            )
         identities: set[tuple[int, int]] = set()
         for process in raw_sample["processes"]:
             identity = (process["pid"], process["start_ticks"])
@@ -396,13 +424,16 @@ def validate_resource_usage(sample: dict[str, Any], path: str, violations: list[
             )
             aggregate["last_seen_ms"] = raw_sample["elapsed_ms"]
         rss = sum(process["rss_pages"] * page_size // 1024 for process in raw_sample["processes"])
-        require_equal(f"{sample_path}.sampled_summed_rss_kib_lower_bound", raw_sample["sampled_summed_rss_kib_lower_bound"], rss, violations)
+        require_equal(
+            f"{sample_path}.sampled_summed_rss_kib_lower_bound",
+            raw_sample["sampled_summed_rss_kib_lower_bound"],
+            rss,
+            violations,
+        )
         rss_peaks.append(rss)
         pss_values = [process["pss_kib"] for process in raw_sample["processes"]]
         expected_pss = (
-            sum(pss_values)
-            if raw_sample["processes"] and all(value is not None for value in pss_values)
-            else None
+            sum(pss_values) if raw_sample["processes"] and all(value is not None for value in pss_values) else None
         )
         require_equal(
             f"{sample_path}.sampled_summed_pss_kib_lower_bound",
@@ -447,9 +478,13 @@ def validate_resource_usage(sample: dict[str, Any], path: str, violations: list[
     cleanup = usage["cleanup"]
     require_equal(f"{path}.resource_usage.cleanup.kill_grace_ms", cleanup["kill_grace_ms"], 1000.0, violations)
     if not cleanup["kill_used"] and cleanup["lingering_before_kill"]:
-        violations.append(Violation(f"{path}.resource_usage.cleanup", "cannot retain lingering identities without cgroup.kill"))
+        violations.append(
+            Violation(f"{path}.resource_usage.cleanup", "cannot retain lingering identities without cgroup.kill")
+        )
     if sample["ok"] and cleanup["kill_used"]:
-        violations.append(Violation(f"{path}.resource_usage.cleanup.kill_used", "passing samples must drain without cgroup.kill"))
+        violations.append(
+            Violation(f"{path}.resource_usage.cleanup.kill_used", "passing samples must drain without cgroup.kill")
+        )
     sampler_cpu_ms = usage["sampler_cpu_user_ms"] + usage["sampler_cpu_sys_ms"]
     sampler_cpu_percent = round(sampler_cpu_ms * 100.0 / usage["wall_ms"], 3) if usage["wall_ms"] else 0.0
     require_equal(
@@ -656,7 +691,9 @@ def validate_semantics(data: dict[str, Any], path: str, violations: list[Violati
     if len(set(launch_accounts)) > 1:
         violations.append(Violation(f"{path}.samples", "all renders must use the same dedicated engine UID and GID"))
     if len(set(executable_identities)) > 1:
-        violations.append(Violation(f"{path}.samples", "engine executable device/inode identity changed between renders"))
+        violations.append(
+            Violation(f"{path}.samples", "engine executable device/inode identity changed between renders")
+        )
 
     aggregates = data["aggregates"]
     passing_samples = [sample for sample in samples if sample["ok"] and sample["correctness"]["pass"]]

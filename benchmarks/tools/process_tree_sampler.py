@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
 
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
 """Run the fixed render command as an unprivileged account in a root-owned cgroup."""
 
 from __future__ import annotations
@@ -684,9 +688,7 @@ def migration_write_probes(paths: dict[str, Path]) -> dict[str, dict[str, str]]:
 def engine_environment(account: EngineAccount) -> dict[str, str]:
     allowed = {"LANG", "LC_ALL", "LC_CTYPE", "LD_LIBRARY_PATH", "PATH", "TZ"}
     environment = {
-        name: value
-        for name, value in os.environ.items()
-        if name in allowed or name.startswith("FONTCONFIG_")
+        name: value for name, value in os.environ.items() if name in allowed or name.startswith("FONTCONFIG_")
     }
     environment.update(
         {
@@ -776,7 +778,9 @@ def read_process_security(pid: int, proc_root: Path = PROC) -> dict[str, Any]:
             "no_new_privs": int(fields["NoNewPrivs"]),
         }
     except (KeyError, OSError, UnicodeError, ValueError) as error:
-        raise incomplete("ENGINE_IDENTITY_UNAVAILABLE", f"cannot read security status for child {pid}: {error}") from error
+        raise incomplete(
+            "ENGINE_IDENTITY_UNAVAILABLE", f"cannot read security status for child {pid}: {error}"
+        ) from error
 
 
 def finish_authority_handshake(
@@ -899,11 +903,7 @@ def remove_bound_leaf(cgroup: BoundDirectory, parent: BoundDirectory) -> None:
     if events["populated"] != 0 or read_bound(cgroup, "cgroup.procs").split():
         raise incomplete("CGROUP_CLEANUP_FAILED", "refusing to remove a populated render cgroup")
     with os.scandir(cgroup.fd) as entries:
-        descendants = [
-            entry.name
-            for entry in entries
-            if entry.is_dir(follow_symlinks=False) or entry.is_symlink()
-        ]
+        descendants = [entry.name for entry in entries if entry.is_dir(follow_symlinks=False) or entry.is_symlink()]
     if descendants:
         raise incomplete("CGROUP_CLEANUP_FAILED", f"refusing recursive cleanup; child cgroups remain: {descendants}")
     os.rmdir(cgroup.name, dir_fd=parent.fd)
@@ -949,8 +949,17 @@ def wait_for_accounting_quiescence(
         snapshot = counter_snapshot(cgroup)
         reads += 1
         clean = snapshot["memory_file_dirty_bytes"] == 0 and snapshot["memory_file_writeback_bytes"] == 0
-        stable = previous is not None and snapshot["io_stat"] == previous["io_stat"] and snapshot["cpu_stat"] == previous["cpu_stat"]
-        if clean and stable and previous["memory_file_dirty_bytes"] == 0 and previous["memory_file_writeback_bytes"] == 0:
+        stable = (
+            previous is not None
+            and snapshot["io_stat"] == previous["io_stat"]
+            and snapshot["cpu_stat"] == previous["cpu_stat"]
+        )
+        if (
+            clean
+            and stable
+            and previous["memory_file_dirty_bytes"] == 0
+            and previous["memory_file_writeback_bytes"] == 0
+        ):
             return snapshot, {
                 "poll_interval_ms": poll_interval_ms,
                 "timeout_ms": timeout_ms,
