@@ -1,0 +1,28 @@
+name: Pliego API 2 contract
+
+on:
+  push:
+    branches: ["main"]
+    paths: &api2-contract-paths
+      - ".github/workflows/pliego-api2-contract.yml"
+      - "contracts/api2/**"
+      - "docs/pliego/adr/0018-api-2-contract-and-public-artifacts.md"
+  pull_request:
+    paths: *api2-contract-paths
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pliego-api2-contract-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contract:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - name: Verify API 2 schemas, fixtures, and byte closure
+        run: python3 contracts/api2/test_contract.py

@@ -1,0 +1,204 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://pliego.dev/schema/render-request.v1.json",
+  "title": "Pliego API 2 RenderRequest",
+  "description": "The normalized behavioral input for one deterministic API 2 render.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "version",
+    "api",
+    "profile",
+    "input",
+    "environment",
+    "page",
+    "resources",
+    "time",
+    "settlement",
+    "diagnostics"
+  ],
+  "properties": {
+    "schema": { "const": "pliego.render-request" },
+    "version": { "const": 1 },
+    "api": { "const": 2 },
+    "profile": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "#/definitions/profile_ref" }
+      ]
+    },
+    "input": { "$ref": "#/definitions/input" },
+    "environment": { "$ref": "#/definitions/environment" },
+    "page": { "$ref": "#/definitions/page" },
+    "resources": { "$ref": "#/definitions/resources" },
+    "time": { "$ref": "#/definitions/time" },
+    "settlement": { "$ref": "#/definitions/settlement" },
+    "diagnostics": { "$ref": "#/definitions/diagnostics" }
+  },
+  "definitions": {
+    "content_address": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "portable_path": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 240,
+      "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._/-]*[A-Za-z0-9_-])?$"
+    },
+    "profile_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "version"],
+      "properties": {
+        "schema": {
+          "type": "string",
+          "pattern": "^pliego\\.profile\\.[a-z0-9][a-z0-9.-]{0,127}$"
+        },
+        "version": { "type": "integer", "minimum": 1, "maximum": 4294967295 }
+      }
+    },
+    "manifest_artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "media_type", "sha256", "bytes"],
+      "properties": {
+        "path": { "const": "input-manifest.json" },
+        "media_type": { "const": "application/vnd.pliego.input-manifest+json" },
+        "sha256": { "$ref": "#/definitions/content_address" },
+        "bytes": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 }
+      }
+    },
+    "input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["entrypoint", "manifest"],
+      "properties": {
+        "entrypoint": { "$ref": "#/definitions/portable_path" },
+        "manifest": { "$ref": "#/definitions/manifest_artifact" }
+      }
+    },
+    "environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["locale", "timezone"],
+      "properties": {
+        "locale": { "type": "string", "enum": ["en-US", "es-MX"] },
+        "timezone": { "type": "string", "enum": ["UTC", "America/Tijuana"] }
+      }
+    },
+    "page": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["size", "margins_app_units", "css_page_precedence"],
+      "properties": {
+        "size": {
+          "oneOf": [
+            { "$ref": "#/definitions/named_page_size" },
+            { "$ref": "#/definitions/explicit_page_size" }
+          ]
+        },
+        "margins_app_units": { "$ref": "#/definitions/margins" },
+        "css_page_precedence": { "const": "css-page-over-request-defaults" }
+      }
+    },
+    "named_page_size": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": {
+        "name": { "const": "A4" }
+      }
+    },
+    "explicit_page_size": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["width_app_units", "height_app_units"],
+      "properties": {
+        "width_app_units": { "type": "integer", "minimum": 1, "maximum": 2147483647 },
+        "height_app_units": { "type": "integer", "minimum": 1, "maximum": 2147483647 }
+      }
+    },
+    "margins": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["top", "right", "bottom", "left"],
+      "properties": {
+        "top": { "type": "integer", "minimum": 0, "maximum": 2147483647 },
+        "right": { "type": "integer", "minimum": 0, "maximum": 2147483647 },
+        "bottom": { "type": "integer", "minimum": 0, "maximum": 2147483647 },
+        "left": { "type": "integer", "minimum": 0, "maximum": 2147483647 }
+      }
+    },
+    "resources": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["network", "host_fonts"],
+      "properties": {
+        "network": { "const": "deny" },
+        "host_fonts": { "const": "deny" }
+      }
+    },
+    "time": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["policy_version", "epoch_unix_ms", "initial_offset_ns"],
+      "properties": {
+        "policy_version": { "const": 1 },
+        "epoch_unix_ms": {
+          "type": "integer",
+          "minimum": -8640000000000000,
+          "maximum": 8640000000000000
+        },
+        "initial_offset_ns": { "const": 0 }
+      }
+    },
+    "settlement_limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "virtual_span_ms",
+        "ordinary_tasks",
+        "microtasks",
+        "rendering_opportunities",
+        "mutations",
+        "post_readiness_resources",
+        "process_cpu_ms",
+        "host_wall_ms"
+      ],
+      "properties": {
+        "virtual_span_ms": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+        "ordinary_tasks": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+        "microtasks": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+        "rendering_opportunities": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+        "mutations": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+        "post_readiness_resources": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "process_cpu_ms": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+        "host_wall_ms": { "type": "integer", "minimum": 1, "maximum": 4294967295 }
+      }
+    },
+    "settlement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["policy_version", "infinite_source_policy", "empty_checkpoints", "limits"],
+      "properties": {
+        "policy_version": { "const": 1 },
+        "infinite_source_policy": { "const": "fail" },
+        "empty_checkpoints": { "const": 2 },
+        "limits": { "$ref": "#/definitions/settlement_limits" }
+      }
+    },
+    "diagnostics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["retention"],
+      "properties": {
+        "retention": {
+          "type": "string",
+          "enum": ["none", "on-failure", "always"]
+        }
+      }
+    }
+  }
+}
