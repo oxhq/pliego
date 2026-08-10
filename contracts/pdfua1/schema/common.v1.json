@@ -1,0 +1,72 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://pliego.dev/schema/pdfua1/common.v1.json",
+  "title": "Pliego PDF/UA-1 common contract definitions",
+  "definitions": {
+    "content_address": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "profile_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "version"],
+      "properties": {
+        "schema": { "const": "pliego.profile.pdfua-1" },
+        "version": { "const": 1 }
+      }
+    },
+    "artifact_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["resource", "media_type", "bytes"],
+      "properties": {
+        "resource": { "$ref": "#/definitions/content_address" },
+        "media_type": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 255,
+          "pattern": "^[a-z0-9][a-z0-9.+-]*/[a-z0-9][a-z0-9.+-]*$"
+        },
+        "bytes": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 }
+      }
+    },
+    "source_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "bytes"],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240,
+          "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._/-]*[A-Za-z0-9_-])?$"
+        },
+        "sha256": { "$ref": "#/definitions/content_address" },
+        "bytes": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 }
+      }
+    },
+    "author_assurance_input_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "media_type", "sha256", "bytes"],
+      "properties": {
+        "path": { "const": "pliego/author-assurance.json" },
+        "media_type": { "const": "application/vnd.pliego.author-assurance+json" },
+        "sha256": { "$ref": "#/definitions/content_address" },
+        "bytes": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 }
+      }
+    },
+    "assessment_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["total", "passed", "failed", "not_evaluated"],
+      "properties": {
+        "total": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+        "passed": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "failed": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "not_evaluated": { "type": "integer", "minimum": 0, "maximum": 4294967295 }
+      }
+    }
+  }
+}

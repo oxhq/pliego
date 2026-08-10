@@ -1,0 +1,201 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://pliego.dev/schema/pdfua1/conformance-evidence.v1.json",
+  "title": "Pliego PDF/UA-1 deterministic conformance evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "version",
+    "profile",
+    "subject_pdf",
+    "decision",
+    "validation_lock",
+    "per_render_machine",
+    "release_corpus",
+    "author_assurance",
+    "assistive_technology",
+    "blockers"
+  ],
+  "properties": {
+    "schema": { "const": "pliego.conformance-evidence.pdfua-1" },
+    "version": { "const": 1 },
+    "profile": { "$ref": "common.v1.json#/definitions/profile_ref" },
+    "subject_pdf": { "$ref": "#/definitions/pdf_ref" },
+    "decision": {
+      "type": "string",
+      "enum": ["satisfied", "failed", "not-evaluated"]
+    },
+    "validation_lock": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "#/definitions/validation_lock_ref" }
+      ]
+    },
+    "per_render_machine": { "$ref": "#/definitions/per_render_machine" },
+    "release_corpus": { "$ref": "#/definitions/release_corpus" },
+    "author_assurance": { "$ref": "#/definitions/author_assurance" },
+    "assistive_technology": { "$ref": "#/definitions/assistive_technology" },
+    "blockers": {
+      "type": "array",
+      "maxItems": 5,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "enum": [
+          "assistive-technology-matrix-not-run",
+          "author-assurance-not-provided",
+          "per-render-machine-not-run",
+          "release-corpus-not-run",
+          "validation-lock-not-ready"
+        ]
+      }
+    }
+  },
+  "definitions": {
+    "pdf_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["resource", "media_type", "bytes"],
+      "properties": {
+        "resource": { "$ref": "common.v1.json#/definitions/content_address" },
+        "media_type": { "const": "application/pdf" },
+        "bytes": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 }
+      }
+    },
+    "validation_lock_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["resource", "media_type", "bytes"],
+      "properties": {
+        "resource": { "$ref": "common.v1.json#/definitions/content_address" },
+        "media_type": { "const": "application/vnd.pliego.pdfua-validation-lock+json" },
+        "bytes": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 }
+      }
+    },
+    "per_render_machine": {
+      "oneOf": [
+        { "$ref": "#/definitions/per_render_machine_not_evaluated" },
+        { "$ref": "#/definitions/per_render_machine_evaluated" }
+      ]
+    },
+    "per_render_machine_not_evaluated": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scope", "status", "report", "summary"],
+      "properties": {
+        "scope": { "const": "per-render" },
+        "status": { "const": "not-evaluated" },
+        "report": { "type": "null" },
+        "summary": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["total", "passed", "failed", "not_evaluated"],
+          "properties": {
+            "total": { "const": 87 },
+            "passed": { "const": 0 },
+            "failed": { "const": 0 },
+            "not_evaluated": { "const": 87 }
+          }
+        }
+      }
+    },
+    "per_render_machine_evaluated": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scope", "status", "report", "summary"],
+      "properties": {
+        "scope": { "const": "per-render" },
+        "status": { "type": "string", "enum": ["passed", "failed"] },
+        "report": { "$ref": "common.v1.json#/definitions/artifact_ref" },
+        "summary": { "$ref": "common.v1.json#/definitions/assessment_summary" }
+      }
+    },
+    "release_corpus": {
+      "oneOf": [
+        { "$ref": "#/definitions/release_corpus_not_evaluated" },
+        { "$ref": "#/definitions/release_corpus_evaluated" }
+      ]
+    },
+    "release_corpus_not_evaluated": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scope", "status", "runtime", "manifest", "report"],
+      "properties": {
+        "scope": { "const": "release-corpus" },
+        "status": { "const": "not-evaluated" },
+        "runtime": { "type": "null" },
+        "manifest": { "type": "null" },
+        "report": { "type": "null" }
+      }
+    },
+    "release_corpus_evaluated": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scope", "status", "runtime", "manifest", "report"],
+      "properties": {
+        "scope": { "const": "release-corpus" },
+        "status": { "type": "string", "enum": ["passed", "failed"] },
+        "runtime": { "$ref": "common.v1.json#/definitions/artifact_ref" },
+        "manifest": { "$ref": "common.v1.json#/definitions/artifact_ref" },
+        "report": { "$ref": "common.v1.json#/definitions/artifact_ref" }
+      }
+    },
+    "author_assurance": {
+      "oneOf": [
+        { "$ref": "#/definitions/author_assurance_not_evaluated" },
+        { "$ref": "#/definitions/author_assurance_evaluated" }
+      ]
+    },
+    "author_assurance_not_evaluated": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scope", "status", "input", "review_record"],
+      "properties": {
+        "scope": { "const": "document-or-template" },
+        "status": { "const": "not-evaluated" },
+        "input": { "type": "null" },
+        "review_record": { "type": "null" }
+      }
+    },
+    "author_assurance_evaluated": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scope", "status", "input", "review_record"],
+      "properties": {
+        "scope": { "const": "document-or-template" },
+        "status": { "type": "string", "enum": ["passed", "failed"] },
+        "input": { "$ref": "common.v1.json#/definitions/author_assurance_input_ref" },
+        "review_record": { "$ref": "common.v1.json#/definitions/artifact_ref" }
+      }
+    },
+    "assistive_technology": {
+      "oneOf": [
+        { "$ref": "#/definitions/assistive_technology_not_evaluated" },
+        { "$ref": "#/definitions/assistive_technology_evaluated" }
+      ]
+    },
+    "assistive_technology_not_evaluated": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scope", "status", "matrix", "report"],
+      "properties": {
+        "scope": { "const": "release-matrix" },
+        "status": { "const": "not-evaluated" },
+        "matrix": { "type": "null" },
+        "report": { "type": "null" }
+      }
+    },
+    "assistive_technology_evaluated": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scope", "status", "matrix", "report"],
+      "properties": {
+        "scope": { "const": "release-matrix" },
+        "status": { "type": "string", "enum": ["passed", "failed"] },
+        "matrix": { "$ref": "common.v1.json#/definitions/artifact_ref" },
+        "report": { "$ref": "common.v1.json#/definitions/artifact_ref" }
+      }
+    }
+  }
+}

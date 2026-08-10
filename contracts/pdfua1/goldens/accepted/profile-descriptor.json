@@ -1,0 +1,76 @@
+{
+  "schema": "pliego.profile.pdfua-1",
+  "version": 1,
+  "target": {
+    "name": "PDF/UA-1",
+    "standard": "ISO 14289-1:2014",
+    "edition": 2,
+    "base_standard": "ISO 32000-1:2008",
+    "pdf_version": "1.7"
+  },
+  "authority": {
+    "order": [
+      "normative-pdfua-standard",
+      "normative-base-pdf-standard",
+      "test-protocol",
+      "implementation-guidance",
+      "reference-suite",
+      "machine-validator"
+    ],
+    "conflict_policy": "earlier-authority-wins",
+    "lock": {
+      "schema": "pliego.pdfua-validation-lock",
+      "version": 1,
+      "media_type": "application/vnd.pliego.pdfua-validation-lock+json"
+    }
+  },
+  "inventory": {
+    "protocol": "Matterhorn Protocol 1.1",
+    "checkpoints": 31,
+    "failure_conditions": 136,
+    "machine": 87,
+    "human": 47,
+    "no_specific_test": ["23-001", "27-001"]
+  },
+  "request": {
+    "profile": {
+      "schema": "pliego.profile.pdfua-1",
+      "version": 1
+    },
+    "selection": "explicit",
+    "unsupported": "reject-before-render",
+    "author_assurance": {
+      "schema": "pliego.author-assurance.pdfua-1",
+      "version": 1,
+      "path": "pliego/author-assurance.json",
+      "media_type": "application/vnd.pliego.author-assurance+json",
+      "addressing": "input-manifest-entry-sha256"
+    }
+  },
+  "result": {
+    "evidence": {
+      "schema": "pliego.conformance-evidence.pdfua-1",
+      "version": 1,
+      "media_type": "application/vnd.pliego.conformance-evidence+json"
+    },
+    "satisfaction": "all-four-gates-pass"
+  },
+  "bindings": {
+    "render_identity": "exact-profile-ref",
+    "semantic_layer": "exact-profile-ref",
+    "pdf_metadata": "exact-standard-revision",
+    "evidence": "exact-profile-ref"
+  },
+  "compatibility": {
+    "profile_match": "exact-schema-and-version",
+    "unknown_version": "unsupported",
+    "tagged_pdf": "not-conforming-without-evidence",
+    "untagged_pdf": "not-conforming",
+    "pdfua2": "separate-profile"
+  },
+  "activation": {
+    "gate": "r3.5-final",
+    "runtime_advertisement": "required-before-acceptance",
+    "descriptor_is_support_claim": false
+  }
+}

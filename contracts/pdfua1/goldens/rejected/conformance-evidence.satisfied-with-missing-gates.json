@@ -1,0 +1,52 @@
+{
+  "schema": "pliego.conformance-evidence.pdfua-1",
+  "version": 1,
+  "profile": {
+    "schema": "pliego.profile.pdfua-1",
+    "version": 1
+  },
+  "subject_pdf": {
+    "resource": "sha256:3b78bf3f4499aa5729f9a387b5ce6082d27b990742dda784c57fa7fe3e73be79",
+    "media_type": "application/pdf",
+    "bytes": 435
+  },
+  "decision": "satisfied",
+  "validation_lock": null,
+  "per_render_machine": {
+    "scope": "per-render",
+    "status": "not-evaluated",
+    "report": null,
+    "summary": {
+      "total": 87,
+      "passed": 0,
+      "failed": 0,
+      "not_evaluated": 87
+    }
+  },
+  "release_corpus": {
+    "scope": "release-corpus",
+    "status": "not-evaluated",
+    "runtime": null,
+    "manifest": null,
+    "report": null
+  },
+  "author_assurance": {
+    "scope": "document-or-template",
+    "status": "not-evaluated",
+    "input": null,
+    "review_record": null
+  },
+  "assistive_technology": {
+    "scope": "release-matrix",
+    "status": "not-evaluated",
+    "matrix": null,
+    "report": null
+  },
+  "blockers": [
+    "assistive-technology-matrix-not-run",
+    "author-assurance-not-provided",
+    "per-render-machine-not-run",
+    "release-corpus-not-run",
+    "validation-lock-not-ready"
+  ]
+}

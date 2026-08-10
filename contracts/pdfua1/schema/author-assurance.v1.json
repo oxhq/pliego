@@ -1,0 +1,73 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://pliego.dev/schema/pdfua1/author-assurance.v1.json",
+  "title": "Pliego PDF/UA-1 author assurance input",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "version", "profile", "subject", "assessment"],
+  "properties": {
+    "schema": { "const": "pliego.author-assurance.pdfua-1" },
+    "version": { "const": 1 },
+    "profile": { "$ref": "common.v1.json#/definitions/profile_ref" },
+    "subject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scope", "entrypoint", "template"],
+      "properties": {
+        "scope": { "type": "string", "enum": ["document", "template"] },
+        "entrypoint": { "$ref": "common.v1.json#/definitions/source_ref" },
+        "template": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "common.v1.json#/definitions/source_ref" }
+          ]
+        }
+      }
+    },
+    "assessment": {
+      "oneOf": [
+        { "$ref": "#/definitions/not_evaluated" },
+        { "$ref": "#/definitions/reviewed" }
+      ]
+    }
+  },
+  "definitions": {
+    "not_evaluated": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "reviewer_id", "review_record", "summary"],
+      "properties": {
+        "status": { "const": "not-evaluated" },
+        "reviewer_id": { "type": "null" },
+        "review_record": { "type": "null" },
+        "summary": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["total", "passed", "failed", "not_evaluated"],
+          "properties": {
+            "total": { "const": 47 },
+            "passed": { "const": 0 },
+            "failed": { "const": 0 },
+            "not_evaluated": { "const": 47 }
+          }
+        }
+      }
+    },
+    "reviewed": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "reviewer_id", "review_record", "summary"],
+      "properties": {
+        "status": { "type": "string", "enum": ["passed", "failed"] },
+        "reviewer_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-z0-9][a-z0-9._-]*$"
+        },
+        "review_record": { "$ref": "common.v1.json#/definitions/artifact_ref" },
+        "summary": { "$ref": "common.v1.json#/definitions/assessment_summary" }
+      }
+    }
+  }
+}

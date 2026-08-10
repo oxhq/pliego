@@ -1,0 +1,84 @@
+{
+  "schema": "pliego.pdfua-validation-lock",
+  "version": 1,
+  "profile": {
+    "schema": "pliego.profile.pdfua-1",
+    "version": 1
+  },
+  "state": "blocked",
+  "authorities": {
+    "pdfua_standard": {
+      "identifier": "ISO 14289-1:2014",
+      "edition": 2,
+      "status": "confirmed-2025",
+      "metadata_url": "https://www.iso.org/standard/64599.html",
+      "clause_access": "unreviewed",
+      "document_sha256": null
+    },
+    "base_pdf_standard": {
+      "identifier": "ISO 32000-1:2008",
+      "edition": 1,
+      "status": "confirmed-2023",
+      "metadata_url": "https://www.iso.org/standard/51502.html",
+      "clause_access": "unreviewed",
+      "document_sha256": null
+    },
+    "test_protocol": {
+      "identifier": "Matterhorn Protocol",
+      "version": "1.1",
+      "published": "2021-04",
+      "source_url": "https://pdfa.org/download-area/publications/Matterhorn-Protocol-1-1.pdf",
+      "document_sha256": null
+    },
+    "implementation_guidance": {
+      "identifier": "Tagged PDF Best Practice Guide: Syntax",
+      "revision": "2019-corrected-2023-07-26",
+      "source_url": "https://pdfa.org/resource/tagged-pdf-best-practice-guide-syntax/",
+      "document_sha256": null
+    },
+    "reference_suite": {
+      "identifier": "PDF/UA-1 Reference Suite",
+      "version": "1.1",
+      "license": "CC-BY-4.0",
+      "source_url": "https://pdfa.org/resource/pdfua-reference-suite/",
+      "archive_url": null,
+      "archive_sha256": null
+    }
+  },
+  "verifier": {
+    "name": "veraPDF",
+    "version": "1.30.2",
+    "flavour": "ua1",
+    "source_tag": "v1.30.2",
+    "source_commit": "7d9b5c3f709846ab83f86ca1a538b24eac2d3f72",
+    "release_url": "https://github.com/veraPDF/veraPDF-apps/releases/tag/v1.30.2",
+    "distribution_url": null,
+    "distribution_sha256": null,
+    "signature": {
+      "url": null,
+      "sha256": null,
+      "verified_key_fingerprint": null
+    },
+    "container": {
+      "reference": null,
+      "image_digest": null
+    }
+  },
+  "blockers": [
+    "base-pdf-standard-clause-access-unreviewed",
+    "base-pdf-standard-document-sha256-unpinned",
+    "implementation-guidance-sha256-unpinned",
+    "matterhorn-sha256-unpinned",
+    "pdfua-standard-clause-access-unreviewed",
+    "pdfua-standard-document-sha256-unpinned",
+    "reference-suite-archive-sha256-unpinned",
+    "reference-suite-archive-url-unpinned",
+    "verifier-container-image-digest-unpinned",
+    "verifier-container-reference-unpinned",
+    "verifier-distribution-sha256-unpinned",
+    "verifier-distribution-url-unpinned",
+    "verifier-signature-key-unverified",
+    "verifier-signature-sha256-unpinned",
+    "verifier-signature-url-unpinned"
+  ]
+}

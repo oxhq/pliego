@@ -1,0 +1,216 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://pliego.dev/schema/pdfua1/validation-lock.v1.json",
+  "title": "Pliego PDF/UA-1 validation authority lock",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "version", "profile", "state", "authorities", "verifier", "blockers"],
+  "properties": {
+    "schema": { "const": "pliego.pdfua-validation-lock" },
+    "version": { "const": 1 },
+    "profile": { "$ref": "common.v1.json#/definitions/profile_ref" },
+    "state": { "type": "string", "enum": ["blocked", "ready"] },
+    "authorities": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "pdfua_standard",
+        "base_pdf_standard",
+        "test_protocol",
+        "implementation_guidance",
+        "reference_suite"
+      ],
+      "properties": {
+        "pdfua_standard": { "$ref": "#/definitions/pdfua_standard" },
+        "base_pdf_standard": { "$ref": "#/definitions/base_pdf_standard" },
+        "test_protocol": { "$ref": "#/definitions/test_protocol" },
+        "implementation_guidance": { "$ref": "#/definitions/implementation_guidance" },
+        "reference_suite": { "$ref": "#/definitions/reference_suite" }
+      }
+    },
+    "verifier": { "$ref": "#/definitions/verifier" },
+    "blockers": {
+      "type": "array",
+      "maxItems": 16,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "enum": [
+          "base-pdf-standard-clause-access-unreviewed",
+          "base-pdf-standard-document-sha256-unpinned",
+          "implementation-guidance-sha256-unpinned",
+          "matterhorn-sha256-unpinned",
+          "pdfua-standard-clause-access-unreviewed",
+          "pdfua-standard-document-sha256-unpinned",
+          "reference-suite-archive-sha256-unpinned",
+          "reference-suite-archive-url-unpinned",
+          "verifier-container-image-digest-unpinned",
+          "verifier-container-reference-unpinned",
+          "verifier-distribution-sha256-unpinned",
+          "verifier-distribution-url-unpinned",
+          "verifier-signature-key-unverified",
+          "verifier-signature-sha256-unpinned",
+          "verifier-signature-url-unpinned"
+        ]
+      }
+    }
+  },
+  "definitions": {
+    "nullable_content_address": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "common.v1.json#/definitions/content_address" }
+      ]
+    },
+    "nullable_url": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "string",
+          "minLength": 9,
+          "maxLength": 2048,
+          "pattern": "^https://[^ ]+$"
+        }
+      ]
+    },
+    "pdfua_standard": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "identifier",
+        "edition",
+        "status",
+        "metadata_url",
+        "clause_access",
+        "document_sha256"
+      ],
+      "properties": {
+        "identifier": { "const": "ISO 14289-1:2014" },
+        "edition": { "const": 2 },
+        "status": { "const": "confirmed-2025" },
+        "metadata_url": { "const": "https://www.iso.org/standard/64599.html" },
+        "clause_access": { "type": "string", "enum": ["unreviewed", "reviewed"] },
+        "document_sha256": { "$ref": "#/definitions/nullable_content_address" }
+      }
+    },
+    "base_pdf_standard": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "identifier",
+        "edition",
+        "status",
+        "metadata_url",
+        "clause_access",
+        "document_sha256"
+      ],
+      "properties": {
+        "identifier": { "const": "ISO 32000-1:2008" },
+        "edition": { "const": 1 },
+        "status": { "const": "confirmed-2023" },
+        "metadata_url": { "const": "https://www.iso.org/standard/51502.html" },
+        "clause_access": { "type": "string", "enum": ["unreviewed", "reviewed"] },
+        "document_sha256": { "$ref": "#/definitions/nullable_content_address" }
+      }
+    },
+    "test_protocol": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["identifier", "version", "published", "source_url", "document_sha256"],
+      "properties": {
+        "identifier": { "const": "Matterhorn Protocol" },
+        "version": { "const": "1.1" },
+        "published": { "const": "2021-04" },
+        "source_url": {
+          "const": "https://pdfa.org/download-area/publications/Matterhorn-Protocol-1-1.pdf"
+        },
+        "document_sha256": { "$ref": "#/definitions/nullable_content_address" }
+      }
+    },
+    "implementation_guidance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["identifier", "revision", "source_url", "document_sha256"],
+      "properties": {
+        "identifier": { "const": "Tagged PDF Best Practice Guide: Syntax" },
+        "revision": { "const": "2019-corrected-2023-07-26" },
+        "source_url": {
+          "const": "https://pdfa.org/resource/tagged-pdf-best-practice-guide-syntax/"
+        },
+        "document_sha256": { "$ref": "#/definitions/nullable_content_address" }
+      }
+    },
+    "reference_suite": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["identifier", "version", "license", "source_url", "archive_url", "archive_sha256"],
+      "properties": {
+        "identifier": { "const": "PDF/UA-1 Reference Suite" },
+        "version": { "const": "1.1" },
+        "license": { "const": "CC-BY-4.0" },
+        "source_url": { "const": "https://pdfa.org/resource/pdfua-reference-suite/" },
+        "archive_url": { "$ref": "#/definitions/nullable_url" },
+        "archive_sha256": { "$ref": "#/definitions/nullable_content_address" }
+      }
+    },
+    "signature": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["url", "sha256", "verified_key_fingerprint"],
+      "properties": {
+        "url": { "$ref": "#/definitions/nullable_url" },
+        "sha256": { "$ref": "#/definitions/nullable_content_address" },
+        "verified_key_fingerprint": {
+          "oneOf": [
+            { "type": "null" },
+            { "type": "string", "pattern": "^(?:[0-9A-F]{40}|[0-9A-F]{64})$" }
+          ]
+        }
+      }
+    },
+    "container": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reference", "image_digest"],
+      "properties": {
+        "reference": {
+          "oneOf": [
+            { "type": "null" },
+            { "type": "string", "pattern": "^ghcr\\.io/[a-z0-9._/-]+:[A-Za-z0-9._-]+$" }
+          ]
+        },
+        "image_digest": { "$ref": "#/definitions/nullable_content_address" }
+      }
+    },
+    "verifier": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "version",
+        "flavour",
+        "source_tag",
+        "source_commit",
+        "release_url",
+        "distribution_url",
+        "distribution_sha256",
+        "signature",
+        "container"
+      ],
+      "properties": {
+        "name": { "const": "veraPDF" },
+        "version": { "const": "1.30.2" },
+        "flavour": { "const": "ua1" },
+        "source_tag": { "const": "v1.30.2" },
+        "source_commit": { "const": "7d9b5c3f709846ab83f86ca1a538b24eac2d3f72" },
+        "release_url": {
+          "const": "https://github.com/veraPDF/veraPDF-apps/releases/tag/v1.30.2"
+        },
+        "distribution_url": { "$ref": "#/definitions/nullable_url" },
+        "distribution_sha256": { "$ref": "#/definitions/nullable_content_address" },
+        "signature": { "$ref": "#/definitions/signature" },
+        "container": { "$ref": "#/definitions/container" }
+      }
+    }
+  }
+}
