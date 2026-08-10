@@ -1153,13 +1153,16 @@ pub struct PendingRestyle {
 /// into the lower 2 bits of the `OpaqueNodeId`, which otherwise contains a 32-bit-aligned
 /// or 64-bit-aligned heap address depending on the machine.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, MallocSizeOf, PartialEq, Serialize)]
+#[repr(u8)]
 pub enum FragmentType {
     /// A StackingContext for the fragment body itself.
-    FragmentBody,
+    FragmentBody = 0,
     /// A StackingContext created to contain ::before pseudo-element content.
-    BeforePseudoContent,
+    BeforePseudoContent = 1,
     /// A StackingContext created to contain ::after pseudo-element content.
-    AfterPseudoContent,
+    AfterPseudoContent = 2,
+    /// A StackingContext created to contain ::marker pseudo-element content.
+    MarkerPseudoContent = 3,
 }
 
 impl From<Option<PseudoElement>> for FragmentType {
@@ -1167,6 +1170,7 @@ impl From<Option<PseudoElement>> for FragmentType {
         match value {
             Some(PseudoElement::After) => FragmentType::AfterPseudoContent,
             Some(PseudoElement::Before) => FragmentType::BeforePseudoContent,
+            Some(PseudoElement::Marker) => FragmentType::MarkerPseudoContent,
             _ => FragmentType::FragmentBody,
         }
     }
@@ -1405,7 +1409,58 @@ mod test {
 
     use pixels::{CorsStatus, ImageFrame, ImageMetadata, PixelFormat, RasterImage, Repeat};
 
-    use crate::ImageAnimationState;
+    use style::selector_parser::PseudoElement;
+
+    use crate::{
+        FragmentType, ImageAnimationState, combine_id_with_fragment_type, node_id_from_scroll_id,
+    };
+
+    #[test]
+    fn fragment_type_low_bits_are_stable_and_distinct() {
+        let node_id = 0x1000;
+        let cases = [
+            (None, FragmentType::FragmentBody, 0),
+            (
+                Some(PseudoElement::Before),
+                FragmentType::BeforePseudoContent,
+                1,
+            ),
+            (
+                Some(PseudoElement::After),
+                FragmentType::AfterPseudoContent,
+                2,
+            ),
+            (
+                Some(PseudoElement::Marker),
+                FragmentType::MarkerPseudoContent,
+                3,
+            ),
+        ];
+
+        for (pseudo, expected_type, expected_low_bits) in cases {
+            assert_eq!(FragmentType::from(pseudo), expected_type);
+            assert_eq!(expected_type as u8, expected_low_bits);
+            assert_eq!(
+                combine_id_with_fragment_type(node_id, expected_type),
+                node_id as u64 | u64::from(expected_low_bits)
+            );
+        }
+    }
+
+    #[test]
+    fn fragment_type_ids_round_trip_to_the_node_id() {
+        let node_id = 0x1234_5678;
+
+        for fragment_type in [
+            FragmentType::FragmentBody,
+            FragmentType::BeforePseudoContent,
+            FragmentType::AfterPseudoContent,
+            FragmentType::MarkerPseudoContent,
+        ] {
+            let fragment_id = combine_id_with_fragment_type(node_id, fragment_type);
+            assert_eq!(node_id_from_scroll_id(fragment_id as usize), node_id);
+        }
+    }
 
     #[test]
     fn test_animated_image_update() {
