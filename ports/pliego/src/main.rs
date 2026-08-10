@@ -326,12 +326,12 @@ fn parse_http_root(value: &OsString) -> Result<url::Url, String> {
         .to_str()
         .ok_or_else(|| "HTTP root must be valid UTF-8".to_owned())?;
     let mut root = url::Url::parse(value).map_err(|error| format!("invalid HTTP root: {error}"))?;
-    if !matches!(root.scheme(), "http" | "https")
-        || root.host_str().is_none()
-        || !root.username().is_empty()
-        || root.password().is_some()
-        || root.query().is_some()
-        || root.fragment().is_some()
+    if !matches!(root.scheme(), "http" | "https") ||
+        root.host_str().is_none() ||
+        !root.username().is_empty() ||
+        root.password().is_some() ||
+        root.query().is_some() ||
+        root.fragment().is_some()
     {
         return Err(
             "HTTP root must be an http(s) URL without credentials, query, or fragment".into(),
@@ -1290,10 +1290,10 @@ fn stable_render_id(
     if allow_host_fonts {
         update_hash_field(&mut hasher, b"pliego.host-fonts.v1");
     }
-    if !resource_policy.allowed_http_roots.is_empty()
-        || !resource_policy.virtual_resources.is_empty()
-        || resource_policy.asset_manifest.is_some()
-        || resource_policy.timeout_ms != DEFAULT_RESOURCE_TIMEOUT_MS
+    if !resource_policy.allowed_http_roots.is_empty() ||
+        !resource_policy.virtual_resources.is_empty() ||
+        resource_policy.asset_manifest.is_some() ||
+        resource_policy.timeout_ms != DEFAULT_RESOURCE_TIMEOUT_MS
     {
         update_hash_field(&mut hasher, RESOURCE_POLICY_ID.as_bytes());
         update_hash_field(&mut hasher, &resource_policy.timeout_ms.to_be_bytes());
@@ -1620,8 +1620,8 @@ fn record_resources(
 
     for resource in resources {
         match resource.event {
-            servoshell::NetworkEvent::HttpRequest(request)
-            | servoshell::NetworkEvent::HttpRequestUpdate(request) => {
+            servoshell::NetworkEvent::HttpRequest(request) |
+            servoshell::NetworkEvent::HttpRequestUpdate(request) => {
                 let method = request.method.to_string();
                 let url = request.url.into_string();
                 let pending_resource = pending.entry(resource.request_id.clone()).or_default();
@@ -1771,8 +1771,8 @@ fn record_resources(
         })
         .filter(|(url, _)| !capture.url_to_resource.contains_key(url))
         .filter(|(url, _)| {
-            url.starts_with("file:")
-                || policy.allowed_http_roots.iter().any(|root| {
+            url.starts_with("file:") ||
+                policy.allowed_http_roots.iter().any(|root| {
                     url::Url::parse(url).is_ok_and(|requested| http_root_allows(root, &requested))
                 })
         })
@@ -1806,8 +1806,8 @@ fn complete_resource(
     request_id: &str,
     body: Option<Vec<u8>>,
 ) -> Option<CompletedResource> {
-    if body.is_none()
-        && !pending
+    if body.is_none() &&
+        !pending
             .get(request_id)?
             .response_status
             .is_some_and(|status| (200..300).contains(&status))
