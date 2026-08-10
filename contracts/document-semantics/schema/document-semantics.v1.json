@@ -311,7 +311,7 @@
     },
     "table_semantics": {
       "type": "object",
-      "description": "The declared rows multiplied by columns must not exceed 1000000 table slots.",
+      "description": "Each grid contributes rows multiplied by columns toward the document-wide maximum of 1000000 declared table slots.",
       "additionalProperties": false,
       "required": ["kind", "rows", "columns"],
       "properties": {

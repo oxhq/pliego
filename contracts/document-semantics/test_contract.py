@@ -132,8 +132,10 @@ def canonical_text_errors(value: str, path: str) -> list[str]:
 def canonical_language_errors(value: str, path: str) -> list[str]:
     subtags = value.split("-")
     variant_start = 1
-    if variant_start < len(subtags) and len(subtags[variant_start]) == 4:
-        variant_start += 1
+    if variant_start < len(subtags):
+        script = subtags[variant_start]
+        if len(script) == 4 and "A" <= script[0] <= "Z" and all("a" <= character <= "z" for character in script[1:]):
+            variant_start += 1
     if variant_start < len(subtags) and (
         len(subtags[variant_start]) == 2 or (len(subtags[variant_start]) == 3 and subtags[variant_start].isdigit())
     ):
@@ -333,7 +335,7 @@ def role_errors(document: dict[str, Any], api2: ModuleType, state: GraphState) -
                 errors.append(error(f"{path}.name", "tagged annotations require a non-null title"))
             if node["alternate_text"] is None:
                 errors.append(error(f"{path}.alternate_text", "tagged annotations require alternate text"))
-            if not api2.canonical_link_target(node["semantics"]["target"]):
+            if semantics_kind == "link" and not api2.canonical_link_target(node["semantics"]["target"]):
                 errors.append(error(f"{path}.semantics.target", "target is not a canonical absolute URL"))
 
     for index, node in enumerate(nodes):
@@ -389,6 +391,8 @@ def list_errors(document: dict[str, Any]) -> list[str]:
             errors.append(error(f"{path}.children", "list requires one or more direct list-item children"))
             continue
         semantics = node["semantics"]
+        if semantics["kind"] != "list":
+            continue
         if semantics["ordered"] and semantics["start"] is None:
             errors.append(error(f"{path}.semantics.start", "ordered lists require an integer start"))
             continue
@@ -401,7 +405,8 @@ def list_errors(document: dict[str, Any]) -> list[str]:
         first = semantics["start"] if semantics["ordered"] else 1
         for offset, item_id in enumerate(item_ids):
             item = nodes[item_id]
-            if item["semantics"]["ordinal"] != first + offset:
+            item_semantics = item["semantics"]
+            if item_semantics["kind"] == "list-item" and item_semantics["ordinal"] != first + offset:
                 errors.append(
                     error(
                         f"$.nodes[{item_id}].semantics.ordinal",
@@ -427,9 +432,32 @@ def list_errors(document: dict[str, Any]) -> list[str]:
 def table_errors(document: dict[str, Any]) -> list[str]:
     errors: list[str] = []
     nodes = document["nodes"]
-    for table in nodes:
-        if table["role"] != "table":
+    declared_table_slots = 0
+    for node in nodes:
+        if node["role"] != "table" or node["semantics"]["kind"] != "table":
             continue
+        table_slots = node["semantics"]["rows"] * node["semantics"]["columns"]
+        declared_table_slots += table_slots
+        if table_slots > MAX_TABLE_SLOTS:
+            errors.append(
+                error(
+                    f"$.nodes[{node['id']}].semantics",
+                    f"table grid exceeds v1 maximum of {MAX_TABLE_SLOTS} slots",
+                )
+            )
+    if declared_table_slots > MAX_TABLE_SLOTS:
+        errors.append(
+            error(
+                "$.nodes",
+                f"document table grids exceed v1 maximum of {MAX_TABLE_SLOTS} declared slots",
+            )
+        )
+        return errors
+
+    for table in nodes:
+        if table["role"] != "table" or table["semantics"]["kind"] != "table":
+            continue
+        table_slots = table["semantics"]["rows"] * table["semantics"]["columns"]
         table_path = f"$.nodes[{table['id']}]"
         if any(child["kind"] != "node" for child in table["children"]):
             errors.append(error(f"{table_path}.children", "table may directly contain only row-group nodes"))
@@ -459,15 +487,6 @@ def table_errors(document: dict[str, Any]) -> list[str]:
 
         rows = table["semantics"]["rows"]
         columns = table["semantics"]["columns"]
-        table_slots = rows * columns
-        if table_slots > MAX_TABLE_SLOTS:
-            errors.append(
-                error(
-                    f"{table_path}.semantics",
-                    f"table grid exceeds v1 maximum of {MAX_TABLE_SLOTS} slots",
-                )
-            )
-            continue
         if len(row_ids) != rows:
             errors.append(error(f"{table_path}.semantics.rows", "declared table row count does not match structure"))
             continue
@@ -487,13 +506,19 @@ def table_errors(document: dict[str, Any]) -> list[str]:
             ):
                 errors.append(error(f"$.nodes[{row_id}].children", "table row requires one or more cell children"))
                 continue
-            columns_in_order = [nodes[cell_id]["semantics"]["column"] for cell_id in row_cells]
-            if columns_in_order != sorted(columns_in_order):
-                errors.append(error(f"$.nodes[{row_id}].children", "table cells must be ordered by starting column"))
+            cell_semantics = [nodes[cell_id]["semantics"] for cell_id in row_cells]
+            if all(semantics["kind"] == "table-cell" for semantics in cell_semantics):
+                columns_in_order = [semantics["column"] for semantics in cell_semantics]
+                if columns_in_order != sorted(columns_in_order):
+                    errors.append(
+                        error(f"$.nodes[{row_id}].children", "table cells must be ordered by starting column")
+                    )
             for cell_id in row_cells:
-                cell_ids.append(cell_id)
                 cell = nodes[cell_id]
                 semantics = cell["semantics"]
+                if semantics["kind"] != "table-cell":
+                    continue
+                cell_ids.append(cell_id)
                 if semantics["row"] != expected_row:
                     errors.append(error(f"$.nodes[{cell_id}].semantics.row", "cell row must equal canonical row order"))
                 if (
@@ -735,7 +760,10 @@ def scene_binding_errors(document: dict[str, Any], scene: dict[str, Any], state:
             link_id = node_has_ancestor_role(document, state, owner_id, "link")
             if link_id is None:
                 errors.append(error(path, "annotation requires a logical link ancestor"))
-            elif document["nodes"][link_id]["semantics"]["target"] != operation["target"]:
+            elif (
+                document["nodes"][link_id]["semantics"]["kind"] == "link"
+                and document["nodes"][link_id]["semantics"]["target"] != operation["target"]
+            ):
                 errors.append(error(path, "link semantic target does not equal annotation paint target"))
         if fragment["kind"] in {"image", "path"} and owner_kind == "node":
             figure_id = node_has_ancestor_role(document, state, owner_id, "figure")
@@ -959,15 +987,20 @@ def verify_generated_adversaries(
             raise AssertionError(f"generated adversary {name!r} did not report {expected!r}:\n{rendered}")
         rejection_count += 1
 
-    regional_language = copy.deepcopy(base)
-    regional_language["language"] = "de-DE"
-    regional_failures = contract_errors(regional_language, scene, api2, schema)
-    if regional_failures:
-        raise AssertionError("canonical language de-DE was rejected:\n" + "\n".join(regional_failures))
+    for language in ("de-DE", "de-1901"):
+        canonical_language = copy.deepcopy(base)
+        canonical_language["language"] = language
+        language_failures = contract_errors(canonical_language, scene, api2, schema)
+        if language_failures:
+            raise AssertionError(f"canonical language {language} was rejected:\n" + "\n".join(language_failures))
 
     repeated_variant = copy.deepcopy(base)
     repeated_variant["language"] = "sl-rozaj-rozaj"
     require_rejection(repeated_variant, "repeated variant subtag", "repeated BCP 47 variant")
+
+    repeated_numeric_variant = copy.deepcopy(base)
+    repeated_numeric_variant["language"] = "de-1901-1901"
+    require_rejection(repeated_numeric_variant, "repeated variant subtag", "repeated numeric BCP 47 variant")
 
     c1_control = copy.deepcopy(base)
     c1_control["metadata"]["title"] = "Invoice\u0085copy"
@@ -985,6 +1018,37 @@ def verify_generated_adversaries(
         f"table grid exceeds v1 maximum of {MAX_TABLE_SLOTS} slots",
         "table slot explosion",
     )
+
+    aggregate_table_explosion = copy.deepcopy(base)
+    aggregate_table_explosion["nodes"][10]["semantics"]["rows"] = 10
+    aggregate_table_explosion["nodes"][10]["semantics"]["columns"] = 60000
+    second_table = copy.deepcopy(aggregate_table_explosion["nodes"][10])
+    second_table["id"] = len(aggregate_table_explosion["nodes"])
+    second_table["source"] = {"kind": "dom", "preorder": second_table["id"]}
+    second_table["children"] = []
+    aggregate_table_explosion["nodes"].append(second_table)
+    aggregate_table_explosion["nodes"][0]["children"].append({"kind": "node", "id": second_table["id"]})
+    require_rejection(
+        aggregate_table_explosion,
+        f"document table grids exceed v1 maximum of {MAX_TABLE_SLOTS} declared slots",
+        "document-wide table slot explosion",
+    )
+
+    for node_id, role, expected_kind in (
+        (1, "heading", "heading"),
+        (3, "list", "list"),
+        (4, "list-item", "list-item"),
+        (10, "table", "table"),
+        (16, "table-cell", "table-cell"),
+        (20, "link", "link"),
+    ):
+        mismatched_semantics = copy.deepcopy(base)
+        mismatched_semantics["nodes"][node_id]["semantics"] = {"kind": "none"}
+        require_rejection(
+            mismatched_semantics,
+            f"role {role!r} requires semantics kind {expected_kind!r}",
+            f"{role} semantics mismatch without exception",
+        )
 
     chain_length = 1050
     logical_chain = copy.deepcopy(base)

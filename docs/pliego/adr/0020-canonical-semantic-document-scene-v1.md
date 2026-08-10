@@ -54,10 +54,10 @@ and unsupported schema versions reject before typed decoding.
 Every collection and string is bounded. Accessible text is at most 4,096 Unicode scalar values and
 16,384 UTF-8 bytes, uses NFC, has no leading or trailing whitespace, and contains no Unicode `Cc`
 control characters or surrogate code points. Logical, artifact, and outline reference structures each
-have a maximum depth of 1,024, counting a root as depth 1. A declared table grid has at most 1,000,000
-row-by-column slots, checked before cell-span expansion. The contract has no generic metadata map.
-Adding a semantic field or role requires a new schema version rather than an unbounded extension
-object.
+have a maximum depth of 1,024, counting a root as depth 1. All declared table grids together have at
+most 1,000,000 row-by-column slots, checked document-wide before any cell-span occupancy expansion.
+The contract has no generic metadata map. Adding a semantic field or role requires a new schema
+version rather than an unbounded extension object.
 
 ### Explicit invariant policy and document metadata
 
@@ -120,14 +120,15 @@ level 1, and later headings cannot skip a level on descent. Lists declare ordere
 list), and a canonical start;
 list-item ordinals follow child order, and every item contains label then body. Tables declare a
 bounded row/column grid; row groups, rows, cells, spans, scope, and ascending header references must
-form an exact non-overlapping grid within the 1,000,000-slot version bound. Links carry a canonical
-resolved API 2 URL and a non-null accessible name.
+form exact non-overlapping grids within the document-wide 1,000,000-slot version bound. Links carry a
+canonical resolved API 2 URL and a non-null accessible name.
 
 The document language is a required canonical, case-normalized restricted BCP 47 form. A node
 language is either null to inherit or another canonical form. This version intentionally omits
 extensions and private-use subtags and rejects repeated variant subtags rather than accepting
 spellings whose normalization is undefined. A language and region may have the same letters, so the
-canonical regional tag `de-DE` is valid while `sl-rozaj-rozaj` is not.
+canonical regional tag `de-DE` is valid. A script is exactly `[A-Z][a-z]{3}`; therefore the numeric
+variant `de-1901` is also valid, while `sl-rozaj-rozaj` and `de-1901-1901` are not.
 
 A meaningful figure or formula requires alternate text. Decorative images belong in the artifact
 subtree, not as figures with empty alternate text. A logical link carries both an explicit title/name
@@ -196,8 +197,9 @@ logical reading order merely because it painted first.
 Readers accept only the exact schema/version tuple they implement. Unknown role, fragment,
 classification, semantics payload, language spelling, or member fails closed. A future role,
 language policy, source-locator form, or relationship rule requires a new semantic schema version and
-profile compatibility decision. PDF/UA-2 remains a separate profile; this model does not infer it from
-PDF/UA-1 semantics.
+profile compatibility decision. After a role/semantics-kind mismatch is recorded, validation does not
+read fields belonging to the rejected semantics variant. PDF/UA-2 remains a separate profile; this
+model does not infer it from PDF/UA-1 semantics.
 
 ## API 2 boundary
 
@@ -226,9 +228,10 @@ The local self-test currently proves:
   missing title/outline, empty tree/outline, dangling or reordered navigation, missing heading,
   skipped heading levels, invalid list numbering, missing pagination subtype, figure/formula/annotation
   text, glyph/text drift, page-edge destinations, paint mismatch, control characters, and lexical negative zero;
-- eight generated adversarial checks cover repeated BCP 47 variants, `Cc` and lone-surrogate text,
-  oversized table grids, 1,050-node logical/artifact/outline chains, and an outline target with a deep
-  logical subtree; and
+- 16 generated adversarial checks cover repeated alphabetic and numeric BCP 47 variants, `Cc` and
+  lone-surrogate text, per-table and document-wide table-grid limits, role/semantics mismatches without
+  exceptions, 1,050-node logical/artifact/outline chains, and an outline target with a deep logical
+  subtree; and
 - 100 fresh isolated (`python -I`) processes reproduce the exact representative semantic digest.
 
 The 100-process check proves deterministic parsing, validation, canonical serialization, and hashing
