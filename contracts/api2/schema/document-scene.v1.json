@@ -1,0 +1,184 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://pliego.dev/schema/document-scene.v1.json",
+  "title": "Pliego public DocumentScene",
+  "description": "The ordered, path-independent public scene artifact for API 2.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "version", "pages"],
+  "properties": {
+    "schema": { "const": "pliego.document-scene" },
+    "version": { "const": 1 },
+    "pages": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/definitions/page" }
+    }
+  },
+  "definitions": {
+    "content_address": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "page": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["size", "operations"],
+      "properties": {
+        "size": { "$ref": "#/definitions/size" },
+        "operations": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/operation" }
+        }
+      }
+    },
+    "size": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["width", "height"],
+      "properties": {
+        "width": { "type": "number", "exclusiveMinimum": 0 },
+        "height": { "type": "number", "exclusiveMinimum": 0 }
+      }
+    },
+    "rect": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["x", "y", "width", "height"],
+      "properties": {
+        "x": { "type": "number", "minimum": 0 },
+        "y": { "type": "number", "minimum": 0 },
+        "width": { "type": "number", "minimum": 0 },
+        "height": { "type": "number", "minimum": 0 }
+      }
+    },
+    "color": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["r", "g", "b", "a"],
+      "properties": {
+        "r": { "type": "number", "minimum": 0, "maximum": 1 },
+        "g": { "type": "number", "minimum": 0, "maximum": 1 },
+        "b": { "type": "number", "minimum": 0, "maximum": 1 },
+        "a": { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    },
+    "stroke": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["color", "width"],
+      "properties": {
+        "color": { "$ref": "#/definitions/color" },
+        "width": { "type": "number", "exclusiveMinimum": 0 }
+      }
+    },
+    "text_range": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["start", "end"],
+      "properties": {
+        "start": { "type": "integer", "minimum": 0 },
+        "end": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "glyph": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "x", "y", "advance", "text_range"],
+      "properties": {
+        "id": { "type": "integer", "minimum": 0 },
+        "x": { "type": "number", "minimum": 0 },
+        "y": { "type": "number", "minimum": 0 },
+        "advance": { "type": "number", "minimum": 0 },
+        "text_range": { "$ref": "#/definitions/text_range" }
+      }
+    },
+    "semantics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["role"],
+      "properties": {
+        "role": { "type": "string", "minLength": 1 },
+        "label": { "type": "string", "minLength": 1 }
+      }
+    },
+    "meta": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "semantics": { "$ref": "#/definitions/semantics" }
+      }
+    },
+    "operation": {
+      "oneOf": [
+        { "$ref": "#/definitions/text_operation" },
+        { "$ref": "#/definitions/path_operation" },
+        { "$ref": "#/definitions/image_operation" },
+        { "$ref": "#/definitions/link_operation" }
+      ]
+    },
+    "text_operation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "text", "font", "font_size", "color", "glyphs", "meta"],
+      "properties": {
+        "type": { "const": "text" },
+        "text": { "type": "string", "minLength": 1 },
+        "font": { "$ref": "#/definitions/content_address" },
+        "font_size": { "type": "number", "exclusiveMinimum": 0 },
+        "color": { "$ref": "#/definitions/color" },
+        "glyphs": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/definitions/glyph" }
+        },
+        "meta": { "$ref": "#/definitions/meta" }
+      }
+    },
+    "path_operation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "bounds", "data", "fill_rule", "meta"],
+      "anyOf": [
+        { "required": ["fill"] },
+        { "required": ["stroke"] }
+      ],
+      "properties": {
+        "type": { "const": "path" },
+        "bounds": { "$ref": "#/definitions/rect" },
+        "data": { "type": "string", "minLength": 1 },
+        "fill": { "$ref": "#/definitions/color" },
+        "fill_rule": { "type": "string", "enum": ["non_zero", "even_odd"] },
+        "stroke": { "$ref": "#/definitions/stroke" },
+        "meta": { "$ref": "#/definitions/meta" }
+      }
+    },
+    "image_operation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "bounds", "resource", "meta"],
+      "properties": {
+        "type": { "const": "image" },
+        "bounds": { "$ref": "#/definitions/rect" },
+        "resource": { "$ref": "#/definitions/content_address" },
+        "meta": { "$ref": "#/definitions/meta" }
+      }
+    },
+    "link_operation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "bounds", "target", "meta"],
+      "properties": {
+        "type": { "const": "link" },
+        "bounds": { "$ref": "#/definitions/rect" },
+        "target": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8192,
+          "pattern": "^(?:https?://|mailto:).+$"
+        },
+        "meta": { "$ref": "#/definitions/meta" }
+      }
+    }
+  }
+}
