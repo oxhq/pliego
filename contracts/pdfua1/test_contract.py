@@ -441,6 +441,39 @@ def main() -> None:
         reordered_profile,
         "authority order is not the accepted hierarchy",
     )
+    missing_revision_binding = copy.deepcopy(accepted["profile"])
+    del missing_revision_binding["bindings"]["pdf_metadata"]["exact_revision_binding"]
+    assert_rejected(
+        api2_contract,
+        "standard-only PDF/UA metadata",
+        "profile",
+        missing_revision_binding,
+        "missing required property 'exact_revision_binding'",
+    )
+    invented_pdfua_revision = copy.deepcopy(accepted["profile"])
+    invented_pdfua_revision["bindings"]["pdf_metadata"]["standard_identification"]["absent_properties"] = [
+        "pdfuaid:amd",
+        "pdfuaid:corr",
+    ]
+    assert_rejected(
+        api2_contract,
+        "PDF/UA-1 edition encoded as pdfuaid:rev",
+        "profile",
+        invented_pdfua_revision,
+        "expected const ['pdfuaid:amd', 'pdfuaid:corr', 'pdfuaid:rev']",
+    )
+    invented_pdfua_amendment = copy.deepcopy(accepted["profile"])
+    invented_pdfua_amendment["bindings"]["pdf_metadata"]["standard_identification"]["absent_properties"] = [
+        "pdfuaid:corr",
+        "pdfuaid:rev",
+    ]
+    assert_rejected(
+        api2_contract,
+        "PDF/UA-1 amendment identifier added",
+        "profile",
+        invented_pdfua_amendment,
+        "expected const ['pdfuaid:amd', 'pdfuaid:corr', 'pdfuaid:rev']",
+    )
     incomplete_lock = copy.deepcopy(accepted["lock"])
     incomplete_lock["blockers"].pop()
     assert_rejected(

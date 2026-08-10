@@ -50,10 +50,10 @@ remain empty until the final R3.5 gate has all required proof.
 
 - **Untagged PDF** has no semantic structure claim and is not PDF/UA conforming.
 - **Tagged PDF** contains a structure tree, but tagging alone is not a PDF/UA claim.
-- **PDF/UA-1 conforming** means the exact profile was requested and advertised, the PDF metadata and
-  render identity bind that profile, and deterministic evidence records every required Pliego gate as
-  passed. A tagged or machine-clean PDF without the other gates remains non-conforming for Pliego's
-  public contract.
+- **PDF/UA-1 conforming** means the exact profile was requested and advertised, the standard PDF/UA-1
+  identifier plus Pliego-owned exact-revision XMP scalar and render identity bind that profile, and
+  deterministic evidence records every required Pliego gate as passed. A tagged or machine-clean PDF
+  without the other gates remains non-conforming for Pliego's public contract.
 
 ### Authority hierarchy
 
@@ -77,6 +77,26 @@ sufficient by itself or permanently tied to one implementation technique.
 
 Normative clause text is not copied into this repository. Full clause access and a human review of
 the licensed ISO publications remain mandatory lock inputs.
+
+### Exact PDF metadata identity
+
+PDF/UA-1:2012 and PDF/UA-1:2014 both use the standard XMP identification
+`pdfuaid:part = 1`; PDF/UA-1 has no standard field that distinguishes edition 2. In particular,
+`pdfuaid:rev` is not repurposed to encode `2014`, because that revision field belongs to PDF/UA-2
+identification. `pdfuaid:amd` and `pdfuaid:corr` are also absent: emitting either would identify an
+amendment or corrigendum outside the exact unamended ISO 14289-1:2014 edition 2 target.
+
+Pliego therefore requires both:
+
+1. the standard `pdfuaid:part = 1` identifier; and
+2. one Pliego-owned custom XMP scalar with namespace
+   `https://pliego.dev/ns/pdfua-profile/1.0/`, property `standardRevision`, and value
+   `https://pliego.dev/profile/pdfua-1/v1#iso-14289-1-2014-ed2`.
+
+The custom scalar is an exact Pliego request/result/evidence binding, not an ISO conformance
+identifier and not a substitute for the standard field. OXH-344 must expose it through a narrow,
+validated, deterministically ordered metadata API; raw XML and arbitrary callbacks are not accepted.
+If the exact scalar cannot be serialized, profile negotiation fails before rendering.
 
 ### Content-addressed author assurance
 
@@ -129,7 +149,8 @@ with guessed values, a mutable `latest` tag, or hashes of an unofficial mirror.
 ## Compatibility and failure behavior
 
 - Request, runtime advertisement, semantic layer, PDF metadata, result, and evidence bind the same
-  exact profile reference and standard revision.
+  exact profile reference and standard revision. PDF metadata uses standard `pdfuaid:part = 1` plus
+  the Pliego-owned exact-revision scalar defined above.
 - Unsupported profile negotiation is an invocation error before document execution, not a best-effort
   untagged render.
 - Conformance failure publishes no successful delivery under the requested profile.

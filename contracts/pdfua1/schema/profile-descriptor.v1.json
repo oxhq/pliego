@@ -154,7 +154,39 @@
       "properties": {
         "render_identity": { "const": "exact-profile-ref" },
         "semantic_layer": { "const": "exact-profile-ref" },
-        "pdf_metadata": { "const": "exact-standard-revision" },
+        "pdf_metadata": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["standard_identification", "exact_revision_binding", "unavailable"],
+          "properties": {
+            "standard_identification": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["property", "value", "absent_properties"],
+              "properties": {
+                "property": { "const": "pdfuaid:part" },
+                "value": { "const": 1 },
+                "absent_properties": {
+                  "const": ["pdfuaid:amd", "pdfuaid:corr", "pdfuaid:rev"]
+                }
+              }
+            },
+            "exact_revision_binding": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["kind", "namespace_uri", "property", "value"],
+              "properties": {
+                "kind": { "const": "pliego-owned-xmp-scalar-not-iso-identifier" },
+                "namespace_uri": { "const": "https://pliego.dev/ns/pdfua-profile/1.0/" },
+                "property": { "const": "standardRevision" },
+                "value": {
+                  "const": "https://pliego.dev/profile/pdfua-1/v1#iso-14289-1-2014-ed2"
+                }
+              }
+            },
+            "unavailable": { "const": "reject-profile-before-render" }
+          }
+        },
         "evidence": { "const": "exact-profile-ref" }
       }
     },

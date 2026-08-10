@@ -64,7 +64,20 @@
   "bindings": {
     "render_identity": "exact-profile-ref",
     "semantic_layer": "exact-profile-ref",
-    "pdf_metadata": "exact-standard-revision",
+    "pdf_metadata": {
+      "standard_identification": {
+        "property": "pdfuaid:part",
+        "value": 1,
+        "absent_properties": ["pdfuaid:amd", "pdfuaid:corr", "pdfuaid:rev"]
+      },
+      "exact_revision_binding": {
+        "kind": "pliego-owned-xmp-scalar-not-iso-identifier",
+        "namespace_uri": "https://pliego.dev/ns/pdfua-profile/1.0/",
+        "property": "standardRevision",
+        "value": "https://pliego.dev/profile/pdfua-1/v1#iso-14289-1-2014-ed2"
+      },
+      "unavailable": "reject-profile-before-render"
+    },
     "evidence": "exact-profile-ref"
   },
   "compatibility": {
