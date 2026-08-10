@@ -110,8 +110,11 @@ The closed role vocabulary is:
 - table, table-head, table-body, table-foot, table-row, table-header-cell, and table-cell;
 - figure, formula, caption, and link.
 
-Heading level is an integer from 1 through 6, and every heading carries an explicit canonical title
-instead of asking the outline writer to extract text. Lists declare ordered state and a canonical start;
+Heading level is a bounded integer from 1 through 65,535, and every heading carries an explicit
+canonical title instead of asking the outline writer to extract text. The first numbered heading is
+level 1, and later headings cannot skip a level on descent. Lists declare ordered state, one explicit
+`decimal`, upper/lower Roman, or upper/lower alphabetic numbering system (or `none` for an unordered
+list), and a canonical start;
 list-item ordinals follow child order, and every item contains label then body. Tables declare a
 bounded row/column grid; row groups, rows, cells, spans, scope, and ascending header references must
 form an exact non-overlapping grid. Links carry a canonical resolved API 2 URL and a non-null
@@ -119,13 +122,15 @@ accessible name.
 
 The document language is a required canonical, case-normalized restricted BCP 47 form. A node
 language is either null to inherit or another canonical form. This version intentionally omits
-extensions and private-use subtags rather than accepting spellings whose normalization is undefined.
+extensions and private-use subtags and rejects repeated subtags rather than accepting spellings whose
+normalization is undefined.
 
 A meaningful figure or formula requires alternate text. Decorative images belong in the artifact
 subtree, not as figures with empty alternate text. A logical link carries both an explicit title/name
 and alternate text for its tagged annotation, in addition to its resolved target. `replacement_text`
-is the profile-neutral ActualText-equivalent value and is allowed only on `span` or `code`. These
-fields model author intent; they do not by themselves prove that the intent is correct.
+is the profile-neutral ActualText-equivalent value and is allowed on `span`, `code`, `figure`, or
+`formula`, including a graphic meant to be consumed primarily as text. These fields model author
+intent; they do not by themselves prove that the intent is correct.
 
 ### Deterministic navigation
 
@@ -167,13 +172,15 @@ artifact subtrees, every fragment has exactly one owner. This gives the semantic
 closure without making paint traversal the reading-order authority.
 
 An annotation must be under a logical link whose canonical target equals the paint target. A logical
-image must be under a meaningful figure or formula with alternate text. The contract retains page association
+image or path must be under a meaningful figure or formula with alternate text. Text fragments bind
+both a glyph range and the exact UTF-8 span covered by those glyphs. The contract retains page association
 across pagination while leaving backend tag and annotation-object construction to later work.
 
 ### Artifacts and decoration
 
 Artifacts have a separate preorder-indexed forest with the closed classifications `pagination`,
-`layout`, `decoration`, and `background`. Artifact children may contain only artifact nodes or
+`layout`, `decoration`, and `background`. Pagination artifacts additionally require the explicit
+subtype `header`, `footer`, or `page-number`; all other classifications require null subtype. Artifact children may contain only artifact nodes or
 fragments. Logical children cannot name artifacts, and a fragment cannot appear in both structures.
 
 This separation makes decoration explicit and prevents a PDF backend from silently guessing that an
@@ -210,10 +217,11 @@ The local self-test currently proves:
   alternate text, language inheritance/override, and an interleaved figure fragment/caption;
 - all four operations in the checked-in API 2 scene are associated exactly once, with the decorative
   path outside logical structure;
-- 43 adversarial cases reject, including unknown semantics, ID drift, cycles, dangling references,
+- 53 adversarial cases reject, including unknown semantics, ID drift, cycles, dangling references,
   logical/artifact mixing, invalid language, metadata injection, list/table drift, noncanonical links,
   missing title/outline, empty tree/outline, dangling or reordered navigation, missing heading,
-  figure/formula/annotation text, paint mismatch, control characters, and lexical negative zero; and
+  skipped heading levels, invalid list numbering, missing pagination subtype, figure/formula/annotation
+  text, glyph/text drift, page-edge destinations, paint mismatch, control characters, and lexical negative zero; and
 - 100 fresh Python processes reproduce the exact representative semantic digest.
 
 The 100-process check proves deterministic parsing, validation, canonical serialization, and hashing

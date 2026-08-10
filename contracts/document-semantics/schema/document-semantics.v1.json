@@ -276,16 +276,20 @@
       "required": ["kind", "level"],
       "properties": {
         "kind": { "const": "heading" },
-        "level": { "type": "integer", "minimum": 1, "maximum": 6 }
+        "level": { "type": "integer", "minimum": 1, "maximum": 65535 }
       }
     },
     "list_semantics": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "ordered", "start"],
+      "required": ["kind", "ordered", "numbering", "start"],
       "properties": {
         "kind": { "const": "list" },
         "ordered": { "type": "boolean" },
+        "numbering": {
+          "type": "string",
+          "enum": ["none", "decimal", "upper-roman", "lower-roman", "upper-alpha", "lower-alpha"]
+        },
         "start": {
           "oneOf": [
             { "type": "null" },
@@ -349,10 +353,16 @@
     "artifact": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "kind", "source", "children"],
+      "required": ["id", "kind", "subtype", "source", "children"],
       "properties": {
         "id": { "$ref": "#/definitions/u32" },
         "kind": { "type": "string", "enum": ["pagination", "layout", "decoration", "background"] },
+        "subtype": {
+          "oneOf": [
+            { "type": "null" },
+            { "type": "string", "enum": ["header", "footer", "page-number"] }
+          ]
+        },
         "source": { "$ref": "#/definitions/source_locator" },
         "children": {
           "type": "array",

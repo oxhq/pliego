@@ -123,6 +123,13 @@ def canonical_text_errors(value: str, path: str) -> list[str]:
     return errors
 
 
+def canonical_language_errors(value: str, path: str) -> list[str]:
+    subtags = [subtag.lower() for subtag in value.split("-")]
+    if len(subtags) != len(set(subtags)):
+        return [error(path, "language tag contains a repeated subtag")]
+    return []
+
+
 def fragment_key(fragment: dict[str, Any]) -> tuple[int, int, int, int]:
     if fragment["kind"] == "text":
         return (
@@ -267,12 +274,16 @@ def role_errors(document: dict[str, Any], api2: ModuleType, state: GraphState) -
             value = node[field_name]
             if value is not None:
                 errors.extend(canonical_text_errors(value, f"{path}.{field_name}"))
+        if node["language"] is not None:
+            errors.extend(canonical_language_errors(node["language"], f"{path}.language"))
         if role in {"figure", "formula"} and node["alternate_text"] is None:
             errors.append(error(f"{path}.alternate_text", f"meaningful {role}s require alternate text"))
         if role not in {"figure", "formula", "link"} and node["alternate_text"] is not None:
             errors.append(error(f"{path}.alternate_text", "alternate text is reserved for figure, formula, or link"))
-        if node["replacement_text"] is not None and role not in {"span", "code"}:
-            errors.append(error(f"{path}.replacement_text", "replacement text is allowed only on span or code"))
+        if node["replacement_text"] is not None and role not in {"span", "code", "figure", "formula"}:
+            errors.append(
+                error(f"{path}.replacement_text", "replacement text is allowed only on span, code, figure, or formula")
+            )
         if role == "heading" and node["name"] is None:
             errors.append(error(f"{path}.name", "headings require a canonical title"))
         if role == "link":
@@ -299,6 +310,24 @@ def role_errors(document: dict[str, Any], api2: ModuleType, state: GraphState) -
         if role in {"table-header-cell", "table-cell"} and parent_role != "table-row":
             errors.append(error(path, f"{role} must be a direct child of table-row"))
 
+    heading_ids = [
+        node["id"]
+        for node in nodes
+        if node["role"] == "heading" and node["semantics"].get("kind") == "heading" and "level" in node["semantics"]
+    ]
+    if heading_ids:
+        first_level = nodes[heading_ids[0]]["semantics"]["level"]
+        if first_level != 1:
+            errors.append(error(f"$.nodes[{heading_ids[0]}].semantics.level", "first numbered heading must be level 1"))
+        previous_level = first_level
+        for heading_id in heading_ids[1:]:
+            level = nodes[heading_id]["semantics"]["level"]
+            if level > previous_level + 1:
+                errors.append(
+                    error(f"$.nodes[{heading_id}].semantics.level", "heading levels must not skip on descent")
+                )
+            previous_level = level
+
     errors.extend(list_errors(document))
     errors.extend(table_errors(document))
     return errors
@@ -321,8 +350,12 @@ def list_errors(document: dict[str, Any]) -> list[str]:
         if semantics["ordered"] and semantics["start"] is None:
             errors.append(error(f"{path}.semantics.start", "ordered lists require an integer start"))
             continue
+        if semantics["ordered"] and semantics["numbering"] == "none":
+            errors.append(error(f"{path}.semantics.numbering", "ordered lists require an explicit numbering system"))
         if not semantics["ordered"] and semantics["start"] is not None:
             errors.append(error(f"{path}.semantics.start", "unordered lists require null start"))
+        if not semantics["ordered"] and semantics["numbering"] != "none":
+            errors.append(error(f"{path}.semantics.numbering", "unordered lists require numbering none"))
         first = semantics["start"] if semantics["ordered"] else 1
         for offset, item_id in enumerate(item_ids):
             item = nodes[item_id]
@@ -504,6 +537,17 @@ def policy_errors(document: dict[str, Any], state: GraphState) -> list[str]:
     return errors
 
 
+def artifact_errors(document: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+    for index, artifact in enumerate(document["artifacts"]):
+        path = f"$.artifacts[{index}].subtype"
+        if artifact["kind"] == "pagination" and artifact["subtype"] is None:
+            errors.append(error(path, "pagination artifacts require header, footer, or page-number subtype"))
+        if artifact["kind"] != "pagination" and artifact["subtype"] is not None:
+            errors.append(error(path, "non-pagination artifacts require null subtype"))
+    return errors
+
+
 def navigation_errors(document: dict[str, Any], scene: dict[str, Any]) -> list[str]:
     navigation = document["navigation"]
     if navigation["kind"] == "none":
@@ -547,6 +591,8 @@ def navigation_errors(document: dict[str, Any], scene: dict[str, Any]) -> list[s
     for index, item in enumerate(items):
         path = f"$.navigation.items[{index}]"
         errors.extend(canonical_text_errors(item["title"], f"{path}.title"))
+        if item["language"] is not None:
+            errors.extend(canonical_language_errors(item["language"], f"{path}.language"))
         target = item["target_node"]
         targets.append(target)
         if target >= len(nodes):
@@ -560,7 +606,7 @@ def navigation_errors(document: dict[str, Any], scene: dict[str, Any]) -> list[s
             errors.append(error(f"{path}.destination.page", f"outline destination page {page_number} does not exist"))
             continue
         page_size = pages[page_number]["size_app_units"]
-        if destination["x_app_units"] > page_size["width"] or destination["y_app_units"] > page_size["height"]:
+        if destination["x_app_units"] >= page_size["width"] or destination["y_app_units"] >= page_size["height"]:
             errors.append(error(f"{path}.destination", "outline destination is outside the page box"))
         fragment_pages = {
             fragments[fragment_id]["paint"]["page"]
@@ -617,12 +663,12 @@ def scene_binding_errors(document: dict[str, Any], scene: dict[str, Any], state:
                 errors.append(error(path, "annotation requires a logical link ancestor"))
             elif document["nodes"][link_id]["semantics"]["target"] != operation["target"]:
                 errors.append(error(path, "link semantic target does not equal annotation paint target"))
-        if fragment["kind"] == "image" and owner_kind == "node":
+        if fragment["kind"] in {"image", "path"} and owner_kind == "node":
             figure_id = node_has_ancestor_role(document, state, owner_id, "figure")
             formula_id = node_has_ancestor_role(document, state, owner_id, "formula")
             semantic_image_id = figure_id if figure_id is not None else formula_id
             if semantic_image_id is None or document["nodes"][semantic_image_id]["alternate_text"] is None:
-                errors.append(error(path, "logical image requires a figure or formula ancestor with alternate text"))
+                errors.append(error(path, "logical graphic requires a figure or formula ancestor with alternate text"))
 
     for page in scene["pages"]:
         for operation_index, operation in enumerate(page["operations"]):
@@ -648,6 +694,19 @@ def scene_binding_errors(document: dict[str, Any], scene: dict[str, Any], state:
                     errors.append(
                         error(f"$.fragments[{fragment['id']}].glyphs", "glyph range is outside the paint operation")
                     )
+                elif glyph_range["start"] < glyph_range["end"]:
+                    selected_glyphs = operation["glyphs"][glyph_range["start"] : glyph_range["end"]]
+                    expected_text = {
+                        "start": selected_glyphs[0]["text_range"]["start"],
+                        "end": selected_glyphs[-1]["text_range"]["end"],
+                    }
+                    if text_range != expected_text:
+                        errors.append(
+                            error(
+                                f"$.fragments[{fragment['id']}].text_utf8",
+                                "text UTF-8 range does not match the selected glyphs",
+                            )
+                        )
                 if (
                     text_range["end"] > text_size
                     or text_range["start"] not in boundaries
@@ -684,9 +743,13 @@ def semantic_errors(document: dict[str, Any], scene: dict[str, Any], api2: Modul
     if not api2.safe_relative_path(document["source"]["entrypoint"]):
         errors.append(error("$.source.entrypoint", "entrypoint is not a portable relative path"))
     errors.extend(canonical_text_errors(document["metadata"]["title"], "$.metadata.title"))
+    errors.extend(canonical_language_errors(document["language"], "$.language"))
+    if document["metadata"]["language"] is not None:
+        errors.extend(canonical_language_errors(document["metadata"]["language"], "$.metadata.language"))
     graph_failures, state = graph_errors(document)
     errors.extend(graph_failures)
     errors.extend(policy_errors(document, state))
+    errors.extend(artifact_errors(document))
     errors.extend(role_errors(document, api2, state))
     errors.extend(navigation_errors(document, scene))
     errors.extend(scene_binding_errors(document, scene, state))

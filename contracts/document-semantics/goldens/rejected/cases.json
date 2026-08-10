@@ -299,6 +299,88 @@
         { "operation": "replace", "path": "/nodes/0/children", "value": [] }
       ],
       "expected": "required logical content rejects an empty semantic tree"
+    },
+    {
+      "name": "first-heading-not-level-one",
+      "mutations": [
+        { "operation": "replace", "path": "/nodes/1/semantics/level", "value": 2 }
+      ],
+      "expected": "first numbered heading must be level 1"
+    },
+    {
+      "name": "heading-level-skip",
+      "mutations": [
+        { "operation": "replace", "path": "/nodes/21/role", "value": "heading" },
+        { "operation": "replace", "path": "/nodes/21/name", "value": "Skipped heading" },
+        { "operation": "replace", "path": "/nodes/21/alternate_text", "value": null },
+        { "operation": "replace", "path": "/nodes/21/replacement_text", "value": null },
+        { "operation": "replace", "path": "/nodes/21/semantics", "value": { "kind": "heading", "level": 3 } }
+      ],
+      "expected": "heading levels must not skip on descent"
+    },
+    {
+      "name": "ordered-list-numbering-none",
+      "mutations": [
+        { "operation": "replace", "path": "/nodes/3/semantics/numbering", "value": "none" }
+      ],
+      "expected": "ordered lists require an explicit numbering system"
+    },
+    {
+      "name": "unknown-list-numbering",
+      "mutations": [
+        { "operation": "replace", "path": "/nodes/3/semantics/numbering", "value": "custom" }
+      ],
+      "expected": "expected one of"
+    },
+    {
+      "name": "pagination-artifact-without-subtype",
+      "mutations": [
+        { "operation": "replace", "path": "/artifacts/0/kind", "value": "pagination" }
+      ],
+      "expected": "pagination artifacts require header, footer, or page-number subtype"
+    },
+    {
+      "name": "decoration-artifact-with-pagination-subtype",
+      "mutations": [
+        { "operation": "replace", "path": "/artifacts/0/subtype", "value": "header" }
+      ],
+      "expected": "non-pagination artifacts require null subtype"
+    },
+    {
+      "name": "outline-destination-at-page-edge",
+      "mutations": [
+        { "operation": "replace", "path": "/navigation/items/0/destination/x_app_units", "value": 47622 }
+      ],
+      "expected": "outline destination is outside the page box"
+    },
+    {
+      "name": "logical-path-without-figure-or-formula",
+      "mutations": [
+        {
+          "operation": "replace",
+          "path": "/nodes/2/children",
+          "value": [
+            { "kind": "fragment", "id": 0 },
+            { "kind": "fragment", "id": 1 }
+          ]
+        },
+        { "operation": "replace", "path": "/artifacts/0/children", "value": [] }
+      ],
+      "expected": "logical graphic requires a figure or formula ancestor with alternate text"
+    },
+    {
+      "name": "glyph-text-range-mismatch",
+      "mutations": [
+        { "operation": "replace", "path": "/fragments/0/text_utf8/start", "value": 1 }
+      ],
+      "expected": "text UTF-8 range does not match the selected glyphs"
+    },
+    {
+      "name": "duplicate-language-subtag",
+      "mutations": [
+        { "operation": "replace", "path": "/navigation/items/0/language", "value": "sl-rozaj-rozaj" }
+      ],
+      "expected": "language tag contains a repeated subtag"
     }
   ]
 }
