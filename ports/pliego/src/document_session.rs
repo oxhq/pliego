@@ -202,10 +202,13 @@ impl DocumentSession {
             .to_path_buf();
         let resource_policy = ResourcePolicy::resolve(&resources, &bundle_root);
         validate_resource_policy(&resource_policy)?;
-        configure_for_process(page).map_err(|_| {
+        let input_url = Url::from_file_path(&input).map_err(|_| {
             SessionError::new(
-                "LAYOUT_CONFIGURATION_FAILED",
-                "paged layout was already configured for this process",
+                "INVALID_REQUEST",
+                format!(
+                    "cannot convert document path to a file URL: {}",
+                    input.display()
+                ),
             )
         })?;
         apply_timezone(environment.timezone)
@@ -229,6 +232,12 @@ impl DocumentSession {
                 format!("cannot activate software rendering context: {error:?}"),
             )
         })?;
+        configure_for_process(page).map_err(|_| {
+            SessionError::new(
+                "LAYOUT_CONFIGURATION_FAILED",
+                "paged layout was already configured for this process",
+            )
+        })?;
 
         let mut preferences = Preferences::default();
         preferences.fonts_host_enabled = allow_host_fonts;
@@ -247,15 +256,6 @@ impl DocumentSession {
             resource_store,
             ..Default::default()
         });
-        let input_url = Url::from_file_path(&input).map_err(|_| {
-            SessionError::new(
-                "INVALID_REQUEST",
-                format!(
-                    "cannot convert document path to a file URL: {}",
-                    input.display()
-                ),
-            )
-        })?;
         let webview = WebViewBuilder::new(&servo, rendering_context.clone())
             .delegate(delegate.clone())
             .user_content_manager(user_content_manager)
@@ -1310,6 +1310,7 @@ mod tests {
     fn resource_and_readiness_fixtures_are_evidenced_and_fail_closed() {
         let mut server = FixtureServer::start();
         for case in [
+            "constructor-recovery",
             "local-success",
             "virtual-success",
             "asset-cache",
@@ -1357,6 +1358,7 @@ mod tests {
         let mut allow_host_fonts = false;
         let mut _bundle = None;
         let input = match case.as_str() {
+            "constructor-recovery" => session_fixture("local-success.html"),
             "local-success" | "denied-url" | "explicit-fail" | "defer-timeout" => {
                 session_fixture(&format!("{case}.html"))
             },
@@ -1456,6 +1458,34 @@ mod tests {
             },
             other => panic!("unknown isolated fixture case: {other}"),
         };
+        if case == "constructor-recovery" {
+            let error = DocumentSession::new(
+                &input,
+                RenderEnvironment {
+                    locale: "en-US",
+                    timezone: "UTC\0invalid",
+                },
+                a4(),
+                resources.clone(),
+                false,
+                readiness,
+            )
+            .err()
+            .expect("invalid timezone must fail session construction");
+            assert_eq!(error.code, "ENVIRONMENT_CONFIGURATION_FAILED");
+
+            let session = DocumentSession::new(
+                &input,
+                RenderEnvironment::default(),
+                a4(),
+                resources,
+                false,
+                readiness,
+            )
+            .expect("a fallible setup failure must not consume layout configuration");
+            drop(session);
+            return;
+        }
         let result = DocumentSession::new(
             &input,
             environment,
