@@ -6,67 +6,13 @@ use std::path::PathBuf;
 
 use layout::pages::PageDefinition;
 
-use super::{DEFAULT_LOCALE, DEFAULT_TIMEZONE, READINESS_TIMEOUT_MS};
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct RenderEnvironment {
-    pub locale: &'static str,
-    pub timezone: &'static str,
-}
-
-impl Default for RenderEnvironment {
-    fn default() -> Self {
-        Self {
-            locale: DEFAULT_LOCALE,
-            timezone: DEFAULT_TIMEZONE,
-        }
-    }
-}
-
-impl RenderEnvironment {
-    pub(crate) fn artifact(self) -> serde_json::Value {
-        serde_json::json!({
-            "locale": {
-                "requested": self.locale,
-                "resolved": self.locale,
-            },
-            "timezone": {
-                "requested": self.timezone,
-                "resolved": self.timezone,
-            },
-        })
-    }
-}
+pub use super::render_environment::RenderEnvironment;
+use super::resource_policy::ResourcePolicyConfig;
 
 #[derive(Debug, PartialEq)]
 pub struct ExplicitRenderPaths {
     pub output: PathBuf,
     pub artifacts: PathBuf,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct ResourcePolicyConfig {
-    pub allowed_http_roots: Vec<url::Url>,
-    pub virtual_resources: Vec<VirtualResourceSpec>,
-    pub asset_manifest: Option<PathBuf>,
-    pub timeout_ms: u64,
-}
-
-impl Default for ResourcePolicyConfig {
-    fn default() -> Self {
-        Self {
-            allowed_http_roots: Vec::new(),
-            virtual_resources: Vec::new(),
-            asset_manifest: None,
-            timeout_ms: READINESS_TIMEOUT_MS,
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct VirtualResourceSpec {
-    pub url: url::Url,
-    pub path: PathBuf,
 }
 
 #[derive(Debug, PartialEq)]
@@ -147,9 +93,9 @@ impl std::error::Error for RenderError {}
 impl From<super::document_session::SessionError> for RenderError {
     fn from(error: super::document_session::SessionError) -> Self {
         if error.code == "INVALID_REQUEST" {
-            Self::request(error.code, error.message)
+            Self::request(&error.code, error.message)
         } else {
-            Self::without_publication(error.code, error.message, 1)
+            Self::without_publication(&error.code, error.message, 1)
         }
     }
 }
@@ -205,7 +151,11 @@ mod tests {
     fn session_failures_preserve_the_engine_error_classes() {
         let request_error = super::super::document_session::DocumentSession::new(
             "__pliego_document_session_missing__.html",
+            RenderEnvironment::default(),
             crate::default_page(),
+            ResourcePolicyConfig::default(),
+            false,
+            super::super::readiness::ReadinessPolicy::default(),
         )
         .err()
         .expect("missing input should return a session error");

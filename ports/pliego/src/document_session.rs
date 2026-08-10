@@ -9,7 +9,7 @@
 //! layout still comes through Servo's temporary, doc-hidden
 //! `debug_layout_snapshot` hook until that upstream seam is made stable.
 
-use std::cell::{Cell, RefCell};
+use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -20,35 +20,79 @@ use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use dpi::PhysicalSize;
 use http::header::CONTENT_TYPE;
 use http::{HeaderMap, HeaderValue};
-use layout::pages::{PageDefinition, configure_for_process};
+use layout::pages::{PageDefinition, reserve_for_process};
 use pliego::capture::{SceneCapture, capture_document_scene};
 use pliego::pdf::{PdfFontResource, PdfFontVariation, render_document_pdf};
 use servo::{
-    LoadStatus, Preferences, RenderingContext, Servo, ServoBuilder, SoftwareRenderingContext,
-    WebResourceLoad, WebResourceResponse, WebView, WebViewBuilder, WebViewDelegate,
+    JSValue, LoadStatus, Preferences, RenderingContext, Servo, ServoBuilder,
+    SoftwareRenderingContext, UserContentManager, UserScript, WebResourceLoad, WebResourceResponse,
+    WebView, WebViewBuilder, WebViewDelegate,
 };
 use url::Url;
 
-const TIMEOUT: Duration = Duration::from_secs(30);
+use super::asset_cache::MAX_CACHE_BYTES;
+use super::engine::RenderEnvironment;
+use super::owned_resource_store::{OwnedResourceStore, decode_bounded_data_url};
+use super::readiness::{self, Readiness, ReadinessPolicy};
+use super::render_environment::{apply_timezone, unexpected_host_font};
+use super::resource_policy::{
+    ControlledResource, MAX_RESOURCE_EVENTS, MAX_RESOURCE_METADATA_BYTES, MAX_RESOURCE_TIMEOUT_MS,
+    ResourceAccounting, ResourceEvidence, ResourcePolicy, ResourcePolicyConfig,
+    ResourcePolicyDecision, ResourcePolicyFailure, ResourcePolicySetupFailure, ResourceRequest,
+    ResourceSource, create_controlled_http_client, fetch_controlled_http,
+    normalize_controlled_response_headers,
+};
 
-#[cfg(unix)]
-#[allow(unsafe_code)]
-unsafe extern "C" {
-    fn tzset();
-}
+const RESOURCE_EVIDENCE_ENTRY_OVERHEAD_BYTES: u64 = 256;
+
+const TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) struct SessionError {
-    pub(crate) code: &'static str,
+    pub(crate) code: String,
     pub(crate) message: String,
+    pub(crate) resource_failure: Option<ResourcePolicyFailure>,
+    pub(crate) resources: Vec<ResourceEvidence>,
+    pub(crate) resource_accounting: ResourceAccounting,
+    pub(crate) resource_store: OwnedResourceStore,
 }
 
 impl SessionError {
-    pub(crate) fn new(code: &'static str, message: impl Into<String>) -> Self {
+    pub(crate) fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
-            code,
+            code: code.into(),
             message: message.into(),
+            resource_failure: None,
+            resources: Vec::new(),
+            resource_accounting: ResourceAccounting::default(),
+            resource_store: OwnedResourceStore::default(),
         }
+    }
+
+    fn from_resource_failure(failure: ResourcePolicyFailure) -> Self {
+        Self {
+            code: failure.code.into(),
+            message: format!("{}: {}", failure.reason, failure.url),
+            resource_failure: Some(failure),
+            resources: Vec::new(),
+            resource_accounting: ResourceAccounting::default(),
+            resource_store: OwnedResourceStore::default(),
+        }
+    }
+
+    fn with_resources(
+        mut self,
+        resources: Vec<ResourceEvidence>,
+        resource_store: OwnedResourceStore,
+    ) -> Self {
+        self.resource_accounting = ResourceAccounting::from_evidence(&resources);
+        // Successful/delegated rows stay in `resources`; the separate first failure is one request.
+        if self.resource_failure.is_some() {
+            self.resource_accounting = self.resource_accounting.with_failure();
+        }
+        self.resources = resources;
+        self.resource_store = resource_store;
+        self
     }
 }
 
@@ -63,18 +107,83 @@ impl std::error::Error for SessionError {}
 pub(crate) struct DocumentOutcome {
     pub(crate) capture: SceneCapture,
     pub(crate) pdf: Vec<u8>,
-    pub(crate) served_resources: Vec<PathBuf>,
+    pub(crate) environment: RenderEnvironment,
+    pub(crate) allow_host_fonts: bool,
+    pub(crate) readiness: serde_json::Value,
+    pub(crate) resources: Vec<ResourceEvidence>,
+    pub(crate) resource_accounting: ResourceAccounting,
+    pub(crate) resource_store: OwnedResourceStore,
+}
+
+#[derive(Clone, Debug)]
+struct ResourceEvidenceLog {
+    entries: Vec<ResourceEvidence>,
+    metadata_bytes: u64,
+    max_metadata_bytes: u64,
+}
+
+impl Default for ResourceEvidenceLog {
+    fn default() -> Self {
+        Self {
+            entries: Vec::new(),
+            metadata_bytes: 0,
+            max_metadata_bytes: MAX_RESOURCE_METADATA_BYTES,
+        }
+    }
+}
+
+impl ResourceEvidenceLog {
+    fn push(&mut self, evidence: ResourceEvidence) -> Result<(), ResourcePolicyFailure> {
+        let next_metadata_bytes = self
+            .metadata_bytes
+            .checked_add(evidence.metadata_bytes())
+            .and_then(|bytes| bytes.checked_add(RESOURCE_EVIDENCE_ENTRY_OVERHEAD_BYTES))
+            .filter(|bytes| *bytes <= self.max_metadata_bytes)
+            .ok_or_else(|| {
+                ResourcePolicyFailure::new(
+                    &evidence.request,
+                    "RESOURCE_METADATA_LIMIT_EXCEEDED",
+                    "denied",
+                    format!(
+                        "resource evidence exceeds the {}-byte metadata bound",
+                        self.max_metadata_bytes
+                    ),
+                )
+            })?;
+        self.metadata_bytes = next_metadata_bytes;
+        self.entries.push(evidence);
+        Ok(())
+    }
 }
 
 pub(crate) struct DocumentSession {
     webview: WebView,
     servo: Servo,
     delegate: Rc<DocumentDelegate>,
+    environment: RenderEnvironment,
+    allow_host_fonts: bool,
+    stable_render_timeout: Duration,
     _rendering_context: Rc<SoftwareRenderingContext>,
 }
 
 impl DocumentSession {
-    pub(crate) fn new(input: impl AsRef<Path>, page: PageDefinition) -> Result<Self, SessionError> {
+    pub(crate) fn new(
+        input: impl AsRef<Path>,
+        environment: RenderEnvironment,
+        page: PageDefinition,
+        resources: ResourcePolicyConfig,
+        allow_host_fonts: bool,
+        readiness: ReadinessPolicy,
+    ) -> Result<Self, SessionError> {
+        let stable_render_timeout = stable_render_timeout(readiness)?;
+        if !(1..=MAX_RESOURCE_TIMEOUT_MS).contains(&resources.timeout_ms) {
+            return Err(SessionError::new(
+                "INVALID_REQUEST",
+                format!(
+                    "resource timeout must be between 1 and {MAX_RESOURCE_TIMEOUT_MS} milliseconds"
+                ),
+            ));
+        }
         let input = input.as_ref().canonicalize().map_err(|error| {
             SessionError::new(
                 "INVALID_REQUEST",
@@ -91,13 +200,25 @@ impl DocumentSession {
             .parent()
             .ok_or_else(|| SessionError::new("INVALID_REQUEST", "document has no bundle root"))?
             .to_path_buf();
-        configure_for_process(page).map_err(|_| {
+        let resource_policy = ResourcePolicy::resolve(&resources, &bundle_root);
+        validate_resource_policy(&resource_policy)?;
+        let input_url = Url::from_file_path(&input).map_err(|_| {
+            SessionError::new(
+                "INVALID_REQUEST",
+                format!(
+                    "cannot convert document path to a file URL: {}",
+                    input.display()
+                ),
+            )
+        })?;
+        let page_reservation = reserve_for_process(page).map_err(|_| {
             SessionError::new(
                 "LAYOUT_CONFIGURATION_FAILED",
                 "paged layout was already configured for this process",
             )
         })?;
-        configure_utc()?;
+        apply_timezone(environment.timezone)
+            .map_err(|error| SessionError::new("ENVIRONMENT_CONFIGURATION_FAILED", error))?;
 
         let rendering_context = Rc::new(
             SoftwareRenderingContext::new(PhysicalSize::new(
@@ -117,29 +238,33 @@ impl DocumentSession {
                 format!("cannot activate software rendering context: {error:?}"),
             )
         })?;
+        page_reservation.commit().map_err(|_| {
+            SessionError::new(
+                "LAYOUT_CONFIGURATION_FAILED",
+                "paged layout was already configured for this process",
+            )
+        })?;
 
         let mut preferences = Preferences::default();
-        preferences.fonts_host_enabled = false;
-        preferences.intl_locale_override = "en-US".into();
+        preferences.fonts_host_enabled = allow_host_fonts;
+        preferences.intl_locale_override = environment.locale.into();
         preferences.network_http_proxy_uri.clear();
         preferences.network_https_proxy_uri.clear();
 
         let servo = ServoBuilder::default().preferences(preferences).build();
+        let user_content_manager = Rc::new(UserContentManager::new(&servo));
+        user_content_manager
+            .add_script(Rc::new(UserScript::from(readiness.document_start_script())));
+        let resource_store = RefCell::new(OwnedResourceStore::new(resource_policy.resident_bytes));
         let delegate = Rc::new(DocumentDelegate {
             bundle_root,
+            resource_policy,
+            resource_store,
             ..Default::default()
         });
-        let input_url = Url::from_file_path(&input).map_err(|_| {
-            SessionError::new(
-                "INVALID_REQUEST",
-                format!(
-                    "cannot convert document path to a file URL: {}",
-                    input.display()
-                ),
-            )
-        })?;
         let webview = WebViewBuilder::new(&servo, rendering_context.clone())
             .delegate(delegate.clone())
+            .user_content_manager(user_content_manager)
             .url(input_url)
             .build();
 
@@ -147,12 +272,20 @@ impl DocumentSession {
             webview,
             servo,
             delegate,
+            environment,
+            allow_host_fonts,
+            stable_render_timeout,
             _rendering_context: rendering_context,
         })
     }
 
     pub(crate) fn render(self) -> Result<DocumentOutcome, SessionError> {
-        self.render_inner()
+        self.render_inner().map_err(|error| {
+            error.with_resources(
+                self.delegate.resources.borrow().entries.clone(),
+                self.delegate.resource_store.borrow().clone(),
+            )
+        })
     }
 
     fn render_inner(&self) -> Result<DocumentOutcome, SessionError> {
@@ -165,7 +298,9 @@ impl DocumentSession {
             *screenshot_result.borrow_mut() =
                 Some(result.map(|_| ()).map_err(|error| format!("{error:?}")));
         });
-        self.spin_until("stable render", || screenshot.borrow().is_some())?;
+        self.spin_until_for("stable render", self.stable_render_timeout, || {
+            screenshot.borrow().is_some()
+        })?;
         screenshot
             .borrow_mut()
             .take()
@@ -182,6 +317,7 @@ impl DocumentSession {
                 "Servo completed the barrier without producing a frame",
             ));
         }
+        let readiness = self.evaluate_readiness()?;
 
         let snapshot = self.webview.debug_layout_snapshot().ok_or_else(|| {
             SessionError::new(
@@ -189,12 +325,16 @@ impl DocumentSession {
                 "Servo did not expose a retained layout snapshot",
             )
         })?;
-        let capture = capture_document_scene(snapshot.as_bytes(), |_| None)
-            .map_err(|error| SessionError::new("SCENE_CAPTURE_FAILED", error.to_string()))?;
+        let capture = {
+            let resources = self.delegate.resource_store.borrow();
+            capture_document_scene(snapshot.as_bytes(), |url| resources.resolve_url(url))
+        }
+        .map_err(|error| SessionError::new("SCENE_CAPTURE_FAILED", error.to_string()))?;
         capture
             .scene
             .validate()
             .map_err(|message| SessionError::new("SCENE_CAPTURE_INVALID", message))?;
+        validate_host_font_policy(&capture, self.allow_host_fonts)?;
         if !capture.unsupported_events.is_empty() || !capture.text_mapping_gaps.is_empty() {
             return Err(SessionError::new(
                 "SCENE_CAPTURE_INCOMPLETE",
@@ -239,30 +379,119 @@ impl DocumentSession {
                 )
             })
             .collect::<BTreeMap<_, _>>();
-        let pdf = render_document_pdf(
-            &capture.scene,
-            |font| {
-                let instance = instances.get(font)?;
-                Some(PdfFontResource {
-                    bytes: decoded_resources.get(instance.resource.as_str())?,
-                    face_index: instance.face_index,
-                    variations: variations.get(font)?,
-                    synthetic_bold: instance.synthetic_bold,
-                })
-            },
-            |_| None,
-        )
+        let image_resources = capture
+            .embedded_image_resources
+            .iter()
+            .map(|resource| (resource.resource.as_str(), resource.png.as_slice()))
+            .collect::<BTreeMap<_, _>>();
+        let pdf = {
+            let resources = self.delegate.resource_store.borrow();
+            render_document_pdf(
+                &capture.scene,
+                |font| {
+                    let instance = instances.get(font)?;
+                    Some(PdfFontResource {
+                        bytes: decoded_resources.get(instance.resource.as_str())?,
+                        face_index: instance.face_index,
+                        variations: variations.get(font)?,
+                        synthetic_bold: instance.synthetic_bold,
+                    })
+                },
+                |image| {
+                    image_resources
+                        .get(image)
+                        .copied()
+                        .or_else(|| resources.resolve_content(image))
+                },
+            )
+        }
         .map_err(|error| SessionError::new("DOCUMENT_PDF_GENERATION_FAILED", error.to_string()))?;
 
+        let resources = self.delegate.resources.borrow().entries.clone();
+        let resource_store = self.delegate.resource_store.borrow().clone();
         Ok(DocumentOutcome {
             capture,
             pdf,
-            served_resources: self.delegate.served_resources.borrow().clone(),
+            environment: self.environment,
+            allow_host_fonts: self.allow_host_fonts,
+            readiness,
+            resource_accounting: ResourceAccounting::from_evidence(&resources),
+            resources,
+            resource_store,
         })
     }
 
+    fn evaluate_readiness(&self) -> Result<serde_json::Value, SessionError> {
+        let deadline = Instant::now()
+            .checked_add(self.stable_render_timeout)
+            .ok_or_else(|| SessionError::new("INVALID_REQUEST", "timeout is too large"))?;
+        loop {
+            let result = Rc::new(RefCell::new(None));
+            let callback_result = result.clone();
+            self.webview
+                .evaluate_javascript(readiness::HOST_EVALUATION_EXPRESSION, move |value| {
+                    *callback_result.borrow_mut() = Some(value)
+                });
+            self.spin_until_for(
+                "readiness evaluation",
+                deadline.saturating_duration_since(Instant::now()),
+                || result.borrow().is_some(),
+            )?;
+            let value = result.borrow_mut().take().ok_or_else(|| {
+                SessionError::new(
+                    "READINESS_EVALUATION_FAILED",
+                    "readiness callback completed without a result",
+                )
+            })?;
+            let value = value.map_err(|error| {
+                SessionError::new("READINESS_EVALUATION_FAILED", format!("{error:?}"))
+            })?;
+            let snapshot = match value {
+                JSValue::String(snapshot) => snapshot,
+                value => {
+                    return Err(SessionError::new(
+                        "READINESS_INVALID_RESULT",
+                        format!("expected readiness JSON string, got {value:?}"),
+                    ));
+                },
+            };
+            let evidence = serde_json::from_str(&snapshot).map_err(|error| {
+                SessionError::new("READINESS_INVALID_RESULT", error.to_string())
+            })?;
+            match readiness::parse_snapshot(&snapshot)
+                .map_err(|error| SessionError::new("READINESS_INVALID_RESULT", error))?
+            {
+                Readiness::Ready { .. } => return Ok(evidence),
+                Readiness::Failed { error } => {
+                    return Err(SessionError::new(error.code, error.message));
+                },
+                Readiness::Pending if Instant::now() >= deadline => {
+                    return Err(SessionError::new(
+                        "READINESS_TIMEOUT",
+                        "document readiness did not settle before the host deadline",
+                    ));
+                },
+                Readiness::Pending => {
+                    self.servo.spin_event_loop();
+                    std::thread::sleep(Duration::from_millis(1));
+                },
+            }
+        }
+    }
+
     fn spin_until(&self, label: &str, done: impl Fn() -> bool) -> Result<(), SessionError> {
-        let deadline = Instant::now() + TIMEOUT;
+        self.spin_until_for(label, TIMEOUT, done)
+    }
+
+    fn spin_until_for(
+        &self,
+        label: &str,
+        timeout: Duration,
+        done: impl Fn() -> bool,
+    ) -> Result<(), SessionError> {
+        let deadline = Instant::now()
+            .checked_add(timeout)
+            .ok_or_else(|| SessionError::new("INVALID_REQUEST", "timeout is too large"))?;
         while !done() {
             self.check_failure(label)?;
             if Instant::now() >= deadline {
@@ -284,52 +513,58 @@ impl DocumentSession {
                 format!("Servo crashed while waiting for {label}: {reason}"),
             ));
         }
-        if let Some(reason) = self.delegate.resource_failure.borrow().as_deref() {
-            return Err(SessionError::new("RESOURCE_DENIED", reason));
+        if let Some(reason) = self.delegate.resource_failure.borrow().as_ref() {
+            return Err(SessionError::from_resource_failure(reason.clone()));
         }
         Ok(())
     }
 }
 
-fn configure_utc() -> Result<(), SessionError> {
-    #[cfg(target_os = "windows")]
-    let result = unsafe { libc::putenv_s(c"TZ".as_ptr(), c"UTC".as_ptr()) };
-    #[cfg(unix)]
-    let result = unsafe { libc::setenv(c"TZ".as_ptr(), c"UTC".as_ptr(), 1) };
-    #[cfg(not(any(target_os = "windows", unix)))]
-    return Err(SessionError::new(
-        "ENVIRONMENT_CONFIGURATION_FAILED",
-        "UTC timezone configuration is unsupported on this desktop target",
-    ));
+fn validate_host_font_policy(
+    capture: &SceneCapture,
+    allow_host_fonts: bool,
+) -> Result<(), SessionError> {
+    let Some(resource) = unexpected_host_font(capture, allow_host_fonts) else {
+        return Ok(());
+    };
 
-    #[cfg(any(target_os = "windows", unix))]
-    {
-        if result != 0 {
-            return Err(SessionError::new(
-                "ENVIRONMENT_CONFIGURATION_FAILED",
-                format!("cannot configure UTC timezone: platform error {result}"),
-            ));
-        }
-        #[cfg(target_os = "windows")]
-        unsafe {
-            libc::tzset()
-        };
-        #[cfg(unix)]
-        unsafe {
-            tzset()
-        };
-        Ok(())
+    Err(SessionError::new(
+        "HOST_FONT_POLICY_VIOLATION",
+        format!("Servo selected host font {resource} while host fonts were disabled"),
+    ))
+}
+
+fn validate_resource_policy(policy: &ResourcePolicy) -> Result<(), SessionError> {
+    match policy.setup_failure() {
+        Some(ResourcePolicySetupFailure::Asset { error, .. }) => {
+            Err(SessionError::new(error.code, error.message.clone()))
+        },
+        Some(ResourcePolicySetupFailure::Aggregate { code, message }) => {
+            Err(SessionError::new(code, message))
+        },
+        None => Ok(()),
     }
+}
+
+fn stable_render_timeout(readiness: ReadinessPolicy) -> Result<Duration, SessionError> {
+    TIMEOUT
+        .checked_add(Duration::from_millis(readiness.timeout_ms))
+        .ok_or_else(|| SessionError::new("INVALID_REQUEST", "readiness timeout is too large"))
 }
 
 #[derive(Default)]
 struct DocumentDelegate {
     bundle_root: PathBuf,
+    resource_policy: ResourcePolicy,
+    controlled_http_client: OnceCell<net::connector::ServoClient>,
+    resource_store: RefCell<OwnedResourceStore>,
     crashed: RefCell<Option<String>>,
     frame_ready: Cell<bool>,
     load_complete: Cell<bool>,
-    resource_failure: RefCell<Option<String>>,
-    served_resources: RefCell<Vec<PathBuf>>,
+    resource_failure: RefCell<Option<ResourcePolicyFailure>>,
+    resource_events: Cell<usize>,
+    delivered_body_bytes: Cell<u64>,
+    resources: RefCell<ResourceEvidenceLog>,
 }
 
 impl WebViewDelegate for DocumentDelegate {
@@ -349,57 +584,270 @@ impl WebViewDelegate for DocumentDelegate {
     }
 
     fn load_web_resource(&self, _webview: WebView, load: WebResourceLoad) {
-        let url = load.request().url.clone();
-        let resource = (|| {
-            if url.scheme() != "file" {
-                return Err(format!("non-file resource is disabled: {url}"));
-            }
-            let path = url
-                .to_file_path()
-                .map_err(|_| format!("resource is not a local file: {url}"))?
-                .canonicalize()
-                .map_err(|error| format!("resource is unavailable: {url}: {error}"))?;
-            if !path.starts_with(&self.bundle_root) {
-                return Err(format!("resource is outside the document bundle: {url}"));
-            }
-            let content_type = match path.extension().and_then(|extension| extension.to_str()) {
-                Some("html") => "text/html; charset=utf-8",
-                Some("ttf") => "font/ttf",
-                _ => return Err(format!("resource type is unsupported: {url}")),
-            };
-            let body = std::fs::read(&path)
-                .map_err(|error| format!("resource is unreadable: {url}: {error}"))?;
-            Ok((path, content_type, body))
-        })();
-
-        let Ok((path, content_type, body)) = resource else {
-            let error = resource.unwrap_err();
-            if self.resource_failure.borrow().is_none() {
-                *self.resource_failure.borrow_mut() = Some(error);
-            }
-            load.intercept(WebResourceResponse::new(url)).cancel();
-            return;
+        let request = ResourceRequest {
+            method: load.request().method.to_string(),
+            url: load.request().url.clone(),
+            destination: format!("{:?}", load.request().destination),
+            referrer_url: load.request().referrer_url.clone(),
+            is_for_main_frame: load.request().is_for_main_frame,
+            is_redirect: load.request().is_redirect,
         };
+        if self.resource_events.get() >= MAX_RESOURCE_EVENTS {
+            self.cancel_resource(
+                load,
+                ResourcePolicyFailure::new(
+                    &request,
+                    "RESOURCE_METADATA_LIMIT_EXCEEDED",
+                    "denied",
+                    format!("document resource loads exceed the {MAX_RESOURCE_EVENTS}-event bound"),
+                ),
+            );
+            return;
+        }
+        self.resource_events.set(self.resource_events.get() + 1);
+        match self.resource_policy.decide(&self.bundle_root, &request) {
+            ResourcePolicyDecision::Allow { source } => {
+                if source != ResourceSource::DataUrl {
+                    let evidence = ResourceEvidence::delegated(request, source);
+                    if let Err(failure) = self.record_resource_evidence(evidence) {
+                        self.cancel_resource(load, failure);
+                    }
+                    return;
+                }
+                let resource = match decode_bounded_data_url(&request) {
+                    Ok(resource) => resource,
+                    Err(failure) => {
+                        self.cancel_resource(load, failure);
+                        return;
+                    },
+                };
+                let mut headers = HeaderMap::new();
+                let content_type = resource.content_type.as_deref().unwrap_or_default();
+                let content_type = match HeaderValue::from_str(content_type) {
+                    Ok(content_type) => content_type,
+                    Err(error) => {
+                        self.cancel_resource(
+                            load,
+                            ResourcePolicyFailure::new(
+                                &request,
+                                "RESOURCE_DATA_URL_INVALID",
+                                "invalid",
+                                format!("data URL has an invalid content type: {error}"),
+                            ),
+                        );
+                        return;
+                    },
+                };
+                headers.insert(CONTENT_TYPE, content_type);
+                self.serve_owned_resource(load, request, source, resource, headers);
+            },
+            ResourcePolicyDecision::FetchHttp => {
+                let client = self
+                    .controlled_http_client
+                    .get_or_init(create_controlled_http_client);
+                match fetch_controlled_http(
+                    client,
+                    &request,
+                    &load.request().headers,
+                    self.resource_policy.timeout_ms,
+                ) {
+                    Ok(response) => {
+                        let resource = ControlledResource {
+                            status: response.status.as_u16(),
+                            content_type: response
+                                .headers
+                                .get(CONTENT_TYPE)
+                                .and_then(|value| value.to_str().ok())
+                                .map(str::to_owned),
+                            body: response.body,
+                        };
+                        self.serve_owned_resource(
+                            load,
+                            request,
+                            ResourceSource::Http,
+                            resource,
+                            response.headers,
+                        );
+                    },
+                    Err(failure) => self.cancel_resource(load, failure),
+                }
+            },
+            ResourcePolicyDecision::Synthesize {
+                body,
+                content_type,
+                source,
+            } => {
+                let resource = ControlledResource {
+                    status: 200,
+                    content_type: Some(content_type.to_owned()),
+                    body,
+                };
+                let mut headers = HeaderMap::new();
+                headers.insert(CONTENT_TYPE, HeaderValue::from_static(content_type));
+                self.serve_owned_resource(load, request, source, resource, headers);
+            },
+            ResourcePolicyDecision::Fail(failure) => self.cancel_resource(load, failure),
+        }
+    }
+}
 
-        self.served_resources.borrow_mut().push(path);
-        let mut headers = HeaderMap::new();
-        headers.insert(CONTENT_TYPE, HeaderValue::from_static(content_type));
-        let mut intercepted = load.intercept(WebResourceResponse::new(url).headers(headers));
-        intercepted.send_body_data(body);
+impl DocumentDelegate {
+    fn serve_owned_resource(
+        &self,
+        load: WebResourceLoad,
+        request: ResourceRequest,
+        source: ResourceSource,
+        resource: ControlledResource,
+        headers: HeaderMap,
+    ) {
+        let next_delivered_body_bytes = match checked_delivered_body_bytes(
+            &request,
+            self.delivered_body_bytes.get(),
+            resource.body.len() as u64,
+            MAX_CACHE_BYTES,
+        ) {
+            Ok(bytes) => bytes,
+            Err(failure) => {
+                self.cancel_resource(load, failure);
+                return;
+            },
+        };
+        let status = match http::StatusCode::from_u16(resource.status) {
+            Ok(status) => status,
+            Err(error) => {
+                self.cancel_resource(
+                    load,
+                    ResourcePolicyFailure::new(
+                        &request,
+                        "RESOURCE_METADATA_INVALID",
+                        "invalid",
+                        format!("controlled resource status is invalid: {error}"),
+                    ),
+                );
+                return;
+            },
+        };
+        let headers =
+            match normalize_controlled_response_headers(&request, headers, resource.body.len()) {
+                Ok(headers) => headers,
+                Err(failure) => {
+                    self.cancel_resource(load, failure);
+                    return;
+                },
+            };
+        let resource = match self
+            .resource_store
+            .borrow_mut()
+            .retain(&request, resource, &headers)
+        {
+            Ok(resource) => resource,
+            Err(failure) => {
+                self.cancel_resource(load, failure);
+                return;
+            },
+        };
+        let evidence = ResourceEvidence::loaded_response(
+            request.clone(),
+            source,
+            resource.status(),
+            resource.content_type(),
+            resource.body(),
+            resource.response_headers().clone(),
+        );
+        debug_assert_eq!(
+            evidence.content_address.as_deref(),
+            Some(resource.content_address())
+        );
+        if let Err(failure) = self.record_resource_evidence(evidence) {
+            self.cancel_resource(load, failure);
+            return;
+        }
+        self.delivered_body_bytes.set(next_delivered_body_bytes);
+        let mut intercepted = load.intercept(
+            WebResourceResponse::new(request.url)
+                .headers(headers)
+                .status_code(status)
+                .status_message(
+                    status
+                        .canonical_reason()
+                        .unwrap_or_default()
+                        .as_bytes()
+                        .to_vec(),
+                ),
+        );
+        intercepted.send_body_data(resource.body().to_vec());
         intercepted.finish();
     }
+
+    fn record_resource_evidence(
+        &self,
+        evidence: ResourceEvidence,
+    ) -> Result<(), ResourcePolicyFailure> {
+        self.resources.borrow_mut().push(evidence)
+    }
+
+    fn cancel_resource(&self, load: WebResourceLoad, failure: ResourcePolicyFailure) {
+        let url = load.request().url.clone();
+        if self.resource_failure.borrow().is_none() {
+            *self.resource_failure.borrow_mut() = Some(failure);
+        }
+        load.intercept(WebResourceResponse::new(url)).cancel();
+    }
+}
+
+fn checked_delivered_body_bytes(
+    request: &ResourceRequest,
+    delivered: u64,
+    additional: u64,
+    limit: u64,
+) -> Result<u64, ResourcePolicyFailure> {
+    delivered
+        .checked_add(additional)
+        .filter(|bytes| *bytes <= limit)
+        .ok_or_else(|| {
+            ResourcePolicyFailure::new(
+                request,
+                "RESOURCE_DELIVERY_LIMIT_EXCEEDED",
+                "denied",
+                format!("delivered resource bodies exceed the {limit}-byte aggregate bound"),
+            )
+        })
 }
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::fs;
+    use std::io::{self, Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::path::{Path, PathBuf};
+    use std::process::{Command, Output, Stdio};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::thread::JoinHandle;
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
     use layout::pages::{PageDefinition, PageMargins};
-    use pliego::Operation;
-    use pliego::capture::CapturedFontSource;
+    use pliego::capture::{CapturedFontSelection, CapturedFontSource, SceneCapture};
+    use pliego::{DocumentScene, Operation, Page, Size};
     use sha2::{Digest, Sha256};
 
-    use super::{DocumentSession, SessionError};
+    use super::super::resource_policy::{
+        ResourceAccounting, ResourceEvidence, ResourcePolicy, ResourceRequest, ResourceSource,
+        ResponseHeaderEvidence, VirtualResourceSpec,
+    };
+    use super::{
+        DocumentSession, RESOURCE_EVIDENCE_ENTRY_OVERHEAD_BYTES, ReadinessPolicy,
+        RenderEnvironment, ResourceEvidenceLog, ResourcePolicyConfig, SessionError,
+        stable_render_timeout, validate_host_font_policy, validate_resource_policy,
+    };
+
+    const ISOLATED_CASE_ENV: &str = "PLIEGO_DOCUMENT_SESSION_FIXTURE";
+    const HTTP_BASE_ENV: &str = "PLIEGO_DOCUMENT_SESSION_HTTP_BASE";
+    const ISOLATED_TEST: &str = "document_session::tests::isolated_resource_and_readiness_fixture";
+    const ALLOWED_HTTP_BODY: &[u8] = b"window.pliego.ready({ http_loaded: true });\n";
+    const FIXTURE_PNG_DATA_URL: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 
     const AHEM_SOURCE_RESOURCE: &str =
         "sha256:b719ecb31c5b21fc573c03f6421c74ac63c271a5a3ff841e34f9705fb94b8448";
@@ -427,6 +875,359 @@ mod tests {
         "sha256:9873076c43b0c76dca8fc54ad5721e5cd20ccee5deca6905425d49df068d7af8";
     const EXPECTED_LINK: &str = "https://pliego.dev/docs";
 
+    #[test]
+    fn repeated_body_delivery_is_bounded_before_interception() {
+        let request = ResourceRequest {
+            method: "GET".into(),
+            url: url::Url::parse("https://example.test/shared").unwrap(),
+            destination: "Image".into(),
+            referrer_url: None,
+            is_for_main_frame: false,
+            is_redirect: false,
+        };
+        let delivered = super::checked_delivered_body_bytes(&request, 0, 3, 4).unwrap();
+        let error = super::checked_delivered_body_bytes(&request, delivered, 3, 4).unwrap_err();
+        assert_eq!(error.code, "RESOURCE_DELIVERY_LIMIT_EXCEEDED");
+        assert_eq!(delivered, 3);
+    }
+
+    #[test]
+    fn evidence_metadata_limit_rejects_before_an_entry_is_retained() {
+        let request = ResourceRequest {
+            method: "GET".into(),
+            url: url::Url::parse("https://example.test/resource").unwrap(),
+            destination: "Script".into(),
+            referrer_url: None,
+            is_for_main_frame: false,
+            is_redirect: false,
+        };
+        let mut headers = http::HeaderMap::new();
+        headers.insert(
+            "x-large",
+            http::HeaderValue::from_str(&"x".repeat(4_096)).unwrap(),
+        );
+        let evidence = ResourceEvidence::loaded_response(
+            request,
+            ResourceSource::Http,
+            200,
+            None,
+            b"",
+            ResponseHeaderEvidence::from_headers(&headers).unwrap(),
+        );
+        assert!(evidence.metadata_bytes() > 4_096);
+        let mut log = ResourceEvidenceLog {
+            max_metadata_bytes: evidence
+                .metadata_bytes()
+                .saturating_add(RESOURCE_EVIDENCE_ENTRY_OVERHEAD_BYTES - 1),
+            ..ResourceEvidenceLog::default()
+        };
+        let error = log.push(evidence).unwrap_err();
+        assert_eq!(error.code, "RESOURCE_METADATA_LIMIT_EXCEEDED");
+        assert!(log.entries.is_empty());
+        assert_eq!(log.metadata_bytes, 0);
+    }
+
+    #[test]
+    fn denied_host_font_fails_before_a_document_outcome() {
+        let capture = SceneCapture {
+            scene: DocumentScene::new(Page {
+                size: Size {
+                    width: 1.0,
+                    height: 1.0,
+                },
+                operations: vec![],
+            }),
+            canvas_resources: vec![],
+            embedded_image_resources: vec![],
+            canvas_diagnostics: vec![],
+            font_resources: vec![],
+            font_instances: vec![],
+            font_selections: vec![CapturedFontSelection {
+                instance: "fixture-instance".into(),
+                resource: "host:Fixture Sans".into(),
+                face_index: 0,
+                source: CapturedFontSource::Host,
+                requested_families: vec!["Fixture Sans".into()],
+                selected_family: Some("Fixture Sans".into()),
+            }],
+            font_warnings: vec![],
+            unsupported_events: vec![],
+            text_mapping_gaps: vec![],
+        };
+
+        let error = validate_host_font_policy(&capture, false)
+            .expect_err("a denied host font must not produce a DocumentOutcome");
+        assert_eq!(error.code, "HOST_FONT_POLICY_VIOLATION");
+        assert_eq!(
+            error.message,
+            "Servo selected host font host:Fixture Sans while host fonts were disabled"
+        );
+        assert!(validate_host_font_policy(&capture, true).is_ok());
+    }
+
+    #[test]
+    fn virtual_and_asset_bodies_fail_before_a_document_outcome() {
+        let bundle = TempBundle::new("aggregate-limit");
+        bundle.write("virtual.js", b"one");
+        bundle.write("a.js", b"two");
+        bundle.write("b.js", b"tri");
+        let digest = |body: &[u8]| content_address(body)[7..].to_owned();
+        bundle.write(
+            "assets.json",
+            serde_json::to_vec(&serde_json::json!({
+                "schema": super::super::asset_cache::MANIFEST_SCHEMA,
+                "version": 1,
+                "assets": [
+                    {
+                        "url": "https://assets.test/a.js",
+                        "path": "a.js",
+                        "sha256": digest(b"two"),
+                    },
+                    {
+                        "url": "https://assets.test/b.js",
+                        "path": "b.js",
+                        "sha256": digest(b"tri"),
+                    },
+                ],
+            }))
+            .unwrap(),
+        );
+        let policy = ResourcePolicy::resolve_with_budget(
+            &ResourcePolicyConfig {
+                virtual_resources: vec![VirtualResourceSpec {
+                    url: url::Url::parse("pliego://host/virtual.js").unwrap(),
+                    path: PathBuf::from("virtual.js"),
+                }],
+                asset_manifest: Some(PathBuf::from("assets.json")),
+                ..ResourcePolicyConfig::default()
+            },
+            &bundle.0,
+            8,
+        );
+
+        let error = validate_resource_policy(&policy)
+            .expect_err("aggregate overflow must fail before a DocumentOutcome exists");
+        assert_eq!(error.code, "ASSET_CACHE_LIMIT");
+        assert!(error.message.contains("5-byte resident allowance"));
+        assert_eq!(policy.resident_bytes, 3);
+    }
+
+    const INVOICE_INPUT: &str =
+        "sha256:b0fa2d0b18e845e84c1229408622bd85e092ecf4d78b0878939006fb26926dce";
+    const PRE_SESSION_INVOICE_SCENE: &str =
+        "sha256:c1874a92a71ecde580f15075fe7d07ad6e5739ec794ad79291c9ba5b9bce1681";
+    const PRE_SESSION_INVOICE_PDF: &str =
+        "sha256:401e756f43adad12a137478cf36abe8273e89405e998b9d537ab62056d2face9";
+
+    struct TempBundle(PathBuf);
+
+    impl TempBundle {
+        fn new(label: &str) -> Self {
+            let root = std::env::temp_dir().join(format!(
+                "pliego-document-session-{label}-{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            fs::create_dir_all(&root).unwrap();
+            Self(root)
+        }
+
+        fn write(&self, name: &str, body: impl AsRef<[u8]>) -> PathBuf {
+            let path = self.0.join(name);
+            fs::write(&path, body).unwrap();
+            path
+        }
+
+        fn copy(&self, source: &Path, name: &str) {
+            fs::copy(source.join(name), self.0.join(name)).unwrap();
+        }
+    }
+
+    impl Drop for TempBundle {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    struct FixtureServer {
+        base_url: String,
+        stop: Arc<AtomicBool>,
+        thread: Option<JoinHandle<io::Result<()>>>,
+    }
+
+    impl FixtureServer {
+        fn start() -> Self {
+            let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let address = listener.local_addr().unwrap();
+            let stop = Arc::new(AtomicBool::new(false));
+            let thread_stop = Arc::clone(&stop);
+            let thread = std::thread::spawn(move || {
+                let mut request_error = None;
+                while !thread_stop.load(Ordering::Relaxed) {
+                    match listener.accept() {
+                        Ok((stream, _)) => {
+                            if let Err(error) = handle_fixture_request(stream) {
+                                request_error.get_or_insert(error);
+                            }
+                        },
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(Duration::from_millis(1));
+                        },
+                        Err(error) => return Err(error),
+                    }
+                }
+                request_error.map_or(Ok(()), Err)
+            });
+            Self {
+                base_url: format!("http://{address}/"),
+                stop,
+                thread: Some(thread),
+            }
+        }
+
+        fn shutdown(&mut self) -> io::Result<()> {
+            self.stop.store(true, Ordering::Relaxed);
+            let Some(thread) = self.thread.take() else {
+                return Ok(());
+            };
+            match thread.join() {
+                Ok(result) => result,
+                Err(_) => Err(io::Error::other("fixture server thread panicked")),
+            }
+        }
+    }
+
+    impl Drop for FixtureServer {
+        fn drop(&mut self) {
+            let _ = self.shutdown();
+        }
+    }
+
+    fn handle_fixture_request(mut stream: TcpStream) -> io::Result<()> {
+        stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+        stream.set_write_timeout(Some(Duration::from_secs(2)))?;
+        let mut request = Vec::new();
+        let mut buffer = [0; 2048];
+        while request.len() < 8192 {
+            let read = stream.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            request.extend_from_slice(&buffer[..read]);
+            if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                break;
+            }
+        }
+        let request = String::from_utf8_lossy(&request);
+        let path = request
+            .lines()
+            .next()
+            .and_then(|line| line.split_whitespace().nth(1))
+            .unwrap_or("/");
+        let cookie_seen = request.lines().any(|line| {
+            line.to_ascii_lowercase().starts_with("cookie:") &&
+                line.contains("pliego_session_seed=1")
+        });
+        let (status, content_type, body) = match path {
+            "/allowed.js" => ("200 OK", "text/javascript", ALLOWED_HTTP_BODY.to_vec()),
+            "/timeout.js" => {
+                std::thread::sleep(Duration::from_millis(250));
+                (
+                    "200 OK",
+                    "text/javascript",
+                    b"window.pliego.ready({ timed_out: false });\n".to_vec(),
+                )
+            },
+            "/seed-frame.html" => (
+                "200 OK",
+                "text/html; charset=utf-8",
+                b"<!doctype html><script>document.cookie = 'pliego_session_seed=1; Path=/'; parent.postMessage({ iframe_cookie_persisted: document.cookie.split('; ').includes('pliego_session_seed=1') }, '*');</script>".to_vec(),
+            ),
+            "/clean-frame.html" => (
+                "200 OK",
+                "text/html; charset=utf-8",
+                format!(
+                    "<!doctype html><script>parent.postMessage({{ iframe_cookie_present: document.cookie.split('; ').includes('pliego_session_seed=1'), cookie_header_seen: {cookie_seen} }}, '*');</script>"
+                )
+                .into_bytes(),
+            ),
+            _ => ("404 Not Found", "application/octet-stream", Vec::new()),
+        };
+        let response = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        let result = stream
+            .write_all(response.as_bytes())
+            .and_then(|()| stream.write_all(&body));
+        match result {
+            Err(error)
+                if path == "/timeout.js" &&
+                    matches!(
+                        error.kind(),
+                        io::ErrorKind::BrokenPipe |
+                            io::ErrorKind::ConnectionAborted |
+                            io::ErrorKind::ConnectionReset
+                    ) =>
+            {
+                Ok(())
+            },
+            result => result,
+        }
+    }
+
+    fn run_isolated(case: &str, http_base: &str) -> Output {
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", ISOLATED_TEST, "--ignored", "--nocapture"])
+            .env(ISOLATED_CASE_ENV, case)
+            .env(HTTP_BASE_ENV, http_base)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let stderr = child.stderr.take().unwrap();
+        let stdout_reader = std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let mut stdout = stdout;
+            stdout.read_to_end(&mut bytes).map(|_| bytes)
+        });
+        let stderr_reader = std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let mut stderr = stderr;
+            stderr.read_to_end(&mut bytes).map(|_| bytes)
+        });
+        let deadline = Instant::now() + Duration::from_secs(75);
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                return Output {
+                    status,
+                    stdout: stdout_reader.join().unwrap().unwrap(),
+                    stderr: stderr_reader.join().unwrap().unwrap(),
+                };
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let status = child.wait().unwrap();
+                let output = Output {
+                    status,
+                    stdout: stdout_reader.join().unwrap().unwrap(),
+                    stderr: stderr_reader.join().unwrap().unwrap(),
+                };
+                panic!(
+                    "isolated {case} fixture exceeded 75 seconds\nstdout:\n{}\nstderr:\n{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr),
+                );
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     fn a4() -> PageDefinition {
         PageDefinition::new(
             793.7008,
@@ -446,14 +1247,628 @@ mod tests {
         )
     }
 
+    fn fixture_png() -> Vec<u8> {
+        BASE64_STANDARD
+            .decode(FIXTURE_PNG_DATA_URL.split_once(',').unwrap().1)
+            .unwrap()
+    }
+
+    fn session_fixture(name: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/document-session")
+            .join(name)
+            .canonicalize()
+            .expect("committed DocumentSession fixture should exist")
+    }
+
     #[test]
     fn missing_document_returns_session_error() {
-        let error = DocumentSession::new("__pliego_missing_document__.html", a4())
-            .err()
-            .expect("missing input should return a typed error");
+        let error = DocumentSession::new(
+            "__pliego_missing_document__.html",
+            RenderEnvironment::default(),
+            a4(),
+            ResourcePolicyConfig::default(),
+            false,
+            ReadinessPolicy::default(),
+        )
+        .err()
+        .expect("missing input should return a typed error");
 
         assert_eq!(error.code, "INVALID_REQUEST");
         assert!(error.message.contains("document is unavailable"));
+    }
+
+    #[test]
+    fn invalid_resource_timeout_is_rejected_before_servo_starts() {
+        let error = DocumentSession::new(
+            "__pliego_missing_document__.html",
+            RenderEnvironment::default(),
+            a4(),
+            ResourcePolicyConfig {
+                timeout_ms: 0,
+                ..ResourcePolicyConfig::default()
+            },
+            false,
+            ReadinessPolicy::default(),
+        )
+        .err()
+        .unwrap();
+        assert_eq!(error.code, "INVALID_REQUEST");
+        assert_eq!(
+            error.message,
+            "resource timeout must be between 1 and 60000 milliseconds"
+        );
+    }
+
+    #[test]
+    fn stable_render_timeout_covers_the_readiness_budget() {
+        let readiness = ReadinessPolicy {
+            timeout_ms: 60_000,
+            wait_for_fonts: true,
+        };
+        assert!(
+            stable_render_timeout(readiness).unwrap() >
+                std::time::Duration::from_millis(readiness.timeout_ms)
+        );
+    }
+
+    #[test]
+    fn resource_and_readiness_fixtures_are_evidenced_and_fail_closed() {
+        let mut server = FixtureServer::start();
+        for case in [
+            "constructor-recovery",
+            "local-success",
+            "virtual-success",
+            "asset-cache",
+            "allowed-url",
+            "raster-local",
+            "raster-data",
+            "invalid-data-url",
+            "oversized-raster",
+            "denied-url",
+            "http-timeout",
+            "explicit-fail",
+            "defer-timeout",
+            "environment",
+            "invoice-oracle",
+            "state-seed",
+            "state-clean",
+        ] {
+            let output = run_isolated(case, &server.base_url);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success(),
+                "isolated {case} fixture failed\nstdout:\n{}\nstderr:\n{}",
+                stdout,
+                String::from_utf8_lossy(&output.stderr),
+            );
+            assert!(
+                stdout.contains("running 1 test") && stdout.contains("1 passed; 0 failed"),
+                "isolated {case} filter did not execute exactly one passing child test:\n{stdout}",
+            );
+        }
+        server.shutdown().unwrap();
+    }
+
+    #[test]
+    #[ignore = "launched in a fresh process by the fixture orchestrator"]
+    fn isolated_resource_and_readiness_fixture() {
+        let case = std::env::var(ISOLATED_CASE_ENV).expect("isolated fixture case should be set");
+        let http_base = std::env::var(HTTP_BASE_ENV).expect("HTTP fixture base should be set");
+        let mut readiness = ReadinessPolicy {
+            timeout_ms: if case == "defer-timeout" { 25 } else { 1_000 },
+            wait_for_fonts: false,
+        };
+        let mut resources = ResourcePolicyConfig::default();
+        let mut environment = RenderEnvironment::default();
+        let mut allow_host_fonts = false;
+        let mut _bundle = None;
+        let input = match case.as_str() {
+            "constructor-recovery" => Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/deterministic-environment/index.html")
+                .canonicalize()
+                .unwrap(),
+            "local-success" | "denied-url" | "explicit-fail" | "defer-timeout" => {
+                session_fixture(&format!("{case}.html"))
+            },
+            "virtual-success" => {
+                resources.virtual_resources.push(VirtualResourceSpec {
+                    url: url::Url::parse("https://virtual.invalid/local-success.js").unwrap(),
+                    path: PathBuf::from("local-success.js"),
+                });
+                session_fixture("virtual-success.html")
+            },
+            "asset-cache" => {
+                let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("tests/fixtures/asset-cache")
+                    .canonicalize()
+                    .unwrap();
+                let bundle = TempBundle::new(case.as_str());
+                for name in ["index.html", "assets.json", "first.js", "renamed.js"] {
+                    bundle.copy(&source, name);
+                }
+                resources.asset_manifest = Some(PathBuf::from("assets.json"));
+                let input = bundle.0.join("index.html");
+                _bundle = Some(bundle);
+                input
+            },
+            "raster-local" => {
+                let bundle = TempBundle::new(case.as_str());
+                bundle.write("pixel.png", fixture_png());
+                let input = bundle.write(
+                    "input.html",
+                    "<!doctype html><img src='pixel.png' alt=''><script>window.pliego?.ready({fixture:'raster-local'});</script>",
+                );
+                _bundle = Some(bundle);
+                input
+            },
+            "raster-data" => {
+                readiness = ReadinessPolicy::default();
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("tests/fixtures/text-scene/index.html")
+                    .canonicalize()
+                    .unwrap()
+            },
+            "invalid-data-url" => {
+                let bundle = TempBundle::new(case.as_str());
+                let input = bundle.write(
+                    "input.html",
+                    "<!doctype html><img src='data:image/png;base64,!'><script>window.pliego?.ready({fixture:'invalid-data-url'});</script>",
+                );
+                _bundle = Some(bundle);
+                input
+            },
+            "oversized-raster" => {
+                let bundle = TempBundle::new(case.as_str());
+                let mut png = fixture_png();
+                png[16..20].copy_from_slice(&16_385_u32.to_be_bytes());
+                bundle.write("oversized.png", png);
+                let input = bundle.write(
+                    "input.html",
+                    "<!doctype html><img src='oversized.png' alt=''><script>window.pliego?.ready({fixture:'oversized-raster'});</script>",
+                );
+                _bundle = Some(bundle);
+                input
+            },
+            "allowed-url" | "http-timeout" | "state-seed" | "state-clean" => {
+                let template = session_fixture(&format!("{case}.html"));
+                let body = fs::read_to_string(template)
+                    .unwrap()
+                    .replace("__BASE_URL__", &http_base);
+                let bundle = TempBundle::new(case.as_str());
+                let input = bundle.write("input.html", body);
+                resources
+                    .allowed_http_roots
+                    .push(url::Url::parse(&http_base).unwrap());
+                if case == "http-timeout" {
+                    resources.timeout_ms = 25;
+                }
+                _bundle = Some(bundle);
+                input
+            },
+            "environment" => {
+                environment = RenderEnvironment {
+                    locale: "es-MX",
+                    timezone: "PST8PDT",
+                };
+                allow_host_fonts = true;
+                readiness.wait_for_fonts = true;
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("tests/fixtures/deterministic-environment/index.html")
+                    .canonicalize()
+                    .unwrap()
+            },
+            "invoice-oracle" => {
+                readiness = ReadinessPolicy::default();
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../benchmarks/fixtures/invoice-showcase/input.html")
+                    .canonicalize()
+                    .unwrap()
+            },
+            other => panic!("unknown isolated fixture case: {other}"),
+        };
+        if case == "constructor-recovery" {
+            let error = DocumentSession::new(
+                &input,
+                RenderEnvironment {
+                    locale: "en-US",
+                    timezone: "UTC\0invalid",
+                },
+                a4(),
+                resources.clone(),
+                false,
+                readiness,
+            )
+            .err()
+            .expect("invalid timezone must fail session construction");
+            assert_eq!(error.code, "ENVIRONMENT_CONFIGURATION_FAILED");
+
+            let session = DocumentSession::new(
+                &input,
+                RenderEnvironment {
+                    locale: "en-US",
+                    timezone: "PST8PDT",
+                },
+                a4(),
+                resources.clone(),
+                false,
+                readiness,
+            )
+            .expect("a fallible setup failure must not consume layout configuration");
+
+            let different_page =
+                PageDefinition::new(816.0, 1056.0, PageMargins::new(48.0, 48.0, 48.0, 48.0))
+                    .unwrap();
+            let conflict = DocumentSession::new(
+                &input,
+                RenderEnvironment::default(),
+                different_page,
+                resources,
+                false,
+                readiness,
+            )
+            .err()
+            .expect("a second session must be rejected before mutating process state");
+            assert_eq!(conflict.code, "LAYOUT_CONFIGURATION_FAILED");
+
+            let outcome = session
+                .render()
+                .expect("the reserved session must still render after a rejected competitor");
+            assert_eq!(outcome.readiness["payload"]["localHour"], 4);
+            return;
+        }
+        let result = DocumentSession::new(
+            &input,
+            environment,
+            a4(),
+            resources,
+            allow_host_fonts,
+            readiness,
+        )
+        .and_then(DocumentSession::render);
+
+        match case.as_str() {
+            "local-success" => {
+                let outcome = result.expect("local resource fixture should render");
+                let script = session_fixture("local-success.js");
+                assert!(outcome.pdf.starts_with(b"%PDF-"));
+                assert_eq!(outcome.readiness["status"], "ready");
+                assert_eq!(outcome.readiness["payload"]["local_loaded"], true);
+                assert_eq!(
+                    outcome.resource_accounting,
+                    ResourceAccounting {
+                        requests: 2,
+                        loaded: 2,
+                        delegated: 0,
+                        failed: 0,
+                        body_bytes: (std::fs::metadata(&input).unwrap().len() +
+                            std::fs::metadata(&script).unwrap().len()),
+                        unavailable_bodies: 0,
+                    }
+                );
+                for path in [&input, &script] {
+                    let url = url::Url::from_file_path(path).unwrap();
+                    let resource = outcome
+                        .resources
+                        .iter()
+                        .find(|resource| resource.request.url == url)
+                        .expect("local request should retain evidence");
+                    let body = std::fs::read(path).unwrap();
+                    assert_eq!(resource.source, ResourceSource::DocumentRoot);
+                    assert_eq!(resource.status, "loaded");
+                    assert_eq!(resource.response_status, Some(200));
+                    assert_eq!(resource.bytes, Some(body.len() as u64));
+                    assert_eq!(
+                        resource.sha256.as_deref(),
+                        Some(&content_address(&body)[7..])
+                    );
+                }
+            },
+            "virtual-success" => {
+                let outcome = result.expect("virtual resource fixture should render");
+                assert_eq!(outcome.readiness["payload"]["local_loaded"], true);
+                let resource = outcome
+                    .resources
+                    .iter()
+                    .find(|resource| {
+                        resource.request.url.as_str() == "https://virtual.invalid/local-success.js"
+                    })
+                    .expect("virtual resource should retain evidence");
+                assert_eq!(resource.source, ResourceSource::VirtualResource);
+                assert_eq!(resource.status, "loaded");
+                assert_eq!(resource.response_status, Some(200));
+                assert!(resource.bytes.is_some_and(|bytes| bytes > 0));
+                assert!(resource.sha256.is_some());
+            },
+            "asset-cache" => {
+                let outcome = result.expect("asset cache fixture should render");
+                assert_eq!(outcome.readiness["payload"]["fixture"], "asset-cache");
+                assert_eq!(outcome.readiness["payload"]["executions"], 2);
+                assert_eq!(outcome.resources.len(), 4);
+                let document = outcome
+                    .resources
+                    .iter()
+                    .filter(|resource| resource.source == ResourceSource::DocumentRoot)
+                    .collect::<Vec<_>>();
+                assert_eq!(document.len(), 1);
+                assert_eq!(document[0].request.method, "GET");
+                assert_eq!(document[0].request.destination, "Document");
+                assert!(document[0].request.is_for_main_frame);
+                assert_eq!(
+                    document[0].request.url,
+                    url::Url::from_file_path(&input).unwrap()
+                );
+                let assets = outcome
+                    .resources
+                    .iter()
+                    .filter(|resource| matches!(resource.source, ResourceSource::AssetCache(_)))
+                    .collect::<Vec<_>>();
+                assert_eq!(assets.len(), 3);
+                let asset_body = fs::read(input.parent().unwrap().join("first.js")).unwrap();
+                let asset_sha = content_address(&asset_body);
+                assert!(assets.iter().all(|resource| {
+                    resource.request.method == "GET" &&
+                        resource.request.destination == "Script" &&
+                        !resource.request.is_for_main_frame &&
+                        resource.status == "loaded" &&
+                        resource.response_status == Some(200) &&
+                        resource.bytes == Some(asset_body.len() as u64) &&
+                        resource.sha256.as_deref() == Some(&asset_sha[7..])
+                }));
+                let first = assets
+                    .iter()
+                    .filter(|resource| resource.request.url.path() == "/first.js")
+                    .collect::<Vec<_>>();
+                assert_eq!(first.len(), 1);
+                assert_eq!(first[0].source, ResourceSource::AssetCache("miss"));
+                let renamed = assets
+                    .iter()
+                    .filter(|resource| resource.request.url.path() == "/renamed.js")
+                    .collect::<Vec<_>>();
+                assert_eq!(renamed.len(), 2);
+                assert!(
+                    renamed
+                        .iter()
+                        .all(|resource| resource.source == ResourceSource::AssetCache("hit"))
+                );
+                assert_eq!(outcome.resource_accounting.requests, 4);
+                assert_eq!(outcome.resource_accounting.loaded, 4);
+                assert_eq!(outcome.resource_accounting.failed, 0);
+            },
+            "allowed-url" => {
+                let outcome = result.expect("allowed HTTP resource fixture should render");
+                assert!(outcome.pdf.starts_with(b"%PDF-"));
+                assert_eq!(outcome.readiness["payload"]["http_loaded"], true);
+                let url = url::Url::parse(&format!("{http_base}allowed.js")).unwrap();
+                let resource = outcome
+                    .resources
+                    .iter()
+                    .find(|resource| resource.request.url == url)
+                    .expect("allowed HTTP request should retain evidence");
+                assert_eq!(resource.source, ResourceSource::Http);
+                assert_eq!(resource.status, "loaded");
+                assert_eq!(resource.response_status, Some(200));
+                assert_eq!(resource.content_type.as_deref(), Some("text/javascript"));
+                assert_eq!(resource.bytes, Some(ALLOWED_HTTP_BODY.len() as u64));
+                assert_eq!(
+                    resource.sha256.as_deref(),
+                    Some(&content_address(ALLOWED_HTTP_BODY)[7..])
+                );
+                assert_eq!(outcome.resource_accounting.requests, 2);
+                assert_eq!(outcome.resource_accounting.loaded, 2);
+                assert_eq!(outcome.resource_accounting.failed, 0);
+            },
+            "raster-local" | "raster-data" => {
+                let outcome = result.expect("owned raster resource fixture should render");
+                assert!(outcome.pdf.starts_with(b"%PDF-"));
+                let expected = fixture_png();
+                let expected_address = content_address(&expected);
+                let scene_images = outcome
+                    .capture
+                    .scene
+                    .pages
+                    .iter()
+                    .flat_map(|page| &page.operations)
+                    .filter_map(|operation| match operation {
+                        Operation::Image { resource, .. } => Some(resource),
+                        _ => None,
+                    })
+                    .filter(|resource| outcome.resource_store.resolve_content(resource).is_some())
+                    .collect::<Vec<_>>();
+                assert_eq!(scene_images, vec![&expected_address]);
+                assert_eq!(
+                    outcome.resource_store.resolve_content(&expected_address),
+                    Some(expected.as_slice())
+                );
+                let source = if case == "raster-data" {
+                    ResourceSource::DataUrl
+                } else {
+                    ResourceSource::DocumentRoot
+                };
+                let evidence = outcome
+                    .resources
+                    .iter()
+                    .find(|resource| {
+                        resource.source == source &&
+                            resource.content_address.as_deref() ==
+                                Some(expected_address.as_str())
+                    })
+                    .expect("raster evidence should reference its owned exact bytes");
+                assert_eq!(evidence.status, "loaded");
+                assert_eq!(evidence.bytes, Some(expected.len() as u64));
+                assert_eq!(
+                    outcome
+                        .resource_store
+                        .resolve_url(evidence.request.url.as_str()),
+                    Some(expected_address)
+                );
+                assert_eq!(outcome.resource_accounting.delegated, 0);
+                assert!(outcome.resource_store.resident_bytes() >= expected.len() as u64);
+            },
+            "invalid-data-url" => {
+                let Err(error) = result else {
+                    panic!("invalid data URL returned a DocumentOutcome containing PDF bytes")
+                };
+                let failure = error
+                    .resource_failure
+                    .as_ref()
+                    .expect("invalid data URL should retain a structured resource failure");
+                assert_eq!(error.code, "RESOURCE_DATA_URL_INVALID");
+                assert_eq!(failure.status, "invalid");
+                assert_eq!(failure.destination, "Image");
+                assert_eq!(error.resource_accounting.failed, 1);
+                assert!(
+                    error
+                        .resource_store
+                        .resolve_url("data:image/png;base64,!")
+                        .is_none()
+                );
+            },
+            "oversized-raster" => {
+                let Err(error) = result else {
+                    panic!("oversized raster returned a DocumentOutcome containing PDF bytes")
+                };
+                let failure = error
+                    .resource_failure
+                    .as_ref()
+                    .expect("oversized raster should retain a structured resource failure");
+                assert_eq!(error.code, "RESOURCE_IMAGE_LIMIT_EXCEEDED");
+                assert_eq!(failure.status, "denied");
+                assert!(failure.reason.contains("declared-width"));
+                assert_eq!(error.resource_accounting.failed, 1);
+                assert!(error.resource_store.resolve_url(&failure.url).is_none());
+            },
+            "denied-url" => {
+                let Err(error) = result else {
+                    panic!("denied resource returned a DocumentOutcome containing PDF bytes")
+                };
+                let failure = error
+                    .resource_failure
+                    .as_ref()
+                    .expect("denial should retain the structured policy failure");
+                assert_eq!(error.code, "RESOURCE_DENIED");
+                assert_eq!(failure.status, "denied");
+                assert_eq!(failure.url, "https://denied.invalid/blocked.js");
+                assert_eq!(failure.method, "GET");
+                assert_eq!(failure.destination, "Script");
+                assert!(!failure.is_for_main_frame);
+                assert!(!failure.is_redirect);
+                assert_eq!(error.resource_accounting.requests, 2);
+                assert_eq!(error.resource_accounting.loaded, 1);
+                assert_eq!(error.resource_accounting.failed, 1);
+                assert_eq!(error.resource_accounting.unavailable_bodies, 1);
+                assert_eq!(
+                    error.resource_accounting.requests,
+                    error.resource_accounting.loaded +
+                        error.resource_accounting.delegated +
+                        error.resource_accounting.failed
+                );
+                assert_eq!(error.resources.len(), 1);
+            },
+            "http-timeout" => {
+                let Err(error) = result else {
+                    panic!("HTTP timeout returned a DocumentOutcome containing PDF bytes")
+                };
+                let failure = error
+                    .resource_failure
+                    .as_ref()
+                    .expect("timeout should retain the structured policy failure");
+                assert_eq!(error.code, "RESOURCE_TIMEOUT");
+                assert_eq!(failure.status, "timeout");
+                assert_eq!(failure.url, format!("{http_base}timeout.js"));
+                assert_eq!(failure.method, "GET");
+                assert_eq!(failure.destination, "Script");
+                assert_eq!(error.resource_accounting.requests, 2);
+                assert_eq!(error.resource_accounting.loaded, 1);
+                assert_eq!(error.resource_accounting.failed, 1);
+                assert_eq!(error.resource_accounting.unavailable_bodies, 1);
+            },
+            "explicit-fail" => {
+                let Err(error) = result else {
+                    panic!(
+                        "explicit readiness failure returned a DocumentOutcome containing PDF bytes"
+                    )
+                };
+                assert_eq!(error.code, "FIXTURE_READINESS_FAILED");
+                assert_eq!(error.message, "expected explicit failure");
+                assert!(error.resource_failure.is_none());
+                assert_eq!(error.resource_accounting.requests, 1);
+                assert_eq!(error.resource_accounting.loaded, 1);
+                assert_eq!(error.resource_accounting.failed, 0);
+            },
+            "defer-timeout" => {
+                let Err(error) = result else {
+                    panic!("deferred timeout returned a DocumentOutcome containing PDF bytes")
+                };
+                assert_eq!(error.code, "READINESS_TIMEOUT");
+                assert_eq!(error.message, "Document readiness timed out after 25 ms");
+                assert!(error.resource_failure.is_none());
+                assert_eq!(error.resource_accounting.requests, 1);
+                assert_eq!(error.resource_accounting.loaded, 1);
+                assert_eq!(error.resource_accounting.failed, 0);
+            },
+            "environment" => {
+                let outcome = result.expect("explicit environment fixture should render");
+                assert_eq!(outcome.environment, environment);
+                assert_eq!(
+                    outcome.environment.artifact(),
+                    serde_json::json!({
+                        "locale": { "requested": "es-MX", "resolved": "es-MX" },
+                        "timezone": { "requested": "PST8PDT", "resolved": "PST8PDT" },
+                    })
+                );
+                assert!(outcome.allow_host_fonts);
+                assert_eq!(outcome.readiness["payload"]["navigatorLanguage"], "es-MX");
+                assert_eq!(outcome.readiness["payload"]["localHour"], 4);
+                assert!(
+                    outcome
+                        .capture
+                        .font_selections
+                        .iter()
+                        .any(|selection| selection.source == CapturedFontSource::Host),
+                    "host-font opt-in did not reach Servo preferences"
+                );
+            },
+            "invoice-oracle" => {
+                let outcome = result.expect("invoice oracle fixture should render");
+                assert_eq!(
+                    content_address(&fs::read(&input).unwrap()),
+                    INVOICE_INPUT,
+                    "same-source invoice input changed"
+                );
+                assert_eq!(outcome.capture.scene.pages.len(), 2);
+                assert_eq!(
+                    content_address(&outcome.capture.scene.normalized_json().unwrap()),
+                    PRE_SESSION_INVOICE_SCENE,
+                    "direct invoice scene differs from the exact pre-session servoshell oracle"
+                );
+                assert_eq!(
+                    content_address(&outcome.pdf),
+                    PRE_SESSION_INVOICE_PDF,
+                    "direct invoice PDF differs from the exact pre-session servoshell oracle"
+                );
+                assert_eq!(outcome.environment, RenderEnvironment::default());
+                assert!(!outcome.allow_host_fonts);
+            },
+            "state-seed" => {
+                let outcome = result.expect("state seed fixture should render");
+                assert_eq!(
+                    outcome.readiness["payload"]["iframe_cookie_persisted"],
+                    true
+                );
+                assert_eq!(
+                    outcome.readiness["payload"]["window_name"],
+                    "pliego-seed-page"
+                );
+            },
+            "state-clean" => {
+                let outcome = result.expect("fresh-state fixture should render");
+                assert_eq!(outcome.readiness["payload"]["iframe_cookie_present"], false);
+                assert_eq!(outcome.readiness["payload"]["cookie_header_seen"], false);
+                assert_eq!(outcome.readiness["payload"]["window_name"], "");
+            },
+            other => panic!("unknown isolated fixture case: {other}"),
+        }
     }
 
     #[test]
@@ -477,14 +1892,30 @@ mod tests {
             AHEM_SOURCE_RESOURCE,
         );
 
-        let outcome = DocumentSession::new(&input, a4())?.render()?;
+        let outcome = DocumentSession::new(
+            &input,
+            RenderEnvironment::default(),
+            a4(),
+            ResourcePolicyConfig::default(),
+            false,
+            ReadinessPolicy::default(),
+        )?
+        .render()?;
+        assert_eq!(outcome.readiness["status"], "ready");
+        assert_eq!(outcome.readiness["payload"], serde_json::Value::Null);
+        assert_eq!(outcome.readiness["font_status"], "loaded");
         assert_eq!(outcome.capture.scene.pages.len(), 1);
         assert_eq!(
             content_address(&outcome.capture.scene.normalized_json().unwrap()),
             PRE_SESSION_SCENE,
         );
         assert_eq!(content_address(&outcome.pdf), PRE_SESSION_PDF);
-        let mut served_resources = outcome.served_resources.clone();
+        let mut served_resources = outcome
+            .resources
+            .iter()
+            .filter(|resource| resource.status == "loaded")
+            .map(|resource| resource.request.url.to_file_path().unwrap())
+            .collect::<Vec<_>>();
         served_resources.sort();
         let mut expected_resources = vec![input, ahem.clone()];
         expected_resources.sort();

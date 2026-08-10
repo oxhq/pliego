@@ -6598,6 +6598,7 @@ version = "0.1.1"
 dependencies = [
  "base64",
  "criterion",
+ "data-url",
  "dpi",
  "flate2",
  "http 1.4.2",
@@ -6619,6 +6620,7 @@ dependencies = [
  "unicode-segmentation",
  "url",
  "vello_cpu 0.0.9",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

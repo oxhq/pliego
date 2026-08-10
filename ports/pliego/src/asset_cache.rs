@@ -3,8 +3,8 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 use std::collections::{BTreeMap, HashSet};
-use std::fs::{self, OpenOptions};
-use std::io::Write as _;
+use std::fs::{self, File, Metadata, OpenOptions};
+use std::io::{Read as _, Write as _};
 use std::path::{Component, Path, PathBuf};
 
 use serde::Deserialize;
@@ -15,6 +15,26 @@ pub const CACHE_SCOPE: &str = "pliego.asset-cache.v1";
 const CACHE_DIRECTORY: &str = ".pliego-asset-cache-v1";
 const MAX_CACHE_ENTRIES: usize = 128;
 pub(crate) const MAX_CACHE_BYTES: u64 = 64 * 1024 * 1024;
+
+pub(crate) fn open_regular_file(path: &Path) -> std::io::Result<(File, Metadata)> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+
+    let file = options.open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "path is not a regular file",
+        ));
+    }
+    Ok((file, metadata))
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CacheResult {
@@ -53,7 +73,10 @@ pub struct AssetStore {
 }
 
 impl AssetStore {
-    pub fn load(path: &Path) -> Result<Self, AssetError> {
+    pub(crate) fn load_with_budget(
+        path: &Path,
+        max_resident_bytes: u64,
+    ) -> Result<Self, AssetError> {
         let manifest = path.canonicalize().map_err(|error| {
             AssetError::new(
                 "ASSET_MANIFEST_INVALID",
@@ -71,13 +94,36 @@ impl AssetStore {
                 "asset manifest has no parent directory".into(),
             )
         })?;
-        let bytes = fs::read(&manifest).map_err(|error| {
+        let (file, metadata) = open_regular_file(&manifest).map_err(|error| {
             AssetError::new(
                 "ASSET_MANIFEST_INVALID",
                 None,
                 format!("cannot read asset manifest {}: {error}", manifest.display()),
             )
         })?;
+        if metadata.len() > MAX_CACHE_BYTES {
+            return Err(AssetError::new(
+                "ASSET_MANIFEST_INVALID",
+                None,
+                format!("asset manifest exceeds the {MAX_CACHE_BYTES}-byte limit"),
+            ));
+        }
+        let mut file = file.take(MAX_CACHE_BYTES + 1);
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).map_err(|error| {
+            AssetError::new(
+                "ASSET_MANIFEST_INVALID",
+                None,
+                format!("cannot read asset manifest {}: {error}", manifest.display()),
+            )
+        })?;
+        if bytes.len() as u64 > MAX_CACHE_BYTES {
+            return Err(AssetError::new(
+                "ASSET_MANIFEST_INVALID",
+                None,
+                format!("asset manifest exceeds the {MAX_CACHE_BYTES}-byte limit"),
+            ));
+        }
         let mut parsed: Manifest = serde_json::from_slice(&bytes).map_err(|error| {
             AssetError::new(
                 "ASSET_MANIFEST_INVALID",
@@ -126,6 +172,7 @@ impl AssetStore {
         let mut hits = 0;
         let mut misses = 0;
         let mut invalidations = 0;
+        let mut resident_bytes = 0u64;
         for entry in parsed.assets {
             let url = url::Url::parse(&entry.url).map_err(|error| {
                 AssetError::new(
@@ -179,6 +226,18 @@ impl AssetStore {
                     (body, CacheResult::Invalidated)
                 },
             };
+            let next_resident_bytes = resident_bytes
+                .checked_add(body.len() as u64)
+                .filter(|bytes| *bytes <= max_resident_bytes)
+                .ok_or_else(|| {
+                    AssetError::new(
+                        "ASSET_CACHE_LIMIT",
+                        Some(url.to_string()),
+                        format!(
+                            "manifest assets exceed the {max_resident_bytes}-byte resident allowance"
+                        ),
+                    )
+                })?;
             match cache_result {
                 CacheResult::Hit => hits += 1,
                 CacheResult::Miss => misses += 1,
@@ -193,6 +252,7 @@ impl AssetStore {
                     cache_result,
                 },
             );
+            resident_bytes = next_resident_bytes;
         }
         let evictions = prune_cache(&cache_directory)?;
         Ok(Self {
@@ -240,6 +300,13 @@ impl AssetStore {
         self.assets
             .values()
             .map(|asset| (asset.url.as_str(), asset.content_hash.as_str()))
+    }
+
+    pub(crate) fn resident_bytes(&self) -> u64 {
+        self.assets
+            .values()
+            .map(|asset| asset.body.len() as u64)
+            .sum()
     }
 }
 
@@ -315,8 +382,8 @@ enum CacheRead {
 }
 
 fn read_verified(path: &Path, expected: &str) -> Result<CacheRead, AssetError> {
-    let body = match fs::read(path) {
-        Ok(body) => body,
+    let (file, metadata) = match open_regular_file(path) {
+        Ok(opened) => opened,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Ok(CacheRead::Missing);
         },
@@ -328,6 +395,18 @@ fn read_verified(path: &Path, expected: &str) -> Result<CacheRead, AssetError> {
             ));
         },
     };
+    if metadata.len() > MAX_CACHE_BYTES {
+        return Ok(CacheRead::Invalid);
+    }
+    let mut file = file.take(MAX_CACHE_BYTES + 1);
+    let mut body = Vec::new();
+    file.read_to_end(&mut body).map_err(|error| {
+        AssetError::new(
+            "ASSET_CACHE_FAILED",
+            None,
+            format!("cannot read cached asset {}: {error}", path.display()),
+        )
+    })?;
     if body.len() as u64 > MAX_CACHE_BYTES {
         return Ok(CacheRead::Invalid);
     }
@@ -339,7 +418,7 @@ fn read_verified(path: &Path, expected: &str) -> Result<CacheRead, AssetError> {
 }
 
 fn read_source(path: &Path, url: &url::Url, expected: &str) -> Result<Vec<u8>, AssetError> {
-    let metadata = fs::metadata(path).map_err(|error| {
+    let (file, metadata) = open_regular_file(path).map_err(|error| {
         AssetError::new(
             "ASSET_NOT_FOUND",
             Some(url.to_string()),
@@ -356,7 +435,9 @@ fn read_source(path: &Path, url: &url::Url, expected: &str) -> Result<Vec<u8>, A
             format!("manifest asset exceeds the {MAX_CACHE_BYTES}-byte cache bound"),
         ));
     }
-    let body = fs::read(path).map_err(|error| {
+    let mut file = file.take(MAX_CACHE_BYTES + 1);
+    let mut body = Vec::new();
+    file.read_to_end(&mut body).map_err(|error| {
         AssetError::new(
             "ASSET_NOT_FOUND",
             Some(url.to_string()),
@@ -491,10 +572,103 @@ fn sha256_hex(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use std::ffi::CString;
     use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::ffi::OsStrExt as _;
+    #[cfg(unix)]
+    use std::process::Command;
+    #[cfg(unix)]
+    use std::thread;
+    #[cfg(unix)]
+    use std::time::{Duration, Instant};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{AssetStore, CacheResult};
+
+    #[cfg(unix)]
+    #[allow(unsafe_code)]
+    fn make_fifo(path: &std::path::Path) {
+        let path = CString::new(path.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn source_and_cached_special_files_are_rejected_without_blocking() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "pliego-asset-special-file-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir(&root).unwrap();
+        let fifo = root.join("asset.fifo");
+        make_fifo(&fifo);
+        let url = url::Url::parse("https://assets.test/asset.fifo").unwrap();
+
+        let source_error = super::read_source(&fifo, &url, &super::sha256_hex(b""))
+            .expect_err("a FIFO must not be accepted as a manifest asset");
+        assert_eq!(source_error.code, "ASSET_NOT_FOUND");
+        assert!(source_error.message.contains("not a regular file"));
+        let cache_error = match super::read_verified(&fifo, &super::sha256_hex(b"")) {
+            Err(error) => error,
+            _ => panic!("a FIFO must not be accepted as a cached asset"),
+        };
+        assert_eq!(cache_error.code, "ASSET_CACHE_FAILED");
+        assert!(cache_error.message.contains("not a regular file"));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn fifo_manifest_is_rejected_under_a_process_watchdog() {
+        const CHILD_ENV: &str = "PLIEGO_FIFO_MANIFEST_TEST_CHILD";
+        if std::env::var_os(CHILD_ENV).is_some() {
+            let unique = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let root = std::env::temp_dir().join(format!(
+                "pliego-asset-manifest-fifo-{}-{unique}",
+                std::process::id()
+            ));
+            fs::create_dir(&root).unwrap();
+            let manifest = root.join("assets.json");
+            make_fifo(&manifest);
+
+            let error = AssetStore::load_with_budget(&manifest, super::MAX_CACHE_BYTES)
+                .expect_err("a FIFO must not be accepted as an asset manifest");
+            assert_eq!(error.code, "ASSET_MANIFEST_INVALID");
+            assert!(error.message.contains("not a regular file"));
+            fs::remove_dir_all(root).unwrap();
+            return;
+        }
+
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .arg("fifo_manifest_is_rejected_under_a_process_watchdog")
+            .arg("--nocapture")
+            .env(CHILD_ENV, "1")
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                assert!(status.success(), "FIFO-manifest child failed: {status}");
+                break;
+            }
+            if Instant::now() >= deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("asset-manifest read blocked past the process watchdog");
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
 
     #[test]
     fn shares_content_by_hash_and_rejects_mismatches() {
@@ -524,7 +698,7 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        let first = AssetStore::load(&manifest).unwrap();
+        let first = AssetStore::load_with_budget(&manifest, super::MAX_CACHE_BYTES).unwrap();
         assert_eq!(
             first
                 .get(&url::Url::parse("https://assets.test/a.svg").unwrap())
@@ -541,7 +715,7 @@ mod tests {
         );
         assert_eq!(first.artifact()["cache"]["hits"], 1);
         assert_eq!(first.artifact()["cache"]["misses"], 1);
-        let second = AssetStore::load(&manifest).unwrap();
+        let second = AssetStore::load_with_budget(&manifest, super::MAX_CACHE_BYTES).unwrap();
         assert!(
             second
                 .assets
@@ -552,7 +726,7 @@ mod tests {
         assert_eq!(second.artifact()["cache"]["misses"], 0);
 
         fs::write(root.join(super::CACHE_DIRECTORY).join(&digest), b"corrupt").unwrap();
-        let recovered = AssetStore::load(&manifest).unwrap();
+        let recovered = AssetStore::load_with_budget(&manifest, super::MAX_CACHE_BYTES).unwrap();
         assert_eq!(recovered.artifact()["cache"]["hits"], 1);
         assert_eq!(recovered.artifact()["cache"]["invalidations"], 1);
 
@@ -572,7 +746,7 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        let changed = AssetStore::load(&manifest).unwrap();
+        let changed = AssetStore::load_with_budget(&manifest, super::MAX_CACHE_BYTES).unwrap();
         assert_eq!(changed.artifact()["cache"]["hits"], 1);
         assert_eq!(changed.artifact()["cache"]["misses"], 1);
         assert!(
@@ -591,7 +765,7 @@ mod tests {
             ),
         )
         .unwrap();
-        let error = AssetStore::load(&manifest).unwrap_err();
+        let error = AssetStore::load_with_budget(&manifest, super::MAX_CACHE_BYTES).unwrap_err();
         assert_eq!(error.code, "ASSET_HASH_MISMATCH");
         assert_eq!(error.expected, Some(format!("sha256:{bad_digest}")));
         assert_ne!(error.expected, error.actual);

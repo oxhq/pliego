@@ -14,7 +14,7 @@ path = "src/scene.rs"
 
 [features]
 default = ["shell"]
-document-session = ["dep:dpi", "dep:layout", "dep:servo"]
+document-session = ["dep:data-url", "dep:dpi", "dep:layout", "dep:servo"]
 shell = ["dep:layout", "dep:servoshell"]
 
 [[bin]]
@@ -24,6 +24,7 @@ required-features = ["shell"]
 
 [dependencies]
 base64 = { workspace = true }
+data-url = { workspace = true, optional = true }
 dpi = { workspace = true, optional = true }
 http = { workspace = true }
 http-body-util = { workspace = true }
@@ -48,6 +49,9 @@ vello_cpu = { workspace = true }
 criterion = { workspace = true }
 flate2 = { workspace = true }
 ttf-parser = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
 
 [[bench]]
 name = "document_scene_pdf"
