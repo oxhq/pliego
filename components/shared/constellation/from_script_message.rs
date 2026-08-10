@@ -790,7 +790,7 @@ pub enum ScriptToConstellationMessage {
         JavaScriptEvaluationId,
         Result<JSValue, JavaScriptEvaluationError>,
     ),
-    /// Return a post-turn controlled document-time observation to the Constellation for recheck.
+    /// Return a post-turn observation or a committed guarded-advance acknowledgement.
     ControlledDocumentTimeResponse(
         DocumentTimeControlRequestId,
         Result<DocumentTimeControlObservation, DocumentTimeControlError>,

@@ -9,7 +9,7 @@ use servo_base::Epoch;
 use servo_base::id::{PipelineId, ScriptEventLoopId, WebViewId};
 pub use timers::DocumentClockConfiguration;
 use timers::{
-    DocumentClockError, DocumentProducerCheckpoint, DocumentProducerFenceError,
+    DocumentClockError, DocumentClockId, DocumentProducerCheckpoint, DocumentProducerFenceError,
     DocumentProducerFenceId, DocumentProducerSnapshot, DocumentTime, DocumentTimeSurface,
     TimerControlError, TimerDeadlineSnapshot,
 };
@@ -45,13 +45,125 @@ pub struct DocumentTimeControlTarget {
     pub fully_active_pipelines: Vec<PipelineId>,
 }
 
+/// Stable identity of one ScriptThread-issued conditional-advance precondition.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+pub struct DocumentTimeAdvanceTokenId(u64);
+
+impl DocumentTimeAdvanceTokenId {
+    /// Construct an identifier from a checked ScriptThread sequence.
+    #[doc(hidden)]
+    pub const fn new(sequence: u64) -> Self {
+        Self(sequence)
+    }
+
+    /// Return the underlying ScriptThread sequence.
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+/// A single-use, ScriptThread-issued precondition for one exact clock advance.
+///
+/// The private fields prevent callers from modifying individual scheduling facts. ScriptThread
+/// also retains the exact issued value and consumes it on every advance attempt.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DocumentTimeAdvanceToken {
+    id: DocumentTimeAdvanceTokenId,
+    target: DocumentTimeControlTarget,
+    clock_id: DocumentClockId,
+    now: DocumentTime,
+    deadline: TimerDeadlineSnapshot,
+    input_revision: u64,
+    pending_events: u64,
+    input_batch_saturated: bool,
+    producers: DocumentTimeProducerObservation,
+}
+
+impl DocumentTimeAdvanceToken {
+    /// Construct a token from one internally qualified ScriptThread observation.
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_internal(
+        id: DocumentTimeAdvanceTokenId,
+        target: DocumentTimeControlTarget,
+        clock_id: DocumentClockId,
+        now: DocumentTime,
+        deadline: TimerDeadlineSnapshot,
+        input_revision: u64,
+        pending_events: u64,
+        input_batch_saturated: bool,
+        producers: DocumentTimeProducerObservation,
+    ) -> Self {
+        Self {
+            id,
+            target,
+            clock_id,
+            now,
+            deadline,
+            input_revision,
+            pending_events,
+            input_batch_saturated,
+            producers,
+        }
+    }
+
+    /// Return this token's single-use sequence.
+    pub const fn id(&self) -> DocumentTimeAdvanceTokenId {
+        self.id
+    }
+
+    /// Return the exact WebView, pipeline, and event-loop target bound by this token.
+    pub const fn target(&self) -> &DocumentTimeControlTarget {
+        &self.target
+    }
+
+    /// Return the identity of the one clock domain this token may advance.
+    pub const fn clock_id(&self) -> DocumentClockId {
+        self.clock_id
+    }
+
+    /// Return the clock offset observed when this token was issued.
+    pub const fn now(&self) -> DocumentTime {
+        self.now
+    }
+
+    /// Return the exact finite deadline this token may activate.
+    pub const fn deadline(&self) -> TimerDeadlineSnapshot {
+        self.deadline
+    }
+
+    /// Return the ordinary-input revision observed when this token was issued.
+    pub const fn input_revision(&self) -> u64 {
+        self.input_revision
+    }
+
+    /// Return the buffered ordinary-event count bound by this token.
+    pub const fn pending_events(&self) -> u64 {
+        self.pending_events
+    }
+
+    /// Return whether bounded input intake was saturated when this token was issued.
+    pub const fn input_batch_saturated(&self) -> bool {
+        self.input_batch_saturated
+    }
+
+    /// Return the qualified producer observation bound by this token.
+    pub const fn producers(&self) -> DocumentTimeProducerObservation {
+        self.producers
+    }
+}
+
 /// A single mechanical operation. None of these operations imply visual settlement.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum DocumentTimeControlCommand {
     /// Observe state without processing an event or advancing time.
     Observe,
-    /// Advance to and activate exactly the freshly observed finite timer deadline.
-    AdvanceTo(TimerDeadlineSnapshot),
+    /// Conditionally advance to and activate the exact deadline bound by a fresh token.
+    ///
+    /// A typed rejection guarantees that neither the clock nor timer queue mutated. A matching
+    /// `TimerActivated` response is committed even if Constellation observes a later navigation
+    /// before forwarding the response.
+    AdvanceTo(DocumentTimeAdvanceToken),
     /// Process one queued event-loop event and its normal checkpoint/render tail.
     ///
     /// If no page event is queued, the driver runs one existing no-op ScriptThread wake turn so
@@ -153,6 +265,8 @@ pub struct DocumentTimeControlObservation {
     pub now: DocumentTime,
     /// Next finite timer deadline, without activating it.
     pub next_deadline: Option<TimerDeadlineSnapshot>,
+    /// Single-use conditional-advance precondition, issued only for qualified empty state.
+    pub advance_token: Option<DocumentTimeAdvanceToken>,
     /// Number of already-received events held for later controlled turns.
     pub pending_events: u64,
     /// The bounded pre/post-command intake batch filled completely.
@@ -185,6 +299,58 @@ pub enum DocumentTimeControlError {
     CommandAlreadyPending,
     /// The Constellation request sequence could not be incremented.
     RequestSequenceOverflow,
+    /// The ScriptThread advance-token sequence could not be incremented.
+    AdvanceTokenSequenceOverflow,
+    /// The checked ordinary-input revision could not represent another admitted event.
+    InputRevisionOverflow,
+    /// No issued token remained for the attempted advance (including token reuse).
+    AdvanceTokenUnavailable {
+        /// Token supplied by the caller.
+        observed: DocumentTimeAdvanceTokenId,
+    },
+    /// The supplied token was not the exact latest token retained by ScriptThread.
+    StaleAdvanceToken {
+        /// Latest retained token consumed by this failed attempt.
+        expected: DocumentTimeAdvanceTokenId,
+        /// Token supplied by the caller.
+        observed: DocumentTimeAdvanceTokenId,
+    },
+    /// A guarded response did not acknowledge the exact deadline routed by Constellation.
+    AdvanceResponseMismatch {
+        /// Deadline bound by the pending guarded request.
+        expected: TimerDeadlineSnapshot,
+        /// Action returned by ScriptThread.
+        observed: DocumentTimeControlAction,
+    },
+    /// Buffered or ready ordinary input changed after token issuance.
+    AdvanceInputChanged {
+        /// Input revision bound by the token.
+        expected_revision: u64,
+        /// Input revision at the conditional action's linearization point.
+        observed_revision: u64,
+        /// Buffered ordinary events at the linearization point.
+        pending_events: u64,
+        /// Whether the final bounded intake filled completely.
+        input_batch_saturated: bool,
+    },
+    /// The clock identity or offset changed after token issuance.
+    AdvanceClockChanged {
+        /// Clock domain bound by the token.
+        expected_id: DocumentClockId,
+        /// Clock domain observed by ScriptThread.
+        observed_id: DocumentClockId,
+        /// Clock offset bound by the token.
+        expected_now: DocumentTime,
+        /// Clock offset observed at the linearization point.
+        observed_now: DocumentTime,
+    },
+    /// Producer identity, checkpoint, or watermarks changed after token issuance.
+    AdvanceProducerChanged {
+        /// Producer observation bound by the token.
+        expected: Box<DocumentTimeProducerObservation>,
+        /// Producer observation at validation time.
+        observed: Box<DocumentTimeProducerObservation>,
+    },
     /// The target identity changed between command routing and response validation.
     TargetChanged {
         /// Identity captured when the command was routed.

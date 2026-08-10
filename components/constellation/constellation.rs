@@ -107,14 +107,15 @@ use devtools_traits::{
 use embedder_traits::resources::{self, Resource};
 use embedder_traits::user_contents::{UserContentManagerId, UserContents};
 use embedder_traits::{
-    AnimationState, DocumentTimeControlCommand, DocumentTimeControlError,
-    DocumentTimeControlObservation, DocumentTimeControlRequestId, DocumentTimeControlTarget,
-    EmbedderControlId, EmbedderControlResponse, EmbedderProxy, FocusSequenceNumber,
-    GenericEmbedderProxy, InputEvent, InputEventAndId, InputEventOutcome, JSValue,
-    JavaScriptEvaluationError, JavaScriptEvaluationId, KeyboardEvent, MediaSessionActionType,
-    MediaSessionEvent, MediaSessionPlaybackState, MouseButton, MouseButtonAction, MouseButtonEvent,
-    NewWebViewDetails, PaintHitTestResult, Theme, ViewportDetails, WakeLockDelegate, WakeLockType,
-    WebDriverCommandMsg, WebDriverLoadStatus, WebDriverScriptCommand,
+    AnimationState, DocumentTimeControlAction, DocumentTimeControlCommand,
+    DocumentTimeControlError, DocumentTimeControlObservation, DocumentTimeControlRequestId,
+    DocumentTimeControlTarget, EmbedderControlId, EmbedderControlResponse, EmbedderProxy,
+    FocusSequenceNumber, GenericEmbedderProxy, InputEvent, InputEventAndId, InputEventOutcome,
+    JSValue, JavaScriptEvaluationError, JavaScriptEvaluationId, KeyboardEvent,
+    MediaSessionActionType, MediaSessionEvent, MediaSessionPlaybackState, MouseButton,
+    MouseButtonAction, MouseButtonEvent, NewWebViewDetails, PaintHitTestResult, Theme,
+    ViewportDetails, WakeLockDelegate, WakeLockType, WebDriverCommandMsg, WebDriverLoadStatus,
+    WebDriverScriptCommand,
 };
 use euclid::Size2D;
 use euclid::default::Size2D as UntypedSize2D;
@@ -176,7 +177,7 @@ use storage_traits::client_storage::ClientStorageThreadMessage;
 use storage_traits::indexeddb::{IndexedDBThreadMsg, SyncOperation};
 use storage_traits::webstorage_thread::{WebStorageThreadMsg, WebStorageType};
 use style::global_style_data::StyleThreadPool;
-use timers::{DocumentClockConfiguration, DocumentTimeSurface};
+use timers::{DocumentClockConfiguration, DocumentTimeSurface, TimerDeadlineSnapshot};
 #[cfg(feature = "webgpu")]
 use webgpu::canvas_context::WebGpuExternalImageMap;
 #[cfg(feature = "webgpu")]
@@ -547,7 +548,176 @@ pub struct Constellation<STF, SWF> {
 
 struct PendingDocumentTimeControl {
     target: DocumentTimeControlTarget,
+    completion: DocumentTimeControlCompletion,
     response: GenericCallback<Result<DocumentTimeControlObservation, DocumentTimeControlError>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DocumentTimeControlCompletion {
+    RecheckCurrentTarget,
+    GuardedAdvance(TimerDeadlineSnapshot),
+}
+
+impl DocumentTimeControlCompletion {
+    fn for_command(command: &DocumentTimeControlCommand) -> Self {
+        match command {
+            DocumentTimeControlCommand::AdvanceTo(token) => Self::GuardedAdvance(token.deadline()),
+            DocumentTimeControlCommand::Observe | DocumentTimeControlCommand::DriveOneTurn => {
+                Self::RecheckCurrentTarget
+            },
+        }
+    }
+
+    fn is_matching_committed_advance(
+        self,
+        result: &Result<DocumentTimeControlObservation, DocumentTimeControlError>,
+    ) -> bool {
+        result
+            .as_ref()
+            .is_ok_and(|observation| self.is_matching_committed_action(observation.action))
+    }
+
+    fn is_matching_committed_action(self, action: DocumentTimeControlAction) -> bool {
+        matches!(
+            (self, action),
+            (
+                Self::GuardedAdvance(expected),
+                DocumentTimeControlAction::TimerActivated(observed),
+            ) if expected == observed
+        )
+    }
+
+    fn is_guarded_advance(self) -> bool {
+        matches!(self, Self::GuardedAdvance(_))
+    }
+}
+
+fn validate_document_time_command_target(
+    command: &DocumentTimeControlCommand,
+    current: &DocumentTimeControlTarget,
+) -> Result<(), DocumentTimeControlError> {
+    if let DocumentTimeControlCommand::AdvanceTo(token) = command &&
+        token.target() != current
+    {
+        return Err(DocumentTimeControlError::TargetChanged {
+            expected: Box::new(token.target().clone()),
+            observed: Some(Box::new(current.clone())),
+        });
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod controlled_document_time_tests {
+    use std::time::Duration;
+
+    use embedder_traits::{
+        DocumentProducerStability, DocumentTimeAdvanceToken, DocumentTimeAdvanceTokenId,
+        DocumentTimeControlCommand, DocumentTimeControlError, DocumentTimeControlTarget,
+        DocumentTimeProducerObservation,
+    };
+    use servo_base::Epoch;
+    use servo_base::id::{TEST_PIPELINE_ID, TEST_SCRIPT_EVENT_LOOP_ID, TEST_WEBVIEW_ID};
+    use timers::{
+        DocumentClock, DocumentClockConfiguration, DocumentProducerCheckpoint,
+        DocumentProducerFence, DocumentTime, TimerDeadlineSnapshot, TimerEventRequest,
+        TimerScheduler,
+    };
+
+    use super::{
+        DocumentTimeControlAction, DocumentTimeControlCompletion,
+        validate_document_time_command_target,
+    };
+
+    fn target() -> DocumentTimeControlTarget {
+        DocumentTimeControlTarget {
+            webview_id: TEST_WEBVIEW_ID,
+            event_loop_id: TEST_SCRIPT_EVENT_LOOP_ID,
+            webview_epoch: Epoch::default(),
+            pipelines: vec![TEST_PIPELINE_ID],
+            fully_active_pipelines: vec![TEST_PIPELINE_ID],
+        }
+    }
+
+    fn deadline() -> TimerDeadlineSnapshot {
+        let clock = DocumentClock::new(DocumentClockConfiguration::Controlled {
+            initial_time_ns: 0,
+            unix_time_origin_ns: 0,
+        });
+        let mut scheduler = TimerScheduler::with_clock(clock);
+        scheduler.schedule_timer(TimerEventRequest {
+            callback: Box::new(|| {}),
+            duration: Duration::from_nanos(10),
+        });
+        scheduler
+            .finite_deadline_snapshot()
+            .expect("test scheduler is controlled")
+            .expect("test timer has a finite deadline")
+    }
+
+    #[test]
+    fn only_exact_guarded_activation_is_a_committed_response() {
+        let expected = deadline();
+        let completion = DocumentTimeControlCompletion::GuardedAdvance(expected);
+        let changed = TimerDeadlineSnapshot {
+            id: expected.id,
+            deadline: DocumentTime::from_nanos(11),
+        };
+
+        assert!(
+            completion
+                .is_matching_committed_action(DocumentTimeControlAction::TimerActivated(expected))
+        );
+        assert!(
+            !completion
+                .is_matching_committed_action(DocumentTimeControlAction::TimerActivated(changed))
+        );
+        assert!(!completion.is_matching_committed_action(DocumentTimeControlAction::Observed));
+        assert!(completion.is_guarded_advance());
+        assert!(!DocumentTimeControlCompletion::RecheckCurrentTarget.is_guarded_advance());
+    }
+
+    #[test]
+    fn stale_target_token_is_rejected_before_routing() {
+        let clock = DocumentClock::new(DocumentClockConfiguration::Controlled {
+            initial_time_ns: 0,
+            unix_time_origin_ns: 0,
+        });
+        let fence = DocumentProducerFence::default();
+        let checkpoint = DocumentProducerCheckpoint::ZERO
+            .checked_next()
+            .expect("test checkpoint sequence is representable");
+        let expected_target = target();
+        let token = DocumentTimeAdvanceToken::new_internal(
+            DocumentTimeAdvanceTokenId::new(0),
+            expected_target.clone(),
+            clock.id(),
+            clock.now(),
+            deadline(),
+            0,
+            0,
+            false,
+            DocumentTimeProducerObservation {
+                fence_id: fence.id(),
+                checkpoint,
+                snapshot: fence.snapshot(),
+                stability: DocumentProducerStability::StableEmpty,
+            },
+        );
+        let command = DocumentTimeControlCommand::AdvanceTo(token);
+        let mut changed_target = expected_target.clone();
+        changed_target.fully_active_pipelines.clear();
+
+        assert_eq!(
+            validate_document_time_command_target(&command, &expected_target),
+            Ok(())
+        );
+        assert!(matches!(
+            validate_document_time_command_target(&command, &changed_target),
+            Err(DocumentTimeControlError::TargetChanged { expected, observed })
+                if *expected == expected_target && observed == Some(Box::new(changed_target))
+        ));
+    }
 }
 
 /// State needed to construct a constellation.
@@ -1898,6 +2068,11 @@ where
                 return;
             },
         };
+        if let Err(error) = validate_document_time_command_target(&command, &target) {
+            let _ = response.send(Err(error));
+            return;
+        }
+        let completion = DocumentTimeControlCompletion::for_command(&command);
         let Some(next_request_id) = self.next_document_time_control_request_id.checked_add(1)
         else {
             let _ = response.send(Err(DocumentTimeControlError::RequestSequenceOverflow));
@@ -1921,6 +2096,7 @@ where
             request_id,
             PendingDocumentTimeControl {
                 target: target.clone(),
+                completion,
                 response,
             },
         );
@@ -3685,6 +3861,25 @@ where
                 webview_id: source_webview_id,
                 pipeline_id: source_pipeline_id,
             })
+        } else if let Ok(observation) = &result &&
+            observation.target != pending.target
+        {
+            Err(DocumentTimeControlError::TargetChanged {
+                expected: Box::new(pending.target.clone()),
+                observed: Some(Box::new(observation.target.clone())),
+            })
+        } else if pending.completion.is_matching_committed_advance(&result) {
+            // Constellation routed the command before any later target mutation. ScriptThread
+            // linearized the guarded advance before replying, so a later navigation must not
+            // retroactively turn that committed success into an error.
+            result
+        } else if let (DocumentTimeControlCompletion::GuardedAdvance(expected), Ok(observation)) =
+            (pending.completion, &result)
+        {
+            Err(DocumentTimeControlError::AdvanceResponseMismatch {
+                expected,
+                observed: observation.action,
+            })
         } else {
             match self.controlled_document_time_target(pending.target.webview_id) {
                 Ok(observed) if observed != pending.target => {
@@ -3693,15 +3888,7 @@ where
                         observed: Some(Box::new(observed)),
                     })
                 },
-                Ok(_) => match result {
-                    Ok(observation) if observation.target != pending.target => {
-                        Err(DocumentTimeControlError::TargetChanged {
-                            expected: Box::new(pending.target.clone()),
-                            observed: Some(Box::new(observation.target)),
-                        })
-                    },
-                    result => result,
-                },
+                Ok(_) => result,
                 Err(error @ DocumentTimeControlError::UnsupportedSurface(_)) => Err(error),
                 Err(_) => Err(DocumentTimeControlError::TargetChanged {
                     expected: Box::new(pending.target.clone()),
@@ -3717,7 +3904,9 @@ where
             .pending_document_time_controls
             .iter()
             .filter_map(|(request_id, pending)| {
-                (pending.target.webview_id == webview_id).then_some(*request_id)
+                (pending.target.webview_id == webview_id &&
+                    !pending.completion.is_guarded_advance())
+                .then_some(*request_id)
             })
             .collect();
         for request_id in request_ids {

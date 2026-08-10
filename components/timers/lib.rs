@@ -203,6 +203,13 @@ pub enum DocumentClockError {
         /// The rejected new clock offset.
         requested: DocumentTime,
     },
+    /// A conditional advance observed a different offset than its scheduling precondition.
+    TimeChanged {
+        /// Offset bound by the conditional scheduling precondition.
+        expected: DocumentTime,
+        /// Offset observed by the atomic comparison.
+        observed: DocumentTime,
+    },
     /// An integer nanosecond conversion or calculation overflowed.
     Overflow,
     /// The current clock slices do not yet control the requested observable surface.
@@ -219,6 +226,12 @@ impl fmt::Display for DocumentClockError {
                 current.as_nanos(),
                 requested.as_nanos()
             ),
+            Self::TimeChanged { expected, observed } => write!(
+                formatter,
+                "document time changed from expected {}ns to {}ns",
+                expected.as_nanos(),
+                observed.as_nanos()
+            ),
             Self::Overflow => formatter.write_str("document time exceeds the u64 nanosecond range"),
             Self::UnsupportedSurface(surface) => {
                 write!(
@@ -231,6 +244,19 @@ impl fmt::Display for DocumentClockError {
 }
 
 impl std::error::Error for DocumentClockError {}
+
+static NEXT_DOCUMENT_CLOCK_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Stable process-local identity for one shared document clock domain.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, MallocSizeOf, PartialEq, Serialize)]
+pub struct DocumentClockId(u64);
+
+impl DocumentClockId {
+    /// Return the process-local clock identifier.
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
 
 enum DocumentClockInner {
     Realtime {
@@ -246,6 +272,7 @@ enum DocumentClockInner {
 /// One clonable clock shared by the timer scheduler and every same-event-loop Window realm.
 #[derive(Clone, MallocSizeOf)]
 pub struct DocumentClock {
+    id: DocumentClockId,
     #[ignore_malloc_size_of = "The clock state is shared and has no owned heap allocations"]
     inner: Arc<DocumentClockInner>,
 }
@@ -259,6 +286,15 @@ impl Default for DocumentClock {
 impl DocumentClock {
     /// Construct a clock from its immutable mode configuration.
     pub fn new(configuration: DocumentClockConfiguration) -> Self {
+        let id = DocumentClockId(
+            NEXT_DOCUMENT_CLOCK_ID
+                .fetch_update(
+                    AtomicOrdering::Relaxed,
+                    AtomicOrdering::Relaxed,
+                    |current| current.checked_add(1),
+                )
+                .expect("document clock identifier exhausted"),
+        );
         let inner = match configuration {
             DocumentClockConfiguration::Realtime => DocumentClockInner::Realtime {
                 origin: Instant::now(),
@@ -273,8 +309,14 @@ impl DocumentClock {
             },
         };
         Self {
+            id,
             inner: Arc::new(inner),
         }
+    }
+
+    /// Return the identity shared by every clone in this clock domain.
+    pub const fn id(&self) -> DocumentClockId {
+        self.id
     }
 
     /// Return whether this clock is explicitly controlled rather than host-driven.
@@ -352,6 +394,35 @@ impl DocumentClock {
                 Err(observed) => current = observed,
             }
         }
+    }
+
+    /// Atomically advance only if the clock still equals an observed scheduling precondition.
+    pub fn advance_from_to(
+        &self,
+        expected: DocumentTime,
+        requested: DocumentTime,
+    ) -> Result<(), DocumentClockError> {
+        let DocumentClockInner::Controlled { now_ns, .. } = &*self.inner else {
+            return Err(DocumentClockError::RealtimeClock);
+        };
+        if requested < expected {
+            return Err(DocumentClockError::TimeMovedBackwards {
+                current: expected,
+                requested,
+            });
+        }
+        now_ns
+            .compare_exchange(
+                expected.as_nanos(),
+                requested.as_nanos(),
+                AtomicOrdering::AcqRel,
+                AtomicOrdering::Acquire,
+            )
+            .map(|_| ())
+            .map_err(|observed| DocumentClockError::TimeChanged {
+                expected,
+                observed: DocumentTime::from_nanos(observed),
+            })
     }
 
     /// Return Unix time at a point in a controlled clock domain, checking integer overflow.
@@ -628,6 +699,19 @@ impl fmt::Display for DocumentProducerFenceError {
 
 impl std::error::Error for DocumentProducerFenceError {}
 
+/// A producer snapshot changed before a conditional action reached its linearization point.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DocumentProducerSnapshotMismatch {
+    observed: Box<DocumentProducerSnapshot>,
+}
+
+impl DocumentProducerSnapshotMismatch {
+    /// Return the producer state observed under the fence lock.
+    pub fn observed(&self) -> DocumentProducerSnapshot {
+        *self.observed
+    }
+}
+
 /// A clonable, linearizable fence shared by all participating producers on one ScriptThread.
 ///
 /// Enqueue and completion mutate one locked state so a snapshot cannot combine watermarks from
@@ -719,6 +803,27 @@ impl DocumentProducerFence {
             .lock()
             .expect("document producer fence poisoned")
             .snapshot()
+    }
+
+    /// Run an action only while the producer snapshot still exactly matches `expected`.
+    ///
+    /// Producer enqueue and completion remain blocked until `action` returns. Callers must keep
+    /// the action small and must not dispatch callbacks that can acquire another producer lease.
+    pub fn with_matching_snapshot<T>(
+        &self,
+        expected: DocumentProducerSnapshot,
+        action: impl FnOnce() -> T,
+    ) -> Result<T, DocumentProducerSnapshotMismatch> {
+        let state = self.inner.lock().expect("document producer fence poisoned");
+        let observed = state.snapshot();
+        if observed != expected {
+            return Err(DocumentProducerSnapshotMismatch {
+                observed: Box::new(observed),
+            });
+        }
+        let result = action();
+        drop(state);
+        Ok(result)
     }
 
     /// Return the stable identity bound to this ScriptThread fence.
@@ -1093,12 +1198,38 @@ impl TimerScheduler {
         &mut self,
         expected: TimerDeadlineSnapshot,
     ) -> Result<(), TimerControlError> {
+        self.validate_and_advance_to(expected)?;
+        self.activate_due_timer(expected)
+    }
+
+    /// Validate one fresh finite deadline and advance to it without dispatching its callback.
+    ///
+    /// This seam lets a controller hold its producer-fence snapshot lock only across validation
+    /// and clock mutation, then release the lock before activating callback-producing work.
+    pub fn validate_and_advance_to(
+        &self,
+        expected: TimerDeadlineSnapshot,
+    ) -> Result<(), TimerControlError> {
         let observed = self.finite_deadline_snapshot()?;
         if observed != Some(expected) {
             return Err(TimerControlError::StaleDeadline { expected, observed });
         }
-        self.clock.advance_to(expected.deadline)?;
-        self.activate_due_timer(expected)
+        self.clock.advance_to(expected.deadline).map_err(Into::into)
+    }
+
+    /// Validate one deadline and atomically require the previously observed clock offset.
+    pub fn validate_and_advance_from(
+        &self,
+        expected_now: DocumentTime,
+        expected: TimerDeadlineSnapshot,
+    ) -> Result<(), TimerControlError> {
+        let observed = self.finite_deadline_snapshot()?;
+        if observed != Some(expected) {
+            return Err(TimerControlError::StaleDeadline { expected, observed });
+        }
+        self.clock
+            .advance_from_to(expected_now, expected.deadline)
+            .map_err(Into::into)
     }
 
     /// Activate exactly one due event selected from a fresh finite-deadline snapshot.
@@ -1148,7 +1279,8 @@ impl TimerScheduler {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Mutex, mpsc};
+    use std::thread;
 
     use super::*;
 
@@ -1179,6 +1311,58 @@ mod tests {
             clock.unsupported_surface(),
             Some(DocumentTimeSurface::HostTimestamp)
         );
+    }
+
+    #[test]
+    fn document_clock_identity_is_shared_only_within_one_domain() {
+        let clock = controlled_clock(0);
+        let clone = clock.clone();
+        let other = controlled_clock(0);
+
+        assert_eq!(clock.id(), clone.id());
+        assert_ne!(clock.id(), other.id());
+    }
+
+    #[test]
+    fn matching_snapshot_lock_excludes_new_producers_until_action_finishes() {
+        let fence = DocumentProducerFence::default();
+        let expected = fence.snapshot();
+        let action_fence = fence.clone();
+        let producer_fence = fence.clone();
+        let (locked_sender, locked_receiver) = mpsc::channel();
+        let (release_sender, release_receiver) = mpsc::channel();
+        let (attempt_sender, attempt_receiver) = mpsc::channel();
+        let (producer_sender, producer_receiver) = mpsc::channel();
+
+        let action = thread::spawn(move || {
+            action_fence
+                .with_matching_snapshot(expected, || {
+                    locked_sender.send(()).unwrap();
+                    release_receiver.recv().unwrap();
+                })
+                .unwrap();
+        });
+        locked_receiver.recv().unwrap();
+        let producer = thread::spawn(move || {
+            attempt_sender.send(()).unwrap();
+            let guard = producer_fence
+                .begin(DocumentProducerKind::Resource)
+                .unwrap();
+            producer_sender.send(()).unwrap();
+            drop(guard);
+        });
+
+        attempt_receiver.recv().unwrap();
+        assert!(
+            producer_receiver
+                .recv_timeout(Duration::from_millis(50))
+                .is_err()
+        );
+        release_sender.send(()).unwrap();
+        action.join().unwrap();
+        producer_receiver.recv().unwrap();
+        producer.join().unwrap();
+        assert_eq!(fence.snapshot().revision(), 2);
     }
 
     fn recording_request(
@@ -1473,6 +1657,30 @@ mod tests {
             Err(TimerControlError::StaleDeadline { observed: None, .. })
         ));
         assert_eq!(clock.now(), DocumentTime::from_nanos(3));
+        assert!(events.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn conditional_advance_atomically_rejects_clock_drift() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let clock = controlled_clock(0);
+        let mut scheduler = TimerScheduler::with_clock(clock.clone());
+        scheduler.schedule_timer(recording_request(&events, 1, Duration::from_nanos(10)));
+        let snapshot = scheduler.finite_deadline_snapshot().unwrap().unwrap();
+        clock.advance_to(DocumentTime::from_nanos(1)).unwrap();
+
+        assert_eq!(
+            scheduler.validate_and_advance_from(DocumentTime::ZERO, snapshot),
+            Err(TimerControlError::Clock(DocumentClockError::TimeChanged {
+                expected: DocumentTime::ZERO,
+                observed: DocumentTime::from_nanos(1),
+            }))
+        );
+        assert_eq!(clock.now(), DocumentTime::from_nanos(1));
+        assert_eq!(
+            scheduler.finite_deadline_snapshot().unwrap(),
+            Some(snapshot)
+        );
         assert!(events.lock().unwrap().is_empty());
     }
 
