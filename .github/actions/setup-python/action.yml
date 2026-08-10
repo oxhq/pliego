@@ -1,4 +1,5 @@
 name: Setup Python and uv
+description: Install the repository Python version and its pinned uv tool.
 inputs:
   python-version-file-path:
     required: false

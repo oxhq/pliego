@@ -38,6 +38,12 @@ use sha2::{Digest, Sha256};
 
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
 mod asset_cache;
+#[cfg(all(
+    feature = "document-session",
+    not(any(target_os = "android", target_env = "ohos"))
+))]
+#[allow(dead_code)]
+mod document_session;
 mod engine;
 mod readiness;
 mod session;
