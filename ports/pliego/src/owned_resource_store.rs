@@ -96,6 +96,17 @@ struct ImageCost {
     decompressed_bytes: u64,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct GifInfo {
+    frames: usize,
+    logical_width: u64,
+    logical_height: u64,
+    max_frame_width: u64,
+    max_frame_height: u64,
+    max_frame_pixels: u64,
+    rectangles_within_screen: bool,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct OwnedResourceStore {
     requests: BTreeMap<RequestIdentity, OwnedResource>,
@@ -481,14 +492,30 @@ fn image_cost(
             "raster image is not PNG, JPEG, GIF, or WebP".into(),
         ));
     };
-    if raster_has_multiple_frames(body).map_err(|reason| {
-        resource_failure(
-            request,
-            "RESOURCE_IMAGE_INVALID",
-            "invalid",
-            format!("raster image container is invalid: {reason}"),
-        )
-    })? {
+    let gif = if body.starts_with(b"GIF87a") || body.starts_with(b"GIF89a") {
+        Some(gif_info(body).map_err(|reason| {
+            resource_failure(
+                request,
+                "RESOURCE_IMAGE_INVALID",
+                "invalid",
+                format!("raster image container is invalid: {reason}"),
+            )
+        })?)
+    } else {
+        None
+    };
+    let has_multiple_frames = match gif {
+        Some(info) => info.frames > 1,
+        None => raster_has_multiple_frames(body).map_err(|reason| {
+            resource_failure(
+                request,
+                "RESOURCE_IMAGE_INVALID",
+                "invalid",
+                format!("raster image container is invalid: {reason}"),
+            )
+        })?,
+    };
+    if has_multiple_frames {
         return Err(resource_failure(
             request,
             "RESOURCE_IMAGE_ANIMATION_UNSUPPORTED",
@@ -496,16 +523,23 @@ fn image_cost(
             "animated raster images require deterministic document-time settlement".into(),
         ));
     }
-    let dimensions = imagesize::blob_size(body).map_err(|error| {
-        resource_failure(
-            request,
-            "RESOURCE_IMAGE_INVALID",
-            "invalid",
-            format!("raster image dimensions are invalid: {error}"),
-        )
-    })?;
-    let width = u64::try_from(dimensions.width).unwrap_or(u64::MAX);
-    let height = u64::try_from(dimensions.height).unwrap_or(u64::MAX);
+    let (width, height) = match gif {
+        Some(info) => (info.logical_width, info.logical_height),
+        None => {
+            let dimensions = imagesize::blob_size(body).map_err(|error| {
+                resource_failure(
+                    request,
+                    "RESOURCE_IMAGE_INVALID",
+                    "invalid",
+                    format!("raster image dimensions are invalid: {error}"),
+                )
+            })?;
+            (
+                u64::try_from(dimensions.width).unwrap_or(u64::MAX),
+                u64::try_from(dimensions.height).unwrap_or(u64::MAX),
+            )
+        },
+    };
     check_image_limit(
         request,
         ImageLimit::DeclaredWidth,
@@ -518,6 +552,34 @@ fn image_cost(
         IMAGE_LIMITS.declared_dimension,
         height,
     )?;
+    if let Some(info) = gif {
+        check_image_limit(
+            request,
+            ImageLimit::DeclaredWidth,
+            IMAGE_LIMITS.declared_dimension,
+            info.max_frame_width,
+        )?;
+        check_image_limit(
+            request,
+            ImageLimit::DeclaredHeight,
+            IMAGE_LIMITS.declared_dimension,
+            info.max_frame_height,
+        )?;
+        check_image_limit(
+            request,
+            ImageLimit::DecodedPixels,
+            IMAGE_LIMITS.decoded_pixels,
+            info.max_frame_pixels,
+        )?;
+        if !info.rectangles_within_screen {
+            return Err(resource_failure(
+                request,
+                "RESOURCE_IMAGE_INVALID",
+                "invalid",
+                "GIF image descriptor extends beyond its logical screen".into(),
+            ));
+        }
+    }
     let decoded_pixels = width.checked_mul(height).unwrap_or(u64::MAX);
     check_image_limit(
         request,
@@ -525,9 +587,22 @@ fn image_cost(
         IMAGE_LIMITS.decoded_pixels,
         decoded_pixels,
     )?;
-    let decompressed_bytes = decoded_pixels
-        .checked_mul(decompressed_bytes_per_pixel)
-        .unwrap_or(u64::MAX);
+    let decompressed_bytes = match gif {
+        // image's GIF AnimationDecoder retains the prior logical screen, allocates the
+        // descriptor buffer, and may allocate a second logical screen while compositing.
+        Some(info) => decoded_pixels
+            .checked_mul(4)
+            .and_then(|screen| screen.checked_mul(2))
+            .and_then(|screen| {
+                info.max_frame_pixels
+                    .checked_mul(4)
+                    .and_then(|frame| screen.checked_add(frame))
+            })
+            .unwrap_or(u64::MAX),
+        None => decoded_pixels
+            .checked_mul(decompressed_bytes_per_pixel)
+            .unwrap_or(u64::MAX),
+    };
     check_image_limit(
         request,
         ImageLimit::DecompressedBytes,
@@ -543,8 +618,6 @@ fn image_cost(
 fn raster_has_multiple_frames(body: &[u8]) -> Result<bool, &'static str> {
     if body.starts_with(b"\x89PNG\r\n\x1a\n") {
         png_has_multiple_frames(body)
-    } else if body.starts_with(b"GIF87a") || body.starts_with(b"GIF89a") {
-        gif_has_multiple_frames(body)
     } else if body.len() >= 12 && &body[..4] == b"RIFF" && &body[8..12] == b"WEBP" {
         webp_has_multiple_frames(body)
     } else {
@@ -594,9 +667,14 @@ fn png_has_multiple_frames(body: &[u8]) -> Result<bool, &'static str> {
     Err("PNG has no end chunk")
 }
 
-fn gif_has_multiple_frames(body: &[u8]) -> Result<bool, &'static str> {
+fn gif_info(body: &[u8]) -> Result<GifInfo, &'static str> {
     if body.len() < 13 {
         return Err("truncated GIF logical screen descriptor");
+    }
+    let logical_width = u64::from(u16::from_le_bytes([body[6], body[7]]));
+    let logical_height = u64::from(u16::from_le_bytes([body[8], body[9]]));
+    if logical_width == 0 || logical_height == 0 {
+        return Err("GIF logical screen dimensions are zero");
     }
     let packed = body[10];
     let mut offset = 13usize;
@@ -613,21 +691,40 @@ fn gif_has_multiple_frames(body: &[u8]) -> Result<bool, &'static str> {
     }
 
     let mut frames = 0usize;
+    let mut max_frame_width = 0u64;
+    let mut max_frame_height = 0u64;
+    let mut max_frame_pixels = 0u64;
+    let mut rectangles_within_screen = true;
     loop {
         let marker = *body.get(offset).ok_or("GIF has no trailer")?;
         offset += 1;
         match marker {
             0x2c => {
                 frames += 1;
-                if frames > 1 {
-                    return Ok(true);
-                }
                 let descriptor_end = offset
                     .checked_add(9)
                     .ok_or("GIF image descriptor overflow")?;
                 if descriptor_end > body.len() {
                     return Err("truncated GIF image descriptor");
                 }
+                let left = u64::from(u16::from_le_bytes([body[offset], body[offset + 1]]));
+                let top = u64::from(u16::from_le_bytes([body[offset + 2], body[offset + 3]]));
+                let width = u64::from(u16::from_le_bytes([body[offset + 4], body[offset + 5]]));
+                let height = u64::from(u16::from_le_bytes([body[offset + 6], body[offset + 7]]));
+                if width == 0 || height == 0 {
+                    return Err("GIF image descriptor dimensions are zero");
+                }
+                let pixels = width
+                    .checked_mul(height)
+                    .ok_or("GIF image descriptor pixel count overflow")?;
+                max_frame_width = max_frame_width.max(width);
+                max_frame_height = max_frame_height.max(height);
+                max_frame_pixels = max_frame_pixels.max(pixels);
+                rectangles_within_screen &= left
+                    .checked_add(width)
+                    .is_some_and(|right| right <= logical_width) &&
+                    top.checked_add(height)
+                        .is_some_and(|bottom| bottom <= logical_height);
                 let packed = body[offset + 8];
                 offset = descriptor_end;
                 if packed & 0x80 != 0 {
@@ -654,7 +751,17 @@ fn gif_has_multiple_frames(body: &[u8]) -> Result<bool, &'static str> {
                 }
                 offset = skip_gif_sub_blocks(body, offset)?;
             },
-            0x3b => return Ok(false),
+            0x3b => {
+                return Ok(GifInfo {
+                    frames,
+                    logical_width,
+                    logical_height,
+                    max_frame_width,
+                    max_frame_height,
+                    max_frame_pixels,
+                    rectangles_within_screen,
+                });
+            },
             _ => return Err("invalid GIF block marker"),
         }
     }
@@ -1089,8 +1196,22 @@ mod tests {
         let animated_gif = BASE64_STANDARD
             .decode(b"R0lGODlhAQABAIEAAP8AAAAAAAAAAAAAACH/C05FVFNDQVBFMi4wAwEAAAAh+QQACgAAACwAAAAAAQABAAAIBAABBAQAIfkEAQoAAQAsAAAAAAEAAQCBAAD/AAAAAAAAAAAACAQAAQQEADs=")
             .unwrap();
-        assert!(!gif_has_multiple_frames(&static_gif).unwrap());
-        assert!(gif_has_multiple_frames(&animated_gif).unwrap());
+        let static_info = gif_info(&static_gif).unwrap();
+        assert_eq!(static_info.frames, 1);
+        assert_eq!(static_info.max_frame_pixels, 1);
+        assert_eq!(
+            image_cost(
+                &request("GET", "https://example.test/static.gif", "Image"),
+                Some("image/gif"),
+                &static_gif,
+            )
+            .unwrap(),
+            Some(ImageCost {
+                decoded_pixels: 1,
+                decompressed_bytes: 12,
+            })
+        );
+        assert_eq!(gif_info(&animated_gif).unwrap().frames, 2);
 
         let mut animated_png = b"\x89PNG\r\n\x1a\n".to_vec();
         animated_png.extend_from_slice(&8u32.to_be_bytes());
@@ -1125,5 +1246,46 @@ mod tests {
             assert!(store.requests.is_empty());
             assert!(store.resources.is_empty());
         }
+    }
+
+    #[test]
+    fn gif_frame_allocations_are_bounded_before_servo_decode() {
+        let mut oversized = b"GIF89a\x01\x00\x01\x00\x00\x00\x00\x2c\x00\x00\x00\x00".to_vec();
+        oversized.extend_from_slice(&u16::MAX.to_le_bytes());
+        oversized.extend_from_slice(&u16::MAX.to_le_bytes());
+        oversized.extend_from_slice(b"\x00\x02\x01\x00\x00\x3b");
+        let info = gif_info(&oversized).unwrap();
+        assert_eq!((info.logical_width, info.logical_height), (1, 1));
+        assert_eq!(
+            (info.max_frame_width, info.max_frame_height),
+            (u64::from(u16::MAX), u64::from(u16::MAX))
+        );
+
+        let mut store = OwnedResourceStore::default();
+        let error = store
+            .retain(
+                &request("GET", "https://example.test/oversized.gif", "Image"),
+                resource("image/gif", oversized),
+                &headers("image/gif"),
+            )
+            .unwrap_err();
+        assert_eq!(error.code, "RESOURCE_IMAGE_LIMIT_EXCEEDED");
+        assert!(error.reason.contains("declared-width"));
+        assert!(store.requests.is_empty());
+        assert!(store.resources.is_empty());
+
+        let outside_screen =
+            b"GIF89a\x01\x00\x01\x00\x00\x00\x00\x2c\x00\x00\x00\x00\x02\x00\x01\x00\x00\x02\x01\x00\x00\x3b";
+        let error = store
+            .retain(
+                &request("GET", "https://example.test/outside.gif", "Image"),
+                resource("image/gif", outside_screen.to_vec()),
+                &headers("image/gif"),
+            )
+            .unwrap_err();
+        assert_eq!(error.code, "RESOURCE_IMAGE_INVALID");
+        assert!(error.reason.contains("logical screen"));
+        assert!(store.requests.is_empty());
+        assert!(store.resources.is_empty());
     }
 }
