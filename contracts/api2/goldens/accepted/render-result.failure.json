@@ -1,0 +1,69 @@
+{
+  "schema": "pliego.render-result",
+  "version": 1,
+  "api": 2,
+  "status": "failed",
+  "request": {
+    "schema": "pliego.render-request",
+    "version": 1,
+    "api": 2,
+    "input": {
+      "entrypoint": "document.html",
+      "bundle_sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    "environment": {
+      "locale": "en-US",
+      "timezone": "UTC"
+    },
+    "page": {
+      "size": {
+        "name": "A4"
+      },
+      "margins_css_px": {
+        "top": 48,
+        "right": 48,
+        "bottom": 48,
+        "left": 48
+      }
+    },
+    "resources": {
+      "network": {
+        "mode": "deny",
+        "allowed_http_roots": []
+      },
+      "host_fonts": "deny",
+      "timeout_ms": 10000
+    },
+    "diagnostics": {
+      "retention": "always"
+    }
+  },
+  "engine": {
+    "name": "pliego",
+    "version": "1.0.0-rc.1",
+    "api": 2,
+    "source_commit": "1be31eab71ecf95c39928343f1f36e805f6754b8",
+    "runtime": {
+      "mode": "one-shot",
+      "target": "x86_64-unknown-linux-gnu",
+      "binary_sha256": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "servo_base": "313b6d5ecc113b08010ce434140db3ca5abcc71c"
+    }
+  },
+  "delivery": null,
+  "diagnostics": {
+    "retained": true,
+    "artifacts": [
+      {
+        "path": "diagnostics/failure.json",
+        "media_type": "application/json",
+        "sha256": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "bytes": 96
+      }
+    ]
+  },
+  "error": {
+    "code": "RESOURCE_DENIED",
+    "message": "network access is disabled for https://example.test/font.woff2"
+  }
+}

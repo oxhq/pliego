@@ -1,0 +1,94 @@
+{
+  "schema": "pliego.document-scene",
+  "version": 1,
+  "pages": [
+    {
+      "size": {
+        "width": 793.7008,
+        "height": 1122.5197
+      },
+      "operations": [
+        {
+          "type": "text",
+          "text": "Invoice",
+          "font": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "font_size": 18,
+          "color": {
+            "r": 0,
+            "g": 0,
+            "b": 0,
+            "a": 1
+          },
+          "glyphs": [
+            {
+              "id": 42,
+              "x": 48,
+              "y": 72,
+              "advance": 54,
+              "text_range": {
+                "start": 0,
+                "end": 7
+              }
+            }
+          ],
+          "meta": {
+            "semantics": {
+              "role": "heading",
+              "label": "Invoice"
+            }
+          }
+        },
+        {
+          "type": "path",
+          "bounds": {
+            "x": 48,
+            "y": 96,
+            "width": 697.7008,
+            "height": 1
+          },
+          "data": "M48 96h697.7008v1H48z",
+          "fill": {
+            "r": 0.25,
+            "g": 0.25,
+            "b": 0.25,
+            "a": 1
+          },
+          "fill_rule": "non_zero",
+          "meta": {}
+        },
+        {
+          "type": "image",
+          "bounds": {
+            "x": 48,
+            "y": 120,
+            "width": 64,
+            "height": 64
+          },
+          "resource": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "meta": {
+            "semantics": {
+              "role": "img",
+              "label": "OxHQ mark"
+            }
+          }
+        },
+        {
+          "type": "link",
+          "bounds": {
+            "x": 48,
+            "y": 200,
+            "width": 120,
+            "height": 18
+          },
+          "target": "https://example.test/invoices/42",
+          "meta": {
+            "semantics": {
+              "role": "link",
+              "label": "Open invoice"
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

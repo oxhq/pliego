@@ -1,0 +1,39 @@
+{
+  "schema": "pliego.render-request",
+  "version": 1,
+  "api": 2,
+  "input": {
+    "entrypoint": "reports/statement.html",
+    "bundle_sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "environment": {
+    "locale": "es-MX",
+    "timezone": "PST8PDT"
+  },
+  "page": {
+    "size": {
+      "width_css_px": 612,
+      "height_css_px": 792
+    },
+    "margins_css_px": {
+      "top": 36,
+      "right": 36,
+      "bottom": 36,
+      "left": 36
+    }
+  },
+  "resources": {
+    "network": {
+      "mode": "allow-listed",
+      "allowed_http_roots": [
+        "https://assets.example.test/fonts/",
+        "https://assets.example.test/images/"
+      ]
+    },
+    "host_fonts": "allow",
+    "timeout_ms": 30000
+  },
+  "diagnostics": {
+    "retention": "on-failure"
+  }
+}
