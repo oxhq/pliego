@@ -207,6 +207,7 @@ function run_engine(array $command, string $cwd): array
     }
 
     $launchedCommand = $command;
+    $processEnvironment = null;
     if ($linux) {
         $sampler = dirname(__DIR__) . '/tools/process_tree_sampler.py';
         if (!is_file($sampler)) {
@@ -225,12 +226,15 @@ function run_engine(array $command, string $cwd): array
             return ['error' => 'sampler interpreter is not a canonical root-owned, non-writable executable: ' . SAMPLER_PYTHON];
         }
         $launchedCommand = [
-            $interpreter, $sampler,
+            $interpreter, '-I', $sampler,
             '--cwd', $cwd,
             '--stdout', $stdoutTmp,
             '--stderr', $stderrTmp,
             '--',
             ...$command,
+        ];
+        $processEnvironment = [
+            'PLIEGO_BENCHMARK_CGROUP_PARENT' => (string) getenv('PLIEGO_BENCHMARK_CGROUP_PARENT'),
         ];
     }
     $descriptors = [
@@ -240,7 +244,7 @@ function run_engine(array $command, string $cwd): array
     ];
 
     $wallStart = microtime(true);
-    $process = proc_open($launchedCommand, $descriptors, $pipes, $cwd);
+    $process = proc_open($launchedCommand, $descriptors, $pipes, $cwd, $processEnvironment);
     if (!is_resource($process)) {
         @unlink($stdoutTmp);
         @unlink($stderrTmp);
