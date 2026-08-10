@@ -1,0 +1,59 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://pliego.dev/schema/benchmark-publication-attestation.v1.json",
+  "title": "Pliego protected-host publication attestation v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "version", "status", "authority", "repository", "ref", "revision",
+    "workflow_ref", "run_id", "run_attempt", "job", "runner", "artifact_name", "subject",
+    "authentication"
+  ],
+  "properties": {
+    "schema": { "const": "pliego.benchmark-publication-attestation" },
+    "version": { "const": 1 },
+    "status": { "const": "authorized" },
+    "authority": { "const": "github-protected-environment-hmac-v1" },
+    "repository": { "const": "OxHQ/pliego" },
+    "ref": { "const": "refs/heads/main" },
+    "revision": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "workflow_ref": {
+      "const": "OxHQ/pliego/.github/workflows/pliego-dedicated-benchmark.yml@refs/heads/main"
+    },
+    "run_id": { "type": "integer", "minimum": 1 },
+    "run_attempt": { "type": "integer", "minimum": 1 },
+    "job": { "const": "dedicated" },
+    "runner": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name"],
+      "properties": {
+        "id": { "type": "integer", "minimum": 1 },
+        "name": { "type": "string", "minLength": 1 }
+      }
+    },
+    "artifact_name": { "type": "string", "minLength": 1 },
+    "subject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "candidate_sha256", "host_proof_bundle_sha256", "observer_proof_sha256", "output_basename"
+      ],
+      "properties": {
+        "candidate_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "host_proof_bundle_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "observer_proof_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "output_basename": { "type": "string", "pattern": "^[^/\\]+\\.json$" }
+      }
+    },
+    "authentication": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["method", "mac"],
+      "properties": {
+        "method": { "const": "hmac-sha256-v1" },
+        "mac": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    }
+  }
+}

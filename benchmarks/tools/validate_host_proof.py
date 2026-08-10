@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import json
 import re
 import sys
 from pathlib import Path
@@ -39,6 +38,7 @@ BENCHMARK_COMMAND_FLAGS = (
 )
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import benchmark_publication  # noqa: E402
 import validate_result  # noqa: E402
 
 
@@ -90,8 +90,8 @@ def load_chronology(path: Path, violations: list[str]) -> list[dict[str, Any]]:
         return events
     for line_number, line in enumerate(lines, 1):
         try:
-            event = json.loads(line)
-        except json.JSONDecodeError as error:
+            event = benchmark_publication.strict_json_loads(line, "host-proof chronology event")
+        except benchmark_publication.PublicationError as error:
             violations.append(f"chronology line {line_number} is invalid JSON: {error}")
             continue
         if not isinstance(event, dict):
@@ -159,6 +159,15 @@ def validate_semantics(
             or identity.get("ref") != "refs/heads/main"
         ):
             violations.append("accepted proof has the wrong repository, event, or ref")
+        if (
+            type(identity.get("run_id")) is not int
+            or identity["run_id"] <= 0
+            or type(identity.get("run_attempt")) is not int
+            or identity["run_attempt"] <= 0
+            or identity.get("job") != "dedicated"
+            or identity.get("workflow_ref") != benchmark_publication.TRUSTED_WORKFLOW_REF
+        ):
+            violations.append("accepted proof has the wrong GitHub run/job/workflow identity")
         shas = {identity.get("sha"), identity.get("checkout_sha"), identity.get("default_branch_sha")}
         if len(shas) != 1 or None in shas:
             violations.append("accepted proof must bind workflow, checkout, and main to one immutable SHA")
@@ -247,8 +256,10 @@ def validate_semantics(
     diagnostics_path = root / DIAGNOSTICS_NAME
     if diagnostics_path.is_file():
         try:
-            diagnostics = json.loads(diagnostics_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as error:
+            diagnostics = benchmark_publication.strict_json_loads(
+                diagnostics_path.read_bytes(), "host-proof diagnostics"
+            )
+        except (OSError, benchmark_publication.PublicationError) as error:
             violations.append(f"diagnostics unreadable: {error}")
         else:
             if diagnostics.get("status") != status or diagnostics.get("mode") != proof.get("mode"):
@@ -303,9 +314,9 @@ def main() -> int:
     args = parser.parse_args()
 
     try:
-        proof = json.loads(args.proof.read_text(encoding="utf-8"))
-        schema = json.loads(args.schema.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
+        proof = benchmark_publication.strict_json_loads(args.proof.read_bytes(), "host proof")
+        schema = benchmark_publication.strict_json_loads(args.schema.read_bytes(), "host-proof schema")
+    except (OSError, benchmark_publication.PublicationError) as error:
         print(f"validate_host_proof: {error}", file=sys.stderr)
         return 1
     if not isinstance(proof, dict) or not isinstance(schema, dict):

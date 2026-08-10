@@ -13,6 +13,7 @@ import io
 import json
 import os
 import random
+import secrets
 import signal
 import shutil
 import subprocess
@@ -196,20 +197,25 @@ def fixture_proofs() -> None:
 
         with tempfile.TemporaryDirectory() as raw:
             directory = Path(raw)
-            input_path = directory / "input.html"
-            output = directory / "output"
-            artifacts = directory / "artifacts"
-            output.mkdir()
+            cwd = directory / "cwd"
+            workspace = directory / "workspace"
+            input_path = cwd / "input.html"
+            output = workspace / "output"
+            artifacts = workspace / "artifacts"
+            cwd.mkdir()
+            output.mkdir(parents=True)
             artifacts.mkdir()
             input_path.write_text("old", encoding="utf-8")
-            cwd_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+            cwd_fd = os.open(cwd, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+            workspace_fd = os.open(workspace, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
             input_fd = os.open(input_path, os.O_RDONLY | os.O_CLOEXEC)
             output_fd = os.open(output, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
             artifacts_fd = os.open(artifacts, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
             cwd_stat, input_stat = os.fstat(cwd_fd), os.fstat(input_fd)
+            workspace_stat = os.fstat(workspace_fd)
             output_stat, artifacts_stat = os.fstat(output_fd), os.fstat(artifacts_fd)
             paths = process_tree_sampler.BoundRunPaths(
-                directory,
+                cwd,
                 cwd_fd,
                 cwd_stat.st_dev,
                 cwd_stat.st_ino,
@@ -218,6 +224,10 @@ def fixture_proofs() -> None:
                 input_stat.st_dev,
                 input_stat.st_ino,
                 process_tree_sampler.hash_fd(input_fd),
+                workspace,
+                workspace_fd,
+                workspace_stat.st_dev,
+                workspace_stat.st_ino,
                 output / "document.pdf",
                 output_fd,
                 output_stat.st_dev,
@@ -232,8 +242,8 @@ def fixture_proofs() -> None:
                 directory.rename(moved)
                 directory.mkdir()
                 process_tree_sampler.verify_run_paths(paths)
-                (moved / "input.html").rename(moved / "old-input.html")
-                (moved / "input.html").write_text("replacement", encoding="utf-8")
+                (moved / "cwd" / "input.html").rename(moved / "cwd" / "old-input.html")
+                (moved / "cwd" / "input.html").write_text("replacement", encoding="utf-8")
                 must_be_incomplete("COMMAND_IDENTITY_CHANGED", lambda: process_tree_sampler.verify_run_paths(paths))
             finally:
                 paths.close()
@@ -532,6 +542,7 @@ def broker_invocation(
     descendant_grace_ms: float = 1000.0,
     deadline_ms: float = 10_000.0,
     observation: bool = True,
+    workspace_root: Path | None = None,
 ) -> Iterator[list[str]]:
     import grp
 
@@ -539,8 +550,14 @@ def broker_invocation(
     parent = os.environ["PLIEGO_BENCHMARK_CGROUP_PARENT"]
     broker = os.environ.get("PLIEGO_BENCHMARK_BROKER", "/usr/local/libexec/pliego-cgroup-broker")
     engine_gid = grp.getgrnam(process_tree_sampler.ENGINE_ACCOUNT).gr_gid
-    with tempfile.TemporaryDirectory(prefix="pliego-broker-output-") as raw:
-        root = Path(raw)
+    temporary: tempfile.TemporaryDirectory[str] | None = None
+    if workspace_root is None:
+        temporary = tempfile.TemporaryDirectory(prefix="pliego-broker-output-")
+        root = Path(temporary.name)
+    else:
+        root = workspace_root / f"execution-{secrets.token_hex(16)}"
+        root.mkdir(mode=0o700)
+    try:
         output_dir = root / "output"
         artifacts_dir = root / "artifacts"
         for directory in (output_dir, artifacts_dir):
@@ -576,6 +593,9 @@ def broker_invocation(
             "--",
             *bound_command,
         ]
+    finally:
+        if temporary is not None:
+            temporary.cleanup()
 
 
 def broker_run(
@@ -584,12 +604,14 @@ def broker_run(
     descendant_grace_ms: float = 1000.0,
     deadline_ms: float = 10_000.0,
     observation: bool = True,
+    workspace_root: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
     with broker_invocation(
         command,
         descendant_grace_ms=descendant_grace_ms,
         deadline_ms=deadline_ms,
         observation=observation,
+        workspace_root=workspace_root,
     ) as invocation:
         return subprocess.run(
             invocation,
@@ -604,8 +626,14 @@ def sampled(
     descendant_grace_ms: float = 1000.0,
     *,
     observation: bool = True,
+    workspace_root: Path | None = None,
 ) -> dict:
-    result = broker_run(command, descendant_grace_ms=descendant_grace_ms, observation=observation)
+    result = broker_run(
+        command,
+        descendant_grace_ms=descendant_grace_ms,
+        observation=observation,
+        workspace_root=workspace_root,
+    )
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout)
 
@@ -921,16 +949,24 @@ def acceptance_overhead_proof() -> tuple[dict, dict]:
     pair_count = observer_ab.PAIR_COUNT
     rng = random.Random(observer_ab.SEED)
     pairs: list[dict] = []
-    with workload_engine() as engine:
+    with (
+        workload_engine() as engine,
+        tempfile.TemporaryDirectory(prefix="pliego-observer-workspaces-") as raw_workspaces,
+    ):
+        workspace_root = Path(raw_workspaces)
         command = workload_command(engine, duration=1.5)
-        sampled(command, observation=False)
-        sampled(command, observation=True)
+        sampled(command, observation=False, workspace_root=workspace_root)
+        sampled(command, observation=True, workspace_root=workspace_root)
         for index in range(pair_count):
             order = ["observation-off", "observation-on"]
             rng.shuffle(order)
             measurements: dict[str, dict] = {}
             for mode in order:
-                measurements[mode] = sampled(command, observation=mode == "observation-on")
+                measurements[mode] = sampled(
+                    command,
+                    observation=mode == "observation-on",
+                    workspace_root=workspace_root,
+                )
             off = measurements["observation-off"]
             on = measurements["observation-on"]
             pairs.append(observer_ab.measurement_pair(index, order, off, on))
@@ -968,7 +1004,7 @@ def main(
                 raise AssertionError("observer measurements output must be absolute and canonical")
             benchmark_publication.atomic_write_bytes(
                 destination,
-                json.dumps(observer_effect, indent=2, ensure_ascii=False).encode("utf-8") + b"\n",
+                benchmark_publication.json_bytes(observer_effect, indent=2),
             )
         assert observer_effect["passed"], observer_effect
     elif observer_measurements_out is not None:

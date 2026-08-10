@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import json
 import math
 import os
 import re
@@ -33,6 +32,8 @@ from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
+
+import benchmark_publication
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_SCHEMA = ROOT / "benchmarks" / "schema" / "benchmark-result.v1.json"
@@ -52,7 +53,15 @@ class Violation:
 class ExternalPublication:
     host_proof_schema: str
     host_proof_bundle_sha256: str
+    attestation_schema: str
+    attestation_sha256: str
+    observer_proof_sha256: str
+    authority: str
     harness_revision: str
+    github_run_id: int
+    github_run_attempt: int
+    github_job: str
+    github_workflow_ref: str
     runner_id: int
     runner_name: str
 
@@ -60,7 +69,15 @@ class ExternalPublication:
         return {
             "host_proof_schema": self.host_proof_schema,
             "host_proof_bundle_sha256": self.host_proof_bundle_sha256,
+            "attestation_schema": self.attestation_schema,
+            "attestation_sha256": self.attestation_sha256,
+            "observer_proof_sha256": self.observer_proof_sha256,
+            "authority": self.authority,
             "harness_revision": self.harness_revision,
+            "github_run_id": self.github_run_id,
+            "github_run_attempt": self.github_run_attempt,
+            "github_job": self.github_job,
+            "github_workflow_ref": self.github_workflow_ref,
             "runner_id": self.runner_id,
             "runner_name": self.runner_name,
         }
@@ -140,6 +157,27 @@ def build_validation_context(
         raise ValueError("benchmark manifest omitted its fixture contracts")
     if external_publication is not None and external_publication.harness_revision != harness_revision:
         raise ValueError("external publication proof revision differs from the benchmark command")
+    if external_publication is not None:
+        if (
+            external_publication.host_proof_schema != "pliego.benchmark-host-proof.v1"
+            or external_publication.attestation_schema != "pliego.benchmark-publication-attestation.v1"
+            or external_publication.authority != "github-protected-environment-hmac-v1"
+            or external_publication.github_job != "dedicated"
+            or external_publication.github_workflow_ref != benchmark_publication.TRUSTED_WORKFLOW_REF
+            or external_publication.github_run_id <= 0
+            or external_publication.github_run_attempt <= 0
+            or external_publication.runner_id <= 0
+            or not external_publication.runner_name
+            or any(
+                re.fullmatch(r"[0-9a-f]{64}", digest) is None
+                for digest in (
+                    external_publication.host_proof_bundle_sha256,
+                    external_publication.attestation_sha256,
+                    external_publication.observer_proof_sha256,
+                )
+            )
+        ):
+            raise ValueError("external publication proof lacks protected GitHub attestation authority")
     return ValidationContext(
         mode=mode,
         repository_root=repository,
@@ -155,8 +193,12 @@ def build_validation_context(
 
 
 def percentile(values: list[int | float], p: float) -> float:
+    if not math.isfinite(float(p)) or not 0 < p <= 100:
+        raise ValueError("percentile must be finite and within (0, 100]")
     if not values:
         return 0.0
+    if any(not math.isfinite(float(value)) for value in values):
+        raise ValueError("percentile input contains a non-finite number")
     ordered = sorted(values)
     index = max(0, min(len(ordered) - 1, math.ceil(p / 100.0 * len(ordered)) - 1))
     return float(ordered[index])
@@ -192,12 +234,10 @@ def _bound_regular_file(path: Path) -> tuple[str, os.stat_result]:
         current = os.stat(path, follow_symlinks=False)
     finally:
         os.close(descriptor)
-    identity = (before.st_dev, before.st_ino, before.st_size)
-    if identity != (after.st_dev, after.st_ino, after.st_size) or identity != (
-        current.st_dev,
-        current.st_ino,
-        current.st_size,
-    ):
+    before_identity = benchmark_publication.stable_stat_identity(before)
+    if before_identity != benchmark_publication.stable_stat_identity(
+        after
+    ) or before_identity != benchmark_publication.stable_stat_identity(current):
         raise ValueError(f"bound file identity changed while hashing: {path}")
     return digest.hexdigest(), before
 
@@ -337,6 +377,7 @@ def validate_fixture_context(
             _context_violation(f"{sample_path}.argv", "omits its exact output/artifact values", violations)
             continue
         output_directory = output_file.parent
+        recorded_workspace = Path(identity["workspace_directory"]["path"])
         recorded_output = Path(identity["output_directory"]["path"])
         recorded_artifacts = Path(identity["artifact_directory"]["path"])
         require_equal(
@@ -352,6 +393,12 @@ def validate_fixture_context(
             violations,
         )
         workspace = output_directory.parent
+        require_equal(
+            f"{sample_path}.command_identity.workspace_directory.path",
+            str(recorded_workspace),
+            str(workspace),
+            violations,
+        )
         if (
             not output_file.is_absolute()
             or not artifact_directory.is_absolute()
@@ -374,18 +421,23 @@ def validate_fixture_context(
             or output_file.name != "document.pdf"
         ):
             _context_violation(f"{sample_path}.argv", "does not bind the indexed retained sample paths", violations)
+        workspace_fd_identity = (
+            identity["workspace_directory"]["device"],
+            identity["workspace_directory"]["inode"],
+        )
         output_fd_identity = (identity["output_directory"]["device"], identity["output_directory"]["inode"])
         artifact_fd_identity = (identity["artifact_directory"]["device"], identity["artifact_directory"]["inode"])
         bound_identities = {
             (cwd["device"], cwd["inode"]),
             (command_input["device"], command_input["inode"]),
+            workspace_fd_identity,
             output_fd_identity,
             artifact_fd_identity,
         }
-        if len(bound_identities) != 4:
+        if len(bound_identities) != 5:
             _context_violation(
                 f"{sample_path}.command_identity",
-                "cwd, input, output, and artifact FD identities must be disjoint",
+                "cwd, input, workspace, output, and artifact FD identities must be disjoint",
                 violations,
             )
 
@@ -425,6 +477,9 @@ def validate(
     violations: list[Violation],
     root: dict[str, Any] | None = None,
 ) -> None:
+    if isinstance(data, float) and not math.isfinite(data):
+        violations.append(Violation(path, "non-finite JSON numbers are forbidden"))
+        return
     if root is None:
         root = schema
     if "$ref" in schema:
@@ -531,6 +586,25 @@ def validate_resource_usage(sample: dict[str, Any], path: str, violations: list[
     if not isinstance(usage, dict):
         violations.append(Violation(f"{path}.resource_usage", "cgroup-v2 samples require retained resource usage"))
         return
+
+    for field in ("root_wall_ms", "tree_wall_ms", "measurement_complete_ms"):
+        value = usage.get(field)
+        if (
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or not math.isfinite(float(value))
+            or value <= 0
+        ):
+            violations.append(Violation(f"{path}.resource_usage.{field}", "must be a positive finite number"))
+    for field in ("drain_ms", "cpu_user_ms", "cpu_sys_ms", "sampler_cpu_user_ms", "sampler_cpu_sys_ms"):
+        value = usage.get(field)
+        if (
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or not math.isfinite(float(value))
+            or value < 0
+        ):
+            violations.append(Violation(f"{path}.resource_usage.{field}", "must be a non-negative finite number"))
 
     exact_fields = {
         "exit_code": "exit_code",
@@ -1248,8 +1322,8 @@ def validate_document(
 
 def load_json(path: Path) -> Any:
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
+        return benchmark_publication.strict_json_loads(path.read_bytes(), str(path))
+    except (OSError, benchmark_publication.PublicationError) as error:
         raise SystemExit(f"cannot read {path}: {error}") from error
 
 
@@ -1264,6 +1338,7 @@ def main() -> int:
     parser.add_argument("--failure-evidence-dir", type=Path)
     parser.add_argument("--revision")
     parser.add_argument("--host-proof", type=Path)
+    parser.add_argument("--attestation", type=Path)
     args = parser.parse_args()
 
     data = load_json(args.result)
@@ -1278,7 +1353,7 @@ def main() -> int:
                 "--revision": args.revision,
             }
             missing = [flag for flag, value in required.items() if value is None]
-            if missing or args.host_proof is not None:
+            if missing or args.host_proof is not None or args.attestation is not None:
                 raise ValueError(f"staged validation requires its command context only; invalid flags: {missing}")
             context = build_validation_context(
                 mode="staged",
@@ -1291,17 +1366,21 @@ def main() -> int:
                 harness_revision=args.revision,
             )
         else:
-            if args.host_proof is None or any(
-                value is not None
-                for value in (
-                    args.binary,
-                    args.frozen_fixture_root,
-                    args.staging_out,
-                    args.failure_evidence_dir,
-                    args.revision,
+            if (
+                args.host_proof is None
+                or args.attestation is None
+                or any(
+                    value is not None
+                    for value in (
+                        args.binary,
+                        args.frozen_fixture_root,
+                        args.staging_out,
+                        args.failure_evidence_dir,
+                        args.revision,
+                    )
                 )
             ):
-                raise ValueError("published validation derives its exact context only from --host-proof")
+                raise ValueError("published validation requires only its host proof plus protected attestation")
             proof_path = args.host_proof.resolve(strict=True)
             if args.host_proof != proof_path or args.host_proof.is_symlink() or not proof_path.is_file():
                 raise ValueError("host proof must be one canonical non-symlink file")
@@ -1310,7 +1389,6 @@ def main() -> int:
                 raise ValueError("host proof must be a JSON object")
             tools = Path(__file__).resolve().parent
             sys.path.insert(0, str(tools))
-            import benchmark_publication  # noqa: PLC0415
             import validate_host_proof  # noqa: PLC0415
 
             argv = proof.get("command", {}).get("argv")
@@ -1328,13 +1406,45 @@ def main() -> int:
                 raise ValueError(f"external host proof is invalid: {host_violations[0]}")
             if proof.get("status") != "accepted" or proof.get("mode") != "production":
                 raise ValueError("published validation requires an accepted production host proof")
-            values = {flag: Path(argv[argv.index(flag) + 1]) for flag in validate_host_proof.BENCHMARK_COMMAND_FLAGS}
-            revision = proof["identity"]["sha"]
+            proof_digest = benchmark_publication.host_proof_bundle_digest(proof_path)
+            trusted = benchmark_publication.load_trusted_publication_attestation(
+                args.attestation,
+                os.environ.get(benchmark_publication.TRUSTED_ATTESTATION_KEY_ENV, ""),
+            )
+            attestation = trusted.document
+            candidate_binding = proof.get("command", {}).get("candidate")
             runner = proof["runner"]
+            identity = proof["identity"]
+            if attestation["subject"] != {
+                "candidate_sha256": candidate_binding.get("sha256") if isinstance(candidate_binding, dict) else None,
+                "host_proof_bundle_sha256": proof_digest,
+                "observer_proof_sha256": attestation["subject"]["observer_proof_sha256"],
+                "output_basename": args.result.name,
+            }:
+                raise ValueError("protected attestation subject differs from the host proof/result")
+            if (
+                attestation["revision"] != identity["sha"]
+                or attestation["run_id"] != identity["run_id"]
+                or attestation["run_attempt"] != identity["run_attempt"]
+                or attestation["job"] != identity["job"]
+                or attestation["workflow_ref"] != identity["workflow_ref"]
+                or attestation["runner"] != {"id": runner["id"], "name": runner["name"]}
+            ):
+                raise ValueError("protected attestation differs from the host run/runner identity")
+            values = {flag: Path(argv[argv.index(flag) + 1]) for flag in validate_host_proof.BENCHMARK_COMMAND_FLAGS}
+            revision = identity["sha"]
             external = ExternalPublication(
                 host_proof_schema="pliego.benchmark-host-proof.v1",
-                host_proof_bundle_sha256=benchmark_publication.host_proof_bundle_digest(proof_path),
+                host_proof_bundle_sha256=proof_digest,
+                attestation_schema="pliego.benchmark-publication-attestation.v1",
+                attestation_sha256=trusted.sha256,
+                observer_proof_sha256=attestation["subject"]["observer_proof_sha256"],
+                authority=attestation["authority"],
                 harness_revision=revision,
+                github_run_id=attestation["run_id"],
+                github_run_attempt=attestation["run_attempt"],
+                github_job=attestation["job"],
+                github_workflow_ref=attestation["workflow_ref"],
                 runner_id=runner["id"],
                 runner_name=runner["name"],
             )

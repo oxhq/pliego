@@ -5,12 +5,11 @@
 from __future__ import annotations
 
 import argparse
+import functools
 import hashlib
-import json
-import os
+import math
 import random
 import re
-import stat
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,6 +24,7 @@ PAIR_COUNT = 20
 SEED = 20260808
 THRESHOLD_PERCENT_EXCLUSIVE = 2.0
 MAX_DOCUMENT_BYTES = 128 * 1024 * 1024
+RESULT_SCHEMA = ROOT / "benchmarks" / "schema" / "benchmark-result.v1.json"
 ALLOWED_DIFFERENCES = [
     "observation_enabled_and_sampled_diagnostics",
     "timing_and_accounting_values",
@@ -38,43 +38,11 @@ import validate_result  # noqa: E402
 
 
 def canonical_bytes(value: Any) -> bytes:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    return benchmark_publication.json_bytes(value, trailing_newline=False)
 
 
 def load_bound_object(path: Path, label: str) -> tuple[dict[str, Any], dict[str, Any]]:
-    resolved = path.resolve(strict=True)
-    if path != resolved or path.is_symlink():
-        raise benchmark_publication.PublicationError(f"{label} must be one canonical non-symlink file")
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
-    descriptor = os.open(path, flags)
-    try:
-        before = os.fstat(descriptor)
-        if not stat.S_ISREG(before.st_mode) or before.st_size <= 0 or before.st_size > MAX_DOCUMENT_BYTES:
-            raise benchmark_publication.PublicationError(f"{label} must be a bounded nonempty regular file")
-        raw = bytearray()
-        while len(raw) < before.st_size:
-            chunk = os.read(descriptor, min(1024 * 1024, before.st_size - len(raw)))
-            if not chunk:
-                raise benchmark_publication.PublicationError(f"{label} shortened while binding")
-            raw.extend(chunk)
-        after = os.fstat(descriptor)
-        current = os.stat(path, follow_symlinks=False)
-        identity = (before.st_dev, before.st_ino, before.st_size)
-        if identity != (after.st_dev, after.st_ino, after.st_size) or identity != (
-            current.st_dev,
-            current.st_ino,
-            current.st_size,
-        ):
-            raise benchmark_publication.PublicationError(f"{label} identity changed while binding")
-    finally:
-        os.close(descriptor)
-    try:
-        document = json.loads(raw)
-    except json.JSONDecodeError as error:
-        raise benchmark_publication.PublicationError(f"{label} is invalid JSON: {error}") from error
-    if not isinstance(document, dict):
-        raise benchmark_publication.PublicationError(f"{label} must be a JSON object")
-    return document, {"path": str(resolved), "sha256": hashlib.sha256(raw).hexdigest(), "bytes": len(raw)}
+    return benchmark_publication.load_bound_json_object(path, label, max_bytes=MAX_DOCUMENT_BYTES)
 
 
 def normalized_contract(proof: dict[str, Any]) -> dict[str, Any]:
@@ -124,6 +92,7 @@ def observation(proof: dict[str, Any]) -> dict[str, Any]:
         "cgroup_path": proof["cgroup_path"],
         "root_pid": proof["root_pid"],
         "root_start_ticks": proof["root_start_ticks"],
+        "workspace_directory": identity["workspace_directory"],
         "output_directory": identity["output_directory"],
         "artifact_directory": identity["artifact_directory"],
     }
@@ -142,10 +111,8 @@ def measurement_pair(index: int, order: list[str], off: dict[str, Any], on: dict
     return {
         "index": index,
         "order": order,
-        "observation_off": off_observation,
-        "observation_on": on_observation,
-        "normalized_off": off_contract,
-        "normalized_on": on_contract,
+        "observation_off_record": off,
+        "observation_on_record": on,
         "overhead_percent": (on_ms - off_ms) * 100.0 / off_ms,
         "sampler_cpu_percent_of_tree_wall": sampler_cpu_ms * 100.0 / on_ms,
     }
@@ -156,11 +123,12 @@ def build_measurements(pairs: list[dict[str, Any]], *, duration_seconds: float) 
     p95 = validate_result.percentile(overhead, 95)
     return {
         "schema": "pliego.observer-ab-measurements",
-        "version": 1,
+        "version": 2,
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "method": "randomized-paired-observation-v3",
+        "method": "randomized-paired-full-broker-record-v4",
         "seed": SEED,
         "pair_count": PAIR_COUNT,
+        "execution_count": PAIR_COUNT * 2,
         "workload_duration_seconds": duration_seconds,
         "percentile_method": validate_result.PERCENTILE_METHOD,
         "threshold_percent_exclusive": THRESHOLD_PERCENT_EXCLUSIVE,
@@ -169,6 +137,78 @@ def build_measurements(pairs: list[dict[str, Any]], *, duration_seconds: float) 
         "allowed_differences": ALLOWED_DIFFERENCES,
         "pairs": pairs,
     }
+
+
+@functools.cache
+def _result_schema() -> dict[str, Any]:
+    schema = benchmark_publication.strict_json_loads(RESULT_SCHEMA.read_bytes(), "benchmark result schema")
+    if not isinstance(schema, dict):
+        raise benchmark_publication.PublicationError("benchmark result schema must be a JSON object")
+    return schema
+
+
+def _record_violations(record: Any, path: str) -> list[str]:
+    if not isinstance(record, dict):
+        return [f"{path} must be a full broker JSON object"]
+    schema = _result_schema()
+    failures: list[validate_result.Violation] = []
+    validate_result.validate(record, schema["definitions"]["resource_usage"], path, failures, schema)
+    if failures:
+        return [str(failure) for failure in failures]
+    diagnostics = record["sampled_diagnostics"]
+    sample = {
+        "resource_usage": record,
+        "exit_code": record["exit_code"],
+        "signal": record["signal"],
+        "wall_ms": record["tree_wall_ms"],
+        "user_ms": record["cpu_user_ms"],
+        "sys_ms": record["cpu_sys_ms"],
+        "memory_current_bytes": record["memory_current_bytes"],
+        "memory_peak_bytes": record["memory_peak_bytes"],
+        "read_bytes": record["read_bytes"],
+        "write_bytes": record["write_bytes"],
+        "read_operations": record["read_operations"],
+        "write_operations": record["write_operations"],
+        "measurement_method": record["method"],
+        "sequential_sampled_peak_rss_kib_diagnostic": diagnostics["sequential_sampled_peak_summed_rss_kib_diagnostic"],
+        "sequential_sampled_peak_pss_kib_diagnostic": diagnostics["sequential_sampled_peak_summed_pss_kib_diagnostic"],
+        "ok": record["exit_code"] == 0 and record["signal"] is None,
+    }
+    semantic_failures: list[validate_result.Violation] = []
+    validate_result.validate_resource_usage(sample, path, semantic_failures)
+    if sys.platform == "win32":
+        semantic_failures = [
+            failure
+            for failure in semantic_failures
+            if not (
+                failure.path.endswith(".launch_security.executable.path")
+                and failure.message == "must be an absolute canonical path"
+            )
+        ]
+    failures.extend(semantic_failures)
+    identity = record["launch_security"]["command_identity"]
+    argv = record["launch_security"]["argv"]
+    try:
+        output = Path(argv[argv.index("--output") + 1])
+        artifacts = Path(argv[argv.index("--artifacts") + 1])
+        workspace = Path(identity["workspace_directory"]["path"])
+        recorded_output = Path(identity["output_directory"]["path"])
+        recorded_artifacts = Path(identity["artifact_directory"]["path"])
+        if output.parent != recorded_output or artifacts != recorded_artifacts:
+            failures.append(validate_result.Violation(path, "raw argv differs from its FD-bound output/artifact paths"))
+        if recorded_output.parent != workspace or recorded_artifacts.parent != workspace:
+            failures.append(
+                validate_result.Violation(path, "raw output/artifact directories are not workspace siblings")
+            )
+        identities = {
+            (identity[label]["device"], identity[label]["inode"])
+            for label in ("cwd", "input", "workspace_directory", "output_directory", "artifact_directory")
+        }
+        if len(identities) != 5:
+            failures.append(validate_result.Violation(path, "raw FD-bound command identities are not disjoint"))
+    except (KeyError, ValueError, IndexError, TypeError) as error:
+        failures.append(validate_result.Violation(path, f"raw command identity is malformed: {error}"))
+    return [str(failure) for failure in failures]
 
 
 def _normalized_violations(contract: Any, path: str) -> list[str]:
@@ -309,6 +349,10 @@ def validate_measurements(document: Any) -> list[str]:
     violations: list[str] = []
     if not isinstance(document, dict):
         return ["measurements must be a JSON object"]
+    try:
+        benchmark_publication.require_finite_json(document)
+    except ValueError as error:
+        return [f"measurements strict numeric contract failed: {error}"]
     expected_keys = {
         "schema",
         "version",
@@ -316,6 +360,7 @@ def validate_measurements(document: Any) -> list[str]:
         "method",
         "seed",
         "pair_count",
+        "execution_count",
         "workload_duration_seconds",
         "percentile_method",
         "threshold_percent_exclusive",
@@ -328,10 +373,11 @@ def validate_measurements(document: Any) -> list[str]:
         violations.append("measurement keys must be exact")
     for field, expected in (
         ("schema", "pliego.observer-ab-measurements"),
-        ("version", 1),
-        ("method", "randomized-paired-observation-v3"),
+        ("version", 2),
+        ("method", "randomized-paired-full-broker-record-v4"),
         ("seed", SEED),
         ("pair_count", PAIR_COUNT),
+        ("execution_count", PAIR_COUNT * 2),
         ("workload_duration_seconds", 1.5),
         ("percentile_method", validate_result.PERCENTILE_METHOD),
         ("threshold_percent_exclusive", THRESHOLD_PERCENT_EXCLUSIVE),
@@ -344,6 +390,21 @@ def validate_measurements(document: Any) -> list[str]:
         return [*violations, f"measurements.pairs must contain exactly {PAIR_COUNT} pairs"]
     rng = random.Random(SEED)
     overheads: list[float] = []
+    cgroup_paths: set[str] = set()
+    process_identities: set[tuple[int, int]] = set()
+    directory_paths: set[str] = set()
+    directory_fd_identities: set[tuple[int, int]] = set()
+
+    def unique(value: Any, seen: set[Any], label: str, path: str) -> None:
+        try:
+            duplicate = value in seen
+        except TypeError:
+            violations.append(f"{path}.{label} is not a hashable identity")
+            return
+        if duplicate:
+            violations.append(f"{path}.{label} was replayed across the 40 executions")
+        seen.add(value)
+
     for index, pair in enumerate(pairs):
         path = f"measurements.pairs[{index}]"
         expected_order = ["observation-off", "observation-on"]
@@ -354,63 +415,77 @@ def validate_measurements(document: Any) -> list[str]:
         if set(pair) != {
             "index",
             "order",
-            "observation_off",
-            "observation_on",
-            "normalized_off",
-            "normalized_on",
+            "observation_off_record",
+            "observation_on_record",
             "overhead_percent",
             "sampler_cpu_percent_of_tree_wall",
         }:
             violations.append(f"{path} keys must be exact")
-        off = pair.get("observation_off", {})
-        on = pair.get("observation_on", {})
-        observation_keys = {
-            "observation_enabled",
-            "tree_wall_ms",
-            "sampler_cpu_ms",
-            "cgroup_path",
-            "root_pid",
-            "root_start_ticks",
-            "output_directory",
-            "artifact_directory",
-        }
-        if (
-            not isinstance(off, dict)
-            or not isinstance(on, dict)
-            or set(off) != observation_keys
-            or set(on) != observation_keys
-        ):
-            violations.append(f"{path} observation keys must be exact")
+        off_record = pair.get("observation_off_record")
+        on_record = pair.get("observation_on_record")
+        record_failures = [
+            *_record_violations(off_record, f"{path}.observation_off_record"),
+            *_record_violations(on_record, f"{path}.observation_on_record"),
+        ]
+        violations.extend(record_failures)
+        if record_failures:
             continue
+        assert isinstance(off_record, dict) and isinstance(on_record, dict)
+        off = observation(off_record)
+        on = observation(on_record)
         if off.get("observation_enabled") is not False or on.get("observation_enabled") is not True:
             violations.append(f"{path} observation modes are invalid")
-        if off.get("cgroup_path") == on.get("cgroup_path"):
-            violations.append(f"{path} did not use fresh cgroup identities")
-        if off.get("root_pid") == on.get("root_pid") and off.get("root_start_ticks") == on.get("root_start_ticks"):
-            violations.append(f"{path} did not use fresh process identities")
-        if off.get("output_directory") == on.get("output_directory") or off.get("artifact_directory") == on.get(
-            "artifact_directory"
-        ):
-            violations.append(f"{path} did not use fresh workspace identities")
-        off_contract = pair.get("normalized_off")
-        on_contract = pair.get("normalized_on")
+        off_contract = normalized_contract(off_record)
+        on_contract = normalized_contract(on_record)
         violations.extend(_normalized_violations(off_contract, f"{path}.normalized_off"))
         violations.extend(_normalized_violations(on_contract, f"{path}.normalized_on"))
         if off_contract != on_contract:
             violations.append(f"{path} normalized security/control contracts differ")
+        for mode, current in (("off", off), ("on", on)):
+            execution_path = f"{path}.{mode}"
+            unique(current["cgroup_path"], cgroup_paths, "cgroup_path", execution_path)
+            unique(
+                (current["root_pid"], current["root_start_ticks"]),
+                process_identities,
+                "root_process_identity",
+                execution_path,
+            )
+            for label in ("workspace_directory", "output_directory", "artifact_directory"):
+                directory = current[label]
+                unique(directory["path"], directory_paths, f"{label}.path", execution_path)
+                unique(
+                    (directory["device"], directory["inode"]),
+                    directory_fd_identities,
+                    f"{label}.fd_identity",
+                    execution_path,
+                )
         try:
             off_ms = float(off["tree_wall_ms"])
             on_ms = float(on["tree_wall_ms"])
+            if not math.isfinite(off_ms) or not math.isfinite(on_ms) or off_ms <= 0 or on_ms <= 0:
+                raise ValueError("tree walls must be positive and finite")
             overhead = (on_ms - off_ms) * 100.0 / off_ms
             sampler = float(on["sampler_cpu_ms"]) * 100.0 / on_ms
-            if abs(float(pair["overhead_percent"]) - overhead) > 1e-9:
+            retained_overhead = float(pair["overhead_percent"])
+            retained_sampler = float(pair["sampler_cpu_percent_of_tree_wall"])
+            if not all(math.isfinite(value) for value in (overhead, sampler, retained_overhead, retained_sampler)):
+                raise ValueError("derived observer ratios must be finite")
+            if sampler < 0:
+                raise ValueError("sampler CPU ratio must be non-negative")
+            if abs(retained_overhead - overhead) > 1e-9:
                 violations.append(f"{path}.overhead_percent is not derived from retained walls")
-            if abs(float(pair["sampler_cpu_percent_of_tree_wall"]) - sampler) > 1e-9:
+            if abs(retained_sampler - sampler) > 1e-9:
                 violations.append(f"{path}.sampler_cpu_percent_of_tree_wall is not derived")
             overheads.append(overhead)
         except (KeyError, TypeError, ValueError, ZeroDivisionError) as error:
             violations.append(f"{path} timing evidence is invalid: {error}")
+    if len(overheads) != PAIR_COUNT:
+        violations.append("measurements did not retain 20 finite derived overheads")
+        return violations
     p95 = validate_result.percentile(overheads, 95)
+    if not math.isfinite(p95):
+        violations.append("measurements derived a non-finite p95")
+        return violations
     if document.get("p95_overhead_percent") != round(p95, 3):
         violations.append("measurements.p95_overhead_percent is not the retained nearest-rank p95")
     if document.get("passed") is not (p95 < THRESHOLD_PERCENT_EXCLUSIVE):
@@ -422,7 +497,9 @@ def validate_measurements(document: Any) -> list[str]:
 
 def load_host_proof(path: Path, *, allow_fixture_evidence: bool) -> tuple[dict[str, Any], str]:
     proof, _ = load_bound_object(path, "host proof")
-    schema = json.loads(validate_host_proof.DEFAULT_SCHEMA.read_text(encoding="utf-8"))
+    schema = benchmark_publication.strict_json_loads(
+        validate_host_proof.DEFAULT_SCHEMA.read_bytes(), "host-proof schema"
+    )
     argv = proof.get("command", {}).get("argv")
     if not isinstance(argv, list) or not validate_host_proof.canonical_benchmark_command(argv):
         raise benchmark_publication.PublicationError("host proof omitted the canonical full benchmark command")
@@ -542,7 +619,7 @@ def main() -> int:
         if args.command == "bind":
             benchmark_publication.require_unprivileged()
             document = build_proof(args.measurements, args.host_proof, args.source_broker, args.installed_broker)
-            schema = json.loads(DEFAULT_SCHEMA.read_text(encoding="utf-8"))
+            schema = benchmark_publication.strict_json_loads(DEFAULT_SCHEMA.read_bytes(), "observer-proof schema")
             violations = validate_proof(
                 document,
                 schema,
@@ -554,12 +631,12 @@ def main() -> int:
                 raise benchmark_publication.PublicationError(f"observer proof is invalid: {violations[0]}")
             benchmark_publication.atomic_write_bytes(
                 args.out,
-                json.dumps(document, indent=2, ensure_ascii=False).encode("utf-8") + b"\n",
+                benchmark_publication.json_bytes(document, indent=2),
             )
             print(f"bound observer proof {args.out}")
             return 0
         document, _ = load_bound_object(args.proof, "observer proof")
-        schema = json.loads(DEFAULT_SCHEMA.read_text(encoding="utf-8"))
+        schema = benchmark_publication.strict_json_loads(DEFAULT_SCHEMA.read_bytes(), "observer-proof schema")
         violations = validate_proof(
             document,
             schema,

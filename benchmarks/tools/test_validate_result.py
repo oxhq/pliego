@@ -7,7 +7,9 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import replace
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -15,6 +17,7 @@ import sys
 import tempfile
 from pathlib import Path
 
+import benchmark_publication
 import validate_result
 
 SCHEMA = json.loads(
@@ -89,6 +92,7 @@ def resource_usage() -> dict:
                     "device": 1,
                     "inode": 4,
                 },
+                "workspace_directory": {"path": "/tmp/workspace", "device": 1, "inode": 6},
                 "output_directory": {"path": "/tmp", "device": 1, "inode": 3},
                 "artifact_directory": {"path": "/tmp/artifacts", "device": 1, "inode": 5},
             },
@@ -370,6 +374,7 @@ def bind_real_context(value: dict, raw_workspace: str) -> validate_result.Valida
             "device": input_metadata.st_dev,
             "inode": input_metadata.st_ino,
         },
+        "workspace_directory": {"path": str(sample_root), "device": 7, "inode": 6},
         "output_directory": {"path": str(output_directory), "device": 7, "inode": 8},
         "artifact_directory": {"path": str(artifact_directory), "device": 7, "inode": 9},
     }
@@ -381,6 +386,23 @@ def main() -> None:
     workspace = tempfile.TemporaryDirectory()
     bind_real_context(valid, workspace.name)
     assert not errors(valid), errors(valid)
+    for non_finite in (math.nan, math.inf, -math.inf):
+        broken = deepcopy(valid)
+        broken["samples"][0]["wall_ms"] = non_finite
+        assert any("non-finite" in str(violation) for violation in errors(broken))
+        try:
+            benchmark_publication.json_bytes(broken)
+        except benchmark_publication.PublicationError as error:
+            assert "non-finite" in str(error)
+        else:
+            raise AssertionError("non-finite result serialization was accepted")
+    for literal in ("NaN", "Infinity", "-Infinity"):
+        try:
+            benchmark_publication.strict_json_loads(f'{{"value":{literal}}}', "result adversary")
+        except benchmark_publication.PublicationError as error:
+            assert "non-finite" in str(error)
+        else:
+            raise AssertionError(f"literal {literal} result JSON was accepted")
     assert validate_result.percentile([1, 3], 50) == 1
     assert validate_result.PERCENTILE_METHOD == "nearest-rank-v1"
 
@@ -605,6 +627,7 @@ def main() -> None:
         outside = Path(tempfile.gettempdir()).resolve() / "attacker-output"
         launch["argv"][launch["argv"].index("--output") + 1] = str(outside / "document.pdf")
         launch["argv"][launch["argv"].index("--artifacts") + 1] = str(outside.parent / "attacker-artifacts")
+        launch["command_identity"]["workspace_directory"]["path"] = str(outside.parent)
         launch["command_identity"]["output_directory"]["path"] = str(outside)
         launch["command_identity"]["artifact_directory"]["path"] = str(outside.parent / "attacker-artifacts")
 
@@ -651,7 +674,15 @@ def main() -> None:
     external = validate_result.ExternalPublication(
         host_proof_schema="pliego.benchmark-host-proof.v1",
         host_proof_bundle_sha256="b" * 64,
+        attestation_schema="pliego.benchmark-publication-attestation.v1",
+        attestation_sha256="c" * 64,
+        observer_proof_sha256="d" * 64,
+        authority="github-protected-environment-hmac-v1",
         harness_revision=CONTEXT.harness_revision,
+        github_run_id=123,
+        github_run_attempt=1,
+        github_job="dedicated",
+        github_workflow_ref=benchmark_publication.TRUSTED_WORKFLOW_REF,
         runner_id=7,
         runner_name="pliego-pinned-01",
     )
@@ -666,6 +697,22 @@ def main() -> None:
         harness_revision=CONTEXT.harness_revision,
         external_publication=external,
     )
+    try:
+        validate_result.build_validation_context(
+            mode="published",
+            repository_root=CONTEXT.repository_root,
+            manifest_path=CONTEXT.manifest_path,
+            frozen_fixture_root=CONTEXT.frozen_fixture_root,
+            staging_output=CONTEXT.staging_output,
+            failure_evidence_root=CONTEXT.failure_evidence_root,
+            engine_binary=CONTEXT.engine_binary,
+            harness_revision=CONTEXT.harness_revision,
+            external_publication=replace(external, authority="self-rehashed-live-bundle"),
+        )
+    except ValueError as error:
+        assert "protected GitHub attestation" in str(error)
+    else:
+        raise AssertionError("self-asserted external publication authority was accepted")
     published = deepcopy(valid)
     published["host"]["dedicated"] = True
     published["publication"] = external.document()
@@ -710,14 +757,17 @@ def main() -> None:
         timeout=30,
     )
     assert invented_cli.returncode == 2
-    assert "derives its exact context only from --host-proof" in invented_cli.stderr
+    assert "host proof plus protected attestation" in invented_cli.stderr
 
     frozen_input = CONTEXT.frozen_fixture_root / "benchmarks" / "fixtures" / "minimal-static" / "input.html"
+    retained_identity = frozen_input.with_suffix(".retained-identity")
+    os.link(frozen_input, retained_identity)
     replacement = frozen_input.with_suffix(".replacement")
     replacement.write_bytes(frozen_input.read_bytes())
     os.replace(replacement, frozen_input)
     replaced_identity = validate_result.validate_document(valid, SCHEMA, CONTEXT)
     assert replaced_identity and "command_identity.input.inode" in "\n".join(map(str, replaced_identity))
+    retained_identity.unlink()
 
     workspace.cleanup()
 

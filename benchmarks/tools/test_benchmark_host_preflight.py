@@ -26,6 +26,7 @@ SECRET = "must-not-reach-child"
 EXPECTED_COMMAND = ["python3", "benchmarks/tools/test_process_tree_sampler.py", "--acceptance-overhead"]
 
 sys.path.insert(0, str(TOOLS))
+import benchmark_publication  # noqa: E402
 import validate_host_proof  # noqa: E402
 
 
@@ -56,6 +57,10 @@ def make_fixture(root: Path) -> Path:
             "GITHUB_REF": "refs/heads/main",
             "GITHUB_REF_PROTECTED": "true",
             "GITHUB_SHA": SHA,
+            "GITHUB_RUN_ID": "123",
+            "GITHUB_RUN_ATTEMPT": "1",
+            "GITHUB_JOB": "dedicated",
+            "GITHUB_WORKFLOW_REF": benchmark_publication.TRUSTED_WORKFLOW_REF,
             "RUNNER_NAME": "pliego-pinned-01",
             "RUNNER_OS": "Linux",
             "RUNNER_ARCH": "X64",
@@ -65,7 +70,8 @@ def make_fixture(root: Path) -> Path:
     runtime["fixture_command"] = [
         sys.executable,
         "-c",
-        "import os; print('PLIEGO_BENCHMARK_PROOF_TOKEN' in os.environ)",
+        "import os; print('PLIEGO_BENCHMARK_PROOF_TOKEN' in os.environ, "
+        "'PLIEGO_BENCHMARK_ATTESTATION_HMAC_KEY_HEX' in os.environ)",
     ]
     write_json(fixture / "runtime.json", runtime)
     write_json(
@@ -131,6 +137,7 @@ def make_fixture(root: Path) -> Path:
 def invoke(fixture: Path, output: Path, *command: str, mode: str = "production") -> subprocess.CompletedProcess[str]:
     environment = dict(os.environ)
     environment["PLIEGO_BENCHMARK_PROOF_TOKEN"] = SECRET
+    environment[benchmark_publication.TRUSTED_ATTESTATION_KEY_ENV] = "e" * 64
     return subprocess.run(
         [
             sys.executable,
@@ -245,7 +252,7 @@ class BenchmarkHostPreflightTests(unittest.TestCase):
             self.assertEqual(document["status"], "accepted")
             self.assertEqual(document["evidence_source"], "fixture")
             self.assertEqual(document["command"]["exit_code"], 0)
-            self.assertEqual((output / "benchmark-command.stdout").read_text(encoding="utf-8"), "False\n")
+            self.assertEqual((output / "benchmark-command.stdout").read_text(encoding="utf-8"), "False False\n")
             self.assertIn("samples.started", events(output))
             validation = subprocess.run(
                 [
@@ -480,6 +487,7 @@ class BenchmarkHostPreflightTests(unittest.TestCase):
         self.assertIn("environment: Pliego dedicated benchmarks", workflow)
         self.assertIn("permissions:\n  contents: read", workflow)
         self.assertEqual(workflow.count("secrets.OXHQ_BENCHMARK_PROOF_TOKEN"), 1)
+        self.assertEqual(workflow.count("secrets.PLIEGO_BENCHMARK_ATTESTATION_HMAC_KEY_HEX"), 1)
         self.assertNotIn("\n    env:\n", workflow)
         self.assertIn("negative-github-hosted", workflow)
         self.assertIn("negative-missing-thermal", workflow)
@@ -487,7 +495,12 @@ class BenchmarkHostPreflightTests(unittest.TestCase):
         self.assertIn("-- python3 benchmarks/tools/test_process_tree_sampler.py --acceptance-overhead", workflow)
         self.assertIn('--observer-measurements-out "$OBSERVER_MEASUREMENTS"', workflow)
         self.assertIn("python3 benchmarks/tools/observer_ab.py bind", workflow)
+        self.assertIn("python3 benchmarks/tools/create_publication_attestation.py", workflow)
         self.assertIn('--observer-proof "$OBSERVER_PROOF"', workflow)
+        self.assertIn('--attestation "$ATTESTATION"', workflow)
+        self.assertIn("Initialize setup diagnostics before checkout", workflow)
+        self.assertIn("benchmark_setup_evidence.py", workflow)
+        self.assertIn("pliego-setup-evidence-${{ github.run_id }}-${{ github.run_attempt }}", workflow)
         self.assertIn("if: success() && inputs.mode == 'production'", workflow)
         always_upload = workflow.split("- name: Retain host proof and failure evidence", 1)[1].split(
             "- name: Retain successful candidate and publication", 1

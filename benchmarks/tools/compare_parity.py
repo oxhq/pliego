@@ -36,7 +36,6 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import json
 import shutil
 import subprocess
 import sys
@@ -44,6 +43,8 @@ import tempfile
 import tomllib
 from pathlib import Path
 from typing import Any
+
+import benchmark_publication
 
 ROOT = Path(__file__).resolve().parents[2]
 MANIFEST = ROOT / "benchmarks" / "manifest.toml"
@@ -68,7 +69,7 @@ def sha256(path: Path) -> str:
 
 
 def canonical_sha256(value: Any) -> str:
-    encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    encoded = benchmark_publication.json_bytes(value, trailing_newline=False)
     return hashlib.sha256(encoded).hexdigest()
 
 
@@ -135,8 +136,8 @@ def reported_path(value: Any, cwd: Path) -> Path | None:
 
 def json_object(path: Path) -> tuple[dict[str, Any], bool]:
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError):
+        value = benchmark_publication.strict_json_loads(path.read_bytes(), str(path))
+    except (OSError, UnicodeError, benchmark_publication.PublicationError):
         return {}, False
     return (value, True) if isinstance(value, dict) else ({}, False)
 
@@ -188,8 +189,8 @@ def stable_outcome(
     summary: dict[str, Any] = {}
     for line in result.stdout.splitlines():
         try:
-            parsed = json.loads(line)
-        except json.JSONDecodeError:
+            parsed = benchmark_publication.strict_json_loads(line, "engine parity summary")
+        except benchmark_publication.PublicationError:
             continue
         if isinstance(parsed, dict):
             summary = parsed
@@ -560,7 +561,7 @@ def main() -> int:
                 )
 
     if args.out:
-        Path(args.out).write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+        benchmark_publication.atomic_write_bytes(Path(args.out), benchmark_publication.json_bytes(report, indent=2))
     if ran_count == 0:
         print("compare_parity: no fixtures actually ran (all skipped?)", file=sys.stderr)
         return 1

@@ -34,7 +34,6 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import json
 import os
 import platform
 import random
@@ -300,8 +299,8 @@ def collect_samples(
     samples_out: list[dict[str, Any]] = []
     for line in lines:
         try:
-            parsed = json.loads(line)
-        except json.JSONDecodeError:
+            parsed = benchmark_publication.strict_json_loads(line, "benchmark runner sample")
+        except benchmark_publication.PublicationError:
             print(f"runner emitted a non-JSON line: {line[:200]}", file=sys.stderr)
             continue
         if isinstance(parsed, dict) and "wall_ms" in parsed:
@@ -602,7 +601,7 @@ def main() -> int:
         fail(f"benchmark validation context is invalid: {error}")
     violations = validate_result.validate_document(
         payload,
-        json.loads(schema.read_text(encoding="utf-8")),
+        benchmark_publication.strict_json_loads(schema.read_bytes(), "benchmark result schema"),
         validation_context,
     )
     if violations:
@@ -648,7 +647,7 @@ def main() -> int:
         )
         print(f"observer A/B gate failed; retained {evidence}", file=sys.stderr)
         return 1
-    benchmark_publication.atomic_write_bytes(out, json.dumps(payload, indent=2).encode("utf-8") + b"\n")
+    benchmark_publication.atomic_write_bytes(out, benchmark_publication.json_bytes(payload, indent=2))
     print(f"staged {out}")
     return 0
 

@@ -33,7 +33,7 @@
       "additionalProperties": false,
       "required": [
         "repository", "event", "ref", "ref_protected", "sha", "checkout_sha",
-        "default_branch_sha", "worktree_clean"
+        "default_branch_sha", "worktree_clean", "run_id", "run_attempt", "job", "workflow_ref"
       ],
       "properties": {
         "repository": { "type": ["string", "null"] },
@@ -43,7 +43,11 @@
         "sha": { "type": ["string", "null"], "pattern": "^[0-9a-f]{40}$" },
         "checkout_sha": { "type": ["string", "null"], "pattern": "^[0-9a-f]{40}$" },
         "default_branch_sha": { "type": ["string", "null"], "pattern": "^[0-9a-f]{40}$" },
-        "worktree_clean": { "type": "boolean" }
+        "worktree_clean": { "type": "boolean" },
+        "run_id": { "type": ["integer", "null"], "minimum": 1 },
+        "run_attempt": { "type": ["integer", "null"], "minimum": 1 },
+        "job": { "type": ["string", "null"] },
+        "workflow_ref": { "type": ["string", "null"] }
       }
     },
     "runner": {

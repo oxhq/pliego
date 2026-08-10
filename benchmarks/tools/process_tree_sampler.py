@@ -33,6 +33,12 @@ if sys.platform == "linux":
 PROC = Path("/proc")
 CGROUP_ROOT = Path("/sys/fs/cgroup")
 REQUIRED_CONTROLLERS = frozenset({"cpu", "io", "memory", "pids"})
+
+
+def reject_json_constant(value: str) -> None:
+    raise ValueError(f"non-finite JSON constant {value!r} is forbidden")
+
+
 HARNESS_CHILD = "harness"
 ENGINE_ACCOUNT = "pliego-benchmark-engine"
 INSTALLED_BROKER = Path("/usr/local/libexec/pliego-cgroup-broker")
@@ -151,6 +157,10 @@ class BoundRunPaths:
     input_device: int
     input_inode: int
     input_sha256: str
+    workspace_path: Path
+    workspace_fd: int
+    workspace_device: int
+    workspace_inode: int
     output_path: Path
     output_dir_fd: int
     output_dir_device: int
@@ -161,7 +171,7 @@ class BoundRunPaths:
     artifacts_inode: int
 
     def close(self) -> None:
-        for field in ("cwd_fd", "input_fd", "output_dir_fd", "artifacts_fd"):
+        for field in ("cwd_fd", "input_fd", "workspace_fd", "output_dir_fd", "artifacts_fd"):
             descriptor = getattr(self, field)
             if descriptor >= 0:
                 os.close(descriptor)
@@ -471,10 +481,29 @@ def bind_run_paths(
         artifacts_canonical = artifacts_path.resolve(strict=True)
         if output_parent != output_path.parent or artifacts_canonical != artifacts_path:
             raise incomplete("COMMAND_PATH_UNSAFE", "output and artifact directories must be canonical")
+        workspace = output_parent.parent
+        if artifacts_canonical.parent != workspace or workspace.resolve(strict=True) != workspace:
+            raise incomplete("COMMAND_PATH_UNSAFE", "output and artifact directories must be siblings in one workspace")
+        workspace_fd, workspace_metadata = _open_directory(workspace, "workspace directory")
+        descriptors.append(workspace_fd)
         output_fd, output_metadata = _open_directory(output_parent, "output directory")
         descriptors.append(output_fd)
         artifacts_fd, artifacts_metadata = _open_directory(artifacts_canonical, "artifact directory")
         descriptors.append(artifacts_fd)
+        bound_identities = {
+            (metadata.st_dev, metadata.st_ino)
+            for metadata in (
+                cwd_metadata,
+                input_metadata,
+                workspace_metadata,
+                output_metadata,
+                artifacts_metadata,
+            )
+        }
+        if len(bound_identities) != 5:
+            raise incomplete(
+                "COMMAND_PATH_UNSAFE", "cwd, input, workspace, output, and artifact identities must differ"
+            )
         _require_output_directory(output_metadata, "output directory", runner_uid, account.gid)
         _require_output_directory(artifacts_metadata, "artifact directory", runner_uid, account.gid)
         if output_path.exists():
@@ -493,6 +522,10 @@ def bind_run_paths(
             input_metadata.st_dev,
             input_metadata.st_ino,
             hash_fd(input_fd),
+            workspace,
+            workspace_fd,
+            workspace_metadata.st_dev,
+            workspace_metadata.st_ino,
             output_path,
             output_fd,
             output_metadata.st_dev,
@@ -515,6 +548,7 @@ def verify_run_paths(paths: BoundRunPaths) -> None:
     identities = (
         (paths.cwd_fd, paths.cwd_device, paths.cwd_inode, "cwd"),
         (paths.input_fd, paths.input_device, paths.input_inode, "input"),
+        (paths.workspace_fd, paths.workspace_device, paths.workspace_inode, "workspace directory"),
         (paths.output_dir_fd, paths.output_dir_device, paths.output_dir_inode, "output directory"),
         (paths.artifacts_fd, paths.artifacts_device, paths.artifacts_inode, "artifact directory"),
     )
@@ -1174,7 +1208,10 @@ def fork_stopped(
                     "migration_write_probes": migration_write_probes(probe_paths),
                     "migration_fd_probes": migration_fd_probes(probe_directories),
                 }
-                os.write(handshake_write, json.dumps(payload, separators=(",", ":")).encode("ascii"))
+                os.write(
+                    handshake_write,
+                    json.dumps(payload, separators=(",", ":"), allow_nan=False).encode("ascii"),
+                )
                 os.kill(os.getpid(), signal.SIGSTOP)
                 allowed = {executable.sealed_fd, paths.output_dir_fd, paths.artifacts_fd}
                 for descriptor in allowed:
@@ -1184,7 +1221,10 @@ def fork_stopped(
             except BaseException as error:
                 with contextlib.suppress(BaseException):
                     payload = {"ok": False, "error": f"{type(error).__name__}: {error}"}
-                    os.write(handshake_write, json.dumps(payload, separators=(",", ":")).encode("utf-8", "replace"))
+                    os.write(
+                        handshake_write,
+                        json.dumps(payload, separators=(",", ":"), allow_nan=False).encode("utf-8", "replace"),
+                    )
                     os.write(2, f"cgroup launcher: {error}\n".encode("utf-8", "replace"))
                 os._exit(127)
     finally:
@@ -1242,8 +1282,8 @@ def finish_authority_handshake(
     if waited != pid or not os.WIFSTOPPED(status_value) or os.WSTOPSIG(status_value) != signal.SIGSTOP:
         raise incomplete("AUTHORITY_DROP_FAILED", f"child {pid} exited before the verified second stop")
     try:
-        handshake = json.loads(raw)
-    except (json.JSONDecodeError, UnicodeDecodeError) as error:
+        handshake = json.loads(raw, parse_constant=reject_json_constant)
+    except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as error:
         raise incomplete("AUTHORITY_DROP_FAILED", f"invalid launcher authority handshake: {error}") from error
     if not isinstance(handshake, dict) or handshake.get("ok") is not True:
         raise incomplete("AUTHORITY_DROP_FAILED", f"launcher authority drop failed: {handshake!r}")
@@ -1609,6 +1649,11 @@ def _sample_command_guarded(
                             "device": paths.input_device,
                             "inode": paths.input_inode,
                         },
+                        "workspace_directory": {
+                            "path": str(paths.workspace_path),
+                            "device": paths.workspace_device,
+                            "inode": paths.workspace_inode,
+                        },
                         "output_directory": {
                             "path": str(paths.output_path.parent),
                             "device": paths.output_dir_device,
@@ -1863,7 +1908,17 @@ def main() -> int:
     if not command:
         parser.error("a command is required after --")
     if (
-        args.interval_ms <= 0
+        not all(
+            math.isfinite(value)
+            for value in (
+                args.interval_ms,
+                args.pss_interval_ms,
+                args.descendant_grace_ms,
+                args.settle_timeout_ms,
+                args.deadline_ms,
+            )
+        )
+        or args.interval_ms <= 0
         or args.pss_interval_ms < args.interval_ms
         or args.descendant_grace_ms < 0
         or args.settle_timeout_ms < args.interval_ms
@@ -1888,7 +1943,7 @@ def main() -> int:
         code = error.code if isinstance(error, MeasurementIncomplete) else "CGROUP_IO_ERROR"
         print(f"process_tree_sampler: measurement-incomplete[{code}]: {error}", file=sys.stderr)
         return 2
-    print(json.dumps(result, separators=(",", ":")))
+    print(json.dumps(result, separators=(",", ":"), allow_nan=False))
     return 0
 
 

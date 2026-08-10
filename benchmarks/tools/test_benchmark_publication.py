@@ -17,6 +17,7 @@ SPEC = importlib.util.spec_from_file_location("publish_benchmark", PUBLISH)
 assert SPEC is not None and SPEC.loader is not None
 publish_benchmark = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(publish_benchmark)
+ATTESTATION_KEY = "e" * 64
 
 
 def result(status: str = "supported", passed: bool = True) -> dict:
@@ -29,6 +30,31 @@ def result(status: str = "supported", passed: bool = True) -> dict:
         "fixture": {"id": "fixture"},
         "aggregates": {"correctness": {"passed": passed}},
     }
+
+
+def attestation(candidate_sha256: str = "c" * 64) -> dict:
+    unsigned = {
+        "schema": "pliego.benchmark-publication-attestation",
+        "version": 1,
+        "status": "authorized",
+        "authority": "github-protected-environment-hmac-v1",
+        "repository": "OxHQ/pliego",
+        "ref": "refs/heads/main",
+        "revision": "a" * 40,
+        "workflow_ref": benchmark_publication.TRUSTED_WORKFLOW_REF,
+        "run_id": 123,
+        "run_attempt": 1,
+        "job": "dedicated",
+        "runner": {"id": 7, "name": "pliego-pinned-01"},
+        "artifact_name": f"benchmark-publication-{'a' * 40}",
+        "subject": {
+            "candidate_sha256": candidate_sha256,
+            "host_proof_bundle_sha256": "b" * 64,
+            "observer_proof_sha256": "d" * 64,
+            "output_basename": "fixture.json",
+        },
+    }
+    return benchmark_publication.authenticate_publication_attestation(unsigned, ATTESTATION_KEY)
 
 
 def main() -> None:
@@ -124,7 +150,44 @@ def main() -> None:
             pass
         else:
             raise AssertionError("hard-linked failure artifact was accepted")
+        completed_attempts = [path for path in (directory / "failures").iterdir() if not path.name.startswith(".")]
+        quarantines = list((directory / "failures").glob(".quarantine-*"))
+        assert len(completed_attempts) == 2
+        assert len(quarantines) == 1 and (quarantines[0] / "retained-samples" / "first").is_file()
+        assert not list((directory / "failures").glob(".building-*"))
         assert baseline.read_bytes() == original
+
+        completed_before = set(completed_attempts)
+        quarantines_before = set(quarantines)
+        original_fsync_directory = benchmark_publication._fsync_directory
+        fail_final_fsync = True
+
+        def interrupted_final_fsync(path: Path) -> None:
+            nonlocal fail_final_fsync
+            if path == (directory / "failures").resolve() and fail_final_fsync:
+                fail_final_fsync = False
+                raise OSError("simulated final evidence fsync failure")
+            original_fsync_directory(path)
+
+        benchmark_publication._fsync_directory = interrupted_final_fsync
+        try:
+            try:
+                benchmark_publication.write_failure_evidence(
+                    directory / "failures",
+                    failed,
+                    "interrupted finalization",
+                )
+            except benchmark_publication.PublicationError:
+                pass
+            else:
+                raise AssertionError("failure evidence survived an interrupted final fsync as a completed attempt")
+        finally:
+            benchmark_publication._fsync_directory = original_fsync_directory
+        completed_after = {path for path in (directory / "failures").iterdir() if not path.name.startswith(".")}
+        quarantines_after = set((directory / "failures").glob(".quarantine-*"))
+        assert completed_after == completed_before
+        assert len(quarantines_after - quarantines_before) == 1
+        assert not list((directory / "failures").glob(".building-*"))
 
         try:
             benchmark_publication.atomic_write_bytes(
@@ -140,19 +203,65 @@ def main() -> None:
         assert not list(directory.glob(".baseline.json.*.tmp"))
 
         proof = {
-            "identity": {"sha": "a" * 40},
+            "identity": {
+                "sha": "a" * 40,
+                "run_id": 123,
+                "run_attempt": 1,
+                "job": "dedicated",
+                "workflow_ref": benchmark_publication.TRUSTED_WORKFLOW_REF,
+            },
             "runner": {"id": 7, "name": "pliego-pinned-01"},
         }
+        authorization_document = attestation()
+        authorization_path = (directory / "123-1.json").resolve()
+        authorization_path.write_bytes(benchmark_publication.canonical_json_bytes(authorization_document))
+        trusted_digest = benchmark_publication.sha256_file(authorization_path)
+        authorization = benchmark_publication.load_trusted_publication_attestation(
+            authorization_path,
+            ATTESTATION_KEY,
+            allow_fixture_authority=True,
+        )
+        forged = dict(authorization_document, artifact_name="benchmark-publication-forged")
+        forged = benchmark_publication.authenticate_publication_attestation(forged, "d" * 64)
+        authorization_path.write_bytes(benchmark_publication.canonical_json_bytes(forged))
+        try:
+            benchmark_publication.load_trusted_publication_attestation(
+                authorization_path,
+                ATTESTATION_KEY,
+                allow_fixture_authority=True,
+            )
+        except benchmark_publication.PublicationError as error:
+            assert "protected workflow context" in str(error)
+        else:
+            raise AssertionError("candidate-mutated publication attestation authenticated itself")
+        authorization_path.write_bytes(benchmark_publication.canonical_json_bytes(authorization_document))
         self_asserted = result()
         self_asserted["host"]["dedicated"] = True
         try:
-            benchmark_publication.bind_publication(self_asserted, proof, "b" * 64)
+            benchmark_publication.bind_publication(
+                self_asserted,
+                proof,
+                "b" * 64,
+                "d" * 64,
+                "c" * 64,
+                "fixture.json",
+                authorization,
+            )
         except benchmark_publication.PublicationError:
             pass
         else:
             raise AssertionError("self-asserted dedicated candidate was accepted")
-        bound = benchmark_publication.bind_publication(result(), proof, "b" * 64)
+        bound = benchmark_publication.bind_publication(
+            result(),
+            proof,
+            "b" * 64,
+            "d" * 64,
+            "c" * 64,
+            "fixture.json",
+            authorization,
+        )
         assert bound["publication"]["host_proof_bundle_sha256"] == "b" * 64
+        assert bound["publication"]["attestation_sha256"] == trusted_digest
         assert bound["host"]["dedicated"] is True
         benchmark_publication.atomic_write_bytes(baseline, benchmark_publication.canonical_json_bytes(bound))
         assert json.loads(baseline.read_text(encoding="utf-8"))["status"] == "supported"
@@ -236,6 +345,56 @@ def main() -> None:
             assert (moved_parent / published.name).read_bytes() == original
             assert (publication_parent / published.name).read_bytes() == replacement_sentinel
             assert not list(moved_parent.glob(".*.tmp"))
+
+            late_parent = directory / "late-bound-baselines"
+            late_parent.mkdir()
+            late_baseline = late_parent / "fixture.json"
+            late_baseline.write_bytes(original)
+            moved_late_parent = directory / "late-bound-baselines-original"
+            with benchmark_publication.bind_publication_directory(late_parent.resolve()) as bound_directory:
+
+                def replace_parent_after_backup() -> None:
+                    late_parent.rename(moved_late_parent)
+                    late_parent.mkdir()
+                    (late_parent / late_baseline.name).write_bytes(replacement_sentinel)
+
+                try:
+                    benchmark_publication.atomic_publish_bytes(
+                        bound_directory,
+                        late_baseline.name,
+                        b'{"official":"detached-write"}\n',
+                        after_backup=replace_parent_after_backup,
+                    )
+                except benchmark_publication.PublicationError as error:
+                    assert "directory identity changed" in str(error)
+                else:
+                    raise AssertionError("late parent replacement was accepted")
+            assert (moved_late_parent / late_baseline.name).read_bytes() == original
+            assert (late_parent / late_baseline.name).read_bytes() == replacement_sentinel
+            assert not list(moved_late_parent.glob(".*.rollback"))
+            assert not list(moved_late_parent.glob(".*.tmp"))
+
+            rollback_parent = directory / "rollback-baselines"
+            rollback_parent.mkdir()
+            rollback_baseline = rollback_parent / "fixture.json"
+            rollback_baseline.write_bytes(original)
+            with benchmark_publication.bind_publication_directory(rollback_parent.resolve()) as bound_directory:
+                try:
+                    benchmark_publication.atomic_publish_bytes(
+                        bound_directory,
+                        rollback_baseline.name,
+                        b'{"official":"interrupted-after-replace"}\n',
+                        after_replace=lambda: (_ for _ in ()).throw(
+                            benchmark_publication.PublicationInterrupted("simulated crash after replacement")
+                        ),
+                    )
+                except benchmark_publication.PublicationInterrupted:
+                    pass
+                else:
+                    raise AssertionError("post-replacement interruption was accepted")
+            assert rollback_baseline.read_bytes() == original
+            assert not list(rollback_parent.glob(".*.rollback"))
+            assert not list(rollback_parent.glob(".*.tmp"))
 
             successful_parent = directory / "successful-baselines"
             successful_parent.mkdir()

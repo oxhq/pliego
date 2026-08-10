@@ -113,14 +113,32 @@
       "required": [
         "host_proof_schema",
         "host_proof_bundle_sha256",
+        "attestation_schema",
+        "attestation_sha256",
+        "observer_proof_sha256",
+        "authority",
         "harness_revision",
+        "github_run_id",
+        "github_run_attempt",
+        "github_job",
+        "github_workflow_ref",
         "runner_id",
         "runner_name"
       ],
       "properties": {
         "host_proof_schema": { "const": "pliego.benchmark-host-proof.v1" },
         "host_proof_bundle_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "attestation_schema": { "const": "pliego.benchmark-publication-attestation.v1" },
+        "attestation_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "observer_proof_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "authority": { "const": "github-protected-environment-hmac-v1" },
         "harness_revision": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "github_run_id": { "type": "integer", "minimum": 1 },
+        "github_run_attempt": { "type": "integer", "minimum": 1 },
+        "github_job": { "const": "dedicated" },
+        "github_workflow_ref": {
+          "const": "OxHQ/pliego/.github/workflows/pliego-dedicated-benchmark.yml@refs/heads/main"
+        },
         "runner_id": { "type": "integer", "minimum": 1 },
         "runner_name": { "type": "string", "minLength": 1 }
       }
@@ -539,7 +557,7 @@
     "command_identity": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["cwd", "input", "output_directory", "artifact_directory"],
+      "required": ["cwd", "input", "workspace_directory", "output_directory", "artifact_directory"],
       "properties": {
         "cwd": { "$ref": "#/definitions/bound_directory_identity" },
         "input": {
@@ -554,6 +572,7 @@
             "inode": { "type": "integer", "minimum": 1 }
           }
         },
+        "workspace_directory": { "$ref": "#/definitions/bound_directory_identity" },
         "output_directory": { "$ref": "#/definitions/bound_directory_identity" },
         "artifact_directory": { "$ref": "#/definitions/bound_directory_identity" }
       }

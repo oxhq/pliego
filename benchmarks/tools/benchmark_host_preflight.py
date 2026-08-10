@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import json
 import os
 import re
 import stat
@@ -41,42 +40,18 @@ def now() -> str:
 
 
 def canonical_sha256(value: Any) -> str:
-    encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    encoded = benchmark_publication.json_bytes(value, trailing_newline=False)
     return hashlib.sha256(encoded).hexdigest()
 
 
 def bind_candidate(path: Path) -> dict[str, Any]:
-    if not path.is_absolute():
-        raise OSError("staged candidate path is not absolute")
-    resolved = path.resolve(strict=True)
-    if resolved != path:
-        raise OSError("staged candidate path is not canonical")
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
-    descriptor = os.open(path, flags)
     try:
-        before = os.fstat(descriptor)
-        if not stat.S_ISREG(before.st_mode) or before.st_size <= 0 or before.st_size > MAX_CANDIDATE_BYTES:
-            raise OSError("staged candidate is not a bounded nonempty regular file")
-        digest = hashlib.sha256()
-        offset = 0
-        while offset < before.st_size:
-            chunk = os.read(descriptor, min(1024 * 1024, before.st_size - offset))
-            if not chunk:
-                raise OSError("staged candidate shortened while hashing")
-            digest.update(chunk)
-            offset += len(chunk)
-        after = os.fstat(descriptor)
-        current = os.stat(path, follow_symlinks=False)
-        identity = (before.st_dev, before.st_ino, before.st_size)
-        if identity != (after.st_dev, after.st_ino, after.st_size) or identity != (
-            current.st_dev,
-            current.st_ino,
-            current.st_size,
-        ):
-            raise OSError("staged candidate identity changed while hashing")
-        return {"path": str(path), "sha256": digest.hexdigest(), "bytes": before.st_size}
-    finally:
-        os.close(descriptor)
+        _document, binding = benchmark_publication.load_bound_json_object(
+            path, "staged candidate", max_bytes=MAX_CANDIDATE_BYTES
+        )
+    except benchmark_publication.PublicationError as error:
+        raise OSError(str(error)) from error
+    return binding
 
 
 def read_text(path: Path) -> str | None:
@@ -96,8 +71,8 @@ def read_int(path: Path) -> int | None:
 
 def read_json(path: Path) -> dict[str, Any]:
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        value = benchmark_publication.strict_json_loads(path.read_bytes(), str(path))
+    except (OSError, benchmark_publication.PublicationError):
         return {}
     return value if isinstance(value, dict) else {}
 
@@ -123,11 +98,11 @@ def read_config(path: Path, *, require_host_owned: bool = False) -> tuple[dict[s
             raw = handle.read(64 * 1024 + 1)
         if len(raw) > 64 * 1024:
             raise OSError("config grew beyond 64 KiB while being read")
-        value = json.loads(raw.decode("utf-8"))
+        value = benchmark_publication.strict_json_loads(raw, "host config")
         if not isinstance(value, dict):
             raise ValueError("config root must be an object")
         return value, hashlib.sha256(raw).hexdigest(), None
-    except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as error:
+    except (OSError, UnicodeError, benchmark_publication.PublicationError, ValueError) as error:
         return {}, None, f"{type(error).__name__}: {error}"
     finally:
         if descriptor is not None:
@@ -582,7 +557,7 @@ def api_get(url: str, token: str) -> dict[str, Any]:
         headers["Authorization"] = f"Bearer {token}"
     request = urllib.request.Request(url, headers=headers)
     with urllib.request.urlopen(request, timeout=20) as response:
-        value = json.loads(response.read().decode("utf-8"))
+        value = benchmark_publication.strict_json_loads(response.read(), "GitHub API response")
     return value if isinstance(value, dict) else {}
 
 
@@ -603,7 +578,7 @@ def collect_api(config: dict[str, Any], token: str, fixture_root: Path | None, e
     for name, url in urls.items():
         try:
             responses[name] = api_get(url, token if name != "branch" else "")
-        except (OSError, UnicodeError, json.JSONDecodeError, urllib.error.HTTPError) as error:
+        except (OSError, UnicodeError, benchmark_publication.PublicationError, urllib.error.HTTPError) as error:
             errors.append(f"GitHub API {name}: {type(error).__name__}: {error}")
             responses[name] = {}
     return responses
@@ -738,9 +713,9 @@ def write_artifacts(
     chronology = output / validate_host_proof.CHRONOLOGY_NAME
     diagnostics = output / validate_host_proof.DIAGNOSTICS_NAME
     proof_path = output / validate_host_proof.PROOF_NAME
-    chronology.write_text(
-        "".join(json.dumps(event, sort_keys=True) + "\n" for event in recorder.events),
-        encoding="utf-8",
+    benchmark_publication.atomic_write_bytes(
+        chronology,
+        b"".join(benchmark_publication.json_bytes(event) for event in recorder.events),
     )
     diagnostics_payload = {
         "schema": "pliego.benchmark-host-diagnostics",
@@ -750,14 +725,16 @@ def write_artifacts(
         "failed_checks": [check["id"] for check in gate.checks if not check["passed"]],
         "collection_errors": collection_errors,
     }
-    diagnostics.write_text(json.dumps(diagnostics_payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    benchmark_publication.atomic_write_bytes(
+        diagnostics, benchmark_publication.json_bytes(diagnostics_payload, indent=2)
+    )
     stdout_path = output / validate_host_proof.STDOUT_NAME
     stderr_path = output / validate_host_proof.STDERR_NAME
-    proof_path.write_text(json.dumps(proof, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    benchmark_publication.atomic_write_bytes(proof_path, benchmark_publication.json_bytes(proof, indent=2))
     manifest_files = sorted((proof_path, chronology, diagnostics, stdout_path, stderr_path), key=lambda path: path.name)
-    (output / validate_host_proof.MANIFEST_NAME).write_text(
-        "".join(f"{validate_host_proof.sha256_file(path)}  {path.name}\n" for path in manifest_files),
-        encoding="ascii",
+    benchmark_publication.atomic_write_bytes(
+        output / validate_host_proof.MANIFEST_NAME,
+        "".join(f"{validate_host_proof.sha256_file(path)}  {path.name}\n" for path in manifest_files).encode("ascii"),
     )
     schema = read_json(SCHEMA)
     return validate_host_proof.validate_document(
@@ -827,6 +804,10 @@ def main() -> int:
         "checkout_sha": git_checkout_sha(fixture_root, runtime),
         "default_branch_sha": branch_commit.get("sha") if isinstance(branch_commit.get("sha"), str) else None,
         "worktree_clean": git_worktree_clean(fixture_root, runtime),
+        "run_id": int(env["GITHUB_RUN_ID"]) if str(env.get("GITHUB_RUN_ID", "")).isdigit() else None,
+        "run_attempt": int(env["GITHUB_RUN_ATTEMPT"]) if str(env.get("GITHUB_RUN_ATTEMPT", "")).isdigit() else None,
+        "job": env.get("GITHUB_JOB"),
+        "workflow_ref": env.get("GITHUB_WORKFLOW_REF"),
     }
     gate.check("identity.repository", identity["repository"], EXPECTED_REPOSITORY)
     gate.check("identity.event", identity["event"], "workflow_dispatch")
@@ -834,6 +815,20 @@ def main() -> int:
     gate.check("identity.protected", identity["ref_protected"], True)
     gate.check("identity.api_protected", branch.get("protected"), True)
     gate.check("identity.worktree_clean", identity["worktree_clean"], True)
+    gate.check(
+        "identity.run_id",
+        identity["run_id"],
+        "positive GitHub run ID",
+        type(identity["run_id"]) is int and identity["run_id"] > 0,
+    )
+    gate.check(
+        "identity.run_attempt",
+        identity["run_attempt"],
+        "positive GitHub run attempt",
+        type(identity["run_attempt"]) is int and identity["run_attempt"] > 0,
+    )
+    gate.check("identity.job", identity["job"], "dedicated")
+    gate.check("identity.workflow_ref", identity["workflow_ref"], benchmark_publication.TRUSTED_WORKFLOW_REF)
     gate.check("command.secret_free", command_contains_token, False)
     if args.mode == "production":
         allowed_command = retained_command == list(validate_host_proof.EXPECTED_PRODUCTION_COMMAND) or (
@@ -971,6 +966,7 @@ def main() -> int:
             command_proof["started"] = True
             command_env = dict(os.environ)
             command_env.pop(args.token_env, None)
+            command_env.pop(benchmark_publication.TRUSTED_ATTESTATION_KEY_ENV, None)
             fixture_command = runtime.get("fixture_command")
             execution_command = command
             if (
