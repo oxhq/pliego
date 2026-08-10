@@ -88,6 +88,7 @@ impl EventLoop {
         let event_loop_id = ScriptEventLoopId::new();
         let initial_script_state = InitialScriptState {
             id: event_loop_id,
+            document_clock: Default::default(),
             script_to_constellation_sender: constellation.script_sender.clone(),
             script_to_embedder_sender,
             namespace_request_sender: constellation.namespace_ipc_sender.clone(),

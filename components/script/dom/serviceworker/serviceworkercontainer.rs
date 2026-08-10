@@ -19,6 +19,7 @@ use servo_constellation_traits::{
     ServiceWorkerAlgorithm, ServiceWorkerAlgorithmResult, ServiceWorkerRegistrationInfo,
 };
 use servo_url::{ImmutableOrigin, ServoUrl};
+use timers::DocumentTimeSurface;
 
 use crate::dom::bindings::codegen::Bindings::ServiceWorkerContainerBinding::{
     RegistrationOptions, ServiceWorkerContainerMethods,
@@ -332,6 +333,13 @@ impl ServiceWorkerContainerMethods<crate::DomTypeHolder> for ServiceWorkerContai
 
         // A: Step 1
         let promise = Promise::new_in_realm(realm);
+        if let Err(error) = global
+            .document_clock()
+            .require_surface(DocumentTimeSurface::Worker)
+        {
+            promise.reject_error(realm, Error::NotSupported(Some(error.to_string())));
+            return promise;
+        }
         let USVString(ref script_url) = script_url;
 
         // A: Step 3

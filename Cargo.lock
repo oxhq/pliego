@@ -9171,6 +9171,7 @@ dependencies = [
  "servo-pixels",
  "servo-profile-traits",
  "servo-storage-traits",
+ "servo-timers",
  "servo-url",
  "servo-webgpu-traits",
  "servo-webxr-api",
@@ -9226,6 +9227,7 @@ version = "0.4.0"
 dependencies = [
  "crossbeam-channel",
  "malloc_size_of_derive",
+ "serde",
  "servo-malloc-size-of",
 ]
 

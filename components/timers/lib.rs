@@ -9,10 +9,14 @@
 
 use std::cmp::{self, Ord};
 use std::collections::BinaryHeap;
+use std::fmt;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, after, never};
 use malloc_size_of_derive::MallocSizeOf;
+use serde::{Deserialize, Serialize};
 
 /// A callback to pass to the [`TimerScheduler`] to be called when the timer is
 /// dispatched.
@@ -32,16 +36,263 @@ impl TimerEventRequest {
     }
 }
 
+/// Configuration used when constructing a document-observable monotonic clock.
+///
+/// Interactive Servo uses [`Self::Realtime`]. The controlled mode does not advance by itself and
+/// never creates a host-clock wake-up; its owner must advance and activate deadlines explicitly.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub enum DocumentClockConfiguration {
+    /// Use elapsed host monotonic time.
+    #[default]
+    Realtime,
+    /// Start a controlled clock at the supplied integer nanosecond offset.
+    Controlled { initial_time_ns: u64 },
+}
+
+/// An integer nanosecond offset in one document clock domain.
+#[derive(
+    Clone, Copy, Debug, Deserialize, Eq, MallocSizeOf, Ord, PartialEq, PartialOrd, Serialize,
+)]
+pub struct DocumentTime(u64);
+
+impl DocumentTime {
+    /// The zero offset.
+    pub const ZERO: Self = Self(0);
+
+    /// Construct an offset from an integer number of nanoseconds.
+    pub const fn from_nanos(nanos: u64) -> Self {
+        Self(nanos)
+    }
+
+    /// Return this offset as integer nanoseconds.
+    pub const fn as_nanos(self) -> u64 {
+        self.0
+    }
+
+    /// Convert a duration without truncating or wrapping it.
+    pub fn checked_from_duration(duration: Duration) -> Result<Self, DocumentClockError> {
+        u64::try_from(duration.as_nanos())
+            .map(Self)
+            .map_err(|_| DocumentClockError::Overflow)
+    }
+
+    /// Add a duration without truncating or wrapping it.
+    pub fn checked_add(self, duration: Duration) -> Result<Self, DocumentClockError> {
+        let duration = Self::checked_from_duration(duration)?;
+        self.0
+            .checked_add(duration.0)
+            .map(Self)
+            .ok_or(DocumentClockError::Overflow)
+    }
+
+    /// Subtract a duration without wrapping it.
+    pub fn checked_sub(self, duration: Duration) -> Result<Self, DocumentClockError> {
+        let duration = Self::checked_from_duration(duration)?;
+        self.0
+            .checked_sub(duration.0)
+            .map(Self)
+            .ok_or(DocumentClockError::Overflow)
+    }
+
+    /// Return the non-negative duration since an earlier offset.
+    pub fn saturating_duration_since(self, earlier: Self) -> Duration {
+        Duration::from_nanos(self.0.saturating_sub(earlier.0))
+    }
+}
+
+/// Document-observable surfaces that eventually need to share one controlled clock.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum DocumentTimeSurface {
+    /// Window timers on one script event loop.
+    WindowTimers,
+    /// A same-event-loop nested browsing context.
+    SameEventLoopIframe,
+    /// JavaScript `Date`.
+    JavaScriptDate,
+    /// The Performance API.
+    Performance,
+    /// Animation-frame timestamps and scheduling.
+    AnimationFrame,
+    /// CSS and Web Animations document timelines.
+    DocumentTimeline,
+    /// Dedicated, shared, or service workers.
+    Worker,
+    /// A nested browsing context hosted by another script event loop.
+    CrossEventLoopIframe,
+}
+
+/// A checked document-clock failure.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DocumentClockError {
+    /// The requested operation requires a controlled clock.
+    RealtimeClock,
+    /// Controlled document time cannot move backwards.
+    TimeMovedBackwards {
+        /// The current clock offset.
+        current: DocumentTime,
+        /// The rejected new clock offset.
+        requested: DocumentTime,
+    },
+    /// An integer nanosecond conversion or calculation overflowed.
+    Overflow,
+    /// This U1 clock slice does not yet control the requested observable surface.
+    UnsupportedSurface(DocumentTimeSurface),
+}
+
+impl fmt::Display for DocumentClockError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::RealtimeClock => formatter.write_str("document clock is using host time"),
+            Self::TimeMovedBackwards { current, requested } => write!(
+                formatter,
+                "document time cannot move backwards from {}ns to {}ns",
+                current.as_nanos(),
+                requested.as_nanos()
+            ),
+            Self::Overflow => formatter.write_str("document time exceeds the u64 nanosecond range"),
+            Self::UnsupportedSurface(surface) => {
+                write!(
+                    formatter,
+                    "controlled document time does not yet support {surface:?}"
+                )
+            },
+        }
+    }
+}
+
+impl std::error::Error for DocumentClockError {}
+
+enum DocumentClockInner {
+    Realtime { origin: Instant },
+    Controlled { now_ns: AtomicU64 },
+}
+
+/// One clonable clock shared by the timer scheduler and every same-event-loop Window realm.
+#[derive(Clone, MallocSizeOf)]
+pub struct DocumentClock {
+    #[ignore_malloc_size_of = "The clock state is shared and has no owned heap allocations"]
+    inner: Arc<DocumentClockInner>,
+}
+
+impl Default for DocumentClock {
+    fn default() -> Self {
+        Self::new(DocumentClockConfiguration::Realtime)
+    }
+}
+
+impl DocumentClock {
+    /// Construct a clock from its immutable mode configuration.
+    pub fn new(configuration: DocumentClockConfiguration) -> Self {
+        let inner = match configuration {
+            DocumentClockConfiguration::Realtime => DocumentClockInner::Realtime {
+                origin: Instant::now(),
+            },
+            DocumentClockConfiguration::Controlled { initial_time_ns } => {
+                DocumentClockInner::Controlled {
+                    now_ns: AtomicU64::new(initial_time_ns),
+                }
+            },
+        };
+        Self {
+            inner: Arc::new(inner),
+        }
+    }
+
+    /// Return whether this clock is explicitly controlled rather than host-driven.
+    pub fn is_controlled(&self) -> bool {
+        matches!(&*self.inner, DocumentClockInner::Controlled { .. })
+    }
+
+    /// Return the current offset, checking the host-duration conversion.
+    pub fn try_now(&self) -> Result<DocumentTime, DocumentClockError> {
+        match &*self.inner {
+            DocumentClockInner::Realtime { origin } => {
+                DocumentTime::checked_from_duration(origin.elapsed())
+            },
+            DocumentClockInner::Controlled { now_ns } => Ok(DocumentTime::from_nanos(
+                now_ns.load(AtomicOrdering::Acquire),
+            )),
+        }
+    }
+
+    /// Return the current offset.
+    ///
+    /// A real monotonic clock would need to run for roughly 584 years to exceed this U1 range.
+    pub fn now(&self) -> DocumentTime {
+        self.try_now()
+            .expect("document clock exceeded its checked integer nanosecond range")
+    }
+
+    /// Advance a controlled clock monotonically without sleeping.
+    pub fn advance_to(&self, requested: DocumentTime) -> Result<(), DocumentClockError> {
+        let DocumentClockInner::Controlled { now_ns } = &*self.inner else {
+            return Err(DocumentClockError::RealtimeClock);
+        };
+
+        let mut current = now_ns.load(AtomicOrdering::Acquire);
+        loop {
+            if requested.as_nanos() < current {
+                return Err(DocumentClockError::TimeMovedBackwards {
+                    current: DocumentTime::from_nanos(current),
+                    requested,
+                });
+            }
+            match now_ns.compare_exchange_weak(
+                current,
+                requested.as_nanos(),
+                AtomicOrdering::AcqRel,
+                AtomicOrdering::Acquire,
+            ) {
+                Ok(_) => return Ok(()),
+                Err(observed) => current = observed,
+            }
+        }
+    }
+
+    /// Check whether this slice controls an observable surface.
+    ///
+    /// U1 intentionally controls only Window timers and same-event-loop iframe timers. Later
+    /// slices must remove the typed blockers as they install the same clock in those subsystems.
+    pub fn require_surface(&self, surface: DocumentTimeSurface) -> Result<(), DocumentClockError> {
+        if !self.is_controlled()
+            || matches!(
+                surface,
+                DocumentTimeSurface::WindowTimers | DocumentTimeSurface::SameEventLoopIframe
+            )
+        {
+            Ok(())
+        } else {
+            Err(DocumentClockError::UnsupportedSurface(surface))
+        }
+    }
+
+    fn realtime_deadline(
+        &self,
+        deadline: DocumentTime,
+    ) -> Result<Option<Instant>, DocumentClockError> {
+        let DocumentClockInner::Realtime { origin } = &*self.inner else {
+            return Ok(None);
+        };
+        origin
+            .checked_add(Duration::from_nanos(deadline.as_nanos()))
+            .map(Some)
+            .ok_or(DocumentClockError::Overflow)
+    }
+}
+
 #[derive(MallocSizeOf)]
 struct ScheduledEvent {
     id: TimerId,
     request: TimerEventRequest,
-    for_time: Instant,
+    deadline: DocumentTime,
 }
 
 impl Ord for ScheduledEvent {
     fn cmp(&self, other: &ScheduledEvent) -> cmp::Ordering {
-        self.for_time.cmp(&other.for_time).reverse()
+        match self.deadline.cmp(&other.deadline).reverse() {
+            cmp::Ordering::Equal => self.id.cmp(&other.id).reverse(),
+            ordering => ordering,
+        }
     }
 }
 
@@ -54,84 +305,404 @@ impl PartialOrd for ScheduledEvent {
 impl Eq for ScheduledEvent {}
 impl PartialEq for ScheduledEvent {
     fn eq(&self, other: &ScheduledEvent) -> bool {
-        std::ptr::eq(self, other)
+        self.id == other.id
     }
 }
 
-#[derive(Clone, Copy, MallocSizeOf, PartialEq)]
-pub struct TimerId(usize);
+/// A stable timer identity whose value is also its scheduler insertion order.
+#[derive(Clone, Copy, Debug, Eq, MallocSizeOf, Ord, PartialEq, PartialOrd)]
+pub struct TimerId(u64);
+
+impl TimerId {
+    /// Return the stable scheduler insertion sequence.
+    pub const fn sequence(self) -> u64 {
+        self.0
+    }
+}
+
+/// The finite deadline exposed by a controlled scheduler.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TimerDeadlineSnapshot {
+    /// Stable identity and insertion order for this event.
+    pub id: TimerId,
+    /// Absolute integer-nanosecond offset in the document clock.
+    pub deadline: DocumentTime,
+}
+
+/// A checked scheduler/control failure.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TimerControlError {
+    /// The underlying document clock rejected an operation.
+    Clock(DocumentClockError),
+    /// Adding a request duration exceeded the document-time range.
+    DeadlineOverflow,
+    /// The stable timer insertion sequence was exhausted.
+    SequenceExhausted,
+    /// A finite-deadline operation was requested from a realtime scheduler.
+    RealtimeScheduler,
+    /// The caller tried to activate a snapshot that is no longer current.
+    StaleDeadline {
+        /// Snapshot supplied by the caller.
+        expected: TimerDeadlineSnapshot,
+        /// Current next snapshot, if any.
+        observed: Option<TimerDeadlineSnapshot>,
+    },
+    /// The selected timer is still in the future.
+    TimerNotDue {
+        /// Selected timer deadline.
+        deadline: DocumentTime,
+        /// Current controlled time.
+        now: DocumentTime,
+    },
+}
+
+impl From<DocumentClockError> for TimerControlError {
+    fn from(error: DocumentClockError) -> Self {
+        Self::Clock(error)
+    }
+}
+
+impl fmt::Display for TimerControlError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{self:?}")
+    }
+}
+
+impl std::error::Error for TimerControlError {}
 
 /// A queue of [`TimerEventRequest`]s that are stored in order of next-to-fire.
-#[derive(Default, MallocSizeOf)]
+#[derive(MallocSizeOf)]
 pub struct TimerScheduler {
-    /// A priority queue of future events, sorted by due time.
+    /// A priority queue of future events, sorted by due time and insertion sequence.
     queue: BinaryHeap<ScheduledEvent>,
+    /// The next stable timer insertion sequence.
+    next_id: u64,
+    /// The same clock used by the DOM timer layer for this event loop.
+    clock: DocumentClock,
+}
 
-    /// The current timer id, used to generate new ones.
-    current_id: usize,
+impl Default for TimerScheduler {
+    fn default() -> Self {
+        Self::with_clock(DocumentClock::default())
+    }
 }
 
 impl TimerScheduler {
-    /// Schedule a new timer for on this [`TimerScheduler`].
-    pub fn schedule_timer(&mut self, request: TimerEventRequest) -> TimerId {
-        let for_time = Instant::now() + request.duration;
+    /// Create a scheduler driven by the supplied document clock.
+    pub fn with_clock(clock: DocumentClock) -> Self {
+        Self {
+            queue: BinaryHeap::new(),
+            next_id: 0,
+            clock,
+        }
+    }
 
-        let id = TimerId(self.current_id);
-        self.current_id += 1;
+    /// Return the scheduler's shared document clock.
+    pub fn clock(&self) -> DocumentClock {
+        self.clock.clone()
+    }
 
+    /// Schedule a timer, returning a typed failure instead of truncating time or sequence values.
+    pub fn try_schedule_timer(
+        &mut self,
+        request: TimerEventRequest,
+    ) -> Result<TimerId, TimerControlError> {
+        let deadline = self
+            .clock
+            .try_now()?
+            .checked_add(request.duration)
+            .map_err(|_| TimerControlError::DeadlineOverflow)?;
+        let next_id = self
+            .next_id
+            .checked_add(1)
+            .ok_or(TimerControlError::SequenceExhausted)?;
+        let id = TimerId(self.next_id);
+        self.next_id = next_id;
         self.queue.push(ScheduledEvent {
             id,
             request,
-            for_time,
+            deadline,
         });
-        id
+        Ok(id)
     }
 
-    /// Cancel a timer with the given [`TimerId`]. If a timer with that id is not
-    /// currently waiting to fire, do nothing.
+    /// Schedule a timer for an interactive caller whose bounded durations are already validated.
+    pub fn schedule_timer(&mut self, request: TimerEventRequest) -> TimerId {
+        self.try_schedule_timer(request)
+            .expect("validated timer request exceeded the checked scheduler range")
+    }
+
+    /// Cancel a timer with the given [`TimerId`]. If it is no longer pending, do nothing.
     pub fn cancel_timer(&mut self, id: TimerId) {
         self.queue.retain(|event| event.id != id);
     }
 
-    /// Get a [`Receiver<Instant>`] that receives a message after waiting for the next timer
-    /// to fire. If there are no timers, the channel will *never* send a message.
+    /// Get a receiver that wakes for the next realtime timer.
+    ///
+    /// Controlled schedulers never wake from host time.
     pub fn wait_channel(&self) -> Receiver<Instant> {
-        self.queue
-            .peek()
-            .map(|event| {
+        self.next_deadline()
+            .map(|deadline| {
                 let now = Instant::now();
-                if event.for_time < now {
-                    after(Duration::ZERO)
-                } else {
-                    after(event.for_time - now)
-                }
+                after(deadline.saturating_duration_since(now))
             })
             .unwrap_or_else(never)
     }
 
-    /// The deadline of the next scheduled timer, or `None` if the queue is empty.
+    /// The host deadline of the next realtime timer.
+    ///
+    /// Returns `None` for controlled schedulers.
     pub fn next_deadline(&self) -> Option<Instant> {
-        self.queue.peek().map(|event| event.for_time)
+        self.queue
+            .peek()
+            .and_then(|event| self.clock.realtime_deadline(event.deadline).ok().flatten())
     }
 
-    /// Dispatch any timer events from this [`TimerScheduler`]'s `queue` when `now` is
-    /// past the due time of the event.
+    /// Return the next finite controlled deadline.
+    pub fn finite_deadline_snapshot(
+        &self,
+    ) -> Result<Option<TimerDeadlineSnapshot>, TimerControlError> {
+        if !self.clock.is_controlled() {
+            return Err(TimerControlError::RealtimeScheduler);
+        }
+        Ok(self.queue.peek().map(|event| TimerDeadlineSnapshot {
+            id: event.id,
+            deadline: event.deadline,
+        }))
+    }
+
+    /// Advance the shared controlled clock monotonically without activating a timer.
+    pub fn advance_controlled_time_to(&self, now: DocumentTime) -> Result<(), TimerControlError> {
+        self.clock.advance_to(now).map_err(Into::into)
+    }
+
+    /// Activate exactly one due event selected from a fresh finite-deadline snapshot.
+    pub fn activate_due_timer(
+        &mut self,
+        expected: TimerDeadlineSnapshot,
+    ) -> Result<(), TimerControlError> {
+        let observed = self.finite_deadline_snapshot()?;
+        if observed != Some(expected) {
+            return Err(TimerControlError::StaleDeadline { expected, observed });
+        }
+        let now = self.clock.try_now()?;
+        if expected.deadline > now {
+            return Err(TimerControlError::TimerNotDue {
+                deadline: expected.deadline,
+                now,
+            });
+        }
+        self.queue
+            .pop()
+            .expect("a matching finite-deadline snapshot must still have an event")
+            .request
+            .dispatch();
+        Ok(())
+    }
+
+    /// Dispatch all timers due on the host clock.
+    ///
+    /// This preserves Servo's interactive behavior. Controlled schedulers are activated only via
+    /// [`Self::activate_due_timer`] so a host event-loop batch cannot coalesce virtual timers.
     pub fn dispatch_completed_timers(&mut self) {
-        let now = Instant::now();
-        loop {
-            match self.queue.peek() {
-                // Dispatch the event if its due time is past.
-                Some(event) if event.for_time <= now => {},
-                // Otherwise, we're done dispatching events.
-                _ => break,
-            }
-            // Remove the event from the priority queue (Note this only executes when the
-            // first event has been dispatched
+        if self.clock.is_controlled() {
+            return;
+        }
+        let Ok(now) = self.clock.try_now() else {
+            return;
+        };
+        while matches!(self.queue.peek(), Some(event) if event.deadline <= now) {
             self.queue
                 .pop()
-                .expect("Expected request")
+                .expect("a due timer must still be queued")
                 .request
                 .dispatch();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use super::*;
+
+    fn controlled_clock(initial_time_ns: u64) -> DocumentClock {
+        DocumentClock::new(DocumentClockConfiguration::Controlled { initial_time_ns })
+    }
+
+    fn recording_request(
+        events: &Arc<Mutex<Vec<u8>>>,
+        value: u8,
+        duration: Duration,
+    ) -> TimerEventRequest {
+        let events = Arc::clone(events);
+        TimerEventRequest {
+            callback: Box::new(move || events.lock().unwrap().push(value)),
+            duration,
+        }
+    }
+
+    #[test]
+    fn controlled_deadlines_activate_one_at_a_time_in_stable_creation_order() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let clock = controlled_clock(0);
+        let mut scheduler = TimerScheduler::with_clock(clock);
+
+        scheduler.schedule_timer(recording_request(&events, 1, Duration::from_nanos(10)));
+        scheduler.schedule_timer(recording_request(&events, 2, Duration::from_nanos(10)));
+        scheduler.schedule_timer(recording_request(&events, 0, Duration::from_nanos(5)));
+
+        let first = scheduler.finite_deadline_snapshot().unwrap().unwrap();
+        assert_eq!(first.deadline, DocumentTime::from_nanos(5));
+        assert!(matches!(
+            scheduler.activate_due_timer(first),
+            Err(TimerControlError::TimerNotDue { .. })
+        ));
+
+        scheduler
+            .advance_controlled_time_to(DocumentTime::from_nanos(5))
+            .unwrap();
+        scheduler.activate_due_timer(first).unwrap();
+        assert_eq!(*events.lock().unwrap(), vec![0]);
+
+        scheduler
+            .advance_controlled_time_to(DocumentTime::from_nanos(10))
+            .unwrap();
+        let second = scheduler.finite_deadline_snapshot().unwrap().unwrap();
+        scheduler.activate_due_timer(second).unwrap();
+        assert_eq!(*events.lock().unwrap(), vec![0, 1]);
+        let third = scheduler.finite_deadline_snapshot().unwrap().unwrap();
+        scheduler.activate_due_timer(third).unwrap();
+        assert_eq!(*events.lock().unwrap(), vec![0, 1, 2]);
+        assert_eq!(scheduler.finite_deadline_snapshot().unwrap(), None);
+    }
+
+    #[test]
+    fn cancellation_invalidates_a_deadline_snapshot_without_running_it() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let clock = controlled_clock(0);
+        let mut scheduler = TimerScheduler::with_clock(clock);
+        let id = scheduler.schedule_timer(recording_request(&events, 1, Duration::from_nanos(10)));
+        let snapshot = scheduler.finite_deadline_snapshot().unwrap().unwrap();
+
+        scheduler.cancel_timer(id);
+        scheduler
+            .advance_controlled_time_to(DocumentTime::from_nanos(10))
+            .unwrap();
+        assert!(matches!(
+            scheduler.activate_due_timer(snapshot),
+            Err(TimerControlError::StaleDeadline { observed: None, .. })
+        ));
+        assert!(events.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn replacement_deadline_rejects_a_stale_cancelled_snapshot() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let clock = controlled_clock(0);
+        let mut scheduler = TimerScheduler::with_clock(clock);
+        let old_id =
+            scheduler.schedule_timer(recording_request(&events, 1, Duration::from_nanos(10)));
+        let stale = scheduler.finite_deadline_snapshot().unwrap().unwrap();
+
+        scheduler.cancel_timer(old_id);
+        scheduler.schedule_timer(recording_request(&events, 2, Duration::from_nanos(5)));
+        scheduler
+            .advance_controlled_time_to(DocumentTime::from_nanos(10))
+            .unwrap();
+
+        let replacement = scheduler.finite_deadline_snapshot().unwrap().unwrap();
+        assert!(matches!(
+            scheduler.activate_due_timer(stale),
+            Err(TimerControlError::StaleDeadline {
+                observed: Some(observed),
+                ..
+            }) if observed == replacement
+        ));
+        assert!(events.lock().unwrap().is_empty());
+        scheduler.activate_due_timer(replacement).unwrap();
+        assert_eq!(*events.lock().unwrap(), vec![2]);
+    }
+
+    #[test]
+    fn controlled_scheduler_never_uses_the_realtime_dispatch_path() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let clock = controlled_clock(0);
+        let mut scheduler = TimerScheduler::with_clock(clock);
+        scheduler.schedule_timer(recording_request(&events, 1, Duration::ZERO));
+
+        scheduler.dispatch_completed_timers();
+
+        assert!(events.lock().unwrap().is_empty());
+        let snapshot = scheduler.finite_deadline_snapshot().unwrap().unwrap();
+        scheduler.activate_due_timer(snapshot).unwrap();
+        assert_eq!(*events.lock().unwrap(), vec![1]);
+    }
+
+    #[test]
+    fn realtime_scheduler_keeps_the_existing_host_dispatch_path() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let mut scheduler = TimerScheduler::default();
+        scheduler.schedule_timer(recording_request(&events, 1, Duration::ZERO));
+
+        assert_eq!(
+            scheduler.finite_deadline_snapshot(),
+            Err(TimerControlError::RealtimeScheduler)
+        );
+        scheduler.dispatch_completed_timers();
+        assert_eq!(*events.lock().unwrap(), vec![1]);
+    }
+
+    #[test]
+    fn controlled_time_is_monotonic_and_deadline_math_is_checked() {
+        assert_eq!(
+            DocumentTime::checked_from_duration(Duration::MAX),
+            Err(DocumentClockError::Overflow)
+        );
+
+        let clock = controlled_clock(u64::MAX - 1);
+        assert_eq!(
+            clock.advance_to(DocumentTime::from_nanos(u64::MAX - 2)),
+            Err(DocumentClockError::TimeMovedBackwards {
+                current: DocumentTime::from_nanos(u64::MAX - 1),
+                requested: DocumentTime::from_nanos(u64::MAX - 2),
+            })
+        );
+
+        let mut scheduler = TimerScheduler::with_clock(clock);
+        let events = Arc::new(Mutex::new(Vec::new()));
+        assert_eq!(
+            scheduler
+                .try_schedule_timer(recording_request(&events, 1, Duration::from_nanos(2)))
+                .unwrap_err(),
+            TimerControlError::DeadlineOverflow
+        );
+    }
+
+    #[test]
+    fn controlled_clock_exposes_the_u1_surface_boundary() {
+        let clock = controlled_clock(0);
+        assert_eq!(
+            clock.require_surface(DocumentTimeSurface::WindowTimers),
+            Ok(())
+        );
+        assert_eq!(
+            clock.require_surface(DocumentTimeSurface::SameEventLoopIframe),
+            Ok(())
+        );
+        for surface in [
+            DocumentTimeSurface::JavaScriptDate,
+            DocumentTimeSurface::Performance,
+            DocumentTimeSurface::AnimationFrame,
+            DocumentTimeSurface::DocumentTimeline,
+            DocumentTimeSurface::Worker,
+            DocumentTimeSurface::CrossEventLoopIframe,
+        ] {
+            assert_eq!(
+                clock.require_surface(surface),
+                Err(DocumentClockError::UnsupportedSurface(surface))
+            );
         }
     }
 }

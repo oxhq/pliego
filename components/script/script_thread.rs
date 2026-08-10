@@ -109,7 +109,10 @@ use style::shared_lock::SharedRwLock;
 use style::stylesheets::{AllowImportRules, DocumentStyleSheet, Origin, Stylesheet};
 use style::thread_state::{self, ThreadState};
 use stylo_atoms::Atom;
-use timers::{TimerEventRequest, TimerId, TimerScheduler};
+use timers::{
+    DocumentClock, DocumentTime, TimerControlError, TimerDeadlineSnapshot, TimerEventRequest,
+    TimerId, TimerScheduler,
+};
 use url::Position;
 #[cfg(feature = "webgpu")]
 use webgpu_traits::{WebGPUDevice, WebGPUMsg};
@@ -329,6 +332,10 @@ pub struct ScriptThread {
     /// in the [`ScriptThread`] event loop.
     #[no_trace]
     timer_scheduler: RefCell<TimerScheduler>,
+
+    /// The document-observable clock shared by this event loop's Window realms and timer queue.
+    #[no_trace]
+    document_clock: DocumentClock,
 
     /// A proxy to the `SystemFontService` to use for accessing system font lists.
     #[no_trace]
@@ -616,6 +623,42 @@ impl ScriptThread {
     /// [`ScriptThread`]'s [`TimerScheduler`].
     pub(crate) fn cancel_timer(&self, timer_id: TimerId) {
         self.timer_scheduler.borrow_mut().cancel_timer(timer_id)
+    }
+
+    /// Return the document clock for the current ScriptThread.
+    pub(crate) fn current_document_clock() -> DocumentClock {
+        with_script_thread(|script_thread| script_thread.document_clock.clone())
+    }
+
+    /// Observe the current finite timer deadline without activating it.
+    #[expect(dead_code)]
+    pub(crate) fn finite_timer_deadline(
+        &self,
+    ) -> Result<Option<TimerDeadlineSnapshot>, TimerControlError> {
+        self.timer_scheduler.borrow().finite_deadline_snapshot()
+    }
+
+    /// Advance this event loop's controlled document clock without running timer callbacks.
+    #[expect(dead_code)]
+    pub(crate) fn advance_document_time_to(
+        &self,
+        now: DocumentTime,
+    ) -> Result<(), TimerControlError> {
+        self.timer_scheduler
+            .borrow()
+            .advance_controlled_time_to(now)
+    }
+
+    /// Activate one freshly observed due timer. Its callback only queues the existing timer task;
+    /// the normal task path remains responsible for the following microtask checkpoint.
+    #[expect(dead_code)]
+    pub(crate) fn activate_due_timer(
+        &self,
+        expected: TimerDeadlineSnapshot,
+    ) -> Result<(), TimerControlError> {
+        self.timer_scheduler
+            .borrow_mut()
+            .activate_due_timer(expected)
     }
 
     // https://html.spec.whatwg.org/multipage/#await-a-stable-state
@@ -951,6 +994,8 @@ impl ScriptThread {
 
         let (image_cache_sender, image_cache_receiver) = unbounded();
 
+        let document_clock = DocumentClock::new(state.document_clock);
+
         let receivers = ScriptThreadReceivers {
             constellation_receiver,
             image_cache_receiver,
@@ -1024,7 +1069,10 @@ impl ScriptThread {
                     task_queue,
                     background_hang_monitor,
                     closing,
-                    timer_scheduler: Default::default(),
+                    timer_scheduler: RefCell::new(TimerScheduler::with_clock(
+                        document_clock.clone(),
+                    )),
+                    document_clock,
                     microtask_queue,
                     js_runtime: Rc::new(runtime),
                     closed_pipelines: DomRefCell::new(FxHashSet::default()),

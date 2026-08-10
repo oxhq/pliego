@@ -52,6 +52,7 @@ use storage_traits::webstorage_thread::WebStorageType;
 use strum::IntoStaticStr;
 use style_traits::{CSSPixel, SpeculativePainter};
 use stylo_atoms::Atom;
+use timers::DocumentClockConfiguration;
 #[cfg(feature = "webgpu")]
 use webgpu_traits::WebGPUMsg;
 use webrender_api::ImageKey;
@@ -375,6 +376,11 @@ pub struct InitialScriptState {
     /// The id of the script event loop that this state will start. This is used to uniquely
     /// identify an event loop.
     pub id: ScriptEventLoopId,
+    /// Configuration for the document-observable clock owned by this event loop.
+    ///
+    /// The default interactive path uses host time. A controlled clock is intentionally not
+    /// exposed through the embedding API until its U2 event-loop control plane is available.
+    pub document_clock: DocumentClockConfiguration,
     /// The sender to use to install the `Pipeline` namespace into this process (if necessary).
     pub namespace_request_sender: GenericSender<PipelineNamespaceRequest>,
     /// A channel with which messages can be sent to us (the script thread).
