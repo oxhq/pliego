@@ -374,6 +374,78 @@ def main() -> None:
             assert not list(moved_late_parent.glob(".*.rollback"))
             assert not list(moved_late_parent.glob(".*.tmp"))
 
+            unlinked_parent = directory / "unlinked-after-journal-baselines"
+            unlinked_parent.mkdir()
+            unlinked_baseline = unlinked_parent / "fixture.json"
+            unlinked_baseline.write_bytes(original)
+            with benchmark_publication.bind_publication_directory(unlinked_parent.resolve()) as bound_directory:
+
+                def unlink_destination_after_backup() -> None:
+                    unlinked_baseline.unlink()
+
+                try:
+                    benchmark_publication.atomic_publish_bytes(
+                        bound_directory,
+                        unlinked_baseline.name,
+                        b'{"official":"must-not-survive-unlink-race"}\n',
+                        after_backup=unlink_destination_after_backup,
+                    )
+                except benchmark_publication.PublicationError as error:
+                    assert "must already exist" in str(error)
+                else:
+                    raise AssertionError("destination unlink after rollback creation was accepted")
+            assert unlinked_baseline.read_bytes() == original
+            assert not list(unlinked_parent.glob(".*.rollback"))
+            assert not list(unlinked_parent.glob(".*.tmp"))
+
+            swapped_parent = directory / "swapped-after-journal-baselines"
+            swapped_parent.mkdir()
+            swapped_baseline = swapped_parent / "fixture.json"
+            swapped_baseline.write_bytes(original)
+            with benchmark_publication.bind_publication_directory(swapped_parent.resolve()) as bound_directory:
+
+                def swap_destination_after_backup() -> None:
+                    replacement = swapped_parent / "replacement.json"
+                    replacement.write_bytes(b"raced destination\n")
+                    os.replace(replacement, swapped_baseline)
+
+                try:
+                    benchmark_publication.atomic_publish_bytes(
+                        bound_directory,
+                        swapped_baseline.name,
+                        b'{"official":"must-not-survive-swap-race"}\n',
+                        after_backup=swap_destination_after_backup,
+                    )
+                except benchmark_publication.PublicationError as error:
+                    assert "identity changed" in str(error)
+                else:
+                    raise AssertionError("destination swap after rollback creation was accepted")
+            assert swapped_baseline.read_bytes() == original
+            assert not list(swapped_parent.glob(".*.rollback"))
+            assert not list(swapped_parent.glob(".*.tmp"))
+
+            prepared_parent = directory / "interrupted-after-journal-baselines"
+            prepared_parent.mkdir()
+            prepared_baseline = prepared_parent / "fixture.json"
+            prepared_baseline.write_bytes(original)
+            with benchmark_publication.bind_publication_directory(prepared_parent.resolve()) as bound_directory:
+                try:
+                    benchmark_publication.atomic_publish_bytes(
+                        bound_directory,
+                        prepared_baseline.name,
+                        b'{"official":"must-not-survive-prepared-crash"}\n',
+                        after_backup=lambda: (_ for _ in ()).throw(
+                            benchmark_publication.PublicationInterrupted("simulated crash after rollback journal")
+                        ),
+                    )
+                except benchmark_publication.PublicationInterrupted:
+                    pass
+                else:
+                    raise AssertionError("post-journal interruption was accepted")
+            assert prepared_baseline.read_bytes() == original
+            assert not list(prepared_parent.glob(".*.rollback"))
+            assert not list(prepared_parent.glob(".*.tmp"))
+
             rollback_parent = directory / "rollback-baselines"
             rollback_parent.mkdir()
             rollback_baseline = rollback_parent / "fixture.json"

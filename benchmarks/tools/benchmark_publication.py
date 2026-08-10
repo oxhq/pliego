@@ -415,7 +415,6 @@ def atomic_publish_bytes(
     temporary = f".{name}.{secrets.token_hex(8)}.tmp"
     rollback = f".{name}.{secrets.token_hex(8)}.rollback"
     backup_created = False
-    replacement_committed = False
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     descriptor = os.open(temporary, flags, 0o644, dir_fd=directory.descriptor)
     try:
@@ -444,29 +443,33 @@ def atomic_publish_bytes(
             follow_symlinks=False,
         )
         backup_created = True
-        os.fsync(directory.descriptor)
-        if after_backup is not None:
-            after_backup()
-        linked_metadata = _require_regular_destination(directory, name, require_single_link=False)
-        if (linked_metadata.st_dev, linked_metadata.st_ino) != (
-            destination_metadata.st_dev,
-            destination_metadata.st_ino,
-        ) or linked_metadata.st_nlink != 2:
-            raise PublicationError("official baseline destination identity changed after rollback journal creation")
         try:
+            # From the moment the rollback link exists, every rejected
+            # transaction must restore through that link.  In particular, the
+            # post-link destination revalidation belongs inside this recovery
+            # boundary: an unlink or swap at that point must not cause the
+            # only durable copy of the previous baseline to be discarded.
+            os.fsync(directory.descriptor)
+            if after_backup is not None:
+                after_backup()
+            linked_metadata = _require_regular_destination(directory, name, require_single_link=False)
+            if (linked_metadata.st_dev, linked_metadata.st_ino) != (
+                destination_metadata.st_dev,
+                destination_metadata.st_ino,
+            ) or linked_metadata.st_nlink != 2:
+                raise PublicationError("official baseline destination identity changed after rollback journal creation")
             os.rename(
                 temporary,
                 name,
                 src_dir_fd=directory.descriptor,
                 dst_dir_fd=directory.descriptor,
             )
-            replacement_committed = True
             if after_replace is not None:
                 after_replace()
             _require_current_publication_directory(directory)
             os.fsync(directory.descriptor)
         except BaseException:
-            if replacement_committed:
+            if backup_created:
                 try:
                     os.rename(
                         rollback,
@@ -500,12 +503,6 @@ def atomic_publish_bytes(
             os.unlink(temporary, dir_fd=directory.descriptor)
         except FileNotFoundError:
             pass
-        if backup_created and not replacement_committed:
-            try:
-                os.unlink(rollback, dir_fd=directory.descriptor)
-                os.fsync(directory.descriptor)
-            except FileNotFoundError:
-                pass
 
 
 def result_documents(payload: dict[str, Any]) -> list[dict[str, Any]]:
