@@ -513,10 +513,10 @@ mod tests {
             .font_selections
             .iter()
             .filter(|selection| {
-                selection.source == CapturedFontSource::Bundled
-                    && selection.resource == AHEM_CAPTURED_RESOURCE
-                    && selection.selected_family.as_deref() == Some("Ahem")
-                    && selection
+                selection.source == CapturedFontSource::Bundled &&
+                    selection.resource == AHEM_CAPTURED_RESOURCE &&
+                    selection.selected_family.as_deref() == Some("Ahem") &&
+                    selection
                         .requested_families
                         .iter()
                         .any(|family| family == "Ahem")
