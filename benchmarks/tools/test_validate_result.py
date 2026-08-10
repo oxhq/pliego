@@ -8,6 +8,11 @@ from __future__ import annotations
 
 from copy import deepcopy
 import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
 from pathlib import Path
 
 import validate_result
@@ -16,6 +21,8 @@ SCHEMA = json.loads(
     (Path(__file__).resolve().parents[1] / "schema" / "benchmark-result.v1.json").read_text(encoding="utf-8")
 )
 HASH = "0" * 64
+ROOT = Path(__file__).resolve().parents[2]
+CONTEXT: validate_result.ValidationContext | None = None
 
 
 def pct(value: int | float) -> dict[str, int | float]:
@@ -275,7 +282,8 @@ def result() -> dict:
 
 
 def errors(value: object) -> list[validate_result.Violation]:
-    return validate_result.validate_document(value, SCHEMA)
+    assert CONTEXT is not None
+    return validate_result.validate_document(value, SCHEMA, CONTEXT)
 
 
 def must_fail(value: object, expected: str) -> None:
@@ -289,8 +297,89 @@ def changed(value: dict, operation: object, expected: str) -> None:
     must_fail(broken, expected)
 
 
+def bind_real_context(value: dict, raw_workspace: str) -> validate_result.ValidationContext:
+    global CONTEXT
+    workspace = Path(raw_workspace)
+    frozen_root = workspace / "frozen"
+    failure_root = workspace / "failures"
+    staging = workspace / "candidate.json"
+    binary = workspace / "pliego"
+    source_directory = ROOT / "benchmarks" / "fixtures" / "minimal-static"
+    frozen_directory = frozen_root / "benchmarks" / "fixtures" / "minimal-static"
+    frozen_directory.mkdir(parents=True)
+    for name in ("input.html", "Ahem.ttf"):
+        shutil.copyfile(source_directory / name, frozen_directory / name)
+    failure_root.mkdir(mode=0o700)
+    if os.name == "posix":
+        os.chmod(failure_root, 0o700)
+    binary.write_bytes(b"test engine\n")
+    revision = value["toolchain"]["harness_revision"]
+    CONTEXT = validate_result.build_validation_context(
+        mode="staged",
+        repository_root=ROOT,
+        manifest_path=ROOT / "benchmarks" / "manifest.toml",
+        frozen_fixture_root=frozen_root.resolve(),
+        staging_output=staging.resolve(),
+        failure_evidence_root=failure_root.resolve(),
+        engine_binary=binary.resolve(),
+        harness_revision=revision,
+    )
+    contract = CONTEXT.fixtures["minimal-static"]
+    frozen_input = frozen_directory / "input.html"
+    frozen_font = frozen_directory / "Ahem.ttf"
+    input_digest, input_metadata = validate_result._bound_regular_file(frozen_input.resolve())
+    font_digest, _ = validate_result._bound_regular_file(frozen_font.resolve())
+    bundle_digest = validate_result._bundle_digest([("input.html", input_digest), ("Ahem.ttf", font_digest)])
+    engine_digest, engine_metadata = validate_result._bound_regular_file(binary.resolve())
+    cwd_metadata = frozen_directory.stat()
+    sample_root = failure_root / ".in-progress-123-0000000000000000"
+    output_directory = sample_root / "sample-0-0000000000000000-output"
+    artifact_directory = sample_root / "sample-0-0000000000000000-artifacts"
+    launch = value["samples"][0]["resource_usage"]["launch_security"]
+    value["fixture"].update(
+        id="minimal-static",
+        purpose=contract["purpose"],
+        category=contract["category"],
+        input=contract["input"],
+        input_sha256=input_digest,
+        bundle_sha256=bundle_digest,
+    )
+    value["toolchain"]["engine"].update(binary_path=str(binary.resolve()), binary_sha256=engine_digest)
+    launch["argv"] = [
+        str(binary.resolve()),
+        "render",
+        frozen_input.name,
+        "--output",
+        str(output_directory / "document.pdf"),
+        "--artifacts",
+        str(artifact_directory),
+    ]
+    launch["executable"] = {
+        "path": str(binary.resolve()),
+        "sha256": engine_digest,
+        "device": engine_metadata.st_dev,
+        "inode": engine_metadata.st_ino,
+        "bytes": engine_metadata.st_size,
+    }
+    launch["command_identity"] = {
+        "cwd": {"path": str(frozen_directory.resolve()), "device": cwd_metadata.st_dev, "inode": cwd_metadata.st_ino},
+        "input": {
+            "manifest_path": str(frozen_input.resolve()),
+            "argv_relative_path": frozen_input.name,
+            "sha256": input_digest,
+            "device": input_metadata.st_dev,
+            "inode": input_metadata.st_ino,
+        },
+        "output_directory": {"path": str(output_directory), "device": 7, "inode": 8},
+        "artifact_directory": {"path": str(artifact_directory), "device": 7, "inode": 9},
+    }
+    return CONTEXT
+
+
 def main() -> None:
     valid = result()
+    workspace = tempfile.TemporaryDirectory()
+    bind_real_context(valid, workspace.name)
     assert not errors(valid), errors(valid)
     assert validate_result.percentile([1, 3], 50) == 1
     assert validate_result.PERCENTILE_METHOD == "nearest-rank-v1"
@@ -354,7 +443,7 @@ def main() -> None:
     }
     assert not errors(timed)
 
-    changed(valid, lambda value: value["host"].update(dedicated=True), "atomic publication provenance")
+    changed(valid, lambda value: value["host"].update(dedicated=True), "staged validation forbids")
     changed(valid, lambda value: value["samples"][0].update(resource_usage=None), "resource_usage")
     changed(valid, lambda value: value["samples"][0].update(user_ms=99), "samples[0].user_ms")
     changed(valid, lambda value: value["samples"][0].update(memory_peak_bytes=99), "memory_peak_bytes")
@@ -496,6 +585,46 @@ def main() -> None:
         ),
         "command_identity.input.sha256",
     )
+    changed(
+        valid,
+        lambda value: value["samples"][0]["resource_usage"]["launch_security"]["command_identity"]["input"].update(
+            manifest_path=str((Path(tempfile.gettempdir()) / "attacker-input.html").resolve())
+        ),
+        "command_identity.input.manifest_path",
+    )
+    changed(
+        valid,
+        lambda value: value["samples"][0]["resource_usage"]["launch_security"]["command_identity"]["cwd"].update(
+            path=str(Path(tempfile.gettempdir()).resolve())
+        ),
+        "command_identity.cwd.path",
+    )
+
+    def escape_outputs(value: dict) -> None:
+        launch = value["samples"][0]["resource_usage"]["launch_security"]
+        outside = Path(tempfile.gettempdir()).resolve() / "attacker-output"
+        launch["argv"][launch["argv"].index("--output") + 1] = str(outside / "document.pdf")
+        launch["argv"][launch["argv"].index("--artifacts") + 1] = str(outside.parent / "attacker-artifacts")
+        launch["command_identity"]["output_directory"]["path"] = str(outside)
+        launch["command_identity"]["artifact_directory"]["path"] = str(outside.parent / "attacker-artifacts")
+
+    changed(valid, escape_outputs, "exact failure-evidence root")
+    changed(
+        valid,
+        lambda value: value["samples"][0]["resource_usage"]["launch_security"]["command_identity"][
+            "artifact_directory"
+        ].update(
+            device=value["samples"][0]["resource_usage"]["launch_security"]["command_identity"]["output_directory"][
+                "device"
+            ],
+            inode=value["samples"][0]["resource_usage"]["launch_security"]["command_identity"]["output_directory"][
+                "inode"
+            ],
+        ),
+        "FD identities must be disjoint",
+    )
+    changed(valid, lambda value: value["fixture"].update(bundle_sha256="1" * 64), "fixture.bundle_sha256")
+    changed(valid, lambda value: value["fixture"].update(input="attacker/input.html"), "fixture.input")
     changed(valid, lambda value: value["protocol"].update(percentile_method="linear"), "percentile_method")
     changed(
         valid,
@@ -517,6 +646,80 @@ def main() -> None:
     changed(
         bundle, lambda value: value["results"][0]["protocol"].update(sample_count=2), "results[0].protocol.sample_count"
     )
+
+    assert CONTEXT is not None
+    external = validate_result.ExternalPublication(
+        host_proof_schema="pliego.benchmark-host-proof.v1",
+        host_proof_bundle_sha256="b" * 64,
+        harness_revision=CONTEXT.harness_revision,
+        runner_id=7,
+        runner_name="pliego-pinned-01",
+    )
+    published_context = validate_result.build_validation_context(
+        mode="published",
+        repository_root=CONTEXT.repository_root,
+        manifest_path=CONTEXT.manifest_path,
+        frozen_fixture_root=CONTEXT.frozen_fixture_root,
+        staging_output=CONTEXT.staging_output,
+        failure_evidence_root=CONTEXT.failure_evidence_root,
+        engine_binary=CONTEXT.engine_binary,
+        harness_revision=CONTEXT.harness_revision,
+        external_publication=external,
+    )
+    published = deepcopy(valid)
+    published["host"]["dedicated"] = True
+    published["publication"] = external.document()
+    assert not validate_result.validate_document(published, SCHEMA, published_context)
+    invented = deepcopy(published)
+    invented["publication"]["runner_name"] = "invented-runner"
+    must_be_external = validate_result.validate_document(invented, SCHEMA, published_context)
+    assert must_be_external and "publication" in str(must_be_external[0])
+    no_external_context = validate_result.validate_document(published, SCHEMA)
+    assert no_external_context and "typed staged or external-publication context" in str(no_external_context[0])
+    staged_path = Path(workspace.name) / "staged-result.json"
+    staged_path.write_text(json.dumps(valid), encoding="utf-8")
+    staged_cli = subprocess.run(
+        [
+            sys.executable,
+            str(Path(validate_result.__file__).resolve()),
+            str(staged_path),
+            "--mode",
+            "staged",
+            "--binary",
+            str(CONTEXT.engine_binary),
+            "--frozen-fixture-root",
+            str(CONTEXT.frozen_fixture_root),
+            "--staging-out",
+            str(CONTEXT.staging_output),
+            "--failure-evidence-dir",
+            str(CONTEXT.failure_evidence_root),
+            "--revision",
+            CONTEXT.harness_revision,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert staged_cli.returncode == 0, staged_cli.stderr
+    invented_path = Path(workspace.name) / "invented-publication.json"
+    invented_path.write_text(json.dumps(invented), encoding="utf-8")
+    invented_cli = subprocess.run(
+        [sys.executable, str(Path(validate_result.__file__).resolve()), str(invented_path), "--mode", "published"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert invented_cli.returncode == 2
+    assert "derives its exact context only from --host-proof" in invented_cli.stderr
+
+    frozen_input = CONTEXT.frozen_fixture_root / "benchmarks" / "fixtures" / "minimal-static" / "input.html"
+    replacement = frozen_input.with_suffix(".replacement")
+    replacement.write_bytes(frozen_input.read_bytes())
+    os.replace(replacement, frozen_input)
+    replaced_identity = validate_result.validate_document(valid, SCHEMA, CONTEXT)
+    assert replaced_identity and "command_identity.input.inode" in "\n".join(map(str, replaced_identity))
+
+    workspace.cleanup()
 
     print("benchmark result validator self-check passed")
 

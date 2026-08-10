@@ -38,6 +38,7 @@ jobs:
           python benchmarks/tools/test_validate_result.py
           python benchmarks/tools/test_run_benchmark.py
           python benchmarks/tools/test_benchmark_publication.py
+          python benchmarks/tools/test_observer_ab.py
           python benchmarks/tools/test_resolve_release.py
           python benchmarks/tools/test_compare_parity.py
           python benchmarks/tools/test_benchmark_host_preflight.py
@@ -95,5 +96,23 @@ jobs:
                     PLIEGO_BENCHMARK_ROOT_SENTINEL=/var/lib/pliego-benchmark-root-sentinel \
                     PLIEGO_BENCHMARK_BROKER=/usr/local/libexec/pliego-cgroup-broker \
                     python3 benchmarks/tools/test_process_tree_sampler.py --live --php-integration
-           ' benchmark-live "$runner_uid" "$runner_gid" "$runner_groups"
-         test "$engine_gid" != "$runner_gid"
+            ' benchmark-live "$runner_uid" "$runner_gid" "$runner_groups"
+          test "$engine_gid" != "$runner_gid"
+
+  windows-contract:
+    runs-on: windows-2025
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+
+      - name: Check Windows fail-closed publication contract
+        run: |
+          python -m compileall -q benchmarks/tools
+          python benchmarks/tools/test_validate_result.py
+          python benchmarks/tools/test_run_benchmark.py
+          python benchmarks/tools/test_benchmark_publication.py
+          python benchmarks/tools/test_observer_ab.py
+          python benchmarks/tools/test_benchmark_host_preflight.py

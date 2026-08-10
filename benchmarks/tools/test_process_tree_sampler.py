@@ -25,6 +25,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 import benchmark_publication
+import observer_ab
 import process_tree_sampler
 import validate_result
 
@@ -917,9 +918,8 @@ os.fsync(sys.stdout.fileno())
 
 
 def acceptance_overhead_proof() -> tuple[dict, dict]:
-    pair_count = 20
-    seed = 20260808
-    rng = random.Random(seed)
+    pair_count = observer_ab.PAIR_COUNT
+    rng = random.Random(observer_ab.SEED)
     pairs: list[dict] = []
     with workload_engine() as engine:
         command = workload_command(engine, duration=1.5)
@@ -933,47 +933,9 @@ def acceptance_overhead_proof() -> tuple[dict, dict]:
                 measurements[mode] = sampled(command, observation=mode == "observation-on")
             off = measurements["observation-off"]
             on = measurements["observation-on"]
-            off_ms = float(off["tree_wall_ms"])
-            on_ms = float(on["tree_wall_ms"])
-            sampler_cpu_ms = float(on["sampler_cpu_user_ms"]) + float(on["sampler_cpu_sys_ms"])
-            off_executable = off["launch_security"]["executable"]["sha256"]
-            on_executable = on["launch_security"]["executable"]["sha256"]
-            off_input = off["launch_security"]["command_identity"]["input"]["sha256"]
-            on_input = on["launch_security"]["command_identity"]["input"]["sha256"]
-            assert off["method"] == on["method"] == "linux-cgroup-v2-v2"
-            assert off_executable == on_executable
-            assert off_input == on_input
-            pairs.append(
-                {
-                    "index": index,
-                    "order": order,
-                    "observation_off_tree_wall_ms": off_ms,
-                    "observation_on_tree_wall_ms": on_ms,
-                    "overhead_percent": (on_ms - off_ms) * 100.0 / off_ms,
-                    "sampler_cpu_percent_of_tree_wall": sampler_cpu_ms * 100.0 / on_ms,
-                    "off_cgroup_path": off["cgroup_path"],
-                    "on_cgroup_path": on["cgroup_path"],
-                    "off_executable_sha256": off_executable,
-                    "on_executable_sha256": on_executable,
-                    "off_input_sha256": off_input,
-                    "on_input_sha256": on_input,
-                    "boundaries": "same-broker-drop-cgroup-sealed-exec; observation flag only",
-                }
-            )
-    overhead = [float(pair["overhead_percent"]) for pair in pairs]
+            pairs.append(observer_ab.measurement_pair(index, order, off, on))
     sampler_cpu = [float(pair["sampler_cpu_percent_of_tree_wall"]) for pair in pairs]
-    overhead_p95 = validate_result.percentile(overhead, 95)
-    observer_effect = {
-        "method": "randomized-paired-observation-v2",
-        "seed": seed,
-        "pair_count": pair_count,
-        "workload_duration_seconds": 1.5,
-        "percentile_method": validate_result.PERCENTILE_METHOD,
-        "p95_overhead_percent": round(overhead_p95, 3),
-        "threshold_percent_exclusive": 2.0,
-        "passed": overhead_p95 < 2.0,
-        "pairs": pairs,
-    }
+    observer_effect = observer_ab.build_measurements(pairs, duration_seconds=1.5)
     sampler_cpu_diagnostic = {
         "method": "sampler-process-cpu-divided-by-tree-wall-derived",
         "percentile_method": validate_result.PERCENTILE_METHOD,
@@ -984,7 +946,12 @@ def acceptance_overhead_proof() -> tuple[dict, dict]:
     return observer_effect, sampler_cpu_diagnostic
 
 
-def main(live: bool, php_integration: bool, acceptance_overhead: bool) -> None:
+def main(
+    live: bool,
+    php_integration: bool,
+    acceptance_overhead: bool,
+    observer_measurements_out: Path | None,
+) -> None:
     fixture_proofs()
     proof = live_cgroup_proofs() if live or acceptance_overhead else None
     if php_integration:
@@ -994,7 +961,18 @@ def main(live: bool, php_integration: bool, acceptance_overhead: bool) -> None:
         observer_effect, sampler_cpu = acceptance_overhead_proof()
         output["observer_effect"] = observer_effect
         output["sampler_cpu_diagnostic"] = sampler_cpu
+        if observer_measurements_out is not None:
+            requested = observer_measurements_out
+            destination = requested.resolve(strict=False)
+            if not requested.is_absolute() or requested != destination:
+                raise AssertionError("observer measurements output must be absolute and canonical")
+            benchmark_publication.atomic_write_bytes(
+                destination,
+                json.dumps(observer_effect, indent=2, ensure_ascii=False).encode("utf-8") + b"\n",
+            )
         assert observer_effect["passed"], observer_effect
+    elif observer_measurements_out is not None:
+        raise AssertionError("--observer-measurements-out requires --acceptance-overhead")
     print(json.dumps(output, indent=2))
 
 
@@ -1003,6 +981,7 @@ if __name__ == "__main__":
     parser.add_argument("--live", action="store_true")
     parser.add_argument("--php-integration", action="store_true")
     parser.add_argument("--acceptance-overhead", action="store_true")
+    parser.add_argument("--observer-measurements-out", type=Path)
     parser.add_argument("--workload-child", nargs=2, metavar=("MEBIBYTES", "DURATION"))
     parser.add_argument("--workload-parent", nargs=2, metavar=("MEBIBYTES", "DURATION"))
     parser.add_argument("--workload-leak", metavar="PID_PATH")
@@ -1025,4 +1004,4 @@ if __name__ == "__main__":
         raise SystemExit(detached_work(float(args.workload_detached[0]), args.workload_detached[1]))
     if args.workload_hang:
         raise SystemExit(hanging_tree(args.workload_hang))
-    main(args.live, args.php_integration, args.acceptance_overhead)
+    main(args.live, args.php_integration, args.acceptance_overhead, args.observer_measurements_out)

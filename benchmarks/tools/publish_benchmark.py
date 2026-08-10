@@ -17,9 +17,11 @@ TOOLS = Path(__file__).resolve().parent
 ROOT = TOOLS.parents[1]
 DEFAULT_SCHEMA = ROOT / "benchmarks" / "schema" / "benchmark-result.v1.json"
 DEFAULT_HOST_SCHEMA = ROOT / "benchmarks" / "schema" / "benchmark-host-proof.v1.json"
+DEFAULT_OBSERVER_SCHEMA = ROOT / "benchmarks" / "schema" / "benchmark-observer-proof.v1.json"
 
 sys.path.insert(0, str(TOOLS))
 import benchmark_publication  # noqa: E402
+import observer_ab  # noqa: E402
 import validate_host_proof  # noqa: E402
 import validate_result  # noqa: E402
 
@@ -29,6 +31,18 @@ MAX_CANDIDATE_BYTES = 512 * 1024 * 1024
 class BoundCandidate(NamedTuple):
     document: dict[str, Any]
     binding: dict[str, Any]
+
+
+class BenchmarkCommandContext(NamedTuple):
+    engine_binary: Path
+    frozen_fixture_root: Path
+    staging_output: Path
+    failure_evidence_root: Path
+
+
+class BaselineDestination(NamedTuple):
+    directory: Path
+    name: str
 
 
 def load_bound_candidate(path: Path) -> BoundCandidate:
@@ -100,6 +114,21 @@ def require_benchmark_command(proof: dict[str, Any], candidate: Path) -> tuple[s
     return tuple(argv)
 
 
+def benchmark_command_context(argv: tuple[str, ...]) -> BenchmarkCommandContext:
+    if not validate_host_proof.canonical_benchmark_command(argv):
+        raise benchmark_publication.PublicationError("cannot extract paths from a noncanonical benchmark command")
+
+    def value(flag: str) -> Path:
+        return Path(argv[argv.index(flag) + 1])
+
+    return BenchmarkCommandContext(
+        engine_binary=value("--binary"),
+        frozen_fixture_root=value("--frozen-fixture-root"),
+        staging_output=value("--staging-out"),
+        failure_evidence_root=value("--failure-evidence-dir"),
+    )
+
+
 def require_accepted_host_proof(proof: dict[str, Any], *, allow_fixture: bool) -> None:
     if proof.get("status") != "accepted" or proof.get("mode") != "production":
         raise benchmark_publication.PublicationError("only an accepted production host proof can publish")
@@ -125,14 +154,18 @@ def require_candidate_binding(proof: dict[str, Any], binding: dict[str, Any]) ->
         raise benchmark_publication.PublicationError("staged candidate differs from the host-bound digest")
 
 
-def require_baseline_output(path: Path) -> Path:
+def require_baseline_output(path: Path) -> BaselineDestination:
     baselines = (ROOT / "benchmarks" / "baselines").resolve(strict=True)
-    output = path.resolve(strict=False)
-    if output.parent != baselines or output.suffix != ".json":
+    output = path if path.is_absolute() else Path.cwd() / path
+    try:
+        parent = output.parent.resolve(strict=True)
+    except OSError as error:
+        raise benchmark_publication.PublicationError(f"cannot bind official baselines directory: {error}") from error
+    if output.parent != parent or parent != baselines or Path(output.name).suffix != ".json":
         raise benchmark_publication.PublicationError("official output must be one JSON file in benchmarks/baselines")
-    if path.is_symlink() or (output.exists() and not output.is_file()):
-        raise benchmark_publication.PublicationError("official baseline output is not a regular non-symlink path")
-    return output
+    if not output.name or Path(output.name).name != output.name:
+        raise benchmark_publication.PublicationError("official baseline output must be one basename")
+    return BaselineDestination(parent, output.name)
 
 
 def publish(
@@ -141,6 +174,8 @@ def publish(
     output_path: Path,
     result_schema_path: Path,
     host_schema_path: Path,
+    observer_proof_path: Path,
+    observer_schema_path: Path,
     *,
     bound_candidate: BoundCandidate | None = None,
 ) -> None:
@@ -151,7 +186,9 @@ def publish(
     proof = load_object(proof_path, "host proof")
     require_accepted_host_proof(proof, allow_fixture=False)
     command = require_benchmark_command(proof, candidate_path)
+    command_context = benchmark_command_context(command)
     require_candidate_binding(proof, bound_candidate.binding)
+    benchmark_publication.require_private_failure_root(command_context.failure_evidence_root)
 
     host_schema = load_object(host_schema_path, "host-proof schema")
     host_violations = validate_host_proof.validate_document(
@@ -163,25 +200,80 @@ def publish(
     )
     if host_violations:
         raise benchmark_publication.PublicationError(f"host proof is not publishable: {host_violations[0]}")
+    observer_document, _ = observer_ab.load_bound_object(observer_proof_path, "observer proof")
+    observer_schema = load_object(observer_schema_path, "observer-proof schema")
+    observer_violations = observer_ab.validate_proof(
+        observer_document,
+        observer_schema,
+        proof_path,
+        observer_ab.SOURCE_BROKER,
+        observer_ab.INSTALLED_BROKER,
+    )
+    if observer_violations:
+        raise benchmark_publication.PublicationError(
+            f"observer A/B prerequisite is not publishable: {observer_violations[0]}"
+        )
 
+    revision = proof["identity"]["sha"]
+    try:
+        staged_context = validate_result.build_validation_context(
+            mode="staged",
+            repository_root=ROOT,
+            manifest_path=ROOT / "benchmarks" / "manifest.toml",
+            frozen_fixture_root=command_context.frozen_fixture_root,
+            staging_output=command_context.staging_output,
+            failure_evidence_root=command_context.failure_evidence_root,
+            engine_binary=command_context.engine_binary,
+            harness_revision=revision,
+        )
+    except ValueError as error:
+        raise benchmark_publication.PublicationError(f"host-bound validation context is invalid: {error}") from error
+    result_schema = load_object(result_schema_path, "result schema")
+    staged_violations = validate_result.validate_document(candidate, result_schema, staged_context)
+    if staged_violations:
+        raise benchmark_publication.PublicationError(f"staged candidate is invalid: {staged_violations[0]}")
     benchmark_publication.require_supported(candidate)
     digest = benchmark_publication.host_proof_bundle_digest(proof_path)
     bound = benchmark_publication.bind_publication(candidate, proof, digest)
-    result_schema = load_object(result_schema_path, "result schema")
-    result_violations = validate_result.validate_document(bound, result_schema)
+    runner = proof["runner"]
+    external = validate_result.ExternalPublication(
+        host_proof_schema="pliego.benchmark-host-proof.v1",
+        host_proof_bundle_sha256=digest,
+        harness_revision=revision,
+        runner_id=runner["id"],
+        runner_name=runner["name"],
+    )
+    try:
+        published_context = validate_result.build_validation_context(
+            mode="published",
+            repository_root=ROOT,
+            manifest_path=ROOT / "benchmarks" / "manifest.toml",
+            frozen_fixture_root=command_context.frozen_fixture_root,
+            staging_output=command_context.staging_output,
+            failure_evidence_root=command_context.failure_evidence_root,
+            engine_binary=command_context.engine_binary,
+            harness_revision=revision,
+            external_publication=external,
+        )
+    except ValueError as error:
+        raise benchmark_publication.PublicationError(f"external publication context is invalid: {error}") from error
+    result_violations = validate_result.validate_document(bound, result_schema, published_context)
     if result_violations:
         raise benchmark_publication.PublicationError(f"bound candidate is invalid: {result_violations[0]}")
     output = require_baseline_output(output_path)
-    benchmark_publication.atomic_write_bytes(
-        output,
-        json.dumps(bound, indent=2, ensure_ascii=False).encode("utf-8") + b"\n",
-    )
+    with benchmark_publication.bind_publication_directory(output.directory) as directory:
+        benchmark_publication.atomic_publish_bytes(
+            directory,
+            output.name,
+            json.dumps(bound, indent=2, ensure_ascii=False).encode("utf-8") + b"\n",
+        )
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--candidate", required=True, type=Path)
     parser.add_argument("--host-proof", required=True, type=Path)
+    parser.add_argument("--observer-proof", required=True, type=Path)
     parser.add_argument("--out", required=True, type=Path)
     parser.add_argument("--failure-evidence", required=True, type=Path)
     args = parser.parse_args()
@@ -201,6 +293,8 @@ def main() -> int:
             args.out,
             DEFAULT_SCHEMA,
             DEFAULT_HOST_SCHEMA,
+            args.observer_proof,
+            DEFAULT_OBSERVER_SCHEMA,
             bound_candidate=bound_candidate,
         )
     except benchmark_publication.PublicationError as error:

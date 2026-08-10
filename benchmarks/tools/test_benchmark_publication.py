@@ -49,10 +49,42 @@ def main() -> None:
         try:
             benchmark_publication.require_supported(failed)
         except benchmark_publication.PublicationError:
-            evidence = benchmark_publication.write_failure_evidence(directory / "failures", failed, "correctness")
+            previous_umask = os.umask(0o022)
+            try:
+                evidence = benchmark_publication.write_failure_evidence(directory / "failures", failed, "correctness")
+            finally:
+                os.umask(previous_umask)
         else:
             raise AssertionError("failed correctness was accepted")
+        if os.name == "posix":
+            assert (directory / "failures").stat().st_mode & 0o777 == 0o700
         assert baseline.read_bytes() == original
+
+        permissive_root = directory / "permissive-failures"
+        permissive_root.mkdir(mode=0o755)
+        if os.name == "posix":
+            os.chmod(permissive_root, 0o755)
+            try:
+                benchmark_publication.require_private_failure_root(permissive_root)
+            except benchmark_publication.PublicationError as error:
+                assert "mode 0700" in str(error)
+            else:
+                raise AssertionError("an existing permissive failure root was accepted")
+            outside_failures = directory / "outside-failures"
+            outside_failures.mkdir()
+            linked_parent = directory / "linked-failure-parent"
+            linked_parent.symlink_to(outside_failures, target_is_directory=True)
+            try:
+                benchmark_publication.write_failure_evidence(
+                    linked_parent / "attempts",
+                    failed,
+                    "symlink parent",
+                )
+            except benchmark_publication.PublicationError:
+                pass
+            else:
+                raise AssertionError("a symlinked failure parent was accepted")
+            assert not (outside_failures / "attempts").exists()
         assert (evidence / "candidate.json").is_file()
         assert (evidence / "SHA256SUMS").read_text(encoding="ascii").split()[0] == benchmark_publication.sha256_file(
             evidence / "candidate.json"
@@ -125,6 +157,106 @@ def main() -> None:
         benchmark_publication.atomic_write_bytes(baseline, benchmark_publication.canonical_json_bytes(bound))
         assert json.loads(baseline.read_text(encoding="utf-8"))["status"] == "supported"
 
+        publication_parent = directory / "bound-baselines"
+        publication_parent.mkdir()
+        published = publication_parent / "fixture.json"
+        published.write_bytes(original)
+        if os.name == "posix":
+            with benchmark_publication.bind_publication_directory(publication_parent.resolve()) as bound_directory:
+                try:
+                    benchmark_publication.atomic_publish_bytes(
+                        bound_directory,
+                        published.name,
+                        b'{"official":"interrupted"}\n',
+                        simulate_crash=True,
+                    )
+                except benchmark_publication.PublicationInterrupted:
+                    pass
+                else:
+                    raise AssertionError("FD-bound simulated crash did not interrupt")
+            assert published.read_bytes() == original
+            assert not list(publication_parent.glob(".*.tmp"))
+
+            outside = directory / "outside-sentinel.json"
+            outside.write_bytes(b"outside sentinel\n")
+            published.unlink()
+            published.symlink_to(outside)
+            with benchmark_publication.bind_publication_directory(publication_parent.resolve()) as bound_directory:
+                try:
+                    benchmark_publication.atomic_publish_bytes(bound_directory, published.name, b"replacement\n")
+                except benchmark_publication.PublicationError:
+                    pass
+                else:
+                    raise AssertionError("symlink baseline destination was accepted")
+            assert outside.read_bytes() == b"outside sentinel\n"
+
+            published.unlink()
+            published.write_bytes(original)
+            with benchmark_publication.bind_publication_directory(publication_parent.resolve()) as bound_directory:
+
+                def replace_destination() -> None:
+                    published.unlink()
+                    published.symlink_to(outside)
+
+                try:
+                    benchmark_publication.atomic_publish_bytes(
+                        bound_directory,
+                        published.name,
+                        b"raced replacement\n",
+                        before_replace=replace_destination,
+                    )
+                except benchmark_publication.PublicationError:
+                    pass
+                else:
+                    raise AssertionError("destination symlink replacement race was accepted")
+            assert outside.read_bytes() == b"outside sentinel\n"
+
+            published.unlink()
+            published.write_bytes(original)
+            moved_parent = directory / "bound-baselines-original"
+            replacement_sentinel = b"replacement directory sentinel\n"
+            with benchmark_publication.bind_publication_directory(publication_parent.resolve()) as bound_directory:
+
+                def replace_parent() -> None:
+                    publication_parent.rename(moved_parent)
+                    publication_parent.mkdir()
+                    (publication_parent / published.name).write_bytes(replacement_sentinel)
+
+                try:
+                    benchmark_publication.atomic_publish_bytes(
+                        bound_directory,
+                        published.name,
+                        b'{"official":"escaped"}\n',
+                        before_replace=replace_parent,
+                    )
+                except benchmark_publication.PublicationError as error:
+                    assert "directory identity changed" in str(error)
+                else:
+                    raise AssertionError("parent replacement was accepted")
+            assert (moved_parent / published.name).read_bytes() == original
+            assert (publication_parent / published.name).read_bytes() == replacement_sentinel
+            assert not list(moved_parent.glob(".*.tmp"))
+
+            successful_parent = directory / "successful-baselines"
+            successful_parent.mkdir()
+            successful_baseline = successful_parent / "fixture.json"
+            successful_baseline.write_bytes(original)
+            with benchmark_publication.bind_publication_directory(successful_parent.resolve()) as bound_directory:
+                benchmark_publication.atomic_publish_bytes(
+                    bound_directory,
+                    successful_baseline.name,
+                    b'{"official":"published"}\n',
+                )
+            assert successful_baseline.read_bytes() == b'{"official":"published"}\n'
+            assert not list(successful_parent.glob(".*.tmp"))
+        else:
+            try:
+                benchmark_publication.bind_publication_directory(publication_parent.resolve())
+            except benchmark_publication.PublicationError as error:
+                assert "requires POSIX" in str(error)
+            else:
+                raise AssertionError("Windows accepted a publication path without directory-FD authority")
+
         candidate = directory / "candidate.json"
         candidate.write_text('{"candidate":1}\n', encoding="utf-8")
         command = [
@@ -138,6 +270,8 @@ def main() -> None:
             str(candidate.resolve()),
             "--failure-evidence-dir",
             str((directory / "failures").resolve()),
+            "--observer-measurements-out",
+            str((directory / "observer-measurements.json").resolve()),
         ]
         digest_proof = {
             "status": "accepted",
@@ -189,7 +323,9 @@ def main() -> None:
         else:
             raise AssertionError("publication outside benchmarks/baselines was accepted")
         official = publish_benchmark.ROOT / "benchmarks" / "baselines" / "fixture.json"
-        assert publish_benchmark.require_baseline_output(official) == official.resolve(strict=False)
+        destination = publish_benchmark.require_baseline_output(official)
+        assert destination.directory == official.parent.resolve(strict=True)
+        assert destination.name == official.name
 
     print("benchmark publication adversarial checks passed")
 

@@ -17,6 +17,7 @@ Usage:
         --frozen-fixture-root /var/lib/pliego-benchmark-fixtures \
         --staging-out /var/tmp/pliego-benchmark/candidate.json \
         --failure-evidence-dir /var/tmp/pliego-benchmark/failures \
+        --observer-measurements-out /var/tmp/pliego-benchmark/observer-measurements.json \
         [--fixture invoice-showcase] [--samples N] [--warmup N] \
         [--php /usr/bin/php]
 
@@ -397,6 +398,11 @@ def main() -> int:
     )
     parser.add_argument("--staging-out", required=True, help="successful candidate path outside baselines")
     parser.add_argument("--failure-evidence-dir", required=True, help="separate failed-attempt evidence root")
+    parser.add_argument(
+        "--observer-measurements-out",
+        required=True,
+        help="host-bound raw 20-pair observer A/B evidence outside the committed tree",
+    )
     parser.add_argument("--fixture", action="append", help="restrict to these fixture ids (repeatable)")
     parser.add_argument("--samples", type=int, help="override samples per fixture")
     parser.add_argument("--warmup", type=int, help="override warmup iterations")
@@ -418,9 +424,13 @@ def main() -> int:
     if not benchmark_clean:
         fail("staging requires a clean benchmarks tree so the harness and fixtures have one exact identity")
 
-    binary = Path(args.binary)
-    if not binary.is_file():
-        fail(f"binary not found: {binary}")
+    requested_binary = Path(args.binary)
+    try:
+        binary = requested_binary.resolve(strict=True)
+    except OSError:
+        fail(f"binary not found: {requested_binary}")
+    if not requested_binary.is_absolute() or requested_binary != binary or not binary.is_file():
+        fail("binary must be one absolute canonical file")
 
     manifest = tomllib.loads(MANIFEST.read_text(encoding="utf-8"))
     target = manifest["targets"].get(args.target)
@@ -432,21 +442,28 @@ def main() -> int:
     php = Path(args.php)
     schema = Path(args.schema)
     frozen_root = args.frozen_fixture_root.resolve(strict=True)
+    if not args.frozen_fixture_root.is_absolute() or args.frozen_fixture_root != frozen_root:
+        fail("frozen fixture root must be absolute and canonical")
     requested_staging = Path(args.staging_out)
     requested_failure_root = Path(args.failure_evidence_dir)
+    requested_observer = Path(args.observer_measurements_out)
     staging_path = requested_staging.resolve(strict=False)
     failure_root = requested_failure_root.resolve(strict=False)
+    observer_path = requested_observer.resolve(strict=False)
     if (
         not requested_staging.is_absolute()
         or requested_staging != staging_path
         or not requested_failure_root.is_absolute()
         or requested_failure_root != failure_root
+        or not requested_observer.is_absolute()
+        or requested_observer != observer_path
     ):
-        fail("staging and failure-evidence paths must be absolute and canonical")
+        fail("staging, failure-evidence, and observer paths must be absolute and canonical")
     benchmark_root = (ROOT / "benchmarks").resolve()
     for candidate, label in (
         (staging_path, "staging"),
         (failure_root, "failure evidence"),
+        (observer_path, "observer measurements"),
     ):
         try:
             candidate.relative_to(benchmark_root)
@@ -456,11 +473,19 @@ def main() -> int:
             fail(f"{label} must remain outside the committed benchmarks tree")
     if failure_root == staging_path or failure_root in staging_path.parents or staging_path in failure_root.parents:
         fail("successful staging and non-atomic failure evidence must use disjoint paths")
-    failure_root.mkdir(parents=True, exist_ok=True, mode=0o700)
-    if os.name == "posix":
-        metadata = failure_root.stat()
-        if metadata.st_uid != os.geteuid() or metadata.st_mode & 0o077:
-            fail("failure-evidence root must be runner-owned and private")
+    if any(
+        first == second or first in second.parents or second in first.parents
+        for first, second in (
+            (observer_path, staging_path),
+            (observer_path, failure_root),
+            (observer_path, frozen_root),
+        )
+    ):
+        fail("observer measurements, staging, failure evidence, and frozen fixtures must be disjoint")
+    try:
+        benchmark_publication.require_private_failure_root(failure_root)
+    except benchmark_publication.PublicationError as error:
+        fail(str(error))
     retained_workspace = failure_root / f".in-progress-{os.getpid()}-{secrets.token_hex(8)}"
     retained_workspace.mkdir(mode=0o700)
     fixture_ids = args.fixture or sorted(manifest["fixtures"].keys())
@@ -562,7 +587,24 @@ def main() -> int:
             "results": results,
         }
     )
-    violations = validate_result.validate_document(payload, json.loads(schema.read_text(encoding="utf-8")))
+    try:
+        validation_context = validate_result.build_validation_context(
+            mode="staged",
+            repository_root=ROOT,
+            manifest_path=MANIFEST,
+            frozen_fixture_root=frozen_root,
+            staging_output=staging_path,
+            failure_evidence_root=failure_root,
+            engine_binary=binary,
+            harness_revision=revision,
+        )
+    except ValueError as error:
+        fail(f"benchmark validation context is invalid: {error}")
+    violations = validate_result.validate_document(
+        payload,
+        json.loads(schema.read_text(encoding="utf-8")),
+        validation_context,
+    )
     if violations:
         fail(f"benchmark output failed validation: {violations[0]}")
     failed = [result["fixture"]["id"] for result in results if not result["aggregates"]["correctness"]["passed"]]
@@ -585,6 +627,27 @@ def main() -> int:
         print(f"unexpected retained sample output; retained {evidence}", file=sys.stderr)
         return 1
     retained_workspace.rmdir()
+    observer_run = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "benchmarks" / "tools" / "test_process_tree_sampler.py"),
+            "--acceptance-overhead",
+            "--observer-measurements-out",
+            str(observer_path),
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=600,
+    )
+    if observer_run.returncode != 0:
+        evidence = benchmark_publication.write_failure_evidence(
+            failure_root,
+            payload,
+            "observer A/B publication prerequisite failed: " + observer_run.stderr[-4000:],
+        )
+        print(f"observer A/B gate failed; retained {evidence}", file=sys.stderr)
+        return 1
     benchmark_publication.atomic_write_bytes(out, json.dumps(payload, indent=2).encode("utf-8") + b"\n")
     print(f"staged {out}")
     return 0

@@ -35,6 +35,7 @@ BENCHMARK_COMMAND_FLAGS = (
     "--frozen-fixture-root",
     "--staging-out",
     "--failure-evidence-dir",
+    "--observer-measurements-out",
 )
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -67,6 +68,12 @@ def benchmark_candidate_path(argv: list[str] | tuple[str, ...]) -> Path | None:
     if not canonical_benchmark_command(argv):
         return None
     return Path(argv[argv.index("--staging-out") + 1])
+
+
+def observer_measurements_path(argv: list[str] | tuple[str, ...]) -> Path | None:
+    if not canonical_benchmark_command(argv):
+        return None
+    return Path(argv[argv.index("--observer-measurements-out") + 1])
 
 
 def sha256_file(path: Path) -> str:
@@ -195,6 +202,12 @@ def validate_semantics(
                 violations.append("accepted benchmark proof omitted the staged candidate digest")
             elif candidate.get("path") != expected_path:
                 violations.append("accepted benchmark proof candidate path differs from its command")
+            observer = proof.get("command", {}).get("observer_measurements")
+            expected_observer_path = str(observer_measurements_path(expected_command))
+            if not isinstance(observer, dict):
+                violations.append("accepted benchmark proof omitted the observer measurement digest")
+            elif observer.get("path") != expected_observer_path:
+                violations.append("accepted observer measurement path differs from its command")
         if proof.get("command", {}).get("exit_code") != 0:
             violations.append("accepted proof command did not exit zero")
         if proof.get("failure") is not None:

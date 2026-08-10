@@ -169,13 +169,19 @@ class BenchmarkHostPreflightTests(unittest.TestCase):
             fixture = make_fixture(root)
             output = root / "out"
             candidate = (root / "candidate.json").resolve()
+            observer = (root / "observer-measurements.json").resolve()
             runtime_path = fixture / "runtime.json"
             runtime = json.loads(runtime_path.read_text(encoding="utf-8"))
             runtime["fixture_command"] = [
                 sys.executable,
                 "-c",
-                "import pathlib,sys; pathlib.Path(sys.argv[1]).write_text('{\"candidate\":true}\\n')",
+                (
+                    "import pathlib,sys; "
+                    "pathlib.Path(sys.argv[1]).write_text('{\"candidate\":true}\\n'); "
+                    "pathlib.Path(sys.argv[2]).write_text('{}\\n')"
+                ),
                 str(candidate),
+                str(observer),
             ]
             write_json(runtime_path, runtime)
             command = [
@@ -189,6 +195,8 @@ class BenchmarkHostPreflightTests(unittest.TestCase):
                 str(candidate),
                 "--failure-evidence-dir",
                 str((root / "failures").resolve()),
+                "--observer-measurements-out",
+                str(observer),
             ]
             result = invoke(fixture, output, *command)
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -199,6 +207,7 @@ class BenchmarkHostPreflightTests(unittest.TestCase):
                 document["command"]["candidate"]["sha256"],
                 validate_host_proof.sha256_file(candidate),
             )
+            self.assertEqual(document["command"]["observer_measurements"]["path"], str(observer))
             schema = json.loads((TOOLS.parent / "schema" / "benchmark-host-proof.v1.json").read_text(encoding="utf-8"))
             self.assertEqual(
                 validate_host_proof.validate_document(
@@ -476,6 +485,15 @@ class BenchmarkHostPreflightTests(unittest.TestCase):
         self.assertIn("negative-missing-thermal", workflow)
         self.assertIn("--forbid-event samples.started", workflow)
         self.assertIn("-- python3 benchmarks/tools/test_process_tree_sampler.py --acceptance-overhead", workflow)
+        self.assertIn('--observer-measurements-out "$OBSERVER_MEASUREMENTS"', workflow)
+        self.assertIn("python3 benchmarks/tools/observer_ab.py bind", workflow)
+        self.assertIn('--observer-proof "$OBSERVER_PROOF"', workflow)
+        self.assertIn("if: success() && inputs.mode == 'production'", workflow)
+        always_upload = workflow.split("- name: Retain host proof and failure evidence", 1)[1].split(
+            "- name: Retain successful candidate and publication", 1
+        )[0]
+        self.assertNotIn("benchmarks/baselines/", always_upload)
+        self.assertNotIn("pliego-candidate-", always_upload)
 
 
 if __name__ == "__main__":

@@ -12,18 +12,25 @@ required, properties, additionalProperties, minimum, minLength, minItems,
 maxItems, $ref
 resolution into `definitions`, and pattern.
 
-Usage:
-    python3 benchmarks/tools/validate_result.py <result.json> [<schema.json>]
+Validation is authority-aware: staged results require the exact benchmark
+command context, while published results additionally require the external
+dedicated-host proof bundle that authorized publication.
 """
 
 from __future__ import annotations
 
+import argparse
+import hashlib
 import json
 import math
+import os
 import re
+import stat
 import statistics
 import sys
+import tomllib
 from collections import Counter
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -39,6 +46,112 @@ class Violation:
 
     def __str__(self) -> str:
         return f"{self.path}: {self.message}"
+
+
+@dataclass(frozen=True)
+class ExternalPublication:
+    host_proof_schema: str
+    host_proof_bundle_sha256: str
+    harness_revision: str
+    runner_id: int
+    runner_name: str
+
+    def document(self) -> dict[str, Any]:
+        return {
+            "host_proof_schema": self.host_proof_schema,
+            "host_proof_bundle_sha256": self.host_proof_bundle_sha256,
+            "harness_revision": self.harness_revision,
+            "runner_id": self.runner_id,
+            "runner_name": self.runner_name,
+        }
+
+
+@dataclass(frozen=True)
+class ValidationContext:
+    mode: str
+    repository_root: Path
+    manifest_path: Path
+    frozen_fixture_root: Path
+    staging_output: Path
+    failure_evidence_root: Path
+    engine_binary: Path
+    harness_revision: str
+    fixtures: dict[str, dict[str, Any]]
+    external_publication: ExternalPublication | None = None
+
+
+def _canonical_path(path: Path, label: str, *, strict: bool) -> Path:
+    try:
+        resolved = path.resolve(strict=strict)
+    except OSError as error:
+        raise ValueError(f"{label} cannot be resolved: {error}") from error
+    if not path.is_absolute() or path != resolved:
+        raise ValueError(f"{label} must be absolute and canonical")
+    return resolved
+
+
+def _overlap(first: Path, second: Path) -> bool:
+    return first == second or first in second.parents or second in first.parents
+
+
+def build_validation_context(
+    *,
+    mode: str,
+    repository_root: Path,
+    manifest_path: Path,
+    frozen_fixture_root: Path,
+    staging_output: Path,
+    failure_evidence_root: Path,
+    engine_binary: Path,
+    harness_revision: str,
+    external_publication: ExternalPublication | None = None,
+) -> ValidationContext:
+    """Bind result validation to the already-authorized benchmark command."""
+
+    if mode not in {"staged", "published"}:
+        raise ValueError("validation mode must be staged or published")
+    if (mode == "published") is not (external_publication is not None):
+        raise ValueError("published mode requires exactly one external publication proof")
+    if re.fullmatch(r"[0-9a-f]{40}", harness_revision) is None:
+        raise ValueError("validation context requires one exact 40-character revision")
+    repository = _canonical_path(repository_root, "repository root", strict=True)
+    manifest = _canonical_path(manifest_path, "benchmark manifest", strict=True)
+    if manifest != repository / "benchmarks" / "manifest.toml":
+        raise ValueError("benchmark manifest must be the canonical repository manifest")
+    frozen = _canonical_path(frozen_fixture_root, "frozen fixture root", strict=True)
+    staging = _canonical_path(staging_output, "staging output", strict=False)
+    failures = _canonical_path(failure_evidence_root, "failure-evidence root", strict=True)
+    binary = _canonical_path(engine_binary, "engine binary", strict=True)
+    for first, second, label in (
+        (frozen, staging, "frozen fixture root and staging output"),
+        (frozen, failures, "frozen fixture root and failure-evidence root"),
+        (staging, failures, "staging output and failure-evidence root"),
+    ):
+        if _overlap(first, second):
+            raise ValueError(f"{label} must be disjoint")
+    if not frozen.is_dir() or not failures.is_dir() or not binary.is_file():
+        raise ValueError("validation context paths do not identify the required directory/file types")
+    try:
+        manifest_document = tomllib.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError) as error:
+        raise ValueError(f"benchmark manifest is unreadable: {error}") from error
+    fixtures = manifest_document.get("fixtures")
+    if not isinstance(fixtures, dict):
+        raise ValueError("benchmark manifest omitted its fixture contracts")
+    if external_publication is not None and external_publication.harness_revision != harness_revision:
+        raise ValueError("external publication proof revision differs from the benchmark command")
+    return ValidationContext(
+        mode=mode,
+        repository_root=repository,
+        manifest_path=manifest,
+        frozen_fixture_root=frozen,
+        staging_output=staging,
+        failure_evidence_root=failures,
+        engine_binary=binary,
+        harness_revision=harness_revision,
+        fixtures=fixtures,
+        external_publication=external_publication,
+    )
 
 
 def percentile(values: list[int | float], p: float) -> float:
@@ -61,6 +174,220 @@ def percentiles(values: list[int | float | None]) -> dict[str, float]:
         "max": max(measured),
         "mean": statistics.fmean(measured),
     }
+
+
+def _bound_regular_file(path: Path) -> tuple[str, os.stat_result]:
+    if path != path.resolve(strict=True) or path.is_symlink():
+        raise ValueError(f"bound file is not canonical and non-following: {path}")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+    descriptor = os.open(path, flags)
+    digest = hashlib.sha256()
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            raise ValueError(f"bound path is not a regular file: {path}")
+        while chunk := os.read(descriptor, 1024 * 1024):
+            digest.update(chunk)
+        after = os.fstat(descriptor)
+        current = os.stat(path, follow_symlinks=False)
+    finally:
+        os.close(descriptor)
+    identity = (before.st_dev, before.st_ino, before.st_size)
+    if identity != (after.st_dev, after.st_ino, after.st_size) or identity != (
+        current.st_dev,
+        current.st_ino,
+        current.st_size,
+    ):
+        raise ValueError(f"bound file identity changed while hashing: {path}")
+    return digest.hexdigest(), before
+
+
+def _manifest_relative_path(value: str, label: str) -> Path:
+    relative = PurePosixPath(value)
+    if relative.is_absolute() or not relative.parts or any(part in {"", ".", ".."} for part in relative.parts):
+        raise ValueError(f"{label} is not one safe manifest-relative path")
+    return Path(*relative.parts)
+
+
+def _bundle_digest(paths: list[tuple[str, str]]) -> str:
+    digest = hashlib.sha256()
+    for relative, file_digest in sorted(paths):
+        digest.update(relative.encode("utf-8") + b"\0")
+        digest.update(bytes.fromhex(file_digest))
+    return digest.hexdigest()
+
+
+def _context_violation(path: str, message: str, violations: list[Violation]) -> None:
+    violations.append(Violation(path, message))
+
+
+def validate_fixture_context(
+    data: dict[str, Any],
+    path: str,
+    violations: list[Violation],
+    context: ValidationContext,
+) -> None:
+    fixture = data["fixture"]
+    fixture_id = fixture["id"]
+    contract = context.fixtures.get(fixture_id)
+    if not isinstance(contract, dict):
+        _context_violation(f"{path}.fixture.id", "is absent from the frozen benchmark manifest", violations)
+        return
+    for field in ("purpose", "category", "input"):
+        require_equal(f"{path}.fixture.{field}", fixture.get(field), contract.get(field), violations)
+    try:
+        input_relative = _manifest_relative_path(contract["input"], "fixture input")
+        source_input = context.repository_root / input_relative
+        frozen_input = context.frozen_fixture_root / input_relative
+        assets = [_manifest_relative_path(value, "fixture asset") for value in contract.get("assets", [])]
+        source_paths = [source_input, *(source_input.parent / asset for asset in assets)]
+        frozen_paths = [frozen_input, *(frozen_input.parent / asset for asset in assets)]
+        source_bundle: list[tuple[str, str]] = []
+        frozen_bundle: list[tuple[str, str]] = []
+        input_metadata: os.stat_result | None = None
+        input_digest = ""
+        for index, (source, frozen) in enumerate(zip(source_paths, frozen_paths)):
+            source_digest, _ = _bound_regular_file(source)
+            frozen_digest, frozen_metadata = _bound_regular_file(frozen)
+            relative = frozen.relative_to(frozen_input.parent).as_posix()
+            source_bundle.append((relative, source_digest))
+            frozen_bundle.append((relative, frozen_digest))
+            if source_digest != frozen_digest:
+                raise ValueError(f"frozen fixture asset differs from committed source: {relative}")
+            if index == 0:
+                input_digest = frozen_digest
+                input_metadata = frozen_metadata
+        source_bundle_digest = _bundle_digest(source_bundle)
+        frozen_bundle_digest = _bundle_digest(frozen_bundle)
+        if source_bundle_digest != frozen_bundle_digest:
+            raise ValueError("frozen fixture bundle differs from committed source")
+        engine_digest, engine_metadata = _bound_regular_file(context.engine_binary)
+        cwd_metadata = os.stat(frozen_input.parent, follow_symlinks=False)
+        if not stat.S_ISDIR(cwd_metadata.st_mode) or frozen_input.parent != frozen_input.parent.resolve(strict=True):
+            raise ValueError("frozen fixture cwd is not one canonical directory")
+        assert input_metadata is not None
+    except (KeyError, OSError, ValueError) as error:
+        _context_violation(f"{path}.fixture", f"cannot bind frozen fixture context: {error}", violations)
+        return
+    require_equal(f"{path}.fixture.input_sha256", fixture.get("input_sha256"), input_digest, violations)
+    require_equal(f"{path}.fixture.bundle_sha256", fixture.get("bundle_sha256"), frozen_bundle_digest, violations)
+    engine = data["toolchain"]["engine"]
+    require_equal(
+        f"{path}.toolchain.engine.binary_path", engine.get("binary_path"), str(context.engine_binary), violations
+    )
+    require_equal(f"{path}.toolchain.engine.binary_sha256", engine.get("binary_sha256"), engine_digest, violations)
+    if "binary_bytes" in engine:
+        require_equal(
+            f"{path}.toolchain.engine.binary_bytes", engine["binary_bytes"], engine_metadata.st_size, violations
+        )
+
+    for index, sample in enumerate(data["samples"]):
+        sample_path = f"{path}.samples[{index}].resource_usage.launch_security"
+        usage = sample.get("resource_usage")
+        if not isinstance(usage, dict):
+            continue
+        launch = usage["launch_security"]
+        argv = launch["argv"]
+        identity = launch["command_identity"]
+        malformed_flags = False
+        for flag in ("--output", "--artifacts"):
+            if argv.count(flag) != 1:
+                _context_violation(f"{sample_path}.argv", f"must contain exactly one {flag!r}", violations)
+                malformed_flags = True
+        if malformed_flags:
+            continue
+        require_equal(f"{sample_path}.argv[0]", argv[0], str(context.engine_binary), violations)
+        require_equal(f"{sample_path}.argv[2]", argv[2], frozen_input.name, violations)
+        require_equal(
+            f"{sample_path}.executable.path", launch["executable"]["path"], str(context.engine_binary), violations
+        )
+        require_equal(f"{sample_path}.executable.sha256", launch["executable"]["sha256"], engine_digest, violations)
+        for field, expected in (
+            ("device", engine_metadata.st_dev),
+            ("inode", engine_metadata.st_ino),
+            ("bytes", engine_metadata.st_size),
+        ):
+            require_equal(f"{sample_path}.executable.{field}", launch["executable"][field], expected, violations)
+        command_input = identity["input"]
+        require_equal(
+            f"{sample_path}.command_identity.input.manifest_path",
+            command_input["manifest_path"],
+            str(frozen_input),
+            violations,
+        )
+        require_equal(
+            f"{sample_path}.command_identity.input.argv_relative_path",
+            command_input["argv_relative_path"],
+            frozen_input.name,
+            violations,
+        )
+        require_equal(f"{sample_path}.command_identity.input.sha256", command_input["sha256"], input_digest, violations)
+        for field, expected in (("device", input_metadata.st_dev), ("inode", input_metadata.st_ino)):
+            require_equal(f"{sample_path}.command_identity.input.{field}", command_input[field], expected, violations)
+        cwd = identity["cwd"]
+        require_equal(f"{sample_path}.command_identity.cwd.path", cwd["path"], str(frozen_input.parent), violations)
+        for field, expected in (("device", cwd_metadata.st_dev), ("inode", cwd_metadata.st_ino)):
+            require_equal(f"{sample_path}.command_identity.cwd.{field}", cwd[field], expected, violations)
+        try:
+            output_flag = argv.index("--output")
+            artifact_flag = argv.index("--artifacts")
+            output_file = Path(argv[output_flag + 1])
+            artifact_directory = Path(argv[artifact_flag + 1])
+        except (ValueError, IndexError):
+            _context_violation(f"{sample_path}.argv", "omits its exact output/artifact values", violations)
+            continue
+        output_directory = output_file.parent
+        recorded_output = Path(identity["output_directory"]["path"])
+        recorded_artifacts = Path(identity["artifact_directory"]["path"])
+        require_equal(
+            f"{sample_path}.command_identity.output_directory.path",
+            str(recorded_output),
+            str(output_directory),
+            violations,
+        )
+        require_equal(
+            f"{sample_path}.command_identity.artifact_directory.path",
+            str(recorded_artifacts),
+            str(artifact_directory),
+            violations,
+        )
+        workspace = output_directory.parent
+        if (
+            not output_file.is_absolute()
+            or not artifact_directory.is_absolute()
+            or ".." in output_file.parts
+            or ".." in artifact_directory.parts
+            or workspace.parent != context.failure_evidence_root
+            or re.fullmatch(r"\.in-progress-[1-9][0-9]*-[0-9a-f]{16}", workspace.name) is None
+            or artifact_directory.parent != workspace
+            or output_directory == artifact_directory
+        ):
+            _context_violation(
+                f"{sample_path}.command_identity",
+                "output and artifact directories must be disjoint siblings below the exact failure-evidence root",
+                violations,
+            )
+        prefix = f"sample-{sample['index']}-"
+        if (
+            re.fullmatch(re.escape(prefix) + r"[0-9a-f]{16}-output", output_directory.name) is None
+            or artifact_directory.name != output_directory.name.removesuffix("-output") + "-artifacts"
+            or output_file.name != "document.pdf"
+        ):
+            _context_violation(f"{sample_path}.argv", "does not bind the indexed retained sample paths", violations)
+        output_fd_identity = (identity["output_directory"]["device"], identity["output_directory"]["inode"])
+        artifact_fd_identity = (identity["artifact_directory"]["device"], identity["artifact_directory"]["inode"])
+        bound_identities = {
+            (cwd["device"], cwd["inode"]),
+            (command_input["device"], command_input["inode"]),
+            output_fd_identity,
+            artifact_fd_identity,
+        }
+        if len(bound_identities) != 4:
+            _context_violation(
+                f"{sample_path}.command_identity",
+                "cwd, input, output, and artifact FD identities must be disjoint",
+                violations,
+            )
 
 
 def resolve(schema: dict[str, Any], ref: str) -> dict[str, Any]:
@@ -275,7 +602,7 @@ def validate_resource_usage(sample: dict[str, Any], path: str, violations: list[
                         )
                     )
     executable = launch["executable"]
-    executable_path = PurePosixPath(executable["path"])
+    executable_path = Path(executable["path"])
     if not executable_path.is_absolute() or ".." in executable_path.parts or str(executable_path) != executable["path"]:
         violations.append(
             Violation(f"{path}.resource_usage.launch_security.executable.path", "must be an absolute canonical path")
@@ -520,27 +847,52 @@ def validate_resource_usage(sample: dict[str, Any], path: str, violations: list[
         )
 
 
-def validate_semantics(data: dict[str, Any], path: str, violations: list[Violation]) -> None:
+def validate_semantics(
+    data: dict[str, Any],
+    path: str,
+    violations: list[Violation],
+    context: ValidationContext | None,
+) -> None:
     if data["schema"] == "pliego.benchmark-bundle":
         for index, result in enumerate(data["results"]):
-            validate_semantics(result, f"{path}.results[{index}]", violations)
-        return
-    if data.get("status") == "not-applicable":
+            validate_semantics(result, f"{path}.results[{index}]", violations, context)
         return
 
     publication = data.get("publication")
     dedicated = data["host"]["dedicated"]
-    if dedicated is not (publication is not None):
+    if context is None:
         violations.append(
             Violation(
-                f"{path}.host.dedicated",
-                "must be true exactly when atomic publication provenance is present",
+                path,
+                "applicable benchmark validation requires a typed staged or external-publication context",
             )
         )
-    if isinstance(publication, dict) and publication.get("harness_revision") != data["toolchain"].get(
-        "harness_revision"
-    ):
-        violations.append(Violation(f"{path}.publication.harness_revision", "must equal toolchain.harness_revision"))
+    elif context.mode == "staged":
+        if publication is not None or dedicated is not False:
+            violations.append(
+                Violation(
+                    f"{path}.publication",
+                    "staged validation forbids dedicated or publication provenance",
+                )
+            )
+    else:
+        assert context.external_publication is not None
+        require_equal(
+            f"{path}.publication",
+            publication,
+            context.external_publication.document(),
+            violations,
+        )
+        require_equal(f"{path}.host.dedicated", dedicated, True, violations)
+    if context is not None:
+        require_equal(
+            f"{path}.toolchain.harness_revision",
+            data["toolchain"].get("harness_revision"),
+            context.harness_revision,
+            violations,
+        )
+    if data.get("status") == "not-applicable":
+        return
 
     samples = data["samples"]
     if data["protocol"]["sample_count"] != len(samples):
@@ -604,43 +956,6 @@ def validate_semantics(data: dict[str, Any], path: str, violations: list[Violati
                     engine["binary_sha256"],
                     violations,
                 )
-            argv = launch["argv"]
-            fixture_path = PurePosixPath(data["fixture"]["input"])
-            require_equal(
-                f"{sample_path}.resource_usage.launch_security.argv[2]",
-                argv[2],
-                fixture_path.name,
-                violations,
-            )
-            command_input = launch["command_identity"]["input"]
-            manifest_path = PurePosixPath(command_input["manifest_path"])
-            if tuple(manifest_path.parts[-len(fixture_path.parts) :]) != fixture_path.parts:
-                violations.append(
-                    Violation(
-                        f"{sample_path}.resource_usage.launch_security.command_identity.input.manifest_path",
-                        f"must end with the manifest path {data['fixture']['input']!r}",
-                    )
-                )
-            require_equal(
-                f"{sample_path}.resource_usage.launch_security.command_identity.cwd.path",
-                launch["command_identity"]["cwd"]["path"],
-                str(manifest_path.parent),
-                violations,
-            )
-            require_equal(
-                f"{sample_path}.resource_usage.launch_security.command_identity.input.sha256",
-                command_input["sha256"],
-                data["fixture"]["input_sha256"],
-                violations,
-            )
-            for flag in ("--output", "--artifacts"):
-                if argv.count(flag) != 1:
-                    violations.append(
-                        Violation(
-                            f"{sample_path}.resource_usage.launch_security.argv",
-                            f"must contain exactly one {flag!r}",
-                        )
-                    )
         correctness = sample["correctness"]
         output = sample["output"]
         failure = sample["failure"]
@@ -758,6 +1073,8 @@ def validate_semantics(data: dict[str, Any], path: str, violations: list[Violati
         violations.append(
             Violation(f"{path}.samples", "engine executable device/inode identity changed between renders")
         )
+    if context is not None:
+        validate_fixture_context(data, path, violations, context)
 
     aggregates = data["aggregates"]
     passing_samples = [sample for sample in samples if sample["ok"] and sample["correctness"]["pass"]]
@@ -917,11 +1234,15 @@ def validate_semantics(data: dict[str, Any], path: str, violations: list[Violati
             )
 
 
-def validate_document(data: Any, schema: dict[str, Any]) -> list[Violation]:
+def validate_document(
+    data: Any,
+    schema: dict[str, Any],
+    context: ValidationContext | None = None,
+) -> list[Violation]:
     violations: list[Violation] = []
     validate(data, schema, "$", violations)
     if not violations:
-        validate_semantics(data, "$", violations)
+        validate_semantics(data, "$", violations, context)
     return violations
 
 
@@ -933,12 +1254,105 @@ def load_json(path: Path) -> Any:
 
 
 def main() -> int:
-    if len(sys.argv) not in (2, 3):
-        print("usage: validate_result.py <result.json> [<schema.json>]", file=sys.stderr)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("result", type=Path)
+    parser.add_argument("--schema", type=Path, default=DEFAULT_SCHEMA)
+    parser.add_argument("--mode", choices=("staged", "published"), required=True)
+    parser.add_argument("--binary", type=Path)
+    parser.add_argument("--frozen-fixture-root", type=Path)
+    parser.add_argument("--staging-out", type=Path)
+    parser.add_argument("--failure-evidence-dir", type=Path)
+    parser.add_argument("--revision")
+    parser.add_argument("--host-proof", type=Path)
+    args = parser.parse_args()
+
+    data = load_json(args.result)
+    schema = load_json(args.schema)
+    try:
+        if args.mode == "staged":
+            required = {
+                "--binary": args.binary,
+                "--frozen-fixture-root": args.frozen_fixture_root,
+                "--staging-out": args.staging_out,
+                "--failure-evidence-dir": args.failure_evidence_dir,
+                "--revision": args.revision,
+            }
+            missing = [flag for flag, value in required.items() if value is None]
+            if missing or args.host_proof is not None:
+                raise ValueError(f"staged validation requires its command context only; invalid flags: {missing}")
+            context = build_validation_context(
+                mode="staged",
+                repository_root=ROOT,
+                manifest_path=ROOT / "benchmarks" / "manifest.toml",
+                frozen_fixture_root=args.frozen_fixture_root,
+                staging_output=args.staging_out,
+                failure_evidence_root=args.failure_evidence_dir,
+                engine_binary=args.binary,
+                harness_revision=args.revision,
+            )
+        else:
+            if args.host_proof is None or any(
+                value is not None
+                for value in (
+                    args.binary,
+                    args.frozen_fixture_root,
+                    args.staging_out,
+                    args.failure_evidence_dir,
+                    args.revision,
+                )
+            ):
+                raise ValueError("published validation derives its exact context only from --host-proof")
+            proof_path = args.host_proof.resolve(strict=True)
+            if args.host_proof != proof_path or args.host_proof.is_symlink() or not proof_path.is_file():
+                raise ValueError("host proof must be one canonical non-symlink file")
+            proof = load_json(proof_path)
+            if not isinstance(proof, dict):
+                raise ValueError("host proof must be a JSON object")
+            tools = Path(__file__).resolve().parent
+            sys.path.insert(0, str(tools))
+            import benchmark_publication  # noqa: PLC0415
+            import validate_host_proof  # noqa: PLC0415
+
+            argv = proof.get("command", {}).get("argv")
+            if not isinstance(argv, list) or not validate_host_proof.canonical_benchmark_command(argv):
+                raise ValueError("host proof omitted the canonical full benchmark command")
+            host_schema = load_json(ROOT / "benchmarks" / "schema" / "benchmark-host-proof.v1.json")
+            host_violations = validate_host_proof.validate_document(
+                proof,
+                host_schema,
+                proof_path.parent,
+                allow_fixture_evidence=False,
+                expected_command=tuple(argv),
+            )
+            if host_violations:
+                raise ValueError(f"external host proof is invalid: {host_violations[0]}")
+            if proof.get("status") != "accepted" or proof.get("mode") != "production":
+                raise ValueError("published validation requires an accepted production host proof")
+            values = {flag: Path(argv[argv.index(flag) + 1]) for flag in validate_host_proof.BENCHMARK_COMMAND_FLAGS}
+            revision = proof["identity"]["sha"]
+            runner = proof["runner"]
+            external = ExternalPublication(
+                host_proof_schema="pliego.benchmark-host-proof.v1",
+                host_proof_bundle_sha256=benchmark_publication.host_proof_bundle_digest(proof_path),
+                harness_revision=revision,
+                runner_id=runner["id"],
+                runner_name=runner["name"],
+            )
+            context = build_validation_context(
+                mode="published",
+                repository_root=ROOT,
+                manifest_path=ROOT / "benchmarks" / "manifest.toml",
+                frozen_fixture_root=values["--frozen-fixture-root"],
+                staging_output=values["--staging-out"],
+                failure_evidence_root=values["--failure-evidence-dir"],
+                engine_binary=values["--binary"],
+                harness_revision=revision,
+                external_publication=external,
+            )
+    except (OSError, ValueError) as error:
+        print(f"validation context rejected: {error}", file=sys.stderr)
         return 2
-    data = load_json(Path(sys.argv[1]))
-    schema = load_json(Path(sys.argv[2]) if len(sys.argv) == 3 else DEFAULT_SCHEMA)
-    violations = validate_document(data, schema)
+    violations = validate_document(data, schema, context)
     if violations:
         for violation in violations:
             print(f"violation {violation}", file=sys.stderr)

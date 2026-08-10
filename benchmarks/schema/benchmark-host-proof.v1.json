@@ -133,7 +133,7 @@
     "command": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["argv", "started", "exit_code", "candidate"],
+      "required": ["argv", "started", "exit_code", "candidate", "observer_measurements"],
       "properties": {
         "argv": { "type": "array", "minItems": 1, "items": { "type": "string" } },
         "started": { "type": "boolean" },
@@ -146,6 +146,17 @@
             "path": { "type": "string" },
             "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
             "bytes": { "type": "integer", "minimum": 1 }
+          }
+        },
+        "observer_measurements": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": ["path", "sha256", "bytes", "canonical_sha256"],
+          "properties": {
+            "path": { "type": "string" },
+            "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "bytes": { "type": "integer", "minimum": 1 },
+            "canonical_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
           }
         }
       }

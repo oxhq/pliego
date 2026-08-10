@@ -6,4 +6,4 @@
 checkout — output is byte-identical on the same revision).
 
 Expected (see `manifest.toml`): 20 pages. The exact count is an estimate and is
-pinned to the measured value by the first signed baseline.
+pinned to the measured value by the first accepted baseline.

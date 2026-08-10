@@ -1,0 +1,134 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://pliego.dev/schema/benchmark-observer-proof.v1.json",
+  "title": "Pliego host-bound observer A/B proof v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "version", "status", "generated_at", "binding", "measurements_binding", "measurements"],
+  "properties": {
+    "schema": { "const": "pliego.benchmark-observer-proof" },
+    "version": { "const": 1 },
+    "status": { "const": "accepted" },
+    "generated_at": { "type": "string", "minLength": 1 },
+    "binding": { "$ref": "#/definitions/binding" },
+    "measurements_binding": { "$ref": "#/definitions/measurementBinding" },
+    "measurements": { "$ref": "#/definitions/measurements" }
+  },
+  "definitions": {
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "measurementBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "bytes", "canonical_sha256"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "sha256": { "$ref": "#/definitions/sha256" },
+        "bytes": { "type": "integer", "minimum": 1 },
+        "canonical_sha256": { "$ref": "#/definitions/sha256" }
+      }
+    },
+    "binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "harness_revision", "source_broker_sha256", "installed_broker_sha256",
+        "host_config_sha256", "host_proof_bundle_sha256", "runner_id", "runner_name"
+      ],
+      "properties": {
+        "harness_revision": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "source_broker_sha256": { "$ref": "#/definitions/sha256" },
+        "installed_broker_sha256": { "$ref": "#/definitions/sha256" },
+        "host_config_sha256": { "$ref": "#/definitions/sha256" },
+        "host_proof_bundle_sha256": { "$ref": "#/definitions/sha256" },
+        "runner_id": { "type": "integer", "minimum": 1 },
+        "runner_name": { "type": "string", "minLength": 1 }
+      }
+    },
+    "directoryIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "device", "inode"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "device": { "type": "integer", "minimum": 0 },
+        "inode": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "observation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "observation_enabled", "tree_wall_ms", "sampler_cpu_ms", "cgroup_path",
+        "root_pid", "root_start_ticks", "output_directory", "artifact_directory"
+      ],
+      "properties": {
+        "observation_enabled": { "type": "boolean" },
+        "tree_wall_ms": { "type": "number", "minimum": 0 },
+        "sampler_cpu_ms": { "type": "number", "minimum": 0 },
+        "cgroup_path": { "type": "string", "minLength": 1 },
+        "root_pid": { "type": "integer", "minimum": 1 },
+        "root_start_ticks": { "type": "integer", "minimum": 1 },
+        "output_directory": { "$ref": "#/definitions/directoryIdentity" },
+        "artifact_directory": { "$ref": "#/definitions/directoryIdentity" }
+      }
+    },
+    "pair": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "index", "order", "observation_off", "observation_on", "normalized_off",
+        "normalized_on", "overhead_percent", "sampler_cpu_percent_of_tree_wall"
+      ],
+      "properties": {
+        "index": { "type": "integer", "minimum": 0 },
+        "order": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": { "enum": ["observation-off", "observation-on"] }
+        },
+        "observation_off": { "$ref": "#/definitions/observation" },
+        "observation_on": { "$ref": "#/definitions/observation" },
+        "normalized_off": { "type": "object" },
+        "normalized_on": { "type": "object" },
+        "overhead_percent": { "type": "number" },
+        "sampler_cpu_percent_of_tree_wall": { "type": "number" }
+      }
+    },
+    "measurements": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema", "version", "generated_at", "method", "seed", "pair_count",
+        "workload_duration_seconds", "percentile_method", "threshold_percent_exclusive",
+        "p95_overhead_percent", "passed", "allowed_differences", "pairs"
+      ],
+      "properties": {
+        "schema": { "const": "pliego.observer-ab-measurements" },
+        "version": { "const": 1 },
+        "generated_at": { "type": "string", "minLength": 1 },
+        "method": { "const": "randomized-paired-observation-v3" },
+        "seed": { "const": 20260808 },
+        "pair_count": { "const": 20 },
+        "workload_duration_seconds": { "type": "number", "minimum": 0 },
+        "percentile_method": { "const": "nearest-rank-v1" },
+        "threshold_percent_exclusive": { "const": 2.0 },
+        "p95_overhead_percent": { "type": "number" },
+        "passed": { "const": true },
+        "allowed_differences": {
+          "const": [
+            "observation_enabled_and_sampled_diagnostics",
+            "timing_and_accounting_values",
+            "fresh_cgroup_process_and_workspace_identities"
+          ]
+        },
+        "pairs": {
+          "type": "array",
+          "minItems": 20,
+          "maxItems": 20,
+          "items": { "$ref": "#/definitions/pair" }
+        }
+      }
+    }
+  }
+}

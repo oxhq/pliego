@@ -10,9 +10,10 @@ import os
 import secrets
 import stat
 import tempfile
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, NoReturn
+from typing import Any, Callable, NoReturn
 
 
 class PublicationError(RuntimeError):
@@ -21,6 +22,27 @@ class PublicationError(RuntimeError):
 
 class PublicationInterrupted(PublicationError):
     """Test-only simulated interruption before the atomic replacement."""
+
+
+@dataclass
+class BoundPublicationDirectory:
+    """One non-following directory descriptor used as publication authority."""
+
+    path: Path
+    descriptor: int
+    device: int
+    inode: int
+
+    def close(self) -> None:
+        if self.descriptor >= 0:
+            os.close(self.descriptor)
+            self.descriptor = -1
+
+    def __enter__(self) -> BoundPublicationDirectory:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
 
 
 def require_unprivileged(uid: int | None = None, euid: int | None = None) -> None:
@@ -75,6 +97,110 @@ def atomic_write_bytes(path: Path, payload: bytes, *, simulate_crash: bool = Fal
     finally:
         try:
             temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def bind_publication_directory(path: Path) -> BoundPublicationDirectory:
+    """Bind a canonical directory without following its final component."""
+
+    if os.name != "posix" or os.open not in os.supports_dir_fd or os.rename not in os.supports_dir_fd:
+        raise PublicationError("official baseline publication requires POSIX directory-FD operations")
+    if not path.is_absolute():
+        raise PublicationError("publication directory must be absolute")
+    try:
+        resolved = path.resolve(strict=True)
+    except OSError as error:
+        raise PublicationError(f"cannot bind publication directory: {error}") from error
+    if path != resolved or path.is_symlink() or not path.is_dir():
+        raise PublicationError("publication directory must be one canonical non-symlink directory")
+    flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as error:
+        raise PublicationError(f"cannot bind publication directory: {error}") from error
+    metadata = os.fstat(descriptor)
+    current = os.stat(path, follow_symlinks=False)
+    if not stat.S_ISDIR(metadata.st_mode) or (metadata.st_dev, metadata.st_ino) != (
+        current.st_dev,
+        current.st_ino,
+    ):
+        os.close(descriptor)
+        raise PublicationError("publication directory identity changed while binding")
+    return BoundPublicationDirectory(path, descriptor, metadata.st_dev, metadata.st_ino)
+
+
+def _require_current_publication_directory(directory: BoundPublicationDirectory) -> None:
+    try:
+        descriptor_metadata = os.fstat(directory.descriptor)
+        path_metadata = os.stat(directory.path, follow_symlinks=False)
+    except OSError as error:
+        raise PublicationError(f"publication directory is no longer bound at its canonical path: {error}") from error
+    expected = (directory.device, directory.inode)
+    if (descriptor_metadata.st_dev, descriptor_metadata.st_ino) != expected or (
+        path_metadata.st_dev,
+        path_metadata.st_ino,
+    ) != expected:
+        raise PublicationError("publication directory identity changed before replacement")
+
+
+def _require_regular_destination(directory: BoundPublicationDirectory, name: str) -> None:
+    try:
+        metadata = os.stat(name, dir_fd=directory.descriptor, follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    except OSError as error:
+        raise PublicationError(f"cannot inspect baseline destination: {error}") from error
+    if not stat.S_ISREG(metadata.st_mode):
+        raise PublicationError("official baseline destination must be a regular non-symlink file")
+
+
+def atomic_publish_bytes(
+    directory: BoundPublicationDirectory,
+    name: str,
+    payload: bytes,
+    *,
+    simulate_crash: bool = False,
+    before_replace: Callable[[], None] | None = None,
+) -> None:
+    """Durably replace one basename relative to the already-bound directory."""
+
+    if not name or name in {".", ".."} or Path(name).name != name:
+        raise PublicationError("official baseline destination must be one basename")
+    _require_current_publication_directory(directory)
+    _require_regular_destination(directory, name)
+    temporary = f".{name}.{secrets.token_hex(8)}.tmp"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(temporary, flags, 0o644, dir_fd=directory.descriptor)
+    try:
+        try:
+            os.fchmod(descriptor, 0o644)
+            offset = 0
+            while offset < len(payload):
+                written = os.write(descriptor, payload[offset:])
+                if written <= 0:
+                    raise PublicationError("short write while staging official baseline")
+                offset += written
+            os.fsync(descriptor)
+            if simulate_crash:
+                raise PublicationInterrupted("simulated interruption before baseline replacement")
+        finally:
+            os.close(descriptor)
+        if before_replace is not None:
+            before_replace()
+        _require_current_publication_directory(directory)
+        _require_regular_destination(directory, name)
+        os.rename(
+            temporary,
+            name,
+            src_dir_fd=directory.descriptor,
+            dst_dir_fd=directory.descriptor,
+        )
+        _require_current_publication_directory(directory)
+        os.fsync(directory.descriptor)
+    finally:
+        try:
+            os.unlink(temporary, dir_fd=directory.descriptor)
         except FileNotFoundError:
             pass
 
@@ -165,6 +291,35 @@ def _chmod_if_owned(path: Path, mode: int) -> None:
         os.chmod(path, mode, follow_symlinks=False)
 
 
+def require_private_failure_root(root: Path) -> Path:
+    """Create a missing root as 0700 or strictly validate an existing one."""
+
+    if not root.is_absolute():
+        raise PublicationError("failure-evidence root must be absolute")
+    try:
+        parent = root.parent.resolve(strict=False)
+    except OSError as error:
+        raise PublicationError(f"failure-evidence parent cannot be resolved: {error}") from error
+    if root.parent != parent:
+        raise PublicationError("failure-evidence parent path must be canonical and non-symlinked")
+    created = False
+    try:
+        root.mkdir(parents=True, mode=0o700)
+        created = True
+    except FileExistsError:
+        pass
+    if created and os.name == "posix":
+        os.chmod(root, 0o700, follow_symlinks=False)
+    resolved_root = root.resolve(strict=True)
+    if root != resolved_root or root.is_symlink() or not root.is_dir():
+        raise PublicationError("failure-evidence root must be a canonical directory")
+    if os.name == "posix":
+        metadata = root.stat(follow_symlinks=False)
+        if metadata.st_uid != os.geteuid() or stat.S_IMODE(metadata.st_mode) != 0o700:
+            raise PublicationError("failure-evidence root must be runner-owned with mode 0700")
+    return resolved_root
+
+
 def write_failure_evidence(
     root: Path,
     payload: dict[str, Any],
@@ -173,16 +328,7 @@ def write_failure_evidence(
 ) -> Path:
     """Retain immutable-by-mode failure evidence without touching a baseline."""
 
-    if not root.is_absolute():
-        raise PublicationError("failure-evidence root must be absolute")
-    root.mkdir(parents=True, exist_ok=True)
-    resolved_root = root.resolve(strict=True)
-    if root != resolved_root or root.is_symlink() or not root.is_dir():
-        raise PublicationError("failure-evidence root must be a canonical directory")
-    if os.name == "posix":
-        metadata = root.stat()
-        if metadata.st_uid != os.geteuid() or stat.S_IMODE(metadata.st_mode) & 0o077:
-            raise PublicationError("failure-evidence root must be runner-owned and private")
+    resolved_root = require_private_failure_root(root)
     attempt = root / (
         datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ") + f"-{os.getpid()}-{secrets.token_hex(4)}"
     )

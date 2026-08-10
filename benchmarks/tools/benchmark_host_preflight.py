@@ -31,7 +31,9 @@ MODES = ("production", "negative-github-hosted", "negative-missing-thermal")
 MAX_CANDIDATE_BYTES = 512 * 1024 * 1024
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import benchmark_publication  # noqa: E402
 import validate_host_proof  # noqa: E402
+import observer_ab  # noqa: E402
 
 
 def now() -> str:
@@ -953,6 +955,7 @@ def main() -> int:
             "started": False,
             "exit_code": None,
             "candidate": None,
+            "observer_measurements": None,
         }
         post: dict[str, Any] | None = None
         drift: dict[str, Any] | None = None
@@ -1006,6 +1009,25 @@ def main() -> int:
                     command_proof["candidate"],
                     "bound nonempty staged candidate digest",
                     command_proof["candidate"] is not None,
+                )
+            observer_path = validate_host_proof.observer_measurements_path(retained_command)
+            if observer_path is not None:
+                try:
+                    observer_document, observer_binding = observer_ab.load_bound_object(
+                        observer_path,
+                        "observer measurements",
+                    )
+                    command_proof["observer_measurements"] = observer_ab.finalize_measurements_binding(
+                        observer_document,
+                        observer_binding,
+                    )
+                except (OSError, benchmark_publication.PublicationError) as error:
+                    collection_errors.append(f"observer measurements: {error}")
+                gate.check(
+                    "command.observer_measurements",
+                    command_proof["observer_measurements"],
+                    "bound nonempty observer measurement digest",
+                    command_proof["observer_measurements"] is not None,
                 )
             recorder.add("samples.finished", exit_code=command_exit)
 

@@ -25,7 +25,8 @@ benchmarks/
 ├── manifest.toml              Single source of truth for fixtures, targets, protocol
 ├── schema/
 │   ├── benchmark-result.v1.json
-│   └── benchmark-host-proof.v1.json
+│   ├── benchmark-host-proof.v1.json
+│   └── benchmark-observer-proof.v1.json
 ├── fixtures/                  Seven frozen fixtures
 │   ├── minimal-static/        Pure startup
 │   ├── invoice-showcase/      Two-page invoice: fonts, table, totals, authored break
@@ -42,6 +43,7 @@ benchmarks/
 │   ├── process_tree_sampler.py Linux cgroup-v2 containment and accounting
 │   ├── run_benchmark.py       Unprivileged orchestrator: manifest → staged candidate
 │   ├── publish_benchmark.py   Host-proof binding and atomic baseline replacement
+│   ├── observer_ab.py         Host-bound normalized observer A/B proof
 │   ├── validate_host_proof.py Validate host proof plus retained raw evidence
 │   ├── test_process_tree_sampler.py Fixture, live cgroup, bridge, and overhead proof
 │   └── validate_result.py     Stdlib-only JSON Schema check for result files
@@ -112,6 +114,8 @@ binary="$(python3 benchmarks/tools/resolve_release.py \
 candidate="$(realpath /var/tmp/pliego-benchmark/candidate.json)"
 frozen="$(realpath /var/lib/pliego-benchmark-fixtures/current)"
 proof="$(realpath /var/tmp/pliego-benchmark/host-proof)"
+observer_raw="$(realpath -m /var/tmp/pliego-benchmark/observer-measurements.json)"
+observer_proof="$(realpath -m /var/tmp/pliego-benchmark/observer-proof.json)"
 
 python3 benchmarks/tools/benchmark_host_preflight.py \
   --mode production --output-dir "$proof" \
@@ -119,11 +123,18 @@ python3 benchmarks/tools/benchmark_host_preflight.py \
     --binary "$binary" \
     --frozen-fixture-root "$frozen" \
     --staging-out "$candidate" \
-    --failure-evidence-dir /var/tmp/pliego-benchmark/failures/run
+    --failure-evidence-dir /var/tmp/pliego-benchmark/failures/run \
+    --observer-measurements-out "$observer_raw"
+
+python3 benchmarks/tools/observer_ab.py bind \
+  --measurements "$observer_raw" \
+  --host-proof "$proof/benchmark-host-proof.v1.json" \
+  --out "$observer_proof"
 
 python3 benchmarks/tools/publish_benchmark.py \
   --candidate "$candidate" \
   --host-proof "$proof/benchmark-host-proof.v1.json" \
+  --observer-proof "$observer_proof" \
   --out benchmarks/baselines/pliego-0.1.1-linux-x86_64.json \
   --failure-evidence /var/tmp/pliego-benchmark/failures/publish
 ```
@@ -142,8 +153,11 @@ canonical publishable command. The orchestrator:
 1. checks the fixture surface (inputs, fonts, chartjs prep) and the binary;
 2. runs `runners/pliego.php` per fixture — warmup discarded, then samples;
 3. aggregates p50/p95/p99/min/max/mean, determinism, correctness, failures;
-4. validates the result against `schema/benchmark-result.v1.json`;
-5. atomically stages a supported candidate outside `benchmarks/baselines`
+4. validates the staged result against the exact frozen fixture and command
+   context, including source/frozen asset-bundle hashes and file identities;
+5. runs the retained 20-pair randomized observation-off/on prerequisite while
+   still inside the dedicated-host gate;
+6. atomically stages a supported candidate outside `benchmarks/baselines`
    (raw samples kept, not just averages).
 
 It never runs the release binary with `--version`; version, commit, Servo build,
@@ -155,10 +169,15 @@ outputs are moved into that attempt, rejected if they contain links or special
 files, and covered by a SHA-256 manifest. The runner makes every entry it owns
 read-only; the dedicated workflow then seals the full attempt root-owned.
 The
-publisher revalidates the candidate and host-proof bundle, requires the exact
-host-bound candidate digest, injects dedicated-host provenance, fsyncs a
-same-directory temporary, then performs one atomic replacement. A crash before
-replacement leaves the previous baseline byte-for-byte unchanged.
+publisher revalidates the staged candidate, the external host-proof bundle, and
+the separately bound observer proof. It derives the binary, frozen-fixture,
+staging, failure, and observer paths only from the validated host command,
+injects that external publication provenance, and verifies the published form
+against it. Official publication binds the canonical `baselines` parent with a
+non-following directory descriptor, creates and fsyncs a temporary by basename,
+renames by directory descriptor, then fsyncs the directory. It never resolves
+the destination leaf. A crash, destination symlink, or parent-directory swap
+cannot overwrite an outside file or alter the previous baseline.
 
 Each sample gets a fresh root-owned, non-delegated child cgroup. The narrow
 broker opens the canonical executable, copies its bytes to a sealed memfd, and
@@ -197,11 +216,14 @@ As root, with `PLIEGO_BENCHMARK_CGROUP_PARENT` exported, run
 `/usr/bin/python3 benchmarks/tools/test_process_tree_sampler.py --live --php-integration`
 inside the delegated `harness` child for the containment, cleanup, counter, and
 PHP-to-Python proof. On a dedicated benchmark host, add
-`--acceptance-overhead` for the 20-pair randomized observation-off/on gate. Both
-lanes use the same broker, authority drop, cgroup boundary, and sealed
-executable; only procfs observation changes. It uses the
-protocol's `nearest-rank-v1` percentiles and requires p95 wall overhead below
-2%; sampler CPU share remains a separate diagnostic.
+`--acceptance-overhead` for the 20-pair randomized observation-off/on gate. The
+retained proof compares normalized UID/GID/groups/capability state, namespace,
+migration denials, executable and frozen-input identities, cwd, cgroup
+boundary, and static cleanup/accounting controls for every pair. The declared
+differences are limited to observation diagnostics, timing/accounting values,
+and fresh per-run cgroup/process/workspace identities. It uses the protocol's
+`nearest-rank-v1` percentiles and requires p95 wall overhead below 2%; sampler
+CPU share remains a separate diagnostic.
 
 ## Dedicated-host proof
 
@@ -214,9 +236,11 @@ checkout, and live branch all name one immutable SHA, and the GitHub API proves
 the exact online/busy runner, group, and labels. Accepted production evidence
 also binds the exact
 canonical full `run_benchmark.py` argv, its staged-candidate SHA-256 and byte
-count, and the host chronology to that clean checkout. The separate randomized
-sampler-overhead proof remains a contract/adversarial gate, not a substitute
-for timing the candidate itself.
+count, the raw observer-measurement digest, and the host chronology to that
+clean checkout. The finalized observer proof is additionally bound to that
+host-proof manifest digest, revision, runner, host-config digest, and matching
+source/installed broker digests. It is a publication prerequisite, not a
+substitute for timing the candidate itself.
 
 The host administrator owns `/etc/pliego-benchmark-host.v1.json`; the live gate
 requires its canonical file to be `root:root` and not group/other writable. Its
@@ -284,7 +308,9 @@ external steps and their hosted proof exist.
 * 10 warm-up iterations, 50 samples for short documents, 20 for long ones.
 * Random order between runners (seed recorded). Raw samples stored.
 * Same host, same binary, same fonts/assets. Network disabled.
-* Results record host info and versions; a baseline is signed by commit/tag.
+* Results record host info and versions; publication is digest-bound to the
+  exact revision and retained external host proof. No cryptographic signature
+  is claimed.
 * All aggregate and observer percentiles use `nearest-rank-v1`.
 
 ## Metrics
@@ -294,7 +320,7 @@ throughput, per-page wall time, PDF and artifact bytes, page count, required
 text, capture status, PDF hash variation, and typed failure publication state.
 CPU, cgroup memory, and cgroup I/O are exact retained counters. Sequential
 sampled summed RSS/PSS remain explicitly non-authoritative diagnostics. Runtime archive size and deeper document
-checks remain separate audited increments before a signed baseline is published.
+checks remain separate audited increments before an externally authorized baseline is published.
 
 ## Fixtures and correctness gates
 
@@ -317,7 +343,7 @@ renderer.
 
 * Concurrency >1 throughput sampling is not implemented yet (serial only).
 * Core (Criterion) and Laravel e2e levels live outside this directory.
-* Page-count expectations for generated fixtures are pinned by the first signed baseline.
+* Page-count expectations for generated fixtures are pinned by the first accepted baseline.
 * A full staged candidate bundles one validated result object per fixture.
   `run_benchmark.py` cannot write inside `benchmarks/baselines`; only
   `publish_benchmark.py` can atomically replace an official baseline after
