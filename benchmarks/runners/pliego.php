@@ -8,7 +8,7 @@
  * wall time, reads the engine's `scene-report.json` and stdout summary, checks
  * the fixture's correctness contract, and emits one JSON object per sample
  * (NDJSON) on stdout. On Linux, cgroup-v2 supplies authoritative CPU, memory,
- * and I/O accounting; sampled RSS/PSS remain lower-bound diagnostics. Warmup
+ * and I/O accounting; sampled RSS/PSS remain sequential, time-smeared diagnostics. Warmup
  * samples are executed and discarded before real samples. Aggregation and
  * schema validation happen in tools/run_benchmark.py.
  *
@@ -19,9 +19,8 @@
  * directory, never inside the artifact directory.
  *
  * Timing: Linux delegates the engine launch to process_tree_sampler.py. The
- * sampler requires a root broker in an externally delegated cgroup-v2 parent.
- * It launches the engine as the fixed unprivileged account in a fresh root-owned
- * leaf and treats procfs RSS/PSS polling only as lower-bound diagnostics.
+ * runner and PDF verifier refuse root. They invoke the fixed, root-owned cgroup
+ * broker through non-interactive sudo; only the broker has cgroup authority.
  * Non-Linux runs retain wall/exit data but are not publishable.
  *
  * Publishable host contract: Linux x86_64, released `checked-release` bundle.
@@ -30,13 +29,13 @@
 declare(strict_types=1);
 
 const ENGINE_ACCOUNT = 'pliego-benchmark-engine';
-const SAMPLER_PYTHON = '/usr/bin/python3';
+const INSTALLED_BROKER = '/usr/local/libexec/pliego-cgroup-broker';
 
 const USAGE = <<<EOT
 Usage: php pliego.php --binary <path> --input <file.html> --output <file.pdf> --artifacts <dir>
   [--samples N] [--warmup N] [--page-count N] [--text-contains TEXT]...
   [--expect-failure] [--expected-code CODE] [--page-size WxH] [--page-margins T,R,B,L]
-  [--locale X] [--timezone Y] [--cwd DIR] [--self-test]
+  [--locale X] [--timezone Y] [--cwd DIR] [--retained-root DIR] [--self-test]
 EOT;
 
 function option(array $options, string $name): ?string
@@ -66,25 +65,10 @@ function fail(string $message, int $code = 2): never
     exit($code);
 }
 
-function sampler_interpreter(): ?string
-{
-    if (PHP_OS_FAMILY !== 'Linux') {
-        return null;
-    }
-    $resolved = realpath(SAMPLER_PYTHON);
-    $mode = $resolved !== false ? fileperms($resolved) : false;
-    if ($resolved === false || !str_starts_with($resolved, DIRECTORY_SEPARATOR)
-        || !is_file($resolved) || !is_executable($resolved)
-        || fileowner($resolved) !== 0 || $mode === false || ($mode & 0022) !== 0) {
-        return null;
-    }
-    return $resolved;
-}
-
 $options = getopt('', [
     'binary:', 'input:', 'output:', 'artifacts:', 'samples:', 'warmup:',
     'page-count:', 'text-contains:', 'expect-failure', 'expected-code:',
-    'page-size:', 'page-margins:', 'locale:', 'timezone:', 'cwd:',
+    'page-size:', 'page-margins:', 'locale:', 'timezone:', 'cwd:', 'retained-root:',
     'self-test',
 ]);
 if ($options === false) {
@@ -106,9 +90,6 @@ if (array_key_exists('self-test', $options)) {
         || parse_stdout_summary("{}\n") !== null) {
         fail('stdout summary self-test failed', 1);
     }
-    if (PHP_OS_FAMILY === 'Linux' && sampler_interpreter() === null) {
-        fail('sampler interpreter self-test failed', 1);
-    }
     fwrite(STDOUT, "Pliego PHP runner self-test passed\n");
     exit(0);
 }
@@ -128,6 +109,7 @@ $pageMargins = option($options, 'page-margins');
 $locale = option($options, 'locale');
 $timezone = option($options, 'timezone');
 $cwd = option($options, 'cwd') ?? dirname($input);
+$retainedRoot = option($options, 'retained-root');
 
 if (!is_file($binary)) {
     fail("binary not found: {$binary}");
@@ -157,8 +139,8 @@ $engineUid = null;
 $engineGid = null;
 if (PHP_OS_FAMILY === 'Linux') {
     if (!function_exists('posix_getuid') || !function_exists('posix_geteuid')
-        || posix_getuid() !== 0 || posix_geteuid() !== 0) {
-        fail('publishable cgroup measurement requires a real/effective root broker');
+        || posix_getuid() === 0 || posix_geteuid() === 0) {
+        fail('benchmark orchestration, PHP correctness checks, and PDF verification must never run as root');
     }
     $account = function_exists('posix_getpwnam') ? posix_getpwnam(ENGINE_ACCOUNT) : false;
     if (!is_array($account) || (int) ($account['uid'] ?? 0) <= 0 || (int) ($account['gid'] ?? 0) <= 0) {
@@ -166,18 +148,34 @@ if (PHP_OS_FAMILY === 'Linux') {
     }
     $engineUid = (int) $account['uid'];
     $engineGid = (int) $account['gid'];
+    if (posix_getuid() === $engineUid || posix_geteuid() === $engineUid) {
+        fail('the runner identity must be separate from the locked engine account');
+    }
+    $groups = function_exists('posix_getgroups') ? posix_getgroups() : false;
+    if (!is_array($groups) || !in_array($engineGid, array_map('intval', $groups), true)) {
+        fail('the unprivileged runner must be provisioned in the engine output group');
+    }
     $cgroupParent = getenv('PLIEGO_BENCHMARK_CGROUP_PARENT');
     $resolvedParent = is_string($cgroupParent) && $cgroupParent !== '' ? realpath($cgroupParent) : false;
     if ($resolvedParent === false || $resolvedParent !== $cgroupParent || !is_dir($resolvedParent)) {
         fail('PLIEGO_BENCHMARK_CGROUP_PARENT must name a canonical existing directory');
     }
+    $resolvedRetained = is_string($retainedRoot) && $retainedRoot !== '' ? realpath($retainedRoot) : false;
+    $retainedMetadata = $resolvedRetained !== false ? stat($resolvedRetained) : false;
+    if ($resolvedRetained === false || $resolvedRetained !== $retainedRoot || !is_array($retainedMetadata)
+        || (int) $retainedMetadata['uid'] !== posix_geteuid()
+        || (((int) $retainedMetadata['mode']) & 0022) !== 0) {
+        fail('--retained-root must be a canonical runner-owned private directory');
+    }
+    $retainedRoot = $resolvedRetained;
 }
 
 /**
  * @param list<string> $command
  * @return array{error: string}|array{wall_ms: float, user_ms: float|null,
  *     sys_ms: float|null, memory_current_bytes: int|null, memory_peak_bytes: int|null,
- *     sampled_peak_rss_kib_lower_bound: int|null, sampled_peak_pss_kib_lower_bound: int|null,
+ *     sequential_sampled_peak_rss_kib_diagnostic: int|null,
+ *     sequential_sampled_peak_pss_kib_diagnostic: int|null,
  *     read_bytes: int|null, write_bytes: int|null, read_operations: int|null,
  *     write_operations: int|null, measurement_method: string,
  *     signal: int|null, resource_usage: object|null,
@@ -186,17 +184,21 @@ if (PHP_OS_FAMILY === 'Linux') {
 function run_engine(array $command, string $cwd): array
 {
     $nullDevice = PHP_OS_FAMILY === 'Windows' ? 'NUL' : '/dev/null';
-    $stdoutTmp = tempnam(sys_get_temp_dir(), 'pliego-bench-out-');
-    $stderrTmp = tempnam(sys_get_temp_dir(), 'pliego-bench-err-');
-    if ($stdoutTmp === false || $stderrTmp === false) {
+    $linux = PHP_OS_FAMILY === 'Linux';
+    $stdoutTmp = $linux ? null : tempnam(sys_get_temp_dir(), 'pliego-bench-out-');
+    $stderrTmp = $linux ? null : tempnam(sys_get_temp_dir(), 'pliego-bench-err-');
+    if (!$linux && ($stdoutTmp === false || $stderrTmp === false)) {
         return ['error' => 'cannot create engine output files'];
     }
-    $linux = PHP_OS_FAMILY === 'Linux';
     $samplerResultTmp = $linux ? tempnam(sys_get_temp_dir(), 'pliego-bench-cgroup-') : null;
     $samplerErrorTmp = $linux ? tempnam(sys_get_temp_dir(), 'pliego-bench-cgroup-err-') : null;
     if ($linux && ($samplerResultTmp === false || $samplerErrorTmp === false)) {
-        @unlink($stdoutTmp);
-        @unlink($stderrTmp);
+        if (is_string($stdoutTmp)) {
+            @unlink($stdoutTmp);
+        }
+        if (is_string($stderrTmp)) {
+            @unlink($stderrTmp);
+        }
         if (is_string($samplerResultTmp)) {
             @unlink($samplerResultTmp);
         }
@@ -209,27 +211,16 @@ function run_engine(array $command, string $cwd): array
     $launchedCommand = $command;
     $processEnvironment = null;
     if ($linux) {
-        $sampler = dirname(__DIR__) . '/tools/process_tree_sampler.py';
-        if (!is_file($sampler)) {
-            @unlink($stdoutTmp);
-            @unlink($stderrTmp);
+        $sampler = INSTALLED_BROKER;
+        if (!is_file($sampler) || !is_executable($sampler)) {
             @unlink($samplerResultTmp);
             @unlink($samplerErrorTmp);
-            return ['error' => "cgroup-v2 sampler not found: {$sampler}"];
-        }
-        $interpreter = sampler_interpreter();
-        if ($interpreter === null) {
-            @unlink($stdoutTmp);
-            @unlink($stderrTmp);
-            @unlink($samplerResultTmp);
-            @unlink($samplerErrorTmp);
-            return ['error' => 'sampler interpreter is not a canonical root-owned, non-writable executable: ' . SAMPLER_PYTHON];
+            return ['error' => "installed cgroup-v2 broker not found: {$sampler}"];
         }
         $launchedCommand = [
-            $interpreter, '-I', $sampler,
+            '/usr/bin/sudo', '--non-interactive', $sampler,
+            '--cgroup-parent', (string) getenv('PLIEGO_BENCHMARK_CGROUP_PARENT'),
             '--cwd', $cwd,
-            '--stdout', $stdoutTmp,
-            '--stderr', $stderrTmp,
             '--',
             ...$command,
         ];
@@ -239,15 +230,19 @@ function run_engine(array $command, string $cwd): array
     }
     $descriptors = [
         0 => ['file', $nullDevice, 'r'],
-        1 => ['file', $linux ? $samplerResultTmp : $stdoutTmp, 'w'],
-        2 => ['file', $linux ? $samplerErrorTmp : $stderrTmp, 'w'],
+        1 => ['file', $linux ? $samplerResultTmp : (string) $stdoutTmp, 'w'],
+        2 => ['file', $linux ? $samplerErrorTmp : (string) $stderrTmp, 'w'],
     ];
 
     $wallStart = microtime(true);
     $process = proc_open($launchedCommand, $descriptors, $pipes, $cwd, $processEnvironment);
     if (!is_resource($process)) {
-        @unlink($stdoutTmp);
-        @unlink($stderrTmp);
+        if (is_string($stdoutTmp)) {
+            @unlink($stdoutTmp);
+        }
+        if (is_string($stderrTmp)) {
+            @unlink($stderrTmp);
+        }
         if (is_string($samplerResultTmp)) {
             @unlink($samplerResultTmp);
         }
@@ -259,10 +254,14 @@ function run_engine(array $command, string $cwd): array
 
     $launcherExitCode = proc_close($process);
     $wallMs = (microtime(true) - $wallStart) * 1000.0;
-    $stdout = (string) file_get_contents($stdoutTmp);
-    $stderr = (string) file_get_contents($stderrTmp);
-    @unlink($stdoutTmp);
-    @unlink($stderrTmp);
+    $stdout = is_string($stdoutTmp) ? (string) file_get_contents($stdoutTmp) : '';
+    $stderr = is_string($stderrTmp) ? (string) file_get_contents($stderrTmp) : '';
+    if (is_string($stdoutTmp)) {
+        @unlink($stdoutTmp);
+    }
+    if (is_string($stderrTmp)) {
+        @unlink($stderrTmp);
+    }
 
     if ($linux) {
         $measurementJson = (string) file_get_contents($samplerResultTmp);
@@ -274,10 +273,13 @@ function run_engine(array $command, string $cwd): array
         if ($launcherExitCode !== 0 || !is_array($measurement) || !is_object($resourceUsage)) {
             return ['error' => 'cgroup-v2 sampler failed: ' . ($samplerError ?: "exit {$launcherExitCode}")];
         }
+        $stdout = is_string($measurement['engine_stdout'] ?? null) ? $measurement['engine_stdout'] : '';
+        $stderr = is_string($measurement['engine_stderr'] ?? null) ? $measurement['engine_stderr'] : '';
         foreach ([
-            'wall_ms', 'cpu_user_ms', 'cpu_sys_ms', 'memory_current_bytes', 'memory_peak_bytes',
+            'root_wall_ms', 'tree_wall_ms', 'measurement_complete_ms',
+            'cpu_user_ms', 'cpu_sys_ms', 'memory_current_bytes', 'memory_peak_bytes',
             'read_bytes', 'write_bytes', 'read_operations', 'write_operations', 'method', 'exit_code',
-            'cgroup_drained', 'cleanup', 'launch_security', 'sampled_diagnostics',
+            'cleanup', 'launch_security', 'sampled_diagnostics', 'engine_stdout', 'engine_stderr',
         ] as $field) {
             if (!array_key_exists($field, $measurement)) {
                 return ['error' => "cgroup-v2 sampler omitted {$field}"];
@@ -288,16 +290,16 @@ function run_engine(array $command, string $cwd): array
             return ['error' => 'cgroup-v2 sampler returned invalid sampled_diagnostics'];
         }
         return [
-            'wall_ms' => (float) $measurement['wall_ms'],
+            'wall_ms' => (float) $measurement['tree_wall_ms'],
             'user_ms' => (float) $measurement['cpu_user_ms'],
             'sys_ms' => (float) $measurement['cpu_sys_ms'],
             'memory_current_bytes' => (int) $measurement['memory_current_bytes'],
             'memory_peak_bytes' => (int) $measurement['memory_peak_bytes'],
-            'sampled_peak_rss_kib_lower_bound' => isset($diagnostics['sampled_peak_summed_rss_kib_lower_bound'])
-                ? (int) $diagnostics['sampled_peak_summed_rss_kib_lower_bound']
+            'sequential_sampled_peak_rss_kib_diagnostic' => isset($diagnostics['sequential_sampled_peak_summed_rss_kib_diagnostic'])
+                ? (int) $diagnostics['sequential_sampled_peak_summed_rss_kib_diagnostic']
                 : null,
-            'sampled_peak_pss_kib_lower_bound' => isset($diagnostics['sampled_peak_summed_pss_kib_lower_bound'])
-                ? (int) $diagnostics['sampled_peak_summed_pss_kib_lower_bound']
+            'sequential_sampled_peak_pss_kib_diagnostic' => isset($diagnostics['sequential_sampled_peak_summed_pss_kib_diagnostic'])
+                ? (int) $diagnostics['sequential_sampled_peak_summed_pss_kib_diagnostic']
                 : null,
             'read_bytes' => (int) $measurement['read_bytes'],
             'write_bytes' => (int) $measurement['write_bytes'],
@@ -318,8 +320,8 @@ function run_engine(array $command, string $cwd): array
         'sys_ms' => null,
         'memory_current_bytes' => null,
         'memory_peak_bytes' => null,
-        'sampled_peak_rss_kib_lower_bound' => null,
-        'sampled_peak_pss_kib_lower_bound' => null,
+        'sequential_sampled_peak_rss_kib_diagnostic' => null,
+        'sequential_sampled_peak_pss_kib_diagnostic' => null,
         'read_bytes' => null,
         'write_bytes' => null,
         'read_operations' => null,
@@ -404,9 +406,14 @@ function pdf_text(string $pdfPath): ?string
 
 function prepare_engine_directory(string $path, int $uid, int $gid): void
 {
-    if (!mkdir($path, 0700) || !chown($path, $uid) || !chgrp($path, $gid) || !chmod($path, 0700)) {
+    if (!mkdir($path, 0770) || !chgrp($path, $gid) || !chmod($path, 0770)) {
         rrmdir($path);
-        fail("cannot create engine-owned directory: {$path}");
+        fail("cannot create runner-owned, engine-group-writable directory: {$path}");
+    }
+    $metadata = stat($path);
+    if (!is_array($metadata) || (int) $metadata['uid'] !== posix_geteuid() || (int) $metadata['gid'] !== $gid) {
+        rrmdir($path);
+        fail("unsafe engine output directory identity: {$path}");
     }
 }
 
@@ -420,8 +427,10 @@ function prepare_engine_directory(string $path, int $uid, int $gid): void
  *     summary: array<string, mixed>|null} */
 function run_sample(array $state, int $index): array
 {
-    $artifactsDir = sys_get_temp_dir() . '/pliego-bench-' . bin2hex(random_bytes(8));
-    $outDir = sys_get_temp_dir() . '/pliego-bench-out-' . bin2hex(random_bytes(8));
+    $retainedRoot = is_string($state['retainedRoot']) ? $state['retainedRoot'] : sys_get_temp_dir();
+    $sampleName = ($index < 0 ? 'warmup-' . abs($index) : 'sample-' . $index) . '-' . bin2hex(random_bytes(8));
+    $artifactsDir = $retainedRoot . '/' . $sampleName . '-artifacts';
+    $outDir = $retainedRoot . '/' . $sampleName . '-output';
     if (PHP_OS_FAMILY === 'Linux') {
         prepare_engine_directory($outDir, $state['engineUid'], $state['engineGid']);
         prepare_engine_directory($artifactsDir, $state['engineUid'], $state['engineGid']);
@@ -508,11 +517,11 @@ function run_sample(array $state, int $index): array
 
     $checks = [];
     if (is_object($exec['resource_usage'])) {
-        $drained = $exec['resource_usage']->cgroup_drained ?? false;
+        $drained = ($exec['resource_usage']->counters->final->cgroup_events->populated ?? 1) === 0;
         $cleanup = $exec['resource_usage']->cleanup ?? null;
         $killUsed = is_object($cleanup) ? ($cleanup->kill_used ?? true) : true;
         $checks[] = [
-            'name' => 'cgroup_drained',
+            'name' => 'tree_fully_drained',
             'status' => $drained ? 'pass' : 'fail',
         ];
         $checks[] = [
@@ -597,8 +606,8 @@ function run_sample(array $state, int $index): array
         'sys_ms' => $exec['sys_ms'],
         'memory_current_bytes' => $exec['memory_current_bytes'],
         'memory_peak_bytes' => $exec['memory_peak_bytes'],
-        'sampled_peak_rss_kib_lower_bound' => $exec['sampled_peak_rss_kib_lower_bound'],
-        'sampled_peak_pss_kib_lower_bound' => $exec['sampled_peak_pss_kib_lower_bound'],
+        'sequential_sampled_peak_rss_kib_diagnostic' => $exec['sequential_sampled_peak_rss_kib_diagnostic'],
+        'sequential_sampled_peak_pss_kib_diagnostic' => $exec['sequential_sampled_peak_pss_kib_diagnostic'],
         'read_bytes' => $exec['read_bytes'],
         'write_bytes' => $exec['write_bytes'],
         'read_operations' => $exec['read_operations'],
@@ -647,6 +656,7 @@ $state = [
     'textContains' => $textContains,
     'engineUid' => $engineUid,
     'engineGid' => $engineGid,
+    'retainedRoot' => $retainedRoot,
 ];
 
 for ($iteration = 0; $iteration < $warmup; $iteration++) {

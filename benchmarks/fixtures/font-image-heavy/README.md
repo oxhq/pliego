@@ -8,4 +8,4 @@ with 48 unique 320x180 inline PNG charts (stdlib only) plus `Ahem.ttf` via
 (SHA-256 `b719ecb31c5b21fc573c03f6421c74ac63c271a5a3ff841e34f9705fb94b8448`).
 
 Expected (see `manifest.toml`): 6 pages. The exact count is an estimate and is
-pinned to the measured value by the first signed baseline.
+pinned to the measured value by the first accepted baseline.

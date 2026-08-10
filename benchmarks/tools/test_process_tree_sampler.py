@@ -6,11 +6,15 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import ctypes
 import errno
+import hashlib
 import io
 import json
 import os
 import random
+import secrets
+import signal
 import shutil
 import subprocess
 import sys
@@ -21,6 +25,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
+import benchmark_publication
+import observer_ab
 import process_tree_sampler
 import validate_result
 
@@ -131,37 +137,119 @@ def fixture_proofs() -> None:
     assert fixture_account.name == process_tree_sampler.ENGINE_ACCOUNT
     with mock.patch.dict(os.environ, {"GITHUB_TOKEN": "must-not-leak", "LANG": "C"}, clear=True):
         child_environment = process_tree_sampler.engine_environment(fixture_account)
-    assert "GITHUB_TOKEN" not in child_environment and child_environment["LANG"] == "C"
+    assert "GITHUB_TOKEN" not in child_environment and child_environment["LANG"] == "C.UTF-8"
+    assert child_environment == {
+        "HOME": "/nonexistent",
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
+        "LOGNAME": process_tree_sampler.ENGINE_ACCOUNT,
+        "PATH": "/usr/bin:/bin",
+        "TMPDIR": "/tmp",
+        "TZ": "UTC",
+        "USER": process_tree_sampler.ENGINE_ACCOUNT,
+    }
+    must_be_incomplete("BROKER_INVOCATION_UNSAFE", lambda: process_tree_sampler.runner_identity({}))
+    assert process_tree_sampler.runner_identity({"SUDO_UID": "1000", "SUDO_GID": "1000"}) == (1000, 1000)
 
     with tempfile.TemporaryDirectory() as raw:
         executable = Path(raw) / "true"
-        shutil.copy2(shutil.which("true") or "/bin/true", executable)
+        executable.write_bytes(b"fixture")
         executable.chmod(0o555)
         must_be_incomplete(
             "ENGINE_COMMAND_INVALID",
             lambda: process_tree_sampler.command_identity([str(executable.resolve())], fixture_account),
         )
-        with (
-            mock.patch.object(process_tree_sampler, "require_broker_root"),
-            mock.patch.object(process_tree_sampler, "resolve_engine_account", return_value=fixture_account),
-            mock.patch.object(process_tree_sampler, "require_delegated_parent") as delegated,
-        ):
+
+    if sys.platform == "linux":
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            directory.chmod(0o755)
+            executable = directory / "engine"
+            original = b"#!/bin/sh\nexit 0\n"
+            executable.write_bytes(original)
+            executable.chmod(0o555)
+            _argv, identity = process_tree_sampler.command_identity(
+                [str(executable.resolve()), "render", "input.html"], fixture_account
+            )
+            try:
+                executable.chmod(0o755)
+                executable.write_bytes(b"#!/bin/sh\nexit 99\n")
+                assert process_tree_sampler.hash_fd(identity.sealed_fd) == hashlib.sha256(original).hexdigest()
+                assert process_tree_sampler.hash_fd(identity.source_fd) != identity.sha256
+                must_be_incomplete(
+                    "ENGINE_EXECUTABLE_CHANGED", lambda: process_tree_sampler.verify_executable(identity)
+                )
+            finally:
+                identity.close()
+
+        with tempfile.TemporaryDirectory() as raw:
+            oversized = Path(raw) / "oversized-engine"
+            with oversized.open("wb") as stream:
+                stream.truncate(process_tree_sampler.MAX_ENGINE_EXECUTABLE_BYTES + 1)
+            oversized.chmod(0o555)
             must_be_incomplete(
-                "ENGINE_COMMAND_INVALID",
-                lambda: process_tree_sampler.sample_command(
-                    [str(executable.resolve())],
-                    raw,
-                    os.devnull,
-                    os.devnull,
-                    1,
-                    1,
-                    0,
-                    1,
-                    Path(raw),
+                "ENGINE_EXECUTABLE_SIZE_UNSAFE",
+                lambda: process_tree_sampler.command_identity(
+                    [str(oversized.resolve()), "render", "input.html"],
+                    fixture_account,
                 ),
             )
-            delegated.assert_not_called()
 
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            cwd = directory / "cwd"
+            workspace = directory / "workspace"
+            input_path = cwd / "input.html"
+            output = workspace / "output"
+            artifacts = workspace / "artifacts"
+            cwd.mkdir()
+            output.mkdir(parents=True)
+            artifacts.mkdir()
+            input_path.write_text("old", encoding="utf-8")
+            cwd_fd = os.open(cwd, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+            workspace_fd = os.open(workspace, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+            input_fd = os.open(input_path, os.O_RDONLY | os.O_CLOEXEC)
+            output_fd = os.open(output, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+            artifacts_fd = os.open(artifacts, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+            cwd_stat, input_stat = os.fstat(cwd_fd), os.fstat(input_fd)
+            workspace_stat = os.fstat(workspace_fd)
+            output_stat, artifacts_stat = os.fstat(output_fd), os.fstat(artifacts_fd)
+            paths = process_tree_sampler.BoundRunPaths(
+                cwd,
+                cwd_fd,
+                cwd_stat.st_dev,
+                cwd_stat.st_ino,
+                "input.html",
+                input_fd,
+                input_stat.st_dev,
+                input_stat.st_ino,
+                process_tree_sampler.hash_fd(input_fd),
+                workspace,
+                workspace_fd,
+                workspace_stat.st_dev,
+                workspace_stat.st_ino,
+                output / "document.pdf",
+                output_fd,
+                output_stat.st_dev,
+                output_stat.st_ino,
+                artifacts,
+                artifacts_fd,
+                artifacts_stat.st_dev,
+                artifacts_stat.st_ino,
+            )
+            try:
+                moved = directory.with_name(directory.name + "-moved")
+                directory.rename(moved)
+                directory.mkdir()
+                process_tree_sampler.verify_run_paths(paths)
+                (moved / "cwd" / "input.html").rename(moved / "cwd" / "old-input.html")
+                (moved / "cwd" / "input.html").write_text("replacement", encoding="utf-8")
+                must_be_incomplete("COMMAND_IDENTITY_CHANGED", lambda: process_tree_sampler.verify_run_paths(paths))
+            finally:
+                paths.close()
+                shutil.rmtree(directory, ignore_errors=True)
+                if moved.exists():
+                    moved.rename(directory)
     with tempfile.TemporaryDirectory() as raw:
         directory = Path(raw)
         directory.chmod(0o755)
@@ -253,10 +341,13 @@ def fixture_proofs() -> None:
         directory = Path(raw)
         cgroup = directory / "leaf"
         counter_fixture(cgroup)
+        assert process_tree_sampler.parse_io_stat("8:80 \n", "fixture") == {
+            "8:80": {"rbytes": 0, "wbytes": 0, "rios": 0, "wios": 0}
+        }
         bound = process_tree_sampler.open_bound_directory(cgroup, directory)
         snapshot, settle = process_tree_sampler.wait_for_accounting_quiescence(bound, 1.0, 20.0)
         assert snapshot["memory_file_dirty_bytes"] == 0
-        assert settle["reads"] == 2 and settle["stable_reads"] == 2
+        assert settle["reads"] == 2 and len(settle["stable_observations"]) == 2
         (cgroup / "memory.stat").write_text("file_dirty 1\nfile_writeback 0\n", encoding="ascii")
         must_be_incomplete(
             "CGROUP_ACCOUNTING_NOT_QUIESCENT",
@@ -302,7 +393,7 @@ def fixture_proofs() -> None:
         timeout=10,
     )
     assert missing.returncode == 2
-    assert "measurement-incomplete[CGROUP_PARENT_REQUIRED]" in missing.stderr
+    assert "--cgroup-parent" in missing.stderr and "required" in missing.stderr
 
 
 def child_workload(mebibytes: int, duration: float) -> int:
@@ -354,17 +445,86 @@ def migration_attack(parent: str) -> int:
     return parent_workload(4, 0.3)
 
 
+def clone_into_cgroup_attack(parent: str) -> int:
+    descriptor = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        fields = (ctypes.c_uint64 * 11)()
+        fields[0] = 0x200000000  # CLONE_INTO_CGROUP
+        fields[4] = signal.SIGCHLD
+        fields[10] = descriptor
+        libc = ctypes.CDLL(None, use_errno=True)
+        result = libc.syscall(435, ctypes.byref(fields), ctypes.sizeof(fields))
+        if result == 0:
+            os._exit(90)
+        if result > 0:
+            os.waitpid(result, 0)
+            return 90
+        return 0 if ctypes.get_errno() in {errno.EACCES, errno.EPERM} else 91
+    finally:
+        os.close(descriptor)
+
+
+def detached_work(duration: float, marker: str) -> int:
+    subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import pathlib,sys,time; time.sleep(float(sys.argv[1])); pathlib.Path(sys.argv[2]).write_text('done')",
+            str(duration),
+            marker,
+        ],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    return 0
+
+
+def hanging_tree(pid_path: str) -> int:
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    Path(pid_path).write_text(str(child.pid), encoding="ascii")
+    time.sleep(60)
+    return 0
+
+
 @contextlib.contextmanager
-def workload_engine() -> Iterator[str]:
+def workload_engine(
+    root_sentinel: str | None = None,
+    root_marker: str | None = None,
+    version_marker: str | None = None,
+) -> Iterator[str]:
     with tempfile.TemporaryDirectory() as raw:
         directory = Path(raw)
         directory.chmod(0o755)
         engine = directory / "fixture-engine.py"
         engine.write_text(
             "#!/usr/bin/env python3\n"
-            "import os, sys\n"
+            "import os, pathlib, sys\n"
+            f"sentinel={root_sentinel!r}; root_marker={root_marker!r}; version_marker={version_marker!r}\n"
+            "outcome='not-configured'\n"
+            "if sentinel:\n"
+            "    try: pathlib.Path(sentinel).read_text(); outcome='readable'\n"
+            "    except PermissionError: outcome='denied'\n"
+            "    except OSError as error: outcome=f'error:{error.errno}'\n"
+            "pathlib.Path(root_marker).write_text(outcome) if root_marker else None\n"
+            "if sys.argv[1:] == ['--version']:\n"
+            "    pathlib.Path(version_marker).write_text(outcome) if version_marker else None\n"
+            "    raise SystemExit(0)\n"
+            "args=sys.argv[3:]; kept=[]; index=0\n"
+            "while index < len(args):\n"
+            "    if args[index] in {'--output','--artifacts'}:\n"
+            "        index += 2\n"
+            "    else:\n"
+            "        kept.append(args[index]); index += 1\n"
             f"os.execv({str(Path(sys.executable).resolve())!r}, "
-            f"[{str(Path(sys.executable).resolve())!r}, {str(Path(__file__).resolve())!r}, *sys.argv[3:]])\n",
+            f"[{str(Path(sys.executable).resolve())!r}, {str(Path(__file__).resolve())!r}, *kept])\n",
             encoding="utf-8",
         )
         engine.chmod(0o555)
@@ -375,33 +535,119 @@ def workload_command(engine: str, mebibytes: int = 32, duration: float = 0.8) ->
     return [engine, "render", "fixture.html", "--workload-parent", str(mebibytes), str(duration)]
 
 
-def sampled(command: list[str], descendant_grace_ms: float = 1000.0) -> dict:
-    result = subprocess.run(
-        [
-            sys.executable,
-            str(SAMPLER),
+@contextlib.contextmanager
+def broker_invocation(
+    command: list[str],
+    *,
+    descendant_grace_ms: float = 1000.0,
+    deadline_ms: float = 10_000.0,
+    observation: bool = True,
+    workspace_root: Path | None = None,
+) -> Iterator[list[str]]:
+    import grp
+
+    cwd = Path(os.environ["PLIEGO_BENCHMARK_FIXTURE_CWD"])
+    parent = os.environ["PLIEGO_BENCHMARK_CGROUP_PARENT"]
+    broker = os.environ.get("PLIEGO_BENCHMARK_BROKER", "/usr/local/libexec/pliego-cgroup-broker")
+    engine_gid = grp.getgrnam(process_tree_sampler.ENGINE_ACCOUNT).gr_gid
+    temporary: tempfile.TemporaryDirectory[str] | None = None
+    if workspace_root is None:
+        temporary = tempfile.TemporaryDirectory(prefix="pliego-broker-output-")
+        root = Path(temporary.name)
+    else:
+        root = workspace_root / f"execution-{secrets.token_hex(16)}"
+        root.mkdir(mode=0o700)
+    try:
+        output_dir = root / "output"
+        artifacts_dir = root / "artifacts"
+        for directory in (output_dir, artifacts_dir):
+            directory.mkdir(mode=0o770)
+            os.chown(directory, os.geteuid(), engine_gid)
+            directory.chmod(0o770)
+        bound_command = [
+            *command[:3],
+            "--output",
+            str(output_dir / "document.pdf"),
+            "--artifacts",
+            str(artifacts_dir),
+            *command[3:],
+        ]
+        yield [
+            "/usr/bin/sudo",
+            "--non-interactive",
+            broker,
+            "--cgroup-parent",
+            parent,
+            "--cwd",
+            str(cwd),
             "--interval-ms",
             "75",
             "--pss-interval-ms",
             "250",
             "--descendant-grace-ms",
             str(descendant_grace_ms),
+            "--deadline-ms",
+            str(deadline_ms),
+            "--observation",
+            "on" if observation else "off",
             "--",
-            *command,
-        ],
-        capture_output=True,
-        text=True,
-        timeout=30,
+            *bound_command,
+        ]
+    finally:
+        if temporary is not None:
+            temporary.cleanup()
+
+
+def broker_run(
+    command: list[str],
+    *,
+    descendant_grace_ms: float = 1000.0,
+    deadline_ms: float = 10_000.0,
+    observation: bool = True,
+    workspace_root: Path | None = None,
+) -> subprocess.CompletedProcess[str]:
+    with broker_invocation(
+        command,
+        descendant_grace_ms=descendant_grace_ms,
+        deadline_ms=deadline_ms,
+        observation=observation,
+        workspace_root=workspace_root,
+    ) as invocation:
+        return subprocess.run(
+            invocation,
+            capture_output=True,
+            text=True,
+            timeout=max(30.0, deadline_ms / 1000.0 + 10.0),
+        )
+
+
+def sampled(
+    command: list[str],
+    descendant_grace_ms: float = 1000.0,
+    *,
+    observation: bool = True,
+    workspace_root: Path | None = None,
+) -> dict:
+    result = broker_run(
+        command,
+        descendant_grace_ms=descendant_grace_ms,
+        observation=observation,
+        workspace_root=workspace_root,
     )
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout)
 
 
-def direct_wall_ms(command: list[str]) -> float:
-    started = time.monotonic()
-    result = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
-    assert result.returncode == 0
-    return (time.monotonic() - started) * 1000.0
+@contextlib.contextmanager
+def engine_shared_directory() -> Iterator[Path]:
+    import grp
+
+    with tempfile.TemporaryDirectory(prefix="pliego-engine-shared-") as raw:
+        directory = Path(raw)
+        engine_gid = grp.getgrnam(process_tree_sampler.ENGINE_ACCOUNT).gr_gid
+        os.chown(directory, os.geteuid(), engine_gid)
+        directory.chmod(0o770)
+        yield directory
 
 
 def assert_exact_counters(proof: dict) -> None:
@@ -424,13 +670,13 @@ def assert_validator_accepts(proof: dict, ok: bool) -> None:
         "ok": ok,
         "exit_code": proof["exit_code"],
         "signal": proof["signal"],
-        "wall_ms": proof["wall_ms"],
+        "wall_ms": proof["tree_wall_ms"],
         "user_ms": proof["cpu_user_ms"],
         "sys_ms": proof["cpu_sys_ms"],
         "memory_current_bytes": proof["memory_current_bytes"],
         "memory_peak_bytes": proof["memory_peak_bytes"],
-        "sampled_peak_rss_kib_lower_bound": diagnostics["sampled_peak_summed_rss_kib_lower_bound"],
-        "sampled_peak_pss_kib_lower_bound": diagnostics["sampled_peak_summed_pss_kib_lower_bound"],
+        "sequential_sampled_peak_rss_kib_diagnostic": diagnostics["sequential_sampled_peak_summed_rss_kib_diagnostic"],
+        "sequential_sampled_peak_pss_kib_diagnostic": diagnostics["sequential_sampled_peak_summed_pss_kib_diagnostic"],
         "read_bytes": proof["read_bytes"],
         "write_bytes": proof["write_bytes"],
         "read_operations": proof["read_operations"],
@@ -445,18 +691,92 @@ def assert_validator_accepts(proof: dict, ok: bool) -> None:
 
 def live_cgroup_proofs() -> dict:
     assert os.environ.get("PLIEGO_BENCHMARK_CGROUP_PARENT"), "live proof requires delegated parent"
+    assert os.geteuid() != 0, "live harness and correctness tools must be unprivileged"
     account = process_tree_sampler.resolve_engine_account()
-    with workload_engine() as engine:
-        proof = sampled(workload_command(engine))
-        parent = os.environ["PLIEGO_BENCHMARK_CGROUP_PARENT"]
-        attacked = sampled([engine, "render", "fixture.html", "--workload-migration-attack", parent])
-        assert attacked["exit_code"] == 0
-        assert attacked["counters"]["final"]["pids_peak"] >= 3
-        assert set(attacked["launch_security"]["migration_write_probes"]["parent"].values()) <= {
-            "EACCES",
-            "EPERM",
-        }
-    assert proof["method"] == "linux-cgroup-v2-v1"
+    sentinel = os.environ["PLIEGO_BENCHMARK_ROOT_SENTINEL"]
+    with engine_shared_directory() as shared:
+        root_marker = shared / "root-sentinel-outcome"
+        version_marker = shared / "version-attempted"
+        with workload_engine(sentinel, str(root_marker), str(version_marker)) as engine:
+            proof = sampled(workload_command(engine))
+            assert root_marker.read_text(encoding="ascii") == "denied", "candidate render retained root authority"
+            assert not version_marker.exists(), "candidate --version executed inside the root broker"
+            parent = os.environ["PLIEGO_BENCHMARK_CGROUP_PARENT"]
+            attacked = sampled([engine, "render", "fixture.html", "--workload-migration-attack", parent])
+            assert attacked["exit_code"] == 0, json.dumps(attacked, sort_keys=True)
+            assert attacked["counters"]["final"]["pids_peak"] >= 3
+            assert set(attacked["launch_security"]["migration_write_probes"]["parent"].values()) <= {
+                "EACCES",
+                "EPERM",
+            }
+            assert set(attacked["launch_security"]["migration_fd_probes"]["measurement"].values()) <= {
+                "EACCES",
+                "EPERM",
+            }
+            clone_attacked = sampled([engine, "render", "fixture.html", "--workload-clone-attack", parent])
+            assert clone_attacked["exit_code"] == 0
+
+            marker = shared / "descendant-finished"
+            descendant = sampled(
+                [engine, "render", "fixture.html", "--workload-detached", "0.45", str(marker)],
+                descendant_grace_ms=1000,
+            )
+            assert descendant["root_wall_ms"] < descendant["tree_wall_ms"]
+            assert descendant["tree_wall_ms"] - descendant["root_wall_ms"] >= 300
+            assert descendant["measurement_complete_ms"] >= descendant["tree_wall_ms"]
+            assert marker.read_text(encoding="utf-8") == "done"
+            assert descendant["cleanup"]["kill_used"] is False
+
+            hang_pid = shared / "hang.pid"
+            timed_out = broker_run(
+                [engine, "render", "fixture.html", "--workload-hang", str(hang_pid)],
+                deadline_ms=350,
+                descendant_grace_ms=1000,
+            )
+            assert timed_out.returncode == 2, timed_out.stderr
+            assert "measurement-incomplete[ENGINE_TIMEOUT]" in timed_out.stderr
+            child_pid = int(hang_pid.read_text(encoding="ascii"))
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline and (Path("/proc") / str(child_pid)).exists():
+                time.sleep(0.02)
+            if (Path("/proc") / str(child_pid)).exists():
+                raw_stat = (Path("/proc") / str(child_pid) / "stat").read_text(encoding="ascii")
+                state = raw_stat[raw_stat.rfind(")") + 2 :].split()[0]
+                assert state == "Z", f"timed-out descendant survived in state {state}"
+            assert sorted(path.name for path in Path(parent).iterdir() if path.is_dir()) == ["harness"]
+
+            signal_pid = shared / "signal-hang.pid"
+            with broker_invocation(
+                [engine, "render", "fixture.html", "--workload-hang", str(signal_pid)],
+                deadline_ms=10_000,
+                descendant_grace_ms=1000,
+            ) as invocation:
+                interrupted = subprocess.Popen(
+                    invocation,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    start_new_session=True,
+                )
+                signal_deadline = time.monotonic() + 2
+                while time.monotonic() < signal_deadline and not signal_pid.is_file():
+                    time.sleep(0.02)
+                assert signal_pid.is_file(), "signal-interruption workload did not start"
+                os.killpg(interrupted.pid, signal.SIGTERM)
+                _stdout, interrupted_stderr = interrupted.communicate(timeout=10)
+            assert interrupted.returncode == 2, interrupted_stderr
+            assert "measurement-incomplete[BROKER_INTERRUPTED]" in interrupted_stderr
+            interrupted_child_pid = int(signal_pid.read_text(encoding="ascii"))
+            signal_deadline = time.monotonic() + 2
+            while time.monotonic() < signal_deadline and (Path("/proc") / str(interrupted_child_pid)).exists():
+                time.sleep(0.02)
+            if (Path("/proc") / str(interrupted_child_pid)).exists():
+                raw_stat = (Path("/proc") / str(interrupted_child_pid) / "stat").read_text(encoding="ascii")
+                state = raw_stat[raw_stat.rfind(")") + 2 :].split()[0]
+                assert state == "Z", f"interrupted descendant survived in state {state}"
+            assert sorted(path.name for path in Path(parent).iterdir() if path.is_dir()) == ["harness"]
+
+    assert proof["method"] == "linux-cgroup-v2-v2"
     assert proof["scope"] == "fresh-root-owned-cgroup-subtree"
     launch = proof["launch_security"]
     assert launch["account"] == process_tree_sampler.ENGINE_ACCOUNT
@@ -464,26 +784,32 @@ def live_cgroup_proofs() -> dict:
     assert launch["status"]["uid"] == [account.uid] * 4
     assert launch["status"]["gid"] == [account.gid] * 4
     assert launch["status"]["supplementary_groups"] == []
-    assert all(int(launch["status"][field], 16) == 0 for field in (
-        "cap_inheritable_hex", "cap_permitted_hex", "cap_effective_hex", "cap_bounding_hex", "cap_ambient_hex"
-    ))
+    assert all(
+        int(launch["status"][field], 16) == 0
+        for field in (
+            "cap_inheritable_hex",
+            "cap_permitted_hex",
+            "cap_effective_hex",
+            "cap_bounding_hex",
+            "cap_ambient_hex",
+        )
+    )
     assert launch["status"]["no_new_privs"] == 1
-    assert proof["cgroup_drained"] is True
+    assert launch["parent_death_signal"] == signal.SIGKILL
+    assert proof["counters"]["final"]["cgroup_events"]["populated"] == 0
     assert proof["cleanup"]["kill_used"] is False
+    assert proof["root_wall_ms"] <= proof["tree_wall_ms"] <= proof["measurement_complete_ms"]
     assert proof["counters"]["final"]["pids_peak"] >= 3
     assert proof["memory_peak_bytes"] >= 48 * 1024 * 1024
     observed = proof["sampled_diagnostics"]["observed_processes"]
     assert len(observed) >= 3, observed
     assert any(row["pid"] == proof["root_pid"] and row["start_ticks"] == proof["root_start_ticks"] for row in observed)
-    assert proof["sampled_diagnostics"]["sampled_peak_summed_rss_kib_lower_bound"] > 48 * 1024
-    assert "lower bounds" in proof["sampled_diagnostics"]["coverage"]
+    assert proof["sampled_diagnostics"]["sequential_sampled_peak_summed_rss_kib_diagnostic"] > 48 * 1024
+    assert "not simultaneous bounds" in proof["sampled_diagnostics"]["coverage"]
     assert_exact_counters(proof)
     assert_validator_accepts(proof, True)
 
-    with tempfile.TemporaryDirectory() as raw:
-        directory = Path(raw)
-        os.chown(directory, account.uid, account.gid)
-        directory.chmod(0o700)
+    with engine_shared_directory() as directory:
         pid_path = directory / "leaked.pid"
         with workload_engine() as engine:
             cleaned = sampled(
@@ -512,11 +838,13 @@ def php_integration_proof() -> None:
     with tempfile.TemporaryDirectory() as raw:
         directory = Path(raw)
         directory.chmod(0o755)
-        input_path = directory / "input.html"
-        output_path = directory / "output.pdf"
-        artifacts_path = directory / "ignored-artifacts"
+        failure_root = directory / "failures"
+        failure_root.mkdir(mode=0o700)
+        retained_workspace = failure_root / ".in-progress-integration"
+        retained_workspace.mkdir(mode=0o700)
+        fixture_cwd = Path(os.environ["PLIEGO_BENCHMARK_FIXTURE_CWD"])
+        input_path = fixture_cwd / "fixture.html"
         engine = directory / "fake-engine.py"
-        input_path.write_text("<p>fixture</p>", encoding="utf-8")
         engine.write_text(
             """#!/usr/bin/env python3
 import json, os, pathlib, sys
@@ -539,95 +867,127 @@ os.fsync(sys.stdout.fileno())
             encoding="utf-8",
         )
         engine.chmod(0o755)
+        runner_command = [
+            php,
+            str(PHP_RUNNER),
+            "--binary",
+            str(engine),
+            "--input",
+            input_path.name,
+            "--output",
+            "output.pdf",
+            "--artifacts",
+            "ignored-artifacts",
+            "--samples",
+            "1",
+            "--warmup",
+            "0",
+            "--cwd",
+            str(fixture_cwd),
+            "--retained-root",
+            str(retained_workspace),
+        ]
+        root_refusal = subprocess.run(
+            ["/usr/bin/sudo", "--non-interactive", *runner_command],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert root_refusal.returncode != 0
+        assert "PDF verification must never run as root" in root_refusal.stderr
         run = subprocess.run(
-            [
-                php,
-                str(PHP_RUNNER),
-                "--binary",
-                str(engine),
-                "--input",
-                input_path.name,
-                "--output",
-                str(output_path),
-                "--artifacts",
-                str(artifacts_path),
-                "--samples",
-                "1",
-                "--warmup",
-                "0",
-                "--cwd",
-                str(directory),
-            ],
+            runner_command,
             capture_output=True,
             text=True,
             timeout=30,
         )
         assert run.returncode == 0, run.stderr
         sample = json.loads(run.stdout)
-        assert sample["measurement_method"] == "linux-cgroup-v2-v1"
+        assert sample["measurement_method"] == "linux-cgroup-v2-v2"
         assert sample["resource_usage"]["root_start_ticks"] > 0
-        assert sample["resource_usage"]["cgroup_drained"] is True
+        assert sample["resource_usage"]["counters"]["final"]["cgroup_events"]["populated"] == 0
+        assert sample["wall_ms"] == sample["resource_usage"]["tree_wall_ms"]
         assert sample["memory_peak_bytes"] == sample["resource_usage"]["memory_peak_bytes"]
         violations: list[validate_result.Violation] = []
         validate_result.validate_resource_usage(sample, "$.sample", violations)
         assert not violations, "\n".join(map(str, violations))
 
+        failed_run = subprocess.run(
+            [*runner_command, "--page-count", "2"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert failed_run.returncode == 0, failed_run.stderr
+        failed = json.loads(failed_run.stdout)
+        assert failed["ok"] is False
+        assert failed["correctness"]["pass"] is False
+        retained_root = retained_workspace.resolve()
+        for key in ("artifacts_dir", "output_dir"):
+            retained = Path(failed["retained"][key])
+            assert retained.resolve().is_relative_to(retained_root)
+            assert retained.is_dir(), f"failed sample did not retain {key}: {retained}"
+        assert (Path(failed["retained"]["artifacts_dir"]) / "scene-report.json").is_file()
+        assert (Path(failed["retained"]["output_dir"]) / "output.pdf").is_file()
+        evidence = benchmark_publication.write_failure_evidence(
+            failure_root,
+            {"sample": failed},
+            "PHP integration correctness failure",
+            retained_workspace,
+        )
+        assert not retained_workspace.exists()
+        assert (evidence / "retained-samples").is_dir()
+        assert "retained-samples/" in (evidence / "SHA256SUMS").read_text(encoding="utf-8")
+        evidence_directories = [evidence, *(path for path in evidence.rglob("*") if path.is_dir())]
+        for path in evidence_directories:
+            if path.stat().st_uid == os.geteuid():
+                path.chmod(0o700)
+        shutil.rmtree(evidence)
+
 
 def acceptance_overhead_proof() -> tuple[dict, dict]:
-    pair_count = 20
-    seed = 20260808
-    rng = random.Random(seed)
+    pair_count = observer_ab.PAIR_COUNT
+    rng = random.Random(observer_ab.SEED)
     pairs: list[dict] = []
-    with workload_engine() as engine:
+    with (
+        workload_engine() as engine,
+        tempfile.TemporaryDirectory(prefix="pliego-observer-workspaces-") as raw_workspaces,
+    ):
+        workspace_root = Path(raw_workspaces)
         command = workload_command(engine, duration=1.5)
-        direct_wall_ms(command)
-        sampled(command)
+        sampled(command, observation=False, workspace_root=workspace_root)
+        sampled(command, observation=True, workspace_root=workspace_root)
         for index in range(pair_count):
-            order = ["direct", "sampled"]
+            order = ["observation-off", "observation-on"]
             rng.shuffle(order)
-            direct_ms = 0.0
-            measurement: dict = {}
+            measurements: dict[str, dict] = {}
             for mode in order:
-                if mode == "direct":
-                    direct_ms = direct_wall_ms(command)
-                else:
-                    measurement = sampled(command)
-            sampled_ms = float(measurement["wall_ms"])
-            pairs.append(
-                {
-                    "index": index,
-                    "order": order,
-                    "direct_wall_ms": direct_ms,
-                    "sampled_wall_ms": sampled_ms,
-                    "overhead_percent": (sampled_ms - direct_ms) * 100.0 / direct_ms,
-                    "sampler_cpu_percent_of_wall": float(measurement["sampler_cpu_percent_of_wall"]),
-                }
-            )
-    overhead = [float(pair["overhead_percent"]) for pair in pairs]
-    sampler_cpu = [float(pair["sampler_cpu_percent_of_wall"]) for pair in pairs]
-    overhead_p95 = validate_result.percentile(overhead, 95)
-    observer_effect = {
-        "method": "randomized-paired-wall-v1",
-        "seed": seed,
-        "pair_count": pair_count,
-        "workload_duration_seconds": 1.5,
-        "percentile_method": validate_result.PERCENTILE_METHOD,
-        "p95_overhead_percent": round(overhead_p95, 3),
-        "threshold_percent_exclusive": 2.0,
-        "passed": overhead_p95 < 2.0,
-        "pairs": pairs,
-    }
+                measurements[mode] = sampled(
+                    command,
+                    observation=mode == "observation-on",
+                    workspace_root=workspace_root,
+                )
+            off = measurements["observation-off"]
+            on = measurements["observation-on"]
+            pairs.append(observer_ab.measurement_pair(index, order, off, on))
+    sampler_cpu = [float(pair["sampler_cpu_percent_of_tree_wall"]) for pair in pairs]
+    observer_effect = observer_ab.build_measurements(pairs, duration_seconds=1.5)
     sampler_cpu_diagnostic = {
-        "method": "sampler-process-cpu-divided-by-engine-wall",
+        "method": "sampler-process-cpu-divided-by-tree-wall-derived",
         "percentile_method": validate_result.PERCENTILE_METHOD,
-        "p50_percent_of_wall": round(validate_result.percentile(sampler_cpu, 50), 3),
-        "p95_percent_of_wall": round(validate_result.percentile(sampler_cpu, 95), 3),
-        "raw_percent_of_wall": sampler_cpu,
+        "p50_percent_of_tree_wall": round(validate_result.percentile(sampler_cpu, 50), 3),
+        "p95_percent_of_tree_wall": round(validate_result.percentile(sampler_cpu, 95), 3),
+        "raw_percent_of_tree_wall": sampler_cpu,
     }
     return observer_effect, sampler_cpu_diagnostic
 
 
-def main(live: bool, php_integration: bool, acceptance_overhead: bool) -> None:
+def main(
+    live: bool,
+    php_integration: bool,
+    acceptance_overhead: bool,
+    observer_measurements_out: Path | None,
+) -> None:
     fixture_proofs()
     proof = live_cgroup_proofs() if live or acceptance_overhead else None
     if php_integration:
@@ -637,7 +997,18 @@ def main(live: bool, php_integration: bool, acceptance_overhead: bool) -> None:
         observer_effect, sampler_cpu = acceptance_overhead_proof()
         output["observer_effect"] = observer_effect
         output["sampler_cpu_diagnostic"] = sampler_cpu
+        if observer_measurements_out is not None:
+            requested = observer_measurements_out
+            destination = requested.resolve(strict=False)
+            if not requested.is_absolute() or requested != destination:
+                raise AssertionError("observer measurements output must be absolute and canonical")
+            benchmark_publication.atomic_write_bytes(
+                destination,
+                benchmark_publication.json_bytes(observer_effect, indent=2),
+            )
         assert observer_effect["passed"], observer_effect
+    elif observer_measurements_out is not None:
+        raise AssertionError("--observer-measurements-out requires --acceptance-overhead")
     print(json.dumps(output, indent=2))
 
 
@@ -646,10 +1017,14 @@ if __name__ == "__main__":
     parser.add_argument("--live", action="store_true")
     parser.add_argument("--php-integration", action="store_true")
     parser.add_argument("--acceptance-overhead", action="store_true")
+    parser.add_argument("--observer-measurements-out", type=Path)
     parser.add_argument("--workload-child", nargs=2, metavar=("MEBIBYTES", "DURATION"))
     parser.add_argument("--workload-parent", nargs=2, metavar=("MEBIBYTES", "DURATION"))
     parser.add_argument("--workload-leak", metavar="PID_PATH")
     parser.add_argument("--workload-migration-attack", metavar="CGROUP_PARENT")
+    parser.add_argument("--workload-clone-attack", metavar="CGROUP_PARENT")
+    parser.add_argument("--workload-detached", nargs=2, metavar=("DURATION", "MARKER"))
+    parser.add_argument("--workload-hang", metavar="PID_PATH")
     args = parser.parse_args()
     if args.workload_child:
         raise SystemExit(child_workload(int(args.workload_child[0]), float(args.workload_child[1])))
@@ -659,4 +1034,10 @@ if __name__ == "__main__":
         raise SystemExit(leaking_parent(args.workload_leak))
     if args.workload_migration_attack:
         raise SystemExit(migration_attack(args.workload_migration_attack))
-    main(args.live, args.php_integration, args.acceptance_overhead)
+    if args.workload_clone_attack:
+        raise SystemExit(clone_into_cgroup_attack(args.workload_clone_attack))
+    if args.workload_detached:
+        raise SystemExit(detached_work(float(args.workload_detached[0]), args.workload_detached[1]))
+    if args.workload_hang:
+        raise SystemExit(hanging_tree(args.workload_hang))
+    main(args.live, args.php_integration, args.acceptance_overhead, args.observer_measurements_out)

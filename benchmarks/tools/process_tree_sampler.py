@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3 -I
 
 """Run the fixed render command as an unprivileged account in a root-owned cgroup."""
 
@@ -33,14 +33,37 @@ if sys.platform == "linux":
 PROC = Path("/proc")
 CGROUP_ROOT = Path("/sys/fs/cgroup")
 REQUIRED_CONTROLLERS = frozenset({"cpu", "io", "memory", "pids"})
+
+
+def reject_json_constant(value: str) -> None:
+    raise ValueError(f"non-finite JSON constant {value!r} is forbidden")
+
+
 HARNESS_CHILD = "harness"
 ENGINE_ACCOUNT = "pliego-benchmark-engine"
+INSTALLED_BROKER = Path("/usr/local/libexec/pliego-cgroup-broker")
 KILL_GRACE_MS = 1000.0
+DEFAULT_DEADLINE_MS = 120_000.0
+MAX_DEADLINE_MS = 600_000.0
+MAX_ENGINE_EXECUTABLE_BYTES = 512 * 1024 * 1024
+MAX_ENGINE_OUTPUT_BYTES = 64 * 1024 * 1024
+MAX_ENGINE_PIDS = 128
 PR_CAPBSET_DROP = 24
+PR_SET_PDEATHSIG = 1
+PR_GET_PDEATHSIG = 2
+PR_SET_DUMPABLE = 4
 PR_SET_NO_NEW_PRIVS = 38
 PR_CAP_AMBIENT = 47
 PR_CAP_AMBIENT_CLEAR_ALL = 4
 CAP_SETPCAP = 8
+CLONE_NEWNET = 0x40000000
+AT_EMPTY_PATH = 0x1000
+F_ADD_SEALS = 1033
+F_SEAL_SEAL = 0x0001
+F_SEAL_SHRINK = 0x0002
+F_SEAL_GROW = 0x0004
+F_SEAL_WRITE = 0x0008
+METHOD = "linux-cgroup-v2-v2"
 
 
 class MeasurementIncomplete(RuntimeError):
@@ -51,6 +74,45 @@ class MeasurementIncomplete(RuntimeError):
 
 def incomplete(code: str, message: str) -> MeasurementIncomplete:
     return MeasurementIncomplete(code, message)
+
+
+_BROKER_SIGNAL: int | None = None
+
+
+@contextlib.contextmanager
+def broker_signal_guard(deadline_seconds: float | None = None) -> Iterator[None]:
+    global _BROKER_SIGNAL
+    _BROKER_SIGNAL = None
+    previous: dict[int, Any] = {}
+
+    def interrupted(signum: int, _frame: Any) -> None:
+        global _BROKER_SIGNAL
+        _BROKER_SIGNAL = signum
+        if signum == signal.SIGALRM:
+            raise incomplete("ENGINE_TIMEOUT", "broker deadline expired")
+        raise incomplete("BROKER_INTERRUPTED", f"broker received signal {signum}")
+
+    for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGALRM):
+        previous[signum] = signal.signal(signum, interrupted)
+    previous_timer = signal.getitimer(signal.ITIMER_REAL)
+    if deadline_seconds is not None:
+        signal.setitimer(signal.ITIMER_REAL, max(deadline_seconds, 0.001))
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0.0)
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
+        if previous_timer != (0.0, 0.0):
+            signal.setitimer(signal.ITIMER_REAL, *previous_timer)
+        _BROKER_SIGNAL = None
+
+
+def require_before_deadline(deadline: float, stage: str) -> None:
+    if _BROKER_SIGNAL is not None:
+        raise incomplete("BROKER_INTERRUPTED", f"broker received signal {_BROKER_SIGNAL} during {stage}")
+    if time.monotonic() >= deadline:
+        raise incomplete("ENGINE_TIMEOUT", f"broker deadline expired during {stage}")
 
 
 def require_linux(parser: argparse.ArgumentParser, platform: str) -> None:
@@ -66,12 +128,54 @@ class EngineAccount:
     home: str
 
 
-@dataclass(frozen=True)
+@dataclass
 class ExecutableIdentity:
     path: Path
     sha256: str
     device: int
     inode: int
+    size: int
+    source_fd: int
+    sealed_fd: int
+
+    def close(self) -> None:
+        for field in ("source_fd", "sealed_fd"):
+            descriptor = getattr(self, field)
+            if descriptor >= 0:
+                os.close(descriptor)
+                setattr(self, field, -1)
+
+
+@dataclass
+class BoundRunPaths:
+    cwd_path: Path
+    cwd_fd: int
+    cwd_device: int
+    cwd_inode: int
+    input_relative: str
+    input_fd: int
+    input_device: int
+    input_inode: int
+    input_sha256: str
+    workspace_path: Path
+    workspace_fd: int
+    workspace_device: int
+    workspace_inode: int
+    output_path: Path
+    output_dir_fd: int
+    output_dir_device: int
+    output_dir_inode: int
+    artifacts_path: Path
+    artifacts_fd: int
+    artifacts_device: int
+    artifacts_inode: int
+
+    def close(self) -> None:
+        for field in ("cwd_fd", "input_fd", "workspace_fd", "output_dir_fd", "artifacts_fd"):
+            descriptor = getattr(self, field)
+            if descriptor >= 0:
+                os.close(descriptor)
+                setattr(self, field, -1)
 
 
 def require_broker_root(uid: int | None = None, euid: int | None = None) -> None:
@@ -79,6 +183,19 @@ def require_broker_root(uid: int | None = None, euid: int | None = None) -> None
     effective = os.geteuid() if euid is None else euid
     if real != 0 or effective != 0:
         raise incomplete("BROKER_ROOT_REQUIRED", "cgroup measurement broker must run with real and effective UID 0")
+
+
+def require_broker_installation(path: Path | None = None) -> None:
+    requested = Path(__file__) if path is None else path
+    try:
+        resolved = requested.resolve(strict=True)
+        metadata = resolved.stat()
+    except OSError as error:
+        raise incomplete("BROKER_INSTALLATION_UNSAFE", f"cannot bind installed broker: {error}") from error
+    if resolved != INSTALLED_BROKER or not stat.S_ISREG(metadata.st_mode):
+        raise incomplete("BROKER_INSTALLATION_UNSAFE", f"broker must execute from {INSTALLED_BROKER}")
+    if metadata.st_uid != 0 or metadata.st_gid != 0 or stat.S_IMODE(metadata.st_mode) & 0o022:
+        raise incomplete("BROKER_INSTALLATION_UNSAFE", "installed broker must be root-owned and immutable")
 
 
 def resolve_engine_account(
@@ -96,7 +213,43 @@ def resolve_engine_account(
     gid = int(entry.pw_gid)
     if uid <= 0 or gid <= 0:
         raise incomplete("ENGINE_ACCOUNT_UNSAFE", f"{ENGINE_ACCOUNT!r} must have non-root UID and GID")
-    return EngineAccount(ENGINE_ACCOUNT, uid, gid, str(entry.pw_dir))
+    home = str(entry.pw_dir)
+    shell = str(getattr(entry, "pw_shell", "/usr/sbin/nologin"))
+    if Path(home).exists() or Path(shell).name not in {"nologin", "false"}:
+        raise incomplete("ENGINE_ACCOUNT_UNSAFE", f"{ENGINE_ACCOUNT!r} requires no home and a nologin shell")
+    return EngineAccount(ENGINE_ACCOUNT, uid, gid, home)
+
+
+def require_account_idle(account: EngineAccount, proc_root: Path = PROC) -> None:
+    active: list[int] = []
+    try:
+        entries = list(proc_root.iterdir())
+    except OSError as error:
+        raise incomplete("ENGINE_ACCOUNT_UNAVAILABLE", f"cannot scan {proc_root}: {error}") from error
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        try:
+            for line in (entry / "status").read_text(encoding="ascii").splitlines():
+                if line.startswith("Uid:") and int(line.split()[1]) == account.uid:
+                    active.append(int(entry.name))
+                    break
+        except (OSError, UnicodeError, ValueError, IndexError):
+            continue
+    if active:
+        raise incomplete("ENGINE_ACCOUNT_BUSY", f"locked engine account already owns processes: {sorted(active)}")
+
+
+def runner_identity(environment: dict[str, str] | None = None) -> tuple[int, int]:
+    values = os.environ if environment is None else environment
+    try:
+        uid = int(values["SUDO_UID"])
+        gid = int(values["SUDO_GID"])
+    except (KeyError, ValueError) as error:
+        raise incomplete("BROKER_INVOCATION_UNSAFE", "broker must be entered by non-interactive sudo") from error
+    if uid <= 0 or gid <= 0:
+        raise incomplete("BROKER_INVOCATION_UNSAFE", "broker invoker must be non-root")
+    return uid, gid
 
 
 def read_text(path: Path) -> str:
@@ -132,6 +285,46 @@ def child_replaceable(parent: os.stat_result, child: os.stat_result, uid: int, g
     return not sticky or uid in {parent.st_uid, child.st_uid}
 
 
+def hash_fd(descriptor: int) -> str:
+    digest = hashlib.sha256()
+    offset = 0
+    while True:
+        chunk = os.pread(descriptor, 1024 * 1024, offset)
+        if not chunk:
+            break
+        digest.update(chunk)
+        offset += len(chunk)
+    return digest.hexdigest()
+
+
+def sealed_executable_copy(source_fd: int, size: int) -> int:
+    if not hasattr(os, "memfd_create") or fcntl is None:
+        raise incomplete("SEALED_EXECUTABLE_UNAVAILABLE", "memfd sealing is required for bound executable bytes")
+    flags = getattr(os, "MFD_CLOEXEC", 0x0001) | getattr(os, "MFD_ALLOW_SEALING", 0x0002)
+    descriptor = os.memfd_create("pliego-benchmark-engine", flags)
+    try:
+        offset = 0
+        while offset < size:
+            chunk = os.pread(source_fd, min(1024 * 1024, size - offset), offset)
+            if not chunk:
+                raise incomplete("ENGINE_EXECUTABLE_CHANGED", "executable shortened while binding bytes")
+            written = os.write(descriptor, chunk)
+            if written != len(chunk):
+                raise incomplete("ENGINE_EXECUTABLE_CHANGED", "short write while sealing executable bytes")
+            offset += written
+        os.fchmod(descriptor, 0o555)
+        fcntl.fcntl(
+            descriptor,
+            F_ADD_SEALS,
+            F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL,
+        )
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
 def command_identity(command: list[str], account: EngineAccount) -> tuple[tuple[str, ...], ExecutableIdentity]:
     if not command or any(not isinstance(arg, str) or not arg or "\0" in arg for arg in command):
         raise incomplete("ENGINE_COMMAND_INVALID", "engine argv must contain nonempty NUL-free strings")
@@ -146,30 +339,51 @@ def command_identity(command: list[str], account: EngineAccount) -> tuple[tuple[
         raise incomplete("ENGINE_EXECUTABLE_UNAVAILABLE", f"cannot resolve engine executable: {error}") from error
     if requested != executable:
         raise incomplete("ENGINE_EXECUTABLE_NOT_CANONICAL", f"engine executable must be canonical, got {requested}")
+    flags = os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0) | os.O_NONBLOCK
     try:
-        metadata = os.stat(executable, follow_symlinks=False)
+        descriptor = os.open(executable, flags)
+        metadata = os.fstat(descriptor)
     except OSError as error:
         raise incomplete("ENGINE_EXECUTABLE_UNAVAILABLE", f"cannot stat {executable}: {error}") from error
     if not stat.S_ISREG(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) & 0o111 == 0:
+        os.close(descriptor)
         raise incomplete("ENGINE_EXECUTABLE_UNSAFE", f"engine executable is not a regular executable: {executable}")
+    if metadata.st_size <= 0 or metadata.st_size > MAX_ENGINE_EXECUTABLE_BYTES:
+        os.close(descriptor)
+        raise incomplete(
+            "ENGINE_EXECUTABLE_SIZE_UNSAFE",
+            f"engine executable must be in (0, {MAX_ENGINE_EXECUTABLE_BYTES}] bytes",
+        )
     if identity_can_write(metadata, account.uid, account.gid):
+        os.close(descriptor)
         raise incomplete("ENGINE_EXECUTABLE_MUTABLE", f"engine account can write {executable}")
 
     child_metadata = metadata
     for parent_path in executable.parents:
         parent_metadata = os.stat(parent_path, follow_symlinks=False)
         if child_replaceable(parent_metadata, child_metadata, account.uid, account.gid):
+            os.close(descriptor)
             raise incomplete(
                 "ENGINE_EXECUTABLE_MUTABLE",
                 f"engine account can replace path component below {parent_path}",
             )
         child_metadata = parent_metadata
 
-    digest = hashlib.sha256()
-    with executable.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return tuple(command), ExecutableIdentity(executable, digest.hexdigest(), metadata.st_dev, metadata.st_ino)
+    digest = hash_fd(descriptor)
+    sealed = sealed_executable_copy(descriptor, metadata.st_size)
+    if hash_fd(sealed) != digest:
+        os.close(descriptor)
+        os.close(sealed)
+        raise incomplete("ENGINE_EXECUTABLE_CHANGED", "sealed executable bytes do not match the source digest")
+    return tuple(command), ExecutableIdentity(
+        executable,
+        digest,
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_size,
+        descriptor,
+        sealed,
+    )
 
 
 def verify_executable(identity: ExecutableIdentity) -> None:
@@ -179,6 +393,177 @@ def verify_executable(identity: ExecutableIdentity) -> None:
         raise incomplete("ENGINE_EXECUTABLE_REPLACED", f"cannot recheck {identity.path}: {error}") from error
     if (metadata.st_dev, metadata.st_ino) != (identity.device, identity.inode):
         raise incomplete("ENGINE_EXECUTABLE_REPLACED", f"engine executable changed: {identity.path}")
+    bound = os.fstat(identity.source_fd)
+    if (bound.st_dev, bound.st_ino, bound.st_size) != (identity.device, identity.inode, identity.size):
+        raise incomplete("ENGINE_EXECUTABLE_CHANGED", "bound executable identity changed after hashing")
+    if hash_fd(identity.source_fd) != identity.sha256:
+        raise incomplete("ENGINE_EXECUTABLE_CHANGED", "bound executable bytes changed after hashing")
+
+
+def _open_directory(path: Path, label: str) -> tuple[int, os.stat_result]:
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+        metadata = os.fstat(descriptor)
+    except OSError as error:
+        raise incomplete("COMMAND_PATH_UNSAFE", f"cannot bind {label} {path}: {error}") from error
+    return descriptor, metadata
+
+
+def _require_frozen_input(metadata: os.stat_result, label: str) -> None:
+    if metadata.st_uid != 0 or stat.S_IMODE(metadata.st_mode) & 0o022:
+        raise incomplete(
+            "COMMAND_INPUT_MUTABLE",
+            f"{label} must be root-owned and not group/other writable on a publishable host",
+        )
+
+
+def _require_output_directory(metadata: os.stat_result, label: str, runner_uid: int, engine_gid: int) -> None:
+    mode = stat.S_IMODE(metadata.st_mode)
+    if metadata.st_uid != runner_uid or metadata.st_gid != engine_gid:
+        raise incomplete(
+            "COMMAND_OUTPUT_UNSAFE",
+            f"{label} must be owned by runner UID {runner_uid} and engine GID {engine_gid}",
+        )
+    if mode & 0o007 or mode & 0o030 != 0o030:
+        raise incomplete(
+            "COMMAND_OUTPUT_UNSAFE",
+            f"{label} must grant engine-group write/execute and no other access",
+        )
+
+
+def _command_option(argv: tuple[str, ...], name: str) -> tuple[int, str]:
+    if argv.count(name) != 1:
+        raise incomplete("ENGINE_COMMAND_INVALID", f"engine argv must contain exactly one {name}")
+    index = argv.index(name)
+    if index + 1 >= len(argv):
+        raise incomplete("ENGINE_COMMAND_INVALID", f"engine argv omitted the {name} value")
+    return index + 1, argv[index + 1]
+
+
+def bind_run_paths(
+    argv: tuple[str, ...],
+    cwd: str,
+    account: EngineAccount,
+    runner_uid: int,
+) -> tuple[tuple[str, ...], BoundRunPaths]:
+    requested_cwd = Path(cwd)
+    if not requested_cwd.is_absolute():
+        raise incomplete("ENGINE_COMMAND_INVALID", "engine cwd must be absolute")
+    try:
+        canonical_cwd = requested_cwd.resolve(strict=True)
+    except OSError as error:
+        raise incomplete("COMMAND_PATH_UNSAFE", f"cannot resolve engine cwd: {error}") from error
+    if canonical_cwd != requested_cwd:
+        raise incomplete("COMMAND_PATH_UNSAFE", f"engine cwd must be canonical, got {requested_cwd}")
+    cwd_fd, cwd_metadata = _open_directory(canonical_cwd, "cwd")
+    descriptors = [cwd_fd]
+    try:
+        _require_frozen_input(cwd_metadata, "cwd")
+        input_relative = argv[2]
+        if Path(input_relative).name != input_relative or input_relative in {".", ".."}:
+            raise incomplete("ENGINE_COMMAND_INVALID", "input argv must be one relative file name")
+        input_flags = os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0) | os.O_NONBLOCK
+        input_fd = os.open(input_relative, input_flags, dir_fd=cwd_fd)
+        descriptors.append(input_fd)
+        input_metadata = os.fstat(input_fd)
+        if not stat.S_ISREG(input_metadata.st_mode):
+            raise incomplete("COMMAND_PATH_UNSAFE", "bound input is not a regular file")
+        _require_frozen_input(input_metadata, "input")
+
+        output_index, output_raw = _command_option(argv, "--output")
+        artifacts_index, artifacts_raw = _command_option(argv, "--artifacts")
+        output_path = Path(output_raw)
+        artifacts_path = Path(artifacts_raw)
+        if not output_path.is_absolute() or not artifacts_path.is_absolute():
+            raise incomplete("ENGINE_COMMAND_INVALID", "output and artifact paths must be absolute")
+        output_parent = output_path.parent.resolve(strict=True)
+        artifacts_canonical = artifacts_path.resolve(strict=True)
+        if output_parent != output_path.parent or artifacts_canonical != artifacts_path:
+            raise incomplete("COMMAND_PATH_UNSAFE", "output and artifact directories must be canonical")
+        workspace = output_parent.parent
+        if artifacts_canonical.parent != workspace or workspace.resolve(strict=True) != workspace:
+            raise incomplete("COMMAND_PATH_UNSAFE", "output and artifact directories must be siblings in one workspace")
+        workspace_fd, workspace_metadata = _open_directory(workspace, "workspace directory")
+        descriptors.append(workspace_fd)
+        output_fd, output_metadata = _open_directory(output_parent, "output directory")
+        descriptors.append(output_fd)
+        artifacts_fd, artifacts_metadata = _open_directory(artifacts_canonical, "artifact directory")
+        descriptors.append(artifacts_fd)
+        bound_identities = {
+            (metadata.st_dev, metadata.st_ino)
+            for metadata in (
+                cwd_metadata,
+                input_metadata,
+                workspace_metadata,
+                output_metadata,
+                artifacts_metadata,
+            )
+        }
+        if len(bound_identities) != 5:
+            raise incomplete(
+                "COMMAND_PATH_UNSAFE", "cwd, input, workspace, output, and artifact identities must differ"
+            )
+        _require_output_directory(output_metadata, "output directory", runner_uid, account.gid)
+        _require_output_directory(artifacts_metadata, "artifact directory", runner_uid, account.gid)
+        if output_path.exists():
+            raise incomplete("COMMAND_OUTPUT_UNSAFE", "requested output must not exist before launch")
+
+        adjusted = list(argv)
+        adjusted[output_index] = f"/proc/self/fd/{output_fd}/{output_path.name}"
+        adjusted[artifacts_index] = f"/proc/self/fd/{artifacts_fd}"
+        paths = BoundRunPaths(
+            canonical_cwd,
+            cwd_fd,
+            cwd_metadata.st_dev,
+            cwd_metadata.st_ino,
+            input_relative,
+            input_fd,
+            input_metadata.st_dev,
+            input_metadata.st_ino,
+            hash_fd(input_fd),
+            workspace,
+            workspace_fd,
+            workspace_metadata.st_dev,
+            workspace_metadata.st_ino,
+            output_path,
+            output_fd,
+            output_metadata.st_dev,
+            output_metadata.st_ino,
+            artifacts_canonical,
+            artifacts_fd,
+            artifacts_metadata.st_dev,
+            artifacts_metadata.st_ino,
+        )
+        descriptors.clear()
+        return tuple(adjusted), paths
+    except BaseException:
+        for descriptor in descriptors:
+            with contextlib.suppress(OSError):
+                os.close(descriptor)
+        raise
+
+
+def verify_run_paths(paths: BoundRunPaths) -> None:
+    identities = (
+        (paths.cwd_fd, paths.cwd_device, paths.cwd_inode, "cwd"),
+        (paths.input_fd, paths.input_device, paths.input_inode, "input"),
+        (paths.workspace_fd, paths.workspace_device, paths.workspace_inode, "workspace directory"),
+        (paths.output_dir_fd, paths.output_dir_device, paths.output_dir_inode, "output directory"),
+        (paths.artifacts_fd, paths.artifacts_device, paths.artifacts_inode, "artifact directory"),
+    )
+    for descriptor, device, inode, label in identities:
+        metadata = os.fstat(descriptor)
+        if (metadata.st_dev, metadata.st_ino) != (device, inode):
+            raise incomplete("COMMAND_IDENTITY_CHANGED", f"bound {label} identity changed")
+    if hash_fd(paths.input_fd) != paths.input_sha256:
+        raise incomplete("COMMAND_IDENTITY_CHANGED", "bound input bytes changed before exec")
+    try:
+        current_input = os.stat(paths.input_relative, dir_fd=paths.cwd_fd, follow_symlinks=False)
+    except OSError as error:
+        raise incomplete("COMMAND_IDENTITY_CHANGED", f"input path changed before exec: {error}") from error
+    if (current_input.st_dev, current_input.st_ino) != (paths.input_device, paths.input_inode):
+        raise incomplete("COMMAND_IDENTITY_CHANGED", "input path was replaced after binding")
 
 
 @dataclass
@@ -293,8 +678,11 @@ def parse_io_stat(raw: str, label: str) -> dict[str, dict[str, int]]:
     devices: dict[str, dict[str, int]] = {}
     for line in raw.splitlines():
         fields = line.split()
-        if len(fields) < 2 or fields[0] in devices:
+        if not fields or fields[0] in devices:
             raise incomplete("CGROUP_COUNTER_INVALID", f"malformed io.stat line in {label}: {line!r}")
+        major, separator, minor = fields[0].partition(":")
+        if not separator or not major.isdigit() or not minor.isdigit():
+            raise incomplete("CGROUP_COUNTER_INVALID", f"malformed io.stat device in {label}: {fields[0]!r}")
         counters: dict[str, int] = {}
         for field in fields[1:]:
             key, separator, raw = field.partition("=")
@@ -307,9 +695,13 @@ def parse_io_stat(raw: str, label: str) -> dict[str, dict[str, int]]:
             if value < 0:
                 raise incomplete("CGROUP_COUNTER_INVALID", f"negative io.stat field: {field!r}")
             counters[key] = value
-        for required in ("rbytes", "wbytes", "rios", "wios"):
-            if required not in counters:
-                raise incomplete("CGROUP_COUNTER_MISSING", f"io.stat device {fields[0]} omitted {required}")
+        required_counters = ("rbytes", "wbytes", "rios", "wios")
+        if len(fields) == 1:
+            counters = {required: 0 for required in required_counters}
+        else:
+            for required in required_counters:
+                if required not in counters:
+                    raise incomplete("CGROUP_COUNTER_MISSING", f"io.stat device {fields[0]} omitted {required}")
         devices[fields[0]] = counters
     return devices
 
@@ -538,6 +930,7 @@ def create_leaf(
             "memory.current",
             "memory.peak",
             "memory.stat",
+            "pids.max",
             "pids.peak",
         }
         missing: list[str] = []
@@ -560,6 +953,9 @@ def create_leaf(
             write_bound(child, interface, "0\n")
             if read_bound(child, interface).strip() != "0":
                 raise incomplete("CGROUP_LEAF_DELEGATED", f"cannot prohibit descendants in {child.path}")
+        write_bound(child, "pids.max", f"{MAX_ENGINE_PIDS}\n")
+        if read_bound(child, "pids.max").strip() != str(MAX_ENGINE_PIDS):
+            raise incomplete("CGROUP_LIMIT_FAILED", "cannot bind the engine process-count limit")
         for interface in ("cgroup.procs", "cgroup.kill"):
             writable = os.open(
                 interface,
@@ -633,20 +1029,50 @@ def scan_cgroup(
     proc_root: Path = PROC,
 ) -> list[dict[str, int | None]]:
     found: list[dict[str, int | None]] = []
-    for pid in cgroup_pids(cgroup):
-        process = read_stat(pid, proc_root)
-        if process is None:
+    members_before = cgroup_pids(cgroup)
+    for pid in members_before:
+        before = read_stat(pid, proc_root)
+        if before is None:
             continue
-        if pid == root_identity[0] and process["start_ticks"] != root_identity[1]:
+        if pid == root_identity[0] and before["start_ticks"] != root_identity[1]:
             raise incomplete("ROOT_IDENTITY_CHANGED", f"root PID {pid} start time changed")
-        process["pss_kib"] = read_pss_kib(pid, proc_root) if include_pss else None
-        found.append(process)
+        try:
+            pidfd = os.pidfd_open(pid)
+        except (AttributeError, OSError):
+            continue
+        try:
+            pss = read_pss_kib(pid, proc_root) if include_pss else None
+            after = read_stat(pid, proc_root)
+            members_after = cgroup_pids(cgroup)
+        finally:
+            os.close(pidfd)
+        if after is None or pid not in members_after or before["start_ticks"] != after["start_ticks"]:
+            continue
+        after["pss_kib"] = pss
+        after["membership_verified"] = 1
+        found.append(after)
     return found
 
 
 def prctl(option: int, arg2: int = 0) -> None:
     libc = ctypes.CDLL(None, use_errno=True)
     if libc.prctl(option, arg2, 0, 0, 0) != 0:
+        value = ctypes.get_errno()
+        raise OSError(value, os.strerror(value))
+
+
+def parent_death_signal() -> int:
+    libc = ctypes.CDLL(None, use_errno=True)
+    retained = ctypes.c_int()
+    if libc.prctl(PR_GET_PDEATHSIG, ctypes.byref(retained), 0, 0, 0) != 0:
+        value = ctypes.get_errno()
+        raise OSError(value, os.strerror(value))
+    return retained.value
+
+
+def unshare_network() -> None:
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.unshare(CLONE_NEWNET) != 0:
         value = ctypes.get_errno()
         raise OSError(value, os.strerror(value))
 
@@ -663,6 +1089,8 @@ def drop_engine_authority(account: EngineAccount) -> None:
     os.setresgid(account.gid, account.gid, account.gid)
     os.setresuid(account.uid, account.uid, account.uid)
     prctl(PR_SET_NO_NEW_PRIVS, 1)
+    prctl(PR_SET_DUMPABLE, 0)
+    prctl(PR_SET_PDEATHSIG, signal.SIGKILL)
 
 
 def migration_write_probes(paths: dict[str, Path]) -> dict[str, dict[str, str]]:
@@ -681,37 +1109,75 @@ def migration_write_probes(paths: dict[str, Path]) -> dict[str, dict[str, str]]:
     return results
 
 
+def migration_fd_probes(directories: dict[str, int]) -> dict[str, dict[str, str]]:
+    results: dict[str, dict[str, str]] = {}
+    flags = os.O_WRONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)
+    for label, directory_fd in directories.items():
+        results[label] = {}
+        for interface in ("cgroup.procs", "cgroup.threads"):
+            try:
+                descriptor = os.open(interface, flags, dir_fd=directory_fd)
+            except OSError as error:
+                results[label][interface] = errno.errorcode.get(error.errno, f"ERRNO_{error.errno}")
+            else:
+                os.close(descriptor)
+                results[label][interface] = "WRITABLE"
+    return results
+
+
 def engine_environment(account: EngineAccount) -> dict[str, str]:
-    allowed = {"LANG", "LC_ALL", "LC_CTYPE", "LD_LIBRARY_PATH", "PATH", "TZ"}
-    environment = {
-        name: value
-        for name, value in os.environ.items()
-        if name in allowed or name.startswith("FONTCONFIG_")
+    return {
+        "HOME": account.home,
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
+        "LOGNAME": account.name,
+        "PATH": "/usr/bin:/bin",
+        "TMPDIR": "/tmp",
+        "TZ": "UTC",
+        "USER": account.name,
     }
-    environment.update(
-        {
-            "HOME": account.home,
-            "LOGNAME": account.name,
-            "PATH": environment.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
-            "TMPDIR": "/tmp",
-            "USER": account.name,
-        }
-    )
-    return environment
+
+
+def execveat(descriptor: int, argv: tuple[str, ...], environment: dict[str, str]) -> None:
+    libc = ctypes.CDLL(None, use_errno=True)
+    encoded_argv = [value.encode() for value in argv]
+    encoded_environment = [f"{name}={value}".encode() for name, value in sorted(environment.items())]
+    argv_array = (ctypes.c_char_p * (len(encoded_argv) + 1))(*encoded_argv, None)
+    environment_array = (ctypes.c_char_p * (len(encoded_environment) + 1))(*encoded_environment, None)
+    if libc.execveat(descriptor, ctypes.c_char_p(b""), argv_array, environment_array, AT_EMPTY_PATH) != 0:
+        value = ctypes.get_errno()
+        raise OSError(value, os.strerror(value))
+
+
+def close_descriptors_except(allowed: set[int]) -> None:
+    entries = list((PROC / "self" / "fd").iterdir())
+    for entry in entries:
+        try:
+            descriptor = int(entry.name)
+        except ValueError:
+            continue
+        if descriptor > 2 and descriptor not in allowed:
+            with contextlib.suppress(OSError):
+                os.close(descriptor)
 
 
 def fork_stopped(
     command: tuple[str, ...],
-    cwd: str,
-    stdout_path: str,
-    stderr_path: str,
+    executable: ExecutableIdentity,
+    paths: BoundRunPaths,
     account: EngineAccount,
     probe_paths: dict[str, Path],
-) -> tuple[int, int]:
+    probe_directories: dict[str, int],
+    broker_net_inode: int,
+) -> tuple[int, int, int, int]:
+    if not hasattr(os, "memfd_create"):
+        raise incomplete("OUTPUT_CAPTURE_UNAVAILABLE", "anonymous bounded output capture requires memfd_create")
+    stdout_capture = os.memfd_create("pliego-engine-stdout", getattr(os, "MFD_CLOEXEC", 0x0001))
+    stderr_capture = os.memfd_create("pliego-engine-stderr", getattr(os, "MFD_CLOEXEC", 0x0001))
     descriptors = [
         os.open(os.devnull, os.O_RDONLY | os.O_CLOEXEC),
-        os.open(stdout_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_CLOEXEC, 0o600),
-        os.open(stderr_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_CLOEXEC, 0o600),
+        stdout_capture,
+        stderr_capture,
     ]
     handshake_read, handshake_write = os.pipe2(os.O_CLOEXEC)
     try:
@@ -719,34 +1185,51 @@ def fork_stopped(
         if pid == 0:
             try:
                 os.close(handshake_read)
+                broker_pid = os.getppid()
                 os.setsid()
-                os.chdir(cwd)
+                prctl(PR_SET_PDEATHSIG, signal.SIGKILL)
+                if os.getppid() != broker_pid:
+                    raise OSError(errno.EOWNERDEAD, "broker died before launcher setup")
+                unshare_network()
+                os.fchdir(paths.cwd_fd)
                 for target, descriptor in enumerate(descriptors):
                     os.dup2(descriptor, target)
-                for descriptor in descriptors:
-                    if descriptor > 2:
-                        os.close(descriptor)
+                resource.setrlimit(resource.RLIMIT_FSIZE, (MAX_ENGINE_OUTPUT_BYTES, MAX_ENGINE_OUTPUT_BYTES))
                 os.kill(os.getpid(), signal.SIGSTOP)
                 drop_engine_authority(account)
+                if os.getppid() != broker_pid or parent_death_signal() != signal.SIGKILL:
+                    raise OSError(errno.EOWNERDEAD, "broker parent/death signal changed during authority drop")
                 payload = {
                     "ok": True,
-                    "executable_accessible": os.access(command[0], os.X_OK),
-                    "executable_writable": os.access(command[0], os.W_OK),
-                    "cwd_accessible": os.access(cwd, os.R_OK | os.X_OK),
+                    "execution_binding": "sealed-memfd-execveat",
+                    "parent_death_signal": parent_death_signal(),
+                    "cwd_accessible": os.access(".", os.R_OK | os.X_OK),
+                    "network_namespace": os.stat(PROC / "self/ns/net").st_ino != broker_net_inode,
                     "migration_write_probes": migration_write_probes(probe_paths),
+                    "migration_fd_probes": migration_fd_probes(probe_directories),
                 }
-                os.write(handshake_write, json.dumps(payload, separators=(",", ":")).encode("ascii"))
+                os.write(
+                    handshake_write,
+                    json.dumps(payload, separators=(",", ":"), allow_nan=False).encode("ascii"),
+                )
                 os.kill(os.getpid(), signal.SIGSTOP)
-                os.execve(command[0], command, engine_environment(account))
+                allowed = {executable.sealed_fd, paths.output_dir_fd, paths.artifacts_fd}
+                for descriptor in allowed:
+                    os.set_inheritable(descriptor, True)
+                close_descriptors_except(allowed)
+                execveat(executable.sealed_fd, command, engine_environment(account))
             except BaseException as error:
                 with contextlib.suppress(BaseException):
                     payload = {"ok": False, "error": f"{type(error).__name__}: {error}"}
-                    os.write(handshake_write, json.dumps(payload, separators=(",", ":")).encode("utf-8", "replace"))
+                    os.write(
+                        handshake_write,
+                        json.dumps(payload, separators=(",", ":"), allow_nan=False).encode("utf-8", "replace"),
+                    )
                     os.write(2, f"cgroup launcher: {error}\n".encode("utf-8", "replace"))
                 os._exit(127)
     finally:
         os.close(handshake_write)
-        for descriptor in descriptors:
+        for descriptor in descriptors[:1]:
             with contextlib.suppress(OSError):
                 os.close(descriptor)
 
@@ -754,7 +1237,7 @@ def fork_stopped(
     if waited != pid or not os.WIFSTOPPED(status_value) or os.WSTOPSIG(status_value) != signal.SIGSTOP:
         os.close(handshake_read)
         raise incomplete("LAUNCH_HANDSHAKE_FAILED", f"child {pid} did not stop before exec")
-    return pid, handshake_read
+    return pid, handshake_read, stdout_capture, stderr_capture
 
 
 def read_process_security(pid: int, proc_root: Path = PROC) -> dict[str, Any]:
@@ -776,7 +1259,9 @@ def read_process_security(pid: int, proc_root: Path = PROC) -> dict[str, Any]:
             "no_new_privs": int(fields["NoNewPrivs"]),
         }
     except (KeyError, OSError, UnicodeError, ValueError) as error:
-        raise incomplete("ENGINE_IDENTITY_UNAVAILABLE", f"cannot read security status for child {pid}: {error}") from error
+        raise incomplete(
+            "ENGINE_IDENTITY_UNAVAILABLE", f"cannot read security status for child {pid}: {error}"
+        ) from error
 
 
 def finish_authority_handshake(
@@ -797,8 +1282,8 @@ def finish_authority_handshake(
     if waited != pid or not os.WIFSTOPPED(status_value) or os.WSTOPSIG(status_value) != signal.SIGSTOP:
         raise incomplete("AUTHORITY_DROP_FAILED", f"child {pid} exited before the verified second stop")
     try:
-        handshake = json.loads(raw)
-    except (json.JSONDecodeError, UnicodeDecodeError) as error:
+        handshake = json.loads(raw, parse_constant=reject_json_constant)
+    except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as error:
         raise incomplete("AUTHORITY_DROP_FAILED", f"invalid launcher authority handshake: {error}") from error
     if not isinstance(handshake, dict) or handshake.get("ok") is not True:
         raise incomplete("AUTHORITY_DROP_FAILED", f"launcher authority drop failed: {handshake!r}")
@@ -832,26 +1317,35 @@ def finish_authority_handshake(
             raise incomplete("ENGINE_CAPABILITIES_RETAINED", f"launcher retained {field}={security[field]}")
     if security["no_new_privs"] != 1:
         raise incomplete("ENGINE_PRIVILEGES_UNSAFE", "launcher did not set no_new_privs")
-    if handshake.get("executable_accessible") is not True or handshake.get("cwd_accessible") is not True:
-        raise incomplete("ENGINE_PATH_INACCESSIBLE", "engine account cannot access its executable or cwd")
-    if handshake.get("executable_writable") is not False:
-        raise incomplete("ENGINE_EXECUTABLE_MUTABLE", "engine account can write its executable")
-    probes = handshake.get("migration_write_probes")
-    if not isinstance(probes, dict) or set(probes) != {"parent", "harness", "staging", "measurement"}:
-        raise incomplete("ENGINE_MIGRATION_PROBE_INVALID", "launcher omitted cgroup migration write probes")
-    for results in probes.values():
-        if (
-            not isinstance(results, dict)
-            or set(results) != {"cgroup.procs", "cgroup.threads"}
-            or any(result not in {"EACCES", "EPERM"} for result in results.values())
-        ):
-            raise incomplete("ENGINE_CGROUP_WRITABLE", f"engine account can access a migration interface: {probes}")
+    if handshake.get("cwd_accessible") is not True:
+        raise incomplete("ENGINE_PATH_INACCESSIBLE", "engine account cannot access its bound cwd")
+    if handshake.get("execution_binding") != "sealed-memfd-execveat":
+        raise incomplete("ENGINE_EXECUTABLE_UNBOUND", "launcher did not bind execution to sealed bytes")
+    if handshake.get("parent_death_signal") != signal.SIGKILL:
+        raise incomplete("ENGINE_LIFECYCLE_UNSAFE", "launcher did not retain SIGKILL on broker death")
+    if handshake.get("network_namespace") is not True:
+        raise incomplete("ENGINE_NETWORK_UNSAFE", "launcher did not enter a private network namespace")
+    for field in ("migration_write_probes", "migration_fd_probes"):
+        probes = handshake.get(field)
+        if not isinstance(probes, dict) or set(probes) != {"parent", "harness", "staging", "measurement"}:
+            raise incomplete("ENGINE_MIGRATION_PROBE_INVALID", f"launcher omitted {field}")
+        for results in probes.values():
+            if (
+                not isinstance(results, dict)
+                or set(results) != {"cgroup.procs", "cgroup.threads"}
+                or any(result not in {"EACCES", "EPERM"} for result in results.values())
+            ):
+                raise incomplete("ENGINE_CGROUP_WRITABLE", f"engine account can access migration via {field}: {probes}")
     return {
         "account": account.name,
         "uid": account.uid,
         "gid": account.gid,
         "status": security,
-        "migration_write_probes": probes,
+        "execution_binding": handshake["execution_binding"],
+        "parent_death_signal": handshake["parent_death_signal"],
+        "network_namespace_isolated": handshake.get("network_namespace") is True,
+        "migration_write_probes": handshake["migration_write_probes"],
+        "migration_fd_probes": handshake["migration_fd_probes"],
     }
 
 
@@ -899,11 +1393,7 @@ def remove_bound_leaf(cgroup: BoundDirectory, parent: BoundDirectory) -> None:
     if events["populated"] != 0 or read_bound(cgroup, "cgroup.procs").split():
         raise incomplete("CGROUP_CLEANUP_FAILED", "refusing to remove a populated render cgroup")
     with os.scandir(cgroup.fd) as entries:
-        descendants = [
-            entry.name
-            for entry in entries
-            if entry.is_dir(follow_symlinks=False) or entry.is_symlink()
-        ]
+        descendants = [entry.name for entry in entries if entry.is_dir(follow_symlinks=False) or entry.is_symlink()]
     if descendants:
         raise incomplete("CGROUP_CLEANUP_FAILED", f"refusing recursive cleanup; child cgroups remain: {descendants}")
     os.rmdir(cgroup.name, dir_fd=parent.fd)
@@ -946,17 +1436,27 @@ def wait_for_accounting_quiescence(
     snapshot: dict[str, Any] | None = None
     reads = 0
     while True:
+        if _BROKER_SIGNAL is not None:
+            raise incomplete("BROKER_INTERRUPTED", "broker interrupted during accounting settle")
         snapshot = counter_snapshot(cgroup)
         reads += 1
         clean = snapshot["memory_file_dirty_bytes"] == 0 and snapshot["memory_file_writeback_bytes"] == 0
-        stable = previous is not None and snapshot["io_stat"] == previous["io_stat"] and snapshot["cpu_stat"] == previous["cpu_stat"]
-        if clean and stable and previous["memory_file_dirty_bytes"] == 0 and previous["memory_file_writeback_bytes"] == 0:
+        stable = (
+            previous is not None
+            and snapshot["io_stat"] == previous["io_stat"]
+            and snapshot["cpu_stat"] == previous["cpu_stat"]
+        )
+        if (
+            clean
+            and stable
+            and previous["memory_file_dirty_bytes"] == 0
+            and previous["memory_file_writeback_bytes"] == 0
+        ):
             return snapshot, {
                 "poll_interval_ms": poll_interval_ms,
                 "timeout_ms": timeout_ms,
                 "duration_ms": round((time.monotonic() - started) * 1000.0, 3),
                 "reads": reads,
-                "stable_reads": 2,
                 "stable_observations": [
                     {
                         "cpu_stat": observation["cpu_stat"],
@@ -977,37 +1477,114 @@ def wait_for_accounting_quiescence(
         time.sleep(poll_interval_ms / 1000.0)
 
 
+def flush_bound_output_filesystems(paths: BoundRunPaths) -> None:
+    """Force candidate writes to accounting completion without reopening paths."""
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    syncfs = getattr(libc, "syncfs", None)
+    if syncfs is None:
+        raise incomplete("CGROUP_ACCOUNTING_UNAVAILABLE", "syncfs is required for complete writeback accounting")
+    syncfs.argtypes = [ctypes.c_int]
+    syncfs.restype = ctypes.c_int
+    devices: set[int] = set()
+    for descriptor in (paths.output_dir_fd, paths.artifacts_fd):
+        device = os.fstat(descriptor).st_dev
+        if device in devices:
+            continue
+        devices.add(device)
+        if syncfs(descriptor) != 0:
+            error = ctypes.get_errno()
+            raise incomplete("CGROUP_ACCOUNTING_IO_ERROR", f"syncfs failed: {os.strerror(error)}")
+
+
+def read_capture(descriptor: int, label: str) -> str:
+    payload = os.pread(descriptor, MAX_ENGINE_OUTPUT_BYTES + 1, 0)
+    if len(payload) > MAX_ENGINE_OUTPUT_BYTES:
+        raise incomplete("ENGINE_OUTPUT_LIMIT", f"{label} exceeded the broker capture limit")
+    return payload.decode("utf-8", "replace")
+
+
 def sample_command(
     command: list[str],
     cwd: str,
-    stdout_path: str,
-    stderr_path: str,
     interval_ms: float,
     pss_interval_ms: float,
     descendant_grace_ms: float,
     settle_timeout_ms: float,
+    deadline_ms: float,
+    observe_processes: bool,
     cgroup_parent: Path,
     cgroup_root: Path = CGROUP_ROOT,
     proc_root: Path = PROC,
     lock_root: Path | None = None,
 ) -> dict[str, Any]:
+    if deadline_ms <= 0 or deadline_ms > MAX_DEADLINE_MS:
+        raise incomplete("BROKER_DEADLINE_INVALID", f"deadline must be in (0, {MAX_DEADLINE_MS}] milliseconds")
+    broker_deadline = time.monotonic() + deadline_ms / 1000.0
+    with broker_signal_guard(deadline_ms / 1000.0):
+        return _sample_command_guarded(
+            command,
+            cwd,
+            interval_ms,
+            pss_interval_ms,
+            descendant_grace_ms,
+            settle_timeout_ms,
+            deadline_ms,
+            observe_processes,
+            cgroup_parent,
+            cgroup_root,
+            proc_root,
+            lock_root,
+            broker_deadline,
+        )
+
+
+def _sample_command_guarded(
+    command: list[str],
+    cwd: str,
+    interval_ms: float,
+    pss_interval_ms: float,
+    descendant_grace_ms: float,
+    settle_timeout_ms: float,
+    deadline_ms: float,
+    observe_processes: bool,
+    cgroup_parent: Path,
+    cgroup_root: Path,
+    proc_root: Path,
+    lock_root: Path | None,
+    broker_deadline: float,
+) -> dict[str, Any]:
     if resource is None:
         raise incomplete("CGROUP_V2_REQUIRED", "Linux resource accounting is unavailable")
     if not hasattr(os, "pidfd_open"):
         raise incomplete("PIDFD_REQUIRED", "os.pidfd_open is unavailable")
+
     require_broker_root()
+    runner_uid, _runner_gid = runner_identity()
     account = resolve_engine_account()
-    argv, executable = command_identity(command, account)
-    parent = require_delegated_parent(cgroup_parent, cgroup_root, proc_root)
+    if runner_uid == account.uid:
+        raise incomplete("BROKER_INVOCATION_UNSAFE", "runner and engine identities must be distinct")
+    require_account_idle(account, proc_root)
+
+    executable: ExecutableIdentity | None = None
+    paths: BoundRunPaths | None = None
+    parent: BoundDirectory | None = None
+    harness: BoundDirectory | None = None
     child: BoundDirectory | None = None
     staging: BoundDirectory | None = None
     root_pid: int | None = None
     handshake_read: int | None = None
+    stdout_capture: int | None = None
+    stderr_capture: int | None = None
     root_in_measurement = False
     root_reaped = False
     usage_start = resource.getrusage(resource.RUSAGE_SELF)
 
     try:
+        argv, executable = command_identity(command, account)
+        exec_argv, paths = bind_run_paths(argv, cwd, account, runner_uid)
+        parent = require_delegated_parent(cgroup_parent, cgroup_root, proc_root)
+        harness = open_bound_directory(parent.path / HARNESS_CHILD, cgroup_root)
         with exclusive_parent_lock(parent.path, lock_root):
             parent.verify_path_identity()
             child = create_leaf(parent)
@@ -1018,17 +1595,25 @@ def sample_command(
 
             probe_paths = {
                 "parent": parent.path,
-                "harness": parent.path / HARNESS_CHILD,
+                "harness": harness.path,
                 "staging": staging.path,
                 "measurement": child.path,
             }
-            root_pid, handshake_read = fork_stopped(
-                argv,
-                cwd,
-                stdout_path,
-                stderr_path,
+            probe_directories = {
+                "parent": parent.fd,
+                "harness": harness.fd,
+                "staging": staging.fd,
+                "measurement": child.fd,
+            }
+            broker_net_inode = os.stat(proc_root / "self/ns/net").st_ino
+            root_pid, handshake_read, stdout_capture, stderr_capture = fork_stopped(
+                exec_argv,
+                executable,
+                paths,
                 account,
                 probe_paths,
+                probe_directories,
+                broker_net_inode,
             )
             root_identity = move_stopped_child(root_pid, staging, cgroup_root, proc_root)
             launch_security = finish_authority_handshake(
@@ -1049,10 +1634,41 @@ def sample_command(
                         "sha256": executable.sha256,
                         "device": executable.device,
                         "inode": executable.inode,
+                        "bytes": executable.size,
+                    },
+                    "command_identity": {
+                        "cwd": {
+                            "path": str(paths.cwd_path),
+                            "device": paths.cwd_device,
+                            "inode": paths.cwd_inode,
+                        },
+                        "input": {
+                            "manifest_path": str(paths.cwd_path / paths.input_relative),
+                            "argv_relative_path": paths.input_relative,
+                            "sha256": paths.input_sha256,
+                            "device": paths.input_device,
+                            "inode": paths.input_inode,
+                        },
+                        "workspace_directory": {
+                            "path": str(paths.workspace_path),
+                            "device": paths.workspace_device,
+                            "inode": paths.workspace_inode,
+                        },
+                        "output_directory": {
+                            "path": str(paths.output_path.parent),
+                            "device": paths.output_dir_device,
+                            "inode": paths.output_dir_inode,
+                        },
+                        "artifact_directory": {
+                            "path": str(paths.artifacts_path),
+                            "device": paths.artifacts_device,
+                            "inode": paths.artifacts_inode,
+                        },
                     },
                 }
             )
             verify_executable(executable)
+            verify_run_paths(paths)
             measurement_identity = move_stopped_child(root_pid, child, cgroup_root, proc_root)
             root_in_measurement = True
             if measurement_identity != root_identity or cgroup_pids(staging):
@@ -1067,12 +1683,14 @@ def sample_command(
             staging = None
 
             page_size = os.sysconf("SC_PAGE_SIZE")
-            samples: list[dict[str, Any]] = []
+            diagnostic_samples: list[dict[str, Any]] = []
             processes: dict[tuple[int, int], dict[str, int | float]] = {}
             next_pss = 0.0
 
             def take_sample(started: float, now: float) -> None:
                 nonlocal next_pss
+                if not observe_processes:
+                    return
                 elapsed_ms = round(max(0.0, (now - started) * 1000.0), 3)
                 include_pss = now >= next_pss
                 if include_pss:
@@ -1100,14 +1718,14 @@ def sample_command(
                         }
                     )
                 pss = [row["pss_kib"] for row in raw_processes]
-                samples.append(
+                diagnostic_samples.append(
                     {
                         "elapsed_ms": elapsed_ms,
                         "cgroup_memory_current_bytes": cgroup_integer(child, "memory.current"),
-                        "sampled_summed_rss_kib_lower_bound": sum(
+                        "sequential_sampled_summed_rss_kib_diagnostic": sum(
                             int(row["rss_pages"]) * page_size // 1024 for row in raw_processes
                         ),
-                        "sampled_summed_pss_kib_lower_bound": (
+                        "sequential_sampled_summed_pss_kib_diagnostic": (
                             sum(int(value) for value in pss)
                             if include_pss and raw_processes and all(value is not None for value in pss)
                             else None
@@ -1127,7 +1745,8 @@ def sample_command(
             root_ended = started
             try:
                 while status_value is None:
-                    timeout = max(0.0, next_sample - time.monotonic())
+                    require_before_deadline(broker_deadline, "root process")
+                    timeout = max(0.0, min(next_sample, broker_deadline) - time.monotonic())
                     ready = poller.poll(math.ceil(timeout * 1000.0))
                     now = time.monotonic()
                     if ready:
@@ -1145,8 +1764,9 @@ def sample_command(
 
             kill_used = False
             lingering_before_kill: list[dict[str, int]] = []
-            drain_deadline = root_ended + descendant_grace_ms / 1000.0
+            drain_deadline = min(broker_deadline, root_ended + descendant_grace_ms / 1000.0)
             while cgroup_flat(child, "cgroup.events", {"populated"})["populated"] != 0:
+                require_before_deadline(broker_deadline, "descendant drain")
                 now = time.monotonic()
                 if now >= drain_deadline:
                     kill_used = True
@@ -1155,10 +1775,9 @@ def sample_command(
                         for row in scan_cgroup(child, False, root_identity, proc_root)
                     ]
                     write_bound(child, "cgroup.kill", "1\n")
-                    kill_deadline = now + KILL_GRACE_MS / 1000.0
+                    kill_deadline = min(broker_deadline, now + KILL_GRACE_MS / 1000.0)
                     while cgroup_flat(child, "cgroup.events", {"populated"})["populated"] != 0:
-                        if time.monotonic() >= kill_deadline:
-                            raise incomplete("CGROUP_CLEANUP_FAILED", "cgroup.kill did not drain the render cgroup")
+                        require_before_deadline(kill_deadline, "cgroup.kill drain")
                         time.sleep(min(interval_ms, 25.0) / 1000.0)
                     break
                 take_sample(started, now)
@@ -1166,30 +1785,43 @@ def sample_command(
 
             drained_at = time.monotonic()
             take_sample(started, drained_at)
-            final, settle = wait_for_accounting_quiescence(child, interval_ms, settle_timeout_ms)
+            require_before_deadline(broker_deadline, "output writeback")
+            flush_bound_output_filesystems(paths)
+            require_before_deadline(broker_deadline, "accounting settle")
+            remaining_ms = max(0.0, (broker_deadline - time.monotonic()) * 1000.0)
+            final, settle = wait_for_accounting_quiescence(
+                child,
+                interval_ms,
+                min(settle_timeout_ms, remaining_ms),
+            )
+            measurement_completed = time.monotonic()
+            require_before_deadline(broker_deadline, "measurement completion")
             if final["cgroup_events"]["populated"] != 0:
                 raise incomplete("CGROUP_CLEANUP_FAILED", "render cgroup repopulated during accounting settle")
 
             exit_code, child_signal = exit_fields(status_value)
             usage_end = resource.getrusage(resource.RUSAGE_SELF)
-            wall_ms = (root_ended - started) * 1000.0
-            elapsed = [float(sample["elapsed_ms"]) for sample in samples]
+            elapsed = [float(sample["elapsed_ms"]) for sample in diagnostic_samples]
             gaps = [later - earlier for earlier, later in zip(elapsed, elapsed[1:])]
-            rss_peaks = [int(sample["sampled_summed_rss_kib_lower_bound"]) for sample in samples]
+            rss_peaks = [int(sample["sequential_sampled_summed_rss_kib_diagnostic"]) for sample in diagnostic_samples]
             pss_peaks = [
-                int(sample["sampled_summed_pss_kib_lower_bound"])
-                for sample in samples
-                if sample["sampled_summed_pss_kib_lower_bound"] is not None
+                int(sample["sequential_sampled_summed_pss_kib_diagnostic"])
+                for sample in diagnostic_samples
+                if sample["sequential_sampled_summed_pss_kib_diagnostic"] is not None
             ]
+            root_wall_ms = round((root_ended - started) * 1000.0, 3)
+            tree_wall_ms = round((drained_at - started) * 1000.0, 3)
             result = {
-                "method": "linux-cgroup-v2-v1",
+                "method": METHOD,
                 "scope": "fresh-root-owned-cgroup-subtree",
                 "delegated_parent": str(parent.path),
                 "cgroup_path": str(child.path),
                 "root_pid": root_identity[0],
                 "root_start_ticks": root_identity[1],
                 "launch_security": launch_security,
-                "wall_ms": round(wall_ms, 3),
+                "root_wall_ms": root_wall_ms,
+                "tree_wall_ms": tree_wall_ms,
+                "measurement_complete_ms": round((measurement_completed - started) * 1000.0, 3),
                 "exit_code": exit_code,
                 "signal": child_signal,
                 "cpu_user_ms": round(final["cpu_stat"]["user_usec"] / 1000.0, 3),
@@ -1200,8 +1832,7 @@ def sample_command(
                 "write_bytes": io_total(final["io_stat"], "wbytes"),
                 "read_operations": io_total(final["io_stat"], "rios"),
                 "write_operations": io_total(final["io_stat"], "wios"),
-                "cgroup_drained": True,
-                "drain_ms": round((drained_at - root_ended) * 1000.0, 3),
+                "drain_ms": round(tree_wall_ms - root_wall_ms, 3),
                 "accounting_settle": settle,
                 "cleanup": {
                     "kill_used": kill_used,
@@ -1211,28 +1842,26 @@ def sample_command(
                 "counters": {"empty": empty, "after_join": after_join, "final": final},
                 "sampled_diagnostics": {
                     "coverage": (
-                        "periodic post-exec cgroup membership snapshots; RSS and PSS peaks are lower bounds "
-                        "and may miss processes shorter than the interval"
+                        "sequential pidfd-identity and membership-verified procfs diagnostics; values are "
+                        "time-smeared observations, not simultaneous bounds or authoritative accounting"
                     ),
+                    "observation_enabled": observe_processes,
                     "sample_interval_ms": interval_ms,
                     "pss_interval_ms": pss_interval_ms,
                     "page_size_bytes": page_size,
                     "max_sample_gap_ms": round(max(gaps, default=0.0), 3),
-                    "sampled_peak_summed_rss_kib_lower_bound": max(rss_peaks, default=0),
-                    "sampled_peak_summed_pss_kib_lower_bound": max(pss_peaks) if pss_peaks else None,
+                    "sequential_sampled_peak_summed_rss_kib_diagnostic": max(rss_peaks, default=0),
+                    "sequential_sampled_peak_summed_pss_kib_diagnostic": max(pss_peaks) if pss_peaks else None,
                     "observed_processes": sorted(
                         processes.values(), key=lambda row: (int(row["pid"]), int(row["start_ticks"]))
                     ),
-                    "samples": samples,
+                    "samples": diagnostic_samples,
                 },
+                "engine_stdout": read_capture(stdout_capture, "engine stdout"),
+                "engine_stderr": read_capture(stderr_capture, "engine stderr"),
                 "sampler_cpu_user_ms": round((usage_end.ru_utime - usage_start.ru_utime) * 1000.0, 3),
                 "sampler_cpu_sys_ms": round((usage_end.ru_stime - usage_start.ru_stime) * 1000.0, 3),
             }
-            sampler_cpu_ms = result["sampler_cpu_user_ms"] + result["sampler_cpu_sys_ms"]
-            result["sampler_cpu_percent_of_wall"] = round(
-                sampler_cpu_ms * 100.0 / result["wall_ms"] if result["wall_ms"] > 0 else 0.0,
-                3,
-            )
             parent.verify_path_identity()
             remove_bound_leaf(child, parent)
             child.close()
@@ -1242,24 +1871,36 @@ def sample_command(
         if handshake_read is not None:
             with contextlib.suppress(OSError):
                 os.close(handshake_read)
-        if child is not None:
+        if child is not None and parent is not None:
             force_cleanup(child, parent, None if root_reaped or not root_in_measurement else root_pid)
             child.close()
-        if staging is not None:
+        if staging is not None and parent is not None:
             force_cleanup(staging, parent, None if root_reaped or root_in_measurement else root_pid)
             staging.close()
-        parent.close()
+        for descriptor in (stdout_capture, stderr_capture):
+            if descriptor is not None:
+                with contextlib.suppress(OSError):
+                    os.close(descriptor)
+        if harness is not None:
+            harness.close()
+        if parent is not None:
+            parent.close()
+        if paths is not None:
+            paths.close()
+        if executable is not None:
+            executable.close()
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cwd", default=os.getcwd())
-    parser.add_argument("--stdout", default=os.devnull, help="command stdout file")
-    parser.add_argument("--stderr", default=os.devnull, help="command stderr file")
+    parser.add_argument("--cgroup-parent", type=Path, required=True)
     parser.add_argument("--interval-ms", type=float, default=75.0)
     parser.add_argument("--pss-interval-ms", type=float, default=250.0)
     parser.add_argument("--descendant-grace-ms", type=float, default=1000.0)
     parser.add_argument("--settle-timeout-ms", type=float, default=10000.0)
+    parser.add_argument("--deadline-ms", type=float, default=DEFAULT_DEADLINE_MS)
+    parser.add_argument("--observation", choices=("on", "off"), default="on")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
@@ -1267,34 +1908,42 @@ def main() -> int:
     if not command:
         parser.error("a command is required after --")
     if (
-        args.interval_ms <= 0
+        not all(
+            math.isfinite(value)
+            for value in (
+                args.interval_ms,
+                args.pss_interval_ms,
+                args.descendant_grace_ms,
+                args.settle_timeout_ms,
+                args.deadline_ms,
+            )
+        )
+        or args.interval_ms <= 0
         or args.pss_interval_ms < args.interval_ms
         or args.descendant_grace_ms < 0
         or args.settle_timeout_ms < args.interval_ms
+        or args.deadline_ms <= 0
+        or args.deadline_ms > MAX_DEADLINE_MS
     ):
-        parser.error("intervals must be positive and PSS/settle intervals must cover the sample interval")
-    configured_parent = os.environ.get("PLIEGO_BENCHMARK_CGROUP_PARENT")
-    if not configured_parent:
-        error = incomplete("CGROUP_PARENT_REQUIRED", "PLIEGO_BENCHMARK_CGROUP_PARENT is required")
-        print(f"process_tree_sampler: measurement-incomplete[{error.code}]: {error}", file=sys.stderr)
-        return 2
+        parser.error("intervals/deadline must be bounded and PSS/settle intervals must cover the sample interval")
     try:
+        require_broker_installation()
         result = sample_command(
             command,
             args.cwd,
-            args.stdout,
-            args.stderr,
             args.interval_ms,
             args.pss_interval_ms,
             args.descendant_grace_ms,
             args.settle_timeout_ms,
-            Path(configured_parent),
+            args.deadline_ms,
+            args.observation == "on",
+            args.cgroup_parent,
         )
     except (MeasurementIncomplete, OSError) as error:
         code = error.code if isinstance(error, MeasurementIncomplete) else "CGROUP_IO_ERROR"
         print(f"process_tree_sampler: measurement-incomplete[{code}]: {error}", file=sys.stderr)
         return 2
-    print(json.dumps(result, separators=(",", ":")))
+    print(json.dumps(result, separators=(",", ":"), allow_nan=False))
     return 0
 
 

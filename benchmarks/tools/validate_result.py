@@ -12,20 +12,28 @@ required, properties, additionalProperties, minimum, minLength, minItems,
 maxItems, $ref
 resolution into `definitions`, and pattern.
 
-Usage:
-    python3 benchmarks/tools/validate_result.py <result.json> [<schema.json>]
+Validation is authority-aware: staged results require the exact benchmark
+command context, while published results additionally require the external
+dedicated-host proof bundle that authorized publication.
 """
 
 from __future__ import annotations
 
-import json
+import argparse
+import hashlib
 import math
+import os
 import re
+import stat
 import statistics
 import sys
+import tomllib
 from collections import Counter
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
+
+import benchmark_publication
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_SCHEMA = ROOT / "benchmarks" / "schema" / "benchmark-result.v1.json"
@@ -41,9 +49,156 @@ class Violation:
         return f"{self.path}: {self.message}"
 
 
+@dataclass(frozen=True)
+class ExternalPublication:
+    host_proof_schema: str
+    host_proof_bundle_sha256: str
+    attestation_schema: str
+    attestation_sha256: str
+    observer_proof_sha256: str
+    authority: str
+    harness_revision: str
+    github_run_id: int
+    github_run_attempt: int
+    github_job: str
+    github_workflow_ref: str
+    runner_id: int
+    runner_name: str
+
+    def document(self) -> dict[str, Any]:
+        return {
+            "host_proof_schema": self.host_proof_schema,
+            "host_proof_bundle_sha256": self.host_proof_bundle_sha256,
+            "attestation_schema": self.attestation_schema,
+            "attestation_sha256": self.attestation_sha256,
+            "observer_proof_sha256": self.observer_proof_sha256,
+            "authority": self.authority,
+            "harness_revision": self.harness_revision,
+            "github_run_id": self.github_run_id,
+            "github_run_attempt": self.github_run_attempt,
+            "github_job": self.github_job,
+            "github_workflow_ref": self.github_workflow_ref,
+            "runner_id": self.runner_id,
+            "runner_name": self.runner_name,
+        }
+
+
+@dataclass(frozen=True)
+class ValidationContext:
+    mode: str
+    repository_root: Path
+    manifest_path: Path
+    frozen_fixture_root: Path
+    staging_output: Path
+    failure_evidence_root: Path
+    engine_binary: Path
+    harness_revision: str
+    fixtures: dict[str, dict[str, Any]]
+    external_publication: ExternalPublication | None = None
+
+
+def _canonical_path(path: Path, label: str, *, strict: bool) -> Path:
+    try:
+        resolved = path.resolve(strict=strict)
+    except OSError as error:
+        raise ValueError(f"{label} cannot be resolved: {error}") from error
+    if not path.is_absolute() or path != resolved:
+        raise ValueError(f"{label} must be absolute and canonical")
+    return resolved
+
+
+def _overlap(first: Path, second: Path) -> bool:
+    return first == second or first in second.parents or second in first.parents
+
+
+def build_validation_context(
+    *,
+    mode: str,
+    repository_root: Path,
+    manifest_path: Path,
+    frozen_fixture_root: Path,
+    staging_output: Path,
+    failure_evidence_root: Path,
+    engine_binary: Path,
+    harness_revision: str,
+    external_publication: ExternalPublication | None = None,
+) -> ValidationContext:
+    """Bind result validation to the already-authorized benchmark command."""
+
+    if mode not in {"staged", "published"}:
+        raise ValueError("validation mode must be staged or published")
+    if (mode == "published") is not (external_publication is not None):
+        raise ValueError("published mode requires exactly one external publication proof")
+    if re.fullmatch(r"[0-9a-f]{40}", harness_revision) is None:
+        raise ValueError("validation context requires one exact 40-character revision")
+    repository = _canonical_path(repository_root, "repository root", strict=True)
+    manifest = _canonical_path(manifest_path, "benchmark manifest", strict=True)
+    if manifest != repository / "benchmarks" / "manifest.toml":
+        raise ValueError("benchmark manifest must be the canonical repository manifest")
+    frozen = _canonical_path(frozen_fixture_root, "frozen fixture root", strict=True)
+    staging = _canonical_path(staging_output, "staging output", strict=False)
+    failures = _canonical_path(failure_evidence_root, "failure-evidence root", strict=True)
+    binary = _canonical_path(engine_binary, "engine binary", strict=True)
+    for first, second, label in (
+        (frozen, staging, "frozen fixture root and staging output"),
+        (frozen, failures, "frozen fixture root and failure-evidence root"),
+        (staging, failures, "staging output and failure-evidence root"),
+    ):
+        if _overlap(first, second):
+            raise ValueError(f"{label} must be disjoint")
+    if not frozen.is_dir() or not failures.is_dir() or not binary.is_file():
+        raise ValueError("validation context paths do not identify the required directory/file types")
+    try:
+        manifest_document = tomllib.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError) as error:
+        raise ValueError(f"benchmark manifest is unreadable: {error}") from error
+    fixtures = manifest_document.get("fixtures")
+    if not isinstance(fixtures, dict):
+        raise ValueError("benchmark manifest omitted its fixture contracts")
+    if external_publication is not None and external_publication.harness_revision != harness_revision:
+        raise ValueError("external publication proof revision differs from the benchmark command")
+    if external_publication is not None:
+        if (
+            external_publication.host_proof_schema != "pliego.benchmark-host-proof.v1"
+            or external_publication.attestation_schema != "pliego.benchmark-publication-attestation.v1"
+            or external_publication.authority != "github-protected-environment-hmac-v1"
+            or external_publication.github_job != "dedicated"
+            or external_publication.github_workflow_ref != benchmark_publication.TRUSTED_WORKFLOW_REF
+            or external_publication.github_run_id <= 0
+            or external_publication.github_run_attempt <= 0
+            or external_publication.runner_id <= 0
+            or not external_publication.runner_name
+            or any(
+                re.fullmatch(r"[0-9a-f]{64}", digest) is None
+                for digest in (
+                    external_publication.host_proof_bundle_sha256,
+                    external_publication.attestation_sha256,
+                    external_publication.observer_proof_sha256,
+                )
+            )
+        ):
+            raise ValueError("external publication proof lacks protected GitHub attestation authority")
+    return ValidationContext(
+        mode=mode,
+        repository_root=repository,
+        manifest_path=manifest,
+        frozen_fixture_root=frozen,
+        staging_output=staging,
+        failure_evidence_root=failures,
+        engine_binary=binary,
+        harness_revision=harness_revision,
+        fixtures=fixtures,
+        external_publication=external_publication,
+    )
+
+
 def percentile(values: list[int | float], p: float) -> float:
+    if not math.isfinite(float(p)) or not 0 < p <= 100:
+        raise ValueError("percentile must be finite and within (0, 100]")
     if not values:
         return 0.0
+    if any(not math.isfinite(float(value)) for value in values):
+        raise ValueError("percentile input contains a non-finite number")
     ordered = sorted(values)
     index = max(0, min(len(ordered) - 1, math.ceil(p / 100.0 * len(ordered)) - 1))
     return float(ordered[index])
@@ -61,6 +216,230 @@ def percentiles(values: list[int | float | None]) -> dict[str, float]:
         "max": max(measured),
         "mean": statistics.fmean(measured),
     }
+
+
+def _bound_regular_file(path: Path) -> tuple[str, os.stat_result]:
+    if path != path.resolve(strict=True) or path.is_symlink():
+        raise ValueError(f"bound file is not canonical and non-following: {path}")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+    descriptor = os.open(path, flags)
+    digest = hashlib.sha256()
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            raise ValueError(f"bound path is not a regular file: {path}")
+        while chunk := os.read(descriptor, 1024 * 1024):
+            digest.update(chunk)
+        after = os.fstat(descriptor)
+        current = os.stat(path, follow_symlinks=False)
+    finally:
+        os.close(descriptor)
+    before_identity = benchmark_publication.stable_stat_identity(before)
+    if before_identity != benchmark_publication.stable_stat_identity(
+        after
+    ) or before_identity != benchmark_publication.stable_stat_identity(current):
+        raise ValueError(f"bound file identity changed while hashing: {path}")
+    return digest.hexdigest(), before
+
+
+def _manifest_relative_path(value: str, label: str) -> Path:
+    relative = PurePosixPath(value)
+    if relative.is_absolute() or not relative.parts or any(part in {"", ".", ".."} for part in relative.parts):
+        raise ValueError(f"{label} is not one safe manifest-relative path")
+    return Path(*relative.parts)
+
+
+def _bundle_digest(paths: list[tuple[str, str]]) -> str:
+    digest = hashlib.sha256()
+    for relative, file_digest in sorted(paths):
+        digest.update(relative.encode("utf-8") + b"\0")
+        digest.update(bytes.fromhex(file_digest))
+    return digest.hexdigest()
+
+
+def _context_violation(path: str, message: str, violations: list[Violation]) -> None:
+    violations.append(Violation(path, message))
+
+
+def validate_fixture_context(
+    data: dict[str, Any],
+    path: str,
+    violations: list[Violation],
+    context: ValidationContext,
+) -> None:
+    fixture = data["fixture"]
+    fixture_id = fixture["id"]
+    contract = context.fixtures.get(fixture_id)
+    if not isinstance(contract, dict):
+        _context_violation(f"{path}.fixture.id", "is absent from the frozen benchmark manifest", violations)
+        return
+    for field in ("purpose", "category", "input"):
+        require_equal(f"{path}.fixture.{field}", fixture.get(field), contract.get(field), violations)
+    try:
+        input_relative = _manifest_relative_path(contract["input"], "fixture input")
+        source_input = context.repository_root / input_relative
+        frozen_input = context.frozen_fixture_root / input_relative
+        assets = [_manifest_relative_path(value, "fixture asset") for value in contract.get("assets", [])]
+        source_paths = [source_input, *(source_input.parent / asset for asset in assets)]
+        frozen_paths = [frozen_input, *(frozen_input.parent / asset for asset in assets)]
+        source_bundle: list[tuple[str, str]] = []
+        frozen_bundle: list[tuple[str, str]] = []
+        input_metadata: os.stat_result | None = None
+        input_digest = ""
+        for index, (source, frozen) in enumerate(zip(source_paths, frozen_paths)):
+            source_digest, _ = _bound_regular_file(source)
+            frozen_digest, frozen_metadata = _bound_regular_file(frozen)
+            relative = frozen.relative_to(frozen_input.parent).as_posix()
+            source_bundle.append((relative, source_digest))
+            frozen_bundle.append((relative, frozen_digest))
+            if source_digest != frozen_digest:
+                raise ValueError(f"frozen fixture asset differs from committed source: {relative}")
+            if index == 0:
+                input_digest = frozen_digest
+                input_metadata = frozen_metadata
+        source_bundle_digest = _bundle_digest(source_bundle)
+        frozen_bundle_digest = _bundle_digest(frozen_bundle)
+        if source_bundle_digest != frozen_bundle_digest:
+            raise ValueError("frozen fixture bundle differs from committed source")
+        engine_digest, engine_metadata = _bound_regular_file(context.engine_binary)
+        cwd_metadata = os.stat(frozen_input.parent, follow_symlinks=False)
+        if not stat.S_ISDIR(cwd_metadata.st_mode) or frozen_input.parent != frozen_input.parent.resolve(strict=True):
+            raise ValueError("frozen fixture cwd is not one canonical directory")
+        assert input_metadata is not None
+    except (KeyError, OSError, ValueError) as error:
+        _context_violation(f"{path}.fixture", f"cannot bind frozen fixture context: {error}", violations)
+        return
+    require_equal(f"{path}.fixture.input_sha256", fixture.get("input_sha256"), input_digest, violations)
+    require_equal(f"{path}.fixture.bundle_sha256", fixture.get("bundle_sha256"), frozen_bundle_digest, violations)
+    engine = data["toolchain"]["engine"]
+    require_equal(
+        f"{path}.toolchain.engine.binary_path", engine.get("binary_path"), str(context.engine_binary), violations
+    )
+    require_equal(f"{path}.toolchain.engine.binary_sha256", engine.get("binary_sha256"), engine_digest, violations)
+    if "binary_bytes" in engine:
+        require_equal(
+            f"{path}.toolchain.engine.binary_bytes", engine["binary_bytes"], engine_metadata.st_size, violations
+        )
+
+    for index, sample in enumerate(data["samples"]):
+        sample_path = f"{path}.samples[{index}].resource_usage.launch_security"
+        usage = sample.get("resource_usage")
+        if not isinstance(usage, dict):
+            continue
+        launch = usage["launch_security"]
+        argv = launch["argv"]
+        identity = launch["command_identity"]
+        malformed_flags = False
+        for flag in ("--output", "--artifacts"):
+            if argv.count(flag) != 1:
+                _context_violation(f"{sample_path}.argv", f"must contain exactly one {flag!r}", violations)
+                malformed_flags = True
+        if malformed_flags:
+            continue
+        require_equal(f"{sample_path}.argv[0]", argv[0], str(context.engine_binary), violations)
+        require_equal(f"{sample_path}.argv[2]", argv[2], frozen_input.name, violations)
+        require_equal(
+            f"{sample_path}.executable.path", launch["executable"]["path"], str(context.engine_binary), violations
+        )
+        require_equal(f"{sample_path}.executable.sha256", launch["executable"]["sha256"], engine_digest, violations)
+        for field, expected in (
+            ("device", engine_metadata.st_dev),
+            ("inode", engine_metadata.st_ino),
+            ("bytes", engine_metadata.st_size),
+        ):
+            require_equal(f"{sample_path}.executable.{field}", launch["executable"][field], expected, violations)
+        command_input = identity["input"]
+        require_equal(
+            f"{sample_path}.command_identity.input.manifest_path",
+            command_input["manifest_path"],
+            str(frozen_input),
+            violations,
+        )
+        require_equal(
+            f"{sample_path}.command_identity.input.argv_relative_path",
+            command_input["argv_relative_path"],
+            frozen_input.name,
+            violations,
+        )
+        require_equal(f"{sample_path}.command_identity.input.sha256", command_input["sha256"], input_digest, violations)
+        for field, expected in (("device", input_metadata.st_dev), ("inode", input_metadata.st_ino)):
+            require_equal(f"{sample_path}.command_identity.input.{field}", command_input[field], expected, violations)
+        cwd = identity["cwd"]
+        require_equal(f"{sample_path}.command_identity.cwd.path", cwd["path"], str(frozen_input.parent), violations)
+        for field, expected in (("device", cwd_metadata.st_dev), ("inode", cwd_metadata.st_ino)):
+            require_equal(f"{sample_path}.command_identity.cwd.{field}", cwd[field], expected, violations)
+        try:
+            output_flag = argv.index("--output")
+            artifact_flag = argv.index("--artifacts")
+            output_file = Path(argv[output_flag + 1])
+            artifact_directory = Path(argv[artifact_flag + 1])
+        except (ValueError, IndexError):
+            _context_violation(f"{sample_path}.argv", "omits its exact output/artifact values", violations)
+            continue
+        output_directory = output_file.parent
+        recorded_workspace = Path(identity["workspace_directory"]["path"])
+        recorded_output = Path(identity["output_directory"]["path"])
+        recorded_artifacts = Path(identity["artifact_directory"]["path"])
+        require_equal(
+            f"{sample_path}.command_identity.output_directory.path",
+            str(recorded_output),
+            str(output_directory),
+            violations,
+        )
+        require_equal(
+            f"{sample_path}.command_identity.artifact_directory.path",
+            str(recorded_artifacts),
+            str(artifact_directory),
+            violations,
+        )
+        workspace = output_directory.parent
+        require_equal(
+            f"{sample_path}.command_identity.workspace_directory.path",
+            str(recorded_workspace),
+            str(workspace),
+            violations,
+        )
+        if (
+            not output_file.is_absolute()
+            or not artifact_directory.is_absolute()
+            or ".." in output_file.parts
+            or ".." in artifact_directory.parts
+            or workspace.parent != context.failure_evidence_root
+            or re.fullmatch(r"\.in-progress-[1-9][0-9]*-[0-9a-f]{16}", workspace.name) is None
+            or artifact_directory.parent != workspace
+            or output_directory == artifact_directory
+        ):
+            _context_violation(
+                f"{sample_path}.command_identity",
+                "output and artifact directories must be disjoint siblings below the exact failure-evidence root",
+                violations,
+            )
+        prefix = f"sample-{sample['index']}-"
+        if (
+            re.fullmatch(re.escape(prefix) + r"[0-9a-f]{16}-output", output_directory.name) is None
+            or artifact_directory.name != output_directory.name.removesuffix("-output") + "-artifacts"
+            or output_file.name != "document.pdf"
+        ):
+            _context_violation(f"{sample_path}.argv", "does not bind the indexed retained sample paths", violations)
+        workspace_fd_identity = (
+            identity["workspace_directory"]["device"],
+            identity["workspace_directory"]["inode"],
+        )
+        output_fd_identity = (identity["output_directory"]["device"], identity["output_directory"]["inode"])
+        artifact_fd_identity = (identity["artifact_directory"]["device"], identity["artifact_directory"]["inode"])
+        bound_identities = {
+            (cwd["device"], cwd["inode"]),
+            (command_input["device"], command_input["inode"]),
+            workspace_fd_identity,
+            output_fd_identity,
+            artifact_fd_identity,
+        }
+        if len(bound_identities) != 5:
+            _context_violation(
+                f"{sample_path}.command_identity",
+                "cwd, input, workspace, output, and artifact FD identities must be disjoint",
+                violations,
+            )
 
 
 def resolve(schema: dict[str, Any], ref: str) -> dict[str, Any]:
@@ -98,6 +477,9 @@ def validate(
     violations: list[Violation],
     root: dict[str, Any] | None = None,
 ) -> None:
+    if isinstance(data, float) and not math.isfinite(data):
+        violations.append(Violation(path, "non-finite JSON numbers are forbidden"))
+        return
     if root is None:
         root = schema
     if "$ref" in schema:
@@ -205,10 +587,29 @@ def validate_resource_usage(sample: dict[str, Any], path: str, violations: list[
         violations.append(Violation(f"{path}.resource_usage", "cgroup-v2 samples require retained resource usage"))
         return
 
+    for field in ("root_wall_ms", "tree_wall_ms", "measurement_complete_ms"):
+        value = usage.get(field)
+        if (
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or not math.isfinite(float(value))
+            or value <= 0
+        ):
+            violations.append(Violation(f"{path}.resource_usage.{field}", "must be a positive finite number"))
+    for field in ("drain_ms", "cpu_user_ms", "cpu_sys_ms", "sampler_cpu_user_ms", "sampler_cpu_sys_ms"):
+        value = usage.get(field)
+        if (
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or not math.isfinite(float(value))
+            or value < 0
+        ):
+            violations.append(Violation(f"{path}.resource_usage.{field}", "must be a non-negative finite number"))
+
     exact_fields = {
         "exit_code": "exit_code",
         "signal": "signal",
-        "wall_ms": "wall_ms",
+        "wall_ms": "tree_wall_ms",
         "user_ms": "cpu_user_ms",
         "sys_ms": "cpu_sys_ms",
         "memory_current_bytes": "memory_current_bytes",
@@ -264,23 +665,43 @@ def validate_resource_usage(sample: dict[str, Any], path: str, violations: list[
         1,
         violations,
     )
-    for label, results in launch["migration_write_probes"].items():
-        for interface, result in results.items():
-            if result not in {"EACCES", "EPERM"}:
-                violations.append(
-                    Violation(
-                        f"{path}.resource_usage.launch_security.migration_write_probes.{label}.{interface}",
-                        "must prove a permission-denied write",
+    for probe_field in ("migration_write_probes", "migration_fd_probes"):
+        for label, results in launch[probe_field].items():
+            for interface, result in results.items():
+                if result not in {"EACCES", "EPERM"}:
+                    violations.append(
+                        Violation(
+                            f"{path}.resource_usage.launch_security.{probe_field}.{label}.{interface}",
+                            "must prove a permission-denied write",
+                        )
                     )
-                )
     executable = launch["executable"]
-    executable_path = PurePosixPath(executable["path"])
+    executable_path = Path(executable["path"])
     if not executable_path.is_absolute() or ".." in executable_path.parts or str(executable_path) != executable["path"]:
         violations.append(
             Violation(f"{path}.resource_usage.launch_security.executable.path", "must be an absolute canonical path")
         )
     require_equal(f"{path}.resource_usage.launch_security.argv[0]", launch["argv"][0], executable["path"], violations)
     require_equal(f"{path}.resource_usage.launch_security.argv[1]", launch["argv"][1], "render", violations)
+    require_equal(
+        f"{path}.resource_usage.launch_security.command_identity.input.argv_relative_path",
+        launch["command_identity"]["input"]["argv_relative_path"],
+        launch["argv"][2],
+        violations,
+    )
+    if not (usage["root_wall_ms"] <= usage["tree_wall_ms"] <= usage["measurement_complete_ms"]):
+        violations.append(
+            Violation(
+                f"{path}.resource_usage.tree_wall_ms",
+                "must include root lifetime and precede measurement completion",
+            )
+        )
+    require_equal(
+        f"{path}.resource_usage.drain_ms",
+        usage["drain_ms"],
+        round(usage["tree_wall_ms"] - usage["root_wall_ms"], 3),
+        violations,
+    )
 
     counters = usage["counters"]
     empty = counters["empty"]
@@ -314,7 +735,9 @@ def validate_resource_usage(sample: dict[str, Any], path: str, violations: list[
 
     cpu = final["cpu_stat"]
     if cpu["usage_usec"] + 2 < cpu["user_usec"] + cpu["system_usec"]:
-        violations.append(Violation(f"{path}.resource_usage.counters.final.cpu_stat.usage_usec", "must cover user plus system CPU"))
+        violations.append(
+            Violation(f"{path}.resource_usage.counters.final.cpu_stat.usage_usec", "must cover user plus system CPU")
+        )
     derived = {
         "cpu_user_ms": round(cpu["user_usec"] / 1000.0, 3),
         "cpu_sys_ms": round(cpu["system_usec"] / 1000.0, 3),
@@ -331,15 +754,42 @@ def validate_resource_usage(sample: dict[str, Any], path: str, violations: list[
     settle = usage["accounting_settle"]
     observations = settle["stable_observations"]
     if len(observations) != 2:
-        violations.append(Violation(f"{path}.resource_usage.accounting_settle.stable_observations", "must retain exactly two stable reads"))
+        violations.append(
+            Violation(
+                f"{path}.resource_usage.accounting_settle.stable_observations", "must retain exactly two stable reads"
+            )
+        )
     elif observations[0] != observations[1]:
-        violations.append(Violation(f"{path}.resource_usage.accounting_settle.stable_observations", "cpu.stat and io.stat reads must be identical"))
+        violations.append(
+            Violation(
+                f"{path}.resource_usage.accounting_settle.stable_observations",
+                "cpu.stat and io.stat reads must be identical",
+            )
+        )
     elif observations[1]["cpu_stat"] != final["cpu_stat"] or observations[1]["io_stat"] != final["io_stat"]:
-        violations.append(Violation(f"{path}.resource_usage.accounting_settle.stable_observations", "last stable read must equal final counters"))
+        violations.append(
+            Violation(
+                f"{path}.resource_usage.accounting_settle.stable_observations",
+                "last stable read must equal final counters",
+            )
+        )
     if settle["duration_ms"] > settle["timeout_ms"] + settle["poll_interval_ms"]:
-        violations.append(Violation(f"{path}.resource_usage.accounting_settle.duration_ms", "exceeds bounded settle budget"))
+        violations.append(
+            Violation(f"{path}.resource_usage.accounting_settle.duration_ms", "exceeds bounded settle budget")
+        )
     if settle["duration_ms"] < settle["poll_interval_ms"]:
-        violations.append(Violation(f"{path}.resource_usage.accounting_settle.duration_ms", "two stable reads were not interval-separated"))
+        violations.append(
+            Violation(
+                f"{path}.resource_usage.accounting_settle.duration_ms", "two stable reads were not interval-separated"
+            )
+        )
+    if usage["measurement_complete_ms"] + 0.002 < usage["tree_wall_ms"] + settle["duration_ms"]:
+        violations.append(
+            Violation(
+                f"{path}.resource_usage.measurement_complete_ms",
+                "must include the full post-drain accounting settle interval",
+            )
+        )
 
     diagnostics = usage["sampled_diagnostics"]
     require_equal(
@@ -349,17 +799,27 @@ def validate_resource_usage(sample: dict[str, Any], path: str, violations: list[
         violations,
     )
     if diagnostics["pss_interval_ms"] < diagnostics["sample_interval_ms"]:
-        violations.append(Violation(f"{path}.resource_usage.sampled_diagnostics.pss_interval_ms", "must cover the sample interval"))
+        violations.append(
+            Violation(f"{path}.resource_usage.sampled_diagnostics.pss_interval_ms", "must cover the sample interval")
+        )
     elapsed = [float(row["elapsed_ms"]) for row in diagnostics["samples"]]
     if elapsed != sorted(elapsed):
-        violations.append(Violation(f"{path}.resource_usage.sampled_diagnostics.samples", "elapsed_ms must be monotonic"))
+        violations.append(
+            Violation(f"{path}.resource_usage.sampled_diagnostics.samples", "elapsed_ms must be monotonic")
+        )
+    if diagnostics["observation_enabled"] is not bool(diagnostics["samples"]):
+        violations.append(
+            Violation(
+                f"{path}.resource_usage.sampled_diagnostics.observation_enabled",
+                "must be true exactly when sequential procfs observations were retained",
+            )
+        )
     gaps = [later - earlier for earlier, later in zip(elapsed, elapsed[1:])]
-    expected_drained_at = round(usage["wall_ms"] + usage["drain_ms"], 3)
-    if abs(elapsed[-1] - expected_drained_at) > 0.002:
+    if elapsed and abs(elapsed[-1] - usage["tree_wall_ms"]) > 0.002:
         violations.append(
             Violation(
                 f"{path}.resource_usage.sampled_diagnostics.samples[-1].elapsed_ms",
-                f"must equal engine wall plus drain duration {expected_drained_at!r}",
+                f"must equal tree wall {usage['tree_wall_ms']!r}",
             )
         )
     require_equal(
@@ -376,7 +836,9 @@ def validate_resource_usage(sample: dict[str, Any], path: str, violations: list[
     for index, raw_sample in enumerate(diagnostics["samples"]):
         sample_path = f"{path}.resource_usage.sampled_diagnostics.samples[{index}]"
         if raw_sample["cgroup_memory_current_bytes"] > final["memory_peak_bytes"]:
-            violations.append(Violation(f"{sample_path}.cgroup_memory_current_bytes", "must not exceed cgroup memory.peak"))
+            violations.append(
+                Violation(f"{sample_path}.cgroup_memory_current_bytes", "must not exceed cgroup memory.peak")
+            )
         identities: set[tuple[int, int]] = set()
         for process in raw_sample["processes"]:
             identity = (process["pid"], process["start_ticks"])
@@ -396,17 +858,20 @@ def validate_resource_usage(sample: dict[str, Any], path: str, violations: list[
             )
             aggregate["last_seen_ms"] = raw_sample["elapsed_ms"]
         rss = sum(process["rss_pages"] * page_size // 1024 for process in raw_sample["processes"])
-        require_equal(f"{sample_path}.sampled_summed_rss_kib_lower_bound", raw_sample["sampled_summed_rss_kib_lower_bound"], rss, violations)
+        require_equal(
+            f"{sample_path}.sequential_sampled_summed_rss_kib_diagnostic",
+            raw_sample["sequential_sampled_summed_rss_kib_diagnostic"],
+            rss,
+            violations,
+        )
         rss_peaks.append(rss)
         pss_values = [process["pss_kib"] for process in raw_sample["processes"]]
         expected_pss = (
-            sum(pss_values)
-            if raw_sample["processes"] and all(value is not None for value in pss_values)
-            else None
+            sum(pss_values) if raw_sample["processes"] and all(value is not None for value in pss_values) else None
         )
         require_equal(
-            f"{sample_path}.sampled_summed_pss_kib_lower_bound",
-            raw_sample["sampled_summed_pss_kib_lower_bound"],
+            f"{sample_path}.sequential_sampled_summed_pss_kib_diagnostic",
+            raw_sample["sequential_sampled_summed_pss_kib_diagnostic"],
             expected_pss,
             violations,
         )
@@ -421,50 +886,85 @@ def validate_resource_usage(sample: dict[str, Any], path: str, violations: list[
         violations,
     )
     require_equal(
-        f"{path}.sampled_peak_rss_kib_lower_bound",
-        sample["sampled_peak_rss_kib_lower_bound"],
+        f"{path}.sequential_sampled_peak_rss_kib_diagnostic",
+        sample["sequential_sampled_peak_rss_kib_diagnostic"],
         max(rss_peaks, default=0),
         violations,
     )
     require_equal(
-        f"{path}.sampled_peak_pss_kib_lower_bound",
-        sample["sampled_peak_pss_kib_lower_bound"],
+        f"{path}.sequential_sampled_peak_pss_kib_diagnostic",
+        sample["sequential_sampled_peak_pss_kib_diagnostic"],
         max(pss_peaks) if pss_peaks else None,
         violations,
     )
     require_equal(
-        f"{path}.resource_usage.sampled_diagnostics.sampled_peak_summed_rss_kib_lower_bound",
-        diagnostics["sampled_peak_summed_rss_kib_lower_bound"],
+        f"{path}.resource_usage.sampled_diagnostics.sequential_sampled_peak_summed_rss_kib_diagnostic",
+        diagnostics["sequential_sampled_peak_summed_rss_kib_diagnostic"],
         max(rss_peaks, default=0),
         violations,
     )
     require_equal(
-        f"{path}.resource_usage.sampled_diagnostics.sampled_peak_summed_pss_kib_lower_bound",
-        diagnostics["sampled_peak_summed_pss_kib_lower_bound"],
+        f"{path}.resource_usage.sampled_diagnostics.sequential_sampled_peak_summed_pss_kib_diagnostic",
+        diagnostics["sequential_sampled_peak_summed_pss_kib_diagnostic"],
         max(pss_peaks) if pss_peaks else None,
         violations,
     )
     cleanup = usage["cleanup"]
     require_equal(f"{path}.resource_usage.cleanup.kill_grace_ms", cleanup["kill_grace_ms"], 1000.0, violations)
     if not cleanup["kill_used"] and cleanup["lingering_before_kill"]:
-        violations.append(Violation(f"{path}.resource_usage.cleanup", "cannot retain lingering identities without cgroup.kill"))
+        violations.append(
+            Violation(f"{path}.resource_usage.cleanup", "cannot retain lingering identities without cgroup.kill")
+        )
     if sample["ok"] and cleanup["kill_used"]:
-        violations.append(Violation(f"{path}.resource_usage.cleanup.kill_used", "passing samples must drain without cgroup.kill"))
-    sampler_cpu_ms = usage["sampler_cpu_user_ms"] + usage["sampler_cpu_sys_ms"]
-    sampler_cpu_percent = round(sampler_cpu_ms * 100.0 / usage["wall_ms"], 3) if usage["wall_ms"] else 0.0
-    require_equal(
-        f"{path}.resource_usage.sampler_cpu_percent_of_wall",
-        usage["sampler_cpu_percent_of_wall"],
-        sampler_cpu_percent,
-        violations,
-    )
+        violations.append(
+            Violation(f"{path}.resource_usage.cleanup.kill_used", "passing samples must drain without cgroup.kill")
+        )
 
 
-def validate_semantics(data: dict[str, Any], path: str, violations: list[Violation]) -> None:
+def validate_semantics(
+    data: dict[str, Any],
+    path: str,
+    violations: list[Violation],
+    context: ValidationContext | None,
+) -> None:
     if data["schema"] == "pliego.benchmark-bundle":
         for index, result in enumerate(data["results"]):
-            validate_semantics(result, f"{path}.results[{index}]", violations)
+            validate_semantics(result, f"{path}.results[{index}]", violations, context)
         return
+
+    publication = data.get("publication")
+    dedicated = data["host"]["dedicated"]
+    if context is None:
+        violations.append(
+            Violation(
+                path,
+                "applicable benchmark validation requires a typed staged or external-publication context",
+            )
+        )
+    elif context.mode == "staged":
+        if publication is not None or dedicated is not False:
+            violations.append(
+                Violation(
+                    f"{path}.publication",
+                    "staged validation forbids dedicated or publication provenance",
+                )
+            )
+    else:
+        assert context.external_publication is not None
+        require_equal(
+            f"{path}.publication",
+            publication,
+            context.external_publication.document(),
+            violations,
+        )
+        require_equal(f"{path}.host.dedicated", dedicated, True, violations)
+    if context is not None:
+        require_equal(
+            f"{path}.toolchain.harness_revision",
+            data["toolchain"].get("harness_revision"),
+            context.harness_revision,
+            violations,
+        )
     if data.get("status") == "not-applicable":
         return
 
@@ -482,14 +982,17 @@ def validate_semantics(data: dict[str, Any], path: str, violations: list[Violati
         violations.append(Violation(f"{path}.samples", "sample indices must be contiguous and ordered from zero"))
 
     protocol_measurement_method = data["protocol"]["measurement_method"]
-    if protocol_measurement_method != "linux-cgroup-v2-v1":
+    if protocol_measurement_method != "linux-cgroup-v2-v2":
         violations.append(
             Violation(
                 f"{path}.protocol.measurement_method",
-                "publishable benchmark results require linux-cgroup-v2-v1",
+                "publishable benchmark results require linux-cgroup-v2-v2",
             )
         )
     engine = data["toolchain"]["engine"]
+    harness_revision = data["toolchain"].get("harness_revision")
+    if not isinstance(harness_revision, str) or re.fullmatch(r"[0-9a-f]{40}", harness_revision) is None:
+        violations.append(Violation(f"{path}.toolchain.harness_revision", "must be one exact 40-character revision"))
     for field in ("binary_path", "binary_sha256"):
         if field not in engine:
             violations.append(Violation(f"{path}.toolchain.engine.{field}", "is required for a publishable engine"))
@@ -527,21 +1030,6 @@ def validate_semantics(data: dict[str, Any], path: str, violations: list[Violati
                     engine["binary_sha256"],
                     violations,
                 )
-            argv = launch["argv"]
-            require_equal(
-                f"{sample_path}.resource_usage.launch_security.argv[2]",
-                argv[2],
-                data["fixture"]["input"],
-                violations,
-            )
-            for flag in ("--output", "--artifacts"):
-                if argv.count(flag) != 1:
-                    violations.append(
-                        Violation(
-                            f"{sample_path}.resource_usage.launch_security.argv",
-                            f"must contain exactly one {flag!r}",
-                        )
-                    )
         correctness = sample["correctness"]
         output = sample["output"]
         failure = sample["failure"]
@@ -656,7 +1144,11 @@ def validate_semantics(data: dict[str, Any], path: str, violations: list[Violati
     if len(set(launch_accounts)) > 1:
         violations.append(Violation(f"{path}.samples", "all renders must use the same dedicated engine UID and GID"))
     if len(set(executable_identities)) > 1:
-        violations.append(Violation(f"{path}.samples", "engine executable device/inode identity changed between renders"))
+        violations.append(
+            Violation(f"{path}.samples", "engine executable device/inode identity changed between renders")
+        )
+    if context is not None:
+        validate_fixture_context(data, path, violations, context)
 
     aggregates = data["aggregates"]
     passing_samples = [sample for sample in samples if sample["ok"] and sample["correctness"]["pass"]]
@@ -676,9 +1168,9 @@ def validate_semantics(data: dict[str, Any], path: str, violations: list[Violati
             aggregates["memory"]["cgroup_peak_bytes"],
             percentiles([sample["memory_peak_bytes"] for sample in passing_samples]),
         ),
-        f"{path}.aggregates.memory.sampled_peak_rss_kib_lower_bound": (
-            aggregates["memory"]["sampled_peak_rss_kib_lower_bound"],
-            percentiles([sample["sampled_peak_rss_kib_lower_bound"] for sample in passing_samples]),
+        f"{path}.aggregates.memory.sequential_sampled_peak_rss_kib_diagnostic": (
+            aggregates["memory"]["sequential_sampled_peak_rss_kib_diagnostic"],
+            percentiles([sample["sequential_sampled_peak_rss_kib_diagnostic"] for sample in passing_samples]),
         ),
         f"{path}.aggregates.io.read_bytes": (
             aggregates["io"]["read_bytes"],
@@ -706,16 +1198,16 @@ def validate_semantics(data: dict[str, Any], path: str, violations: list[Violati
             violations.append(Violation(aggregate_path, f"must equal aggregate of passing samples {expected!r}"))
 
     pss_values = [
-        sample["sampled_peak_pss_kib_lower_bound"]
+        sample["sequential_sampled_peak_pss_kib_diagnostic"]
         for sample in passing_samples
-        if sample["sampled_peak_pss_kib_lower_bound"] is not None
+        if sample["sequential_sampled_peak_pss_kib_diagnostic"] is not None
     ]
     expected_pss = percentiles(pss_values) if passing_samples and len(pss_values) == len(passing_samples) else None
-    actual_pss = aggregates["memory"].get("sampled_peak_pss_kib_lower_bound")
+    actual_pss = aggregates["memory"].get("sequential_sampled_peak_pss_kib_diagnostic")
     if actual_pss != expected_pss:
         violations.append(
             Violation(
-                f"{path}.aggregates.memory.sampled_peak_pss_kib_lower_bound",
+                f"{path}.aggregates.memory.sequential_sampled_peak_pss_kib_diagnostic",
                 f"must equal aggregate of passing samples {expected_pss!r}",
             )
         )
@@ -816,28 +1308,161 @@ def validate_semantics(data: dict[str, Any], path: str, violations: list[Violati
             )
 
 
-def validate_document(data: Any, schema: dict[str, Any]) -> list[Violation]:
+def validate_document(
+    data: Any,
+    schema: dict[str, Any],
+    context: ValidationContext | None = None,
+) -> list[Violation]:
     violations: list[Violation] = []
     validate(data, schema, "$", violations)
     if not violations:
-        validate_semantics(data, "$", violations)
+        validate_semantics(data, "$", violations, context)
     return violations
 
 
 def load_json(path: Path) -> Any:
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
+        return benchmark_publication.strict_json_loads(path.read_bytes(), str(path))
+    except (OSError, benchmark_publication.PublicationError) as error:
         raise SystemExit(f"cannot read {path}: {error}") from error
 
 
 def main() -> int:
-    if len(sys.argv) not in (2, 3):
-        print("usage: validate_result.py <result.json> [<schema.json>]", file=sys.stderr)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("result", type=Path)
+    parser.add_argument("--schema", type=Path, default=DEFAULT_SCHEMA)
+    parser.add_argument("--mode", choices=("staged", "published"), required=True)
+    parser.add_argument("--binary", type=Path)
+    parser.add_argument("--frozen-fixture-root", type=Path)
+    parser.add_argument("--staging-out", type=Path)
+    parser.add_argument("--failure-evidence-dir", type=Path)
+    parser.add_argument("--revision")
+    parser.add_argument("--host-proof", type=Path)
+    parser.add_argument("--attestation", type=Path)
+    args = parser.parse_args()
+
+    data = load_json(args.result)
+    schema = load_json(args.schema)
+    try:
+        if args.mode == "staged":
+            required = {
+                "--binary": args.binary,
+                "--frozen-fixture-root": args.frozen_fixture_root,
+                "--staging-out": args.staging_out,
+                "--failure-evidence-dir": args.failure_evidence_dir,
+                "--revision": args.revision,
+            }
+            missing = [flag for flag, value in required.items() if value is None]
+            if missing or args.host_proof is not None or args.attestation is not None:
+                raise ValueError(f"staged validation requires its command context only; invalid flags: {missing}")
+            context = build_validation_context(
+                mode="staged",
+                repository_root=ROOT,
+                manifest_path=ROOT / "benchmarks" / "manifest.toml",
+                frozen_fixture_root=args.frozen_fixture_root,
+                staging_output=args.staging_out,
+                failure_evidence_root=args.failure_evidence_dir,
+                engine_binary=args.binary,
+                harness_revision=args.revision,
+            )
+        else:
+            if (
+                args.host_proof is None
+                or args.attestation is None
+                or any(
+                    value is not None
+                    for value in (
+                        args.binary,
+                        args.frozen_fixture_root,
+                        args.staging_out,
+                        args.failure_evidence_dir,
+                        args.revision,
+                    )
+                )
+            ):
+                raise ValueError("published validation requires only its host proof plus protected attestation")
+            proof_path = args.host_proof.resolve(strict=True)
+            if args.host_proof != proof_path or args.host_proof.is_symlink() or not proof_path.is_file():
+                raise ValueError("host proof must be one canonical non-symlink file")
+            proof = load_json(proof_path)
+            if not isinstance(proof, dict):
+                raise ValueError("host proof must be a JSON object")
+            tools = Path(__file__).resolve().parent
+            sys.path.insert(0, str(tools))
+            import validate_host_proof  # noqa: PLC0415
+
+            argv = proof.get("command", {}).get("argv")
+            if not isinstance(argv, list) or not validate_host_proof.canonical_benchmark_command(argv):
+                raise ValueError("host proof omitted the canonical full benchmark command")
+            host_schema = load_json(ROOT / "benchmarks" / "schema" / "benchmark-host-proof.v1.json")
+            host_violations = validate_host_proof.validate_document(
+                proof,
+                host_schema,
+                proof_path.parent,
+                allow_fixture_evidence=False,
+                expected_command=tuple(argv),
+            )
+            if host_violations:
+                raise ValueError(f"external host proof is invalid: {host_violations[0]}")
+            if proof.get("status") != "accepted" or proof.get("mode") != "production":
+                raise ValueError("published validation requires an accepted production host proof")
+            proof_digest = benchmark_publication.host_proof_bundle_digest(proof_path)
+            trusted = benchmark_publication.load_trusted_publication_attestation(
+                args.attestation,
+                os.environ.get(benchmark_publication.TRUSTED_ATTESTATION_KEY_ENV, ""),
+            )
+            attestation = trusted.document
+            candidate_binding = proof.get("command", {}).get("candidate")
+            runner = proof["runner"]
+            identity = proof["identity"]
+            if attestation["subject"] != {
+                "candidate_sha256": candidate_binding.get("sha256") if isinstance(candidate_binding, dict) else None,
+                "host_proof_bundle_sha256": proof_digest,
+                "observer_proof_sha256": attestation["subject"]["observer_proof_sha256"],
+                "output_basename": args.result.name,
+            }:
+                raise ValueError("protected attestation subject differs from the host proof/result")
+            if (
+                attestation["revision"] != identity["sha"]
+                or attestation["run_id"] != identity["run_id"]
+                or attestation["run_attempt"] != identity["run_attempt"]
+                or attestation["job"] != identity["job"]
+                or attestation["workflow_ref"] != identity["workflow_ref"]
+                or attestation["runner"] != {"id": runner["id"], "name": runner["name"]}
+            ):
+                raise ValueError("protected attestation differs from the host run/runner identity")
+            values = {flag: Path(argv[argv.index(flag) + 1]) for flag in validate_host_proof.BENCHMARK_COMMAND_FLAGS}
+            revision = identity["sha"]
+            external = ExternalPublication(
+                host_proof_schema="pliego.benchmark-host-proof.v1",
+                host_proof_bundle_sha256=proof_digest,
+                attestation_schema="pliego.benchmark-publication-attestation.v1",
+                attestation_sha256=trusted.sha256,
+                observer_proof_sha256=attestation["subject"]["observer_proof_sha256"],
+                authority=attestation["authority"],
+                harness_revision=revision,
+                github_run_id=attestation["run_id"],
+                github_run_attempt=attestation["run_attempt"],
+                github_job=attestation["job"],
+                github_workflow_ref=attestation["workflow_ref"],
+                runner_id=runner["id"],
+                runner_name=runner["name"],
+            )
+            context = build_validation_context(
+                mode="published",
+                repository_root=ROOT,
+                manifest_path=ROOT / "benchmarks" / "manifest.toml",
+                frozen_fixture_root=values["--frozen-fixture-root"],
+                staging_output=values["--staging-out"],
+                failure_evidence_root=values["--failure-evidence-dir"],
+                engine_binary=values["--binary"],
+                harness_revision=revision,
+                external_publication=external,
+            )
+    except (OSError, ValueError) as error:
+        print(f"validation context rejected: {error}", file=sys.stderr)
         return 2
-    data = load_json(Path(sys.argv[1]))
-    schema = load_json(Path(sys.argv[2]) if len(sys.argv) == 3 else DEFAULT_SCHEMA)
-    violations = validate_document(data, schema)
+    violations = validate_document(data, schema, context)
     if violations:
         for violation in violations:
             print(f"violation {violation}", file=sys.stderr)

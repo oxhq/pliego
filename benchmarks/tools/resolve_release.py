@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import json
 import os
 import platform
 import re
@@ -23,6 +22,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path, PurePosixPath
 from typing import Any, IO
+
+import benchmark_publication
 
 ROOT = Path(__file__).resolve().parents[2]
 MANIFEST = ROOT / "benchmarks" / "manifest.toml"
@@ -91,7 +92,7 @@ def load_release(target_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
         if not isinstance(target[key], str) or re.fullmatch(f"[0-9a-f]{{{length}}}", target[key]) is None:
             raise ReleaseError(f"target {key} is not a pinned digest")
 
-    runtimes = json.loads(RUNTIMES.read_text(encoding="utf-8"))
+    runtimes = benchmark_publication.strict_json_loads(RUNTIMES.read_bytes(), "Laravel runtime manifest")
     if runtimes.get("version") != target["version"]:
         raise ReleaseError("Laravel runtime manifest version differs from benchmark target")
     runtime = runtimes.get("assets", {}).get("linux-x86_64")
@@ -285,7 +286,10 @@ def main() -> int:
         }
         if args.metadata_out:
             args.metadata_out.parent.mkdir(parents=True, exist_ok=True)
-            args.metadata_out.write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
+            benchmark_publication.atomic_write_bytes(
+                args.metadata_out,
+                benchmark_publication.json_bytes(metadata, indent=2),
+            )
         print(binary)
         return 0
     except (

@@ -14,15 +14,18 @@ into a result document, and validates it against
 Usage:
     python3 benchmarks/tools/run_benchmark.py \
         --binary /path/to/pliego \
-        [--out benchmarks/baselines/pliego-0.1.1-linux-x86_64.json] \
+        --frozen-fixture-root /var/lib/pliego-benchmark-fixtures \
+        --staging-out /var/tmp/pliego-benchmark/candidate.json \
+        --failure-evidence-dir /var/tmp/pliego-benchmark/failures \
+        --observer-measurements-out /var/tmp/pliego-benchmark/observer-measurements.json \
         [--fixture invoice-showcase] [--samples N] [--warmup N] \
-        [--php /usr/bin/php] [--dedicated]
+        [--php /usr/bin/php]
 
 Design notes:
-* The PHP runner owns each engine launch and delegates Linux execution to the
-  cgroup-v2 sampler; this script only reads the binary version.
-* Results are validated against the schema before being written; a result
-  that fails validation is not saved.
+* This orchestrator and the PHP verifier refuse root authority. Candidate code
+  executes only through the cgroup broker after its authority drop.
+* This command can only stage a successful candidate. A separate host-proof
+  publisher atomically replaces an official baseline.
 * Throughput is serial renders/minute (concurrency 1); concurrent 2/4/8
   sampling is a later increment.
 """
@@ -31,10 +34,10 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import json
 import os
 import platform
 import random
+import secrets
 import statistics
 import subprocess
 import sys
@@ -50,6 +53,7 @@ DEFAULT_SCHEMA = ROOT / "benchmarks" / "schema" / "benchmark-result.v1.json"
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import validate_result  # noqa: E402
+import benchmark_publication  # noqa: E402
 
 
 def fail(message: str) -> NoReturn:
@@ -83,7 +87,7 @@ def windows_ram_bytes() -> int:
     return 0
 
 
-def host_info(dedicated: bool) -> dict[str, Any]:
+def host_info() -> dict[str, Any]:
     info: dict[str, Any] = {
         "os": platform.system(),
         "arch": platform.machine(),
@@ -91,7 +95,7 @@ def host_info(dedicated: bool) -> dict[str, Any]:
         "cpu_model": platform.processor() or "",
         "cores": os_cpu_count(),
         "ram_bytes": 0,
-        "dedicated": dedicated,
+        "dedicated": False,
     }
     if platform.system() == "Linux":
         cpuinfo = Path("/proc/cpuinfo")
@@ -124,16 +128,10 @@ def run(command: list[str], cwd: Path | None = None) -> subprocess.CompletedProc
     return subprocess.run(command, cwd=cwd, capture_output=True, text=True, timeout=600)
 
 
-def engine_version(binary: Path) -> str:
-    result = run([str(binary), "--version"])
-    text = (result.stdout + result.stderr).strip()
-    return text.splitlines()[0] if text else "unknown"
-
-
 def engine_identity(binary: Path, target: dict[str, Any]) -> dict[str, Any]:
     identity: dict[str, Any] = {
         "name": "pliego",
-        "version": engine_version(binary),
+        "version": f"pliego {target['version']}",
         "binary_path": str(binary.resolve()),
     }
     digest = hashlib.sha256()
@@ -200,21 +198,58 @@ def tool_version(command: list[str]) -> str:
         return ""
 
 
-def check_prep(fixture_id: str, fixture: dict[str, Any]) -> None:
-    fixture_input = (ROOT / fixture["input"]).resolve()
-    required = [fixture_input, *(fixture_input.parent / asset for asset in fixture.get("assets", []))]
-    missing = [path for path in required if not path.is_file()]
+def frozen_fixture_path(frozen_root: Path, fixture: dict[str, Any]) -> Path:
+    root = frozen_root.resolve(strict=False)
+    candidate = (root / fixture["input"]).resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        fail(f"frozen fixture escaped its root: {fixture['input']}")
+    return candidate
+
+
+def check_prep(fixture_id: str, fixture: dict[str, Any], frozen_root: Path) -> None:
+    source_input = (ROOT / fixture["input"]).resolve()
+    frozen_input = frozen_fixture_path(frozen_root, fixture)
+    source_required = [source_input, *(source_input.parent / asset for asset in fixture.get("assets", []))]
+    frozen_required = [frozen_input, *(frozen_input.parent / asset for asset in fixture.get("assets", []))]
+    missing = [path for path in (*source_required, *frozen_required) if not path.is_file()]
     if missing:
         fail(f"fixture {fixture_id!r} is not prepared; missing {missing}")
+    for source, frozen in zip(source_required, frozen_required):
+        if file_sha256(source) != file_sha256(frozen):
+            fail(f"frozen fixture {fixture_id!r} differs from committed input: {frozen}")
+    if os.name == "posix":
+        immutable_paths: set[Path] = set(frozen_required)
+        for frozen in frozen_required:
+            parent = frozen.parent
+            while True:
+                immutable_paths.add(parent)
+                if parent == frozen_root:
+                    break
+                if frozen_root not in parent.parents:
+                    fail(f"frozen fixture escaped its root: {frozen}")
+                parent = parent.parent
+        for path in immutable_paths:
+            metadata = path.stat()
+            if metadata.st_uid != 0 or metadata.st_mode & 0o022:
+                fail(f"frozen fixture path must be root-owned and immutable: {path}")
 
 
 def build_command(
-    php: Path, fixture_id: str, fixture: dict[str, Any], binary: Path, samples: int, warmup: int
+    php: Path,
+    fixture_id: str,
+    fixture: dict[str, Any],
+    binary: Path,
+    frozen_root: Path,
+    retained_root: Path,
+    samples: int,
+    warmup: int,
 ) -> list[str]:
     # The engine resolves the input relative to the process cwd and rejects
     # absolute or parent-traversing paths (mirroring the PHP SDK). Run with
     # cwd = the input's own directory and pass the bare file name.
-    input_path = (ROOT / fixture["input"]).resolve()
+    input_path = frozen_fixture_path(frozen_root, fixture)
     command = [
         str(php),
         str(RUNNER),
@@ -232,6 +267,8 @@ def build_command(
         str(warmup),
         "--cwd",
         str(input_path.parent),
+        "--retained-root",
+        str(retained_root),
     ]
     correctness = fixture.get("correctness", {})
     if "page_count" in correctness:
@@ -247,16 +284,23 @@ def build_command(
 
 
 def collect_samples(
-    php: Path, fixture_id: str, fixture: dict[str, Any], binary: Path, samples: int, warmup: int
+    php: Path,
+    fixture_id: str,
+    fixture: dict[str, Any],
+    binary: Path,
+    frozen_root: Path,
+    retained_root: Path,
+    samples: int,
+    warmup: int,
 ) -> list[dict[str, Any]]:
-    command = build_command(php, fixture_id, fixture, binary, samples, warmup)
+    command = build_command(php, fixture_id, fixture, binary, frozen_root, retained_root, samples, warmup)
     result = subprocess.run(command, capture_output=True, text=True, timeout=max(600, samples * 60))
     lines = [line for line in result.stdout.splitlines() if line.strip()]
     samples_out: list[dict[str, Any]] = []
     for line in lines:
         try:
-            parsed = json.loads(line)
-        except json.JSONDecodeError:
+            parsed = benchmark_publication.strict_json_loads(line, "benchmark runner sample")
+        except benchmark_publication.PublicationError:
             print(f"runner emitted a non-JSON line: {line[:200]}", file=sys.stderr)
             continue
         if isinstance(parsed, dict) and "wall_ms" in parsed:
@@ -274,8 +318,8 @@ def aggregates(samples: list[dict[str, Any]], page_count: int | None) -> dict[st
     users = [value for s in valid if (value := s.get("user_ms")) is not None]
     syss = [value for s in valid if (value := s.get("sys_ms")) is not None]
     memory_peaks = [value for s in valid if (value := s.get("memory_peak_bytes")) is not None]
-    rss = [value for s in valid if (value := s.get("sampled_peak_rss_kib_lower_bound")) is not None]
-    pss = [value for s in valid if (value := s.get("sampled_peak_pss_kib_lower_bound")) is not None]
+    rss = [value for s in valid if (value := s.get("sequential_sampled_peak_rss_kib_diagnostic")) is not None]
+    pss = [value for s in valid if (value := s.get("sequential_sampled_peak_pss_kib_diagnostic")) is not None]
     reads = [value for s in valid if (value := s.get("read_bytes")) is not None]
     writes = [value for s in valid if (value := s.get("write_bytes")) is not None]
     read_operations = [value for s in valid if (value := s.get("read_operations")) is not None]
@@ -304,7 +348,7 @@ def aggregates(samples: list[dict[str, Any]], page_count: int | None) -> dict[st
         },
         "memory": {
             "cgroup_peak_bytes": validate_result.percentiles(memory_peaks),
-            "sampled_peak_rss_kib_lower_bound": validate_result.percentiles(rss),
+            "sequential_sampled_peak_rss_kib_diagnostic": validate_result.percentiles(rss),
         },
         "io": {
             "read_bytes": validate_result.percentiles(reads),
@@ -329,7 +373,7 @@ def aggregates(samples: list[dict[str, Any]], page_count: int | None) -> dict[st
         "failures": {"count": len(failures), "codes": codes},
     }
     if pss and len(pss) == len(valid):
-        agg["memory"]["sampled_peak_pss_kib_lower_bound"] = validate_result.percentiles(pss)
+        agg["memory"]["sequential_sampled_peak_pss_kib_diagnostic"] = validate_result.percentiles(pss)
     if page_count:
         agg["scaling"] = {
             "per_page_wall_ms": round(mean_wall / page_count, 3),
@@ -345,56 +389,120 @@ def aggregates(samples: list[dict[str, Any]], page_count: int | None) -> dict[st
 def main() -> int:
     parser = argparse.ArgumentParser(description="Pliego benchmark orchestrator")
     parser.add_argument("--binary", required=True, help="path to the published pliego binary")
-    parser.add_argument("--out", help="result file path (default: baselines/pliego-<target>-<host>.json)")
+    parser.add_argument(
+        "--frozen-fixture-root",
+        required=True,
+        type=Path,
+        help="root-owned immutable mirror containing manifest-relative fixture paths",
+    )
+    parser.add_argument("--staging-out", required=True, help="successful candidate path outside baselines")
+    parser.add_argument("--failure-evidence-dir", required=True, help="separate failed-attempt evidence root")
+    parser.add_argument(
+        "--observer-measurements-out",
+        required=True,
+        help="host-bound raw 20-pair observer A/B evidence outside the committed tree",
+    )
     parser.add_argument("--fixture", action="append", help="restrict to these fixture ids (repeatable)")
     parser.add_argument("--samples", type=int, help="override samples per fixture")
     parser.add_argument("--warmup", type=int, help="override warmup iterations")
     parser.add_argument("--php", default="php", help="php-cli binary (default: php)")
     parser.add_argument("--target", default="pliego-0.1.1", help="manifest target id")
-    parser.add_argument("--dedicated", action="store_true", help="host is dedicated to the run")
     parser.add_argument("--schema", default=str(DEFAULT_SCHEMA), help="result schema path")
     args = parser.parse_args()
+
+    try:
+        benchmark_publication.require_unprivileged()
+    except benchmark_publication.PublicationError as error:
+        fail(str(error))
 
     if args.samples is not None and args.samples < 1:
         fail("--samples must be at least 1")
     if args.warmup is not None and args.warmup < 0:
         fail("--warmup cannot be negative")
     benchmark_clean = benchmark_tree_is_clean()
-    if args.dedicated and not benchmark_clean:
-        fail(
-            "--dedicated requires a clean benchmarks tree so the recorded revision identifies the harness and fixtures"
-        )
+    if not benchmark_clean:
+        fail("staging requires a clean benchmarks tree so the harness and fixtures have one exact identity")
 
-    binary = Path(args.binary)
-    if not binary.is_file():
-        fail(f"binary not found: {binary}")
+    requested_binary = Path(args.binary)
+    try:
+        binary = requested_binary.resolve(strict=True)
+    except OSError:
+        fail(f"binary not found: {requested_binary}")
+    if not requested_binary.is_absolute() or requested_binary != binary or not binary.is_file():
+        fail("binary must be one absolute canonical file")
 
     manifest = tomllib.loads(MANIFEST.read_text(encoding="utf-8"))
     target = manifest["targets"].get(args.target)
     if not target or not target.get("enabled", False):
         fail(f"target {args.target!r} is not enabled in {MANIFEST}")
-    actual_version = engine_version(binary)
-    if actual_version != f"pliego {target['version']}":
-        fail(f"target {args.target!r} requires pliego {target['version']}, got {actual_version!r}")
+    actual_version = f"pliego {target['version']}"
 
     protocol = manifest["protocol"]
     php = Path(args.php)
     schema = Path(args.schema)
+    frozen_root = args.frozen_fixture_root.resolve(strict=True)
+    if not args.frozen_fixture_root.is_absolute() or args.frozen_fixture_root != frozen_root:
+        fail("frozen fixture root must be absolute and canonical")
+    requested_staging = Path(args.staging_out)
+    requested_failure_root = Path(args.failure_evidence_dir)
+    requested_observer = Path(args.observer_measurements_out)
+    staging_path = requested_staging.resolve(strict=False)
+    failure_root = requested_failure_root.resolve(strict=False)
+    observer_path = requested_observer.resolve(strict=False)
+    if (
+        not requested_staging.is_absolute()
+        or requested_staging != staging_path
+        or not requested_failure_root.is_absolute()
+        or requested_failure_root != failure_root
+        or not requested_observer.is_absolute()
+        or requested_observer != observer_path
+    ):
+        fail("staging, failure-evidence, and observer paths must be absolute and canonical")
+    benchmark_root = (ROOT / "benchmarks").resolve()
+    for candidate, label in (
+        (staging_path, "staging"),
+        (failure_root, "failure evidence"),
+        (observer_path, "observer measurements"),
+    ):
+        try:
+            candidate.relative_to(benchmark_root)
+        except ValueError:
+            pass
+        else:
+            fail(f"{label} must remain outside the committed benchmarks tree")
+    if failure_root == staging_path or failure_root in staging_path.parents or staging_path in failure_root.parents:
+        fail("successful staging and non-atomic failure evidence must use disjoint paths")
+    if any(
+        first == second or first in second.parents or second in first.parents
+        for first, second in (
+            (observer_path, staging_path),
+            (observer_path, failure_root),
+            (observer_path, frozen_root),
+        )
+    ):
+        fail("observer measurements, staging, failure evidence, and frozen fixtures must be disjoint")
+    try:
+        benchmark_publication.require_private_failure_root(failure_root)
+    except benchmark_publication.PublicationError as error:
+        fail(str(error))
+    retained_workspace = failure_root / f".in-progress-{os.getpid()}-{secrets.token_hex(8)}"
+    retained_workspace.mkdir(mode=0o700)
     fixture_ids = args.fixture or sorted(manifest["fixtures"].keys())
     if args.fixture is None and protocol.get("seed") is not None:
         random.Random(protocol["seed"]).shuffle(fixture_ids)
 
     generated_at = datetime.now(timezone.utc).isoformat()
-    host = host_info(args.dedicated)
+    host = host_info()
     engine = engine_identity(binary, target)
-    revision = harness_revision() if benchmark_clean else None
+    revision = harness_revision()
+    if revision is None or len(revision) != 40:
+        fail("cannot bind the staging candidate to an exact 40-character harness revision")
     toolchain = {
         "engine": engine,
         "python_version": platform.python_version(),
         "php_version": tool_version([str(php), "--version"]),
     }
-    if revision:
-        toolchain["harness_revision"] = revision
+    toolchain["harness_revision"] = revision
 
     print(f"host: {platform.system()} {platform.machine()} ({os_cpu_count()} cores)")
     print(f"engine: {actual_version}")
@@ -404,11 +512,20 @@ def main() -> int:
         fixture = manifest["fixtures"].get(fixture_id)
         if fixture is None:
             fail(f"unknown fixture {fixture_id!r}")
-        check_prep(fixture_id, fixture)
+        check_prep(fixture_id, fixture, frozen_root)
         samples_n = args.samples if args.samples else fixture.get("samples", protocol["samples_short"])
         warmup_n = args.warmup if args.warmup is not None else protocol["warmup_iterations"]
         print(f"[{fixture_id}] {fixture['purpose']} ({samples_n} samples, {warmup_n} warmup)")
-        samples = collect_samples(php, fixture_id, fixture, binary, samples_n, warmup_n)
+        samples = collect_samples(
+            php,
+            fixture_id,
+            fixture,
+            binary,
+            frozen_root,
+            retained_workspace,
+            samples_n,
+            warmup_n,
+        )
         correctness = fixture.get("correctness", {})
         page_count = correctness.get("page_count")
         measured_pages = [
@@ -458,11 +575,7 @@ def main() -> int:
             f"correctness {result['aggregates']['correctness']['pass_count']}/{result['aggregates']['correctness']['total']}"
         )
 
-    if args.out:
-        out = Path(args.out)
-    else:
-        safe_host = platform.system().lower().replace(" ", "-")
-        out = ROOT / "benchmarks" / "baselines" / f"{args.target}-{safe_host}-{platform.machine().lower()}.json"
+    out = staging_path
     payload = (
         results[0]
         if len(results) == 1
@@ -473,16 +586,69 @@ def main() -> int:
             "results": results,
         }
     )
-    violations = validate_result.validate_document(payload, json.loads(schema.read_text(encoding="utf-8")))
+    try:
+        validation_context = validate_result.build_validation_context(
+            mode="staged",
+            repository_root=ROOT,
+            manifest_path=MANIFEST,
+            frozen_fixture_root=frozen_root,
+            staging_output=staging_path,
+            failure_evidence_root=failure_root,
+            engine_binary=binary,
+            harness_revision=revision,
+        )
+    except ValueError as error:
+        fail(f"benchmark validation context is invalid: {error}")
+    violations = validate_result.validate_document(
+        payload,
+        benchmark_publication.strict_json_loads(schema.read_bytes(), "benchmark result schema"),
+        validation_context,
+    )
     if violations:
         fail(f"benchmark output failed validation: {violations[0]}")
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-    print(f"wrote {out}")
     failed = [result["fixture"]["id"] for result in results if not result["aggregates"]["correctness"]["passed"]]
     if failed:
-        print(f"correctness gate failed: {', '.join(failed)}", file=sys.stderr)
+        evidence = benchmark_publication.write_failure_evidence(
+            failure_root,
+            payload,
+            f"correctness gate failed: {', '.join(failed)}",
+            retained_workspace,
+        )
+        print(f"correctness gate failed: {', '.join(failed)}; retained {evidence}", file=sys.stderr)
         return 1
+    if any(retained_workspace.iterdir()):
+        evidence = benchmark_publication.write_failure_evidence(
+            failure_root,
+            payload,
+            "passing samples left unexpected retained output",
+            retained_workspace,
+        )
+        print(f"unexpected retained sample output; retained {evidence}", file=sys.stderr)
+        return 1
+    retained_workspace.rmdir()
+    observer_run = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "benchmarks" / "tools" / "test_process_tree_sampler.py"),
+            "--acceptance-overhead",
+            "--observer-measurements-out",
+            str(observer_path),
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=600,
+    )
+    if observer_run.returncode != 0:
+        evidence = benchmark_publication.write_failure_evidence(
+            failure_root,
+            payload,
+            "observer A/B publication prerequisite failed: " + observer_run.stderr[-4000:],
+        )
+        print(f"observer A/B gate failed; retained {evidence}", file=sys.stderr)
+        return 1
+    benchmark_publication.atomic_write_bytes(out, benchmark_publication.json_bytes(payload, indent=2))
+    print(f"staged {out}")
     return 0
 
 

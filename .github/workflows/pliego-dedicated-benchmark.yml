@@ -1,0 +1,315 @@
+name: Pliego dedicated benchmark host
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Production host proof or a controlled fail-closed check
+        required: true
+        default: production
+        type: choice
+        options:
+          - production
+          - negative-github-hosted
+          - negative-missing-thermal
+
+permissions:
+  contents: read
+
+concurrency:
+  group: Pliego dedicated benchmarks
+  cancel-in-progress: false
+
+jobs:
+  dedicated:
+    if: inputs.mode != 'negative-github-hosted'
+    runs-on:
+      group: Pliego dedicated benchmarks
+      labels: [self-hosted, Linux, X64, pliego-benchmark-pinned-v1]
+    environment: Pliego dedicated benchmarks
+    timeout-minutes: 45
+    steps:
+      - name: Initialize setup diagnostics before checkout
+        env:
+          SETUP_EVIDENCE: ${{ runner.temp }}/pliego-setup-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          REVISION: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+        run: |
+          set -euo pipefail
+          umask 0077
+          test ! -e "$SETUP_EVIDENCE"
+          mkdir -m 0700 "$SETUP_EVIDENCE"
+          python3 - "$SETUP_EVIDENCE" <<'PY'
+          import datetime, hashlib, json, os, pathlib, sys
+          root = pathlib.Path(sys.argv[1])
+          document = {
+              "schema": "pliego.benchmark-setup-diagnostic",
+              "version": 1,
+              "status": "started",
+              "phase": "checkout",
+              "exit_code": None,
+              "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+              "repository": os.environ["GITHUB_REPOSITORY"],
+              "revision": os.environ["REVISION"],
+              "run_id": int(os.environ["RUN_ID"]),
+              "run_attempt": int(os.environ["RUN_ATTEMPT"]),
+              "job": os.environ["GITHUB_JOB"],
+              "workflow_ref": os.environ["WORKFLOW_REF"],
+              "runner_os": os.environ["RUNNER_OS"],
+              "runner_arch": os.environ["RUNNER_ARCH"],
+          }
+          target = root / "benchmark-setup-diagnostic.v1.json"
+          temporary = root / ".benchmark-setup-diagnostic.v1.json.tmp"
+          with temporary.open("w", encoding="utf-8") as stream:
+              stream.write(json.dumps(document, indent=2, sort_keys=True, allow_nan=False) + "\n")
+              stream.flush()
+              os.fsync(stream.fileno())
+          os.replace(temporary, target)
+          digest = hashlib.sha256(target.read_bytes()).hexdigest()
+          manifest = root / "SHA256SUMS"
+          temporary_manifest = root / ".SHA256SUMS.tmp"
+          with temporary_manifest.open("w", encoding="ascii") as stream:
+              stream.write(f"{digest}  {target.name}\n")
+              stream.flush()
+              os.fsync(stream.fileno())
+          os.replace(temporary_manifest, manifest)
+          descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+          try:
+              os.fsync(descriptor)
+          finally:
+              os.close(descriptor)
+          PY
+
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+
+      - name: Gate host and produce benchmark evidence
+        env:
+          MODE: ${{ inputs.mode }}
+          SETUP_EVIDENCE: ${{ runner.temp }}/pliego-setup-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          PROOF_DIR: ${{ runner.temp }}/pliego-host-proof-${{ github.run_id }}-${{ github.run_attempt }}
+          CANDIDATE: ${{ runner.temp }}/pliego-candidate-${{ github.run_id }}-${{ github.run_attempt }}.json
+          FAILURE_EVIDENCE: ${{ runner.temp }}/pliego-failures-${{ github.run_id }}-${{ github.run_attempt }}
+          OBSERVER_MEASUREMENTS: ${{ runner.temp }}/pliego-observer-measurements-${{ github.run_id }}-${{ github.run_attempt }}.json
+          OBSERVER_PROOF: ${{ runner.temp }}/pliego-observer-proof-${{ github.run_id }}-${{ github.run_attempt }}.json
+          ATTESTATION_STAGING: ${{ runner.temp }}/${{ github.run_id }}-${{ github.run_attempt }}.json
+          ATTESTATION: /var/lib/pliego-benchmark-attestations/${{ github.run_id }}-${{ github.run_attempt }}.json
+          PUBLISHED_BASELINE: benchmarks/baselines/pliego-0.1.1-linux-x86_64.json
+          PLIEGO_BENCHMARK_PROOF_TOKEN: ${{ secrets.OXHQ_BENCHMARK_PROOF_TOKEN }}
+          PLIEGO_BENCHMARK_ATTESTATION_HMAC_KEY_HEX: ${{ secrets.PLIEGO_BENCHMARK_ATTESTATION_HMAC_KEY_HEX }}
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          set -euo pipefail
+          SETUP_PHASE=host-contract
+          SETUP_FINISHED=0
+          record_setup() {
+            extra=()
+            if [[ $# -ge 3 ]]; then
+              extra=(--exit-code "$3")
+            fi
+            python3 benchmarks/tools/benchmark_setup_evidence.py \
+              --output-dir "$SETUP_EVIDENCE" \
+              --status "$1" \
+              --phase "$2" \
+              "${extra[@]}" \
+              --repository "$GITHUB_REPOSITORY" \
+              --revision "$GITHUB_SHA" \
+              --run-id "$GITHUB_RUN_ID" \
+              --run-attempt "$GITHUB_RUN_ATTEMPT" \
+              --job "$GITHUB_JOB" \
+              --workflow-ref "$GITHUB_WORKFLOW_REF" \
+              --runner-os "$RUNNER_OS" \
+              --runner-arch "$RUNNER_ARCH"
+          }
+          trap 'code=$?; if [[ "$SETUP_FINISHED" != 1 ]]; then record_setup failed "$SETUP_PHASE" "$code" || true; fi' EXIT
+          record_setup started "$SETUP_PHASE"
+          if [[ "$MODE" == "production" ]]; then
+            test -n "${PLIEGO_BENCHMARK_CGROUP_PARENT:-}"
+            test "$(stat -c '%U:%G:%a' /usr/local/libexec/pliego-cgroup-broker)" = "root:root:555"
+            test "$(sha256sum /usr/local/libexec/pliego-cgroup-broker | cut -d' ' -f1)" = \
+              "$(sha256sum benchmarks/tools/process_tree_sampler.py | cut -d' ' -f1)"
+            engine_gid="$(getent group pliego-benchmark-engine | cut -d: -f3)"
+            id -G | tr ' ' '\n' | grep -Fx "$engine_gid"
+            test "$(id -u)" != "$(id -u pliego-benchmark-engine)"
+
+            SETUP_PHASE=fixture-generation
+            npm --prefix ports/pliego/tests/fixtures/chartjs-report ci
+            cp components/fonts/tests/support/dejavu-fonts-ttf-2.37/ttf/DejaVuSans.ttf \
+              ports/pliego/tests/fixtures/chartjs-report/ReportSans.ttf
+            python3 benchmarks/tools/generate_fixtures.py --check
+            SETUP_PHASE=release-resolution
+            binary="$(python3 benchmarks/tools/resolve_release.py \
+              --cache "$RUNNER_TEMP/pliego-release-cache" \
+              --metadata-out "$RUNNER_TEMP/pliego-verified-release.json")"
+
+            SETUP_PHASE=frozen-fixtures
+            frozen_root="$RUNNER_TEMP/pliego-frozen-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            test ! -e "$frozen_root"
+            sudo install -d -o root -g root -m 0555 \
+              "$frozen_root/benchmarks" \
+              "$frozen_root/ports/pliego/tests/fixtures"
+            sudo cp -a benchmarks/fixtures "$frozen_root/benchmarks/"
+            sudo cp -a ports/pliego/tests/fixtures/chartjs-report \
+              "$frozen_root/ports/pliego/tests/fixtures/"
+            sudo chown -R root:root "$frozen_root"
+            sudo find "$frozen_root" -type d -exec chmod 0555 {} +
+            sudo find "$frozen_root" -type f -exec chmod 0444 {} +
+
+            SETUP_PHASE=host-preflight
+            python3 benchmarks/tools/benchmark_host_preflight.py \
+              --mode production \
+              --output-dir "$PROOF_DIR" \
+              --config "${PLIEGO_BENCHMARK_HOST_CONFIG:-/etc/pliego-benchmark-host.v1.json}" \
+              -- python3 benchmarks/tools/run_benchmark.py \
+                --binary "$binary" \
+                --frozen-fixture-root "$frozen_root" \
+                --staging-out "$CANDIDATE" \
+                --failure-evidence-dir "$FAILURE_EVIDENCE/run" \
+                --observer-measurements-out "$OBSERVER_MEASUREMENTS"
+
+            SETUP_PHASE=observer-proof
+            python3 benchmarks/tools/observer_ab.py bind \
+              --measurements "$OBSERVER_MEASUREMENTS" \
+              --host-proof "$PROOF_DIR/benchmark-host-proof.v1.json" \
+              --out "$OBSERVER_PROOF"
+            python3 benchmarks/tools/observer_ab.py validate \
+              "$OBSERVER_PROOF" \
+              --host-proof "$PROOF_DIR/benchmark-host-proof.v1.json"
+
+            SETUP_PHASE=protected-attestation
+            test -n "$PLIEGO_BENCHMARK_ATTESTATION_HMAC_KEY_HEX"
+            test ! -e "$ATTESTATION_STAGING"
+            python3 benchmarks/tools/create_publication_attestation.py \
+              --candidate "$CANDIDATE" \
+              --host-proof "$PROOF_DIR/benchmark-host-proof.v1.json" \
+              --observer-proof "$OBSERVER_PROOF" \
+              --output-basename "$(basename "$PUBLISHED_BASELINE")" \
+              --out "$ATTESTATION_STAGING"
+            sudo install -d -o root -g root -m 0755 "$(dirname "$ATTESTATION")"
+            test ! -e "$ATTESTATION"
+            sudo install -o root -g root -m 0444 "$ATTESTATION_STAGING" "$ATTESTATION"
+            rm "$ATTESTATION_STAGING"
+            python3 benchmarks/tools/publish_benchmark.py \
+              --candidate "$CANDIDATE" \
+              --host-proof "$PROOF_DIR/benchmark-host-proof.v1.json" \
+              --observer-proof "$OBSERVER_PROOF" \
+              --attestation "$ATTESTATION" \
+              --out "$PUBLISHED_BASELINE" \
+              --failure-evidence "$FAILURE_EVIDENCE/publish"
+
+            SETUP_PHASE=publication-complete
+            record_setup passed "$SETUP_PHASE" 0
+            SETUP_FINISHED=1
+            exit 0
+          fi
+
+          set +e
+          python3 benchmarks/tools/benchmark_host_preflight.py \
+            --mode "$MODE" \
+            --output-dir "$PROOF_DIR" \
+            --config "${PLIEGO_BENCHMARK_HOST_CONFIG:-/etc/pliego-benchmark-host.v1.json}" \
+            -- python3 benchmarks/tools/test_process_tree_sampler.py --acceptance-overhead
+          status=$?
+          set -e
+          test "$status" -ne 0
+          python3 benchmarks/tools/validate_host_proof.py \
+            "$PROOF_DIR/benchmark-host-proof.v1.json" \
+            --expect-status rejected \
+            --forbid-event samples.started
+          SETUP_PHASE=negative-gate-complete
+          record_setup passed "$SETUP_PHASE" 0
+          SETUP_FINISHED=1
+
+      - name: Remove frozen fixture mirror
+        if: always() && inputs.mode == 'production'
+        env:
+          FROZEN_ROOT: ${{ runner.temp }}/pliego-frozen-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          case "$FROZEN_ROOT" in
+            "$RUNNER_TEMP"/pliego-frozen-*)
+              if [[ -e "$FROZEN_ROOT" ]]; then
+                sudo rm -rf --one-file-system -- "$FROZEN_ROOT"
+              fi
+              ;;
+            *) echo "refusing unsafe frozen-fixture cleanup: $FROZEN_ROOT" >&2; exit 1 ;;
+          esac
+
+      - name: Seal retained failure evidence
+        if: always() && inputs.mode == 'production'
+        env:
+          FAILURE_EVIDENCE: ${{ runner.temp }}/pliego-failures-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          if [[ -d "$FAILURE_EVIDENCE" ]]; then
+            sudo chown -R root:root "$FAILURE_EVIDENCE"
+            sudo find "$FAILURE_EVIDENCE" -type d -exec chmod 0555 {} +
+            sudo find "$FAILURE_EVIDENCE" -type f -exec chmod 0444 {} +
+          fi
+
+      - name: Retain host proof and failure evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: benchmark-host-proof-${{ inputs.mode }}-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/pliego-host-proof-${{ github.run_id }}-${{ github.run_attempt }}/
+            ${{ runner.temp }}/pliego-failures-${{ github.run_id }}-${{ github.run_attempt }}/
+            ${{ runner.temp }}/pliego-observer-measurements-${{ github.run_id }}-${{ github.run_attempt }}.json
+            ${{ runner.temp }}/pliego-setup-evidence-${{ github.run_id }}-${{ github.run_attempt }}/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Retain successful candidate and publication
+        if: success() && inputs.mode == 'production'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: benchmark-publication-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/pliego-candidate-${{ github.run_id }}-${{ github.run_attempt }}.json
+            ${{ runner.temp }}/pliego-observer-proof-${{ github.run_id }}-${{ github.run_attempt }}.json
+            /var/lib/pliego-benchmark-attestations/${{ github.run_id }}-${{ github.run_attempt }}.json
+            benchmarks/baselines/pliego-0.1.1-linux-x86_64.json
+          if-no-files-found: error
+          retention-days: 30
+
+  github-hosted-negative:
+    if: inputs.mode == 'negative-github-hosted'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+
+      - name: Prove GitHub-hosted runners fail before samples
+        env:
+          PROOF_DIR: ${{ runner.temp }}/pliego-host-proof-${{ github.run_id }}-${{ github.run_attempt }}
+          PLIEGO_BENCHMARK_PROOF_TOKEN: ${{ github.token }}
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          set +e
+          python3 benchmarks/tools/benchmark_host_preflight.py \
+            --mode negative-github-hosted \
+            --output-dir "$PROOF_DIR" \
+            -- python3 -c "raise SystemExit('samples must not start')"
+          status=$?
+          set -e
+          test "$status" -ne 0
+          python3 benchmarks/tools/validate_host_proof.py \
+            "$PROOF_DIR/benchmark-host-proof.v1.json" \
+            --expect-status rejected \
+            --forbid-event samples.started
+
+      - name: Retain negative diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: benchmark-host-proof-negative-github-hosted-${{ github.sha }}
+          path: ${{ runner.temp }}/pliego-host-proof-${{ github.run_id }}-${{ github.run_attempt }}/
+          if-no-files-found: error
+          retention-days: 30

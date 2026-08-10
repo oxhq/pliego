@@ -1,0 +1,49 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://pliego.dev/schema/benchmark-observer-proof.v1.json",
+  "title": "Pliego host-bound observer A/B proof v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "version", "status", "generated_at", "binding", "measurements_binding", "measurements"],
+  "properties": {
+    "schema": { "const": "pliego.benchmark-observer-proof" },
+    "version": { "const": 1 },
+    "status": { "const": "accepted" },
+    "generated_at": { "type": "string", "minLength": 1 },
+    "binding": { "$ref": "#/definitions/binding" },
+    "measurements_binding": { "$ref": "#/definitions/measurementBinding" },
+    "measurements": { "$ref": "#/definitions/measurements" }
+  },
+  "definitions": {
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "measurementBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "bytes", "canonical_sha256"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "sha256": { "$ref": "#/definitions/sha256" },
+        "bytes": { "type": "integer", "minimum": 1 },
+        "canonical_sha256": { "$ref": "#/definitions/sha256" }
+      }
+    },
+    "binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "harness_revision", "source_broker_sha256", "installed_broker_sha256",
+        "host_config_sha256", "host_proof_bundle_sha256", "runner_id", "runner_name"
+      ],
+      "properties": {
+        "harness_revision": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "source_broker_sha256": { "$ref": "#/definitions/sha256" },
+        "installed_broker_sha256": { "$ref": "#/definitions/sha256" },
+        "host_config_sha256": { "$ref": "#/definitions/sha256" },
+        "host_proof_bundle_sha256": { "$ref": "#/definitions/sha256" },
+        "runner_id": { "type": "integer", "minimum": 1 },
+        "runner_name": { "type": "string", "minLength": 1 }
+      }
+    },
+    "measurements": { "type": "object" }
+  }
+}

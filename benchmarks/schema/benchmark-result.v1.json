@@ -15,6 +15,7 @@
       "required": [
         "schema",
         "version",
+        "status",
         "generated_at",
         "host",
         "toolchain",
@@ -34,6 +35,7 @@
         "protocol": { "$ref": "#/definitions/protocol" },
         "target": { "$ref": "#/definitions/target" },
         "fixture": { "$ref": "#/definitions/fixture" },
+        "publication": { "$ref": "#/definitions/publication" },
         "samples": {
           "type": "array",
           "minItems": 1,
@@ -105,6 +107,42 @@
         "disk_free_bytes": { "type": "integer", "minimum": 0 }
       }
     },
+    "publication": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "host_proof_schema",
+        "host_proof_bundle_sha256",
+        "attestation_schema",
+        "attestation_sha256",
+        "observer_proof_sha256",
+        "authority",
+        "harness_revision",
+        "github_run_id",
+        "github_run_attempt",
+        "github_job",
+        "github_workflow_ref",
+        "runner_id",
+        "runner_name"
+      ],
+      "properties": {
+        "host_proof_schema": { "const": "pliego.benchmark-host-proof.v1" },
+        "host_proof_bundle_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "attestation_schema": { "const": "pliego.benchmark-publication-attestation.v1" },
+        "attestation_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "observer_proof_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "authority": { "const": "github-protected-environment-hmac-v1" },
+        "harness_revision": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "github_run_id": { "type": "integer", "minimum": 1 },
+        "github_run_attempt": { "type": "integer", "minimum": 1 },
+        "github_job": { "const": "dedicated" },
+        "github_workflow_ref": {
+          "const": "OxHQ/pliego/.github/workflows/pliego-dedicated-benchmark.yml@refs/heads/main"
+        },
+        "runner_id": { "type": "integer", "minimum": 1 },
+        "runner_name": { "type": "string", "minLength": 1 }
+      }
+    },
     "toolchain": {
       "type": "object",
       "additionalProperties": false,
@@ -113,7 +151,7 @@
         "engine": { "$ref": "#/definitions/engine" },
         "python_version": { "type": "string" },
         "php_version": { "type": "string" },
-        "harness_revision": { "type": "string", "pattern": "^[0-9a-f]{7,64}$" },
+        "harness_revision": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
         "competitors": {
           "type": "object",
           "additionalProperties": { "type": "string" }
@@ -160,7 +198,7 @@
         "seed": { "type": "integer" },
         "network": { "const": "disabled" },
         "binary_profile": { "type": "string" },
-        "measurement_method": { "type": "string", "enum": ["linux-cgroup-v2-v1", "unavailable"] },
+        "measurement_method": { "type": "string", "enum": ["linux-cgroup-v2-v2", "unavailable"] },
         "percentile_method": { "const": "nearest-rank-v1" }
       }
     },
@@ -226,8 +264,8 @@
         "sys_ms",
         "memory_current_bytes",
         "memory_peak_bytes",
-        "sampled_peak_rss_kib_lower_bound",
-        "sampled_peak_pss_kib_lower_bound",
+        "sequential_sampled_peak_rss_kib_diagnostic",
+        "sequential_sampled_peak_pss_kib_diagnostic",
         "read_bytes",
         "write_bytes",
         "read_operations",
@@ -248,13 +286,13 @@
         "sys_ms": { "type": ["number", "null"], "minimum": 0 },
         "memory_current_bytes": { "type": ["integer", "null"], "minimum": 0 },
         "memory_peak_bytes": { "type": ["integer", "null"], "minimum": 0 },
-        "sampled_peak_rss_kib_lower_bound": { "type": ["integer", "null"], "minimum": 0 },
-        "sampled_peak_pss_kib_lower_bound": { "type": ["integer", "null"], "minimum": 0 },
+        "sequential_sampled_peak_rss_kib_diagnostic": { "type": ["integer", "null"], "minimum": 0 },
+        "sequential_sampled_peak_pss_kib_diagnostic": { "type": ["integer", "null"], "minimum": 0 },
         "read_bytes": { "type": ["integer", "null"], "minimum": 0 },
         "write_bytes": { "type": ["integer", "null"], "minimum": 0 },
         "read_operations": { "type": ["integer", "null"], "minimum": 0 },
         "write_operations": { "type": ["integer", "null"], "minimum": 0 },
-        "measurement_method": { "type": "string", "enum": ["linux-cgroup-v2-v1", "unavailable"] },
+        "measurement_method": { "type": "string", "enum": ["linux-cgroup-v2-v2", "unavailable"] },
         "signal": { "type": ["integer", "null"], "minimum": 1 },
         "resource_usage": {
           "oneOf": [
@@ -369,7 +407,9 @@
         "root_pid",
         "root_start_ticks",
         "launch_security",
-        "wall_ms",
+        "root_wall_ms",
+        "tree_wall_ms",
+        "measurement_complete_ms",
         "exit_code",
         "signal",
         "cpu_user_ms",
@@ -380,25 +420,27 @@
         "write_bytes",
         "read_operations",
         "write_operations",
-        "cgroup_drained",
         "drain_ms",
         "accounting_settle",
         "cleanup",
         "counters",
         "sampled_diagnostics",
+        "engine_stdout",
+        "engine_stderr",
         "sampler_cpu_user_ms",
-        "sampler_cpu_sys_ms",
-        "sampler_cpu_percent_of_wall"
+        "sampler_cpu_sys_ms"
       ],
       "properties": {
-        "method": { "const": "linux-cgroup-v2-v1" },
+        "method": { "const": "linux-cgroup-v2-v2" },
         "scope": { "const": "fresh-root-owned-cgroup-subtree" },
         "delegated_parent": { "type": "string" },
         "cgroup_path": { "type": "string" },
         "root_pid": { "type": "integer", "minimum": 1 },
         "root_start_ticks": { "type": "integer", "minimum": 1 },
         "launch_security": { "$ref": "#/definitions/launch_security" },
-        "wall_ms": { "type": "number", "minimum": 0 },
+        "root_wall_ms": { "type": "number", "minimum": 0 },
+        "tree_wall_ms": { "type": "number", "minimum": 0 },
+        "measurement_complete_ms": { "type": "number", "minimum": 0 },
         "exit_code": { "type": "integer" },
         "signal": { "type": ["integer", "null"], "minimum": 1 },
         "cpu_user_ms": { "type": "number", "minimum": 0 },
@@ -409,7 +451,6 @@
         "write_bytes": { "type": "integer", "minimum": 0 },
         "read_operations": { "type": "integer", "minimum": 0 },
         "write_operations": { "type": "integer", "minimum": 0 },
-        "cgroup_drained": { "const": true },
         "drain_ms": { "type": "number", "minimum": 0 },
         "accounting_settle": { "$ref": "#/definitions/accounting_settle" },
         "cleanup": { "$ref": "#/definitions/cgroup_cleanup" },
@@ -424,15 +465,20 @@
           }
         },
         "sampled_diagnostics": { "$ref": "#/definitions/sampled_diagnostics" },
+        "engine_stdout": { "type": "string" },
+        "engine_stderr": { "type": "string" },
         "sampler_cpu_user_ms": { "type": "number", "minimum": 0 },
-        "sampler_cpu_sys_ms": { "type": "number", "minimum": 0 },
-        "sampler_cpu_percent_of_wall": { "type": "number", "minimum": 0 }
+        "sampler_cpu_sys_ms": { "type": "number", "minimum": 0 }
       }
     },
     "launch_security": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["account", "uid", "gid", "argv", "executable", "status", "migration_write_probes"],
+      "required": [
+        "account", "uid", "gid", "argv", "executable", "command_identity",
+        "execution_binding", "parent_death_signal", "network_namespace_isolated", "status",
+        "migration_write_probes", "migration_fd_probes"
+      ],
       "properties": {
         "account": { "const": "pliego-benchmark-engine" },
         "uid": { "type": "integer", "minimum": 1 },
@@ -445,14 +491,19 @@
         "executable": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["path", "sha256", "device", "inode"],
+          "required": ["path", "sha256", "device", "inode", "bytes"],
           "properties": {
             "path": { "type": "string", "minLength": 1 },
             "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
             "device": { "type": "integer", "minimum": 0 },
-            "inode": { "type": "integer", "minimum": 1 }
+            "inode": { "type": "integer", "minimum": 1 },
+            "bytes": { "type": "integer", "minimum": 1 }
           }
         },
+        "command_identity": { "$ref": "#/definitions/command_identity" },
+        "execution_binding": { "const": "sealed-memfd-execveat" },
+        "parent_death_signal": { "const": 9 },
+        "network_namespace_isolated": { "const": true },
         "status": {
           "type": "object",
           "additionalProperties": false,
@@ -489,7 +540,51 @@
             "staging": { "$ref": "#/definitions/migration_denials" },
             "measurement": { "$ref": "#/definitions/migration_denials" }
           }
+        },
+        "migration_fd_probes": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["parent", "harness", "staging", "measurement"],
+          "properties": {
+            "parent": { "$ref": "#/definitions/migration_denials" },
+            "harness": { "$ref": "#/definitions/migration_denials" },
+            "staging": { "$ref": "#/definitions/migration_denials" },
+            "measurement": { "$ref": "#/definitions/migration_denials" }
+          }
         }
+      }
+    },
+    "command_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cwd", "input", "workspace_directory", "output_directory", "artifact_directory"],
+      "properties": {
+        "cwd": { "$ref": "#/definitions/bound_directory_identity" },
+        "input": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["manifest_path", "argv_relative_path", "sha256", "device", "inode"],
+          "properties": {
+            "manifest_path": { "type": "string", "minLength": 1 },
+            "argv_relative_path": { "type": "string", "pattern": "^[^/\\\\]+$" },
+            "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "device": { "type": "integer", "minimum": 0 },
+            "inode": { "type": "integer", "minimum": 1 }
+          }
+        },
+        "workspace_directory": { "$ref": "#/definitions/bound_directory_identity" },
+        "output_directory": { "$ref": "#/definitions/bound_directory_identity" },
+        "artifact_directory": { "$ref": "#/definitions/bound_directory_identity" }
+      }
+    },
+    "bound_directory_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "device", "inode"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "device": { "type": "integer", "minimum": 0 },
+        "inode": { "type": "integer", "minimum": 1 }
       }
     },
     "migration_denials": {
@@ -509,7 +604,6 @@
         "timeout_ms",
         "duration_ms",
         "reads",
-        "stable_reads",
         "stable_observations"
       ],
       "properties": {
@@ -517,7 +611,6 @@
         "timeout_ms": { "type": "number", "minimum": 0 },
         "duration_ms": { "type": "number", "minimum": 0 },
         "reads": { "type": "integer", "minimum": 2 },
-        "stable_reads": { "const": 2 },
         "stable_observations": {
           "type": "array",
           "minItems": 2,
@@ -623,32 +716,34 @@
       "additionalProperties": false,
       "required": [
         "coverage",
+        "observation_enabled",
         "sample_interval_ms",
         "pss_interval_ms",
         "page_size_bytes",
         "max_sample_gap_ms",
-        "sampled_peak_summed_rss_kib_lower_bound",
-        "sampled_peak_summed_pss_kib_lower_bound",
+        "sequential_sampled_peak_summed_rss_kib_diagnostic",
+        "sequential_sampled_peak_summed_pss_kib_diagnostic",
         "observed_processes",
         "samples"
       ],
       "properties": {
         "coverage": {
-          "const": "periodic post-exec cgroup membership snapshots; RSS and PSS peaks are lower bounds and may miss processes shorter than the interval"
+          "const": "sequential pidfd-identity and membership-verified procfs diagnostics; values are time-smeared observations, not simultaneous bounds or authoritative accounting"
         },
+        "observation_enabled": { "type": "boolean" },
         "sample_interval_ms": { "type": "number", "minimum": 0 },
         "pss_interval_ms": { "type": "number", "minimum": 0 },
         "page_size_bytes": { "type": "integer", "minimum": 1 },
         "max_sample_gap_ms": { "type": "number", "minimum": 0 },
-        "sampled_peak_summed_rss_kib_lower_bound": { "type": "integer", "minimum": 0 },
-        "sampled_peak_summed_pss_kib_lower_bound": { "type": ["integer", "null"], "minimum": 0 },
+        "sequential_sampled_peak_summed_rss_kib_diagnostic": { "type": "integer", "minimum": 0 },
+        "sequential_sampled_peak_summed_pss_kib_diagnostic": { "type": ["integer", "null"], "minimum": 0 },
         "observed_processes": {
           "type": "array",
           "items": { "$ref": "#/definitions/observed_process" }
         },
         "samples": {
           "type": "array",
-          "minItems": 1,
+          "minItems": 0,
           "items": { "$ref": "#/definitions/diagnostic_sample" }
         }
       }
@@ -670,15 +765,15 @@
       "required": [
         "elapsed_ms",
         "cgroup_memory_current_bytes",
-        "sampled_summed_rss_kib_lower_bound",
-        "sampled_summed_pss_kib_lower_bound",
+        "sequential_sampled_summed_rss_kib_diagnostic",
+        "sequential_sampled_summed_pss_kib_diagnostic",
         "processes"
       ],
       "properties": {
         "elapsed_ms": { "type": "number", "minimum": 0 },
         "cgroup_memory_current_bytes": { "type": "integer", "minimum": 0 },
-        "sampled_summed_rss_kib_lower_bound": { "type": "integer", "minimum": 0 },
-        "sampled_summed_pss_kib_lower_bound": { "type": ["integer", "null"], "minimum": 0 },
+        "sequential_sampled_summed_rss_kib_diagnostic": { "type": "integer", "minimum": 0 },
+        "sequential_sampled_summed_pss_kib_diagnostic": { "type": ["integer", "null"], "minimum": 0 },
         "processes": {
           "type": "array",
           "items": { "$ref": "#/definitions/diagnostic_sample_process" }
@@ -768,11 +863,11 @@
         "memory": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["cgroup_peak_bytes", "sampled_peak_rss_kib_lower_bound"],
+          "required": ["cgroup_peak_bytes", "sequential_sampled_peak_rss_kib_diagnostic"],
           "properties": {
             "cgroup_peak_bytes": { "$ref": "#/definitions/percentiles" },
-            "sampled_peak_rss_kib_lower_bound": { "$ref": "#/definitions/percentiles" },
-            "sampled_peak_pss_kib_lower_bound": { "$ref": "#/definitions/percentiles" }
+            "sequential_sampled_peak_rss_kib_diagnostic": { "$ref": "#/definitions/percentiles" },
+            "sequential_sampled_peak_pss_kib_diagnostic": { "$ref": "#/definitions/percentiles" }
           }
         },
         "io": {
