@@ -143,6 +143,7 @@ python3 benchmarks/tools/create_publication_attestation.py \
   --host-proof "$proof/benchmark-host-proof.v1.json" \
   --observer-proof "$observer_proof" \
   --output-basename pliego-0.1.1-linux-x86_64.json \
+  --operation bootstrap \
   --out "$attestation_staging"
 sudo install -d -o root -g root -m 0755 "$(dirname "$attestation")"
 sudo install -o root -g root -m 0444 "$attestation_staging" "$attestation"
@@ -153,6 +154,7 @@ python3 benchmarks/tools/publish_benchmark.py \
   --observer-proof "$observer_proof" \
   --attestation "$attestation" \
   --out benchmarks/baselines/pliego-0.1.1-linux-x86_64.json \
+  --operation bootstrap \
   --failure-evidence /var/tmp/pliego-benchmark/failures/publish
 ```
 
@@ -160,6 +162,11 @@ The resolver accepts only the committed Linux x86_64 release name, size,
 archive SHA-256, exact file set, binary SHA-256, native commit, and Servo build.
 Use `--offline` after the verified archive is cached. The orchestrator checks
 the binary digest again before starting a sample.
+
+`--operation bootstrap` is an explicit, MAC-bound authorization for the first
+creation only. It atomically refuses an existing basename; after the first
+artifact has been created, subsequent protected runs must use `replace`.
+Neither operation can escape the canonical `benchmarks/baselines` directory.
 
 Those commands describe the contract; publishable runs enter through the
 manual dedicated-host workflow, which supplies the exact paths. Local

@@ -260,6 +260,7 @@ def load_trusted_publication_attestation(
         "host_proof_bundle_sha256",
         "observer_proof_sha256",
         "output_basename",
+        "operation",
     }:
         raise PublicationError("publication attestation subject keys are not exact")
     for field in ("candidate_sha256", "host_proof_bundle_sha256", "observer_proof_sha256"):
@@ -272,6 +273,8 @@ def load_trusted_publication_attestation(
         or not output_basename.endswith(".json")
     ):
         raise PublicationError("publication attestation output basename is invalid")
+    if subject.get("operation") not in {"bootstrap", "replace"}:
+        raise PublicationError("publication attestation operation is invalid")
     if document.get("artifact_name") != f"benchmark-publication-{document['revision']}":
         raise PublicationError("publication attestation artifact name differs from its revision")
     if path.name != f"{document['run_id']}-{document['run_attempt']}.json":
@@ -396,6 +399,16 @@ def _require_regular_destination(
     return metadata
 
 
+def _require_absent_destination(directory: BoundPublicationDirectory, name: str) -> None:
+    try:
+        os.stat(name, dir_fd=directory.descriptor, follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    except OSError as error:
+        raise PublicationError(f"cannot inspect baseline bootstrap destination: {error}") from error
+    raise PublicationError("official baseline bootstrap destination must not already exist")
+
+
 def atomic_publish_bytes(
     directory: BoundPublicationDirectory,
     name: str,
@@ -505,6 +518,105 @@ def atomic_publish_bytes(
             pass
 
 
+def atomic_bootstrap_bytes(
+    directory: BoundPublicationDirectory,
+    name: str,
+    payload: bytes,
+    *,
+    simulate_crash: bool = False,
+    before_create: Callable[[], None] | None = None,
+    after_create: Callable[[], None] | None = None,
+) -> None:
+    """Durably create one explicitly authorized baseline without replacement."""
+
+    if not name or name in {".", ".."} or Path(name).name != name:
+        raise PublicationError("official baseline bootstrap destination must be one basename")
+    _require_current_publication_directory(directory)
+    _require_absent_destination(directory, name)
+    temporary = f".{name}.{secrets.token_hex(8)}.bootstrap"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(temporary, flags, 0o644, dir_fd=directory.descriptor)
+    try:
+        try:
+            os.fchmod(descriptor, 0o644)
+            offset = 0
+            while offset < len(payload):
+                written = os.write(descriptor, payload[offset:])
+                if written <= 0:
+                    raise PublicationError("short write while staging official baseline bootstrap")
+                offset += written
+            os.fsync(descriptor)
+            staged_metadata = os.fstat(descriptor)
+            if simulate_crash:
+                raise PublicationInterrupted("simulated interruption before baseline bootstrap")
+        finally:
+            os.close(descriptor)
+        if before_create is not None:
+            before_create()
+        _require_current_publication_directory(directory)
+        _require_absent_destination(directory, name)
+        try:
+            os.link(
+                temporary,
+                name,
+                src_dir_fd=directory.descriptor,
+                dst_dir_fd=directory.descriptor,
+                follow_symlinks=False,
+            )
+        except FileExistsError:
+            raise PublicationError("official baseline bootstrap destination must remain absent") from None
+        try:
+            if after_create is not None:
+                after_create()
+            _require_current_publication_directory(directory)
+            destination_metadata = _require_regular_destination(directory, name, require_single_link=False)
+            if (destination_metadata.st_dev, destination_metadata.st_ino) != (
+                staged_metadata.st_dev,
+                staged_metadata.st_ino,
+            ) or destination_metadata.st_nlink != 2:
+                raise PublicationError("official baseline bootstrap destination identity changed after creation")
+            os.fsync(directory.descriptor)
+        except BaseException as failure:
+            try:
+                current = os.stat(name, dir_fd=directory.descriptor, follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            except OSError as inspect_error:
+                raise PublicationError(
+                    f"bootstrap failed and created destination cannot be inspected safely: {inspect_error}"
+                ) from failure
+            else:
+                if (current.st_dev, current.st_ino) != (staged_metadata.st_dev, staged_metadata.st_ino):
+                    raise PublicationError(
+                        "bootstrap failed after destination identity changed; refusing to unlink a raced target"
+                    ) from failure
+                try:
+                    os.unlink(name, dir_fd=directory.descriptor)
+                    os.fsync(directory.descriptor)
+                except OSError as rollback_error:
+                    raise PublicationError(
+                        f"bootstrap failed and the created destination could not be removed safely: {rollback_error}"
+                    ) from failure
+            raise
+        # The destination is now a durable link to the fully written payload.
+        # Cleanup cannot invalidate it, so an unremovable staging link is only
+        # stale debris and must not turn a committed bootstrap into a failure.
+        try:
+            os.unlink(temporary, dir_fd=directory.descriptor)
+        except OSError:
+            pass
+        else:
+            try:
+                os.fsync(directory.descriptor)
+            except OSError:
+                pass
+    finally:
+        try:
+            os.unlink(temporary, dir_fd=directory.descriptor)
+        except FileNotFoundError:
+            pass
+
+
 def result_documents(payload: dict[str, Any]) -> list[dict[str, Any]]:
     if payload.get("schema") == "pliego.benchmark-result":
         return [payload]
@@ -541,6 +653,7 @@ def bind_publication(
     observer_proof_sha256: str,
     candidate_sha256: str,
     output_basename: str,
+    operation: str,
     attestation: TrustedPublicationAttestation,
 ) -> dict[str, Any]:
     identity = proof.get("identity", {})
@@ -554,6 +667,7 @@ def bind_publication(
         "host_proof_bundle_sha256": proof_digest,
         "observer_proof_sha256": observer_proof_sha256,
         "output_basename": output_basename,
+        "operation": operation,
     }
     if authorization["subject"] != expected_subject:
         raise PublicationError("protected publication attestation does not bind this candidate/proof/observer subject")

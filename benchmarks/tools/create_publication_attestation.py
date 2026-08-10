@@ -21,6 +21,7 @@ def build_attestation(
     host_proof: Path,
     observer_proof: Path,
     output_basename: str,
+    operation: str,
     key_hex: str,
 ) -> dict[str, Any]:
     _, candidate_binding = benchmark_publication.load_bound_json_object(candidate, "staged candidate")
@@ -49,6 +50,7 @@ def build_attestation(
             "host_proof_bundle_sha256": benchmark_publication.host_proof_bundle_digest(host_proof),
             "observer_proof_sha256": observer_binding["sha256"],
             "output_basename": output_basename,
+            "operation": operation,
         },
     }
     return benchmark_publication.authenticate_publication_attestation(unsigned, key_hex)
@@ -60,6 +62,7 @@ def main() -> int:
     parser.add_argument("--host-proof", required=True, type=Path)
     parser.add_argument("--observer-proof", required=True, type=Path)
     parser.add_argument("--output-basename", required=True)
+    parser.add_argument("--operation", required=True, choices=("bootstrap", "replace"))
     parser.add_argument("--out", required=True, type=Path)
     args = parser.parse_args()
     try:
@@ -69,6 +72,7 @@ def main() -> int:
             args.host_proof,
             args.observer_proof,
             args.output_basename,
+            args.operation,
             os.environ.get(benchmark_publication.TRUSTED_ATTESTATION_KEY_ENV, ""),
         )
         benchmark_publication.atomic_write_bytes(

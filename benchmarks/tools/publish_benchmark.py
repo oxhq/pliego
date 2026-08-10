@@ -132,6 +132,7 @@ def publish(
     observer_schema_path: Path,
     attestation_path: Path,
     trusted_attestation_key_hex: str,
+    operation: str,
     *,
     bound_candidate: BoundCandidate | None = None,
 ) -> None:
@@ -202,6 +203,7 @@ def publish(
         observer_file_binding["sha256"],
         bound_candidate.binding["sha256"],
         output.name,
+        operation,
         attestation,
     )
     external = validate_result.ExternalPublication(**bound["publication"])
@@ -223,11 +225,13 @@ def publish(
     if result_violations:
         raise benchmark_publication.PublicationError(f"bound candidate is invalid: {result_violations[0]}")
     with benchmark_publication.bind_publication_directory(output.directory) as directory:
-        benchmark_publication.atomic_publish_bytes(
-            directory,
-            output.name,
-            benchmark_publication.json_bytes(bound, indent=2),
-        )
+        payload = benchmark_publication.json_bytes(bound, indent=2)
+        if operation == "bootstrap":
+            benchmark_publication.atomic_bootstrap_bytes(directory, output.name, payload)
+        elif operation == "replace":
+            benchmark_publication.atomic_publish_bytes(directory, output.name, payload)
+        else:
+            raise benchmark_publication.PublicationError("publication operation must be bootstrap or replace")
 
 
 def main() -> int:
@@ -237,6 +241,7 @@ def main() -> int:
     parser.add_argument("--observer-proof", required=True, type=Path)
     parser.add_argument("--attestation", required=True, type=Path)
     parser.add_argument("--out", required=True, type=Path)
+    parser.add_argument("--operation", required=True, choices=("bootstrap", "replace"))
     parser.add_argument("--failure-evidence", required=True, type=Path)
     args = parser.parse_args()
 
@@ -259,6 +264,7 @@ def main() -> int:
             DEFAULT_OBSERVER_SCHEMA,
             args.attestation,
             os.environ.get(benchmark_publication.TRUSTED_ATTESTATION_KEY_ENV, ""),
+            args.operation,
             bound_candidate=bound_candidate,
         )
     except benchmark_publication.PublicationError as error:

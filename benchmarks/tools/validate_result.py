@@ -1420,6 +1420,7 @@ def main() -> int:
                 "host_proof_bundle_sha256": proof_digest,
                 "observer_proof_sha256": attestation["subject"]["observer_proof_sha256"],
                 "output_basename": args.result.name,
+                "operation": attestation["subject"]["operation"],
             }:
                 raise ValueError("protected attestation subject differs from the host proof/result")
             if (

@@ -37,13 +37,15 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "candidate_sha256", "host_proof_bundle_sha256", "observer_proof_sha256", "output_basename"
+        "candidate_sha256", "host_proof_bundle_sha256", "observer_proof_sha256", "output_basename",
+        "operation"
       ],
       "properties": {
         "candidate_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
         "host_proof_bundle_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
         "observer_proof_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
-        "output_basename": { "type": "string", "pattern": "^[^/\\]+\\.json$" }
+        "output_basename": { "type": "string", "pattern": "^[^/\\]+\\.json$" },
+        "operation": { "enum": ["bootstrap", "replace"] }
       }
     },
     "authentication": {

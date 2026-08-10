@@ -45,6 +45,7 @@ def main() -> None:
             proof,
             observer,
             "fixture.json",
+            "bootstrap",
             key,
         )
         attestation = root / "123-1.json"
@@ -55,6 +56,7 @@ def main() -> None:
             allow_fixture_authority=True,
         )
         assert trusted.document["subject"]["candidate_sha256"] == benchmark_publication.sha256_file(candidate)
+        assert trusted.document["subject"]["operation"] == "bootstrap"
 
         forged_unsigned = {name: value for name, value in document.items() if name != "authentication"}
         forged_unsigned["subject"] = {**forged_unsigned["subject"], "candidate_sha256": "f" * 64}

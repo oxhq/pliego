@@ -12,6 +12,14 @@ on:
           - production
           - negative-github-hosted
           - negative-missing-thermal
+      publication:
+        description: Explicit protected authorization for normal replacement or the one-time absent-file bootstrap
+        required: true
+        default: replace
+        type: choice
+        options:
+          - replace
+          - bootstrap
 
 permissions:
   contents: read
@@ -90,6 +98,7 @@ jobs:
       - name: Gate host and produce benchmark evidence
         env:
           MODE: ${{ inputs.mode }}
+          PUBLICATION_OPERATION: ${{ inputs.publication }}
           SETUP_EVIDENCE: ${{ runner.temp }}/pliego-setup-evidence-${{ github.run_id }}-${{ github.run_attempt }}
           PROOF_DIR: ${{ runner.temp }}/pliego-host-proof-${{ github.run_id }}-${{ github.run_attempt }}
           CANDIDATE: ${{ runner.temp }}/pliego-candidate-${{ github.run_id }}-${{ github.run_attempt }}.json
@@ -188,6 +197,7 @@ jobs:
               --host-proof "$PROOF_DIR/benchmark-host-proof.v1.json" \
               --observer-proof "$OBSERVER_PROOF" \
               --output-basename "$(basename "$PUBLISHED_BASELINE")" \
+              --operation "$PUBLICATION_OPERATION" \
               --out "$ATTESTATION_STAGING"
             sudo install -d -o root -g root -m 0755 "$(dirname "$ATTESTATION")"
             test ! -e "$ATTESTATION"
@@ -199,6 +209,7 @@ jobs:
               --observer-proof "$OBSERVER_PROOF" \
               --attestation "$ATTESTATION" \
               --out "$PUBLISHED_BASELINE" \
+              --operation "$PUBLICATION_OPERATION" \
               --failure-evidence "$FAILURE_EVIDENCE/publish"
 
             SETUP_PHASE=publication-complete
