@@ -360,16 +360,14 @@ def main() -> None:
     )
     changed(
         valid,
-        lambda value: value["samples"][0]["resource_usage"]["launch_security"][
-            "migration_write_probes"
-        ]["parent"].update({"cgroup.procs": "WRITABLE"}),
+        lambda value: value["samples"][0]["resource_usage"]["launch_security"]["migration_write_probes"][
+            "parent"
+        ].update({"cgroup.procs": "WRITABLE"}),
         "migration_write_probes.parent.cgroup.procs",
     )
     changed(
         valid,
-        lambda value: value["samples"][0]["resource_usage"]["launch_security"]["executable"].update(
-            sha256="1" * 64
-        ),
+        lambda value: value["samples"][0]["resource_usage"]["launch_security"]["executable"].update(sha256="1" * 64),
         "launch_security.executable.sha256",
     )
     changed(
@@ -396,9 +394,7 @@ def main() -> None:
     )
     changed(
         valid,
-        lambda value: value["samples"][0]["resource_usage"]["counters"]["final"]["cpu_stat"].update(
-            usage_usec=1
-        ),
+        lambda value: value["samples"][0]["resource_usage"]["counters"]["final"]["cpu_stat"].update(usage_usec=1),
         "cover user plus system CPU",
     )
     changed(
@@ -415,9 +411,9 @@ def main() -> None:
     )
     changed(
         valid,
-        lambda value: value["samples"][0]["resource_usage"]["sampled_diagnostics"]["samples"][0]["processes"][
-            0
-        ].update(start_ticks=101),
+        lambda value: value["samples"][0]["resource_usage"]["sampled_diagnostics"]["samples"][0]["processes"][0].update(
+            start_ticks=101
+        ),
         "root PID has a different start time",
     )
     changed(
@@ -429,9 +425,7 @@ def main() -> None:
     )
     changed(
         valid,
-        lambda value: value["samples"][0]["resource_usage"]["sampled_diagnostics"]["samples"][-1].update(
-            elapsed_ms=2
-        ),
+        lambda value: value["samples"][0]["resource_usage"]["sampled_diagnostics"]["samples"][-1].update(elapsed_ms=2),
         "engine wall plus drain duration",
     )
     changed(
@@ -471,8 +465,12 @@ def main() -> None:
     changed(valid, lambda value: value["samples"][0]["correctness"].update({"pass": False}), "correctness.pass")
     changed(valid, lambda value: value["samples"][0]["failure"].update(published_pdf=False), "failure.published_pdf")
     changed(valid, lambda value: value["samples"][0]["output"].update(page_count=2), "expected page count 1")
-    changed(timed, lambda value: value["samples"][0]["bridge_timings"].update(bridge_overhead_ms=99), "bridge_overhead_ms")
-    changed(bundle, lambda value: value["results"][0]["protocol"].update(sample_count=2), "results[0].protocol.sample_count")
+    changed(
+        timed, lambda value: value["samples"][0]["bridge_timings"].update(bridge_overhead_ms=99), "bridge_overhead_ms"
+    )
+    changed(
+        bundle, lambda value: value["results"][0]["protocol"].update(sample_count=2), "results[0].protocol.sample_count"
+    )
 
     print("benchmark result validator self-check passed")
 

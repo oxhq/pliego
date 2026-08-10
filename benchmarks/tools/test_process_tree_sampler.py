@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
 
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
 """Fixture, live cgroup-v2, observer, and PHP bridge checks."""
 
 from __future__ import annotations
@@ -464,9 +468,16 @@ def live_cgroup_proofs() -> dict:
     assert launch["status"]["uid"] == [account.uid] * 4
     assert launch["status"]["gid"] == [account.gid] * 4
     assert launch["status"]["supplementary_groups"] == []
-    assert all(int(launch["status"][field], 16) == 0 for field in (
-        "cap_inheritable_hex", "cap_permitted_hex", "cap_effective_hex", "cap_bounding_hex", "cap_ambient_hex"
-    ))
+    assert all(
+        int(launch["status"][field], 16) == 0
+        for field in (
+            "cap_inheritable_hex",
+            "cap_permitted_hex",
+            "cap_effective_hex",
+            "cap_bounding_hex",
+            "cap_ambient_hex",
+        )
+    )
     assert launch["status"]["no_new_privs"] == 1
     assert proof["cgroup_drained"] is True
     assert proof["cleanup"]["kill_used"] is False
