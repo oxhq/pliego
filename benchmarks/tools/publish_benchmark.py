@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -244,6 +243,7 @@ def main() -> int:
     parser.add_argument("--operation", required=True, choices=("bootstrap", "replace"))
     parser.add_argument("--failure-evidence", required=True, type=Path)
     args = parser.parse_args()
+    trusted_key = benchmark_publication.consume_trusted_attestation_key()
 
     try:
         benchmark_publication.require_unprivileged()
@@ -263,7 +263,7 @@ def main() -> int:
             args.observer_proof,
             DEFAULT_OBSERVER_SCHEMA,
             args.attestation,
-            os.environ.get(benchmark_publication.TRUSTED_ATTESTATION_KEY_ENV, ""),
+            trusted_key,
             args.operation,
             bound_candidate=bound_candidate,
         )

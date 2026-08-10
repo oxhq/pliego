@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -65,6 +64,7 @@ def main() -> int:
     parser.add_argument("--operation", required=True, choices=("bootstrap", "replace"))
     parser.add_argument("--out", required=True, type=Path)
     args = parser.parse_args()
+    trusted_key = benchmark_publication.consume_trusted_attestation_key()
     try:
         benchmark_publication.require_unprivileged()
         document = build_attestation(
@@ -73,7 +73,7 @@ def main() -> int:
             args.observer_proof,
             args.output_basename,
             args.operation,
-            os.environ.get(benchmark_publication.TRUSTED_ATTESTATION_KEY_ENV, ""),
+            trusted_key,
         )
         benchmark_publication.atomic_write_bytes(
             args.out,

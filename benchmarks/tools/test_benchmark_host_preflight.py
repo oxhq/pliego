@@ -487,7 +487,7 @@ class BenchmarkHostPreflightTests(unittest.TestCase):
         self.assertIn("environment: Pliego dedicated benchmarks", workflow)
         self.assertIn("permissions:\n  contents: read", workflow)
         self.assertEqual(workflow.count("secrets.OXHQ_BENCHMARK_PROOF_TOKEN"), 1)
-        self.assertEqual(workflow.count("secrets.PLIEGO_BENCHMARK_ATTESTATION_HMAC_KEY_HEX"), 1)
+        self.assertEqual(workflow.count("secrets.PLIEGO_BENCHMARK_ATTESTATION_HMAC_KEY_HEX"), 2)
         self.assertNotIn("\n    env:\n", workflow)
         self.assertIn("negative-github-hosted", workflow)
         self.assertIn("negative-missing-thermal", workflow)
@@ -501,6 +501,25 @@ class BenchmarkHostPreflightTests(unittest.TestCase):
         self.assertIn("python3 benchmarks/tools/create_publication_attestation.py", workflow)
         self.assertIn('--observer-proof "$OBSERVER_PROOF"', workflow)
         self.assertIn('--attestation "$ATTESTATION"', workflow)
+        evidence_step = workflow.split("- name: Gate host and produce benchmark evidence", 1)[1].split(
+            "- name: Authenticate benchmark publication subject", 1
+        )[0]
+        attestation_step = workflow.split("- name: Authenticate benchmark publication subject", 1)[1].split(
+            "- name: Publish authenticated benchmark baseline", 1
+        )[0]
+        publisher_step = workflow.split("- name: Publish authenticated benchmark baseline", 1)[1].split(
+            "- name: Remove frozen fixture mirror", 1
+        )[0]
+        self.assertNotIn("PLIEGO_BENCHMARK_ATTESTATION_HMAC_KEY_HEX", evidence_step)
+        self.assertIn("create_publication_attestation.py", attestation_step)
+        self.assertNotIn("publish_benchmark.py", attestation_step)
+        self.assertIn("${PUBLISHED_BASELINE##*/}", attestation_step)
+        self.assertNotIn("$(basename", attestation_step)
+        self.assertIn("publish_benchmark.py", publisher_step)
+        self.assertNotIn("create_publication_attestation.py", publisher_step)
+        for sensitive_step in (attestation_step, publisher_step):
+            self.assertEqual(sensitive_step.count("secrets.PLIEGO_BENCHMARK_ATTESTATION_HMAC_KEY_HEX"), 1)
+            self.assertIn("unset PLIEGO_BENCHMARK_ATTESTATION_HMAC_KEY_HEX", sensitive_step)
         self.assertIn("Initialize setup diagnostics before checkout", workflow)
         self.assertIn("benchmark_setup_evidence.py", workflow)
         self.assertIn("pliego-setup-evidence-${{ github.run_id }}-${{ github.run_attempt }}", workflow)

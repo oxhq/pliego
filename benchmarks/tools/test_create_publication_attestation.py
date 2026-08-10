@@ -4,6 +4,9 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -13,6 +16,22 @@ import create_publication_attestation
 
 def main() -> None:
     key = "e" * 64
+    variable = benchmark_publication.TRUSTED_ATTESTATION_KEY_ENV
+    previous = os.environ.pop(variable, None)
+    try:
+        os.environ[variable] = key
+        assert benchmark_publication.consume_trusted_attestation_key() == key
+        assert variable not in os.environ
+        child = subprocess.run(
+            [sys.executable, "-c", f"import os; raise SystemExit({variable!r} in os.environ)"],
+            check=False,
+            env=os.environ.copy(),
+        )
+        assert child.returncode == 0
+    finally:
+        os.environ.pop(variable, None)
+        if previous is not None:
+            os.environ[variable] = previous
     with tempfile.TemporaryDirectory() as raw:
         root = Path(raw).resolve()
         candidate = root / "candidate.json"

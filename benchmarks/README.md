@@ -121,7 +121,6 @@ proof="$(realpath /var/tmp/pliego-benchmark/host-proof)"
 observer_raw="$(realpath -m /var/tmp/pliego-benchmark/observer-measurements.json)"
 observer_proof="$(realpath -m /var/tmp/pliego-benchmark/observer-proof.json)"
 attestation="/var/lib/pliego-benchmark-attestations/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.json"
-: "${PLIEGO_BENCHMARK_ATTESTATION_HMAC_KEY_HEX:?protected workflow must supply its 256-bit context key}"
 
 python3 benchmarks/tools/benchmark_host_preflight.py \
   --mode production --output-dir "$proof" \
@@ -138,7 +137,10 @@ python3 benchmarks/tools/observer_ab.py bind \
   --out "$observer_proof"
 
 attestation_staging="$(realpath -m "/var/tmp/pliego-benchmark/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.json")"
-python3 benchmarks/tools/create_publication_attestation.py \
+read -r -s -p "Protected publication HMAC key: " attestation_key_hex
+printf '\n'
+PLIEGO_BENCHMARK_ATTESTATION_HMAC_KEY_HEX="$attestation_key_hex" \
+  python3 benchmarks/tools/create_publication_attestation.py \
   --candidate "$candidate" \
   --host-proof "$proof/benchmark-host-proof.v1.json" \
   --observer-proof "$observer_proof" \
@@ -148,7 +150,8 @@ python3 benchmarks/tools/create_publication_attestation.py \
 sudo install -d -o root -g root -m 0755 "$(dirname "$attestation")"
 sudo install -o root -g root -m 0444 "$attestation_staging" "$attestation"
 
-python3 benchmarks/tools/publish_benchmark.py \
+PLIEGO_BENCHMARK_ATTESTATION_HMAC_KEY_HEX="$attestation_key_hex" \
+  python3 benchmarks/tools/publish_benchmark.py \
   --candidate "$candidate" \
   --host-proof "$proof/benchmark-host-proof.v1.json" \
   --observer-proof "$observer_proof" \
@@ -156,6 +159,7 @@ python3 benchmarks/tools/publish_benchmark.py \
   --out benchmarks/baselines/pliego-0.1.1-linux-x86_64.json \
   --operation bootstrap \
   --failure-evidence /var/tmp/pliego-benchmark/failures/publish
+unset attestation_key_hex
 ```
 
 The resolver accepts only the committed Linux x86_64 release name, size,
@@ -167,6 +171,9 @@ the binary digest again before starting a sample.
 creation only. It atomically refuses an existing basename; after the first
 artifact has been created, subsequent protected runs must use `replace`.
 Neither operation can escape the canonical `benchmarks/baselines` directory.
+The dedicated workflow exposes the HMAC key only to the attestation and
+publisher steps; each Python entry point consumes it from its environment
+before doing any work that could later gain a child process.
 
 Those commands describe the contract; publishable runs enter through the
 manual dedicated-host workflow, which supplies the exact paths. Local

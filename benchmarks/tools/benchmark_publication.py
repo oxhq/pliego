@@ -136,6 +136,12 @@ def _attestation_key(value: str) -> bytes:
     return bytes.fromhex(value)
 
 
+def consume_trusted_attestation_key() -> str:
+    """Remove protected HMAC authority before any later child can inherit it."""
+
+    return os.environ.pop(TRUSTED_ATTESTATION_KEY_ENV, "")
+
+
 def authenticate_publication_attestation(document: dict[str, Any], key_hex: str) -> dict[str, Any]:
     """Attach a MAC from protected workflow context that candidate bytes never receive."""
 
