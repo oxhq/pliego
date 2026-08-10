@@ -448,11 +448,6 @@ impl SessionArtifacts {
         prepare_new_file(&self.directory.join("document.pdf"), destination.as_ref())
     }
 
-    /// Publish the diagnostic PDF without replacing an existing caller-owned path.
-    pub fn publish_document_pdf(&self, destination: impl AsRef<Path>) -> io::Result<()> {
-        self.prepare_document_pdf(destination)?.commit()
-    }
-
     /// Bind the completed diagnostic artifacts and prepared PDF to this render ID.
     pub(crate) fn write_prepared_bundle(
         &self,
@@ -493,22 +488,17 @@ impl SessionArtifacts {
             .write(true)
             .create_new(true)
             .open(&bundle_path)?;
-        serde_json::to_writer_pretty(&mut bundle, &manifest).map_err(io::Error::other)?;
-        bundle.write_all(b"\n")?;
-        bundle.sync_all()?;
+        let write_result = (|| {
+            serde_json::to_writer_pretty(&mut bundle, &manifest).map_err(io::Error::other)?;
+            bundle.write_all(b"\n")?;
+            bundle.sync_all()
+        })();
+        drop(bundle);
+        if let Err(error) = write_result {
+            let _ = std::fs::remove_file(&bundle_path);
+            return Err(error);
+        }
         Ok(bundle_path)
-    }
-
-    /// Bind completed artifacts to an output that is already visible.
-    pub fn write_bundle(&self, output: impl AsRef<Path>) -> io::Result<PathBuf> {
-        let output = output.as_ref();
-        let (sha256, bytes) = hash_regular_file(output)?;
-        self.write_prepared_bundle(&PreparedDocumentPdf {
-            destination: output.to_owned(),
-            temporary_path: None,
-            sha256,
-            bytes,
-        })
     }
 
     pub fn write_pdf_structure(&self, structure: &serde_json::Value) -> io::Result<()> {

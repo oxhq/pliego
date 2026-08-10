@@ -1179,6 +1179,32 @@ fn publish_captured_document(
             )
         })
     };
+    let fail_before_output_commit =
+        |environment: &mut serde_json::Value,
+         code: &'static str,
+         message: String,
+         owned_bundle_path: Option<&std::path::Path>| {
+            let failure = SceneArtifactError::new(code, message);
+            let mut warnings = Vec::new();
+            if let Some(bundle_path) = owned_bundle_path &&
+                let Err(remove_error) = std::fs::remove_file(bundle_path) &&
+                remove_error.kind() != std::io::ErrorKind::NotFound
+            {
+                warnings.push(format!(
+                    "cannot remove invalidated bundle after failed PDF publication: {remove_error}"
+                ));
+            }
+            set_document_pdf_environment(environment, &document_pdf_path, "failed", Some(&failure));
+            if let Err(write_error) = artifacts.write_environment(environment) {
+                warnings.push(format!(
+                    "cannot record failed PDF publication state: {write_error}"
+                ));
+            }
+            let mut error = fail(failure.code, &failure.message);
+            warnings.append(&mut error.warnings);
+            error.warnings = warnings;
+            error
+        };
 
     match stage_resolved_input_hash(&mut environment, &resolved_input_hash) {
         Ok(true) => record_session_artifact(artifacts.write_environment(&environment))?,
@@ -1259,66 +1285,71 @@ fn publish_captured_document(
             "Servo did not produce a rendered image",
         ));
     }
-    if request.explicit_paths.is_some() {
-        if let Err(error) = artifacts.publish_document_pdf(&document_pdf_path) {
+    let prepared_output = artifacts
+        .prepare_document_pdf(&document_pdf_path)
+        .map_err(|error| {
             let code = if error.kind() == std::io::ErrorKind::AlreadyExists {
                 "OUTPUT_ALREADY_EXISTS"
             } else {
                 "OUTPUT_PUBLISH_FAILED"
             };
-            let failure = SceneArtifactError::new(
+            fail_before_output_commit(
+                &mut environment,
                 code,
                 format!(
-                    "cannot publish requested output {}: {error}",
+                    "cannot prepare requested output {}: {error}",
                     document_pdf_path.display()
                 ),
-            );
-            set_document_pdf_environment(
-                &mut environment,
-                &document_pdf_path,
-                "failed",
-                Some(&failure),
-            );
-            let warning = artifacts
-                .write_environment(&environment)
-                .err()
-                .map(|write_error| {
-                    format!("cannot record failed PDF publication state: {write_error}")
-                });
-            let mut error = fail(failure.code, &failure.message);
-            if let Some(warning) = warning {
-                error.warnings.insert(0, warning);
-            }
-            return Err(error);
-        }
-    }
+                None,
+            )
+        })?;
     set_document_pdf_environment(
         &mut environment,
         &document_pdf_path,
         scene_artifacts.pdf_status,
         None,
     );
-    artifacts
-        .write_environment(&environment)
-        .map_err(|error| fail("DOCUMENT_PDF_ENVIRONMENT_WRITE_FAILED", &error.to_string()))?;
+    if let Err(error) = artifacts.write_environment(&environment) {
+        return Err(fail_before_output_commit(
+            &mut environment,
+            "DOCUMENT_PDF_ENVIRONMENT_WRITE_FAILED",
+            error.to_string(),
+            None,
+        ));
+    }
     let scene_previews = scene_artifacts
         .preview_paths
         .iter()
         .map(|path| path.to_string_lossy().into_owned())
         .collect::<Vec<_>>();
     let scene_preview = scene_previews.first().cloned();
-    record_session_artifact(artifacts.record_state("rendered", None))?;
-    let bundle_path = artifacts
-        .write_bundle(&document_pdf_path)
-        .map_err(|error| fail("BUNDLE_WRITE_FAILED", &error.to_string()))?;
+    if let Err(error) = artifacts.record_state("rendered", None) {
+        return Err(fail_before_output_commit(
+            &mut environment,
+            "SESSION_ARTIFACT_WRITE_FAILED",
+            format!("cannot write session artifact: {error}"),
+            None,
+        ));
+    }
+    let bundle_path = match artifacts.write_prepared_bundle(&prepared_output) {
+        Ok(path) => path,
+        Err(error) => {
+            return Err(fail_before_output_commit(
+                &mut environment,
+                "BUNDLE_WRITE_FAILED",
+                error.to_string(),
+                None,
+            ));
+        },
+    };
 
-    Ok(RenderOutcome {
+    let outcome = RenderOutcome {
         summary: serde_json::json!({
             "artifacts": artifacts.directory().to_string_lossy(),
             "bundle": bundle_path.to_string_lossy(),
             "engine": "pliego",
             "document_root": document.root().to_string_lossy(),
-            "environment": environment,
+            "environment": environment.clone(),
             "environment_artifact": environment_path.to_string_lossy(),
             "input": request.input.to_string_lossy(),
             "resolved_input": document.path().to_string_lossy(),
@@ -1360,7 +1391,24 @@ fn publish_captured_document(
             "rendered_bytes": rendered_bytes,
             "status": "rendered"
         }),
-    })
+    };
+    if let Err(error) = prepared_output.commit() {
+        let code = if error.kind() == std::io::ErrorKind::AlreadyExists {
+            "OUTPUT_ALREADY_EXISTS"
+        } else {
+            "OUTPUT_PUBLISH_FAILED"
+        };
+        return Err(fail_before_output_commit(
+            &mut environment,
+            code,
+            format!(
+                "cannot publish requested output {}: {error}",
+                document_pdf_path.display()
+            ),
+            Some(&bundle_path),
+        ));
+    }
+    Ok(outcome)
 }
 
 #[cfg(all(
@@ -4906,6 +4954,22 @@ mod tests {
         );
         assert!(fixture.root.join("artifacts/render.png").is_file());
         assert!(fixture.root.join("artifacts/bundle.json").is_file());
+        let published_pdf = fs::read(fixture.root.join("output.pdf")).unwrap();
+        let bundle: serde_json::Value =
+            serde_json::from_slice(&fs::read(fixture.root.join("artifacts/bundle.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            bundle["output"]["sha256"],
+            format!("sha256:{}", sha256_hex(&published_pdf))
+        );
+        assert_eq!(bundle["output"]["bytes"], published_pdf.len() as u64);
+        assert!(fs::read_dir(&fixture.root).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .contains(".pliego-")
+        }));
         let resources = fs::read_to_string(fixture.root.join("artifacts/resources.jsonl")).unwrap();
         let terminal: serde_json::Value =
             serde_json::from_str(resources.lines().last().unwrap()).unwrap();
@@ -4913,6 +4977,96 @@ mod tests {
         assert_eq!(terminal["is_for_main_frame"], true);
         assert_eq!(terminal["source"], "document_root");
         assert_eq!(terminal["resource"], fixture.expected_input.content_address);
+
+        fs::remove_dir_all(fixture.root).unwrap();
+    }
+
+    #[cfg(feature = "document-session")]
+    #[test]
+    fn direct_publisher_does_not_publish_when_bundle_finalization_fails() {
+        let fixture =
+            direct_publication_fixture("pliego-direct-publisher-bundle-failure", b"direct input");
+        let outcome = direct_capture_outcome(&fixture.document, b"direct input");
+        let bundle_path = fixture.root.join("artifacts/bundle.json");
+        fs::write(&bundle_path, b"caller bundle").unwrap();
+
+        let error = finish_document_session_render(
+            &fixture.request,
+            &fixture.document,
+            &fixture.render_id,
+            &fixture.expected_input,
+            fixture.publication,
+            Ok(outcome),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, "BUNDLE_WRITE_FAILED");
+        assert!(!fixture.root.join("output.pdf").exists());
+        assert_eq!(fs::read(&bundle_path).unwrap(), b"caller bundle");
+        let environment: serde_json::Value = serde_json::from_slice(
+            &fs::read(fixture.root.join("artifacts/environment.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(environment["document_pdf"]["status"], "failed");
+        assert_eq!(
+            environment["document_pdf"]["error"]["code"],
+            "BUNDLE_WRITE_FAILED"
+        );
+        let states =
+            fs::read_to_string(fixture.root.join("artifacts/session-state.jsonl")).unwrap();
+        let terminal: serde_json::Value =
+            serde_json::from_str(states.lines().last().unwrap()).unwrap();
+        assert_eq!(terminal["state"], "failed");
+        assert!(fs::read_dir(&fixture.root).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .contains(".pliego-")
+        }));
+
+        fs::remove_dir_all(fixture.root).unwrap();
+    }
+
+    #[cfg(feature = "document-session")]
+    #[test]
+    fn direct_publisher_does_not_publish_when_terminal_state_write_fails() {
+        let fixture =
+            direct_publication_fixture("pliego-direct-publisher-state-failure", b"direct input");
+        let outcome = direct_capture_outcome(&fixture.document, b"direct input");
+        let state_path = fixture.root.join("artifacts/session-state.jsonl");
+        fs::remove_file(&state_path).unwrap();
+        fs::create_dir(&state_path).unwrap();
+
+        let error = finish_document_session_render(
+            &fixture.request,
+            &fixture.document,
+            &fixture.render_id,
+            &fixture.expected_input,
+            fixture.publication,
+            Ok(outcome),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, "SESSION_ARTIFACT_WRITE_FAILED");
+        assert!(!fixture.root.join("output.pdf").exists());
+        assert!(!fixture.root.join("artifacts/bundle.json").exists());
+        let environment: serde_json::Value = serde_json::from_slice(
+            &fs::read(fixture.root.join("artifacts/environment.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(environment["document_pdf"]["status"], "failed");
+        assert_eq!(
+            environment["document_pdf"]["error"]["code"],
+            "SESSION_ARTIFACT_WRITE_FAILED"
+        );
+        assert!(fs::read_dir(&fixture.root).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .contains(".pliego-")
+        }));
 
         fs::remove_dir_all(fixture.root).unwrap();
     }
