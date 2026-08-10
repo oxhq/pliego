@@ -33,6 +33,57 @@ struct BundleManifest<'a> {
 }
 
 #[derive(Debug)]
+pub(crate) struct PreparedDocumentPdf {
+    destination: PathBuf,
+    temporary_path: Option<PathBuf>,
+    sha256: String,
+    bytes: u64,
+}
+
+impl PreparedDocumentPdf {
+    fn bundle_entry(&self) -> io::Result<BundleEntry> {
+        let path = self.destination.to_str().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "published output path is not valid UTF-8: {}",
+                    self.destination.display()
+                ),
+            )
+        })?;
+        Ok(BundleEntry {
+            path: path.to_owned(),
+            sha256: self.sha256.clone(),
+            bytes: self.bytes,
+        })
+    }
+
+    /// Make the prepared bytes visible at the caller-owned path without replacing it.
+    ///
+    /// A successful hard link is the publication commit. Cleanup after that point is
+    /// best-effort so committed output can never be reported as a failed render.
+    pub(crate) fn commit(mut self) -> io::Result<()> {
+        let Some(temporary_path) = self.temporary_path.take() else {
+            return Ok(());
+        };
+        if let Err(error) = std::fs::hard_link(&temporary_path, &self.destination) {
+            self.temporary_path = Some(temporary_path);
+            return Err(error);
+        }
+        let _ = std::fs::remove_file(temporary_path);
+        Ok(())
+    }
+}
+
+impl Drop for PreparedDocumentPdf {
+    fn drop(&mut self) {
+        if let Some(path) = self.temporary_path.take() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+#[derive(Debug)]
 pub struct LocalDocument {
     root: PathBuf,
     path: PathBuf,
@@ -387,13 +438,26 @@ impl SessionArtifacts {
         self.write_bytes("document.pdf", pdf)
     }
 
-    /// Publish the diagnostic PDF without replacing an existing caller-owned path.
-    pub fn publish_document_pdf(&self, destination: impl AsRef<Path>) -> io::Result<()> {
-        publish_new_file(&self.directory.join("document.pdf"), destination.as_ref())
+    /// Stage the diagnostic PDF beside its caller-owned destination.
+    ///
+    /// The returned value owns the staged file until it is committed or dropped.
+    pub(crate) fn prepare_document_pdf(
+        &self,
+        destination: impl AsRef<Path>,
+    ) -> io::Result<PreparedDocumentPdf> {
+        prepare_new_file(&self.directory.join("document.pdf"), destination.as_ref())
     }
 
-    /// Bind the completed diagnostic artifacts and published PDF to this render ID.
-    pub fn write_bundle(&self, output: impl AsRef<Path>) -> io::Result<PathBuf> {
+    /// Publish the diagnostic PDF without replacing an existing caller-owned path.
+    pub fn publish_document_pdf(&self, destination: impl AsRef<Path>) -> io::Result<()> {
+        self.prepare_document_pdf(destination)?.commit()
+    }
+
+    /// Bind the completed diagnostic artifacts and prepared PDF to this render ID.
+    pub(crate) fn write_prepared_bundle(
+        &self,
+        output: &PreparedDocumentPdf,
+    ) -> io::Result<PathBuf> {
         require_rendered_terminal_state(&self.directory.join("session-state.jsonl"))?;
         require_directory_without_symlink(&self.directory)?;
 
@@ -401,27 +465,27 @@ impl SessionArtifacts {
         collect_bundle_entries(&self.directory, &self.directory, &mut entries)?;
         entries.sort_by(|left, right| left.path.cmp(&right.path));
 
-        let output_path = output.as_ref();
-        let output_path_string = output_path.to_str().ok_or_else(|| {
-            io::Error::new(
+        let document_pdf = entries
+            .iter()
+            .find(|entry| entry.path == "document.pdf")
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "bundle artifacts have no staged document.pdf",
+                )
+            })?;
+        if document_pdf.sha256 != output.sha256 || document_pdf.bytes != output.bytes {
+            return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!(
-                    "published output path is not valid UTF-8: {}",
-                    output_path.display()
-                ),
-            )
-        })?;
-        let (output_sha256, output_bytes) = hash_regular_file(output_path)?;
+                "staged document.pdf changed after output preparation",
+            ));
+        }
         let manifest = BundleManifest {
             schema: "pliego.bundle",
             version: 1,
             render_id: &self.render_id,
             entries,
-            output: BundleEntry {
-                path: output_path_string.to_owned(),
-                sha256: output_sha256,
-                bytes: output_bytes,
-            },
+            output: output.bundle_entry()?,
         };
 
         let bundle_path = self.directory.join(BUNDLE_FILE_NAME);
@@ -433,6 +497,18 @@ impl SessionArtifacts {
         bundle.write_all(b"\n")?;
         bundle.sync_all()?;
         Ok(bundle_path)
+    }
+
+    /// Bind completed artifacts to an output that is already visible.
+    pub fn write_bundle(&self, output: impl AsRef<Path>) -> io::Result<PathBuf> {
+        let output = output.as_ref();
+        let (sha256, bytes) = hash_regular_file(output)?;
+        self.write_prepared_bundle(&PreparedDocumentPdf {
+            destination: output.to_owned(),
+            temporary_path: None,
+            sha256,
+            bytes,
+        })
     }
 
     pub fn write_pdf_structure(&self, structure: &serde_json::Value) -> io::Result<()> {
@@ -755,7 +831,16 @@ fn open_private_file(path: &Path) -> io::Result<File> {
         .open(path)
 }
 
-fn publish_new_file(source: &Path, destination: &Path) -> io::Result<()> {
+fn prepare_new_file(source: &Path, destination: &Path) -> io::Result<PreparedDocumentPdf> {
+    if source == destination {
+        let (sha256, bytes) = hash_regular_file(source)?;
+        return Ok(PreparedDocumentPdf {
+            destination: destination.to_owned(),
+            temporary_path: None,
+            sha256,
+            bytes,
+        });
+    }
     let file_name = destination.file_name().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -772,7 +857,15 @@ fn publish_new_file(source: &Path, destination: &Path) -> io::Result<()> {
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
+    let source_path_metadata = std::fs::symlink_metadata(source)?;
+    if source_path_metadata.file_type().is_symlink() || !source_path_metadata.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("document PDF is not a regular file: {}", source.display()),
+        ));
+    }
     let mut source_file = File::open(source)?;
+    let source_metadata = source_file.metadata()?;
 
     for attempt in 0..32 {
         let mut temporary_name = OsString::from(".");
@@ -790,29 +883,46 @@ fn publish_new_file(source: &Path, destination: &Path) -> io::Result<()> {
         };
 
         let write_result = (|| {
-            io::copy(&mut source_file, &mut temporary_file)?;
-            temporary_file.sync_all()
+            let mut hasher = Sha256::new();
+            let mut bytes = 0_u64;
+            let mut buffer = [0_u8; 64 * 1024];
+            loop {
+                let read = source_file.read(&mut buffer)?;
+                if read == 0 {
+                    break;
+                }
+                temporary_file.write_all(&buffer[..read])?;
+                hasher.update(&buffer[..read]);
+                bytes = bytes.checked_add(read as u64).ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "document PDF is too large")
+                })?;
+            }
+            if bytes != source_metadata.len() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "document PDF changed while preparing output",
+                ));
+            }
+            temporary_file.sync_all()?;
+            Ok((
+                format!("sha256:{}", lowercase_hex(&hasher.finalize())),
+                bytes,
+            ))
         })();
         drop(temporary_file);
-        if let Err(error) = write_result {
-            let _ = std::fs::remove_file(&temporary_path);
-            return Err(error);
-        }
-
-        // A hard-link publish is the stdlib's portable atomic no-clobber operation. The temporary
-        // file is a sibling, so supported filesystems keep both names on the same volume.
-        match std::fs::hard_link(&temporary_path, destination) {
-            Ok(()) => {
-                // The destination is fully published at this point. A best-effort temporary-name
-                // cleanup must not turn that committed output into a reported render failure.
-                let _ = std::fs::remove_file(&temporary_path);
-                return Ok(());
-            },
+        let (sha256, bytes) = match write_result {
+            Ok(result) => result,
             Err(error) => {
                 let _ = std::fs::remove_file(&temporary_path);
                 return Err(error);
             },
-        }
+        };
+        return Ok(PreparedDocumentPdf {
+            destination: destination.to_owned(),
+            temporary_path: Some(temporary_path),
+            sha256,
+            bytes,
+        });
     }
 
     Err(io::Error::new(
@@ -897,7 +1007,9 @@ mod tests {
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use super::{LocalDocument, SessionArtifacts, SessionFailure, WebResourceLoadRole};
+    use super::{
+        BUNDLE_FILE_NAME, LocalDocument, SessionArtifacts, SessionFailure, WebResourceLoadRole,
+    };
 
     #[test]
     fn resolves_a_local_file_and_rejects_escape_paths() {
@@ -1220,13 +1332,15 @@ mod tests {
         let output = sandbox.join("invoice.pdf");
         artifacts.write_document_pdf(b"%PDF-first").unwrap();
 
-        artifacts.publish_document_pdf(&output).unwrap();
+        let prepared = artifacts.prepare_document_pdf(&output).unwrap();
+        assert!(!output.exists());
+        prepared.commit().unwrap();
         assert_eq!(fs::read(&output).unwrap(), b"%PDF-first");
         assert_eq!(
             fs::read(artifacts.directory().join("document.pdf")).unwrap(),
             b"%PDF-first"
         );
-        let collision = artifacts.publish_document_pdf(&output).unwrap_err();
+        let collision = artifacts.prepare_document_pdf(&output).unwrap_err();
         assert_eq!(collision.kind(), std::io::ErrorKind::AlreadyExists);
         assert_eq!(fs::read(&output).unwrap(), b"%PDF-first");
         assert!(fs::read_dir(&sandbox).unwrap().all(|entry| {
@@ -1258,10 +1372,11 @@ mod tests {
 
         artifacts.write_scene(b"{}\n").unwrap();
         artifacts.write_document_pdf(b"%PDF-bundle").unwrap();
-        artifacts.publish_document_pdf(&output).unwrap();
+        let prepared = artifacts.prepare_document_pdf(&output).unwrap();
+        assert!(!output.exists());
         artifacts.record_state("started", None).unwrap();
         artifacts.record_state("rendered", None).unwrap();
-        let bundle_path = artifacts.write_bundle(&output).unwrap();
+        let bundle_path = artifacts.write_prepared_bundle(&prepared).unwrap();
         let bundle: serde_json::Value =
             serde_json::from_slice(&fs::read(bundle_path).unwrap()).unwrap();
 
@@ -1290,6 +1405,173 @@ mod tests {
                 "session-state.jsonl",
             ]
         );
+        prepared.commit().unwrap();
+        assert_eq!(fs::read(&output).unwrap(), b"%PDF-bundle");
+
+        fs::remove_dir_all(sandbox).unwrap();
+    }
+
+    #[test]
+    fn failed_finalization_drops_the_prepared_output_without_publishing() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let sandbox = std::env::temp_dir().join(format!(
+            "pliego-prepared-drop-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir(&sandbox).unwrap();
+        let artifacts = SessionArtifacts::create(sandbox.join("artifacts")).unwrap();
+        let output = sandbox.join("invoice.pdf");
+        artifacts.write_document_pdf(b"%PDF-prepared").unwrap();
+
+        let prepared = artifacts.prepare_document_pdf(&output).unwrap();
+        assert!(!output.exists());
+        assert!(fs::read_dir(&sandbox).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .contains(".pliego-")
+        }));
+        drop(prepared);
+
+        assert!(!output.exists());
+        assert!(fs::read_dir(&sandbox).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .contains(".pliego-")
+        }));
+        fs::remove_dir_all(sandbox).unwrap();
+    }
+
+    #[test]
+    fn bundle_rejects_document_pdf_drift_before_publication() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let sandbox = std::env::temp_dir().join(format!(
+            "pliego-prepared-drift-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir(&sandbox).unwrap();
+        let artifacts = SessionArtifacts::create(sandbox.join("artifacts")).unwrap();
+        let output = sandbox.join("invoice.pdf");
+        artifacts.write_document_pdf(b"%PDF-original").unwrap();
+        let prepared = artifacts.prepare_document_pdf(&output).unwrap();
+        artifacts.write_document_pdf(b"%PDF-mutated").unwrap();
+        artifacts.record_state("rendered", None).unwrap();
+
+        let error = artifacts.write_prepared_bundle(&prepared).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(
+            error
+                .to_string()
+                .contains("changed after output preparation")
+        );
+        assert!(!output.exists());
+        drop(prepared);
+
+        fs::remove_dir_all(sandbox).unwrap();
+    }
+
+    #[test]
+    fn publication_collision_preserves_caller_bytes_and_cleans_staging() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let sandbox = std::env::temp_dir().join(format!(
+            "pliego-prepared-collision-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir(&sandbox).unwrap();
+        let artifacts = SessionArtifacts::create(sandbox.join("artifacts")).unwrap();
+        let output = sandbox.join("invoice.pdf");
+        artifacts.write_document_pdf(b"%PDF-owned").unwrap();
+        let prepared = artifacts.prepare_document_pdf(&output).unwrap();
+        fs::write(&output, b"caller sentinel").unwrap();
+
+        let error = prepared.commit().unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(&output).unwrap(), b"caller sentinel");
+        assert!(fs::read_dir(&sandbox).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .contains(".pliego-")
+        }));
+
+        fs::remove_dir_all(sandbox).unwrap();
+    }
+
+    #[test]
+    fn bundle_collision_does_not_publish_the_prepared_output() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let sandbox = std::env::temp_dir().join(format!(
+            "pliego-prepared-bundle-collision-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir(&sandbox).unwrap();
+        let artifacts = SessionArtifacts::create(sandbox.join("artifacts")).unwrap();
+        let output = sandbox.join("invoice.pdf");
+        artifacts.write_document_pdf(b"%PDF-owned").unwrap();
+        let prepared = artifacts.prepare_document_pdf(&output).unwrap();
+        artifacts.record_state("rendered", None).unwrap();
+        fs::write(
+            artifacts.directory().join(BUNDLE_FILE_NAME),
+            b"caller bundle",
+        )
+        .unwrap();
+
+        let error = artifacts.write_prepared_bundle(&prepared).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert!(!output.exists());
+        assert_eq!(
+            fs::read(artifacts.directory().join(BUNDLE_FILE_NAME)).unwrap(),
+            b"caller bundle"
+        );
+        drop(prepared);
+
+        fs::remove_dir_all(sandbox).unwrap();
+    }
+
+    #[test]
+    fn preparation_fails_after_all_bounded_temporary_names_are_taken() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let sandbox = std::env::temp_dir().join(format!(
+            "pliego-prepared-exhaustion-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir(&sandbox).unwrap();
+        let artifacts = SessionArtifacts::create(sandbox.join("artifacts")).unwrap();
+        let output = sandbox.join("invoice.pdf");
+        artifacts.write_document_pdf(b"%PDF-owned").unwrap();
+        for attempt in 0..32 {
+            fs::write(
+                sandbox.join(format!(
+                    ".invoice.pdf.pliego-{}-{attempt}.tmp",
+                    std::process::id()
+                )),
+                b"occupied",
+            )
+            .unwrap();
+        }
+
+        let error = artifacts.prepare_document_pdf(&output).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert!(!output.exists());
 
         fs::remove_dir_all(sandbox).unwrap();
     }
