@@ -13,16 +13,40 @@ use pliego::{IMAGE_LIMITS, ImageLimit};
 
 use super::asset_cache;
 use super::resource_policy::{
-    ControlledResource, ResourcePolicyFailure, ResourceRequest, sha256_hex,
+    ControlledResource, MAX_RESOURCE_EVENTS, MAX_RESOURCE_METADATA_BYTES,
+    ResourcePolicyFailure, ResourceRequest, ResponseHeaderEvidence, sha256_hex,
 };
 
 const MAX_DATA_URL_OVERHEAD_BYTES: u64 = 4 * 1024;
+const METADATA_ENTRY_OVERHEAD_BYTES: u64 = 256;
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct RequestIdentity {
     method: String,
     url: String,
     destination: String,
+}
+
+impl RequestIdentity {
+    fn metadata_bytes(&self) -> u64 {
+        (self.method.len() + self.url.len() + self.destination.len()) as u64
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ResponseIdentity {
+    status: u16,
+    content_type: Option<String>,
+    content_address: String,
+    response_headers: ResponseHeaderEvidence,
+}
+
+impl ResponseIdentity {
+    fn metadata_bytes(&self) -> u64 {
+        self.content_type.as_ref().map_or(0, String::len) as u64
+            + self.content_address.len() as u64
+            + self.response_headers.retained_metadata_bytes()
+    }
 }
 
 impl RequestIdentity {
@@ -40,6 +64,7 @@ pub(crate) struct OwnedResource {
     status: u16,
     content_type: Option<String>,
     content_address: String,
+    response_headers: ResponseHeaderEvidence,
     body: Arc<[u8]>,
 }
 
@@ -56,6 +81,10 @@ impl OwnedResource {
         &self.content_address
     }
 
+    pub(crate) fn response_headers(&self) -> &ResponseHeaderEvidence {
+        &self.response_headers
+    }
+
     pub(crate) fn body(&self) -> &[u8] {
         &self.body
     }
@@ -70,12 +99,15 @@ struct ImageCost {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct OwnedResourceStore {
     requests: BTreeMap<RequestIdentity, OwnedResource>,
-    url_to_resource: BTreeMap<String, String>,
+    url_to_resource: BTreeMap<String, ResponseIdentity>,
     resources: BTreeMap<String, Arc<[u8]>>,
     image_costs: BTreeMap<String, ImageCost>,
     resident_bytes: u64,
     decoded_image_pixels: u64,
     decompressed_image_bytes: u64,
+    metadata_bytes: u64,
+    max_identities: usize,
+    max_metadata_bytes: u64,
 }
 
 impl Default for OwnedResourceStore {
@@ -86,6 +118,14 @@ impl Default for OwnedResourceStore {
 
 impl OwnedResourceStore {
     pub(crate) fn new(reserved_bytes: u64) -> Self {
+        Self::with_limits(
+            reserved_bytes,
+            MAX_RESOURCE_EVENTS,
+            MAX_RESOURCE_METADATA_BYTES,
+        )
+    }
+
+    fn with_limits(reserved_bytes: u64, max_identities: usize, max_metadata_bytes: u64) -> Self {
         Self {
             requests: BTreeMap::new(),
             url_to_resource: BTreeMap::new(),
@@ -94,6 +134,9 @@ impl OwnedResourceStore {
             resident_bytes: reserved_bytes,
             decoded_image_pixels: 0,
             decompressed_image_bytes: 0,
+            metadata_bytes: 0,
+            max_identities,
+            max_metadata_bytes,
         }
     }
 
@@ -101,8 +144,17 @@ impl OwnedResourceStore {
         &mut self,
         request: &ResourceRequest,
         resource: ControlledResource,
+        headers: &http::HeaderMap,
     ) -> Result<OwnedResource, ResourcePolicyFailure> {
         let identity = RequestIdentity::new(request);
+        let response_headers = ResponseHeaderEvidence::from_headers(headers).map_err(|reason| {
+            resource_failure(
+                request,
+                "RESOURCE_METADATA_LIMIT_EXCEEDED",
+                "denied",
+                reason,
+            )
+        })?;
         if resource.body.len() as u64 > asset_cache::MAX_CACHE_BYTES {
             return Err(resource_failure(
                 request,
@@ -120,12 +172,33 @@ impl OwnedResourceStore {
             content_type,
             body,
         } = resource;
+        let header_content_type = headers
+            .get(http::header::CONTENT_TYPE)
+            .map(|value| value.to_str())
+            .transpose()
+            .map_err(|error| {
+                resource_failure(
+                    request,
+                    "RESOURCE_METADATA_INVALID",
+                    "invalid",
+                    format!("response Content-Type header is invalid: {error}"),
+                )
+            })?;
+        if header_content_type != content_type.as_deref() {
+            return Err(resource_failure(
+                request,
+                "RESOURCE_METADATA_INVALID",
+                "invalid",
+                "response Content-Type metadata does not match the intercepted headers".into(),
+            ));
+        }
         let content_address = format!("sha256:{}", sha256_hex(&body));
 
         if let Some(existing) = self.requests.get(&identity) {
             return if existing.status == status
                 && existing.content_type.as_deref() == content_type.as_deref()
                 && existing.content_address == content_address
+                && existing.response_headers == response_headers
                 && existing.body() == body
             {
                 Ok(existing.clone())
@@ -134,11 +207,17 @@ impl OwnedResourceStore {
             };
         }
 
+        let response_identity = ResponseIdentity {
+            status,
+            content_type: content_type.clone(),
+            content_address: content_address.clone(),
+            response_headers: response_headers.clone(),
+        };
         if request.method != "HEAD"
             && self
                 .url_to_resource
                 .get(&identity.url)
-                .is_some_and(|existing| existing != &content_address)
+                .is_some_and(|existing| existing != &response_identity)
         {
             return Err(changed_resource_failure(request));
         }
@@ -199,10 +278,58 @@ impl OwnedResourceStore {
             ),
             None => (self.decoded_image_pixels, self.decompressed_image_bytes),
         };
+        if self.requests.len() >= self.max_identities {
+            return Err(resource_failure(
+                request,
+                "RESOURCE_METADATA_LIMIT_EXCEEDED",
+                "denied",
+                format!(
+                    "controlled resources exceed the {}-identity bound",
+                    self.max_identities
+                ),
+            ));
+        }
+        let response_metadata_bytes = response_identity.metadata_bytes();
+        let mut additional_metadata_bytes = identity
+            .metadata_bytes()
+            .saturating_add(response_metadata_bytes)
+            .saturating_add(METADATA_ENTRY_OVERHEAD_BYTES);
+        if request.method != "HEAD" {
+            additional_metadata_bytes = additional_metadata_bytes
+                .saturating_add(identity.url.len() as u64)
+                .saturating_add(response_metadata_bytes)
+                .saturating_add(METADATA_ENTRY_OVERHEAD_BYTES);
+        }
+        if !self.resources.contains_key(&content_address) {
+            additional_metadata_bytes = additional_metadata_bytes
+                .saturating_add(content_address.len() as u64)
+                .saturating_add(METADATA_ENTRY_OVERHEAD_BYTES);
+        }
+        if image_cost.is_some() {
+            additional_metadata_bytes = additional_metadata_bytes
+                .saturating_add(identity.url.len() as u64)
+                .saturating_add(METADATA_ENTRY_OVERHEAD_BYTES);
+        }
+        let next_metadata_bytes = self
+            .metadata_bytes
+            .checked_add(additional_metadata_bytes)
+            .filter(|bytes| *bytes <= self.max_metadata_bytes)
+            .ok_or_else(|| {
+                resource_failure(
+                    request,
+                    "RESOURCE_METADATA_LIMIT_EXCEEDED",
+                    "denied",
+                    format!(
+                        "controlled resource metadata exceeds the {}-byte aggregate bound",
+                        self.max_metadata_bytes
+                    ),
+                )
+            })?;
 
         self.resident_bytes = next_resident_bytes;
         self.decoded_image_pixels = next_pixels;
         self.decompressed_image_bytes = next_image_bytes;
+        self.metadata_bytes = next_metadata_bytes;
         let body = self
             .resources
             .get(&content_address)
@@ -216,12 +343,13 @@ impl OwnedResourceStore {
         }
         if request.method != "HEAD" {
             self.url_to_resource
-                .insert(identity.url.clone(), content_address.clone());
+                .insert(identity.url.clone(), response_identity);
         }
         let owned = OwnedResource {
             status,
             content_type,
             content_address,
+            response_headers,
             body,
         };
         self.requests.insert(identity, owned.clone());
@@ -230,7 +358,9 @@ impl OwnedResourceStore {
 
     pub(crate) fn resolve_url(&self, url: &str) -> Option<String> {
         let url = url::Url::parse(url).ok()?;
-        self.url_to_resource.get(&normalized_url(&url)).cloned()
+        self.url_to_resource
+            .get(&normalized_url(&url))
+            .map(|resource| resource.content_address.clone())
     }
 
     pub(crate) fn resolve_content(&self, resource: &str) -> Option<&[u8]> {
@@ -352,6 +482,21 @@ fn image_cost(
             "raster image is not PNG, JPEG, GIF, or WebP".into(),
         ));
     };
+    if raster_has_multiple_frames(body).map_err(|reason| {
+        resource_failure(
+            request,
+            "RESOURCE_IMAGE_INVALID",
+            "invalid",
+            format!("raster image container is invalid: {reason}"),
+        )
+    })? {
+        return Err(resource_failure(
+            request,
+            "RESOURCE_IMAGE_ANIMATION_UNSUPPORTED",
+            "unsupported",
+            "animated raster images require deterministic document-time settlement".into(),
+        ));
+    }
     let dimensions = imagesize::blob_size(body).map_err(|error| {
         resource_failure(
             request,
@@ -394,6 +539,196 @@ fn image_cost(
         decoded_pixels,
         decompressed_bytes,
     }))
+}
+
+fn raster_has_multiple_frames(body: &[u8]) -> Result<bool, &'static str> {
+    if body.starts_with(b"\x89PNG\r\n\x1a\n") {
+        png_has_multiple_frames(body)
+    } else if body.starts_with(b"GIF87a") || body.starts_with(b"GIF89a") {
+        gif_has_multiple_frames(body)
+    } else if body.len() >= 12 && &body[..4] == b"RIFF" && &body[8..12] == b"WEBP" {
+        webp_has_multiple_frames(body)
+    } else {
+        Ok(false)
+    }
+}
+
+fn png_has_multiple_frames(body: &[u8]) -> Result<bool, &'static str> {
+    let mut offset = 8usize;
+    while offset < body.len() {
+        let header_end = offset.checked_add(8).ok_or("PNG chunk offset overflow")?;
+        if header_end > body.len() {
+            return Err("truncated PNG chunk header");
+        }
+        let length = u32::from_be_bytes(
+            body[offset..offset + 4]
+                .try_into()
+                .map_err(|_| "truncated PNG chunk length")?,
+        ) as usize;
+        let chunk_end = header_end
+            .checked_add(length)
+            .and_then(|end| end.checked_add(4))
+            .ok_or("PNG chunk length overflow")?;
+        if chunk_end > body.len() {
+            return Err("truncated PNG chunk body");
+        }
+        let kind = &body[offset + 4..header_end];
+        if kind == b"acTL" {
+            if length != 8 {
+                return Err("invalid APNG animation-control chunk");
+            }
+            let frames = u32::from_be_bytes(
+                body[header_end..header_end + 4]
+                    .try_into()
+                    .map_err(|_| "truncated APNG frame count")?,
+            );
+            if frames == 0 {
+                return Err("APNG declares zero frames");
+            }
+            return Ok(frames > 1);
+        }
+        if kind == b"IEND" {
+            return Ok(false);
+        }
+        offset = chunk_end;
+    }
+    Err("PNG has no end chunk")
+}
+
+fn gif_has_multiple_frames(body: &[u8]) -> Result<bool, &'static str> {
+    if body.len() < 13 {
+        return Err("truncated GIF logical screen descriptor");
+    }
+    let packed = body[10];
+    let mut offset = 13usize;
+    if packed & 0x80 != 0 {
+        let table_bytes = 3usize
+            .checked_mul(1usize << ((packed & 0x07) + 1))
+            .ok_or("GIF global color table overflow")?;
+        offset = offset
+            .checked_add(table_bytes)
+            .ok_or("GIF global color table overflow")?;
+        if offset > body.len() {
+            return Err("truncated GIF global color table");
+        }
+    }
+
+    let mut frames = 0usize;
+    loop {
+        let marker = *body.get(offset).ok_or("GIF has no trailer")?;
+        offset += 1;
+        match marker {
+            0x2c => {
+                frames += 1;
+                if frames > 1 {
+                    return Ok(true);
+                }
+                let descriptor_end = offset
+                    .checked_add(9)
+                    .ok_or("GIF image descriptor overflow")?;
+                if descriptor_end > body.len() {
+                    return Err("truncated GIF image descriptor");
+                }
+                let packed = body[offset + 8];
+                offset = descriptor_end;
+                if packed & 0x80 != 0 {
+                    let table_bytes = 3usize
+                        .checked_mul(1usize << ((packed & 0x07) + 1))
+                        .ok_or("GIF local color table overflow")?;
+                    offset = offset
+                        .checked_add(table_bytes)
+                        .ok_or("GIF local color table overflow")?;
+                    if offset > body.len() {
+                        return Err("truncated GIF local color table");
+                    }
+                }
+                offset = offset
+                    .checked_add(1)
+                    .ok_or("GIF image data overflow")?;
+                if offset > body.len() {
+                    return Err("truncated GIF LZW code size");
+                }
+                offset = skip_gif_sub_blocks(body, offset)?;
+            },
+            0x21 => {
+                offset = offset
+                    .checked_add(1)
+                    .ok_or("GIF extension overflow")?;
+                if offset > body.len() {
+                    return Err("truncated GIF extension label");
+                }
+                offset = skip_gif_sub_blocks(body, offset)?;
+            },
+            0x3b => return Ok(false),
+            _ => return Err("invalid GIF block marker"),
+        }
+    }
+}
+
+fn skip_gif_sub_blocks(body: &[u8], mut offset: usize) -> Result<usize, &'static str> {
+    loop {
+        let length = *body.get(offset).ok_or("truncated GIF sub-block")? as usize;
+        offset += 1;
+        if length == 0 {
+            return Ok(offset);
+        }
+        offset = offset
+            .checked_add(length)
+            .ok_or("GIF sub-block length overflow")?;
+        if offset > body.len() {
+            return Err("truncated GIF sub-block body");
+        }
+    }
+}
+
+fn webp_has_multiple_frames(body: &[u8]) -> Result<bool, &'static str> {
+    if body.len() < 12 {
+        return Err("truncated WebP header");
+    }
+    let declared = u32::from_le_bytes(
+        body[4..8]
+            .try_into()
+            .map_err(|_| "truncated WebP length")?,
+    ) as usize;
+    let end = declared
+        .checked_add(8)
+        .ok_or("WebP container length overflow")?;
+    if end > body.len() || end < 12 {
+        return Err("truncated WebP container");
+    }
+
+    let mut offset = 12usize;
+    while offset < end {
+        let header_end = offset.checked_add(8).ok_or("WebP chunk overflow")?;
+        if header_end > end {
+            return Err("truncated WebP chunk header");
+        }
+        let kind = &body[offset..offset + 4];
+        let length = u32::from_le_bytes(
+            body[offset + 4..header_end]
+                .try_into()
+                .map_err(|_| "truncated WebP chunk length")?,
+        ) as usize;
+        let payload_end = header_end
+            .checked_add(length)
+            .ok_or("WebP chunk length overflow")?;
+        if payload_end > end {
+            return Err("truncated WebP chunk body");
+        }
+        if kind == b"ANIM" || kind == b"ANMF" {
+            return Ok(true);
+        }
+        if kind == b"VP8X" && length >= 1 && body[header_end] & 0x02 != 0 {
+            return Ok(true);
+        }
+        offset = payload_end
+            .checked_add(length & 1)
+            .ok_or("WebP padding overflow")?;
+        if offset > end {
+            return Err("truncated WebP chunk padding");
+        }
+    }
+    Ok(false)
 }
 
 fn checked_image_sum(
@@ -480,6 +815,15 @@ mod tests {
         }
     }
 
+    fn headers(content_type: &str) -> http::HeaderMap {
+        let mut headers = http::HeaderMap::new();
+        headers.insert(
+            http::header::CONTENT_TYPE,
+            http::HeaderValue::from_str(content_type).unwrap(),
+        );
+        headers
+    }
+
     fn fixture_png() -> Vec<u8> {
         BASE64_STANDARD
             .decode(
@@ -497,12 +841,14 @@ mod tests {
             .retain(
                 &first_request,
                 resource("application/octet-stream", b"same".to_vec()),
+                &headers("application/octet-stream"),
             )
             .unwrap();
         let second = store
             .retain(
                 &second_request,
                 resource("application/octet-stream", b"same".to_vec()),
+                &headers("application/octet-stream"),
             )
             .unwrap();
 
@@ -524,12 +870,14 @@ mod tests {
             .retain(
                 &first_request,
                 resource("application/octet-stream", b"one".to_vec()),
+                &headers("application/octet-stream"),
             )
             .unwrap();
         let error = changed
             .retain(
                 &first_request,
                 resource("application/octet-stream", b"two".to_vec()),
+                &headers("application/octet-stream"),
             )
             .unwrap_err();
         assert_eq!(error.code, "RESOURCE_CHANGED_DURING_RENDER");
@@ -541,12 +889,90 @@ mod tests {
             .retain(
                 &request("GET", "https://example.test/two.bin", "Script"),
                 resource("application/octet-stream", b"12".to_vec()),
+                &headers("application/octet-stream"),
             )
             .unwrap_err();
         assert_eq!(error.code, "RESOURCE_DENIED");
         assert!(full.requests.is_empty());
         assert!(full.resources.is_empty());
         assert_eq!(full.resident_bytes(), asset_cache::MAX_CACHE_BYTES - 1);
+    }
+
+    #[test]
+    fn response_headers_and_cross_destination_metadata_are_one_url_identity() {
+        let mut store = OwnedResourceStore::default();
+        let url = "https://example.test/stable.css";
+        let mut original_headers = headers("text/css");
+        original_headers.insert(
+            http::header::CONTENT_SECURITY_POLICY,
+            http::HeaderValue::from_static("default-src 'none'"),
+        );
+        store
+            .retain(
+                &request("GET", url, "Style"),
+                resource("text/css", b"body {}".to_vec()),
+                &original_headers,
+            )
+            .unwrap();
+
+        let mut changed_headers = headers("text/css");
+        changed_headers.insert(
+            http::header::CONTENT_SECURITY_POLICY,
+            http::HeaderValue::from_static("default-src *"),
+        );
+        let error = store
+            .retain(
+                &request("GET", url, "Style"),
+                resource("text/css", b"body {}".to_vec()),
+                &changed_headers,
+            )
+            .unwrap_err();
+        assert_eq!(error.code, "RESOURCE_CHANGED_DURING_RENDER");
+
+        let mut changed_status = resource("text/css", b"body {}".to_vec());
+        changed_status.status = 201;
+        let error = store
+            .retain(
+                &request("GET", url, "Image"),
+                changed_status,
+                &original_headers,
+            )
+            .unwrap_err();
+        assert_eq!(error.code, "RESOURCE_CHANGED_DURING_RENDER");
+        assert_eq!(store.requests.len(), 1);
+    }
+
+    #[test]
+    fn request_identity_and_metadata_are_bounded_before_insertion() {
+        let mut identities = OwnedResourceStore::with_limits(0, 1, u64::MAX);
+        identities
+            .retain(
+                &request("GET", "https://example.test/one", "Script"),
+                resource("text/javascript", Vec::new()),
+                &headers("text/javascript"),
+            )
+            .unwrap();
+        let error = identities
+            .retain(
+                &request("GET", "https://example.test/two", "Script"),
+                resource("text/javascript", Vec::new()),
+                &headers("text/javascript"),
+            )
+            .unwrap_err();
+        assert_eq!(error.code, "RESOURCE_METADATA_LIMIT_EXCEEDED");
+        assert_eq!(identities.requests.len(), 1);
+
+        let mut metadata = OwnedResourceStore::with_limits(0, usize::MAX, 1);
+        let error = metadata
+            .retain(
+                &request("GET", "https://example.test/metadata", "Script"),
+                resource("text/javascript", Vec::new()),
+                &headers("text/javascript"),
+            )
+            .unwrap_err();
+        assert_eq!(error.code, "RESOURCE_METADATA_LIMIT_EXCEEDED");
+        assert!(metadata.requests.is_empty());
+        assert_eq!(metadata.metadata_bytes, 0);
     }
 
     #[test]
@@ -585,6 +1011,7 @@ mod tests {
             .retain(
                 &favicon,
                 resource("text/plain;charset=US-ASCII", Vec::new()),
+                &headers("text/plain;charset=US-ASCII"),
             )
             .unwrap();
 
@@ -603,6 +1030,7 @@ mod tests {
             .retain(
                 &request("GET", "https://example.test/valid.png", "Image"),
                 resource("image/png", valid.clone()),
+                &headers("image/png"),
             )
             .unwrap();
 
@@ -612,6 +1040,7 @@ mod tests {
             .retain(
                 &request("GET", "https://example.test/wide.png", "Image"),
                 resource("image/png", too_wide.clone()),
+                &headers("image/png"),
             )
             .unwrap_err();
         assert_eq!(error.code, "RESOURCE_IMAGE_LIMIT_EXCEEDED");
@@ -622,12 +1051,14 @@ mod tests {
             .retain(
                 &request("GET", "https://example.test/destination.png", "Script"),
                 resource("application/octet-stream", too_wide.clone()),
+                &headers("application/octet-stream"),
             )
             .unwrap();
         let error = changed_destination
             .retain(
                 &request("GET", "https://example.test/destination.png", "Image"),
                 resource("application/octet-stream", too_wide),
+                &headers("application/octet-stream"),
             )
             .unwrap_err();
         assert_eq!(error.code, "RESOURCE_IMAGE_LIMIT_EXCEEDED");
@@ -642,17 +1073,65 @@ mod tests {
             .retain(
                 &request("GET", "https://example.test/large-a.png", "Image"),
                 resource("image/png", first_large),
+                &headers("image/png"),
             )
             .unwrap();
         let error = aggregate
             .retain(
                 &request("GET", "https://example.test/large-b.png", "Image"),
                 resource("image/png", second_large),
+                &headers("image/png"),
             )
             .unwrap_err();
         assert_eq!(error.code, "RESOURCE_IMAGE_LIMIT_EXCEEDED");
         assert!(error.reason.contains("document-decoded-pixel"));
         assert_eq!(aggregate.resources.len(), 1);
         assert_eq!(aggregate.image_costs.len(), 1);
+    }
+
+    #[test]
+    fn animated_rasters_fail_before_servo_can_retain_every_frame() {
+        let static_gif = BASE64_STANDARD
+            .decode(b"R0lGODdhAQABAIEAAP8AAAAAAAAAAAAAACwAAAAAAQABAAAIBAABBAQAOw==")
+            .unwrap();
+        let animated_gif = BASE64_STANDARD
+            .decode(b"R0lGODlhAQABAIEAAP8AAAAAAAAAAAAAACH/C05FVFNDQVBFMi4wAwEAAAAh+QQACgAAACwAAAAAAQABAAAIBAABBAQAIfkEAQoAAQAsAAAAAAEAAQCBAAD/AAAAAAAAAAAACAQAAQQEADs=")
+            .unwrap();
+        assert!(!gif_has_multiple_frames(&static_gif).unwrap());
+        assert!(gif_has_multiple_frames(&animated_gif).unwrap());
+
+        let mut animated_png = b"\x89PNG\r\n\x1a\n".to_vec();
+        animated_png.extend_from_slice(&8u32.to_be_bytes());
+        animated_png.extend_from_slice(b"acTL");
+        animated_png.extend_from_slice(&2u32.to_be_bytes());
+        animated_png.extend_from_slice(&0u32.to_be_bytes());
+        animated_png.extend_from_slice(&0u32.to_be_bytes());
+        assert!(png_has_multiple_frames(&animated_png).unwrap());
+
+        let mut animated_webp = b"RIFF".to_vec();
+        animated_webp.extend_from_slice(&18u32.to_le_bytes());
+        animated_webp.extend_from_slice(b"WEBP");
+        animated_webp.extend_from_slice(b"ANIM");
+        animated_webp.extend_from_slice(&6u32.to_le_bytes());
+        animated_webp.extend_from_slice(&[0; 6]);
+        assert!(webp_has_multiple_frames(&animated_webp).unwrap());
+
+        for (content_type, body) in [
+            ("image/gif", animated_gif),
+            ("image/png", animated_png),
+            ("image/webp", animated_webp),
+        ] {
+            let mut store = OwnedResourceStore::default();
+            let error = store
+                .retain(
+                    &request("GET", "https://example.test/animated", "Image"),
+                    resource(content_type, body),
+                    &headers(content_type),
+                )
+                .unwrap_err();
+            assert_eq!(error.code, "RESOURCE_IMAGE_ANIMATION_UNSUPPORTED");
+            assert!(store.requests.is_empty());
+            assert!(store.resources.is_empty());
+        }
     }
 }

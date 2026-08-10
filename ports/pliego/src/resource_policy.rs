@@ -16,6 +16,31 @@ use super::asset_cache;
 pub(crate) const RESOURCE_POLICY_ID: &str = "pliego.resource-policy.v1";
 pub(crate) const DEFAULT_RESOURCE_TIMEOUT_MS: u64 = 10_000;
 pub(crate) const MAX_RESOURCE_TIMEOUT_MS: u64 = 60_000;
+#[cfg(all(
+    feature = "document-session",
+    not(any(target_os = "android", target_env = "ohos"))
+))]
+pub(crate) const MAX_RESPONSE_HEADER_COUNT: usize = 256;
+#[cfg(all(
+    feature = "document-session",
+    not(any(target_os = "android", target_env = "ohos"))
+))]
+pub(crate) const MAX_RESPONSE_HEADER_BYTES: u64 = 64 * 1024;
+#[cfg(all(
+    feature = "document-session",
+    not(any(target_os = "android", target_env = "ohos"))
+))]
+pub(crate) const MAX_RESOURCE_EVENTS: usize = 16_384;
+#[cfg(all(
+    feature = "document-session",
+    not(any(target_os = "android", target_env = "ohos"))
+))]
+pub(crate) const MAX_RESOURCE_METADATA_BYTES: u64 = 64 * 1024 * 1024;
+#[cfg(all(
+    feature = "document-session",
+    not(any(target_os = "android", target_env = "ohos"))
+))]
+const RESPONSE_HEADER_ENTRY_OVERHEAD_BYTES: u64 = 64;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ResourcePolicyConfig {
@@ -129,6 +154,94 @@ pub(crate) struct ControlledHttpResponse {
     not(any(target_os = "android", target_env = "ohos"))
 ))]
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ResponseHeaderEvidence {
+    pub(crate) count: u64,
+    pub(crate) bytes: u64,
+    pub(crate) names: Vec<String>,
+    pub(crate) sha256: String,
+}
+
+#[cfg(all(
+    feature = "document-session",
+    not(any(target_os = "android", target_env = "ohos"))
+))]
+impl ResponseHeaderEvidence {
+    pub(crate) fn from_headers(headers: &http::HeaderMap) -> Result<Self, String> {
+        let count = headers.len();
+        if count > MAX_RESPONSE_HEADER_COUNT {
+            return Err(format!(
+                "response has {count} header values, exceeding the {MAX_RESPONSE_HEADER_COUNT}-value bound"
+            ));
+        }
+
+        let mut bytes = 0u64;
+        let mut entries = headers
+            .iter()
+            .enumerate()
+            .map(|(index, (name, value))| {
+                bytes = bytes
+                    .checked_add(name.as_str().len() as u64)
+                    .and_then(|bytes| bytes.checked_add(value.as_bytes().len() as u64))
+                    .unwrap_or(u64::MAX);
+                (name.as_str().as_bytes(), value.as_bytes(), index)
+            })
+            .collect::<Vec<_>>();
+        if bytes > MAX_RESPONSE_HEADER_BYTES {
+            return Err(format!(
+                "response headers contain {bytes} bytes, exceeding the {MAX_RESPONSE_HEADER_BYTES}-byte bound"
+            ));
+        }
+
+        // Header names are case-insensitive and cross-name insertion order is not semantic.
+        // Preserve the original order of repeated values for the same name.
+        entries.sort_by(|left, right| {
+            left.0
+                .cmp(right.0)
+                .then_with(|| left.2.cmp(&right.2))
+        });
+        let mut names = entries
+            .iter()
+            .map(|(name, _, _)| String::from_utf8_lossy(name).into_owned())
+            .collect::<Vec<_>>();
+        names.dedup();
+        let mut canonical = Vec::with_capacity(bytes as usize + entries.len() * 8 + 32);
+        canonical.extend_from_slice(b"pliego.response-headers.v1\0");
+        for (name, value, _) in entries {
+            canonical.extend_from_slice(&(name.len() as u32).to_be_bytes());
+            canonical.extend_from_slice(name);
+            canonical.extend_from_slice(&(value.len() as u32).to_be_bytes());
+            canonical.extend_from_slice(value);
+        }
+        Ok(Self {
+            count: count as u64,
+            bytes,
+            names,
+            sha256: sha256_hex(&canonical),
+        })
+    }
+
+    pub(crate) fn retained_metadata_bytes(&self) -> u64 {
+        self.sha256.len() as u64
+            + self.names.iter().map(|name| name.len() as u64).sum::<u64>()
+            + self.names.len() as u64 * std::mem::size_of::<String>() as u64
+            + std::mem::size_of::<Self>() as u64
+    }
+
+    fn intercepted_metadata_bytes(&self) -> u64 {
+        self.retained_metadata_bytes()
+            .saturating_add(self.bytes)
+            .saturating_add(
+                self.count
+                    .saturating_mul(RESPONSE_HEADER_ENTRY_OVERHEAD_BYTES),
+            )
+    }
+}
+
+#[cfg(all(
+    feature = "document-session",
+    not(any(target_os = "android", target_env = "ohos"))
+))]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ResourceEvidence {
     pub(crate) request: ResourceRequest,
     pub(crate) source: ResourceSource,
@@ -138,6 +251,7 @@ pub(crate) struct ResourceEvidence {
     pub(crate) bytes: Option<u64>,
     pub(crate) sha256: Option<String>,
     pub(crate) content_address: Option<String>,
+    pub(crate) response_headers: Option<ResponseHeaderEvidence>,
 }
 
 #[cfg(all(
@@ -152,7 +266,19 @@ impl ResourceEvidence {
         content_type: &str,
         body: &[u8],
     ) -> Self {
-        Self::loaded_response(request, source, 200, Some(content_type), body)
+        let mut headers = http::HeaderMap::new();
+        headers.insert(
+            http::header::CONTENT_TYPE,
+            http::HeaderValue::from_str(content_type).unwrap(),
+        );
+        Self::loaded_response(
+            request,
+            source,
+            200,
+            Some(content_type),
+            body,
+            ResponseHeaderEvidence::from_headers(&headers).unwrap(),
+        )
     }
 
     pub(crate) fn loaded_response(
@@ -161,6 +287,7 @@ impl ResourceEvidence {
         response_status: u16,
         content_type: Option<&str>,
         body: &[u8],
+        response_headers: ResponseHeaderEvidence,
     ) -> Self {
         let bytes = body.len() as u64;
         let sha256 = sha256_hex(&body);
@@ -174,6 +301,7 @@ impl ResourceEvidence {
             bytes: Some(bytes),
             sha256: Some(sha256),
             content_address: Some(content_address),
+            response_headers: Some(response_headers),
         }
     }
 
@@ -187,6 +315,7 @@ impl ResourceEvidence {
             bytes: None,
             sha256: None,
             content_address: None,
+            response_headers: None,
         }
     }
 
@@ -201,7 +330,29 @@ impl ResourceEvidence {
                 .get(http::header::CONTENT_TYPE)
                 .and_then(|value| value.to_str().ok()),
             &response.body,
+            ResponseHeaderEvidence::from_headers(&response.headers).unwrap(),
         )
+    }
+
+    pub(crate) fn metadata_bytes(&self) -> u64 {
+        let request = (self.request.method.len() as u64)
+            .saturating_add(self.request.url.as_str().len() as u64)
+            .saturating_add(self.request.destination.len() as u64)
+            .saturating_add(
+                self.request
+                    .referrer_url
+                    .as_ref()
+                    .map_or(0, |url| url.as_str().len() as u64),
+            );
+        let response = (self.content_type.as_ref().map_or(0, String::len) as u64)
+            .saturating_add(self.sha256.as_ref().map_or(0, String::len) as u64)
+            .saturating_add(self.content_address.as_ref().map_or(0, String::len) as u64)
+            .saturating_add(
+                self.response_headers
+                    .as_ref()
+                    .map_or(0, ResponseHeaderEvidence::intercepted_metadata_bytes),
+            );
+        request.saturating_add(response)
     }
 }
 
@@ -620,6 +771,10 @@ pub(crate) fn fetch_controlled_http(
             )
         })?;
     *outbound.headers_mut() = headers.clone();
+    outbound.headers_mut().insert(
+        http::header::ACCEPT_ENCODING,
+        http::HeaderValue::from_static("identity"),
+    );
 
     let client = client.clone();
     let is_head = request.method == "HEAD";
@@ -667,7 +822,7 @@ pub(crate) fn fetch_controlled_http(
         .await
     });
 
-    let (status, headers, body) = match fetched {
+    let (status, mut headers, body) = match fetched {
         Err(_) => {
             return Err(failure(
                 "RESOURCE_TIMEOUT",
@@ -705,11 +860,50 @@ pub(crate) fn fetch_controlled_http(
         return Err(failure(code, failure_status, reason.into(), is_redirect));
     }
 
+    headers = normalize_controlled_response_headers(request, headers, body.len())?;
+
     Ok(ControlledHttpResponse {
         status,
         headers,
         body,
     })
+}
+
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+pub(crate) fn normalize_controlled_response_headers(
+    request: &ResourceRequest,
+    mut headers: http::HeaderMap,
+    body_bytes: usize,
+) -> Result<http::HeaderMap, ResourcePolicyFailure> {
+    if headers.get_all(http::header::CONTENT_ENCODING).iter().any(|value| {
+        value.to_str().map_or(true, |value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .any(|encoding| !encoding.eq_ignore_ascii_case("identity"))
+        })
+    }) {
+        return Err(ResourcePolicyFailure::new(
+            request,
+            "RESOURCE_ENCODING_UNSUPPORTED",
+            "unsupported",
+            "controlled HTTP resources must use identity content encoding",
+        ));
+    }
+    headers.remove(http::header::CONTENT_ENCODING);
+    headers.remove(http::header::CONTENT_LENGTH);
+    headers.insert(
+        http::header::CONTENT_LENGTH,
+        http::HeaderValue::from_str(&body_bytes.to_string()).map_err(|error| {
+            ResourcePolicyFailure::new(
+                request,
+                "RESOURCE_DENIED",
+                "denied",
+                format!("controlled HTTP response length is invalid: {error}"),
+            )
+        })?,
+    );
+    Ok(headers)
 }
 
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
@@ -1028,6 +1222,8 @@ mod tests {
         assert_eq!(delegated.bytes, None);
         assert_eq!(delegated.sha256, None);
         assert_eq!(delegated.content_address, None);
+        assert!(loaded.response_headers.is_some());
+        assert_eq!(delegated.response_headers, None);
         let accounting = ResourceAccounting::from_evidence(&[loaded, delegated]);
         assert_eq!(
             accounting,
@@ -1141,5 +1337,72 @@ mod tests {
             evidence.content_address.as_deref(),
             Some("sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
         );
+        let header_evidence = evidence.response_headers.unwrap();
+        assert_eq!(header_evidence.names, ["content-type"]);
+        assert_eq!(header_evidence.count, 1);
+    }
+
+    #[test]
+    #[cfg(feature = "document-session")]
+    fn response_header_identity_is_order_stable_but_preserves_repeated_value_order() {
+        let mut first = http::HeaderMap::new();
+        first.insert("x-second", http::HeaderValue::from_static("2"));
+        first.append("set-cookie", http::HeaderValue::from_static("a=1"));
+        first.append("set-cookie", http::HeaderValue::from_static("b=2"));
+        first.insert("x-first", http::HeaderValue::from_static("1"));
+        let mut reordered_names = http::HeaderMap::new();
+        reordered_names.insert("x-first", http::HeaderValue::from_static("1"));
+        reordered_names.append("set-cookie", http::HeaderValue::from_static("a=1"));
+        reordered_names.append("set-cookie", http::HeaderValue::from_static("b=2"));
+        reordered_names.insert("x-second", http::HeaderValue::from_static("2"));
+        let mut reversed_values = reordered_names.clone();
+        reversed_values.remove("set-cookie");
+        reversed_values.append("set-cookie", http::HeaderValue::from_static("b=2"));
+        reversed_values.append("set-cookie", http::HeaderValue::from_static("a=1"));
+
+        let first = ResponseHeaderEvidence::from_headers(&first).unwrap();
+        let reordered = ResponseHeaderEvidence::from_headers(&reordered_names).unwrap();
+        let reversed = ResponseHeaderEvidence::from_headers(&reversed_values).unwrap();
+        assert_eq!(first, reordered);
+        assert_ne!(first.sha256, reversed.sha256);
+        assert_eq!(first.names, ["set-cookie", "x-first", "x-second"]);
+
+        let mut too_many = http::HeaderMap::new();
+        for _ in 0..=MAX_RESPONSE_HEADER_COUNT {
+            too_many.append("x-value", http::HeaderValue::from_static("1"));
+        }
+        assert!(ResponseHeaderEvidence::from_headers(&too_many).is_err());
+    }
+
+    #[test]
+    fn controlled_response_headers_are_identity_encoded_and_body_bound() {
+        let request = ResourceRequest {
+            method: "GET".into(),
+            url: url::Url::parse("https://example.test/body").unwrap(),
+            destination: "Script".into(),
+            referrer_url: None,
+            is_for_main_frame: false,
+            is_redirect: false,
+        };
+        let mut encoded = http::HeaderMap::new();
+        encoded.insert(
+            http::header::CONTENT_ENCODING,
+            http::HeaderValue::from_static("gzip"),
+        );
+        let error = normalize_controlled_response_headers(&request, encoded, 3).unwrap_err();
+        assert_eq!(error.code, "RESOURCE_ENCODING_UNSUPPORTED");
+
+        let mut identity = http::HeaderMap::new();
+        identity.insert(
+            http::header::CONTENT_ENCODING,
+            http::HeaderValue::from_static("identity"),
+        );
+        identity.insert(
+            http::header::CONTENT_LENGTH,
+            http::HeaderValue::from_static("999"),
+        );
+        let normalized = normalize_controlled_response_headers(&request, identity, 3).unwrap();
+        assert!(!normalized.contains_key(http::header::CONTENT_ENCODING));
+        assert_eq!(normalized[http::header::CONTENT_LENGTH], "3");
     }
 }

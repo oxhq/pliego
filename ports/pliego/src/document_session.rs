@@ -31,14 +31,18 @@ use servo::{
 use url::Url;
 
 use super::engine::RenderEnvironment;
-use super::owned_resource_store::{OwnedResource, OwnedResourceStore, decode_bounded_data_url};
+use super::owned_resource_store::{OwnedResourceStore, decode_bounded_data_url};
 use super::readiness::{self, Readiness, ReadinessPolicy};
 use super::render_environment::{apply_timezone, unexpected_host_font};
 use super::resource_policy::{
-    ControlledResource, MAX_RESOURCE_TIMEOUT_MS, ResourceAccounting, ResourceEvidence,
-    ResourcePolicy, ResourcePolicyConfig, ResourcePolicyDecision, ResourcePolicyFailure,
-    ResourceRequest, ResourceSource, create_controlled_http_client, fetch_controlled_http,
+    ControlledResource, MAX_RESOURCE_EVENTS, MAX_RESOURCE_METADATA_BYTES,
+    MAX_RESOURCE_TIMEOUT_MS, ResourceAccounting, ResourceEvidence, ResourcePolicy,
+    ResourcePolicyConfig, ResourcePolicyDecision, ResourcePolicyFailure, ResourceRequest,
+    ResourceSource, create_controlled_http_client, fetch_controlled_http,
+    normalize_controlled_response_headers,
 };
+
+const RESOURCE_EVIDENCE_ENTRY_OVERHEAD_BYTES: u64 = 256;
 
 const TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -108,6 +112,48 @@ pub(crate) struct DocumentOutcome {
     pub(crate) resources: Vec<ResourceEvidence>,
     pub(crate) resource_accounting: ResourceAccounting,
     pub(crate) resource_store: OwnedResourceStore,
+}
+
+#[derive(Clone, Debug)]
+struct ResourceEvidenceLog {
+    entries: Vec<ResourceEvidence>,
+    metadata_bytes: u64,
+    max_metadata_bytes: u64,
+}
+
+impl Default for ResourceEvidenceLog {
+    fn default() -> Self {
+        Self {
+            entries: Vec::new(),
+            metadata_bytes: 0,
+            max_metadata_bytes: MAX_RESOURCE_METADATA_BYTES,
+        }
+    }
+}
+
+impl ResourceEvidenceLog {
+    fn push(&mut self, evidence: ResourceEvidence) -> Result<(), ResourcePolicyFailure> {
+        let next_metadata_bytes = self
+            .metadata_bytes
+            .checked_add(evidence.metadata_bytes())
+            .and_then(|bytes| bytes.checked_add(RESOURCE_EVIDENCE_ENTRY_OVERHEAD_BYTES))
+            .filter(|bytes| *bytes <= self.max_metadata_bytes)
+            .ok_or_else(|| {
+                ResourcePolicyFailure::new(
+                    &evidence.request,
+                    "RESOURCE_METADATA_LIMIT_EXCEEDED",
+                    "denied",
+                    format!(
+                        "resource evidence exceeds the {}-byte metadata bound",
+                        self.max_metadata_bytes
+                    ),
+                )
+            })?;
+        self.metadata_bytes = next_metadata_bytes;
+        self.entries.push(evidence);
+        Ok(())
+    }
+
 }
 
 pub(crate) struct DocumentSession {
@@ -230,7 +276,7 @@ impl DocumentSession {
     pub(crate) fn render(self) -> Result<DocumentOutcome, SessionError> {
         self.render_inner().map_err(|error| {
             error.with_resources(
-                self.delegate.resources.borrow().clone(),
+                self.delegate.resources.borrow().entries.clone(),
                 self.delegate.resource_store.borrow().clone(),
             )
         })
@@ -355,7 +401,7 @@ impl DocumentSession {
         }
         .map_err(|error| SessionError::new("DOCUMENT_PDF_GENERATION_FAILED", error.to_string()))?;
 
-        let resources = self.delegate.resources.borrow().clone();
+        let resources = self.delegate.resources.borrow().entries.clone();
         let resource_store = self.delegate.resource_store.borrow().clone();
         Ok(DocumentOutcome {
             capture,
@@ -508,7 +554,8 @@ struct DocumentDelegate {
     frame_ready: Cell<bool>,
     load_complete: Cell<bool>,
     resource_failure: RefCell<Option<ResourcePolicyFailure>>,
-    resources: RefCell<Vec<ResourceEvidence>>,
+    resource_events: Cell<usize>,
+    resources: RefCell<ResourceEvidenceLog>,
 }
 
 impl WebViewDelegate for DocumentDelegate {
@@ -536,12 +583,28 @@ impl WebViewDelegate for DocumentDelegate {
             is_for_main_frame: load.request().is_for_main_frame,
             is_redirect: load.request().is_redirect,
         };
+        if self.resource_events.get() >= MAX_RESOURCE_EVENTS {
+            self.cancel_resource(
+                load,
+                ResourcePolicyFailure::new(
+                    &request,
+                    "RESOURCE_METADATA_LIMIT_EXCEEDED",
+                    "denied",
+                    format!(
+                        "document resource loads exceed the {MAX_RESOURCE_EVENTS}-event bound"
+                    ),
+                ),
+            );
+            return;
+        }
+        self.resource_events.set(self.resource_events.get() + 1);
         match self.resource_policy.decide(&self.bundle_root, &request) {
             ResourcePolicyDecision::Allow { source } => {
                 if source != ResourceSource::DataUrl {
-                    self.resources
-                        .borrow_mut()
-                        .push(ResourceEvidence::delegated(request, source));
+                    let evidence = ResourceEvidence::delegated(request, source);
+                    if let Err(failure) = self.record_resource_evidence(evidence) {
+                        self.cancel_resource(load, failure);
+                    }
                     return;
                 }
                 let resource = match decode_bounded_data_url(&request) {
@@ -575,7 +638,6 @@ impl WebViewDelegate for DocumentDelegate {
                     source,
                     resource,
                     headers,
-                    http::StatusCode::OK,
                 );
             },
             ResourcePolicyDecision::FetchHttp => {
@@ -604,7 +666,6 @@ impl WebViewDelegate for DocumentDelegate {
                             ResourceSource::Http,
                             resource,
                             response.headers,
-                            response.status,
                         );
                     },
                     Err(failure) => self.cancel_resource(load, failure),
@@ -628,7 +689,6 @@ impl WebViewDelegate for DocumentDelegate {
                     source,
                     resource,
                     headers,
-                    http::StatusCode::OK,
                 );
             },
             ResourcePolicyDecision::Fail(failure) => self.cancel_resource(load, failure),
@@ -637,14 +697,6 @@ impl WebViewDelegate for DocumentDelegate {
 }
 
 impl DocumentDelegate {
-    fn retain_controlled(
-        &self,
-        request: &ResourceRequest,
-        resource: ControlledResource,
-    ) -> Result<OwnedResource, ResourcePolicyFailure> {
-        self.resource_store.borrow_mut().retain(request, resource)
-    }
-
     fn serve_owned_resource(
         &self,
         load: WebResourceLoad,
@@ -652,27 +704,60 @@ impl DocumentDelegate {
         source: ResourceSource,
         resource: ControlledResource,
         headers: HeaderMap,
-        status: http::StatusCode,
     ) {
-        let resource = match self.retain_controlled(&request, resource) {
+        let status = match http::StatusCode::from_u16(resource.status) {
+            Ok(status) => status,
+            Err(error) => {
+                self.cancel_resource(
+                    load,
+                    ResourcePolicyFailure::new(
+                        &request,
+                        "RESOURCE_METADATA_INVALID",
+                        "invalid",
+                        format!("controlled resource status is invalid: {error}"),
+                    ),
+                );
+                return;
+            },
+        };
+        let headers = match normalize_controlled_response_headers(
+            &request,
+            headers,
+            resource.body.len(),
+        ) {
+            Ok(headers) => headers,
+            Err(failure) => {
+                self.cancel_resource(load, failure);
+                return;
+            },
+        };
+        let resource = match self
+            .resource_store
+            .borrow_mut()
+            .retain(&request, resource, &headers)
+        {
             Ok(resource) => resource,
             Err(failure) => {
                 self.cancel_resource(load, failure);
                 return;
             },
         };
-        debug_assert_eq!(resource.status(), status.as_u16());
         let evidence = ResourceEvidence::loaded_response(
             request.clone(),
             source,
             resource.status(),
             resource.content_type(),
             resource.body(),
+            resource.response_headers().clone(),
         );
         debug_assert_eq!(
             evidence.content_address.as_deref(),
             Some(resource.content_address())
         );
+        if let Err(failure) = self.record_resource_evidence(evidence) {
+            self.cancel_resource(load, failure);
+            return;
+        }
         let mut intercepted = load.intercept(
             WebResourceResponse::new(request.url)
                 .headers(headers)
@@ -687,7 +772,13 @@ impl DocumentDelegate {
         );
         intercepted.send_body_data(resource.body().to_vec());
         intercepted.finish();
-        self.resources.borrow_mut().push(evidence);
+    }
+
+    fn record_resource_evidence(
+        &self,
+        evidence: ResourceEvidence,
+    ) -> Result<(), ResourcePolicyFailure> {
+        self.resources.borrow_mut().push(evidence)
     }
 
     fn cancel_resource(&self, load: WebResourceLoad, failure: ResourcePolicyFailure) {
@@ -719,10 +810,12 @@ mod tests {
     use sha2::{Digest, Sha256};
 
     use super::super::resource_policy::{
-        ResourceAccounting, ResourcePolicy, ResourceSource, VirtualResourceSpec,
+        ResourceAccounting, ResourceEvidence, ResourcePolicy, ResourceRequest, ResourceSource,
+        ResponseHeaderEvidence, VirtualResourceSpec,
     };
     use super::{
-        DocumentSession, ReadinessPolicy, RenderEnvironment, ResourcePolicyConfig, SessionError,
+        DocumentSession, ReadinessPolicy, RenderEnvironment, ResourceEvidenceLog,
+        ResourcePolicyConfig, SessionError, RESOURCE_EVIDENCE_ENTRY_OVERHEAD_BYTES,
         stable_render_timeout, validate_host_font_policy, validate_resource_policy,
     };
 
@@ -757,6 +850,42 @@ mod tests {
     const PRE_SESSION_PDF: &str =
         "sha256:9873076c43b0c76dca8fc54ad5721e5cd20ccee5deca6905425d49df068d7af8";
     const EXPECTED_LINK: &str = "https://pliego.dev/docs";
+
+    #[test]
+    fn evidence_metadata_limit_rejects_before_an_entry_is_retained() {
+        let request = ResourceRequest {
+            method: "GET".into(),
+            url: url::Url::parse("https://example.test/resource").unwrap(),
+            destination: "Script".into(),
+            referrer_url: None,
+            is_for_main_frame: false,
+            is_redirect: false,
+        };
+        let mut headers = http::HeaderMap::new();
+        headers.insert(
+            "x-large",
+            http::HeaderValue::from_str(&"x".repeat(4_096)).unwrap(),
+        );
+        let evidence = ResourceEvidence::loaded_response(
+            request,
+            ResourceSource::Http,
+            200,
+            None,
+            b"",
+            ResponseHeaderEvidence::from_headers(&headers).unwrap(),
+        );
+        assert!(evidence.metadata_bytes() > 4_096);
+        let mut log = ResourceEvidenceLog {
+            max_metadata_bytes: evidence
+                .metadata_bytes()
+                .saturating_add(RESOURCE_EVIDENCE_ENTRY_OVERHEAD_BYTES - 1),
+            ..ResourceEvidenceLog::default()
+        };
+        let error = log.push(evidence).unwrap_err();
+        assert_eq!(error.code, "RESOURCE_METADATA_LIMIT_EXCEEDED");
+        assert!(log.entries.is_empty());
+        assert_eq!(log.metadata_bytes, 0);
+    }
 
     #[test]
     fn denied_host_font_fails_before_a_document_outcome() {
