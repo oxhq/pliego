@@ -6620,6 +6620,7 @@ dependencies = [
  "unicode-segmentation",
  "url",
  "vello_cpu 0.0.9",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

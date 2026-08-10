@@ -65,8 +65,9 @@ use resource_policy::classify_controlled_http_status;
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
 use resource_policy::{
     ControlledResource, RESOURCE_POLICY_ID, ResourcePolicy, ResourcePolicyDecision,
-    ResourcePolicyFailure, ResourceRequest, create_controlled_http_client, fetch_controlled_http,
-    http_root_allows, retain_controlled_resource as retain_shared_controlled_resource,
+    ResourcePolicyFailure, ResourcePolicySetupFailure, ResourceRequest,
+    create_controlled_http_client, fetch_controlled_http, http_root_allows,
+    retain_controlled_resource as retain_shared_controlled_resource,
 };
 use resource_policy::{
     DEFAULT_RESOURCE_TIMEOUT_MS, MAX_RESOURCE_TIMEOUT_MS, ResourcePolicyConfig, VirtualResourceSpec,
@@ -652,27 +653,27 @@ fn render(request: RenderRequest) -> Result<RenderOutcome, RenderError> {
     });
     set_document_pdf_environment(&mut environment, &document_pdf_path, "pending", None);
     record_session_artifact(artifacts.write_environment(&environment))?;
-    if let Some((code, message)) = resource_policy.aggregate_limit_error() {
-        return Err(fail_session(&artifacts, &document_pdf_path, code, &message));
-    }
-    if let (Some(error), Some(manifest)) = (
-        resource_policy.asset_error.as_ref(),
-        resource_policy.asset_manifest.as_deref(),
-    ) {
-        record_session_artifact(artifacts.record_asset_failure(
-            error.code,
-            manifest,
-            error.url.as_deref(),
-            &error.message,
-            error.expected.as_deref(),
-            error.actual.as_deref(),
-        ))?;
-        return Err(fail_session(
-            &artifacts,
-            &document_pdf_path,
-            error.code,
-            &error.message,
-        ));
+    match resource_policy.setup_failure() {
+        Some(ResourcePolicySetupFailure::Asset { error, manifest }) => {
+            record_session_artifact(artifacts.record_asset_failure(
+                error.code,
+                manifest,
+                error.url.as_deref(),
+                &error.message,
+                error.expected.as_deref(),
+                error.actual.as_deref(),
+            ))?;
+            return Err(fail_session(
+                &artifacts,
+                &document_pdf_path,
+                error.code,
+                &error.message,
+            ));
+        },
+        Some(ResourcePolicySetupFailure::Aggregate { code, message }) => {
+            return Err(fail_session(&artifacts, &document_pdf_path, code, &message));
+        },
+        None => {},
     }
     if request.explicit_paths.is_some() {
         match document_pdf_path.try_exists() {

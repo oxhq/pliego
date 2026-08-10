@@ -14,7 +14,7 @@ use pliego::{IMAGE_LIMITS, ImageLimit};
 use super::asset_cache;
 use super::resource_policy::{
     ControlledResource, MAX_RESOURCE_EVENTS, MAX_RESOURCE_METADATA_BYTES, ResourcePolicyFailure,
-    ResourceRequest, ResponseHeaderEvidence, sha256_hex,
+    ResourceRequest, ResponseHeaderEvidence, normalized_url, sha256_hex,
 };
 
 const MAX_DATA_URL_OVERHEAD_BYTES: u64 = 4 * 1024;
@@ -304,7 +304,7 @@ impl OwnedResourceStore {
             .metadata_bytes()
             .saturating_add(response_metadata_bytes)
             .saturating_add(METADATA_ENTRY_OVERHEAD_BYTES);
-        if request.method != "HEAD" {
+        if request.method != "HEAD" && !self.url_to_resource.contains_key(&identity.url) {
             additional_metadata_bytes = additional_metadata_bytes
                 .saturating_add(identity.url.len() as u64)
                 .saturating_add(response_metadata_bytes)
@@ -862,12 +862,6 @@ fn check_image_limit(
     }
 }
 
-fn normalized_url(url: &url::Url) -> String {
-    let mut normalized = url.clone();
-    normalized.set_fragment(None);
-    normalized.to_string()
-}
-
 fn changed_resource_failure(request: &ResourceRequest) -> ResourcePolicyFailure {
     resource_failure(
         request,
@@ -1039,6 +1033,55 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.code, "RESOURCE_CHANGED_DURING_RENDER");
         assert_eq!(store.requests.len(), 1);
+    }
+
+    #[test]
+    fn repeated_url_across_destinations_charges_the_url_entry_once() {
+        let url = "https://example.test/shared.css";
+        let first_request = request("GET", url, "Style");
+        let second_request = request("GET", url, "Script");
+        let body = b"body {}".to_vec();
+        let response_headers = ResponseHeaderEvidence::from_headers(&headers("text/css")).unwrap();
+        let response_identity = ResponseIdentity {
+            status: 200,
+            content_type: Some("text/css".into()),
+            content_address: format!("sha256:{}", sha256_hex(&body)),
+            response_headers,
+        };
+
+        let mut probe = OwnedResourceStore::default();
+        probe
+            .retain(
+                &first_request,
+                resource("text/css", body.clone()),
+                &headers("text/css"),
+            )
+            .unwrap();
+        let exact_limit = probe
+            .metadata_bytes
+            .checked_add(RequestIdentity::new(&second_request).metadata_bytes())
+            .and_then(|bytes| bytes.checked_add(response_identity.metadata_bytes()))
+            .and_then(|bytes| bytes.checked_add(METADATA_ENTRY_OVERHEAD_BYTES))
+            .unwrap();
+
+        let mut bounded = OwnedResourceStore::with_limits(0, 2, exact_limit);
+        bounded
+            .retain(
+                &first_request,
+                resource("text/css", body.clone()),
+                &headers("text/css"),
+            )
+            .unwrap();
+        bounded
+            .retain(
+                &second_request,
+                resource("text/css", body),
+                &headers("text/css"),
+            )
+            .unwrap();
+        assert_eq!(bounded.metadata_bytes, exact_limit);
+        assert_eq!(bounded.url_to_resource.len(), 1);
+        assert_eq!(bounded.requests.len(), 2);
     }
 
     #[test]

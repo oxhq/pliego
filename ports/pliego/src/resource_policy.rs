@@ -81,6 +81,18 @@ pub(crate) struct ResourcePolicy {
 }
 
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+pub(crate) enum ResourcePolicySetupFailure<'a> {
+    Asset {
+        error: &'a asset_cache::AssetError,
+        manifest: &'a Path,
+    },
+    Aggregate {
+        code: &'static str,
+        message: String,
+    },
+}
+
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
 impl Default for ResourcePolicy {
     fn default() -> Self {
         Self {
@@ -108,6 +120,7 @@ pub(crate) struct VirtualResource {
 #[derive(Clone, Debug)]
 pub(crate) enum LocalResourceReadError {
     AggregateLimit,
+    OutsideRoot,
     Unavailable(String),
     TooLarge,
 }
@@ -536,6 +549,16 @@ impl ResourcePolicy {
         })
     }
 
+    pub(crate) fn setup_failure(&self) -> Option<ResourcePolicySetupFailure<'_>> {
+        if let (Some(error), Some(manifest)) =
+            (self.asset_error.as_ref(), self.asset_manifest.as_deref())
+        {
+            return Some(ResourcePolicySetupFailure::Asset { error, manifest });
+        }
+        self.aggregate_limit_error()
+            .map(|(code, message)| ResourcePolicySetupFailure::Aggregate { code, message })
+    }
+
     pub(crate) fn decide(
         &self,
         document_root: &Path,
@@ -595,6 +618,11 @@ impl ResourcePolicy {
                         self.aggregate_limit.unwrap_or(asset_cache::MAX_CACHE_BYTES),
                     ),
                 ),
+                Err(LocalResourceReadError::OutsideRoot) => failure(
+                    "RESOURCE_DENIED",
+                    "denied",
+                    "host virtual resource resolved outside the document root".into(),
+                ),
                 Err(LocalResourceReadError::Unavailable(reason)) => failure(
                     "RESOURCE_NOT_FOUND",
                     "not_found",
@@ -625,7 +653,7 @@ impl ResourcePolicy {
                 };
                 match path.canonicalize() {
                     Ok(path) if path.starts_with(document_root) => {
-                        match read_bounded_local_resource(&path) {
+                        match read_bounded_document_resource(&path, document_root) {
                             Ok(body) => synthesize(
                                 &body,
                                 resource_content_type(&request.url),
@@ -635,6 +663,11 @@ impl ResourcePolicy {
                                 "RESOURCE_DENIED",
                                 "denied",
                                 aggregate_limit_message(asset_cache::MAX_CACHE_BYTES),
+                            ),
+                            Err(LocalResourceReadError::OutsideRoot) => failure(
+                                "RESOURCE_DENIED",
+                                "denied",
+                                "file is outside the document root".into(),
                             ),
                             Err(LocalResourceReadError::Unavailable(error)) => failure(
                                 "RESOURCE_NOT_FOUND",
@@ -754,9 +787,10 @@ pub(crate) fn fetch_controlled_http(
     let body = Empty::<Bytes>::new()
         .map_err(|error: std::convert::Infallible| match error {})
         .boxed();
+    let target = normalized_url(&request.url);
     let mut outbound = http::Request::builder()
         .method(request.method.as_str())
-        .uri(request.url.as_str())
+        .uri(target)
         .body(body)
         .map_err(|error| {
             failure(
@@ -766,11 +800,7 @@ pub(crate) fn fetch_controlled_http(
                 false,
             )
         })?;
-    *outbound.headers_mut() = headers.clone();
-    outbound.headers_mut().insert(
-        http::header::ACCEPT_ENCODING,
-        http::HeaderValue::from_static("identity"),
-    );
+    *outbound.headers_mut() = controlled_request_headers(headers);
 
     let client = client.clone();
     let is_head = request.method == "HEAD";
@@ -866,6 +896,21 @@ pub(crate) fn fetch_controlled_http(
 }
 
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+fn controlled_request_headers(headers: &http::HeaderMap) -> http::HeaderMap {
+    let mut controlled = http::HeaderMap::new();
+    for name in [http::header::ACCEPT, http::header::ACCEPT_LANGUAGE] {
+        for value in headers.get_all(&name) {
+            controlled.append(name.clone(), value.clone());
+        }
+    }
+    controlled.insert(
+        http::header::ACCEPT_ENCODING,
+        http::HeaderValue::from_static("identity"),
+    );
+    controlled
+}
+
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
 pub(crate) fn normalize_controlled_response_headers(
     request: &ResourceRequest,
     mut headers: http::HeaderMap,
@@ -938,7 +983,7 @@ pub(crate) fn retain_controlled_resource(
     request: &ResourceRequest,
     resource: ControlledResource,
 ) -> Result<(), ResourcePolicyFailure> {
-    let key = (request.method.clone(), request.url.to_string());
+    let key = (request.method.clone(), normalized_url(&request.url));
     if let Some(existing) = resources.get(&key) {
         if existing != &resource {
             return Err(ResourcePolicyFailure::new(
@@ -974,12 +1019,29 @@ fn aggregate_limit_message(max_resident_bytes: u64) -> String {
 
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
 pub(crate) fn http_root_allows(root: &url::Url, requested: &url::Url) -> bool {
+    let root_path = root.path();
+    let requested_path = requested.path();
+    let path_allowed = if root_path.ends_with('/') {
+        requested_path.starts_with(root_path)
+    } else {
+        requested_path == root_path ||
+            requested_path
+                .strip_prefix(root_path)
+                .is_some_and(|rest| rest.starts_with('/'))
+    };
     requested.username().is_empty() &&
         requested.password().is_none() &&
         root.scheme() == requested.scheme() &&
         root.host_str() == requested.host_str() &&
         root.port_or_known_default() == requested.port_or_known_default() &&
-        requested.path().starts_with(root.path())
+        path_allowed
+}
+
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+pub(crate) fn normalized_url(url: &url::Url) -> String {
+    let mut normalized = url.clone();
+    normalized.set_fragment(None);
+    normalized.to_string()
 }
 
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
@@ -993,6 +1055,29 @@ fn nearest_existing_ancestor(path: &Path) -> Option<PathBuf> {
 fn read_bounded_local_resource(path: &Path) -> Result<Vec<u8>, LocalResourceReadError> {
     let (file, metadata) = asset_cache::open_regular_file(path)
         .map_err(|error| LocalResourceReadError::Unavailable(error.to_string()))?;
+    read_bounded_opened_resource(file, metadata)
+}
+
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+fn read_bounded_document_resource(
+    path: &Path,
+    document_root: &Path,
+) -> Result<Vec<u8>, LocalResourceReadError> {
+    let (file, metadata) = asset_cache::open_regular_file(path)
+        .map_err(|error| LocalResourceReadError::Unavailable(error.to_string()))?;
+    let opened_path = opened_regular_file_path(&file)
+        .map_err(|error| LocalResourceReadError::Unavailable(error.to_string()))?;
+    if !opened_path.starts_with(document_root) {
+        return Err(LocalResourceReadError::OutsideRoot);
+    }
+    read_bounded_opened_resource(file, metadata)
+}
+
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+fn read_bounded_opened_resource(
+    file: std::fs::File,
+    metadata: std::fs::Metadata,
+) -> Result<Vec<u8>, LocalResourceReadError> {
     if metadata.len() > asset_cache::MAX_CACHE_BYTES {
         return Err(LocalResourceReadError::TooLarge);
     }
@@ -1008,6 +1093,73 @@ fn read_bounded_local_resource(path: &Path) -> Result<Vec<u8>, LocalResourceRead
     }
 }
 
+#[cfg(target_os = "linux")]
+fn opened_regular_file_path(file: &std::fs::File) -> std::io::Result<PathBuf> {
+    use std::os::fd::AsRawFd as _;
+
+    std::fs::canonicalize(format!("/proc/self/fd/{}", file.as_raw_fd()))
+}
+
+#[cfg(target_vendor = "apple")]
+#[allow(unsafe_code)]
+fn opened_regular_file_path(file: &std::fs::File) -> std::io::Result<PathBuf> {
+    use std::ffi::OsString;
+    use std::os::fd::AsRawFd as _;
+    use std::os::unix::ffi::OsStringExt as _;
+
+    let mut buffer = vec![0_u8; libc::PATH_MAX as usize];
+    let result = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETPATH, buffer.as_mut_ptr()) };
+    if result == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let length = buffer.iter().position(|byte| *byte == 0).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "opened file path is not null terminated",
+        )
+    })?;
+    buffer.truncate(length);
+    Ok(PathBuf::from(OsString::from_vec(buffer)))
+}
+
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn opened_regular_file_path(file: &std::fs::File) -> std::io::Result<PathBuf> {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::OsStringExt as _;
+    use std::os::windows::io::AsRawHandle as _;
+
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_NAME_NORMALIZED, GetFinalPathNameByHandleW, VOLUME_NAME_DOS,
+    };
+
+    let handle = file.as_raw_handle().cast();
+    let flags = FILE_NAME_NORMALIZED | VOLUME_NAME_DOS;
+    let mut buffer = vec![0_u16; 512];
+    loop {
+        let length = unsafe {
+            GetFinalPathNameByHandleW(handle, buffer.as_mut_ptr(), buffer.len() as u32, flags)
+        };
+        if length == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let length = length as usize;
+        if length < buffer.len() {
+            buffer.truncate(length);
+            return Ok(PathBuf::from(OsString::from_wide(&buffer)));
+        }
+        buffer.resize(length + 1, 0);
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_vendor = "apple", windows)))]
+fn opened_regular_file_path(_file: &std::fs::File) -> std::io::Result<PathBuf> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "opened file path verification is unavailable on this platform",
+    ))
+}
+
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
 fn resource_content_type(url: &url::Url) -> &'static str {
     let extension = Path::new(url.path())
@@ -1019,6 +1171,9 @@ fn resource_content_type(url: &url::Url) -> &'static str {
         Some("html") | Some("htm") => "text/html; charset=utf-8",
         Some("js") | Some("mjs") => "text/javascript",
         Some("png") => "image/png",
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
         Some("svg") => "image/svg+xml",
         Some("otf") => "font/otf",
         Some("ttf") => "font/ttf",
@@ -1098,6 +1253,91 @@ mod tests {
         }
 
         fs::remove_dir_all(sandbox).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn opened_document_handle_cannot_escape_the_root_through_a_symlink() {
+        let sandbox = std::env::temp_dir().join(format!(
+            "pliego-resource-handle-root-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let root = sandbox.join("root");
+        let outside = sandbox.join("outside.css");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(&outside, b"outside").unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("escape.css")).unwrap();
+        let root = root.canonicalize().unwrap();
+
+        assert!(matches!(
+            read_bounded_document_resource(&root.join("escape.css"), &root),
+            Err(LocalResourceReadError::OutsideRoot)
+        ));
+
+        fs::remove_dir_all(sandbox).unwrap();
+    }
+
+    #[test]
+    fn http_roots_require_a_path_segment_boundary() {
+        let root = url::Url::parse("https://example.test/assets").unwrap();
+        assert!(http_root_allows(&root, &root));
+        assert!(http_root_allows(
+            &root,
+            &url::Url::parse("https://example.test/assets/style.css").unwrap()
+        ));
+        assert!(!http_root_allows(
+            &root,
+            &url::Url::parse("https://example.test/assets-private/style.css").unwrap()
+        ));
+        assert!(!http_root_allows(
+            &root,
+            &url::Url::parse("https://example.test/assetsX").unwrap()
+        ));
+    }
+
+    #[test]
+    fn synthesized_raster_content_types_match_supported_formats() {
+        for (path, expected) in [
+            ("image.jpg", "image/jpeg"),
+            ("image.JPEG", "image/jpeg"),
+            ("image.gif", "image/gif"),
+            ("image.webp", "image/webp"),
+            ("image.png", "image/png"),
+        ] {
+            let url = url::Url::parse(&format!("file:///bundle/{path}")).unwrap();
+            assert_eq!(resource_content_type(&url), expected);
+        }
+    }
+
+    #[test]
+    fn setup_failure_precedence_is_shared_and_asset_first() {
+        let manifest = PathBuf::from("assets.json");
+        let policy = ResourcePolicy {
+            asset_manifest: Some(manifest.clone()),
+            asset_error: Some(asset_cache::AssetError {
+                code: "ASSET_NOT_FOUND",
+                url: None,
+                message: "missing asset".into(),
+                expected: None,
+                actual: None,
+            }),
+            aggregate_limit: Some(1),
+            ..ResourcePolicy::default()
+        };
+
+        let Some(ResourcePolicySetupFailure::Asset {
+            error,
+            manifest: selected_manifest,
+        }) = policy.setup_failure()
+        else {
+            panic!("asset failure must precede aggregate failure")
+        };
+        assert_eq!(error.code, "ASSET_NOT_FOUND");
+        assert_eq!(selected_manifest, manifest);
     }
 
     #[test]
@@ -1260,7 +1500,7 @@ mod tests {
     fn repeated_controlled_resource_must_not_change_during_one_render() {
         let request = ResourceRequest {
             method: "GET".into(),
-            url: url::Url::parse("https://example.test/stable.js").unwrap(),
+            url: url::Url::parse("https://example.test/stable.js#first").unwrap(),
             destination: "Script".into(),
             referrer_url: None,
             is_for_main_frame: false,
@@ -1289,10 +1529,12 @@ mod tests {
         .unwrap();
         assert_eq!(resident_bytes, original.body.len() as u64);
 
+        let mut fragment_alias = request.clone();
+        fragment_alias.url.set_fragment(Some("second"));
         let error = retain_controlled_resource(
             &mut resources,
             &mut resident_bytes,
-            &request,
+            &fragment_alias,
             ControlledResource {
                 body: b"window.stable = false;".to_vec(),
                 ..original
@@ -1404,5 +1646,53 @@ mod tests {
         let normalized = normalize_controlled_response_headers(&request, identity, 3).unwrap();
         assert!(!normalized.contains_key(http::header::CONTENT_ENCODING));
         assert_eq!(normalized[http::header::CONTENT_LENGTH], "3");
+
+        let mut outbound = http::HeaderMap::new();
+        outbound.insert(
+            http::header::AUTHORIZATION,
+            http::HeaderValue::from_static("Bearer secret"),
+        );
+        outbound.insert(
+            http::header::COOKIE,
+            http::HeaderValue::from_static("session=secret"),
+        );
+        outbound.insert(
+            http::header::PROXY_AUTHORIZATION,
+            http::HeaderValue::from_static("Basic secret"),
+        );
+        outbound.insert(
+            http::header::ACCEPT_ENCODING,
+            http::HeaderValue::from_static("gzip"),
+        );
+        outbound.insert(
+            http::header::ACCEPT,
+            http::HeaderValue::from_static("text/css,*/*;q=0.1"),
+        );
+        outbound.insert(
+            http::header::ACCEPT_LANGUAGE,
+            http::HeaderValue::from_static("en-US"),
+        );
+        outbound.insert(
+            http::header::CONNECTION,
+            http::HeaderValue::from_static("keep-alive"),
+        );
+        outbound.insert(
+            http::header::CONTENT_LENGTH,
+            http::HeaderValue::from_static("123"),
+        );
+        outbound.insert(
+            http::HeaderName::from_static("x-api-key"),
+            http::HeaderValue::from_static("secret"),
+        );
+        let outbound = controlled_request_headers(&outbound);
+        assert!(!outbound.contains_key(http::header::AUTHORIZATION));
+        assert!(!outbound.contains_key(http::header::COOKIE));
+        assert!(!outbound.contains_key(http::header::PROXY_AUTHORIZATION));
+        assert!(!outbound.contains_key(http::header::CONNECTION));
+        assert!(!outbound.contains_key(http::header::CONTENT_LENGTH));
+        assert!(!outbound.contains_key("x-api-key"));
+        assert_eq!(outbound[http::header::ACCEPT], "text/css,*/*;q=0.1");
+        assert_eq!(outbound[http::header::ACCEPT_LANGUAGE], "en-US");
+        assert_eq!(outbound[http::header::ACCEPT_ENCODING], "identity");
     }
 }

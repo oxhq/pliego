@@ -50,6 +50,9 @@ criterion = { workspace = true }
 flate2 = { workspace = true }
 ttf-parser = { workspace = true }
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+
 [[bench]]
 name = "document_scene_pdf"
 harness = false

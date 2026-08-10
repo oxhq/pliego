@@ -38,8 +38,9 @@ use super::render_environment::{apply_timezone, unexpected_host_font};
 use super::resource_policy::{
     ControlledResource, MAX_RESOURCE_EVENTS, MAX_RESOURCE_METADATA_BYTES, MAX_RESOURCE_TIMEOUT_MS,
     ResourceAccounting, ResourceEvidence, ResourcePolicy, ResourcePolicyConfig,
-    ResourcePolicyDecision, ResourcePolicyFailure, ResourceRequest, ResourceSource,
-    create_controlled_http_client, fetch_controlled_http, normalize_controlled_response_headers,
+    ResourcePolicyDecision, ResourcePolicyFailure, ResourcePolicySetupFailure, ResourceRequest,
+    ResourceSource, create_controlled_http_client, fetch_controlled_http,
+    normalize_controlled_response_headers,
 };
 
 const RESOURCE_EVIDENCE_ENTRY_OVERHEAD_BYTES: u64 = 256;
@@ -528,13 +529,15 @@ fn validate_host_font_policy(
 }
 
 fn validate_resource_policy(policy: &ResourcePolicy) -> Result<(), SessionError> {
-    if let Some(error) = policy.asset_error.as_ref() {
-        return Err(SessionError::new(error.code, error.message.clone()));
+    match policy.setup_failure() {
+        Some(ResourcePolicySetupFailure::Asset { error, .. }) => {
+            Err(SessionError::new(error.code, error.message.clone()))
+        },
+        Some(ResourcePolicySetupFailure::Aggregate { code, message }) => {
+            Err(SessionError::new(code, message))
+        },
+        None => Ok(()),
     }
-    if let Some((code, message)) = policy.aggregate_limit_error() {
-        return Err(SessionError::new(code, message));
-    }
-    Ok(())
 }
 
 fn stable_render_timeout(readiness: ReadinessPolicy) -> Result<Duration, SessionError> {
@@ -808,7 +811,7 @@ fn checked_delivered_body_bytes(
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::io::{Read, Write};
+    use std::io::{self, Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::path::{Path, PathBuf};
     use std::process::{Command, Output, Stdio};
@@ -1046,7 +1049,7 @@ mod tests {
     struct FixtureServer {
         base_url: String,
         stop: Arc<AtomicBool>,
-        thread: Option<JoinHandle<()>>,
+        thread: Option<JoinHandle<io::Result<()>>>,
     }
 
     impl FixtureServer {
@@ -1057,15 +1060,21 @@ mod tests {
             let stop = Arc::new(AtomicBool::new(false));
             let thread_stop = Arc::clone(&stop);
             let thread = std::thread::spawn(move || {
+                let mut request_error = None;
                 while !thread_stop.load(Ordering::Relaxed) {
                     match listener.accept() {
-                        Ok((stream, _)) => handle_fixture_request(stream),
+                        Ok((stream, _)) => {
+                            if let Err(error) = handle_fixture_request(stream) {
+                                request_error.get_or_insert(error);
+                            }
+                        },
                         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                             std::thread::sleep(Duration::from_millis(1));
                         },
-                        Err(error) => panic!("fixture server accept failed: {error}"),
+                        Err(error) => return Err(error),
                     }
                 }
+                request_error.map_or(Ok(()), Err)
             });
             Self {
                 base_url: format!("http://{address}/"),
@@ -1073,26 +1082,32 @@ mod tests {
                 thread: Some(thread),
             }
         }
+
+        fn shutdown(&mut self) -> io::Result<()> {
+            self.stop.store(true, Ordering::Relaxed);
+            let Some(thread) = self.thread.take() else {
+                return Ok(());
+            };
+            match thread.join() {
+                Ok(result) => result,
+                Err(_) => Err(io::Error::other("fixture server thread panicked")),
+            }
+        }
     }
 
     impl Drop for FixtureServer {
         fn drop(&mut self) {
-            self.stop.store(true, Ordering::Relaxed);
-            self.thread.take().unwrap().join().unwrap();
+            let _ = self.shutdown();
         }
     }
 
-    fn handle_fixture_request(mut stream: TcpStream) {
-        stream
-            .set_read_timeout(Some(Duration::from_secs(2)))
-            .unwrap();
-        stream
-            .set_write_timeout(Some(Duration::from_secs(2)))
-            .unwrap();
+    fn handle_fixture_request(mut stream: TcpStream) -> io::Result<()> {
+        stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+        stream.set_write_timeout(Some(Duration::from_secs(2)))?;
         let mut request = Vec::new();
         let mut buffer = [0; 2048];
         while request.len() < 8192 {
-            let read = stream.read(&mut buffer).unwrap_or(0);
+            let read = stream.read(&mut buffer)?;
             if read == 0 {
                 break;
             }
@@ -1140,8 +1155,23 @@ mod tests {
             "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
             body.len()
         );
-        let _ = stream.write_all(response.as_bytes());
-        let _ = stream.write_all(&body);
+        let result = stream
+            .write_all(response.as_bytes())
+            .and_then(|()| stream.write_all(&body));
+        match result {
+            Err(error)
+                if path == "/timeout.js" &&
+                    matches!(
+                        error.kind(),
+                        io::ErrorKind::BrokenPipe |
+                            io::ErrorKind::ConnectionAborted |
+                            io::ErrorKind::ConnectionReset
+                    ) =>
+            {
+                Ok(())
+            },
+            result => result,
+        }
     }
 
     fn run_isolated(case: &str, http_base: &str) -> Output {
@@ -1153,14 +1183,35 @@ mod tests {
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let stderr = child.stderr.take().unwrap();
+        let stdout_reader = std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let mut stdout = stdout;
+            stdout.read_to_end(&mut bytes).map(|_| bytes)
+        });
+        let stderr_reader = std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let mut stderr = stderr;
+            stderr.read_to_end(&mut bytes).map(|_| bytes)
+        });
         let deadline = Instant::now() + Duration::from_secs(75);
         loop {
-            if child.try_wait().unwrap().is_some() {
-                return child.wait_with_output().unwrap();
+            if let Some(status) = child.try_wait().unwrap() {
+                return Output {
+                    status,
+                    stdout: stdout_reader.join().unwrap().unwrap(),
+                    stderr: stderr_reader.join().unwrap().unwrap(),
+                };
             }
             if Instant::now() >= deadline {
-                child.kill().unwrap();
-                let output = child.wait_with_output().unwrap();
+                let _ = child.kill();
+                let status = child.wait().unwrap();
+                let output = Output {
+                    status,
+                    stdout: stdout_reader.join().unwrap().unwrap(),
+                    stderr: stderr_reader.join().unwrap().unwrap(),
+                };
                 panic!(
                     "isolated {case} fixture exceeded 75 seconds\nstdout:\n{}\nstderr:\n{}",
                     String::from_utf8_lossy(&output.stdout),
@@ -1257,7 +1308,7 @@ mod tests {
 
     #[test]
     fn resource_and_readiness_fixtures_are_evidenced_and_fail_closed() {
-        let server = FixtureServer::start();
+        let mut server = FixtureServer::start();
         for case in [
             "local-success",
             "virtual-success",
@@ -1289,6 +1340,7 @@ mod tests {
                 "isolated {case} filter did not execute exactly one passing child test:\n{stdout}",
             );
         }
+        server.shutdown().unwrap();
     }
 
     #[test]
