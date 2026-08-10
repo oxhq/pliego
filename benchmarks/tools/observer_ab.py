@@ -12,7 +12,7 @@ import random
 import re
 import sys
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 TOOLS = Path(__file__).resolve().parent
@@ -49,6 +49,11 @@ def normalized_contract(proof: dict[str, Any]) -> dict[str, Any]:
     launch = proof["launch_security"]
     identity = launch["command_identity"]
     counters = proof["counters"]
+    argv = list(launch["argv"])
+    output_index = argv.index("--output") + 1
+    artifacts_index = argv.index("--artifacts") + 1
+    argv[output_index] = f"<fresh-output-directory>/{PurePosixPath(argv[output_index]).name}"
+    argv[artifacts_index] = "<fresh-artifact-directory>"
     return {
         "cgroup_boundary": {
             "method": proof["method"],
@@ -68,12 +73,20 @@ def normalized_contract(proof: dict[str, Any]) -> dict[str, Any]:
             "executable": launch["executable"],
         },
         "frozen_command": {
+            "argv": argv,
             "cwd": identity["cwd"],
             "input": identity["input"],
+        },
+        "outcome": {
+            "exit_code": proof["exit_code"],
+            "signal": proof["signal"],
+            "engine_stdout": proof["engine_stdout"],
+            "engine_stderr": proof["engine_stderr"],
         },
         "static_controls": {
             "cleanup_kill_used": proof["cleanup"]["kill_used"],
             "cleanup_kill_grace_ms": proof["cleanup"]["kill_grace_ms"],
+            "cleanup_lingering_before_kill": proof["cleanup"]["lingering_before_kill"],
             "accounting_poll_interval_ms": proof["accounting_settle"]["poll_interval_ms"],
             "empty_cgroup_events": counters["empty"]["cgroup_events"],
             "after_join_cgroup_events": counters["after_join"]["cgroup_events"],
@@ -189,6 +202,8 @@ def _record_violations(record: Any, path: str) -> list[str]:
     identity = record["launch_security"]["command_identity"]
     argv = record["launch_security"]["argv"]
     try:
+        if argv.count("--output") != 1 or argv.count("--artifacts") != 1:
+            raise ValueError("raw argv must contain one output and artifact option")
         output = Path(argv[argv.index("--output") + 1])
         artifacts = Path(argv[argv.index("--artifacts") + 1])
         workspace = Path(identity["workspace_directory"]["path"])
@@ -220,8 +235,9 @@ def _normalized_violations(contract: Any, path: str) -> list[str]:
         launch = contract["launch_security"]
         status = launch["status"]
         frozen = contract["frozen_command"]
+        outcome = contract["outcome"]
         controls = contract["static_controls"]
-        expected_top = {"cgroup_boundary", "launch_security", "frozen_command", "static_controls"}
+        expected_top = {"cgroup_boundary", "launch_security", "frozen_command", "outcome", "static_controls"}
         if set(contract) != expected_top:
             violations.append(f"{path} keys must be exact")
         if set(boundary) != {"method", "scope", "delegated_parent"}:
@@ -304,12 +320,26 @@ def _normalized_violations(contract: Any, path: str) -> list[str]:
             violations.append(f"{path}.launch_security.executable is invalid")
         cwd = frozen["cwd"]
         input_identity = frozen["input"]
+        argv = frozen["argv"]
         if (
-            set(frozen) != {"cwd", "input"}
+            set(frozen) != {"argv", "cwd", "input"}
             or set(cwd) != {"path", "device", "inode"}
             or set(input_identity) != {"manifest_path", "argv_relative_path", "sha256", "device", "inode"}
         ):
             violations.append(f"{path}.frozen_command keys must be exact")
+        if (
+            not isinstance(argv, list)
+            or any(not isinstance(value, str) for value in argv)
+            or len(argv) < 7
+            or argv[0] != launch["executable"]["path"]
+            or argv[1] != "render"
+            or argv[2] != input_identity.get("argv_relative_path")
+            or argv.count("--output") != 1
+            or argv[argv.index("--output") + 1] != "<fresh-output-directory>/document.pdf"
+            or argv.count("--artifacts") != 1
+            or argv[argv.index("--artifacts") + 1] != "<fresh-artifact-directory>"
+        ):
+            violations.append(f"{path}.frozen_command.argv is invalid")
         if (
             not str(input_identity.get("manifest_path", "")).startswith(str(cwd.get("path", "")) + "/")
             or input_identity.get("argv_relative_path") != Path(input_identity.get("manifest_path", "")).name
@@ -322,9 +352,17 @@ def _normalized_violations(contract: Any, path: str) -> list[str]:
             or input_identity.get("inode", 0) <= 0
         ):
             violations.append(f"{path}.frozen_command is invalid")
+        if set(outcome) != {"exit_code", "signal", "engine_stdout", "engine_stderr"} or outcome != {
+            "exit_code": 0,
+            "signal": None,
+            "engine_stdout": "",
+            "engine_stderr": "",
+        }:
+            violations.append(f"{path}.outcome must be one quiet successful execution")
         if (
             controls.get("cleanup_kill_used") is not False
             or controls.get("cleanup_kill_grace_ms") != 1000.0
+            or controls.get("cleanup_lingering_before_kill") != []
             or controls.get("accounting_poll_interval_ms", 0) <= 0
             or controls.get("empty_cgroup_events") != {"populated": 0, "frozen": 0}
             or controls.get("after_join_cgroup_events") != {"populated": 1, "frozen": 0}
@@ -334,13 +372,14 @@ def _normalized_violations(contract: Any, path: str) -> list[str]:
         if set(controls) != {
             "cleanup_kill_used",
             "cleanup_kill_grace_ms",
+            "cleanup_lingering_before_kill",
             "accounting_poll_interval_ms",
             "empty_cgroup_events",
             "after_join_cgroup_events",
             "final_cgroup_events",
         }:
             violations.append(f"{path}.static_controls keys must be exact")
-    except (KeyError, TypeError, ValueError) as error:
+    except (IndexError, KeyError, TypeError, ValueError) as error:
         violations.append(f"{path} is malformed: {error}")
     return violations
 

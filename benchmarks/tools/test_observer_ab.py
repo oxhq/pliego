@@ -116,6 +116,11 @@ def main() -> None:
         (("launch_security", "command_identity", "input", "inode"), 5),
         (("cleanup", "kill_used"), True),
         (("cleanup", "kill_grace_ms"), 0),
+        (("cleanup", "lingering_before_kill"), [{"pid": 99, "start_ticks": 1}]),
+        (("exit_code",), 1),
+        (("signal",), 9),
+        (("engine_stdout",), "attacker output"),
+        (("engine_stderr",), "attacker error"),
         (("accounting_settle", "poll_interval_ms"), 0),
         (("counters", "empty", "cgroup_events"), {"populated": 1, "frozen": 0}),
         (("counters", "after_join", "cgroup_events"), {"populated": 0, "frozen": 0}),
@@ -144,6 +149,13 @@ def main() -> None:
         broken = deepcopy(valid)
         set_path(broken["pairs"][0]["observation_on_record"], path, replacement)
         assert observer_ab.validate_measurements(broken), path
+
+    changed_argv = deepcopy(valid)
+    changed_argv["pairs"][0]["observation_on_record"]["launch_security"]["argv"].extend(["--attacker-mode", "1"])
+    assert any(
+        "normalized security/control contracts differ" in violation
+        for violation in observer_ab.validate_measurements(changed_argv)
+    )
 
     malicious = deepcopy(valid)
     for side in ("observation_off_record", "observation_on_record"):

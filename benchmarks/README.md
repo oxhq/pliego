@@ -244,7 +244,8 @@ PHP-to-Python proof. On a dedicated benchmark host, add
 retained proof stores and revalidates all 40 raw broker records, then compares
 normalized UID/GID/groups/capability state, namespace,
 migration denials, executable and frozen-input identities, cwd, cgroup
-boundary, and static cleanup/accounting controls for every pair. The declared
+boundary, canonical argv after substituting only fresh output paths, quiet
+successful outcome, and static cleanup/accounting controls for every pair. The declared
 differences are limited to observation diagnostics, timing/accounting values,
 and fresh per-run cgroup/process/workspace identities. Cgroup path,
 `(PID,start_ticks)`, and workspace/output/artifact FD identities must be
