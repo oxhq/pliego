@@ -47,6 +47,9 @@ const RESOURCE_EVIDENCE_ENTRY_OVERHEAD_BYTES: u64 = 256;
 
 const TIMEOUT: Duration = Duration::from_secs(30);
 
+#[cfg(test)]
+type ResourceEvidenceObserver = Rc<dyn Fn(&ResourceEvidence)>;
+
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) struct SessionError {
     pub(crate) code: String,
@@ -234,6 +237,19 @@ impl DocumentSession {
                 )
             },
         )
+    }
+
+    #[cfg(test)]
+    fn set_resource_evidence_observer(&self, observer: ResourceEvidenceObserver) {
+        let previous = self
+            .delegate
+            .resource_evidence_observer
+            .borrow_mut()
+            .replace(observer);
+        assert!(
+            previous.is_none(),
+            "resource evidence observer was already set"
+        );
     }
 
     fn new_with_canvas_retention(
@@ -662,6 +678,8 @@ struct DocumentDelegate {
     resource_failure: RefCell<Option<ResourcePolicyFailure>>,
     delivered_body_bytes: Cell<u64>,
     resources: RefCell<ResourceEvidenceLog>,
+    #[cfg(test)]
+    resource_evidence_observer: RefCell<Option<ResourceEvidenceObserver>>,
 }
 
 impl WebViewDelegate for DocumentDelegate {
@@ -872,7 +890,16 @@ impl DocumentDelegate {
         &self,
         evidence: ResourceEvidence,
     ) -> Result<(), ResourcePolicyFailure> {
-        self.resources.borrow_mut().push(evidence)
+        #[cfg(test)]
+        let observed_evidence = evidence.clone();
+        let result = self.resources.borrow_mut().push(evidence);
+        #[cfg(test)]
+        if result.is_ok() &&
+            let Some(observer) = self.resource_evidence_observer.borrow().as_ref()
+        {
+            observer(&observed_evidence);
+        }
+        result
     }
 
     fn cancel_resource(&self, load: WebResourceLoad, failure: ResourcePolicyFailure) {
@@ -938,6 +965,7 @@ mod tests {
     use std::net::{TcpListener, TcpStream};
     use std::path::{Path, PathBuf};
     use std::process::{Command, Output, Stdio};
+    use std::rc::Rc;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::thread::JoinHandle;
@@ -1258,6 +1286,14 @@ mod tests {
 
     impl FixtureServer {
         fn start() -> Self {
+            Self::start_with_metadata_evidence(None)
+        }
+
+        fn start_for_metadata_evidence(observed: Arc<AtomicBool>) -> Self {
+            Self::start_with_metadata_evidence(Some(observed))
+        }
+
+        fn start_with_metadata_evidence(observed: Option<Arc<AtomicBool>>) -> Self {
             let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
             listener.set_nonblocking(true).unwrap();
             let address = listener.local_addr().unwrap();
@@ -1268,7 +1304,8 @@ mod tests {
                 while !thread_stop.load(Ordering::Relaxed) {
                     match listener.accept() {
                         Ok((stream, _)) => {
-                            if let Err(error) = handle_fixture_request(stream) {
+                            if let Err(error) = handle_fixture_request(stream, observed.as_deref())
+                            {
                                 request_error.get_or_insert(error);
                             }
                         },
@@ -1305,7 +1342,10 @@ mod tests {
         }
     }
 
-    fn handle_fixture_request(mut stream: TcpStream) -> io::Result<()> {
+    fn handle_fixture_request(
+        mut stream: TcpStream,
+        metadata_evidence_observed: Option<&AtomicBool>,
+    ) -> io::Result<()> {
         stream.set_read_timeout(Some(Duration::from_secs(2)))?;
         stream.set_write_timeout(Some(Duration::from_secs(2)))?;
         let mut request = Vec::new();
@@ -1332,6 +1372,16 @@ mod tests {
         });
         let (status, content_type, body) = match path {
             "/allowed.js" => ("200 OK", "text/javascript", ALLOWED_HTTP_BODY.to_vec()),
+            path if path.starts_with("/metadata-evidence.js?") => (
+                "200 OK",
+                "text/javascript",
+                format!(
+                    "window.__pliegoMetadataEvidence({});\n",
+                    metadata_evidence_observed
+                        .is_some_and(|observed| observed.load(Ordering::SeqCst))
+                )
+                .into_bytes(),
+            ),
             "/timeout.js" => {
                 std::thread::sleep(Duration::from_millis(250));
                 (
@@ -1424,6 +1474,87 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    fn metadata_evidence_fixture(
+        case: &str,
+        icon_href: &str,
+        probe_base: &str,
+        body: &str,
+    ) -> String {
+        let case = serde_json::to_string(case).unwrap();
+        let icon_href = serde_json::to_string(icon_href).unwrap();
+        let probe_url =
+            serde_json::to_string(&format!("{probe_base}metadata-evidence.js")).unwrap();
+        format!(
+            r#"<!doctype html>{body}<script>
+window.pliego?.defer();
+(() => {{
+  const fixture = {case};
+  const iconHref = {icon_href};
+  const probeUrl = {probe_url};
+  let faviconStarted = false;
+  let probeCount = 0;
+
+  const fail = message => window.pliego?.fail({{
+    code: "FIXTURE_METADATA_EVIDENCE_FAILED",
+    message,
+  }});
+  const probe = () => {{
+    probeCount += 1;
+    if (probeCount > 64) {{
+      fail("favicon evidence was not observed within 64 probes");
+      return;
+    }}
+    const script = document.createElement("script");
+    script.src = `${{probeUrl}}?probe=${{probeCount}}`;
+    script.addEventListener("error", () => fail("metadata evidence probe failed"), {{ once: true }});
+    script.addEventListener("load", () => script.remove(), {{ once: true }});
+    document.head.append(script);
+  }};
+
+  window.__pliegoMetadataEvidence = observed => {{
+    if (!faviconStarted) {{
+      if (observed) {{
+        fail("favicon evidence existed before the fixture started the favicon request");
+        return;
+      }}
+      faviconStarted = true;
+      const favicon = document.createElement("link");
+      favicon.rel = "icon";
+      favicon.href = iconHref;
+      document.head.append(favicon);
+      queueMicrotask(probe);
+      return;
+    }}
+    if (!observed) {{
+      queueMicrotask(probe);
+      return;
+    }}
+    window.pliego?.ready({{
+      fixture,
+      metadataEvidenceBeforeRequest: false,
+      metadataEvidenceAtReadiness: true,
+      metadataEvidenceProbes: probeCount,
+    }});
+  }};
+
+  addEventListener("load", probe, {{ once: true }});
+}})();
+</script>"#
+        )
+    }
+
+    fn assert_metadata_evidence_precedes_readiness(readiness: &serde_json::Value, case: &str) {
+        assert_eq!(readiness["payload"]["fixture"], case);
+        assert_eq!(readiness["payload"]["metadataEvidenceBeforeRequest"], false);
+        assert_eq!(readiness["payload"]["metadataEvidenceAtReadiness"], true);
+        assert!(
+            readiness["payload"]["metadataEvidenceProbes"]
+                .as_u64()
+                .is_some_and(|probes| probes >= 2),
+            "the fixture must prove absence before waiting for recorded metadata evidence"
+        );
     }
 
     fn a4() -> PageDefinition {
@@ -1609,6 +1740,23 @@ mod tests {
             wait_for_fonts: false,
         };
         let mut resources = ResourcePolicyConfig::default();
+        let metadata_evidence_observed = matches!(
+            case.as_str(),
+            "metadata-denied-non-icon" | "same-url-role-split" | "metadata-allowed-icon"
+        )
+        .then(|| Arc::new(AtomicBool::new(false)));
+        let _metadata_probe_server = metadata_evidence_observed
+            .as_ref()
+            .map(|observed| FixtureServer::start_for_metadata_evidence(Arc::clone(observed)));
+        let metadata_probe_base = _metadata_probe_server
+            .as_ref()
+            .map(|server| server.base_url.as_str())
+            .unwrap_or(http_base.as_str());
+        if let Some(server) = _metadata_probe_server.as_ref() {
+            resources
+                .allowed_http_roots
+                .push(url::Url::parse(&server.base_url).unwrap());
+        }
         let mut environment = RenderEnvironment::default();
         let mut allow_host_fonts = false;
         let mut _bundle = None;
@@ -1662,7 +1810,12 @@ mod tests {
                 let bundle = TempBundle::new(case.as_str());
                 let input = bundle.write(
                     "input.html",
-                    "<!doctype html><link rel='icon' href='https://denied.invalid/report.bin'><script>window.pliego?.defer();addEventListener('load',()=>setTimeout(()=>window.pliego?.ready({fixture:'metadata-denied-non-icon'}),25));</script>",
+                    metadata_evidence_fixture(
+                        case.as_str(),
+                        "https://denied.invalid/report.bin",
+                        metadata_probe_base,
+                        "",
+                    ),
                 );
                 _bundle = Some(bundle);
                 input
@@ -1681,7 +1834,12 @@ mod tests {
                 bundle.write("shared.png", fixture_png());
                 let input = bundle.write(
                     "input.html",
-                    "<!doctype html><link rel='icon' href='shared.png'><img src='shared.png' width='1' height='1' alt=''><script>window.pliego?.defer();addEventListener('load',()=>setTimeout(()=>window.pliego?.ready({fixture:'same-url-role-split'}),25));</script>",
+                    metadata_evidence_fixture(
+                        case.as_str(),
+                        "shared.png",
+                        metadata_probe_base,
+                        "<img src='shared.png' width='1' height='1' alt=''>",
+                    ),
                 );
                 _bundle = Some(bundle);
                 input
@@ -1700,7 +1858,7 @@ mod tests {
                 bundle.write("icon.png", fixture_png());
                 let input = bundle.write(
                     "input.html",
-                    "<!doctype html><link rel='icon' href='icon.png'><script>window.pliego?.defer();addEventListener('load',()=>setTimeout(()=>window.pliego?.ready({fixture:'metadata-allowed-icon'}),25));</script>",
+                    metadata_evidence_fixture(case.as_str(), "icon.png", metadata_probe_base, ""),
                 );
                 _bundle = Some(bundle);
                 input
@@ -1843,6 +2001,21 @@ mod tests {
             },
             _ => a4(),
         };
+        let expected_metadata_outcome = match case.as_str() {
+            "metadata-denied-non-icon" => Some((
+                url::Url::parse("https://denied.invalid/report.bin").unwrap(),
+                "cancelled",
+            )),
+            "same-url-role-split" => Some((
+                url::Url::from_file_path(input.parent().unwrap().join("shared.png")).unwrap(),
+                "loaded",
+            )),
+            "metadata-allowed-icon" => Some((
+                url::Url::from_file_path(input.parent().unwrap().join("icon.png")).unwrap(),
+                "loaded",
+            )),
+            _ => None,
+        };
         let session = if case == "canvas-retention-budget" {
             DocumentSession::new_with_canvas_retention_limits(
                 &input,
@@ -1863,6 +2036,22 @@ mod tests {
                 readiness,
             )
         };
+        if let (Ok(session), Some(observed), Some((target, status))) = (
+            session.as_ref(),
+            metadata_evidence_observed.as_ref(),
+            expected_metadata_outcome,
+        ) {
+            let observed = Arc::clone(observed);
+            session.set_resource_evidence_observer(Rc::new(move |evidence| {
+                if evidence.request.url == target &&
+                    evidence.request.load_role == WebResourceLoadRole::DocumentMetadata &&
+                    evidence.request.destination == "Image" &&
+                    evidence.status == status
+                {
+                    observed.store(true, Ordering::SeqCst);
+                }
+            }));
+        }
         let result = session.and_then(|session| {
             if case == "canvas-missing-snapshot" {
                 session.render_with_canvas_freezer(|keys| {
@@ -2056,7 +2245,7 @@ mod tests {
             "metadata-denied-non-icon" => {
                 let outcome = result.expect("denied document metadata must not abort rendering");
                 assert!(outcome.pdf.starts_with(b"%PDF-"));
-                assert_eq!(outcome.readiness["payload"]["fixture"], case);
+                assert_metadata_evidence_precedes_readiness(&outcome.readiness, case.as_str());
                 let evidence = outcome
                     .resources
                     .iter()
@@ -2077,9 +2266,14 @@ mod tests {
                 assert_eq!(failure.status, "denied");
                 assert!(!failure.fatal);
                 assert_eq!(failure.load_role, WebResourceLoadRole::DocumentMetadata);
-                assert_eq!(outcome.resource_accounting.requests, 2);
-                assert_eq!(outcome.resource_accounting.loaded, 1);
                 assert_eq!(outcome.resource_accounting.failed, 1);
+                assert_eq!(
+                    outcome.resource_accounting.requests,
+                    outcome.resource_accounting.loaded +
+                        outcome.resource_accounting.delegated +
+                        outcome.resource_accounting.failed
+                );
+                assert!(outcome.resource_accounting.loaded >= 3);
             },
             "content-favicon-name" => {
                 let Err(error) = result else {
@@ -2095,6 +2289,7 @@ mod tests {
             "same-url-role-split" => {
                 let outcome =
                     result.expect("same-URL metadata and content loads should both render");
+                assert_metadata_evidence_precedes_readiness(&outcome.readiness, case.as_str());
                 let shared =
                     url::Url::from_file_path(input.parent().unwrap().join("shared.png")).unwrap();
                 let roles = outcome
@@ -2124,6 +2319,7 @@ mod tests {
             },
             "metadata-allowed-icon" => {
                 let outcome = result.expect("an allowed icon should load normally");
+                assert_metadata_evidence_precedes_readiness(&outcome.readiness, case.as_str());
                 let icon =
                     url::Url::from_file_path(input.parent().unwrap().join("icon.png")).unwrap();
                 let evidence = outcome
