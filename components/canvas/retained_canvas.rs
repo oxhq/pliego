@@ -208,6 +208,13 @@ fn freeze_canvas_snapshots_with_observer(
     image_keys: &[(u32, u32)],
     mut after_snapshot: impl FnMut(usize),
 ) -> Result<FrozenCanvasSnapshots, FreezeCanvasSnapshotsError> {
+    if image_keys.is_empty() {
+        return Ok(FrozenCanvasSnapshots {
+            generation: 0,
+            retention_budget_exceeded: false,
+            snapshots: HashMap::new(),
+        });
+    }
     // Materialize and deduplicate the request before taking the global registry lock. Accepting a
     // slice also prevents a custom iterator from re-entering retention while `next()` runs.
     if !ENABLED.load(Ordering::Acquire) {
@@ -724,6 +731,10 @@ mod tests {
             freeze_canvas_snapshots(&[(7, 11)]),
             Err(FreezeCanvasSnapshotsError::RetentionDisabled)
         ));
+        let empty = freeze_canvas_snapshots(&[]).unwrap();
+        assert_eq!(empty.generation(), 0);
+        assert!(!empty.retention_budget_exceeded());
+        assert!(empty.get(7, 11).is_none());
     }
 
     #[test]
