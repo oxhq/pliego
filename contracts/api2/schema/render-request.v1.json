@@ -1,0 +1,156 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://pliego.dev/schema/render-request.v1.json",
+  "title": "Pliego API 2 RenderRequest",
+  "description": "The normalized behavioral input for one API 2 render.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "version",
+    "api",
+    "input",
+    "environment",
+    "page",
+    "resources",
+    "diagnostics"
+  ],
+  "properties": {
+    "schema": { "const": "pliego.render-request" },
+    "version": { "const": 1 },
+    "api": { "const": 2 },
+    "input": { "$ref": "#/definitions/input" },
+    "environment": { "$ref": "#/definitions/environment" },
+    "page": { "$ref": "#/definitions/page" },
+    "resources": { "$ref": "#/definitions/resources" },
+    "diagnostics": { "$ref": "#/definitions/diagnostics" }
+  },
+  "definitions": {
+    "content_address": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "relative_path": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]*$"
+    },
+    "input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["entrypoint", "bundle_sha256"],
+      "properties": {
+        "entrypoint": { "$ref": "#/definitions/relative_path" },
+        "bundle_sha256": { "$ref": "#/definitions/content_address" }
+      }
+    },
+    "environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["locale", "timezone"],
+      "properties": {
+        "locale": { "type": "string", "enum": ["en-US", "es-MX"] },
+        "timezone": { "type": "string", "enum": ["UTC", "PST8PDT"] }
+      }
+    },
+    "page": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["size", "margins_css_px"],
+      "properties": {
+        "size": {
+          "oneOf": [
+            { "$ref": "#/definitions/named_page_size" },
+            { "$ref": "#/definitions/explicit_page_size" }
+          ]
+        },
+        "margins_css_px": { "$ref": "#/definitions/margins" }
+      }
+    },
+    "named_page_size": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": {
+        "name": { "const": "A4" }
+      }
+    },
+    "explicit_page_size": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["width_css_px", "height_css_px"],
+      "properties": {
+        "width_css_px": { "type": "number", "exclusiveMinimum": 0 },
+        "height_css_px": { "type": "number", "exclusiveMinimum": 0 }
+      }
+    },
+    "margins": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["top", "right", "bottom", "left"],
+      "properties": {
+        "top": { "type": "number", "minimum": 0 },
+        "right": { "type": "number", "minimum": 0 },
+        "bottom": { "type": "number", "minimum": 0 },
+        "left": { "type": "number", "minimum": 0 }
+      }
+    },
+    "resources": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["network", "host_fonts", "timeout_ms"],
+      "properties": {
+        "network": {
+          "oneOf": [
+            { "$ref": "#/definitions/denied_network" },
+            { "$ref": "#/definitions/allow_listed_network" }
+          ]
+        },
+        "host_fonts": { "type": "string", "enum": ["deny", "allow"] },
+        "timeout_ms": { "type": "integer", "minimum": 1, "maximum": 60000 }
+      }
+    },
+    "denied_network": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "allowed_http_roots"],
+      "properties": {
+        "mode": { "const": "deny" },
+        "allowed_http_roots": {
+          "type": "array",
+          "maxItems": 0,
+          "items": { "$ref": "#/definitions/http_root" }
+        }
+      }
+    },
+    "allow_listed_network": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "allowed_http_roots"],
+      "properties": {
+        "mode": { "const": "allow-listed" },
+        "allowed_http_roots": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/definitions/http_root" }
+        }
+      }
+    },
+    "http_root": {
+      "type": "string",
+      "pattern": "^https?://[^\\s]+/$"
+    },
+    "diagnostics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["retention"],
+      "properties": {
+        "retention": {
+          "type": "string",
+          "enum": ["none", "on-failure", "always"]
+        }
+      }
+    }
+  }
+}

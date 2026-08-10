@@ -1,0 +1,193 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://pliego.dev/schema/render-result.v1.json",
+  "title": "Pliego API 2 RenderResult",
+  "description": "The unified terminal result for one accepted API 2 request.",
+  "oneOf": [
+    { "$ref": "#/definitions/success" },
+    { "$ref": "#/definitions/failure" }
+  ],
+  "definitions": {
+    "content_address": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "relative_path": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]*$"
+    },
+    "engine": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version", "api", "source_commit", "runtime"],
+      "properties": {
+        "name": { "const": "pliego" },
+        "version": {
+          "type": "string",
+          "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$"
+        },
+        "api": { "const": 2 },
+        "source_commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "runtime": { "$ref": "#/definitions/runtime" }
+      }
+    },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "target", "binary_sha256", "servo_base"],
+      "properties": {
+        "mode": { "const": "one-shot" },
+        "target": { "type": "string", "minLength": 1 },
+        "binary_sha256": { "$ref": "#/definitions/content_address" },
+        "servo_base": { "type": "string", "pattern": "^[0-9a-f]{40}$" }
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "media_type", "sha256", "bytes"],
+      "properties": {
+        "path": { "$ref": "#/definitions/relative_path" },
+        "media_type": { "type": "string", "minLength": 1 },
+        "sha256": { "$ref": "#/definitions/content_address" },
+        "bytes": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "pdf_artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "media_type", "sha256", "bytes"],
+      "properties": {
+        "path": { "const": "document.pdf" },
+        "media_type": { "const": "application/pdf" },
+        "sha256": { "$ref": "#/definitions/content_address" },
+        "bytes": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "scene_artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "media_type", "sha256", "bytes"],
+      "properties": {
+        "path": { "const": "scene.json" },
+        "media_type": { "const": "application/vnd.pliego.document-scene+json" },
+        "sha256": { "$ref": "#/definitions/content_address" },
+        "bytes": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "bundle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "media_type", "sha256", "bytes", "entries"],
+      "properties": {
+        "path": { "const": "bundle.json" },
+        "media_type": { "const": "application/vnd.pliego.bundle+json" },
+        "sha256": { "$ref": "#/definitions/content_address" },
+        "bytes": { "type": "integer", "minimum": 1 },
+        "entries": {
+          "type": "array",
+          "minItems": 2,
+          "items": { "$ref": "#/definitions/artifact" }
+        }
+      }
+    },
+    "delivery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pdf", "scene", "bundle"],
+      "properties": {
+        "pdf": { "$ref": "#/definitions/pdf_artifact" },
+        "scene": { "$ref": "#/definitions/scene_artifact" },
+        "bundle": { "$ref": "#/definitions/bundle" }
+      }
+    },
+    "diagnostic_artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "media_type", "sha256", "bytes"],
+      "properties": {
+        "path": {
+          "type": "string",
+          "pattern": "^diagnostics/[A-Za-z0-9][A-Za-z0-9._/-]*$"
+        },
+        "media_type": { "type": "string", "minLength": 1 },
+        "sha256": { "$ref": "#/definitions/content_address" },
+        "bytes": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "diagnostics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["retained", "artifacts"],
+      "properties": {
+        "retained": { "type": "boolean" },
+        "artifacts": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/diagnostic_artifact" }
+        }
+      }
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message"],
+      "properties": {
+        "code": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]*$" },
+        "message": { "type": "string", "minLength": 1 }
+      }
+    },
+    "success": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "version",
+        "api",
+        "status",
+        "request",
+        "engine",
+        "delivery",
+        "diagnostics",
+        "error"
+      ],
+      "properties": {
+        "schema": { "const": "pliego.render-result" },
+        "version": { "const": 1 },
+        "api": { "const": 2 },
+        "status": { "const": "success" },
+        "request": { "$ref": "render-request.v1.json" },
+        "engine": { "$ref": "#/definitions/engine" },
+        "delivery": { "$ref": "#/definitions/delivery" },
+        "diagnostics": { "$ref": "#/definitions/diagnostics" },
+        "error": { "type": "null" }
+      }
+    },
+    "failure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "version",
+        "api",
+        "status",
+        "request",
+        "engine",
+        "delivery",
+        "diagnostics",
+        "error"
+      ],
+      "properties": {
+        "schema": { "const": "pliego.render-result" },
+        "version": { "const": 1 },
+        "api": { "const": 2 },
+        "status": { "const": "failed" },
+        "request": { "$ref": "render-request.v1.json" },
+        "engine": { "$ref": "#/definitions/engine" },
+        "delivery": { "type": "null" },
+        "diagnostics": { "$ref": "#/definitions/diagnostics" },
+        "error": { "$ref": "#/definitions/error" }
+      }
+    }
+  }
+}
