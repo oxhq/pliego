@@ -89,10 +89,10 @@ jobs:
           version: "0.11.16"
           enable-cache: false
 
-      - name: Resolve Pliego version
+      - name: Resolve package versions
         shell: bash
         run: |
-          python -c 'import json, os, subprocess; m=json.loads(subprocess.check_output(["cargo", "metadata", "--no-deps", "--format-version", "1"])); v=next(p["version"] for p in m["packages"] if p["name"] == "pliego"); open(os.environ["GITHUB_ENV"], "a", encoding="utf-8").write(f"PLIEGO_VERSION={v}\n")'
+          python -c 'import json, os, subprocess; m=json.loads(subprocess.check_output(["cargo", "metadata", "--no-deps", "--format-version", "1"])); pliego=next(p["version"] for p in m["packages"] if p["name"] == "pliego"); servo=next(p["version"] for p in m["packages"] if p["name"] == "servo"); open(os.environ["GITHUB_ENV"], "a", encoding="utf-8").write(f"PLIEGO_VERSION={pliego}\nSERVO_VERSION={servo}\n")'
 
       - name: Cache Rust compilation
         uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
@@ -159,6 +159,7 @@ jobs:
           printf '%s\n' '1. Verify the adjacent SHA-256 file.' '2. Put pliego on PATH or set PLIEGO_BINARY.' '3. Run pliego --version.' > "dist/$bundle/INSTALL.txt"
           "dist/$bundle/pliego" --version | tee "dist/$bundle/VERSION.txt"
           grep -Fqx 'pliego-api 1' "dist/$bundle/VERSION.txt"
+          grep -Fqx "Servo ${SERVO_VERSION}-$(git rev-parse --short HEAD)" "dist/$bundle/VERSION.txt"
           tar -C dist -czf "dist/$archive" "$bundle"
           python python/check_pliego_release_archive.py "dist/$archive" --version "$PLIEGO_VERSION" --bundle '${{ matrix.bundle }}' --repository-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
           python -c 'import hashlib, pathlib, sys; p = pathlib.Path(sys.argv[1]); print(f"{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.name}")' "dist/$archive" > "dist/$archive.sha256"
@@ -192,6 +193,10 @@ jobs:
           & "$directory\pliego.exe" --version | Tee-Object -FilePath "$directory\VERSION.txt"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           if ((Get-Content -LiteralPath "$directory\VERSION.txt") -cnotcontains 'pliego-api 1') { throw 'VERSION.txt must contain pliego-api 1' }
+          $revision = git rev-parse --short HEAD
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $expectedServoBuild = "Servo $env:SERVO_VERSION-$revision"
+          if ((Get-Content -LiteralPath "$directory\VERSION.txt") -cnotcontains $expectedServoBuild) { throw "VERSION.txt must contain $expectedServoBuild" }
           Compress-Archive -Path $directory -DestinationPath "dist/$archive"
           python python/check_pliego_release_archive.py "dist/$archive" --version "$env:PLIEGO_VERSION" --bundle '${{ matrix.bundle }}' --repository-url "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
