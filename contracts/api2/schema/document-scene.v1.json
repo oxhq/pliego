@@ -2,16 +2,32 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://pliego.dev/schema/document-scene.v1.json",
   "title": "Pliego public DocumentScene",
-  "description": "The ordered, path-independent public scene artifact for API 2.",
+  "description": "The ordered, fixed-point, path-independent public scene artifact for API 2.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema", "version", "pages"],
+  "required": [
+    "schema",
+    "version",
+    "app_units_per_css_px",
+    "request_page",
+    "semantic_layer",
+    "pages"
+  ],
   "properties": {
     "schema": { "const": "pliego.document-scene" },
     "version": { "const": 1 },
+    "app_units_per_css_px": { "const": 60 },
+    "request_page": { "$ref": "render-request.v1.json#/definitions/page" },
+    "semantic_layer": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "#/definitions/semantic_layer_ref" }
+      ]
+    },
     "pages": {
       "type": "array",
       "minItems": 1,
+      "maxItems": 4294967295,
       "items": { "$ref": "#/definitions/page" }
     }
   },
@@ -20,14 +36,48 @@
       "type": "string",
       "pattern": "^sha256:[0-9a-f]{64}$"
     },
+    "semantic_layer_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "version", "profile", "resource", "media_type"],
+      "properties": {
+        "schema": {
+          "type": "string",
+          "pattern": "^pliego\\.document-semantics\\.[a-z0-9][a-z0-9.-]{0,127}$"
+        },
+        "version": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+        "profile": { "$ref": "render-request.v1.json#/definitions/profile_ref" },
+        "resource": { "$ref": "#/definitions/content_address" },
+        "media_type": { "const": "application/vnd.pliego.document-semantics+json" }
+      }
+    },
+    "signed_app_unit": {
+      "type": "integer",
+      "minimum": -2147483648,
+      "maximum": 2147483647
+    },
+    "nonnegative_app_unit": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 2147483647
+    },
+    "positive_app_unit": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 2147483647
+    },
     "page": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["size", "operations"],
+      "required": ["number", "style_source", "size_app_units", "margins_app_units", "operations"],
       "properties": {
-        "size": { "$ref": "#/definitions/size" },
+        "number": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+        "style_source": { "type": "string", "enum": ["request-defaults", "css-page"] },
+        "size_app_units": { "$ref": "#/definitions/size" },
+        "margins_app_units": { "$ref": "render-request.v1.json#/definitions/margins" },
         "operations": {
           "type": "array",
+          "maxItems": 4294967295,
           "items": { "$ref": "#/definitions/operation" }
         }
       }
@@ -37,8 +87,8 @@
       "additionalProperties": false,
       "required": ["width", "height"],
       "properties": {
-        "width": { "type": "number", "exclusiveMinimum": 0 },
-        "height": { "type": "number", "exclusiveMinimum": 0 }
+        "width": { "$ref": "#/definitions/positive_app_unit" },
+        "height": { "$ref": "#/definitions/positive_app_unit" }
       }
     },
     "rect": {
@@ -46,30 +96,30 @@
       "additionalProperties": false,
       "required": ["x", "y", "width", "height"],
       "properties": {
-        "x": { "type": "number", "minimum": 0 },
-        "y": { "type": "number", "minimum": 0 },
-        "width": { "type": "number", "minimum": 0 },
-        "height": { "type": "number", "minimum": 0 }
+        "x": { "$ref": "#/definitions/signed_app_unit" },
+        "y": { "$ref": "#/definitions/signed_app_unit" },
+        "width": { "$ref": "#/definitions/nonnegative_app_unit" },
+        "height": { "$ref": "#/definitions/nonnegative_app_unit" }
       }
     },
-    "color": {
+    "color_rgba8": {
       "type": "object",
       "additionalProperties": false,
       "required": ["r", "g", "b", "a"],
       "properties": {
-        "r": { "type": "number", "minimum": 0, "maximum": 1 },
-        "g": { "type": "number", "minimum": 0, "maximum": 1 },
-        "b": { "type": "number", "minimum": 0, "maximum": 1 },
-        "a": { "type": "number", "minimum": 0, "maximum": 1 }
+        "r": { "type": "integer", "minimum": 0, "maximum": 255 },
+        "g": { "type": "integer", "minimum": 0, "maximum": 255 },
+        "b": { "type": "integer", "minimum": 0, "maximum": 255 },
+        "a": { "type": "integer", "minimum": 0, "maximum": 255 }
       }
     },
     "stroke": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["color", "width"],
+      "required": ["color", "width_app_units"],
       "properties": {
-        "color": { "$ref": "#/definitions/color" },
-        "width": { "type": "number", "exclusiveMinimum": 0 }
+        "color": { "$ref": "#/definitions/color_rgba8" },
+        "width_app_units": { "$ref": "#/definitions/positive_app_unit" }
       }
     },
     "text_range": {
@@ -77,8 +127,8 @@
       "additionalProperties": false,
       "required": ["start", "end"],
       "properties": {
-        "start": { "type": "integer", "minimum": 0 },
-        "end": { "type": "integer", "minimum": 1 }
+        "start": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "end": { "type": "integer", "minimum": 1, "maximum": 4294967295 }
       }
     },
     "glyph": {
@@ -86,27 +136,11 @@
       "additionalProperties": false,
       "required": ["id", "x", "y", "advance", "text_range"],
       "properties": {
-        "id": { "type": "integer", "minimum": 0 },
-        "x": { "type": "number", "minimum": 0 },
-        "y": { "type": "number", "minimum": 0 },
-        "advance": { "type": "number", "minimum": 0 },
+        "id": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "x": { "$ref": "#/definitions/signed_app_unit" },
+        "y": { "$ref": "#/definitions/signed_app_unit" },
+        "advance": { "$ref": "#/definitions/signed_app_unit" },
         "text_range": { "$ref": "#/definitions/text_range" }
-      }
-    },
-    "semantics": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["role"],
-      "properties": {
-        "role": { "type": "string", "minLength": 1 },
-        "label": { "type": "string", "minLength": 1 }
-      }
-    },
-    "meta": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "semantics": { "$ref": "#/definitions/semantics" }
       }
     },
     "operation": {
@@ -120,25 +154,32 @@
     "text_operation": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["type", "text", "font", "font_size", "color", "glyphs", "meta"],
+      "required": ["type", "text", "font", "font_size_app_units", "color", "glyphs"],
       "properties": {
         "type": { "const": "text" },
-        "text": { "type": "string", "minLength": 1 },
+        "text": { "type": "string", "minLength": 1, "maxLength": 4294967295 },
         "font": { "$ref": "#/definitions/content_address" },
-        "font_size": { "type": "number", "exclusiveMinimum": 0 },
-        "color": { "$ref": "#/definitions/color" },
+        "font_size_app_units": { "$ref": "#/definitions/positive_app_unit" },
+        "color": { "$ref": "#/definitions/color_rgba8" },
         "glyphs": {
           "type": "array",
           "minItems": 1,
+          "maxItems": 4294967295,
           "items": { "$ref": "#/definitions/glyph" }
-        },
-        "meta": { "$ref": "#/definitions/meta" }
+        }
       }
+    },
+    "path_data": {
+      "type": "string",
+      "minLength": 5,
+      "maxLength": 16777216,
+      "description": "Canonical absolute SVG subset: uppercase M, L, Q, C, Z; one ASCII space; base-10 i32; no commas, plus signs, leading zeros, or negative zero.",
+      "pattern": "^M (?:0|-?[1-9][0-9]*) (?:0|-?[1-9][0-9]*)(?: (?:M (?:0|-?[1-9][0-9]*) (?:0|-?[1-9][0-9]*)|L (?:0|-?[1-9][0-9]*) (?:0|-?[1-9][0-9]*)|Q (?:0|-?[1-9][0-9]*) (?:0|-?[1-9][0-9]*) (?:0|-?[1-9][0-9]*) (?:0|-?[1-9][0-9]*)|C (?:0|-?[1-9][0-9]*) (?:0|-?[1-9][0-9]*) (?:0|-?[1-9][0-9]*) (?:0|-?[1-9][0-9]*) (?:0|-?[1-9][0-9]*) (?:0|-?[1-9][0-9]*)|Z))*$"
     },
     "path_operation": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["type", "bounds", "data", "fill_rule", "meta"],
+      "required": ["type", "bounds", "data", "fill_rule"],
       "anyOf": [
         { "required": ["fill"] },
         { "required": ["stroke"] }
@@ -146,28 +187,26 @@
       "properties": {
         "type": { "const": "path" },
         "bounds": { "$ref": "#/definitions/rect" },
-        "data": { "type": "string", "minLength": 1 },
-        "fill": { "$ref": "#/definitions/color" },
-        "fill_rule": { "type": "string", "enum": ["non_zero", "even_odd"] },
-        "stroke": { "$ref": "#/definitions/stroke" },
-        "meta": { "$ref": "#/definitions/meta" }
+        "data": { "$ref": "#/definitions/path_data" },
+        "fill": { "$ref": "#/definitions/color_rgba8" },
+        "fill_rule": { "type": "string", "enum": ["non-zero", "even-odd"] },
+        "stroke": { "$ref": "#/definitions/stroke" }
       }
     },
     "image_operation": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["type", "bounds", "resource", "meta"],
+      "required": ["type", "bounds", "resource"],
       "properties": {
         "type": { "const": "image" },
         "bounds": { "$ref": "#/definitions/rect" },
-        "resource": { "$ref": "#/definitions/content_address" },
-        "meta": { "$ref": "#/definitions/meta" }
+        "resource": { "$ref": "#/definitions/content_address" }
       }
     },
     "link_operation": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["type", "bounds", "target", "meta"],
+      "required": ["type", "bounds", "target"],
       "properties": {
         "type": { "const": "link" },
         "bounds": { "$ref": "#/definitions/rect" },
@@ -175,9 +214,8 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 8192,
-          "pattern": "^(?:https?://|mailto:).+$"
-        },
-        "meta": { "$ref": "#/definitions/meta" }
+          "pattern": "^(?:https?://|mailto:)[^\\s]+$"
+        }
       }
     }
   }

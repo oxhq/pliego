@@ -2,36 +2,56 @@
   "schema": "pliego.render-request",
   "version": 1,
   "api": 2,
+  "profile": null,
   "input": {
-    "entrypoint": "reports/statement.html",
-    "bundle_sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    "entrypoint": "document.html",
+    "manifest": {
+      "path": "input-manifest.json",
+      "media_type": "application/vnd.pliego.input-manifest+json",
+      "sha256": "sha256:65fb0708211a8786d538d1940dd924f8e60e9cc875d6f3fde552b763f3f71907",
+      "bytes": 723
+    }
   },
   "environment": {
     "locale": "es-MX",
-    "timezone": "PST8PDT"
+    "timezone": "America/Tijuana"
   },
   "page": {
     "size": {
-      "width_css_px": 612,
-      "height_css_px": 792
+      "width_app_units": 36720,
+      "height_app_units": 47520
     },
-    "margins_css_px": {
-      "top": 36,
-      "right": 36,
-      "bottom": 36,
-      "left": 36
-    }
+    "margins_app_units": {
+      "top": 2160,
+      "right": 2160,
+      "bottom": 2160,
+      "left": 2160
+    },
+    "css_page_precedence": "css-page-over-request-defaults"
   },
   "resources": {
-    "network": {
-      "mode": "allow-listed",
-      "allowed_http_roots": [
-        "https://assets.example.test/fonts/",
-        "https://assets.example.test/images/"
-      ]
-    },
-    "host_fonts": "allow",
-    "timeout_ms": 30000
+    "network": "deny",
+    "host_fonts": "deny"
+  },
+  "time": {
+    "policy_version": 1,
+    "epoch_unix_ms": 0,
+    "initial_offset_ns": 0
+  },
+  "settlement": {
+    "policy_version": 1,
+    "infinite_source_policy": "fail",
+    "empty_checkpoints": 2,
+    "limits": {
+      "virtual_span_ms": 172800000,
+      "ordinary_tasks": 200000,
+      "microtasks": 2000000,
+      "rendering_opportunities": 20000,
+      "mutations": 2000000,
+      "post_readiness_resources": 2048,
+      "process_cpu_ms": 60000,
+      "host_wall_ms": 120000
+    }
   },
   "diagnostics": {
     "retention": "on-failure"
