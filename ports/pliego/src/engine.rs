@@ -106,6 +106,19 @@ impl DocumentEngine {
     pub fn render(request: RenderRequest) -> Result<RenderOutcome, RenderError> {
         crate::render(request)
     }
+
+    /// Exercise the Pliego-owned direct Servo runtime through the production
+    /// artifact publisher without changing the CLI's default engine yet.
+    #[cfg(all(
+        feature = "document-session",
+        not(any(target_os = "android", target_env = "ohos"))
+    ))]
+    #[allow(dead_code)]
+    pub fn render_with_document_session(
+        request: RenderRequest,
+    ) -> Result<RenderOutcome, RenderError> {
+        crate::render_with_document_session(request)
+    }
 }
 
 #[cfg(test)]

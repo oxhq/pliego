@@ -267,6 +267,27 @@ impl SessionArtifacts {
         )
     }
 
+    /// Record one terminal resource event supplied by a Pliego-owned runtime.
+    ///
+    /// The caller supplies the runtime-specific evidence fields; this artifact
+    /// boundary owns the timestamp, render identity, and policy identity so a
+    /// runtime cannot accidentally publish evidence for a different session.
+    pub fn record_resource_evidence(&self, evidence: serde_json::Value) -> io::Result<()> {
+        let mut evidence = evidence.as_object().cloned().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "resource evidence must be a JSON object",
+            )
+        })?;
+        evidence.insert("timestamp_ms".into(), serde_json::json!(timestamp_ms()));
+        evidence.insert("render_id".into(), self.render_id.clone().into());
+        evidence.insert(
+            "policy".into(),
+            serde_json::Value::String("pliego.resource-policy.v1".into()),
+        );
+        self.append("resources.jsonl", serde_json::Value::Object(evidence))
+    }
+
     pub fn record_asset_failure(
         &self,
         code: &str,
@@ -324,6 +345,10 @@ impl SessionArtifacts {
 
     pub fn write_scene_preview(&self, png: &[u8]) -> io::Result<()> {
         self.write_bytes("scene-preview.png", png)
+    }
+
+    pub fn write_render_image(&self, png: &[u8]) -> io::Result<()> {
+        self.write_bytes("render.png", png)
     }
 
     pub fn write_scene_previews(&self, pages: &[Vec<u8>]) -> io::Result<Vec<PathBuf>> {
