@@ -6619,6 +6619,7 @@ dependencies = [
  "servoshell",
  "sha2 0.11.0",
  "tokio",
+ "toml_edit",
  "ttf-parser",
  "unicode-segmentation",
  "url",

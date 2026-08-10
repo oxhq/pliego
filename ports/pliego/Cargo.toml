@@ -54,6 +54,9 @@ flate2 = { workspace = true }
 servo-canvas = { workspace = true, features = ["document-session-testing"] }
 ttf-parser = { workspace = true }
 
+[build-dependencies]
+toml_edit = { version = "=0.25.12", default-features = false, features = ["parse"] }
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = ["Wdk_Storage_FileSystem", "Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_IO"] }
 

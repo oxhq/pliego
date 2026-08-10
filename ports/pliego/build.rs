@@ -24,35 +24,27 @@ fn git_output(workspace_root: &Path, args: &[&str]) -> Result<String, String> {
 
 fn servo_workspace_version(workspace_manifest: &Path) -> Result<String, String> {
     let manifest = fs::read_to_string(workspace_manifest).map_err(|error| error.to_string())?;
-    let mut in_workspace_package = false;
-    for raw_line in manifest.lines() {
-        let line = raw_line.trim();
-        if line.starts_with('[') {
-            in_workspace_package = line == "[workspace.package]";
-            continue;
-        }
-        if !in_workspace_package {
-            continue;
-        }
-        let Some((key, value)) = line.split_once('=') else {
-            continue;
-        };
-        if key.trim() != "version" {
-            continue;
-        }
-        let value = value.trim();
-        let Some(version) = value
-            .strip_prefix('"')
-            .and_then(|value| value.strip_suffix('"'))
-        else {
-            return Err("workspace.package.version must be one quoted string".into());
-        };
-        if version.is_empty() || version.chars().any(char::is_whitespace) {
-            return Err("workspace.package.version must be one non-empty token".into());
-        }
-        return Ok(version.to_owned());
+    servo_workspace_version_from_manifest(&manifest)
+}
+
+fn servo_workspace_version_from_manifest(manifest: &str) -> Result<String, String> {
+    let document = manifest
+        .parse::<toml_edit::DocumentMut>()
+        .map_err(|error| format!("workspace Cargo.toml is invalid TOML: {error}"))?;
+    let version = document
+        .as_table()
+        .get("workspace")
+        .and_then(toml_edit::Item::as_table_like)
+        .and_then(|workspace| workspace.get("package"))
+        .and_then(toml_edit::Item::as_table_like)
+        .and_then(|package| package.get("version"))
+        .ok_or("workspace.package.version is missing")?
+        .as_str()
+        .ok_or("workspace.package.version must be a string")?;
+    if version.is_empty() || version.chars().any(char::is_whitespace) {
+        return Err("workspace.package.version must be one non-empty token".into());
     }
-    Err("workspace.package.version is missing".into())
+    Ok(version.to_owned())
 }
 
 fn emit_servo_build_identity(workspace_root: &Path) -> Result<(), Box<dyn Error>> {
@@ -73,12 +65,18 @@ fn emit_servo_build_identity(workspace_root: &Path) -> Result<(), Box<dyn Error>
         let head_path = normalize_git_path(workspace_root, &head_path);
         println!("cargo:rerun-if-changed={}", head_path.display());
     }
-    if let Ok(reference) = git_output(workspace_root, &["symbolic-ref", "-q", "HEAD"]) &&
-        let Ok(reference_path) =
+    if let Ok(reference) = git_output(workspace_root, &["symbolic-ref", "-q", "HEAD"])
+        && let Ok(reference_path) =
             git_output(workspace_root, &["rev-parse", "--git-path", &reference])
     {
         let reference_path = normalize_git_path(workspace_root, &reference_path);
         println!("cargo:rerun-if-changed={}", reference_path.display());
+    }
+    if let Ok(packed_refs_path) =
+        git_output(workspace_root, &["rev-parse", "--git-path", "packed-refs"])
+    {
+        let packed_refs_path = normalize_git_path(workspace_root, &packed_refs_path);
+        println!("cargo:rerun-if-changed={}", packed_refs_path.display());
     }
     Ok(())
 }
@@ -132,52 +130,57 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
     use std::path::Path;
 
-    use super::{normalize_git_path, servo_workspace_version};
+    use super::{normalize_git_path, servo_workspace_version_from_manifest};
 
     #[test]
     fn reads_only_the_workspace_package_version() {
-        let root =
-            std::env::temp_dir().join(format!("pliego-build-version-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).unwrap();
-        let manifest = root.join("Cargo.toml");
-        fs::write(
-            &manifest,
-            "[package]\nversion = \"9.9.9\"\n[workspace.package]\nversion = \"0.4.0\"\n",
-        )
-        .unwrap();
-
-        assert_eq!(servo_workspace_version(&manifest).unwrap(), "0.4.0");
-
-        fs::remove_dir_all(root).unwrap();
+        assert_eq!(
+            servo_workspace_version_from_manifest(
+                "[package]\nversion = \"9.9.9\"\n[workspace.package]\nversion = \"0.4.0\"\n"
+            )
+            .unwrap(),
+            "0.4.0"
+        );
     }
 
     #[test]
-    fn rejects_missing_or_unquoted_workspace_versions() {
-        let root = std::env::temp_dir().join(format!(
-            "pliego-build-invalid-version-{}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).unwrap();
-        let manifest = root.join("Cargo.toml");
-
-        fs::write(&manifest, "[package]\nversion = \"9.9.9\"\n").unwrap();
+    fn accepts_literal_strings_and_inline_comments() {
         assert_eq!(
-            servo_workspace_version(&manifest).unwrap_err(),
+            servo_workspace_version_from_manifest(
+                "[workspace.package] # package metadata\nversion = '0.4.0' # Servo version\n"
+            )
+            .unwrap(),
+            "0.4.0"
+        );
+    }
+
+    #[test]
+    fn rejects_missing_non_string_or_whitespace_workspace_versions() {
+        assert_eq!(
+            servo_workspace_version_from_manifest("[package]\nversion = \"9.9.9\"\n").unwrap_err(),
             "workspace.package.version is missing"
         );
-
-        fs::write(&manifest, "[workspace.package]\nversion = 0.4.0\n").unwrap();
         assert_eq!(
-            servo_workspace_version(&manifest).unwrap_err(),
-            "workspace.package.version must be one quoted string"
+            servo_workspace_version_from_manifest("[workspace.package]\nversion = 4\n")
+                .unwrap_err(),
+            "workspace.package.version must be a string"
         );
+        assert_eq!(
+            servo_workspace_version_from_manifest("[workspace.package]\nversion = \"0.4.0 dev\"\n")
+                .unwrap_err(),
+            "workspace.package.version must be one non-empty token"
+        );
+    }
 
-        fs::remove_dir_all(root).unwrap();
+    #[test]
+    fn rejects_malformed_toml_instead_of_partially_parsing_it() {
+        let error = servo_workspace_version_from_manifest(
+            "[workspace.package]\nversion = \"0.4.0\" trailing\n",
+        )
+        .unwrap_err();
+        assert!(error.starts_with("workspace Cargo.toml is invalid TOML:"));
     }
 
     #[test]
