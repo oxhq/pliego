@@ -6611,6 +6611,7 @@ dependencies = [
  "serde_json",
  "servo",
  "servo-canvas",
+ "servo-embedder-traits",
  "servo-layout",
  "servo-net",
  "servoshell",

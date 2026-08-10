@@ -19,6 +19,8 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use base64::Engine as _;
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+use embedder_traits::WebResourceLoadRole;
 use layout::pages::{PageDefinition, PageMargins};
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
 use pliego::Operation;
@@ -89,6 +91,7 @@ fn resource_request(request: &servoshell::WebResourceRequest) -> ResourceRequest
         method: request.method.to_string(),
         url: request.url.clone(),
         destination: format!("{:?}", request.destination),
+        load_role: request.load_role,
         referrer_url: request.referrer_url.clone(),
         is_for_main_frame: request.is_for_main_frame,
         is_redirect: request.is_redirect,
@@ -102,6 +105,15 @@ fn decide_resource_policy(
     request: &servoshell::WebResourceRequest,
 ) -> ResourcePolicyDecision {
     policy.decide(document_root, &resource_request(request))
+}
+
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+fn first_fatal_policy_failure(
+    failures: &[ResourcePolicyFailure],
+) -> Option<&ResourcePolicyFailure> {
+    failures
+        .iter()
+        .find(|failure| !failure.is_optional_metadata_failure())
 }
 
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
@@ -123,9 +135,11 @@ fn policy_failure_for_pending(url: String, response_status: Option<u16>) -> Reso
     ResourcePolicyFailure {
         code,
         status,
+        fatal: true,
         url,
         method: "GET".into(),
         destination: "Unknown".into(),
+        load_role: WebResourceLoadRole::DocumentContent,
         referrer_url: None,
         is_for_main_frame: false,
         is_redirect: false,
@@ -860,13 +874,15 @@ fn render(request: RenderRequest) -> Result<RenderOutcome, RenderError> {
             &failure.url,
             &failure.method,
             &failure.destination,
+            failure.load_role,
+            failure.fatal,
             failure.referrer_url.as_deref(),
             failure.is_for_main_frame,
             failure.is_redirect,
             &failure.reason,
         ))?;
     }
-    if let Some(failure) = policy_failures.first() {
+    if let Some(failure) = first_fatal_policy_failure(&policy_failures) {
         return Err(fail_session(
             &artifacts,
             &document_pdf_path,
@@ -896,6 +912,7 @@ fn render(request: RenderRequest) -> Result<RenderOutcome, RenderError> {
             result.resources,
             &resource_policy,
             &controlled_resources,
+            &policy_failures,
             &document_pdf_path,
         )
     }?;
@@ -906,6 +923,8 @@ fn render(request: RenderRequest) -> Result<RenderOutcome, RenderError> {
             &failure.url,
             &failure.method,
             &failure.destination,
+            failure.load_role,
+            failure.fatal,
             failure.referrer_url.as_deref(),
             failure.is_for_main_frame,
             failure.is_redirect,
@@ -1602,6 +1621,7 @@ fn record_resources(
     resources: Vec<servoshell::ResourceEvent>,
     policy: &ResourcePolicy,
     controlled_resources: &BTreeMap<(String, String), ControlledResource>,
+    policy_failures: &[ResourcePolicyFailure],
     document_pdf: &Path,
 ) -> Result<ResourceCapture, RenderError> {
     let mut pending: HashMap<String, PendingResource> = HashMap::new();
@@ -1671,9 +1691,11 @@ fn record_resources(
                             .get_or_insert_with(|| ResourcePolicyFailure {
                                 code: "ASSET_HASH_MISMATCH",
                                 status: "hash_mismatch",
+                                fatal: true,
                                 url: asset.url.to_string(),
                                 method: "GET".into(),
                                 destination: "Unknown".into(),
+                                load_role: WebResourceLoadRole::DocumentContent,
                                 referrer_url: None,
                                 is_for_main_frame: false,
                                 is_redirect: false,
@@ -1750,44 +1772,92 @@ fn record_resources(
         })?;
     }
 
-    let mut incomplete = pending
-        .into_values()
-        .flat_map(|resource| {
-            let response_status = resource.response_status;
-            resource
-                .urls
-                .into_iter()
-                .map(move |url| (url, response_status))
-        })
-        .filter(|(url, _)| !capture.url_to_resource.contains_key(url))
-        .filter(|(url, _)| {
-            url.starts_with("file:") ||
-                policy.allowed_http_roots.iter().any(|root| {
-                    url::Url::parse(url).is_ok_and(|requested| http_root_allows(root, &requested))
-                })
-        })
-        .collect::<Vec<_>>();
-    incomplete.sort_by(|left, right| left.0.cmp(&right.0));
     if capture.failure.is_none() {
-        capture.failure = incomplete.into_iter().next().map(|(url, response_status)| {
+        let failure = incomplete_resource_failure(pending, &capture, policy, policy_failures);
+        capture.failure = failure;
+    }
+    Ok(capture)
+}
+
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+fn incomplete_resource_failure(
+    pending: HashMap<String, PendingResource>,
+    capture: &ResourceCapture,
+    policy: &ResourcePolicy,
+    policy_failures: &[ResourcePolicyFailure],
+) -> Option<ResourcePolicyFailure> {
+    let mut cancelled_requests = HashMap::<(String, String), usize>::new();
+    for failure in policy_failures
+        .iter()
+        .filter(|failure| failure.is_optional_metadata_failure())
+    {
+        *cancelled_requests
+            .entry((failure.method.clone(), failure.url.clone()))
+            .or_default() += 1;
+    }
+
+    let mut pending = pending.into_values().collect::<Vec<_>>();
+    pending.sort_by(|left, right| {
+        left.urls
+            .cmp(&right.urls)
+            .then_with(|| left.method.cmp(&right.method))
+            .then_with(|| left.response_status.cmp(&right.response_status))
+    });
+    let mut incomplete = Vec::new();
+    for resource in pending {
+        let method = resource.method.unwrap_or_else(|| "GET".into());
+        let cancellation = resource.urls.iter().find_map(|url| {
+            let key = (method.clone(), url.clone());
+            cancelled_requests
+                .get(&key)
+                .copied()
+                .filter(|count| *count != 0)
+                .map(|_| key)
+        });
+        if let Some(key) = cancellation {
+            let count = cancelled_requests.get_mut(&key).unwrap();
+            *count -= 1;
+            continue;
+        }
+
+        for url in resource.urls {
+            if capture.url_to_resource.contains_key(&url) {
+                continue;
+            }
+            let controlled = url.starts_with("file:") ||
+                policy.allowed_http_roots.iter().any(|root| {
+                    url::Url::parse(&url).is_ok_and(|requested| http_root_allows(root, &requested))
+                });
+            if controlled {
+                incomplete.push((url, method.clone(), resource.response_status));
+            }
+        }
+    }
+    incomplete.sort();
+    incomplete
+        .into_iter()
+        .next()
+        .map(|(url, method, response_status)| {
             if url.starts_with("file:") {
                 ResourcePolicyFailure {
                     code: "RESOURCE_NOT_FOUND",
                     status: "not_found",
+                    fatal: true,
                     url,
-                    method: "GET".into(),
+                    method,
                     destination: "Unknown".into(),
+                    load_role: WebResourceLoadRole::DocumentContent,
                     referrer_url: None,
                     is_for_main_frame: false,
                     is_redirect: false,
                     reason: "local resource did not complete".into(),
                 }
             } else {
-                policy_failure_for_pending(url, response_status)
+                let mut failure = policy_failure_for_pending(url, response_status);
+                failure.method = method;
+                failure
             }
-        });
-    }
-    Ok(capture)
+        })
 }
 
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
@@ -2478,10 +2548,12 @@ mod tests {
         Command, ControlledResource, DEFAULT_LOCALE, DEFAULT_TIMEZONE, ExplicitRenderPaths,
         PageDefinition, PageMargins, PendingResource, RenderEnvironment, RenderError,
         RenderRequest, ResourceCapture, ResourcePolicy, ResourcePolicyConfig,
-        ResourcePolicyDecision, classify_controlled_http_status, cli_render_error,
-        complete_resource, create_session_artifacts, decide_resource_policy, default_page,
-        page_artifact, parse_args, persist_scene_capture, resolve_scene_resource,
-        retain_controlled_resource, set_document_pdf_environment, sha256_hex, stable_render_id,
+        ResourcePolicyDecision, ResourcePolicyFailure, ResourceRequest, WebResourceLoadRole,
+        classify_controlled_http_status, cli_render_error, complete_resource,
+        create_session_artifacts, decide_resource_policy, default_page, first_fatal_policy_failure,
+        incomplete_resource_failure, page_artifact, parse_args, persist_scene_capture,
+        resolve_scene_resource, retain_controlled_resource, set_document_pdf_environment,
+        sha256_hex, stable_render_id,
     };
     use crate::session::SessionArtifacts;
 
@@ -2777,6 +2849,144 @@ mod tests {
                 "invalid page options were accepted"
             );
         }
+    }
+
+    #[test]
+    fn web_resource_load_roles_default_and_round_trip_through_serialization() {
+        let legacy: servoshell::WebResourceRequest = serde_json::from_value(serde_json::json!({
+            "method": "GET",
+            "headers": {},
+            "url": "https://example.test/icon.png",
+            "destination": "Image",
+            "referrer_url": null,
+            "is_for_main_frame": false,
+            "is_redirect": true,
+        }))
+        .unwrap();
+        assert_eq!(legacy.load_role, WebResourceLoadRole::DocumentContent);
+
+        let mut metadata = legacy;
+        metadata.load_role = WebResourceLoadRole::DocumentMetadata;
+        let round_trip: servoshell::WebResourceRequest =
+            serde_json::from_value(serde_json::to_value(metadata).unwrap()).unwrap();
+        assert_eq!(round_trip.load_role, WebResourceLoadRole::DocumentMetadata);
+        assert!(round_trip.is_redirect);
+    }
+
+    #[test]
+    fn legacy_resource_path_ignores_metadata_denials_but_not_budget_failures() {
+        let request = ResourceRequest {
+            method: "GET".into(),
+            url: url::Url::parse("https://denied.invalid/report.bin").unwrap(),
+            destination: "Image".into(),
+            load_role: WebResourceLoadRole::DocumentMetadata,
+            referrer_url: None,
+            is_for_main_frame: false,
+            is_redirect: false,
+        };
+        let denial = ResourcePolicyFailure::new(
+            &request,
+            "RESOURCE_DENIED",
+            "denied",
+            "network URL is outside the configured HTTP roots",
+        )
+        .nonfatal();
+        let budget = ResourcePolicyFailure::new(
+            &request,
+            "RESOURCE_METADATA_LIMIT_EXCEEDED",
+            "denied",
+            "resource evidence exceeds its configured bound",
+        );
+
+        assert!(first_fatal_policy_failure(std::slice::from_ref(&denial)).is_none());
+        let failures = [denial, budget];
+        let fatal = first_fatal_policy_failure(&failures).unwrap();
+        assert_eq!(fatal.code, "RESOURCE_METADATA_LIMIT_EXCEEDED");
+        assert_eq!(fatal.load_role, WebResourceLoadRole::DocumentMetadata);
+        assert!(fatal.fatal);
+
+        let mut content_request = request;
+        content_request.load_role = WebResourceLoadRole::DocumentContent;
+        let malformed_content = ResourcePolicyFailure::new(
+            &content_request,
+            "RESOURCE_DENIED",
+            "denied",
+            "malformed nonfatal content denial",
+        )
+        .nonfatal();
+        assert!(first_fatal_policy_failure(std::slice::from_ref(&malformed_content)).is_some());
+    }
+
+    #[test]
+    fn legacy_incomplete_capture_does_not_refatalize_a_metadata_cancellation() {
+        let url = "file:///document/escape.css";
+        let pending = |request_ids: &[&str]| {
+            request_ids
+                .iter()
+                .map(|request_id| {
+                    (
+                        (*request_id).into(),
+                        PendingResource {
+                            urls: vec![url.into()],
+                            method: Some("GET".into()),
+                            ..PendingResource::default()
+                        },
+                    )
+                })
+                .collect::<HashMap<String, PendingResource>>()
+        };
+        let request = ResourceRequest {
+            method: "GET".into(),
+            url: url::Url::parse(url).unwrap(),
+            destination: "Image".into(),
+            load_role: WebResourceLoadRole::DocumentMetadata,
+            referrer_url: None,
+            is_for_main_frame: false,
+            is_redirect: false,
+        };
+        let cancellation = ResourcePolicyFailure::new(
+            &request,
+            "RESOURCE_DENIED",
+            "denied",
+            "file is outside the document root",
+        )
+        .nonfatal();
+        let capture = ResourceCapture::default();
+        let policy = ResourcePolicy::default();
+
+        assert!(
+            incomplete_resource_failure(
+                pending(&["metadata"]),
+                &capture,
+                &policy,
+                &[cancellation.clone()],
+            )
+            .is_none()
+        );
+        let mut malformed_content = cancellation.clone();
+        malformed_content.load_role = WebResourceLoadRole::DocumentContent;
+        assert!(
+            incomplete_resource_failure(
+                pending(&["content"]),
+                &capture,
+                &policy,
+                &[malformed_content],
+            )
+            .is_some()
+        );
+        let content_failure = incomplete_resource_failure(
+            pending(&["metadata", "content"]),
+            &capture,
+            &policy,
+            &[cancellation],
+        )
+        .unwrap();
+        assert_eq!(content_failure.code, "RESOURCE_NOT_FOUND");
+        assert_eq!(
+            content_failure.load_role,
+            WebResourceLoadRole::DocumentContent
+        );
+        assert!(content_failure.fatal);
     }
 
     #[test]

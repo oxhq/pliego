@@ -7,6 +7,8 @@ use std::path::Path;
 use std::path::PathBuf;
 
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+use embedder_traits::WebResourceLoadRole;
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
 use sha2::{Digest, Sha256};
 
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
@@ -131,6 +133,7 @@ pub(crate) struct ResourceRequest {
     pub(crate) method: String,
     pub(crate) url: url::Url,
     pub(crate) destination: String,
+    pub(crate) load_role: WebResourceLoadRole,
     pub(crate) referrer_url: Option<url::Url>,
     pub(crate) is_for_main_frame: bool,
     pub(crate) is_redirect: bool,
@@ -253,8 +256,10 @@ impl ResponseHeaderEvidence {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ResourceEvidence {
     pub(crate) request: ResourceRequest,
-    pub(crate) source: ResourceSource,
+    pub(crate) source: Option<ResourceSource>,
     pub(crate) status: &'static str,
+    pub(crate) fatal: bool,
+    pub(crate) failure: Option<ResourcePolicyFailure>,
     pub(crate) response_status: Option<u16>,
     pub(crate) content_type: Option<String>,
     pub(crate) bytes: Option<u64>,
@@ -303,8 +308,10 @@ impl ResourceEvidence {
         let content_address = format!("sha256:{sha256}");
         Self {
             request,
-            source,
+            source: Some(source),
             status: "loaded",
+            fatal: false,
+            failure: None,
             response_status: Some(response_status),
             content_type: content_type.map(str::to_owned),
             bytes: Some(bytes),
@@ -317,8 +324,28 @@ impl ResourceEvidence {
     pub(crate) fn delegated(request: ResourceRequest, source: ResourceSource) -> Self {
         Self {
             request,
-            source,
+            source: Some(source),
             status: "delegated",
+            fatal: false,
+            failure: None,
+            response_status: None,
+            content_type: None,
+            bytes: None,
+            sha256: None,
+            content_address: None,
+            response_headers: None,
+        }
+    }
+
+    pub(crate) fn cancelled(request: ResourceRequest, failure: ResourcePolicyFailure) -> Self {
+        debug_assert!(failure.is_optional_metadata_failure());
+        debug_assert_eq!(request.load_role, WebResourceLoadRole::DocumentMetadata);
+        Self {
+            request,
+            source: None,
+            status: "cancelled",
+            fatal: failure.fatal,
+            failure: Some(failure),
             response_status: None,
             content_type: None,
             bytes: None,
@@ -360,6 +387,11 @@ impl ResourceEvidence {
                 self.response_headers
                     .as_ref()
                     .map_or(0, ResponseHeaderEvidence::intercepted_metadata_bytes),
+            )
+            .saturating_add(
+                self.failure
+                    .as_ref()
+                    .map_or(0, ResourcePolicyFailure::metadata_bytes),
             );
         request.saturating_add(response)
     }
@@ -395,7 +427,10 @@ impl ResourceAccounting {
                 .iter()
                 .filter(|resource| resource.status == "delegated")
                 .count(),
-            failed: 0,
+            failed: resources
+                .iter()
+                .filter(|resource| resource.failure.is_some())
+                .count(),
             body_bytes: resources.iter().filter_map(|resource| resource.bytes).sum(),
             unavailable_bodies: resources
                 .iter()
@@ -417,9 +452,11 @@ impl ResourceAccounting {
 pub(crate) struct ResourcePolicyFailure {
     pub(crate) code: &'static str,
     pub(crate) status: &'static str,
+    pub(crate) fatal: bool,
     pub(crate) url: String,
     pub(crate) method: String,
     pub(crate) destination: String,
+    pub(crate) load_role: WebResourceLoadRole,
     pub(crate) referrer_url: Option<String>,
     pub(crate) is_for_main_frame: bool,
     pub(crate) is_redirect: bool,
@@ -437,14 +474,35 @@ impl ResourcePolicyFailure {
         Self {
             code,
             status,
+            fatal: true,
             url: request.url.to_string(),
             method: request.method.clone(),
             destination: request.destination.clone(),
+            load_role: request.load_role,
             referrer_url: request.referrer_url.as_ref().map(ToString::to_string),
             is_for_main_frame: request.is_for_main_frame,
             is_redirect: request.is_redirect,
             reason: reason.into(),
         }
+    }
+
+    pub(crate) fn nonfatal(mut self) -> Self {
+        self.fatal = false;
+        self
+    }
+
+    pub(crate) fn is_optional_metadata_failure(&self) -> bool {
+        !self.fatal && self.load_role == WebResourceLoadRole::DocumentMetadata
+    }
+
+    #[cfg(feature = "document-session")]
+    fn metadata_bytes(&self) -> u64 {
+        self.url.len() as u64 +
+            self.method.len() as u64 +
+            self.destination.len() as u64 +
+            self.referrer_url.as_ref().map_or(0, String::len) as u64 +
+            self.reason.len() as u64 +
+            std::mem::size_of::<Self>() as u64
     }
 }
 
@@ -564,16 +622,26 @@ impl ResourcePolicy {
         document_root: &Path,
         request: &ResourceRequest,
     ) -> ResourcePolicyDecision {
-        let failure = |code, status, reason: String| {
+        let denial = |code, status, reason: String| {
+            let failure = ResourcePolicyFailure::new(request, code, status, reason);
+            ResourcePolicyDecision::Fail(
+                if request.load_role == WebResourceLoadRole::DocumentMetadata {
+                    failure.nonfatal()
+                } else {
+                    failure
+                },
+            )
+        };
+        let fatal_failure = |code, status, reason: String| {
             ResourcePolicyDecision::Fail(ResourcePolicyFailure::new(request, code, status, reason))
         };
 
         if request.is_redirect {
-            return failure("RESOURCE_DENIED", "denied", "redirects are disabled".into());
+            return denial("RESOURCE_DENIED", "denied", "redirects are disabled".into());
         }
 
         if !matches!(request.method.as_str(), "GET" | "HEAD") {
-            return failure(
+            return denial(
                 "RESOURCE_DENIED",
                 "denied",
                 "only GET and HEAD resource requests are allowed".into(),
@@ -611,24 +679,24 @@ impl ResourcePolicy {
                 Ok(body) => {
                     synthesize(body, resource.content_type, ResourceSource::VirtualResource)
                 },
-                Err(LocalResourceReadError::AggregateLimit) => failure(
+                Err(LocalResourceReadError::AggregateLimit) => fatal_failure(
                     "RESOURCE_DENIED",
                     "denied",
                     aggregate_limit_message(
                         self.aggregate_limit.unwrap_or(asset_cache::MAX_CACHE_BYTES),
                     ),
                 ),
-                Err(LocalResourceReadError::OutsideRoot) => failure(
+                Err(LocalResourceReadError::OutsideRoot) => denial(
                     "RESOURCE_DENIED",
                     "denied",
                     "host virtual resource resolved outside the document root".into(),
                 ),
-                Err(LocalResourceReadError::Unavailable(reason)) => failure(
+                Err(LocalResourceReadError::Unavailable(reason)) => denial(
                     "RESOURCE_NOT_FOUND",
                     "not_found",
                     format!("host virtual resource is unavailable: {reason}"),
                 ),
-                Err(LocalResourceReadError::TooLarge) => failure(
+                Err(LocalResourceReadError::TooLarge) => fatal_failure(
                     "RESOURCE_DENIED",
                     "denied",
                     format!(
@@ -645,7 +713,7 @@ impl ResourcePolicy {
             },
             "file" => {
                 let Ok(path) = request.url.to_file_path() else {
-                    return failure(
+                    return denial(
                         "RESOURCE_DENIED",
                         "denied",
                         "file URL cannot be resolved".into(),
@@ -659,22 +727,22 @@ impl ResourcePolicy {
                                 resource_content_type(&request.url),
                                 ResourceSource::DocumentRoot,
                             ),
-                            Err(LocalResourceReadError::AggregateLimit) => failure(
+                            Err(LocalResourceReadError::AggregateLimit) => fatal_failure(
                                 "RESOURCE_DENIED",
                                 "denied",
                                 aggregate_limit_message(asset_cache::MAX_CACHE_BYTES),
                             ),
-                            Err(LocalResourceReadError::OutsideRoot) => failure(
+                            Err(LocalResourceReadError::OutsideRoot) => denial(
                                 "RESOURCE_DENIED",
                                 "denied",
                                 "file is outside the document root".into(),
                             ),
-                            Err(LocalResourceReadError::Unavailable(error)) => failure(
+                            Err(LocalResourceReadError::Unavailable(error)) => denial(
                                 "RESOURCE_NOT_FOUND",
                                 "not_found",
                                 format!("file inside the document root is unavailable: {error}"),
                             ),
-                            Err(LocalResourceReadError::TooLarge) => failure(
+                            Err(LocalResourceReadError::TooLarge) => fatal_failure(
                                 "RESOURCE_DENIED",
                                 "denied",
                                 format!(
@@ -684,7 +752,7 @@ impl ResourcePolicy {
                             ),
                         }
                     },
-                    Ok(_) => failure(
+                    Ok(_) => denial(
                         "RESOURCE_DENIED",
                         "denied",
                         "file is outside the document root".into(),
@@ -694,13 +762,13 @@ impl ResourcePolicy {
                             nearest_existing_ancestor(&path)
                                 .is_some_and(|ancestor| ancestor.starts_with(document_root)) =>
                     {
-                        failure(
+                        denial(
                             "RESOURCE_NOT_FOUND",
                             "not_found",
                             "file does not exist inside the document root".into(),
                         )
                     },
-                    Err(_) => failure(
+                    Err(_) => denial(
                         "RESOURCE_DENIED",
                         "denied",
                         "file is outside the document root or unavailable".into(),
@@ -715,12 +783,12 @@ impl ResourcePolicy {
             {
                 ResourcePolicyDecision::FetchHttp
             },
-            "http" | "https" => failure(
+            "http" | "https" => denial(
                 "RESOURCE_DENIED",
                 "denied",
                 "network URL is outside the configured HTTP roots".into(),
             ),
-            _ => failure(
+            _ => denial(
                 "RESOURCE_DENIED",
                 "denied",
                 "URL scheme is not allowed".into(),
@@ -1239,6 +1307,7 @@ mod tests {
             method: "GET".into(),
             url,
             destination: "Unknown".into(),
+            load_role: WebResourceLoadRole::DocumentContent,
             referrer_url: None,
             is_for_main_frame: false,
             is_redirect: false,
@@ -1273,10 +1342,48 @@ mod tests {
         std::os::unix::fs::symlink(&outside, root.join("escape.css")).unwrap();
         let root = root.canonicalize().unwrap();
 
+        let escape_path = root.join("escape.css");
         assert!(matches!(
-            read_bounded_document_resource(&root.join("escape.css"), &root),
+            read_bounded_document_resource(&escape_path, &root),
             Err(LocalResourceReadError::OutsideRoot)
         ));
+
+        #[cfg(feature = "document-session")]
+        {
+            let mut metadata_request = ResourceRequest {
+                method: "GET".into(),
+                url: url::Url::from_file_path(&escape_path).unwrap(),
+                destination: "Image".into(),
+                load_role: WebResourceLoadRole::DocumentMetadata,
+                referrer_url: None,
+                is_for_main_frame: false,
+                is_redirect: false,
+            };
+            let policy = ResourcePolicy::default();
+            let ResourcePolicyDecision::Fail(metadata_failure) =
+                policy.decide(&root, &metadata_request)
+            else {
+                panic!("metadata symlink escape must be denied")
+            };
+            assert!(!metadata_failure.fatal);
+            let cancellation =
+                ResourceEvidence::cancelled(metadata_request.clone(), metadata_failure);
+            assert_eq!(cancellation.status, "cancelled");
+            assert!(!cancellation.fatal);
+            assert_eq!(cancellation.source, None);
+            assert_eq!(
+                cancellation.failure.as_ref().unwrap().load_role,
+                WebResourceLoadRole::DocumentMetadata
+            );
+
+            metadata_request.load_role = WebResourceLoadRole::DocumentContent;
+            let ResourcePolicyDecision::Fail(content_failure) =
+                policy.decide(&root, &metadata_request)
+            else {
+                panic!("the identical content symlink escape must be fatal")
+            };
+            assert!(content_failure.fatal);
+        }
 
         fs::remove_dir_all(sandbox).unwrap();
     }
@@ -1354,6 +1461,11 @@ mod tests {
         let outside = sandbox.join("outside.css");
         fs::create_dir_all(&root).unwrap();
         fs::write(root.join("inside.css"), b"body {}").unwrap();
+        let oversized = root.join("oversized.ico");
+        fs::File::create(&oversized)
+            .unwrap()
+            .set_len(asset_cache::MAX_CACHE_BYTES + 1)
+            .unwrap();
         fs::write(&outside, b"outside {}").unwrap();
         let root = root.canonicalize().unwrap();
         let allowed = url::Url::parse("https://example.test/assets/style.css").unwrap();
@@ -1369,6 +1481,7 @@ mod tests {
             method: method.into(),
             url,
             destination: "Style".into(),
+            load_role: WebResourceLoadRole::DocumentContent,
             referrer_url: Some(url::Url::parse("file:///document.html").unwrap()),
             is_for_main_frame: false,
             is_redirect,
@@ -1417,6 +1530,61 @@ mod tests {
             ResourcePolicyDecision::FetchHttp
         ));
 
+        let content_denial_request = request(
+            "GET",
+            url::Url::parse("https://denied.invalid/report.bin").unwrap(),
+            false,
+        );
+        let mut metadata_denial_request = content_denial_request.clone();
+        metadata_denial_request.load_role = WebResourceLoadRole::DocumentMetadata;
+        let ResourcePolicyDecision::Fail(metadata_denial) =
+            policy.decide(&root, &metadata_denial_request)
+        else {
+            panic!("metadata outside the configured roots should be denied")
+        };
+        assert!(!metadata_denial.fatal);
+
+        let ResourcePolicyDecision::Fail(content_denial) =
+            policy.decide(&root, &content_denial_request)
+        else {
+            panic!("the identical content request must fail closed")
+        };
+        assert!(content_denial.fatal);
+        assert_eq!(content_denial.code, metadata_denial.code);
+        assert_eq!(content_denial.reason, metadata_denial.reason);
+
+        let mut metadata_budget =
+            request("GET", url::Url::from_file_path(oversized).unwrap(), false);
+        metadata_budget.load_role = WebResourceLoadRole::DocumentMetadata;
+        let ResourcePolicyDecision::Fail(metadata_budget) = policy.decide(&root, &metadata_budget)
+        else {
+            panic!("metadata must not bypass the per-resource body budget")
+        };
+        assert_eq!(metadata_budget.code, "RESOURCE_DENIED");
+        assert!(metadata_budget.fatal);
+
+        let aggregate_url = url::Url::parse("https://virtual.test/inside.css").unwrap();
+        let aggregate_policy = ResourcePolicy::resolve_with_budget(
+            &ResourcePolicyConfig {
+                virtual_resources: vec![VirtualResourceSpec {
+                    url: aggregate_url.clone(),
+                    path: "inside.css".into(),
+                }],
+                ..ResourcePolicyConfig::default()
+            },
+            &root,
+            0,
+        );
+        let mut metadata_aggregate = request("GET", aggregate_url, false);
+        metadata_aggregate.load_role = WebResourceLoadRole::DocumentMetadata;
+        let ResourcePolicyDecision::Fail(metadata_aggregate) =
+            aggregate_policy.decide(&root, &metadata_aggregate)
+        else {
+            panic!("metadata must not bypass the aggregate body budget")
+        };
+        assert_eq!(metadata_aggregate.code, "RESOURCE_DENIED");
+        assert!(metadata_aggregate.fatal);
+
         let artifact = policy.artifact("sha256:test");
         assert_eq!(artifact["timeout_ms"], 321);
         assert_eq!(artifact["filesystem"], "document-root");
@@ -1431,6 +1599,7 @@ mod tests {
             method: "GET".into(),
             url: url::Url::parse("file:///document.css").unwrap(),
             destination: "Style".into(),
+            load_role: WebResourceLoadRole::DocumentContent,
             referrer_url: Some(url::Url::parse("file:///document.html").unwrap()),
             is_for_main_frame: false,
             is_redirect: false,
@@ -1442,7 +1611,7 @@ mod tests {
             b"body {}",
         );
         let delegated = ResourceEvidence::delegated(request, ResourceSource::DataUrl);
-        assert_eq!(loaded.source, ResourceSource::DocumentRoot);
+        assert_eq!(loaded.source, Some(ResourceSource::DocumentRoot));
         assert_eq!(loaded.status, "loaded");
         assert_eq!(loaded.response_status, Some(200));
         assert_eq!(loaded.content_type.as_deref(), Some("text/css"));
@@ -1455,7 +1624,7 @@ mod tests {
             loaded.content_address.as_deref(),
             Some(format!("sha256:{}", sha256_hex(b"body {}")).as_str())
         );
-        assert_eq!(delegated.source, ResourceSource::DataUrl);
+        assert_eq!(delegated.source, Some(ResourceSource::DataUrl));
         assert_eq!(delegated.status, "delegated");
         assert_eq!(delegated.response_status, None);
         assert_eq!(delegated.content_type, None);
@@ -1502,6 +1671,7 @@ mod tests {
             method: "GET".into(),
             url: url::Url::parse("https://example.test/stable.js#first").unwrap(),
             destination: "Script".into(),
+            load_role: WebResourceLoadRole::DocumentContent,
             referrer_url: None,
             is_for_main_frame: false,
             is_redirect: false,
@@ -1559,6 +1729,7 @@ mod tests {
                 method: "HEAD".into(),
                 url: url::Url::parse("https://example.test/style.css").unwrap(),
                 destination: "Style".into(),
+                load_role: WebResourceLoadRole::DocumentContent,
                 referrer_url: None,
                 is_for_main_frame: false,
                 is_redirect: false,
@@ -1622,6 +1793,7 @@ mod tests {
             method: "GET".into(),
             url: url::Url::parse("https://example.test/body").unwrap(),
             destination: "Script".into(),
+            load_role: WebResourceLoadRole::DocumentContent,
             referrer_url: None,
             is_for_main_frame: false,
             is_redirect: false,
