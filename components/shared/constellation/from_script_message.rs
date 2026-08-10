@@ -10,7 +10,8 @@ use content_security_policy::sandboxing_directive::SandboxingFlagSet;
 use devtools_traits::{DevtoolScriptControlMsg, ScriptToDevtoolsControlMsg, WorkerId};
 use embedder_traits::user_contents::UserContentManagerId;
 use embedder_traits::{
-    AnimationState, FocusSequenceNumber, JSValue, JavaScriptEvaluationError,
+    AnimationState, DocumentTimeControlError, DocumentTimeControlObservation,
+    DocumentTimeControlRequestId, FocusSequenceNumber, JSValue, JavaScriptEvaluationError,
     JavaScriptEvaluationId, MediaSessionEvent, ScriptToEmbedderChan, Theme, ViewportDetails,
     WakeLockType,
 };
@@ -788,6 +789,11 @@ pub enum ScriptToConstellationMessage {
     FinishJavaScriptEvaluation(
         JavaScriptEvaluationId,
         Result<JSValue, JavaScriptEvaluationError>,
+    ),
+    /// Return a post-turn controlled document-time observation to the Constellation for recheck.
+    ControlledDocumentTimeResponse(
+        DocumentTimeControlRequestId,
+        Result<DocumentTimeControlObservation, DocumentTimeControlError>,
     ),
     /// Forward a keyboard scroll operation from an `<iframe>` to a parent pipeline.
     ForwardKeyboardScroll(PipelineId, KeyboardScroll),

@@ -19,6 +19,7 @@ use embedder_traits::user_contents::{
     UserContentManagerId, UserScript, UserScriptId, UserStyleSheet, UserStyleSheetId,
 };
 use embedder_traits::{
+    DocumentTimeControlCommand, DocumentTimeControlError, DocumentTimeControlObservation,
     EmbedderControlId, EmbedderControlResponse, InputEventAndId, JavaScriptEvaluationId,
     MediaSessionActionType, NewWebViewDetails, PaintHitTestResult, Theme, TraversalId, UrlRequest,
     ViewportDetails, WebDriverCommandMsg,
@@ -101,6 +102,12 @@ pub enum EmbedderToConstellationMessage {
     EvaluateJavaScript(WebViewId, JavaScriptEvaluationId, String),
     /// Return the cached layout debug snapshot for the active document in a `WebView`.
     RequestLayoutDebugSnapshot(WebViewId, GenericCallback<Option<String>>),
+    /// Mechanically drive or observe one opt-in controlled document event loop.
+    ControlDocumentTime(
+        WebViewId,
+        DocumentTimeControlCommand,
+        GenericCallback<Result<DocumentTimeControlObservation, DocumentTimeControlError>>,
+    ),
     /// Create a memory report and return it via the [`GenericCallback`]
     CreateMemoryReport(GenericCallback<MemoryReportResult>),
     /// Sends the generated image key to the image cache associated with this pipeline.

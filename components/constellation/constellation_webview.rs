@@ -103,6 +103,10 @@ impl ConstellationWebView {
         self.controlled_event_loop_id
     }
 
+    pub(crate) const fn document_time_failure(&self) -> Option<DocumentTimeSurface> {
+        self.document_time_failure
+    }
+
     pub(crate) fn bind_controlled_event_loop(
         &mut self,
         event_loop_id: ScriptEventLoopId,

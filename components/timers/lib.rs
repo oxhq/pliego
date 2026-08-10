@@ -192,7 +192,7 @@ impl DocumentTimeSurface {
 }
 
 /// A checked document-clock failure.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum DocumentClockError {
     /// The requested operation requires a controlled clock.
     RealtimeClock,
@@ -479,13 +479,24 @@ impl DocumentProducerSequence {
     }
 }
 
+/// Stable identity of one ScriptThread-owned producer fence.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, MallocSizeOf, PartialEq, Serialize)]
+pub struct DocumentProducerFenceId(u64);
+
+impl DocumentProducerFenceId {
+    /// Return the process-local fence identifier.
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
 /// Serializable identity for an explicitly acknowledged producer lease.
 ///
 /// The ID carries no synchronization state. Its owning [`DocumentProducerFence`] validates that
 /// the sequence is still live and belongs to the expected producer class before completing it.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, MallocSizeOf, PartialEq, Serialize)]
 pub struct DocumentProducerLeaseId {
-    fence_id: u64,
+    fence_id: DocumentProducerFenceId,
     sequence: DocumentProducerSequence,
     kind: DocumentProducerKind,
 }
@@ -503,7 +514,7 @@ impl DocumentProducerLeaseId {
 }
 
 /// Enqueue, completion, and pending watermarks for one producer class.
-#[derive(Clone, Copy, Debug, Default, Eq, MallocSizeOf, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, MallocSizeOf, PartialEq, Serialize)]
 pub struct DocumentProducerWatermark {
     enqueued: u64,
     completed: u64,
@@ -528,7 +539,7 @@ impl DocumentProducerWatermark {
 }
 
 /// One mutex-consistent snapshot of all participating document producers.
-#[derive(Clone, Copy, Debug, Eq, MallocSizeOf, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, MallocSizeOf, PartialEq, Serialize)]
 pub struct DocumentProducerSnapshot {
     revision: u64,
     enqueued: u64,
@@ -592,7 +603,7 @@ impl DocumentProducerFenceState {
 }
 
 /// A checked producer-fence failure.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum DocumentProducerFenceError {
     /// A sequence or watermark would exceed the `u64` representation.
     CounterOverflow,
@@ -624,20 +635,22 @@ impl std::error::Error for DocumentProducerFenceError {}
 /// RAII completion, making overflow a checked enqueue failure rather than a fallible destructor.
 #[derive(Clone, MallocSizeOf)]
 pub struct DocumentProducerFence {
-    fence_id: u64,
+    fence_id: DocumentProducerFenceId,
     #[ignore_malloc_size_of = "The producer state is shared and measured by its owner"]
     inner: Arc<Mutex<DocumentProducerFenceState>>,
 }
 
 impl Default for DocumentProducerFence {
     fn default() -> Self {
-        let fence_id = NEXT_DOCUMENT_PRODUCER_FENCE_ID
-            .fetch_update(
-                AtomicOrdering::Relaxed,
-                AtomicOrdering::Relaxed,
-                |current| current.checked_add(1),
-            )
-            .expect("document producer fence identifier exhausted");
+        let fence_id = DocumentProducerFenceId(
+            NEXT_DOCUMENT_PRODUCER_FENCE_ID
+                .fetch_update(
+                    AtomicOrdering::Relaxed,
+                    AtomicOrdering::Relaxed,
+                    |current| current.checked_add(1),
+                )
+                .expect("document producer fence identifier exhausted"),
+        );
         Self {
             fence_id,
             inner: Arc::new(Mutex::new(DocumentProducerFenceState::default())),
@@ -706,6 +719,11 @@ impl DocumentProducerFence {
             .lock()
             .expect("document producer fence poisoned")
             .snapshot()
+    }
+
+    /// Return the stable identity bound to this ScriptThread fence.
+    pub const fn id(&self) -> DocumentProducerFenceId {
+        self.fence_id
     }
 
     /// Complete a live lease after its terminal message has been handled.
@@ -782,7 +800,19 @@ impl Drop for DocumentProducerGuard {
 }
 
 /// A monotonically increasing token created only after a ScriptThread microtask checkpoint.
-#[derive(Clone, Copy, Debug, Default, Eq, MallocSizeOf, Ord, PartialEq, PartialOrd)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    Deserialize,
+    Eq,
+    MallocSizeOf,
+    Ord,
+    PartialEq,
+    PartialOrd,
+    Serialize,
+)]
 pub struct DocumentProducerCheckpoint(u64);
 
 impl DocumentProducerCheckpoint {
@@ -804,7 +834,7 @@ impl DocumentProducerCheckpoint {
 }
 
 /// Mechanical result of one fenced observation after a microtask checkpoint.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum DocumentProducerObservation {
     /// At least one producer is live.
     Busy(DocumentProducerSnapshot),
@@ -887,7 +917,9 @@ impl PartialEq for ScheduledEvent {
 }
 
 /// A stable timer identity whose value is also its scheduler insertion order.
-#[derive(Clone, Copy, Debug, Eq, MallocSizeOf, Ord, PartialEq, PartialOrd)]
+#[derive(
+    Clone, Copy, Debug, Deserialize, Eq, MallocSizeOf, Ord, PartialEq, PartialOrd, Serialize,
+)]
 pub struct TimerId(u64);
 
 impl TimerId {
@@ -898,7 +930,7 @@ impl TimerId {
 }
 
 /// The finite deadline exposed by a controlled scheduler.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct TimerDeadlineSnapshot {
     /// Stable identity and insertion order for this event.
     pub id: TimerId,
@@ -907,7 +939,7 @@ pub struct TimerDeadlineSnapshot {
 }
 
 /// A checked scheduler/control failure.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum TimerControlError {
     /// The underlying document clock rejected an operation.
     Clock(DocumentClockError),
@@ -1051,6 +1083,22 @@ impl TimerScheduler {
     /// Advance the shared controlled clock monotonically without activating a timer.
     pub fn advance_controlled_time_to(&self, now: DocumentTime) -> Result<(), TimerControlError> {
         self.clock.advance_to(now).map_err(Into::into)
+    }
+
+    /// Validate one fresh finite deadline, advance to it, and activate exactly that event.
+    ///
+    /// Validation happens before the clock mutates so a canceled or replaced snapshot cannot move
+    /// controlled time and then fail stale.
+    pub fn advance_to_and_activate(
+        &mut self,
+        expected: TimerDeadlineSnapshot,
+    ) -> Result<(), TimerControlError> {
+        let observed = self.finite_deadline_snapshot()?;
+        if observed != Some(expected) {
+            return Err(TimerControlError::StaleDeadline { expected, observed });
+        }
+        self.clock.advance_to(expected.deadline)?;
+        self.activate_due_timer(expected)
     }
 
     /// Activate exactly one due event selected from a fresh finite-deadline snapshot.
@@ -1278,7 +1326,7 @@ mod tests {
             ..DocumentProducerFenceState::default()
         };
         let fence = DocumentProducerFence {
-            fence_id: 1,
+            fence_id: DocumentProducerFenceId(1),
             inner: Arc::new(Mutex::new(state)),
         };
         let before = fence.snapshot();
@@ -1408,6 +1456,23 @@ mod tests {
             scheduler.activate_due_timer(snapshot),
             Err(TimerControlError::StaleDeadline { observed: None, .. })
         ));
+        assert!(events.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn stale_exact_advance_does_not_move_the_controlled_clock() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let clock = controlled_clock(3);
+        let mut scheduler = TimerScheduler::with_clock(clock.clone());
+        let id = scheduler.schedule_timer(recording_request(&events, 1, Duration::from_nanos(7)));
+        let stale = scheduler.finite_deadline_snapshot().unwrap().unwrap();
+        scheduler.cancel_timer(id);
+
+        assert!(matches!(
+            scheduler.advance_to_and_activate(stale),
+            Err(TimerControlError::StaleDeadline { observed: None, .. })
+        ));
+        assert_eq!(clock.now(), DocumentTime::from_nanos(3));
         assert!(events.lock().unwrap().is_empty());
     }
 

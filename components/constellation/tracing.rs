@@ -73,6 +73,7 @@ mod from_embedder {
                 Self::PaintMetric(..) => target!("PaintMetric"),
                 Self::EvaluateJavaScript(..) => target!("EvaluateJavaScript"),
                 Self::RequestLayoutDebugSnapshot(..) => target!("RequestLayoutDebugSnapshot"),
+                Self::ControlDocumentTime(..) => target!("ControlDocumentTime"),
                 Self::CreateMemoryReport(..) => target!("CreateMemoryReport"),
                 Self::SendImageKeysForPipeline(..) => target!("SendImageKeysForPipeline"),
                 Self::PreferencesUpdated(..) => target!("PreferencesUpdated"),
@@ -186,6 +187,9 @@ mod from_script {
                 Self::IFrameSizes(..) => target!("IFrameSizes"),
                 Self::ReportMemory(..) => target!("ReportMemory"),
                 Self::FinishJavaScriptEvaluation(..) => target!("FinishJavaScriptEvaluation"),
+                Self::ControlledDocumentTimeResponse(..) => {
+                    target!("ControlledDocumentTimeResponse")
+                },
                 Self::ForwardKeyboardScroll(..) => target!("ForwardKeyboardScroll"),
                 Self::RespondToScreenshotReadinessRequest(..) => {
                     target!("RespondToScreenshotReadinessRequest")

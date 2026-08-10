@@ -71,6 +71,9 @@ impl MixedMessage {
                 ScriptThreadMessage::GetTitle(id) => Some(*id),
                 ScriptThreadMessage::GetDocumentOrigin(id, _) => Some(*id),
                 ScriptThreadMessage::GetLayoutDebugSnapshot(id, _) => Some(*id),
+                ScriptThreadMessage::ControlDocumentTime(_, target, _) => {
+                    target.pipelines.first().copied()
+                },
                 ScriptThreadMessage::SetDocumentActivity(id, ..) => Some(*id),
                 ScriptThreadMessage::SetThrottled(_, id, ..) => Some(*id),
                 ScriptThreadMessage::SetThrottledInContainingIframe(_, id, ..) => Some(*id),
@@ -526,6 +529,26 @@ impl ScriptThreadReceivers {
         timer_scheduler: &TimerScheduler,
         fully_active: &FxHashSet<PipelineId>,
     ) -> MixedMessage {
+        self.recv_with_task_port_drain(task_queue, timer_scheduler, fully_active, true)
+    }
+
+    /// Block for one controlled input without draining an unbounded ready task port.
+    pub(crate) fn recv_controlled(
+        &self,
+        task_queue: &TaskQueue<MainThreadScriptMsg>,
+        timer_scheduler: &TimerScheduler,
+        fully_active: &FxHashSet<PipelineId>,
+    ) -> MixedMessage {
+        self.recv_with_task_port_drain(task_queue, timer_scheduler, fully_active, false)
+    }
+
+    fn recv_with_task_port_drain(
+        &self,
+        task_queue: &TaskQueue<MainThreadScriptMsg>,
+        timer_scheduler: &TimerScheduler,
+        fully_active: &FxHashSet<PipelineId>,
+        drain_ready_task_port: bool,
+    ) -> MixedMessage {
         let mut select = Select::new();
 
         let task_recv = task_queue.select();
@@ -543,11 +566,17 @@ impl ScriptThreadReceivers {
             let index = operation.index();
             if index == task_index {
                 let msg = operation.recv(task_recv).unwrap();
-                task_queue.take_tasks(msg, fully_active);
-                let event = task_queue.recv().expect(
-                    "Spurious wake-up of the event-loop, task-queue has no tasks available",
-                );
-                MixedMessage::FromScript(event)
+                if drain_ready_task_port {
+                    task_queue.take_tasks(msg, fully_active);
+                    let event = task_queue.recv().expect(
+                        "Spurious wake-up of the event-loop, task-queue has no tasks available",
+                    );
+                    MixedMessage::FromScript(event)
+                } else {
+                    MixedMessage::FromScript(
+                        task_queue.take_controlled_task_and_recv(msg, fully_active),
+                    )
+                }
             } else if index == constellation_index {
                 MixedMessage::FromConstellation(
                     operation
@@ -617,6 +646,39 @@ impl ScriptThreadReceivers {
         #[cfg(feature = "webgpu")]
         if let Ok(message) = self.webgpu_receiver.borrow().try_recv() {
             return MixedMessage::FromWebGPUServer(message.unwrap()).into();
+        }
+        None
+    }
+
+    /// Receive at most one controlled input from each selected source invocation.
+    pub(crate) fn try_recv_controlled(
+        &self,
+        task_queue: &TaskQueue<MainThreadScriptMsg>,
+        fully_active: &FxHashSet<PipelineId>,
+    ) -> Option<MixedMessage> {
+        if let Ok(message) = self.constellation_receiver.try_recv() {
+            let message = message
+                .inspect_err(|e| {
+                    log::warn!(
+                        "ScriptThreadReceivers IPC error on constellation_receiver: {:?}",
+                        e
+                    );
+                })
+                .ok()?;
+            return Some(MixedMessage::FromConstellation(message));
+        }
+        if let Ok(message) = task_queue.take_one_task_and_recv(fully_active) {
+            return Some(MixedMessage::FromScript(message));
+        }
+        if let Ok(message) = self.devtools_server_receiver.try_recv() {
+            return Some(MixedMessage::FromDevtools(message.unwrap()));
+        }
+        if let Ok(message) = self.image_cache_receiver.try_recv() {
+            return Some(MixedMessage::FromImageCache(message));
+        }
+        #[cfg(feature = "webgpu")]
+        if let Ok(message) = self.webgpu_receiver.borrow().try_recv() {
+            return Some(MixedMessage::FromWebGPUServer(message.unwrap()));
         }
         None
     }

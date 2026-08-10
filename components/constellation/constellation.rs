@@ -107,7 +107,9 @@ use devtools_traits::{
 use embedder_traits::resources::{self, Resource};
 use embedder_traits::user_contents::{UserContentManagerId, UserContents};
 use embedder_traits::{
-    AnimationState, EmbedderControlId, EmbedderControlResponse, EmbedderProxy, FocusSequenceNumber,
+    AnimationState, DocumentTimeControlCommand, DocumentTimeControlError,
+    DocumentTimeControlObservation, DocumentTimeControlRequestId, DocumentTimeControlTarget,
+    EmbedderControlId, EmbedderControlResponse, EmbedderProxy, FocusSequenceNumber,
     GenericEmbedderProxy, InputEvent, InputEventAndId, InputEventOutcome, JSValue,
     JavaScriptEvaluationError, JavaScriptEvaluationId, KeyboardEvent, MediaSessionActionType,
     MediaSessionEvent, MediaSessionPlaybackState, MouseButton, MouseButtonAction, MouseButtonEvent,
@@ -353,6 +355,13 @@ pub struct Constellation<STF, SWF> {
     /// Bookkeeping data for all webviews in the constellation.
     webviews: FxHashMap<WebViewId, ConstellationWebView>,
 
+    /// Checked sequence for controlled document-time commands.
+    next_document_time_control_request_id: u64,
+
+    /// Callbacks held until ScriptThread responds and the target is revalidated.
+    pending_document_time_controls:
+        FxHashMap<DocumentTimeControlRequestId, PendingDocumentTimeControl>,
+
     /// Channels for the constellation to send messages to the public
     /// resource-related threads. There are two groups of resource threads: one
     /// for public browsing, and one for private browsing.
@@ -536,6 +545,11 @@ pub struct Constellation<STF, SWF> {
     pub(crate) user_contents_for_manager_id: FxHashMap<UserContentManagerId, UserContents>,
 }
 
+struct PendingDocumentTimeControl {
+    target: DocumentTimeControlTarget,
+    response: GenericCallback<Result<DocumentTimeControlObservation, DocumentTimeControlError>>,
+}
+
 /// State needed to construct a constellation.
 pub struct InitialConstellationState {
     /// A channel through which messages can be sent to the embedder. This is not used by the `Constellation`
@@ -696,6 +710,8 @@ where
                     constellation_to_embedder_proxy: state.constellation_to_embedder_proxy,
                     paint_proxy: state.paint_proxy,
                     webviews: Default::default(),
+                    next_document_time_control_request_id: 0,
+                    pending_document_time_controls: Default::default(),
                     devtools_sender: state.devtools_sender,
                     script_to_devtools_callback: Default::default(),
                     #[cfg(feature = "bluetooth")]
@@ -1575,6 +1591,9 @@ where
             EmbedderToConstellationMessage::RequestLayoutDebugSnapshot(webview_id, response) => {
                 self.handle_request_layout_debug_snapshot(webview_id, response)
             },
+            EmbedderToConstellationMessage::ControlDocumentTime(webview_id, command, response) => {
+                self.handle_control_document_time(webview_id, command, response)
+            },
             EmbedderToConstellationMessage::CreateMemoryReport(sender) => {
                 self.mem_profiler_chan.send(ProfilerMsg::Report(sender));
             },
@@ -1785,6 +1804,137 @@ where
             .is_err()
         {
             let _ = response_on_error.send(None);
+        }
+    }
+
+    fn controlled_document_time_target(
+        &self,
+        webview_id: WebViewId,
+    ) -> Result<DocumentTimeControlTarget, DocumentTimeControlError> {
+        let Some(webview) = self.webviews.get(&webview_id) else {
+            return Err(DocumentTimeControlError::WebViewUnavailable);
+        };
+        if webview.document_clock() == DocumentClockConfiguration::Realtime {
+            return Err(DocumentTimeControlError::NotControlled);
+        }
+        if let Some(surface) = webview.document_time_failure() {
+            return Err(DocumentTimeControlError::UnsupportedSurface(surface));
+        }
+        let Some(event_loop_id) = webview.controlled_event_loop_id() else {
+            return Err(DocumentTimeControlError::EventLoopUnavailable);
+        };
+        let webview_epoch = webview.active_top_level_pipeline_epoch;
+
+        if self.pipelines.values().any(|pipeline| {
+            pipeline.event_loop.id() == event_loop_id && pipeline.webview_id != webview_id
+        }) {
+            return Err(DocumentTimeControlError::SharedEventLoopWebView);
+        }
+
+        let mut pipelines: Vec<_> = self
+            .pipelines
+            .values()
+            .filter_map(|pipeline| {
+                (pipeline.webview_id == webview_id)
+                    .then_some((pipeline.id, pipeline.event_loop.id()))
+            })
+            .collect();
+        if pipelines.is_empty() {
+            return Err(DocumentTimeControlError::EventLoopUnavailable);
+        }
+        if pipelines
+            .iter()
+            .any(|(_, pipeline_event_loop_id)| *pipeline_event_loop_id != event_loop_id)
+        {
+            return Err(DocumentTimeControlError::MultipleEventLoops);
+        }
+        let mut pipelines: Vec<_> = pipelines
+            .drain(..)
+            .map(|(pipeline_id, _)| pipeline_id)
+            .collect();
+        pipelines.sort_unstable();
+        pipelines.dedup();
+
+        let mut fully_active_pipelines = Vec::new();
+        for browsing_context in self.fully_active_browsing_contexts_iter(webview_id) {
+            let Some(pipeline) = self.pipelines.get(&browsing_context.pipeline_id) else {
+                return Err(DocumentTimeControlError::EventLoopUnavailable);
+            };
+            if pipeline.event_loop.id() != event_loop_id {
+                return Err(DocumentTimeControlError::MultipleEventLoops);
+            }
+            fully_active_pipelines.push(pipeline.id);
+        }
+        fully_active_pipelines.sort_unstable();
+        fully_active_pipelines.dedup();
+
+        Ok(DocumentTimeControlTarget {
+            webview_id,
+            event_loop_id,
+            webview_epoch,
+            pipelines,
+            fully_active_pipelines,
+        })
+    }
+
+    fn handle_control_document_time(
+        &mut self,
+        webview_id: WebViewId,
+        command: DocumentTimeControlCommand,
+        response: GenericCallback<Result<DocumentTimeControlObservation, DocumentTimeControlError>>,
+    ) {
+        if self
+            .pending_document_time_controls
+            .values()
+            .any(|pending| pending.target.webview_id == webview_id)
+        {
+            let _ = response.send(Err(DocumentTimeControlError::CommandAlreadyPending));
+            return;
+        }
+
+        let target = match self.controlled_document_time_target(webview_id) {
+            Ok(target) => target,
+            Err(error) => {
+                let _ = response.send(Err(error));
+                return;
+            },
+        };
+        let Some(next_request_id) = self.next_document_time_control_request_id.checked_add(1)
+        else {
+            let _ = response.send(Err(DocumentTimeControlError::RequestSequenceOverflow));
+            return;
+        };
+        let request_id =
+            DocumentTimeControlRequestId::new(self.next_document_time_control_request_id);
+        self.next_document_time_control_request_id = next_request_id;
+
+        let Some(event_loop) = target
+            .pipelines
+            .first()
+            .and_then(|pipeline_id| self.pipelines.get(pipeline_id))
+            .map(|pipeline| pipeline.event_loop.clone())
+        else {
+            let _ = response.send(Err(DocumentTimeControlError::EventLoopUnavailable));
+            return;
+        };
+
+        self.pending_document_time_controls.insert(
+            request_id,
+            PendingDocumentTimeControl {
+                target: target.clone(),
+                response,
+            },
+        );
+        if event_loop
+            .send(ScriptThreadMessage::ControlDocumentTime(
+                request_id, target, command,
+            ))
+            .is_err()
+            && let Some(pending) = self.pending_document_time_controls.remove(&request_id)
+        {
+            let _ = pending
+                .response
+                .send(Err(DocumentTimeControlError::ChannelClosed));
         }
     }
 
@@ -2162,6 +2312,14 @@ where
             },
             ScriptToConstellationMessage::FinishJavaScriptEvaluation(evaluation_id, result) => {
                 self.handle_finish_javascript_evaluation(evaluation_id, result)
+            },
+            ScriptToConstellationMessage::ControlledDocumentTimeResponse(request_id, result) => {
+                self.handle_controlled_document_time_response(
+                    webview_id,
+                    source_pipeline_id,
+                    request_id,
+                    result,
+                )
             },
             ScriptToConstellationMessage::ForwardKeyboardScroll(pipeline_id, scroll) => {
                 if let Some(pipeline) = self.pipelines.get(&pipeline_id) &&
@@ -2790,6 +2948,12 @@ where
             return;
         }
         self.shutting_down = true;
+
+        for (_, pending) in std::mem::take(&mut self.pending_document_time_controls) {
+            let _ = pending
+                .response
+                .send(Err(DocumentTimeControlError::ChannelClosed));
+        }
 
         self.mem_profiler_chan.send(mem::ProfilerMsg::Exit);
 
@@ -3440,6 +3604,7 @@ where
     /// <https://html.spec.whatwg.org/multipage/#destroy-a-top-level-traversable>
     fn handle_close_top_level_browsing_context(&mut self, webview_id: WebViewId) {
         debug!("{webview_id}: Closing");
+        self.fail_pending_document_time_controls_for_webview(webview_id);
         let browsing_context_id = BrowsingContextId::from(webview_id);
         // Step 5. Remove traversable from the user agent's top-level traversable set.
         let browsing_context =
@@ -3500,6 +3665,72 @@ where
         self.constellation_to_embedder_proxy.send(
             ConstellationToEmbedderMsg::FinishJavaScriptEvaluation(evaluation_id, result),
         );
+    }
+
+    fn handle_controlled_document_time_response(
+        &mut self,
+        source_webview_id: WebViewId,
+        source_pipeline_id: PipelineId,
+        request_id: DocumentTimeControlRequestId,
+        result: Result<DocumentTimeControlObservation, DocumentTimeControlError>,
+    ) {
+        let Some(pending) = self.pending_document_time_controls.remove(&request_id) else {
+            warn!("Ignoring unknown controlled document-time response {request_id:?}");
+            return;
+        };
+
+        let response = if source_webview_id != pending.target.webview_id
+            || !pending.target.pipelines.contains(&source_pipeline_id)
+        {
+            Err(DocumentTimeControlError::ResponseSourceMismatch {
+                webview_id: source_webview_id,
+                pipeline_id: source_pipeline_id,
+            })
+        } else {
+            match self.controlled_document_time_target(pending.target.webview_id) {
+                Ok(observed) if observed != pending.target => {
+                    Err(DocumentTimeControlError::TargetChanged {
+                        expected: Box::new(pending.target.clone()),
+                        observed: Some(Box::new(observed)),
+                    })
+                },
+                Ok(_) => match result {
+                    Ok(observation) if observation.target != pending.target => {
+                        Err(DocumentTimeControlError::TargetChanged {
+                            expected: Box::new(pending.target.clone()),
+                            observed: Some(Box::new(observation.target)),
+                        })
+                    },
+                    result => result,
+                },
+                Err(error @ DocumentTimeControlError::UnsupportedSurface(_)) => Err(error),
+                Err(_) => Err(DocumentTimeControlError::TargetChanged {
+                    expected: Box::new(pending.target.clone()),
+                    observed: None,
+                }),
+            }
+        };
+        let _ = pending.response.send(response);
+    }
+
+    fn fail_pending_document_time_controls_for_webview(&mut self, webview_id: WebViewId) {
+        let request_ids: Vec<_> = self
+            .pending_document_time_controls
+            .iter()
+            .filter_map(|(request_id, pending)| {
+                (pending.target.webview_id == webview_id).then_some(*request_id)
+            })
+            .collect();
+        for request_id in request_ids {
+            if let Some(pending) = self.pending_document_time_controls.remove(&request_id) {
+                let _ = pending
+                    .response
+                    .send(Err(DocumentTimeControlError::TargetChanged {
+                        expected: Box::new(pending.target),
+                        observed: None,
+                    }));
+            }
+        }
     }
 
     #[servo_tracing::instrument(skip_all)]
@@ -3770,7 +4001,7 @@ where
             };
         if script_sender.document_clock() != document_clock {
             if let Some(opener_webview) = self.webviews.get_mut(&opener_webview_id) {
-                opener_webview.fail_document_time(DocumentTimeSurface::CrossEventLoopIframe);
+                opener_webview.fail_document_time(DocumentTimeSurface::AuxiliaryWebView);
             }
             warn!(
                 "{new_webview_id}: auxiliary WebView clock does not match its opener's event loop"

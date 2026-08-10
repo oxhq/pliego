@@ -18,7 +18,7 @@
 //! loop.
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::default::Default;
 use std::option::Option;
 use std::rc::{Rc, Weak};
@@ -41,9 +41,12 @@ use devtools_traits::{
 };
 use embedder_traits::user_contents::{UserContentManagerId, UserContents, UserScript};
 use embedder_traits::{
-    EmbedderControlId, EmbedderControlResponse, EmbedderMsg, FocusSequenceNumber,
-    InputEventOutcome, JavaScriptEvaluationError, JavaScriptEvaluationId, MediaSessionActionType,
-    Theme, ViewportDetails, WebDriverScriptCommand,
+    DocumentProducerStability, DocumentTimeControlAction, DocumentTimeControlCommand,
+    DocumentTimeControlError, DocumentTimeControlObservation, DocumentTimeControlRequestId,
+    DocumentTimeControlTarget, DocumentTimeDocumentObservation, DocumentTimeProducerObservation,
+    DocumentTimeReadinessBlocker, EmbedderControlId, EmbedderControlResponse, EmbedderMsg,
+    FocusSequenceNumber, InputEventOutcome, JavaScriptEvaluationError, JavaScriptEvaluationId,
+    MediaSessionActionType, Theme, ViewportDetails, WebDriverScriptCommand,
 };
 use encoding_rs::Encoding;
 use fonts::{FontContext, SystemFontServiceProxy, WebFontLoadEvent};
@@ -202,6 +205,109 @@ unsafe_no_jsmanaged_fields!(TaskQueue<MainThreadScriptMsg>);
 
 type NodeIdSet = HashSet<String>;
 
+struct ControlledDocumentTimeRequest {
+    request_id: DocumentTimeControlRequestId,
+    target: DocumentTimeControlTarget,
+    command: DocumentTimeControlCommand,
+}
+
+const CONTROLLED_INPUT_BATCH_LIMIT: usize = 64;
+
+#[derive(Default)]
+struct ControlledDocumentProducerObserver {
+    target: Option<DocumentTimeControlTarget>,
+    observer: DocumentProducerObserver,
+    last_checkpoint: Option<DocumentProducerCheckpoint>,
+}
+
+impl ControlledDocumentProducerObserver {
+    fn invalidate(&mut self) {
+        self.target = None;
+        self.observer = DocumentProducerObserver::default();
+    }
+
+    fn observe_with(
+        &mut self,
+        target: &DocumentTimeControlTarget,
+        checkpoint: DocumentProducerCheckpoint,
+        observe: impl FnOnce(
+            &mut DocumentProducerObserver,
+        ) -> Result<DocumentProducerObservation, DocumentProducerFenceError>,
+    ) -> Result<DocumentProducerObservation, DocumentProducerFenceError> {
+        if self.target.as_ref() != Some(target) {
+            self.target = Some(target.clone());
+            self.observer = DocumentProducerObserver::default();
+        }
+        if let Some(previous) = self.last_checkpoint
+            && checkpoint <= previous
+        {
+            return Err(DocumentProducerFenceError::StaleCheckpoint {
+                previous,
+                observed: checkpoint,
+            });
+        }
+        let result = observe(&mut self.observer);
+        if result.is_ok() {
+            self.last_checkpoint = Some(checkpoint);
+        }
+        result
+    }
+}
+
+fn enqueue_controlled_input(
+    pending_events: &mut VecDeque<MixedMessage>,
+    pending_requests: &mut VecDeque<ControlledDocumentTimeRequest>,
+    event: MixedMessage,
+) {
+    match event {
+        MixedMessage::FromConstellation(ScriptThreadMessage::ControlDocumentTime(
+            request_id,
+            target,
+            command,
+        )) => pending_requests.push_back(ControlledDocumentTimeRequest {
+            request_id,
+            target,
+            command,
+        }),
+        event => pending_events.push_back(event),
+    }
+}
+
+fn drain_controlled_input_batch(
+    pending_events: &mut VecDeque<MixedMessage>,
+    pending_requests: &mut VecDeque<ControlledDocumentTimeRequest>,
+    input: &mut impl Iterator<Item = MixedMessage>,
+) -> bool {
+    for _ in 0..CONTROLLED_INPUT_BATCH_LIMIT {
+        let Some(event) = input.next() else {
+            return false;
+        };
+        enqueue_controlled_input(pending_events, pending_requests, event);
+    }
+    true
+}
+
+const fn command_requires_exact_target_before_action(command: DocumentTimeControlCommand) -> bool {
+    !matches!(command, DocumentTimeControlCommand::DriveOneTurn)
+}
+
+fn take_controlled_exit(pending_events: &mut VecDeque<MixedMessage>) -> Option<MixedMessage> {
+    let exit_index = pending_events.iter().position(|event| {
+        matches!(
+            event,
+            MixedMessage::FromConstellation(ScriptThreadMessage::ExitScriptThread)
+        )
+    })?;
+    pending_events.remove(exit_index)
+}
+
+fn take_controlled_turn(pending_events: &mut VecDeque<MixedMessage>) -> (MixedMessage, bool) {
+    match pending_events.pop_front() {
+        Some(event) => (event, false),
+        None => (MixedMessage::FromScript(MainThreadScriptMsg::WakeUp), true),
+    }
+}
+
 #[derive(Serialize)]
 struct LayoutDebugSnapshotWithLinks<'a> {
     #[serde(flatten)]
@@ -289,6 +395,22 @@ pub struct ScriptThread {
     /// upgradable to an `Rc` as long as the `ScriptThread` is running.
     #[no_trace]
     this: Weak<ScriptThread>,
+
+    /// Stable identity assigned by the Constellation to this ScriptThread.
+    #[no_trace]
+    event_loop_id: ScriptEventLoopId,
+
+    /// Events received while controlled, released one at a time by the internal driver.
+    #[no_trace]
+    controlled_pending_events: RefCell<VecDeque<MixedMessage>>,
+
+    /// Control requests received while another command is being answered.
+    #[no_trace]
+    controlled_pending_requests: RefCell<VecDeque<ControlledDocumentTimeRequest>>,
+
+    /// Qualifies producer emptiness only across fresh post-task checkpoints.
+    #[no_trace]
+    controlled_document_producer_observer: RefCell<ControlledDocumentProducerObserver>,
 
     /// <https://html.spec.whatwg.org/multipage/#last-render-opportunity-time>
     #[no_trace]
@@ -656,7 +778,6 @@ impl ScriptThread {
     }
 
     /// Mechanically observe producer watermarks at the latest completed microtask checkpoint.
-    #[expect(dead_code)]
     pub(crate) fn observe_document_producers(
         &self,
         observer: &mut DocumentProducerObserver,
@@ -668,34 +789,20 @@ impl ScriptThread {
     }
 
     /// Observe the current finite timer deadline without activating it.
-    #[expect(dead_code)]
     pub(crate) fn finite_timer_deadline(
         &self,
     ) -> Result<Option<TimerDeadlineSnapshot>, TimerControlError> {
         self.timer_scheduler.borrow().finite_deadline_snapshot()
     }
 
-    /// Advance this event loop's controlled document clock without running timer callbacks.
-    #[expect(dead_code)]
-    pub(crate) fn advance_document_time_to(
-        &self,
-        now: DocumentTime,
-    ) -> Result<(), TimerControlError> {
-        self.timer_scheduler
-            .borrow()
-            .advance_controlled_time_to(now)
-    }
-
-    /// Activate one freshly observed due timer. Its callback only queues the existing timer task;
-    /// the normal task path remains responsible for the following microtask checkpoint.
-    #[expect(dead_code)]
-    pub(crate) fn activate_due_timer(
+    /// Advance to and activate one freshly observed finite timer deadline.
+    pub(crate) fn advance_to_and_activate_timer(
         &self,
         expected: TimerDeadlineSnapshot,
     ) -> Result<(), TimerControlError> {
         self.timer_scheduler
             .borrow_mut()
-            .activate_due_timer(expected)
+            .advance_to_and_activate(expected)
     }
 
     // https://html.spec.whatwg.org/multipage/#await-a-stable-state
@@ -1115,6 +1222,10 @@ impl ScriptThread {
                     document_clock,
                     document_producer_fence,
                     document_producer_checkpoint: Cell::new(DocumentProducerCheckpoint::ZERO),
+                    event_loop_id: state.id,
+                    controlled_pending_events: Default::default(),
+                    controlled_pending_requests: Default::default(),
+                    controlled_document_producer_observer: Default::default(),
                     microtask_queue,
                     js_runtime: Rc::new(runtime),
                     closed_pipelines: DomRefCell::new(FxHashSet::default()),
@@ -1177,7 +1288,11 @@ impl ScriptThread {
     /// messages on its port.
     pub(crate) fn start(&self, cx: &mut js::context::JSContext) {
         debug!("Starting script thread.");
-        while self.handle_msgs(cx) {
+        while if self.document_clock.is_controlled() {
+            self.handle_controlled_document_time(cx)
+        } else {
+            self.handle_msgs(cx)
+        } {
             // Go on...
             debug!("Running script thread.");
         }
@@ -1513,6 +1628,350 @@ impl ScriptThread {
         }
     }
 
+    fn queue_controlled_input(&self, event: MixedMessage) {
+        enqueue_controlled_input(
+            &mut self.controlled_pending_events.borrow_mut(),
+            &mut self.controlled_pending_requests.borrow_mut(),
+            event,
+        );
+    }
+
+    fn drain_ready_controlled_inputs(&self) -> bool {
+        let fully_active = self.get_fully_active_document_ids();
+        let mut input = std::iter::from_fn(|| {
+            self.receivers
+                .try_recv_controlled(&self.task_queue, &fully_active)
+        });
+        drain_controlled_input_batch(
+            &mut self.controlled_pending_events.borrow_mut(),
+            &mut self.controlled_pending_requests.borrow_mut(),
+            &mut input,
+        )
+    }
+
+    fn send_controlled_document_time_response(
+        &self,
+        request: &ControlledDocumentTimeRequest,
+        result: Result<DocumentTimeControlObservation, DocumentTimeControlError>,
+    ) -> bool {
+        let Some(source_pipeline_id) = request.target.pipelines.first().copied() else {
+            return false;
+        };
+        self.senders
+            .pipeline_to_constellation_sender
+            .send((
+                request.target.webview_id,
+                source_pipeline_id,
+                ScriptToConstellationMessage::ControlledDocumentTimeResponse(
+                    request.request_id,
+                    result,
+                ),
+            ))
+            .is_ok()
+    }
+
+    fn validate_controlled_document_time_authority(
+        &self,
+        target: &DocumentTimeControlTarget,
+    ) -> Result<(), DocumentTimeControlError> {
+        if target.event_loop_id != self.event_loop_id {
+            self.controlled_document_producer_observer
+                .borrow_mut()
+                .invalidate();
+            return Err(DocumentTimeControlError::TargetChanged {
+                expected: Box::new(target.clone()),
+                observed: None,
+            });
+        }
+        if let Some(surface) = self.document_clock.unsupported_surface() {
+            self.controlled_document_producer_observer
+                .borrow_mut()
+                .invalidate();
+            return Err(DocumentTimeControlError::UnsupportedSurface(surface));
+        }
+        if target.pipelines.iter().any(|pipeline_id| {
+            self.documents
+                .borrow()
+                .find_document(*pipeline_id)
+                .is_some_and(|document| document.webview_id() != target.webview_id)
+        }) {
+            self.controlled_document_producer_observer
+                .borrow_mut()
+                .invalidate();
+            return Err(DocumentTimeControlError::TargetChanged {
+                expected: Box::new(target.clone()),
+                observed: None,
+            });
+        }
+        Ok(())
+    }
+
+    fn validate_controlled_document_time_target(
+        &self,
+        target: &DocumentTimeControlTarget,
+    ) -> Result<(), DocumentTimeControlError> {
+        self.validate_controlled_document_time_authority(target)?;
+        let mut fully_active_pipelines: Vec<_> =
+            self.get_fully_active_document_ids().into_iter().collect();
+        fully_active_pipelines.sort_unstable();
+        if fully_active_pipelines != target.fully_active_pipelines {
+            // A transient navigation/activity target must invalidate an earlier FirstEmpty even
+            // when a later turn returns to a byte-identical target snapshot.
+            self.controlled_document_producer_observer
+                .borrow_mut()
+                .invalidate();
+            return Err(DocumentTimeControlError::TargetChanged {
+                expected: Box::new(target.clone()),
+                observed: None,
+            });
+        }
+        Ok(())
+    }
+
+    fn controlled_document_time_observation(
+        &self,
+        cx: &mut js::context::JSContext,
+        target: &DocumentTimeControlTarget,
+        action: DocumentTimeControlAction,
+        input_batch_saturated: bool,
+    ) -> Result<DocumentTimeControlObservation, DocumentTimeControlError> {
+        self.validate_controlled_document_time_target(target)?;
+
+        let checkpoint = self.document_producer_checkpoint();
+        let (snapshot, stability) = if checkpoint == DocumentProducerCheckpoint::ZERO {
+            (
+                self.document_producer_fence.snapshot(),
+                DocumentProducerStability::NotCheckpointed,
+            )
+        } else {
+            let observation = {
+                let mut observer = self.controlled_document_producer_observer.borrow_mut();
+                observer.observe_with(target, checkpoint, |observer| {
+                    self.observe_document_producers(observer)
+                })
+            };
+            match observation {
+                Ok(DocumentProducerObservation::Busy(snapshot)) => {
+                    (snapshot, DocumentProducerStability::Busy)
+                },
+                Ok(DocumentProducerObservation::FirstEmpty(snapshot)) => {
+                    (snapshot, DocumentProducerStability::FirstEmpty)
+                },
+                Ok(DocumentProducerObservation::StableEmpty(snapshot)) => {
+                    (snapshot, DocumentProducerStability::StableEmpty)
+                },
+                Err(DocumentProducerFenceError::StaleCheckpoint { previous, observed })
+                    if previous == observed =>
+                {
+                    (
+                        self.document_producer_fence.snapshot(),
+                        DocumentProducerStability::UnchangedCheckpoint,
+                    )
+                },
+                Err(error) => return Err(DocumentTimeControlError::ProducerFence(error)),
+            }
+        };
+
+        let pending_events = u64::try_from(self.controlled_pending_events.borrow().len())
+            .map_err(|_| DocumentTimeControlError::QueueLengthOverflow)?;
+        let mut documents = Vec::with_capacity(target.fully_active_pipelines.len());
+        for pipeline_id in &target.fully_active_pipelines {
+            let Some(document) = self.documents.borrow().find_document(*pipeline_id) else {
+                documents.push(DocumentTimeDocumentObservation {
+                    pipeline_id: *pipeline_id,
+                    script_rendering_epoch: None,
+                    readiness_blockers: vec![DocumentTimeReadinessBlocker::DocumentUnavailable],
+                });
+                continue;
+            };
+            if document.webview_id() != target.webview_id {
+                return Err(DocumentTimeControlError::TargetChanged {
+                    expected: Box::new(target.clone()),
+                    observed: None,
+                });
+            }
+            let script_rendering_epoch = document.current_rendering_epoch();
+            let window = document.window();
+            let mut realm = enter_auto_realm(cx, window.upcast::<GlobalScope>());
+            let readiness_blockers =
+                window.controlled_document_time_readiness(&mut realm.current_realm());
+            documents.push(DocumentTimeDocumentObservation {
+                pipeline_id: *pipeline_id,
+                script_rendering_epoch: Some(script_rendering_epoch),
+                readiness_blockers,
+            });
+        }
+
+        if let Some(surface) = self.document_clock.unsupported_surface() {
+            return Err(DocumentTimeControlError::UnsupportedSurface(surface));
+        }
+
+        Ok(DocumentTimeControlObservation {
+            target: target.clone(),
+            now: self
+                .document_clock
+                .try_now()
+                .map_err(DocumentTimeControlError::Clock)?,
+            next_deadline: self
+                .finite_timer_deadline()
+                .map_err(DocumentTimeControlError::Timer)?,
+            pending_events,
+            input_batch_saturated,
+            action,
+            producers: DocumentTimeProducerObservation {
+                fence_id: self.document_producer_fence.id(),
+                checkpoint,
+                snapshot,
+                stability,
+            },
+            documents,
+        })
+    }
+
+    fn process_one_controlled_event(
+        &self,
+        cx: &mut js::context::JSContext,
+        event: MixedMessage,
+    ) -> bool {
+        self.timer_scheduler
+            .borrow_mut()
+            .dispatch_completed_timers();
+        match event {
+            MixedMessage::FromConstellation(ScriptThreadMessage::SpawnPipeline(
+                new_pipeline_info,
+            )) => {
+                self.spawn_pipeline(cx, new_pipeline_info);
+                self.finish_event_loop_turn(cx);
+                true
+            },
+            MixedMessage::FromScript(MainThreadScriptMsg::Inactive) => {
+                self.finish_event_loop_turn(cx);
+                true
+            },
+            MixedMessage::FromConstellation(ScriptThreadMessage::ExitFullScreen(id)) => {
+                self.profile_event(ScriptThreadEventCategory::ExitFullscreen, Some(id), || {
+                    self.handle_exit_fullscreen(id, cx);
+                });
+                self.finish_event_loop_turn(cx);
+                true
+            },
+            MixedMessage::FromConstellation(ScriptThreadMessage::ControlDocumentTime(..)) => {
+                unreachable!("controlled requests are never queued as ordinary events")
+            },
+            event => self.process_sequential_events(cx, vec![event]),
+        }
+    }
+
+    fn execute_controlled_document_time_request(
+        &self,
+        cx: &mut js::context::JSContext,
+        request: ControlledDocumentTimeRequest,
+        prior_input_batch_saturated: bool,
+    ) -> bool {
+        self.task_queue.start_event_loop_iteration();
+        let mut input_batch_saturated =
+            prior_input_batch_saturated | self.drain_ready_controlled_inputs();
+        let prevalidation = if command_requires_exact_target_before_action(request.command) {
+            self.validate_controlled_document_time_target(&request.target)
+        } else {
+            self.validate_controlled_document_time_authority(&request.target)
+        };
+        if let Err(error) = prevalidation {
+            return self.send_controlled_document_time_response(&request, Err(error));
+        }
+        let before_checkpoint = self.document_producer_checkpoint();
+        let action = match request.command {
+            DocumentTimeControlCommand::Observe => Ok(DocumentTimeControlAction::Observed),
+            DocumentTimeControlCommand::AdvanceTo(expected) => self
+                .advance_to_and_activate_timer(expected)
+                .map(|()| {
+                    // Realtime activation is entered through a TimerFired loop event. Preserve
+                    // that turn even when the timer callback itself only marks rendering work.
+                    self.controlled_pending_events
+                        .borrow_mut()
+                        .push_back(MixedMessage::TimerFired);
+                    DocumentTimeControlAction::TimerActivated(expected)
+                })
+                .map_err(DocumentTimeControlError::Timer),
+            DocumentTimeControlCommand::DriveOneTurn => {
+                let (event, is_checkpoint_turn) =
+                    take_controlled_turn(&mut self.controlled_pending_events.borrow_mut());
+                if !self.process_one_controlled_event(cx, event) {
+                    let _ = self.send_controlled_document_time_response(
+                        &request,
+                        Err(DocumentTimeControlError::ChannelClosed),
+                    );
+                    return false;
+                }
+                let microtask_checkpoint_advanced =
+                    self.document_producer_checkpoint() > before_checkpoint;
+                if is_checkpoint_turn {
+                    Ok(DocumentTimeControlAction::CheckpointTurnProcessed {
+                        microtask_checkpoint_advanced,
+                    })
+                } else {
+                    Ok(DocumentTimeControlAction::TurnProcessed {
+                        microtask_checkpoint_advanced,
+                    })
+                }
+            },
+        };
+
+        input_batch_saturated |= self.drain_ready_controlled_inputs();
+        let result = action.and_then(|action| {
+            self.controlled_document_time_observation(
+                cx,
+                &request.target,
+                action,
+                input_batch_saturated,
+            )
+        });
+        self.send_controlled_document_time_response(&request, result)
+    }
+
+    fn handle_controlled_document_time(&self, cx: &mut js::context::JSContext) -> bool {
+        let pending_request = self.controlled_pending_requests.borrow_mut().pop_front();
+        if let Some(request) = pending_request {
+            return self.execute_controlled_document_time_request(cx, request, false);
+        }
+
+        let exit_event = take_controlled_exit(&mut self.controlled_pending_events.borrow_mut());
+        if let Some(event) = exit_event {
+            return self.process_one_controlled_event(cx, event);
+        }
+
+        self.background_hang_monitor.notify_wait();
+        loop {
+            let input_batch_saturated = self.drain_ready_controlled_inputs();
+            let pending_request = self.controlled_pending_requests.borrow_mut().pop_front();
+            if let Some(request) = pending_request {
+                return self.execute_controlled_document_time_request(
+                    cx,
+                    request,
+                    input_batch_saturated,
+                );
+            }
+
+            let fully_active = self.get_fully_active_document_ids();
+            let event = self.receivers.recv_controlled(
+                &self.task_queue,
+                &self.timer_scheduler.borrow(),
+                &fully_active,
+            );
+            if matches!(
+                event,
+                MixedMessage::FromConstellation(ScriptThreadMessage::ExitScriptThread)
+            ) {
+                return self.process_one_controlled_event(cx, event);
+            }
+            self.queue_controlled_input(event);
+            let pending_request = self.controlled_pending_requests.borrow_mut().pop_front();
+            if let Some(request) = pending_request {
+                return self.execute_controlled_document_time_request(cx, request, false);
+            }
+        }
+    }
+
     /// Handle incoming messages from other tasks and the task queue.
     fn handle_msgs(&self, cx: &mut js::context::JSContext) -> bool {
         // Proritize rendering tasks and others, and gather all other events as `sequential`.
@@ -1570,7 +2029,14 @@ impl ScriptThread {
             }
         }
 
-        // Process the gathered events.
+        self.process_sequential_events(cx, sequential)
+    }
+
+    fn process_sequential_events(
+        &self,
+        cx: &mut js::context::JSContext,
+        sequential: Vec<MixedMessage>,
+    ) -> bool {
         debug!("Processing events.");
         for msg in sequential {
             debug!("Processing event {:?}.", msg);
@@ -1658,6 +2124,11 @@ impl ScriptThread {
             };
         }
 
+        self.finish_event_loop_turn(cx);
+        true
+    }
+
+    fn finish_event_loop_turn(&self, cx: &mut js::context::JSContext) {
         for (_, doc) in self.documents.borrow().iter() {
             let window = doc.window();
             window
@@ -1687,8 +2158,6 @@ impl ScriptThread {
 
         // This must happen last to detect if any change above makes a rendering update necessary.
         self.maybe_schedule_rendering_opportunity_after_ipc_message(built_any_display_lists);
-
-        true
     }
 
     fn categorize_msg(&self, msg: &MixedMessage) -> ScriptThreadEventCategory {
@@ -2076,9 +2545,10 @@ impl ScriptThread {
                     document.handle_no_longer_waiting_on_asynchronous_image_updates();
                 }
             },
-            msg @ ScriptThreadMessage::SpawnPipeline(..) |
-            msg @ ScriptThreadMessage::ExitFullScreen(..) |
-            msg @ ScriptThreadMessage::ExitScriptThread => {
+            msg @ ScriptThreadMessage::SpawnPipeline(..)
+            | msg @ ScriptThreadMessage::ControlDocumentTime(..)
+            | msg @ ScriptThreadMessage::ExitFullScreen(..)
+            | msg @ ScriptThreadMessage::ExitScriptThread => {
                 panic!("should have handled {:?} already", msg)
             },
             ScriptThreadMessage::SetScrollStates(pipeline_id, scroll_states) => {
@@ -4685,14 +5155,219 @@ fn renderer_may_drive_rendering(clock: &DocumentClock) -> bool {
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
+    use std::collections::VecDeque;
     use std::time::Duration;
 
-    use timers::{DocumentClock, DocumentClockConfiguration, DocumentClockError, DocumentTime};
+    use crate::messaging::MainThreadScriptMsg;
+    use embedder_traits::{
+        DocumentTimeControlCommand, DocumentTimeControlRequestId, DocumentTimeControlTarget,
+    };
+    use script_traits::ScriptThreadMessage;
+    use servo_base::Epoch;
+    use servo_base::id::{TEST_PIPELINE_ID, TEST_SCRIPT_EVENT_LOOP_ID, TEST_WEBVIEW_ID};
+    use timers::{
+        DocumentClock, DocumentClockConfiguration, DocumentClockError, DocumentProducerCheckpoint,
+        DocumentProducerFence, DocumentProducerFenceError, DocumentProducerObservation,
+        DocumentTime,
+    };
 
     use super::{
-        dirty_document_before_unblocking_web_fonts, remaining_rendering_opportunity_delay,
-        renderer_may_drive_rendering,
+        CONTROLLED_INPUT_BATCH_LIMIT, ControlledDocumentProducerObserver,
+        ControlledDocumentTimeRequest, MixedMessage, command_requires_exact_target_before_action,
+        dirty_document_before_unblocking_web_fonts, drain_controlled_input_batch,
+        enqueue_controlled_input, remaining_rendering_opportunity_delay,
+        renderer_may_drive_rendering, take_controlled_exit, take_controlled_turn,
     };
+
+    fn control_target() -> DocumentTimeControlTarget {
+        DocumentTimeControlTarget {
+            webview_id: TEST_WEBVIEW_ID,
+            event_loop_id: TEST_SCRIPT_EVENT_LOOP_ID,
+            webview_epoch: Epoch::default(),
+            pipelines: vec![TEST_PIPELINE_ID],
+            fully_active_pipelines: vec![TEST_PIPELINE_ID],
+        }
+    }
+
+    #[test]
+    fn controlled_queue_keeps_commands_out_of_exact_one_turn_order() {
+        let mut events = VecDeque::new();
+        let mut requests: VecDeque<ControlledDocumentTimeRequest> = VecDeque::new();
+        enqueue_controlled_input(&mut events, &mut requests, MixedMessage::TimerFired);
+        enqueue_controlled_input(
+            &mut events,
+            &mut requests,
+            MixedMessage::FromConstellation(ScriptThreadMessage::ControlDocumentTime(
+                DocumentTimeControlRequestId::new(7),
+                control_target(),
+                DocumentTimeControlCommand::DriveOneTurn,
+            )),
+        );
+        enqueue_controlled_input(&mut events, &mut requests, MixedMessage::TimerFired);
+
+        assert_eq!(events.len(), 2);
+        assert_eq!(requests.len(), 1);
+        assert!(matches!(events.pop_front(), Some(MixedMessage::TimerFired)));
+        assert_eq!(events.len(), 1, "one drive leaves the next event queued");
+        let request = requests.pop_front().unwrap();
+        assert_eq!(request.request_id.get(), 7);
+        assert_eq!(request.command, DocumentTimeControlCommand::DriveOneTurn);
+    }
+
+    #[test]
+    fn controlled_shutdown_cannot_be_stranded_behind_buffered_work() {
+        let mut events = VecDeque::from([
+            MixedMessage::TimerFired,
+            MixedMessage::FromConstellation(ScriptThreadMessage::ExitScriptThread),
+            MixedMessage::TimerFired,
+        ]);
+
+        assert!(matches!(
+            take_controlled_exit(&mut events),
+            Some(MixedMessage::FromConstellation(
+                ScriptThreadMessage::ExitScriptThread
+            ))
+        ));
+        assert_eq!(events.len(), 2);
+        assert!(take_controlled_exit(&mut events).is_none());
+    }
+
+    #[test]
+    fn empty_controlled_queue_uses_one_existing_noop_checkpoint_turn() {
+        let mut events = VecDeque::new();
+
+        let (event, is_checkpoint_turn) = take_controlled_turn(&mut events);
+
+        assert!(is_checkpoint_turn);
+        assert!(matches!(
+            event,
+            MixedMessage::FromScript(MainThreadScriptMsg::WakeUp)
+        ));
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn controlled_turn_never_skips_a_queued_page_event_for_a_checkpoint_turn() {
+        let mut events = VecDeque::from([MixedMessage::TimerFired]);
+
+        let (event, is_checkpoint_turn) = take_controlled_turn(&mut events);
+
+        assert!(!is_checkpoint_turn);
+        assert!(matches!(event, MixedMessage::TimerFired));
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn controlled_input_batch_is_bounded_under_a_continuously_ready_source() {
+        let mut events = VecDeque::new();
+        let mut requests = VecDeque::new();
+        let mut input = (0..CONTROLLED_INPUT_BATCH_LIMIT + 1).map(|_| MixedMessage::TimerFired);
+
+        let saturated = drain_controlled_input_batch(&mut events, &mut requests, &mut input);
+
+        assert!(saturated);
+        assert_eq!(events.len(), CONTROLLED_INPUT_BATCH_LIMIT);
+        assert!(requests.is_empty());
+        assert!(
+            input.next().is_some(),
+            "bounded intake leaves later work queued"
+        );
+    }
+
+    #[test]
+    fn drive_can_reconcile_a_queued_navigation_transition_before_exact_validation() {
+        assert!(!command_requires_exact_target_before_action(
+            DocumentTimeControlCommand::DriveOneTurn
+        ));
+        assert!(command_requires_exact_target_before_action(
+            DocumentTimeControlCommand::Observe
+        ));
+    }
+
+    #[test]
+    fn producer_stability_restarts_when_the_control_target_changes() {
+        let fence = DocumentProducerFence::default();
+        let first_checkpoint = DocumentProducerCheckpoint::ZERO.checked_next().unwrap();
+        let second_checkpoint = first_checkpoint.checked_next().unwrap();
+        let third_checkpoint = second_checkpoint.checked_next().unwrap();
+        let mut observer = ControlledDocumentProducerObserver::default();
+        let first_target = control_target();
+        let mut second_target = first_target.clone();
+        second_target.webview_epoch = Epoch(1);
+
+        assert!(matches!(
+            observer
+                .observe_with(&first_target, first_checkpoint, |observer| {
+                    observer.observe(&fence, first_checkpoint)
+                })
+                .unwrap(),
+            DocumentProducerObservation::FirstEmpty(_)
+        ));
+        assert!(matches!(
+            observer.observe_with(&second_target, first_checkpoint, |observer| {
+                observer.observe(&fence, first_checkpoint)
+            }),
+            Err(DocumentProducerFenceError::StaleCheckpoint {
+                previous,
+                observed,
+            }) if previous == first_checkpoint && observed == first_checkpoint
+        ));
+        assert!(matches!(
+            observer
+                .observe_with(&second_target, second_checkpoint, |observer| {
+                    observer.observe(&fence, second_checkpoint)
+                })
+                .unwrap(),
+            DocumentProducerObservation::FirstEmpty(_)
+        ));
+        assert!(matches!(
+            observer
+                .observe_with(&second_target, third_checkpoint, |observer| {
+                    observer.observe(&fence, third_checkpoint)
+                })
+                .unwrap(),
+            DocumentProducerObservation::StableEmpty(_)
+        ));
+    }
+
+    #[test]
+    fn producer_stability_restarts_after_unobserved_transient_target_change() {
+        let fence = DocumentProducerFence::default();
+        let first_checkpoint = DocumentProducerCheckpoint::ZERO.checked_next().unwrap();
+        let second_checkpoint = first_checkpoint.checked_next().unwrap();
+        let third_checkpoint = second_checkpoint.checked_next().unwrap();
+        let mut observer = ControlledDocumentProducerObserver::default();
+        let target = control_target();
+
+        assert!(matches!(
+            observer
+                .observe_with(&target, first_checkpoint, |observer| {
+                    observer.observe(&fence, first_checkpoint)
+                })
+                .unwrap(),
+            DocumentProducerObservation::FirstEmpty(_)
+        ));
+
+        // Validation of an intermediate target failed before an observation could be emitted.
+        // Returning to the identical target must still require two new fenced observations.
+        observer.invalidate();
+        assert!(matches!(
+            observer
+                .observe_with(&target, second_checkpoint, |observer| {
+                    observer.observe(&fence, second_checkpoint)
+                })
+                .unwrap(),
+            DocumentProducerObservation::FirstEmpty(_)
+        ));
+        assert!(matches!(
+            observer
+                .observe_with(&target, third_checkpoint, |observer| {
+                    observer.observe(&fence, third_checkpoint)
+                })
+                .unwrap(),
+            DocumentProducerObservation::StableEmpty(_)
+        ));
+    }
 
     #[test]
     fn successful_web_font_load_dirties_document_before_unblocking_font_ready() {

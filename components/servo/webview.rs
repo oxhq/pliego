@@ -12,11 +12,12 @@ use accesskit::{
 };
 use dpi::PhysicalSize;
 use embedder_traits::{
-    ContextMenuAction, ContextMenuItem, Cursor, DocumentClockConfiguration, EmbedderControlId,
-    EmbedderControlRequest, Image, InputEvent, InputEventAndId, InputEventId, JSValue,
-    JavaScriptEvaluationError, LoadStatus, MediaSessionActionType, NewWebViewDetails, ScreenGeometry,
-    ScreenshotCaptureError, Scroll, Theme, TraversalId, UrlRequest, ViewportDetails, WebViewPoint,
-    WebViewRect,
+    ContextMenuAction, ContextMenuItem, Cursor, DocumentClockConfiguration,
+    DocumentTimeControlCommand, DocumentTimeControlError, DocumentTimeControlObservation,
+    EmbedderControlId, EmbedderControlRequest, Image, InputEvent, InputEventAndId, InputEventId,
+    JSValue, JavaScriptEvaluationError, LoadStatus, MediaSessionActionType, NewWebViewDetails,
+    ScreenGeometry, ScreenshotCaptureError, Scroll, Theme, TraversalId, UrlRequest,
+    ViewportDetails, WebViewPoint, WebViewRect,
 };
 use euclid::{Scale, Size2D};
 use image::RgbaImage;
@@ -24,7 +25,7 @@ use log::debug;
 use paint_api::WebViewTrait;
 use paint_api::rendering_context::RenderingContext;
 use servo_base::Epoch;
-use servo_base::generic_channel::{GenericCallback, GenericSender};
+use servo_base::generic_channel::{GenericCallback, GenericReceiver, GenericSender};
 use servo_base::id::WebViewId;
 use servo_config::pref;
 use servo_constellation_traits::{EmbedderToConstellationMessage, TraversalDirection};
@@ -790,6 +791,26 @@ impl WebView {
         receiver
             .try_recv_timeout(Duration::from_secs(5))
             .unwrap_or(None)
+    }
+
+    /// Submit one internal mechanical command to an opt-in controlled ScriptThread.
+    ///
+    /// The returned receiver yields a post-turn observation. This API neither decides visual
+    /// settlement nor captures output.
+    #[doc(hidden)]
+    pub fn request_controlled_document_time(
+        &self,
+        command: DocumentTimeControlCommand,
+    ) -> Result<
+        GenericReceiver<Result<DocumentTimeControlObservation, DocumentTimeControlError>>,
+        DocumentTimeControlError,
+    > {
+        let (response, receiver) =
+            GenericCallback::new_blocking().map_err(|_| DocumentTimeControlError::ChannelClosed)?;
+        self.inner().servo.constellation_proxy().send(
+            EmbedderToConstellationMessage::ControlDocumentTime(self.id(), command, response),
+        );
+        Ok(receiver)
     }
 
     /// Asynchronously take a screenshot of the [`WebView`] contents, given a `rect` or the whole

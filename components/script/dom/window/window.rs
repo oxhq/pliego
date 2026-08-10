@@ -24,9 +24,9 @@ use devtools_traits::{ScriptToDevtoolsControlMsg, TimelineMarker, TimelineMarker
 use dom_struct::dom_struct;
 use embedder_traits::user_contents::UserScript;
 use embedder_traits::{
-    AlertResponse, ConfirmResponse, EmbedderMsg, JavaScriptEvaluationError, PromptResponse,
-    ScriptToEmbedderChan, SimpleDialogRequest, Theme, UntrustedNodeAddress, ViewportDetails,
-    WebDriverJSResult, WebDriverLoadStatus,
+    AlertResponse, ConfirmResponse, DocumentTimeReadinessBlocker, EmbedderMsg,
+    JavaScriptEvaluationError, PromptResponse, ScriptToEmbedderChan, SimpleDialogRequest, Theme,
+    UntrustedNodeAddress, ViewportDetails, WebDriverJSResult, WebDriverLoadStatus,
 };
 use euclid::{Point2D, Rect, Scale, Size2D, Vector2D};
 use fonts::{CspViolationHandler, FontContext, NetworkTimingHandler, WebFontDocumentContext};
@@ -2791,6 +2791,48 @@ impl Window {
             ),
         );
         self.has_pending_screenshot_readiness_request.set(false);
+    }
+
+    pub(crate) fn controlled_document_time_readiness(
+        &self,
+        cx: &mut JSContext,
+    ) -> Vec<DocumentTimeReadinessBlocker> {
+        let document = self.Document();
+        let mut blockers = Vec::new();
+        if !document.is_fully_active() {
+            blockers.push(DocumentTimeReadinessBlocker::NotFullyActive);
+        }
+        if document.ReadyState() != DocumentReadyState::Complete {
+            blockers.push(DocumentTimeReadinessBlocker::Loading);
+        }
+        if document.render_blocking_element_count() > 0 {
+            blockers.push(DocumentTimeReadinessBlocker::RenderBlocked);
+        }
+        if document.GetDocumentElement().is_some_and(|element| {
+            element.has_class(&atom!("reftest-wait"), CaseSensitivity::CaseSensitive)
+                || element.has_class(&Atom::from("test-wait"), CaseSensitivity::CaseSensitive)
+        }) {
+            blockers.push(DocumentTimeReadinessBlocker::WaitMarker);
+        }
+        if self.font_context().web_fonts_still_loading() != 0 {
+            blockers.push(DocumentTimeReadinessBlocker::FontsLoading);
+        }
+        if document.Fonts(cx).waiting_to_fullfill_promise() {
+            blockers.push(DocumentTimeReadinessBlocker::FontReadyPromise);
+        }
+        if !self.pending_layout_images.borrow().is_empty() {
+            blockers.push(DocumentTimeReadinessBlocker::LayoutImages);
+        }
+        if !self.pending_images_for_rasterization.borrow().is_empty() {
+            blockers.push(DocumentTimeReadinessBlocker::RasterImages);
+        }
+        if document.needs_rendering_update() {
+            blockers.push(DocumentTimeReadinessBlocker::RenderingUpdate);
+        }
+        if document.waiting_on_canvas_image_updates() {
+            blockers.push(DocumentTimeReadinessBlocker::CanvasImageUpdates);
+        }
+        blockers
     }
 
     /// If parsing has taken a long time and reflows are still waiting for the `load` event,

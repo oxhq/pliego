@@ -15,6 +15,7 @@ use crossbeam_channel::RecvTimeoutError;
 use devtools_traits::ScriptToDevtoolsControlMsg;
 use embedder_traits::user_contents::{UserContentManagerId, UserContents};
 use embedder_traits::{
+    DocumentTimeControlCommand, DocumentTimeControlRequestId, DocumentTimeControlTarget,
     EmbedderControlId, EmbedderControlResponse, FocusSequenceNumber, InputEventAndId,
     JavaScriptEvaluationId, MediaSessionActionType, PaintHitTestResult, ScriptToEmbedderChan,
     Theme, ViewportDetails, WebDriverScriptCommand,
@@ -186,6 +187,12 @@ pub enum ScriptThreadMessage {
     GetDocumentOrigin(PipelineId, GenericSender<Option<String>>),
     /// Return the cached layout debug snapshot for a pipeline without triggering layout.
     GetLayoutDebugSnapshot(PipelineId, GenericCallback<Option<String>>),
+    /// Run one internal controlled-time command on this ScriptThread.
+    ControlDocumentTime(
+        DocumentTimeControlRequestId,
+        DocumentTimeControlTarget,
+        DocumentTimeControlCommand,
+    ),
     /// Notifies script thread of a change to one of its document's activity
     SetDocumentActivity(PipelineId, DocumentActivity),
     /// Set whether to use less resources by running timers at a heavily limited rate.
