@@ -153,13 +153,11 @@ fn window_date_time_microseconds(host_time: f64, clock: &DocumentClock) -> f64 {
     {
         return f64::NAN;
     }
-    clock
-        .unix_time_ns()
-        .map_or(f64::NAN, |nanoseconds| {
-            let whole_microseconds = nanoseconds / 1000;
-            let sub_microsecond_nanoseconds = nanoseconds % 1000;
-            whole_microseconds as f64 + sub_microsecond_nanoseconds as f64 / 1000.0
-        })
+    clock.unix_time_ns().map_or(f64::NAN, |nanoseconds| {
+        let whole_microseconds = nanoseconds / 1000;
+        let sub_microsecond_nanoseconds = nanoseconds % 1000;
+        whole_microseconds as f64 + sub_microsecond_nanoseconds as f64 / 1000.0
+    })
 }
 
 /// SpiderMonkey obtains JavaScript Date wall time before invoking this process-wide hook. Only a

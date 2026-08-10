@@ -155,9 +155,7 @@ impl TimerTimebase {
         let Some(suspended_at) = self.suspended_at else {
             return Ok(false);
         };
-        let paused_for = clock
-            .try_now()?
-            .saturating_duration_since(suspended_at);
+        let paused_for = clock.try_now()?.saturating_duration_since(suspended_at);
         self.suspension_offset = self
             .suspension_offset
             .checked_add(paused_for)
@@ -583,7 +581,9 @@ impl OneshotTimers {
 
         let event_request = TimerEventRequest {
             callback,
-            duration: timer.scheduled_for.saturating_duration_since(self.base_time()),
+            duration: timer
+                .scheduled_for
+                .saturating_duration_since(self.base_time()),
         };
 
         self.scheduled_timer_id
@@ -1089,10 +1089,7 @@ mod tests {
     #[test]
     fn timer_nesting_preserves_the_existing_minimum_delay_boundary() {
         assert_eq!(clamp_duration(5, Duration::ZERO), Duration::ZERO);
-        assert_eq!(
-            clamp_duration(6, Duration::ZERO),
-            Duration::from_millis(4)
-        );
+        assert_eq!(clamp_duration(6, Duration::ZERO), Duration::from_millis(4));
         assert_eq!(
             clamp_duration(6, Duration::from_millis(9)),
             Duration::from_millis(9)

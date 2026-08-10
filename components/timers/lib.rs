@@ -203,7 +203,9 @@ impl fmt::Display for DocumentClockError {
 impl std::error::Error for DocumentClockError {}
 
 enum DocumentClockInner {
-    Realtime { origin: Instant },
+    Realtime {
+        origin: Instant,
+    },
     Controlled {
         now_ns: AtomicU64,
         unix_time_origin_ns: u64,
@@ -344,16 +346,16 @@ impl DocumentClock {
     /// Only surfaces routed in the current upstream slices are accepted. Later slices must remove
     /// the remaining typed blockers as they install the same clock in those subsystems.
     pub fn require_surface(&self, surface: DocumentTimeSurface) -> Result<(), DocumentClockError> {
-        if !self.is_controlled()
-            || matches!(
+        if !self.is_controlled() ||
+            matches!(
                 surface,
-                DocumentTimeSurface::WindowTimers
-                    | DocumentTimeSurface::SameEventLoopIframe
-                    | DocumentTimeSurface::JavaScriptDate
-                    | DocumentTimeSurface::Performance
-                    | DocumentTimeSurface::UpdateRendering
-                    | DocumentTimeSurface::AnimationFrame
-                    | DocumentTimeSurface::DocumentTimeline
+                DocumentTimeSurface::WindowTimers |
+                    DocumentTimeSurface::SameEventLoopIframe |
+                    DocumentTimeSurface::JavaScriptDate |
+                    DocumentTimeSurface::Performance |
+                    DocumentTimeSurface::UpdateRendering |
+                    DocumentTimeSurface::AnimationFrame |
+                    DocumentTimeSurface::DocumentTimeline
             )
         {
             Ok(())

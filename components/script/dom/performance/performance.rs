@@ -608,8 +608,8 @@ impl PerformanceMethods<crate::DomTypeHolder> for Performance {
 
     /// <https://www.w3.org/TR/hr-time-2/#dom-performance-timeorigin>
     fn TimeOrigin(&self) -> DOMHighResTimeStamp {
-        if let Some(clock) = &self.window_clock
-            && clock.clock.is_controlled()
+        if let Some(clock) = &self.window_clock &&
+            clock.clock.is_controlled()
         {
             return clock.time_origin().unwrap_or_else(|_| Finite::wrap(0.0));
         }

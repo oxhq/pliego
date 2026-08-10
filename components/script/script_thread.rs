@@ -1410,9 +1410,9 @@ impl ScriptThread {
         // If animations are running and a reflow in this event loop iteration
         // produced a display list, rely on the renderer to inform us of the
         // next animation tick / rendering opportunity.
-        if renderer_may_drive_rendering(&self.document_clock)
-            && running_animations
-            && built_any_display_lists
+        if renderer_may_drive_rendering(&self.document_clock) &&
+            running_animations &&
+            built_any_display_lists
         {
             return;
         }
