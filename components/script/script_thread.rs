@@ -110,8 +110,8 @@ use style::stylesheets::{AllowImportRules, DocumentStyleSheet, Origin, Styleshee
 use style::thread_state::{self, ThreadState};
 use stylo_atoms::Atom;
 use timers::{
-    DocumentClock, DocumentTime, TimerControlError, TimerDeadlineSnapshot, TimerEventRequest,
-    TimerId, TimerScheduler,
+    DocumentClock, DocumentClockError, DocumentTime, DocumentTimeSurface, TimerControlError,
+    TimerDeadlineSnapshot, TimerEventRequest, TimerId, TimerScheduler,
 };
 use url::Position;
 #[cfg(feature = "webgpu")]
@@ -288,7 +288,8 @@ pub struct ScriptThread {
     this: Weak<ScriptThread>,
 
     /// <https://html.spec.whatwg.org/multipage/#last-render-opportunity-time>
-    last_render_opportunity_time: Cell<Option<Instant>>,
+    #[no_trace]
+    last_render_opportunity_time: Cell<Option<DocumentTime>>,
 
     /// The documents for pipelines managed by this thread
     documents: DomRefCell<DocumentCollection>,
@@ -1195,7 +1196,12 @@ impl ScriptThread {
     ///
     /// Returns true if any reflows produced a new display list.
     pub(crate) fn update_the_rendering(&self, cx: &mut js::context::JSContext) -> bool {
-        self.last_render_opportunity_time.set(Some(Instant::now()));
+        let frame_time = self
+            .document_clock
+            .rendering_time()
+            .expect("update the rendering requires a supported document clock");
+        self.last_render_opportunity_time
+            .set(Some(frame_time.document_time()));
         self.cancel_scheduled_update_the_rendering();
         self.needs_rendering_update.store(false, Ordering::Relaxed);
 
@@ -1304,7 +1310,7 @@ impl ScriptThread {
             // > 11. For each doc of docs, update animations and send events for doc, passing
             // > in relative high resolution time given frameTimestamp and doc's relevant
             // > global object as the timestamp [WEBANIMATIONS]
-            document.update_animations_and_send_events(cx);
+            document.update_animations_and_send_events(cx, frame_time);
 
             // TODO(#31866): Implement "run the fullscreen steps" from
             // https://fullscreen.spec.whatwg.org/multipage/#run-the-fullscreen-steps.
@@ -1315,7 +1321,7 @@ impl ScriptThread {
             // > 14. For each doc of docs, run the animation frame callbacks for doc, passing
             // > in the relative high resolution time given frameTimestamp and doc's
             // > relevant global object as the timestamp.
-            document.run_the_animation_frame_callbacks(cx);
+            document.run_the_animation_frame_callbacks(cx, frame_time);
 
             // Run the resize observer steps.
             let mut depth = Default::default();
@@ -1404,7 +1410,10 @@ impl ScriptThread {
         // If animations are running and a reflow in this event loop iteration
         // produced a display list, rely on the renderer to inform us of the
         // next animation tick / rendering opportunity.
-        if running_animations && built_any_display_lists {
+        if renderer_may_drive_rendering(&self.document_clock)
+            && running_animations
+            && built_any_display_lists
+        {
             return;
         }
 
@@ -1426,15 +1435,17 @@ impl ScriptThread {
             Duration::from_millis(20)
         };
 
-        let time_since_last_rendering_opportunity = self
-            .last_render_opportunity_time
-            .get()
-            .map(|last_render_opportunity_time| Instant::now() - last_render_opportunity_time)
-            .unwrap_or(Duration::MAX)
-            .min(animation_delay);
-        self.schedule_update_the_rendering_timer_if_necessary(
-            animation_delay - time_since_last_rendering_opportunity,
-        );
+        let now = self
+            .document_clock
+            .now_for_surface(DocumentTimeSurface::UpdateRendering)
+            .expect("rendering opportunity scheduling requires a supported document clock");
+        let remaining_delay = remaining_rendering_opportunity_delay(
+            self.last_render_opportunity_time.get(),
+            now,
+            animation_delay,
+        )
+        .expect("the document clock cannot move backwards between rendering opportunities");
+        self.schedule_update_the_rendering_timer_if_necessary(remaining_delay);
     }
 
     /// Fulfill the possibly-pending pending `document.fonts.ready` promise if
@@ -2010,7 +2021,9 @@ impl ScriptThread {
                 *self.receivers.webgpu_receiver.borrow_mut() = port.route_preserving_errors();
             },
             ScriptThreadMessage::TickAllAnimations(_webviews) => {
-                self.set_needs_rendering_update();
+                if renderer_may_drive_rendering(&self.document_clock) {
+                    self.set_needs_rendering_update();
+                }
             },
             ScriptThreadMessage::NoLongerWaitingOnAsychronousImageUpdates(pipeline_id) => {
                 if let Some(document) = self.documents.borrow().find_document(pipeline_id) {
@@ -4589,11 +4602,33 @@ fn dirty_document_before_unblocking_web_fonts(
     unblock_web_fonts();
 }
 
+fn remaining_rendering_opportunity_delay(
+    last_rendering_time: Option<DocumentTime>,
+    now: DocumentTime,
+    target_delay: Duration,
+) -> Result<Duration, DocumentClockError> {
+    let elapsed = match last_rendering_time {
+        Some(last_rendering_time) => now.checked_duration_since(last_rendering_time)?,
+        None => Duration::MAX,
+    };
+    Ok(target_delay - elapsed.min(target_delay))
+}
+
+fn renderer_may_drive_rendering(clock: &DocumentClock) -> bool {
+    !clock.is_controlled()
+}
+
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
+    use std::time::Duration;
 
-    use super::dirty_document_before_unblocking_web_fonts;
+    use timers::{DocumentClock, DocumentClockConfiguration, DocumentClockError, DocumentTime};
+
+    use super::{
+        dirty_document_before_unblocking_web_fonts, remaining_rendering_opportunity_delay,
+        renderer_may_drive_rendering,
+    };
 
     #[test]
     fn successful_web_font_load_dirties_document_before_unblocking_font_ready() {
@@ -4611,5 +4646,45 @@ mod tests {
         );
 
         assert_eq!(state.get(), 2);
+    }
+
+    #[test]
+    fn rendering_opportunity_delay_uses_checked_document_time() {
+        let target = Duration::from_millis(20);
+
+        assert_eq!(
+            remaining_rendering_opportunity_delay(
+                Some(DocumentTime::from_nanos(10_000_000)),
+                DocumentTime::from_nanos(15_000_000),
+                target,
+            ),
+            Ok(Duration::from_millis(15))
+        );
+        assert_eq!(
+            remaining_rendering_opportunity_delay(None, DocumentTime::ZERO, target),
+            Ok(Duration::ZERO)
+        );
+        assert_eq!(
+            remaining_rendering_opportunity_delay(
+                Some(DocumentTime::from_nanos(2)),
+                DocumentTime::from_nanos(1),
+                target,
+            ),
+            Err(DocumentClockError::TimeMovedBackwards {
+                current: DocumentTime::from_nanos(2),
+                requested: DocumentTime::from_nanos(1),
+            })
+        );
+    }
+
+    #[test]
+    fn renderer_ticks_cannot_activate_controlled_rendering() {
+        let controlled = DocumentClock::new(DocumentClockConfiguration::Controlled {
+            initial_time_ns: 0,
+            unix_time_origin_ns: 0,
+        });
+
+        assert!(!renderer_may_drive_rendering(&controlled));
+        assert!(renderer_may_drive_rendering(&DocumentClock::default()));
     }
 }

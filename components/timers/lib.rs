@@ -120,6 +120,20 @@ impl DocumentTime {
     }
 }
 
+/// One immutable timestamp captured for an "update the rendering" invocation.
+///
+/// The token prevents animation timelines and animation-frame callbacks from independently
+/// sampling the clock while one rendering update is in progress.
+#[derive(Clone, Copy, Debug, Eq, MallocSizeOf, PartialEq)]
+pub struct DocumentRenderingTime(DocumentTime);
+
+impl DocumentRenderingTime {
+    /// Return the timestamp in the underlying document-clock domain.
+    pub const fn document_time(self) -> DocumentTime {
+        self.0
+    }
+}
+
 /// Document-observable surfaces that eventually need to share one controlled clock.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum DocumentTimeSurface {
@@ -133,7 +147,9 @@ pub enum DocumentTimeSurface {
     Performance,
     /// A DOM high-resolution timestamp supplied by a host or another process.
     HostTimestamp,
-    /// Animation-frame timestamps and scheduling.
+    /// The timestamp captured once for an "update the rendering" invocation.
+    UpdateRendering,
+    /// Window `requestAnimationFrame` timestamps and scheduling.
     AnimationFrame,
     /// CSS and Web Animations document timelines.
     DocumentTimeline,
@@ -252,6 +268,32 @@ impl DocumentClock {
             .expect("document clock exceeded its checked integer nanosecond range")
     }
 
+    /// Return the current offset after checking that the observable surface is controlled.
+    pub fn now_for_surface(
+        &self,
+        surface: DocumentTimeSurface,
+    ) -> Result<DocumentTime, DocumentClockError> {
+        self.require_surface(surface)?;
+        self.try_now()
+    }
+
+    /// Capture the one timestamp shared by all consumers in a rendering update.
+    pub fn rendering_time(&self) -> Result<DocumentRenderingTime, DocumentClockError> {
+        self.now_for_surface(DocumentTimeSurface::UpdateRendering)
+            .map(DocumentRenderingTime)
+    }
+
+    /// Return a checked elapsed duration in the requested observable surface.
+    pub fn duration_since_for_surface(
+        &self,
+        surface: DocumentTimeSurface,
+        origin: DocumentTime,
+        observed: DocumentTime,
+    ) -> Result<Duration, DocumentClockError> {
+        self.require_surface(surface)?;
+        observed.checked_duration_since(origin)
+    }
+
     /// Advance a controlled clock monotonically without sleeping.
     pub fn advance_to(&self, requested: DocumentTime) -> Result<(), DocumentClockError> {
         let DocumentClockInner::Controlled { now_ns, .. } = &*self.inner else {
@@ -309,6 +351,9 @@ impl DocumentClock {
                     | DocumentTimeSurface::SameEventLoopIframe
                     | DocumentTimeSurface::JavaScriptDate
                     | DocumentTimeSurface::Performance
+                    | DocumentTimeSurface::UpdateRendering
+                    | DocumentTimeSurface::AnimationFrame
+                    | DocumentTimeSurface::DocumentTimeline
             )
         {
             Ok(())
@@ -742,13 +787,14 @@ mod tests {
             DocumentTimeSurface::SameEventLoopIframe,
             DocumentTimeSurface::JavaScriptDate,
             DocumentTimeSurface::Performance,
+            DocumentTimeSurface::UpdateRendering,
+            DocumentTimeSurface::AnimationFrame,
+            DocumentTimeSurface::DocumentTimeline,
         ] {
             assert_eq!(clock.require_surface(surface), Ok(()));
         }
         for surface in [
             DocumentTimeSurface::HostTimestamp,
-            DocumentTimeSurface::AnimationFrame,
-            DocumentTimeSurface::DocumentTimeline,
             DocumentTimeSurface::Worker,
             DocumentTimeSurface::Worklet,
             DocumentTimeSurface::CrossEventLoopIframe,
@@ -758,6 +804,72 @@ mod tests {
                 Err(DocumentClockError::UnsupportedSurface(surface))
             );
         }
+    }
+
+    #[test]
+    fn one_rendering_snapshot_drives_raf_and_timeline_time() {
+        let clock = controlled_clock(5_000_000);
+        let navigation_origin = clock.now();
+        clock
+            .advance_to(DocumentTime::from_nanos(12_000_000))
+            .unwrap();
+
+        let frame_time = clock.rendering_time().unwrap();
+        let raf_time = clock
+            .duration_since_for_surface(
+                DocumentTimeSurface::AnimationFrame,
+                navigation_origin,
+                frame_time.document_time(),
+            )
+            .unwrap();
+        let timeline_time = clock
+            .duration_since_for_surface(
+                DocumentTimeSurface::DocumentTimeline,
+                navigation_origin,
+                frame_time.document_time(),
+            )
+            .unwrap();
+
+        assert_eq!(raf_time, Duration::from_millis(7));
+        assert_eq!(timeline_time, raf_time);
+
+        clock
+            .advance_to(DocumentTime::from_nanos(20_000_000))
+            .unwrap();
+        assert_eq!(
+            frame_time.document_time(),
+            DocumentTime::from_nanos(12_000_000)
+        );
+        assert_eq!(
+            clock.rendering_time().unwrap().document_time(),
+            DocumentTime::from_nanos(20_000_000)
+        );
+    }
+
+    #[test]
+    fn realtime_rendering_surfaces_keep_the_monotonic_host_clock_path() {
+        let clock = DocumentClock::default();
+        let navigation_origin = clock
+            .now_for_surface(DocumentTimeSurface::DocumentTimeline)
+            .unwrap();
+        let frame_time = clock.rendering_time().unwrap();
+
+        let raf_time = clock
+            .duration_since_for_surface(
+                DocumentTimeSurface::AnimationFrame,
+                navigation_origin,
+                frame_time.document_time(),
+            )
+            .unwrap();
+        let timeline_time = clock
+            .duration_since_for_surface(
+                DocumentTimeSurface::DocumentTimeline,
+                navigation_origin,
+                frame_time.document_time(),
+            )
+            .unwrap();
+
+        assert_eq!(timeline_time, raf_time);
     }
 
     #[test]

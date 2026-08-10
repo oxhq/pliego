@@ -95,7 +95,7 @@ use style::stylesheets::UrlExtraData;
 use style_traits::CSSPixel;
 use stylo_atoms::Atom;
 use time::Duration as TimeDuration;
-use timers::DocumentTime;
+use timers::{DocumentClockError, DocumentTime, DocumentTimeSurface};
 use webrender_api::ExternalScrollId;
 use webrender_api::units::{DeviceIntSize, DevicePixel, LayoutPixel, LayoutPoint};
 
@@ -3549,8 +3549,18 @@ impl Window {
             .set(self.as_global_scope().document_clock().now());
     }
 
-    pub(crate) fn navigation_start(&self) -> CrossProcessInstant {
-        self.navigation_start.get()
+    /// Return a checked timestamp relative to this Window's navigation origin.
+    ///
+    /// Callers must name the observable surface so controlled time cannot silently fall back to a
+    /// host timestamp when a new producer has not been routed yet.
+    pub(crate) fn document_time_since_navigation(
+        &self,
+        observed: DocumentTime,
+        surface: DocumentTimeSurface,
+    ) -> Result<Duration, DocumentClockError> {
+        self.as_global_scope()
+            .document_clock()
+            .duration_since_for_surface(surface, self.document_time_origin.get(), observed)
     }
 
     pub(crate) fn set_last_activation_timestamp(&self, time: UserActivationTimestamp) {
