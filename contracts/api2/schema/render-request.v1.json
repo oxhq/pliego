@@ -2,27 +2,38 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://pliego.dev/schema/render-request.v1.json",
   "title": "Pliego API 2 RenderRequest",
-  "description": "The normalized behavioral input for one API 2 render.",
+  "description": "The normalized behavioral input for one deterministic API 2 render.",
   "type": "object",
   "additionalProperties": false,
   "required": [
     "schema",
     "version",
     "api",
+    "profile",
     "input",
     "environment",
     "page",
     "resources",
+    "time",
+    "settlement",
     "diagnostics"
   ],
   "properties": {
     "schema": { "const": "pliego.render-request" },
     "version": { "const": 1 },
     "api": { "const": 2 },
+    "profile": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "#/definitions/profile_ref" }
+      ]
+    },
     "input": { "$ref": "#/definitions/input" },
     "environment": { "$ref": "#/definitions/environment" },
     "page": { "$ref": "#/definitions/page" },
     "resources": { "$ref": "#/definitions/resources" },
+    "time": { "$ref": "#/definitions/time" },
+    "settlement": { "$ref": "#/definitions/settlement" },
     "diagnostics": { "$ref": "#/definitions/diagnostics" }
   },
   "definitions": {
@@ -30,18 +41,42 @@
       "type": "string",
       "pattern": "^sha256:[0-9a-f]{64}$"
     },
-    "relative_path": {
+    "portable_path": {
       "type": "string",
       "minLength": 1,
-      "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]*$"
+      "maxLength": 240,
+      "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._/-]*[A-Za-z0-9_-])?$"
+    },
+    "profile_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "version"],
+      "properties": {
+        "schema": {
+          "type": "string",
+          "pattern": "^pliego\\.profile\\.[a-z0-9][a-z0-9.-]{0,127}$"
+        },
+        "version": { "type": "integer", "minimum": 1, "maximum": 4294967295 }
+      }
+    },
+    "manifest_artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "media_type", "sha256", "bytes"],
+      "properties": {
+        "path": { "const": "input-manifest.json" },
+        "media_type": { "const": "application/vnd.pliego.input-manifest+json" },
+        "sha256": { "$ref": "#/definitions/content_address" },
+        "bytes": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 }
+      }
     },
     "input": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["entrypoint", "bundle_sha256"],
+      "required": ["entrypoint", "manifest"],
       "properties": {
-        "entrypoint": { "$ref": "#/definitions/relative_path" },
-        "bundle_sha256": { "$ref": "#/definitions/content_address" }
+        "entrypoint": { "$ref": "#/definitions/portable_path" },
+        "manifest": { "$ref": "#/definitions/manifest_artifact" }
       }
     },
     "environment": {
@@ -50,13 +85,13 @@
       "required": ["locale", "timezone"],
       "properties": {
         "locale": { "type": "string", "enum": ["en-US", "es-MX"] },
-        "timezone": { "type": "string", "enum": ["UTC", "PST8PDT"] }
+        "timezone": { "type": "string", "enum": ["UTC", "America/Tijuana"] }
       }
     },
     "page": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["size", "margins_css_px"],
+      "required": ["size", "margins_app_units", "css_page_precedence"],
       "properties": {
         "size": {
           "oneOf": [
@@ -64,7 +99,8 @@
             { "$ref": "#/definitions/explicit_page_size" }
           ]
         },
-        "margins_css_px": { "$ref": "#/definitions/margins" }
+        "margins_app_units": { "$ref": "#/definitions/margins" },
+        "css_page_precedence": { "const": "css-page-over-request-defaults" }
       }
     },
     "named_page_size": {
@@ -78,10 +114,10 @@
     "explicit_page_size": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["width_css_px", "height_css_px"],
+      "required": ["width_app_units", "height_app_units"],
       "properties": {
-        "width_css_px": { "type": "number", "exclusiveMinimum": 0 },
-        "height_css_px": { "type": "number", "exclusiveMinimum": 0 }
+        "width_app_units": { "type": "integer", "minimum": 1, "maximum": 2147483647 },
+        "height_app_units": { "type": "integer", "minimum": 1, "maximum": 2147483647 }
       }
     },
     "margins": {
@@ -89,57 +125,69 @@
       "additionalProperties": false,
       "required": ["top", "right", "bottom", "left"],
       "properties": {
-        "top": { "type": "number", "minimum": 0 },
-        "right": { "type": "number", "minimum": 0 },
-        "bottom": { "type": "number", "minimum": 0 },
-        "left": { "type": "number", "minimum": 0 }
+        "top": { "type": "integer", "minimum": 0, "maximum": 2147483647 },
+        "right": { "type": "integer", "minimum": 0, "maximum": 2147483647 },
+        "bottom": { "type": "integer", "minimum": 0, "maximum": 2147483647 },
+        "left": { "type": "integer", "minimum": 0, "maximum": 2147483647 }
       }
     },
     "resources": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["network", "host_fonts", "timeout_ms"],
+      "required": ["network", "host_fonts"],
       "properties": {
-        "network": {
-          "oneOf": [
-            { "$ref": "#/definitions/denied_network" },
-            { "$ref": "#/definitions/allow_listed_network" }
-          ]
+        "network": { "const": "deny" },
+        "host_fonts": { "const": "deny" }
+      }
+    },
+    "time": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["policy_version", "epoch_unix_ms", "initial_offset_ns"],
+      "properties": {
+        "policy_version": { "const": 1 },
+        "epoch_unix_ms": {
+          "type": "integer",
+          "minimum": -8640000000000000,
+          "maximum": 8640000000000000
         },
-        "host_fonts": { "type": "string", "enum": ["deny", "allow"] },
-        "timeout_ms": { "type": "integer", "minimum": 1, "maximum": 60000 }
+        "initial_offset_ns": { "const": 0 }
       }
     },
-    "denied_network": {
+    "settlement_limits": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["mode", "allowed_http_roots"],
+      "required": [
+        "virtual_span_ms",
+        "ordinary_tasks",
+        "microtasks",
+        "rendering_opportunities",
+        "mutations",
+        "post_readiness_resources",
+        "process_cpu_ms",
+        "host_wall_ms"
+      ],
       "properties": {
-        "mode": { "const": "deny" },
-        "allowed_http_roots": {
-          "type": "array",
-          "maxItems": 0,
-          "items": { "$ref": "#/definitions/http_root" }
-        }
+        "virtual_span_ms": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+        "ordinary_tasks": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+        "microtasks": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+        "rendering_opportunities": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+        "mutations": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+        "post_readiness_resources": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "process_cpu_ms": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+        "host_wall_ms": { "type": "integer", "minimum": 1, "maximum": 4294967295 }
       }
     },
-    "allow_listed_network": {
+    "settlement": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["mode", "allowed_http_roots"],
+      "required": ["policy_version", "infinite_source_policy", "empty_checkpoints", "limits"],
       "properties": {
-        "mode": { "const": "allow-listed" },
-        "allowed_http_roots": {
-          "type": "array",
-          "minItems": 1,
-          "uniqueItems": true,
-          "items": { "$ref": "#/definitions/http_root" }
-        }
+        "policy_version": { "const": 1 },
+        "infinite_source_policy": { "const": "fail" },
+        "empty_checkpoints": { "const": 2 },
+        "limits": { "$ref": "#/definitions/settlement_limits" }
       }
-    },
-    "http_root": {
-      "type": "string",
-      "pattern": "^https?://[^\\s]+/$"
     },
     "diagnostics": {
       "type": "object",

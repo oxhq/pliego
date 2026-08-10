@@ -7,9 +7,15 @@
     "schema": "pliego.render-request",
     "version": 1,
     "api": 2,
+    "profile": null,
     "input": {
       "entrypoint": "document.html",
-      "bundle_sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+      "manifest": {
+        "path": "input-manifest.json",
+        "media_type": "application/vnd.pliego.input-manifest+json",
+        "sha256": "sha256:65fb0708211a8786d538d1940dd924f8e60e9cc875d6f3fde552b763f3f71907",
+        "bytes": 723
+      }
     },
     "environment": {
       "locale": "en-US",
@@ -19,20 +25,37 @@
       "size": {
         "name": "A4"
       },
-      "margins_css_px": {
-        "top": 48,
-        "right": 48,
-        "bottom": 48,
-        "left": 48
-      }
+      "margins_app_units": {
+        "top": 2880,
+        "right": 2880,
+        "bottom": 2880,
+        "left": 2880
+      },
+      "css_page_precedence": "css-page-over-request-defaults"
     },
     "resources": {
-      "network": {
-        "mode": "deny",
-        "allowed_http_roots": []
-      },
-      "host_fonts": "deny",
-      "timeout_ms": 10000
+      "network": "deny",
+      "host_fonts": "deny"
+    },
+    "time": {
+      "policy_version": 1,
+      "epoch_unix_ms": 946684800000,
+      "initial_offset_ns": 0
+    },
+    "settlement": {
+      "policy_version": 1,
+      "infinite_source_policy": "fail",
+      "empty_checkpoints": 2,
+      "limits": {
+        "virtual_span_ms": 86400000,
+        "ordinary_tasks": 100000,
+        "microtasks": 1000000,
+        "rendering_opportunities": 10000,
+        "mutations": 1000000,
+        "post_readiness_resources": 1024,
+        "process_cpu_ms": 30000,
+        "host_wall_ms": 60000
+      }
     },
     "diagnostics": {
       "retention": "always"
@@ -54,47 +77,26 @@
     "pdf": {
       "path": "document.pdf",
       "media_type": "application/pdf",
-      "sha256": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-      "bytes": 4096
+      "sha256": "sha256:3b78bf3f4499aa5729f9a387b5ce6082d27b990742dda784c57fa7fe3e73be79",
+      "bytes": 435
     },
     "scene": {
       "path": "scene.json",
       "media_type": "application/vnd.pliego.document-scene+json",
-      "sha256": "sha256:aa7241a42de8607fd7a531199f5ce412e2b446f07c006ad2dbc1d40014693345",
-      "bytes": 972
+      "sha256": "sha256:0d51c5523c1d6e73360da65857ebf4afe4dd439502351a01c20f13ad488651e7",
+      "bytes": 1368
     },
     "bundle": {
       "path": "bundle.json",
-      "media_type": "application/vnd.pliego.bundle+json",
-      "sha256": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
-      "bytes": 1024,
-      "entries": [
-        {
-          "path": "document.pdf",
-          "media_type": "application/pdf",
-          "sha256": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-          "bytes": 4096
-        },
-        {
-          "path": "resources/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-          "media_type": "font/woff2",
-          "sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-          "bytes": 2048
-        },
-        {
-          "path": "resources/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-          "media_type": "image/png",
-          "sha256": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-          "bytes": 256
-        },
-        {
-          "path": "scene.json",
-          "media_type": "application/vnd.pliego.document-scene+json",
-          "sha256": "sha256:aa7241a42de8607fd7a531199f5ce412e2b446f07c006ad2dbc1d40014693345",
-          "bytes": 972
-        }
-      ]
+      "media_type": "application/vnd.pliego.bundle-manifest+json",
+      "sha256": "sha256:1d35c25aac3ac4a64a66ce16599e7359ec70e34d4b773d47bbf2ef9eb18e7da8",
+      "bytes": 816
     }
+  },
+  "conformance": {
+    "requested": null,
+    "status": "not-requested",
+    "evidence": null
   },
   "diagnostics": {
     "retained": true,
@@ -102,8 +104,8 @@
       {
         "path": "diagnostics/environment.json",
         "media_type": "application/json",
-        "sha256": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
-        "bytes": 128
+        "sha256": "sha256:bfa3ada71c5cd6cc907d8112236eea1b4ca89187132dd1ad6c1ca223f14cb020",
+        "bytes": 49
       }
     ]
   },

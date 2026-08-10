@@ -12,10 +12,11 @@
       "type": "string",
       "pattern": "^sha256:[0-9a-f]{64}$"
     },
-    "relative_path": {
+    "portable_path": {
       "type": "string",
       "minLength": 1,
-      "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]*$"
+      "maxLength": 240,
+      "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._/-]*[A-Za-z0-9_-])?$"
     },
     "engine": {
       "type": "object",
@@ -38,7 +39,12 @@
       "required": ["mode", "target", "binary_sha256", "servo_base"],
       "properties": {
         "mode": { "const": "one-shot" },
-        "target": { "type": "string", "minLength": 1 },
+        "target": {
+          "type": "string",
+          "minLength": 5,
+          "maxLength": 63,
+          "pattern": "^[a-z0-9]+(?:_[a-z0-9]+)*-[a-z0-9]+(?:_[a-z0-9]+)*-[a-z0-9]+(?:_[a-z0-9]+)*(?:-[a-z0-9]+(?:_[a-z0-9]+)*)?$"
+        },
         "binary_sha256": { "$ref": "#/definitions/content_address" },
         "servo_base": { "type": "string", "pattern": "^[0-9a-f]{40}$" }
       }
@@ -48,10 +54,10 @@
       "additionalProperties": false,
       "required": ["path", "media_type", "sha256", "bytes"],
       "properties": {
-        "path": { "$ref": "#/definitions/relative_path" },
-        "media_type": { "type": "string", "minLength": 1 },
+        "path": { "$ref": "#/definitions/portable_path" },
+        "media_type": { "type": "string", "minLength": 3, "maxLength": 255 },
         "sha256": { "$ref": "#/definitions/content_address" },
-        "bytes": { "type": "integer", "minimum": 1 }
+        "bytes": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 }
       }
     },
     "pdf_artifact": {
@@ -62,7 +68,7 @@
         "path": { "const": "document.pdf" },
         "media_type": { "const": "application/pdf" },
         "sha256": { "$ref": "#/definitions/content_address" },
-        "bytes": { "type": "integer", "minimum": 1 }
+        "bytes": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 }
       }
     },
     "scene_artifact": {
@@ -73,23 +79,18 @@
         "path": { "const": "scene.json" },
         "media_type": { "const": "application/vnd.pliego.document-scene+json" },
         "sha256": { "$ref": "#/definitions/content_address" },
-        "bytes": { "type": "integer", "minimum": 1 }
+        "bytes": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 }
       }
     },
-    "bundle": {
+    "bundle_artifact": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["path", "media_type", "sha256", "bytes", "entries"],
+      "required": ["path", "media_type", "sha256", "bytes"],
       "properties": {
         "path": { "const": "bundle.json" },
-        "media_type": { "const": "application/vnd.pliego.bundle+json" },
+        "media_type": { "const": "application/vnd.pliego.bundle-manifest+json" },
         "sha256": { "$ref": "#/definitions/content_address" },
-        "bytes": { "type": "integer", "minimum": 1 },
-        "entries": {
-          "type": "array",
-          "minItems": 2,
-          "items": { "$ref": "#/definitions/artifact" }
-        }
+        "bytes": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 }
       }
     },
     "delivery": {
@@ -99,7 +100,7 @@
       "properties": {
         "pdf": { "$ref": "#/definitions/pdf_artifact" },
         "scene": { "$ref": "#/definitions/scene_artifact" },
-        "bundle": { "$ref": "#/definitions/bundle" }
+        "bundle": { "$ref": "#/definitions/bundle_artifact" }
       }
     },
     "diagnostic_artifact": {
@@ -109,11 +110,12 @@
       "properties": {
         "path": {
           "type": "string",
-          "pattern": "^diagnostics/[A-Za-z0-9][A-Za-z0-9._/-]*$"
+          "maxLength": 240,
+          "pattern": "^diagnostics/[A-Za-z0-9](?:[A-Za-z0-9._/-]*[A-Za-z0-9_-])?$"
         },
-        "media_type": { "type": "string", "minLength": 1 },
+        "media_type": { "type": "string", "minLength": 3, "maxLength": 255 },
         "sha256": { "$ref": "#/definitions/content_address" },
-        "bytes": { "type": "integer", "minimum": 1 }
+        "bytes": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 }
       }
     },
     "diagnostics": {
@@ -124,17 +126,66 @@
         "retained": { "type": "boolean" },
         "artifacts": {
           "type": "array",
+          "maxItems": 4294967295,
           "items": { "$ref": "#/definitions/diagnostic_artifact" }
+        }
+      }
+    },
+    "conformance_evidence_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "version", "profile", "resource", "media_type"],
+      "properties": {
+        "schema": {
+          "type": "string",
+          "pattern": "^pliego\\.conformance-evidence\\.[a-z0-9][a-z0-9.-]{0,127}$"
+        },
+        "version": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+        "profile": { "$ref": "render-request.v1.json#/definitions/profile_ref" },
+        "resource": { "$ref": "#/definitions/content_address" },
+        "media_type": { "const": "application/vnd.pliego.conformance-evidence+json" }
+      }
+    },
+    "conformance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["requested", "status", "evidence"],
+      "properties": {
+        "requested": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "render-request.v1.json#/definitions/profile_ref" }
+          ]
+        },
+        "status": {
+          "type": "string",
+          "enum": ["not-requested", "satisfied", "failed", "not-evaluated"]
+        },
+        "evidence": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/definitions/conformance_evidence_ref" }
+          ]
         }
       }
     },
     "error": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["code", "message"],
+      "required": ["kind"],
       "properties": {
-        "code": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]*$" },
-        "message": { "type": "string", "minLength": 1 }
+        "kind": {
+          "type": "string",
+          "enum": [
+            "resource",
+            "readiness",
+            "settlement",
+            "capture",
+            "artifact",
+            "conformance",
+            "internal"
+          ]
+        }
       }
     },
     "success": {
@@ -148,6 +199,7 @@
         "request",
         "engine",
         "delivery",
+        "conformance",
         "diagnostics",
         "error"
       ],
@@ -159,6 +211,7 @@
         "request": { "$ref": "render-request.v1.json" },
         "engine": { "$ref": "#/definitions/engine" },
         "delivery": { "$ref": "#/definitions/delivery" },
+        "conformance": { "$ref": "#/definitions/conformance" },
         "diagnostics": { "$ref": "#/definitions/diagnostics" },
         "error": { "type": "null" }
       }
@@ -174,6 +227,7 @@
         "request",
         "engine",
         "delivery",
+        "conformance",
         "diagnostics",
         "error"
       ],
@@ -185,6 +239,7 @@
         "request": { "$ref": "render-request.v1.json" },
         "engine": { "$ref": "#/definitions/engine" },
         "delivery": { "type": "null" },
+        "conformance": { "$ref": "#/definitions/conformance" },
         "diagnostics": { "$ref": "#/definitions/diagnostics" },
         "error": { "$ref": "#/definitions/error" }
       }
