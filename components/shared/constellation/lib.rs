@@ -19,10 +19,10 @@ use embedder_traits::user_contents::{
     UserContentManagerId, UserScript, UserScriptId, UserStyleSheet, UserStyleSheetId,
 };
 use embedder_traits::{
-    DocumentTimeControlCommand, DocumentTimeControlError, DocumentTimeControlObservation,
-    EmbedderControlId, EmbedderControlResponse, InputEventAndId, JavaScriptEvaluationId,
-    MediaSessionActionType, NewWebViewDetails, PaintHitTestResult, Theme, TraversalId, UrlRequest,
-    ViewportDetails, WebDriverCommandMsg,
+    DocumentTimeControlCommand, DocumentTimeControlOutcome, EmbedderControlId,
+    EmbedderControlResponse, InputEventAndId, JavaScriptEvaluationId, MediaSessionActionType,
+    NewWebViewDetails, PaintHitTestResult, Theme, TraversalId, UrlRequest, ViewportDetails,
+    WebDriverCommandMsg,
 };
 pub use from_script_message::*;
 use malloc_size_of_derive::MallocSizeOf;
@@ -106,7 +106,7 @@ pub enum EmbedderToConstellationMessage {
     ControlDocumentTime(
         WebViewId,
         DocumentTimeControlCommand,
-        GenericCallback<Result<DocumentTimeControlObservation, DocumentTimeControlError>>,
+        GenericCallback<DocumentTimeControlOutcome>,
     ),
     /// Create a memory report and return it via the [`GenericCallback`]
     CreateMemoryReport(GenericCallback<MemoryReportResult>),

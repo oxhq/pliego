@@ -13,7 +13,7 @@ use accesskit::{
 use dpi::PhysicalSize;
 use embedder_traits::{
     ContextMenuAction, ContextMenuItem, Cursor, DocumentClockConfiguration,
-    DocumentTimeControlCommand, DocumentTimeControlError, DocumentTimeControlObservation,
+    DocumentTimeControlCommand, DocumentTimeControlError, DocumentTimeControlReceiver,
     EmbedderControlId, EmbedderControlRequest, Image, InputEvent, InputEventAndId, InputEventId,
     JSValue, JavaScriptEvaluationError, LoadStatus, MediaSessionActionType, NewWebViewDetails,
     ScreenGeometry, ScreenshotCaptureError, Scroll, Theme, TraversalId, UrlRequest,
@@ -25,7 +25,7 @@ use log::debug;
 use paint_api::WebViewTrait;
 use paint_api::rendering_context::RenderingContext;
 use servo_base::Epoch;
-use servo_base::generic_channel::{GenericCallback, GenericReceiver, GenericSender};
+use servo_base::generic_channel::{GenericCallback, GenericSender};
 use servo_base::id::WebViewId;
 use servo_config::pref;
 use servo_constellation_traits::{EmbedderToConstellationMessage, TraversalDirection};
@@ -795,18 +795,19 @@ impl WebView {
 
     /// Submit one internal mechanical command to an opt-in controlled ScriptThread.
     ///
-    /// The returned receiver yields a post-turn observation. This API neither decides visual
-    /// settlement nor captures output.
+    /// The returned receiver consumes itself after one bounded wait and preserves timeout,
+    /// disconnect, decoding, and I/O failures distinctly. A missing `Observe` response is
+    /// non-mutating; a missing `DriveOneTurn` response may have completed late and must not be
+    /// retried as a no-op. A guarded failure remains exact-token indeterminate. This API neither
+    /// decides visual settlement nor captures output.
     #[doc(hidden)]
     pub fn request_controlled_document_time(
         &self,
         command: DocumentTimeControlCommand,
-    ) -> Result<
-        GenericReceiver<Result<DocumentTimeControlObservation, DocumentTimeControlError>>,
-        DocumentTimeControlError,
-    > {
+    ) -> Result<DocumentTimeControlReceiver, DocumentTimeControlError> {
         let (response, receiver) =
             GenericCallback::new_blocking().map_err(|_| DocumentTimeControlError::ChannelClosed)?;
+        let receiver = DocumentTimeControlReceiver::new(receiver, &command);
         self.inner().servo.constellation_proxy().send(
             EmbedderToConstellationMessage::ControlDocumentTime(self.id(), command, response),
         );

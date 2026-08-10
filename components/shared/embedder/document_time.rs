@@ -4,8 +4,11 @@
 
 //! Internal embedding protocol for mechanically driving one controlled document event loop.
 
+use std::time::Duration;
+
 use serde::{Deserialize, Serialize};
 use servo_base::Epoch;
+use servo_base::generic_channel::{GenericReceiver, ReceiveError, TryReceiveError};
 use servo_base::id::{PipelineId, ScriptEventLoopId, WebViewId};
 pub use timers::DocumentClockConfiguration;
 use timers::{
@@ -282,6 +285,165 @@ pub struct DocumentTimeControlObservation {
     pub documents: Vec<DocumentTimeDocumentObservation>,
 }
 
+/// Definitive or explicitly indeterminate completion of one mechanical control command.
+///
+/// `AdvanceOutcomeIndeterminate` is intentionally not an error: after submission, shutdown,
+/// transport failure, or a non-authoritative successful envelope can prevent proof of which side of
+/// the clock linearization point won. The caller must not interpret that outcome as proof that time
+/// stayed unchanged or retry the token.
+///
+/// This enum crosses Servo's callback channel and is a same-build protocol. Existing variant order
+/// and payloads must remain stable; receiver-local transport states belong in
+/// [`DocumentTimeControlReceiveOutcome`] instead of being inserted here.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum DocumentTimeControlOutcome {
+    /// ScriptThread completed the command and returned its authoritative observation.
+    Completed(DocumentTimeControlObservation),
+    /// The command was definitively rejected before a guarded clock mutation. This does not make a
+    /// submitted single-use token reusable.
+    Rejected(DocumentTimeControlError),
+    /// The runtime cannot determine whether this guarded advance committed.
+    AdvanceOutcomeIndeterminate {
+        /// Single-use token whose outcome cannot be recovered.
+        token_id: DocumentTimeAdvanceTokenId,
+        /// Exact target bound when Constellation routed the token.
+        target: Box<DocumentTimeControlTarget>,
+        /// Exact deadline which may or may not have been activated.
+        deadline: TimerDeadlineSnapshot,
+    },
+}
+
+/// Why a bounded local wait failed to deliver a command outcome.
+///
+/// This type is local to the embedding caller and is deliberately not serialized into the
+/// same-build Constellation protocol.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[doc(hidden)]
+pub enum DocumentTimeControlTransportFailure {
+    /// The bounded wait elapsed while the callback might still complete later.
+    TimedOut,
+    /// The callback channel closed without an outcome.
+    Disconnected,
+    /// The callback payload could not be decoded.
+    DeserializationFailed(String),
+    /// The IPC transport returned an I/O failure.
+    Io {
+        /// Standard I/O category retained from the transport.
+        kind: std::io::ErrorKind,
+        /// Transport-provided diagnostic.
+        message: String,
+    },
+}
+
+impl From<TryReceiveError> for DocumentTimeControlTransportFailure {
+    fn from(error: TryReceiveError) -> Self {
+        match error {
+            TryReceiveError::Empty => Self::TimedOut,
+            TryReceiveError::ReceiveError(ReceiveError::Disconnected) => Self::Disconnected,
+            TryReceiveError::ReceiveError(ReceiveError::DeserializationFailed(message)) => {
+                Self::DeserializationFailed(message)
+            },
+            TryReceiveError::ReceiveError(ReceiveError::Io(error)) => Self::Io {
+                kind: error.kind(),
+                message: error.to_string(),
+            },
+        }
+    }
+}
+
+/// The sole result of consuming a bounded document-time receiver.
+///
+/// A missing `Observe` response is a transport failure only: observing never mutates the event
+/// loop. A missing `DriveOneTurn` response is indeterminate because the turn may complete after the
+/// caller stops waiting; callers must not retry it as though no event was processed. Guarded
+/// advances retain their exact-token [`DocumentTimeControlOutcome::AdvanceOutcomeIndeterminate`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[doc(hidden)]
+pub enum DocumentTimeControlReceiveOutcome {
+    /// Constellation delivered a typed command outcome.
+    CommandOutcome(DocumentTimeControlOutcome),
+    /// No observation was delivered; the `Observe` command itself was non-mutating.
+    ObserveTransportFailure(DocumentTimeControlTransportFailure),
+    /// The caller cannot know whether the requested event-loop turn completed.
+    DriveOneTurnOutcomeIndeterminate(DocumentTimeControlTransportFailure),
+}
+
+enum DocumentTimeControlTransportSemantics {
+    Observe,
+    DriveOneTurn,
+    GuardedAdvance(DocumentTimeControlOutcome),
+}
+
+/// One bounded, single-result receiver for a submitted document-time command.
+///
+/// The receiver consumes itself so a timeout or transport failure is terminal for the caller and a
+/// late response cannot be mistaken for a second result. For `AdvanceTo`, every timeout,
+/// disconnection, I/O failure, or deserialization failure is conservatively indeterminate and the
+/// submitted token must not be retried.
+#[doc(hidden)]
+pub struct DocumentTimeControlReceiver {
+    receiver: GenericReceiver<DocumentTimeControlOutcome>,
+    transport_semantics: DocumentTimeControlTransportSemantics,
+}
+
+impl DocumentTimeControlReceiver {
+    /// Bind transport-failure semantics before the command is submitted.
+    #[doc(hidden)]
+    pub fn new(
+        receiver: GenericReceiver<DocumentTimeControlOutcome>,
+        command: &DocumentTimeControlCommand,
+    ) -> Self {
+        let transport_semantics = match command {
+            DocumentTimeControlCommand::AdvanceTo(token) => {
+                DocumentTimeControlTransportSemantics::GuardedAdvance(
+                    DocumentTimeControlOutcome::AdvanceOutcomeIndeterminate {
+                        token_id: token.id(),
+                        target: Box::new(token.target().clone()),
+                        deadline: token.deadline(),
+                    },
+                )
+            },
+            DocumentTimeControlCommand::Observe => DocumentTimeControlTransportSemantics::Observe,
+            DocumentTimeControlCommand::DriveOneTurn => {
+                DocumentTimeControlTransportSemantics::DriveOneTurn
+            },
+        };
+        Self {
+            receiver,
+            transport_semantics,
+        }
+    }
+
+    /// Wait at most `timeout` for the command's only terminal outcome.
+    pub fn recv_timeout(self, timeout: Duration) -> DocumentTimeControlReceiveOutcome {
+        let result = self.receiver.try_recv_timeout(timeout);
+        self.resolve(result)
+    }
+
+    fn resolve(
+        self,
+        result: Result<DocumentTimeControlOutcome, TryReceiveError>,
+    ) -> DocumentTimeControlReceiveOutcome {
+        match result {
+            Ok(outcome) => DocumentTimeControlReceiveOutcome::CommandOutcome(outcome),
+            Err(error) => {
+                let failure = error.into();
+                match self.transport_semantics {
+                    DocumentTimeControlTransportSemantics::Observe => {
+                        DocumentTimeControlReceiveOutcome::ObserveTransportFailure(failure)
+                    },
+                    DocumentTimeControlTransportSemantics::DriveOneTurn => {
+                        DocumentTimeControlReceiveOutcome::DriveOneTurnOutcomeIndeterminate(failure)
+                    },
+                    DocumentTimeControlTransportSemantics::GuardedAdvance(outcome) => {
+                        DocumentTimeControlReceiveOutcome::CommandOutcome(outcome)
+                    },
+                }
+            },
+        }
+    }
+}
+
 /// Typed failure from activation, routing, one-turn driving, or observation.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum DocumentTimeControlError {
@@ -314,13 +476,6 @@ pub enum DocumentTimeControlError {
         expected: DocumentTimeAdvanceTokenId,
         /// Token supplied by the caller.
         observed: DocumentTimeAdvanceTokenId,
-    },
-    /// A guarded response did not acknowledge the exact deadline routed by Constellation.
-    AdvanceResponseMismatch {
-        /// Deadline bound by the pending guarded request.
-        expected: TimerDeadlineSnapshot,
-        /// Action returned by ScriptThread.
-        observed: DocumentTimeControlAction,
     },
     /// Buffered or ready ordinary input changed after token issuance.
     AdvanceInputChanged {
@@ -358,13 +513,6 @@ pub enum DocumentTimeControlError {
         /// Current identity, if a controlled target still exists.
         observed: Option<Box<DocumentTimeControlTarget>>,
     },
-    /// The ScriptThread response envelope did not belong to the routed target.
-    ResponseSourceMismatch {
-        /// WebView carried by the ScriptThread response envelope.
-        webview_id: WebViewId,
-        /// Pipeline carried by the ScriptThread response envelope.
-        pipeline_id: PipelineId,
-    },
     /// A worker, worklet, cross-loop navigation, or host timestamp escaped this slice.
     UnsupportedSurface(DocumentTimeSurface),
     /// Checked document-clock operation failed.
@@ -377,4 +525,226 @@ pub enum DocumentTimeControlError {
     QueueLengthOverflow,
     /// The selected ScriptThread channel was closed.
     ChannelClosed,
+}
+
+#[cfg(test)]
+mod tests {
+    use servo_base::generic_channel::{GenericCallback, ReceiveError, TryReceiveError};
+    use servo_base::id::{TEST_PIPELINE_ID, TEST_SCRIPT_EVENT_LOOP_ID, TEST_WEBVIEW_ID};
+    use timers::{DocumentClock, DocumentProducerFence, TimerEventRequest, TimerScheduler};
+
+    use super::*;
+
+    fn target() -> DocumentTimeControlTarget {
+        DocumentTimeControlTarget {
+            webview_id: TEST_WEBVIEW_ID,
+            event_loop_id: TEST_SCRIPT_EVENT_LOOP_ID,
+            webview_epoch: Epoch::default(),
+            pipelines: vec![TEST_PIPELINE_ID],
+            fully_active_pipelines: vec![TEST_PIPELINE_ID],
+        }
+    }
+
+    fn advance_token() -> DocumentTimeAdvanceToken {
+        let clock = DocumentClock::new(DocumentClockConfiguration::Controlled {
+            initial_time_ns: 0,
+            unix_time_origin_ns: 0,
+        });
+        let mut scheduler = TimerScheduler::with_clock(clock.clone());
+        scheduler.schedule_timer(TimerEventRequest {
+            callback: Box::new(|| {}),
+            duration: Duration::from_nanos(10),
+        });
+        let fence = DocumentProducerFence::default();
+        DocumentTimeAdvanceToken::new_internal(
+            DocumentTimeAdvanceTokenId::new(3),
+            target(),
+            clock.id(),
+            clock.now(),
+            scheduler
+                .finite_deadline_snapshot()
+                .expect("test scheduler is controlled")
+                .expect("test timer has a finite deadline"),
+            0,
+            0,
+            false,
+            DocumentTimeProducerObservation {
+                fence_id: fence.id(),
+                checkpoint: DocumentProducerCheckpoint::ZERO,
+                snapshot: fence.snapshot(),
+                stability: DocumentProducerStability::StableEmpty,
+            },
+        )
+    }
+
+    fn assert_indeterminate(
+        outcome: DocumentTimeControlReceiveOutcome,
+        token: &DocumentTimeAdvanceToken,
+    ) {
+        assert!(matches!(
+            outcome,
+            DocumentTimeControlReceiveOutcome::CommandOutcome(
+                DocumentTimeControlOutcome::AdvanceOutcomeIndeterminate {
+                    token_id,
+                    target: observed_target,
+                    deadline,
+                }
+            ) if token_id == token.id() && *observed_target == *token.target() &&
+                    deadline == token.deadline()
+        ));
+    }
+
+    #[test]
+    fn observe_timeout_is_a_non_mutating_transport_failure() {
+        let command = DocumentTimeControlCommand::Observe;
+        let (_response, receiver) = GenericCallback::new_blocking()
+            .expect("test control callback channel should be created");
+        let receiver = DocumentTimeControlReceiver::new(receiver, &command);
+
+        assert_eq!(
+            receiver.recv_timeout(Duration::ZERO),
+            DocumentTimeControlReceiveOutcome::ObserveTransportFailure(
+                DocumentTimeControlTransportFailure::TimedOut
+            )
+        );
+    }
+
+    #[test]
+    fn drive_one_turn_timeout_is_indeterminate() {
+        let command = DocumentTimeControlCommand::DriveOneTurn;
+        let (_response, receiver) = GenericCallback::new_blocking()
+            .expect("test control callback channel should be created");
+        let receiver = DocumentTimeControlReceiver::new(receiver, &command);
+
+        assert_eq!(
+            receiver.recv_timeout(Duration::ZERO),
+            DocumentTimeControlReceiveOutcome::DriveOneTurnOutcomeIndeterminate(
+                DocumentTimeControlTransportFailure::TimedOut
+            )
+        );
+    }
+
+    #[test]
+    fn ordinary_disconnects_remain_distinct_from_timeout() {
+        let (observe_response, observe_receiver) = GenericCallback::new_blocking()
+            .expect("test observe callback channel should be created");
+        let observe_receiver = DocumentTimeControlReceiver::new(
+            observe_receiver,
+            &DocumentTimeControlCommand::Observe,
+        );
+        drop(observe_response);
+        assert_eq!(
+            observe_receiver.recv_timeout(Duration::from_secs(1)),
+            DocumentTimeControlReceiveOutcome::ObserveTransportFailure(
+                DocumentTimeControlTransportFailure::Disconnected
+            )
+        );
+
+        let (drive_response, drive_receiver) =
+            GenericCallback::new_blocking().expect("test drive callback channel should be created");
+        let drive_receiver = DocumentTimeControlReceiver::new(
+            drive_receiver,
+            &DocumentTimeControlCommand::DriveOneTurn,
+        );
+        drop(drive_response);
+        assert_eq!(
+            drive_receiver.recv_timeout(Duration::from_secs(1)),
+            DocumentTimeControlReceiveOutcome::DriveOneTurnOutcomeIndeterminate(
+                DocumentTimeControlTransportFailure::Disconnected
+            )
+        );
+    }
+
+    #[test]
+    fn ordinary_decode_and_io_failures_keep_their_transport_identity() {
+        let (_response, receiver) = GenericCallback::new_blocking()
+            .expect("test observe callback channel should be created");
+        let receiver =
+            DocumentTimeControlReceiver::new(receiver, &DocumentTimeControlCommand::Observe);
+        assert_eq!(
+            receiver.resolve(Err(TryReceiveError::ReceiveError(
+                ReceiveError::DeserializationFailed("test corruption".to_owned()),
+            ))),
+            DocumentTimeControlReceiveOutcome::ObserveTransportFailure(
+                DocumentTimeControlTransportFailure::DeserializationFailed(
+                    "test corruption".to_owned()
+                )
+            )
+        );
+
+        let (_response, receiver) =
+            GenericCallback::new_blocking().expect("test drive callback channel should be created");
+        let receiver =
+            DocumentTimeControlReceiver::new(receiver, &DocumentTimeControlCommand::DriveOneTurn);
+        assert_eq!(
+            receiver.resolve(Err(TryReceiveError::ReceiveError(ReceiveError::Io(
+                std::io::Error::new(std::io::ErrorKind::BrokenPipe, "test pipe"),
+            )))),
+            DocumentTimeControlReceiveOutcome::DriveOneTurnOutcomeIndeterminate(
+                DocumentTimeControlTransportFailure::Io {
+                    kind: std::io::ErrorKind::BrokenPipe,
+                    message: "test pipe".to_owned(),
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn late_drive_result_has_no_second_receive_path_after_timeout() {
+        let (response, receiver) =
+            GenericCallback::new_blocking().expect("test drive callback channel should be created");
+        let receiver =
+            DocumentTimeControlReceiver::new(receiver, &DocumentTimeControlCommand::DriveOneTurn);
+
+        assert_eq!(
+            receiver.recv_timeout(Duration::ZERO),
+            DocumentTimeControlReceiveOutcome::DriveOneTurnOutcomeIndeterminate(
+                DocumentTimeControlTransportFailure::TimedOut
+            )
+        );
+        // `recv_timeout` consumed and dropped the only receiver. A late callback cannot expose a
+        // second result, regardless of whether the channel implementation reports send failure.
+        let _ = response.send(DocumentTimeControlOutcome::Rejected(
+            DocumentTimeControlError::ChannelClosed,
+        ));
+    }
+
+    #[test]
+    fn guarded_timeout_is_terminal_and_consumes_the_receiver() {
+        let token = advance_token();
+        let command = DocumentTimeControlCommand::AdvanceTo(token.clone());
+        let (_response, receiver) = GenericCallback::new_blocking()
+            .expect("test control callback channel should be created");
+        let receiver = DocumentTimeControlReceiver::new(receiver, &command);
+
+        assert_indeterminate(receiver.recv_timeout(Duration::ZERO), &token);
+    }
+
+    #[test]
+    fn guarded_disconnect_is_indeterminate() {
+        let token = advance_token();
+        let command = DocumentTimeControlCommand::AdvanceTo(token.clone());
+        let (response, receiver) = GenericCallback::new_blocking()
+            .expect("test control callback channel should be created");
+        let receiver = DocumentTimeControlReceiver::new(receiver, &command);
+        drop(response);
+
+        assert_indeterminate(receiver.recv_timeout(Duration::from_secs(1)), &token);
+    }
+
+    #[test]
+    fn guarded_deserialization_failure_is_indeterminate() {
+        let token = advance_token();
+        let command = DocumentTimeControlCommand::AdvanceTo(token.clone());
+        let (_response, receiver) = GenericCallback::new_blocking()
+            .expect("test control callback channel should be created");
+        let receiver = DocumentTimeControlReceiver::new(receiver, &command);
+
+        assert_indeterminate(
+            receiver.resolve(Err(TryReceiveError::ReceiveError(
+                ReceiveError::DeserializationFailed("test corruption".to_owned()),
+            ))),
+            &token,
+        );
+    }
 }
