@@ -45,3 +45,6 @@ url = { workspace = true }
 uuid = { workspace = true }
 webdriver = { workspace = true }
 webrender_api = { workspace = true }
+
+[dev-dependencies]
+ipc-channel = { workspace = true }

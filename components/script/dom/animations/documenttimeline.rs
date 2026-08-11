@@ -17,7 +17,7 @@ use time::Duration;
 use timers::{DocumentRenderingTime, DocumentTime, DocumentTimeSurface};
 
 use crate::dom::bindings::codegen::Bindings::DocumentTimelineBinding::DocumentTimelineMethods;
-use crate::dom::performance::performance::ToDOMHighResTimeStamp;
+use crate::dom::performance::performance::document_duration_to_dom_high_res_time_stamp;
 use crate::dom::types::{AnimationTimeline, Window};
 
 /// <https://drafts.csswg.org/web-animations-1/#the-documenttimeline-interface>
@@ -110,7 +110,7 @@ fn timeline_time_from_elapsed(elapsed: std::time::Duration, origin_offset: Durat
 }
 
 pub(crate) fn rendering_timestamp_from_elapsed(elapsed: std::time::Duration) -> Finite<f64> {
-    Duration::nanoseconds_i128(elapsed.as_nanos() as i128).to_dom_high_res_time_stamp()
+    document_duration_to_dom_high_res_time_stamp(elapsed)
 }
 
 impl DocumentTimelineMethods<crate::DomTypeHolder> for DocumentTimeline {

@@ -25,6 +25,20 @@ not turn committed work into a control-plane rejection. A guarded AdvanceTo pres
 terminal is definitively rejected while the ledger is locked and before clock mutation. Missing
 DriveOneTurn or AdvanceTo responses retain their existing indeterminate transport semantics.
 
+The optional virtual-span limit is measured from the controlled clock's initial monotonic offset.
+ScriptThread first rejects a stale timer snapshot without changing policy state, then holds the
+ledger guard across a second exact scheduler validation and clock mutation. A before-initial or
+over-span request latches one typed terminal without moving the clock. Raw clock and scheduler APIs
+remain mechanisms; this ScriptThread conditional-advance path is the current enforcement authority.
+
+Controlled monotonic offsets use unsigned 128-bit nanoseconds and wall time uses signed 128-bit
+nanoseconds, covering the API 2 epoch and span arithmetic without a u64 narrowing. Performance
+conversion casts the exact integer-millisecond part before fractional precision. JavaScript Date's
+f64-microsecond SpiderMonkey hook is fail-closed: an in-TimeClip millisecond that no adjacent f64
+candidate can preserve latches a typed clock terminal and returns NaN; exact values outside
+TimeClip return the specification's NaN without being misrounded back to a finite boundary. Neither
+path consults host wall time.
+
 When the ledger is enabled, producer empty-checkpoint qualification is also bound to the exact
 execution observation. Any task, microtask, rendering, mutation-record, resource-evidence, or
 terminal counter change discards the previous empty candidate even if no producer ticket changed;
@@ -49,3 +63,6 @@ This slice does not claim:
 
 Those are separate fail-closed gates. A ledger terminal must prevent publication, but wiring that
 terminal through the Pliego-owned settlement and publication state machine belongs to later slices.
+The same is true of mapping normalized API 2 epoch and limit fields into the production clock
+configuration. The widened serde/IPC shapes are verified for one same-build runtime; they are not a
+backward-wire-compatibility claim for older binaries.

@@ -155,7 +155,7 @@ impl TimerTimebase {
         let Some(suspended_at) = self.suspended_at else {
             return Ok(false);
         };
-        let paused_for = clock.try_now()?.saturating_duration_since(suspended_at);
+        let paused_for = clock.try_now()?.checked_duration_since(suspended_at)?;
         self.suspension_offset = self
             .suspension_offset
             .checked_add(paused_for)
@@ -163,6 +163,16 @@ impl TimerTimebase {
         self.suspended_at = None;
         Ok(true)
     }
+}
+
+fn scheduled_timer_delay(
+    scheduled_for: DocumentTime,
+    base_time: DocumentTime,
+) -> Result<Duration, DocumentClockError> {
+    if scheduled_for <= base_time {
+        return Ok(Duration::ZERO);
+    }
+    scheduled_for.checked_duration_since(base_time)
 }
 
 // This enum is required to work around the fact that trait objects do not support generic methods.
@@ -581,9 +591,8 @@ impl OneshotTimers {
 
         let event_request = TimerEventRequest {
             callback,
-            duration: timer
-                .scheduled_for
-                .saturating_duration_since(self.base_time()),
+            duration: scheduled_timer_delay(timer.scheduled_for, self.base_time())
+                .expect("DOM timer deadline exceeded the standard duration range"),
         };
 
         self.scheduled_timer_id
@@ -1055,7 +1064,7 @@ mod tests {
     fn suspension_freezes_dom_timer_time_and_resume_excludes_the_pause() {
         let clock = DocumentClock::new(DocumentClockConfiguration::Controlled {
             initial_time_ns: 10,
-            unix_time_origin_ns: 0,
+            unix_time_origin_ns: timers::DocumentUnixTime::default(),
             execution_limits: None,
         });
         let mut timebase = TimerTimebase::default();
@@ -1072,8 +1081,8 @@ mod tests {
         assert_eq!(timebase.now(&clock).unwrap(), DocumentTime::from_nanos(15));
         let original_deadline = DocumentTime::from_nanos(20);
         assert_eq!(
-            original_deadline.saturating_duration_since(timebase.now(&clock).unwrap()),
-            Duration::from_nanos(5)
+            original_deadline.checked_duration_since(timebase.now(&clock).unwrap()),
+            Ok(Duration::from_nanos(5))
         );
     }
 
@@ -1085,6 +1094,24 @@ mod tests {
         assert_eq!(compare_timer_order(late, 0, early, 9), Ordering::Less);
         assert_eq!(compare_timer_order(early, 0, early, 1), Ordering::Greater);
         assert_eq!(compare_timer_order(early, 1, early, 0), Ordering::Less);
+    }
+
+    #[test]
+    fn overdue_dom_timer_schedules_immediately_without_underflow() {
+        let base_time = DocumentTime::from_nanos(10);
+
+        assert_eq!(
+            scheduled_timer_delay(DocumentTime::from_nanos(9), base_time),
+            Ok(Duration::ZERO)
+        );
+        assert_eq!(
+            scheduled_timer_delay(base_time, base_time),
+            Ok(Duration::ZERO)
+        );
+        assert_eq!(
+            scheduled_timer_delay(DocumentTime::from_nanos(11), base_time),
+            Ok(Duration::from_nanos(1))
+        );
     }
 
     #[test]

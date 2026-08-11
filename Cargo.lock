@@ -8210,6 +8210,7 @@ dependencies = [
  "http 1.4.2",
  "image",
  "inventory",
+ "ipc-channel",
  "keyboard-types",
  "log",
  "malloc_size_of_derive",
@@ -9231,6 +9232,7 @@ version = "0.4.0"
 dependencies = [
  "crossbeam-channel",
  "malloc_size_of_derive",
+ "postcard",
  "serde",
  "servo-malloc-size-of",
 ]

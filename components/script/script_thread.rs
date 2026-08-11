@@ -415,11 +415,21 @@ const fn command_requires_exact_target_before_action(command: &DocumentTimeContr
 
 fn controlled_advance_execution_guard(
     ledger: Option<&DocumentExecutionLedger>,
+    requested: DocumentTime,
 ) -> Result<Option<timers::DocumentExecutionActiveGuard<'_>>, DocumentTimeControlError> {
     ledger
-        .map(DocumentExecutionLedger::active_guard)
+        .map(|ledger| ledger.active_guard_for_time(requested))
         .transpose()
         .map_err(DocumentTimeControlError::ExecutionTerminated)
+}
+
+fn controlled_document_time_now(
+    clock: &DocumentClock,
+) -> Result<DocumentTime, DocumentTimeControlError> {
+    if let Some(error) = clock.terminal_error() {
+        return Err(DocumentTimeControlError::Clock(error));
+    }
+    clock.try_now().map_err(DocumentTimeControlError::Clock)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -452,7 +462,7 @@ fn validate_conditional_advance_state(
         });
     }
 
-    let observed_now = clock.try_now().map_err(DocumentTimeControlError::Clock)?;
+    let observed_now = controlled_document_time_now(clock)?;
     if clock.id() != token.clock_id() || observed_now != token.now() {
         return Err(DocumentTimeControlError::AdvanceClockChanged {
             expected_id: token.clock_id(),
@@ -1934,7 +1944,7 @@ impl ScriptThread {
                 source_pipeline_id,
                 ScriptToConstellationMessage::ControlledDocumentTimeResponse(
                     request.request_id,
-                    result,
+                    Box::new(result),
                 ),
             ))
             .is_ok()
@@ -1952,6 +1962,12 @@ impl ScriptThread {
                 expected: Box::new(target.clone()),
                 observed: None,
             });
+        }
+        if let Some(error) = self.document_clock.terminal_error() {
+            self.controlled_document_producer_observer
+                .borrow_mut()
+                .invalidate();
+            return Err(DocumentTimeControlError::Clock(error));
         }
         if let Some(surface) = self.document_clock.unsupported_surface() {
             self.controlled_document_producer_observer
@@ -2054,10 +2070,7 @@ impl ScriptThread {
             return Err(DocumentTimeControlError::UnsupportedSurface(surface));
         }
 
-        let now = self
-            .document_clock
-            .try_now()
-            .map_err(DocumentTimeControlError::Clock)?;
+        let now = controlled_document_time_now(&self.document_clock)?;
         let next_deadline = self
             .finite_timer_deadline()
             .map_err(DocumentTimeControlError::Timer)?;
@@ -2204,11 +2217,20 @@ impl ScriptThread {
                     checkpoint,
                     expected_producers.snapshot,
                 )?;
+                // Reject a stale/cancelled/replaced deadline before a requested time can latch an
+                // execution terminal. The guarded validation below repeats this exact check at
+                // the clock-mutation linearization point.
+                self.timer_scheduler
+                    .borrow()
+                    .validate_deadline_snapshot(token.deadline())
+                    .map_err(DocumentTimeControlError::Timer)?;
                 // Hold the execution-ledger lock across the exact scheduler validation and clock
                 // mutation. A future asynchronous terminal hook must linearize on one side of this
                 // guard rather than racing a stale token past a separate observation.
-                let _execution_guard =
-                    controlled_advance_execution_guard(self.document_execution_ledger.as_ref())?;
+                let _execution_guard = controlled_advance_execution_guard(
+                    self.document_execution_ledger.as_ref(),
+                    token.deadline().deadline,
+                )?;
                 self.timer_scheduler
                     .borrow()
                     .validate_and_advance_from(token.now(), token.deadline())
@@ -2344,7 +2366,6 @@ impl ScriptThread {
         if let Err(error) = prevalidation {
             return self.send_controlled_document_time_response(&request, Err(error));
         }
-
         if let DocumentTimeControlCommand::AdvanceTo(token) = &request.command {
             let result =
                 self.execute_conditional_advance(cx, &request.target, token, input_batch_saturated);
@@ -5668,10 +5689,11 @@ mod tests {
         ControlledDocumentTimeRequest, ControlledDocumentTimeState, MixedMessage,
         advance_document_producer_checkpoint_after_microtasks,
         command_requires_exact_target_before_action, controlled_advance_execution_guard,
-        controlled_event_consumes_ordinary_task_budget, dirty_document_before_unblocking_web_fonts,
-        drain_controlled_input_batch, enqueue_controlled_input,
-        remaining_rendering_opportunity_delay, renderer_may_drive_rendering, take_controlled_exit,
-        take_controlled_turn, validate_conditional_advance_state,
+        controlled_document_time_now, controlled_event_consumes_ordinary_task_budget,
+        dirty_document_before_unblocking_web_fonts, drain_controlled_input_batch,
+        enqueue_controlled_input, remaining_rendering_opportunity_delay,
+        renderer_may_drive_rendering, take_controlled_exit, take_controlled_turn,
+        validate_conditional_advance_state,
     };
     use crate::messaging::{CommonScriptMsg, MainThreadScriptMsg};
     use crate::microtask::MicrotaskCheckpointResult;
@@ -5714,14 +5736,19 @@ mod tests {
 
     impl GuardedAdvanceFixture {
         fn new() -> Self {
+            Self::with_virtual_span(None)
+        }
+
+        fn with_virtual_span(virtual_span: Option<DocumentTime>) -> Self {
             let clock = DocumentClock::new(DocumentClockConfiguration::Controlled {
                 initial_time_ns: 0,
-                unix_time_origin_ns: 0,
+                unix_time_origin_ns: timers::DocumentUnixTime::default(),
                 execution_limits: Some(DocumentExecutionLimits {
                     ordinary_tasks: 0,
                     microtasks: 1,
                     rendering_opportunities: 1,
                     mutations: 1,
+                    virtual_span,
                 }),
             });
             let execution_ledger = clock
@@ -5797,8 +5824,13 @@ mod tests {
                         self.checkpoint,
                         expected_producers.snapshot,
                     )?;
-                    let _execution_guard =
-                        controlled_advance_execution_guard(Some(&self.execution_ledger))?;
+                    self.scheduler
+                        .validate_deadline_snapshot(token.deadline())
+                        .map_err(DocumentTimeControlError::Timer)?;
+                    let _execution_guard = controlled_advance_execution_guard(
+                        Some(&self.execution_ledger),
+                        token.deadline().deadline,
+                    )?;
                     self.scheduler
                         .validate_and_advance_from(token.now(), token.deadline())
                         .map_err(DocumentTimeControlError::Timer)
@@ -6001,6 +6033,27 @@ mod tests {
     }
 
     #[test]
+    fn clock_terminal_freezes_time_and_observe_sampling_surfaces_exact_error() {
+        const ADVERSARIAL_EPOCH_NS: i128 = 8_639_999_999_999_979_000_000;
+        let clock = DocumentClock::new(DocumentClockConfiguration::Controlled {
+            initial_time_ns: 0,
+            unix_time_origin_ns: timers::DocumentUnixTime::from_nanos(ADVERSARIAL_EPOCH_NS),
+            execution_limits: None,
+        });
+        let error = clock
+            .javascript_date_time_microseconds()
+            .expect_err("adversarial Date millisecond must latch a terminal");
+
+        assert_eq!(clock.try_now(), Ok(DocumentTime::ZERO));
+        assert_eq!(clock.now(), DocumentTime::ZERO);
+        assert_eq!(clock.advance_to(DocumentTime::from_nanos(1)), Err(error));
+        assert_eq!(
+            controlled_document_time_now(&clock),
+            Err(DocumentTimeControlError::Clock(error))
+        );
+    }
+
+    #[test]
     fn saturated_final_intake_invalidates_conditional_advance() {
         let mut fixture = GuardedAdvanceFixture::new();
         let token = fixture.token.clone();
@@ -6094,6 +6147,24 @@ mod tests {
                 TimerControlError::StaleDeadline { observed: None, .. }
             ))
         ));
+        assert_eq!(fixture.clock.now(), DocumentTime::ZERO);
+        assert_eq!(fixture.callbacks.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn stale_over_span_deadline_does_not_latch_execution_terminal() {
+        let mut fixture =
+            GuardedAdvanceFixture::with_virtual_span(Some(DocumentTime::from_nanos(5)));
+        let token = fixture.token.clone();
+        fixture.scheduler.cancel_timer(token.deadline().id);
+
+        assert!(matches!(
+            fixture.attempt(&token, &control_target(), 0, false),
+            Err(DocumentTimeControlError::Timer(
+                TimerControlError::StaleDeadline { observed: None, .. }
+            ))
+        ));
+        assert_eq!(fixture.execution_ledger.observation().terminal, None);
         assert_eq!(fixture.clock.now(), DocumentTime::ZERO);
         assert_eq!(fixture.callbacks.load(Ordering::SeqCst), 0);
     }
@@ -6415,7 +6486,7 @@ mod tests {
     fn renderer_ticks_cannot_activate_controlled_rendering() {
         let controlled = DocumentClock::new(DocumentClockConfiguration::Controlled {
             initial_time_ns: 0,
-            unix_time_origin_ns: 0,
+            unix_time_origin_ns: timers::DocumentUnixTime::default(),
             execution_limits: None,
         });
 

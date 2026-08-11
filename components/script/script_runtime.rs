@@ -68,7 +68,7 @@ use script_bindings::settings_stack::run_a_script;
 use servo_config::opts::{self, DiagnosticsLoggingOption};
 use servo_config::pref;
 use style::thread_state::{self, ThreadState};
-use timers::{DocumentClock, DocumentTimeSurface};
+use timers::DocumentClock;
 
 use crate::dom::bindings::codegen::Bindings::PromiseBinding::PromiseJobCallback;
 use crate::dom::bindings::codegen::Bindings::ResponseBinding::Response_Binding::ResponseMethods;
@@ -149,17 +149,9 @@ fn window_date_time_microseconds(host_time: f64, clock: &DocumentClock) -> f64 {
     if !clock.is_controlled() {
         return host_time;
     }
-    if clock
-        .require_surface(DocumentTimeSurface::JavaScriptDate)
-        .is_err()
-    {
-        return f64::NAN;
-    }
-    clock.unix_time_ns().map_or(f64::NAN, |nanoseconds| {
-        let whole_microseconds = nanoseconds / 1000;
-        let sub_microsecond_nanoseconds = nanoseconds % 1000;
-        whole_microseconds as f64 + sub_microsecond_nanoseconds as f64 / 1000.0
-    })
+    clock
+        .javascript_date_time_microseconds()
+        .unwrap_or(f64::NAN)
 }
 
 /// SpiderMonkey obtains JavaScript Date wall time before invoking this process-wide hook. Only a
@@ -1663,7 +1655,7 @@ impl IntroductionType {
 
 #[cfg(test)]
 mod tests {
-    use timers::{DocumentClockConfiguration, DocumentTime};
+    use timers::{DocumentClockConfiguration, DocumentTime, DocumentUnixTime};
 
     use super::*;
 
@@ -1671,7 +1663,7 @@ mod tests {
     fn controlled_window_date_uses_checked_clock_wall_time_in_exact_order() {
         let clock = DocumentClock::new(DocumentClockConfiguration::Controlled {
             initial_time_ns: 2_000,
-            unix_time_origin_ns: 5_000,
+            unix_time_origin_ns: DocumentUnixTime::from_nanos(5_000),
             execution_limits: None,
         });
 
@@ -1682,14 +1674,80 @@ mod tests {
     }
 
     #[test]
-    fn controlled_window_date_fails_closed_on_wall_time_overflow() {
+    fn controlled_window_date_supports_negative_fractional_unix_time() {
         let clock = DocumentClock::new(DocumentClockConfiguration::Controlled {
-            initial_time_ns: 1,
-            unix_time_origin_ns: u64::MAX,
+            initial_time_ns: 0,
+            unix_time_origin_ns: DocumentUnixTime::from_nanos(-1),
+            execution_limits: None,
+        });
+
+        assert_eq!(window_date_time_microseconds(123.0, &clock), -0.001);
+    }
+
+    #[test]
+    fn controlled_window_date_returns_nan_after_a_sticky_wall_overflow() {
+        let clock = DocumentClock::new(DocumentClockConfiguration::Controlled {
+            initial_time_ns: 0,
+            unix_time_origin_ns: DocumentUnixTime::from_nanos(i128::MAX),
             execution_limits: None,
         });
 
         assert!(window_date_time_microseconds(123.0, &clock).is_nan());
+        assert_eq!(clock.terminal_error(), None);
+        assert_eq!(
+            clock.advance_to(DocumentTime::from_nanos(1)),
+            Err(timers::DocumentClockError::Overflow)
+        );
+        assert_eq!(
+            clock.terminal_error(),
+            Some(timers::DocumentClockError::Overflow)
+        );
+        assert!(window_date_time_microseconds(456.0, &clock).is_nan());
+        assert_eq!(clock.try_now(), Ok(DocumentTime::ZERO));
+    }
+
+    #[test]
+    fn controlled_window_date_returns_spec_nan_outside_time_clip_without_rounding_to_boundary() {
+        const API2_MAX_EPOCH_NS: i128 = 8_640_000_000_000_000_000_000;
+        const API2_MAX_SPAN_NS: u128 = 9_007_199_254_740_991_000_000;
+        let clock = DocumentClock::new(DocumentClockConfiguration::Controlled {
+            initial_time_ns: API2_MAX_SPAN_NS,
+            unix_time_origin_ns: DocumentUnixTime::from_nanos(API2_MAX_EPOCH_NS),
+            execution_limits: None,
+        });
+
+        let observed = window_date_time_microseconds(-123.0, &clock);
+        assert_eq!(
+            clock.unix_time_ns(),
+            Ok(DocumentUnixTime::from_nanos(
+                API2_MAX_EPOCH_NS + API2_MAX_SPAN_NS as i128
+            ))
+        );
+        assert!(observed.is_nan());
+        assert_eq!(clock.terminal_error(), None);
+    }
+
+    #[test]
+    fn controlled_window_date_fails_closed_on_unreachable_in_range_millisecond() {
+        const ADVERSARIAL_EPOCH_MS: i128 = 8_639_999_999_999_979;
+
+        for epoch_ms in [ADVERSARIAL_EPOCH_MS, -ADVERSARIAL_EPOCH_MS] {
+            let clock = DocumentClock::new(DocumentClockConfiguration::Controlled {
+                initial_time_ns: 0,
+                unix_time_origin_ns: DocumentUnixTime::from_nanos(epoch_ms * 1_000_000),
+                execution_limits: None,
+            });
+
+            assert!(window_date_time_microseconds(789.0, &clock).is_nan());
+            assert!(matches!(
+                clock.terminal_error(),
+                Some(timers::DocumentClockError::JavaScriptDatePrecisionLoss {
+                    expected_milliseconds,
+                    ..
+                }) if expected_milliseconds == epoch_ms
+            ));
+            assert_eq!(clock.try_now(), Ok(DocumentTime::ZERO));
+        }
     }
 
     #[test]
