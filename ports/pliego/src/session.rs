@@ -2595,10 +2595,10 @@ mod tests {
         .unwrap();
 
         let error = prepared.commit(&bundle).unwrap_err();
-        assert!(matches!(error, PreparedPublicationError::Bundle(_)));
+        assert!(matches!(error, super::PreparedPublicationError::Bundle(_)));
         assert!(!output.exists());
         let discard_error = bundle.discard().unwrap_err();
-        assert_eq!(discard_error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(discard_error.kind(), std::io::ErrorKind::InvalidData);
         assert!(artifact_root.join(BUNDLE_FILE_NAME).exists());
 
         fs::remove_dir_all(&artifact_root).unwrap();

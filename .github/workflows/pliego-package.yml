@@ -118,6 +118,9 @@ jobs:
       - name: Build Pliego only
         run: cargo build -p pliego --locked --profile checked-release
 
+      - name: Test native PDF publication primitives
+        run: cargo test -p pliego --bin pliego --locked --profile checked-release session::tests
+
       - name: Package and smoke-test Unix bundle
         if: runner.os != 'Windows'
         shell: bash
