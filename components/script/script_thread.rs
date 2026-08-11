@@ -2972,13 +2972,12 @@ impl ScriptThread {
                 if acknowledgement.event() == Some(WebFontLoadEvent::LoadedSuccessfully) {
                     self.handle_web_font_loaded(pipeline_id)
                 }
-                if let Some(producer_lease_id) = acknowledgement.producer_lease_id() {
-                    if let Err(error) = self
+                if let Some(producer_lease_id) = acknowledgement.producer_lease_id() &&
+                    let Err(error) = self
                         .document_producer_fence
                         .complete_lease(producer_lease_id)
-                    {
-                        warn!("Ignoring stale web-font producer lease: {error}");
-                    }
+                {
+                    warn!("Ignoring stale web-font producer lease: {error}");
                 }
             },
             ScriptThreadMessage::DispatchIFrameLoadEvent {
