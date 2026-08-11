@@ -99,7 +99,7 @@ def verify_failure(result: subprocess.CompletedProcess[str], summary: dict[str, 
     require(summary.get("status") == "failed", repr(summary))
     error = summary.get("error")
     require(isinstance(error, dict), f"failure summary has no typed error: {summary!r}")
-    require(error.get("code") == "SCENE_CAPTURE_PREVIEW_FAILED", repr(error))
+    require(error.get("code") == "RESOURCE_IMAGE_LIMIT_EXCEEDED", repr(error))
     message = error.get("message")
     require(isinstance(message, str), repr(error))
     require("declared-width limit" in message, message)
