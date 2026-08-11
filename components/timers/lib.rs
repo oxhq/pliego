@@ -1110,10 +1110,10 @@ impl DocumentProducerFence {
         debug_assert!(previous.is_none());
 
         drop(state);
-        if kind == DocumentProducerKind::Resource {
-            if let Some(ledger) = &self.execution_ledger {
-                ledger.record_owned_resource_event();
-            }
+        if kind == DocumentProducerKind::Resource &&
+            let Some(ledger) = &self.execution_ledger
+        {
+            ledger.record_owned_resource_event();
         }
 
         Ok(DocumentProducerGuard {
