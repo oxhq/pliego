@@ -118,6 +118,28 @@ jobs:
       - name: Build Pliego only
         run: cargo build -p pliego --locked --profile checked-release
 
+      - name: Test native PDF publication primitives
+        shell: bash
+        run: |
+          set -euo pipefail
+          selected_tests="$({
+            cargo test -p pliego --bin pliego --locked --profile checked-release \
+              session::tests:: -- --list --skip document_session::tests::
+          } | awk 'sub(/: test$/, "") { print }')"
+          native_test_count="$(printf '%s\n' "$selected_tests" | awk '/^session::tests::/ { count++ } END { print count + 0 }')"
+          if [[ "$native_test_count" -lt 1 ]]; then
+            echo '::error::No native session::tests:: publication tests were selected.'
+            exit 1
+          fi
+          unexpected_tests="$(printf '%s\n' "$selected_tests" | awk 'NF && $0 !~ /^session::tests::/ { print }')"
+          if [[ -n "$unexpected_tests" ]]; then
+            echo '::error::The native publication filter selected tests outside session::tests::.'
+            printf '%s\n' "$unexpected_tests"
+            exit 1
+          fi
+          cargo test -p pliego --bin pliego --locked --profile checked-release \
+            session::tests:: -- --skip document_session::tests::
+
       - name: Package and smoke-test Unix bundle
         if: runner.os != 'Windows'
         shell: bash

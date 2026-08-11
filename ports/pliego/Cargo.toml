@@ -36,6 +36,7 @@ libc = { workspace = true }
 krilla = { version = "0.8.2", default-features = false, features = ["raster-images"] }
 layout = { workspace = true, optional = true }
 net = { workspace = true }
+same-file = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
@@ -54,7 +55,7 @@ servo-canvas = { workspace = true, features = ["document-session-testing"] }
 ttf-parser = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+windows-sys = { workspace = true, features = ["Wdk_Storage_FileSystem", "Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_IO"] }
 
 [[bench]]
 name = "document_scene_pdf"

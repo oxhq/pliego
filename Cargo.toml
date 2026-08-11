@@ -215,6 +215,7 @@ rustc-hash = "2.1.2"
 rustls = { version = "0.23", default-features = false, features = ["logging", "std", "tls12"] }
 rustls-pki-types = "1.14"
 rustls-platform-verifier = "0.7.0"
+same-file = "1"
 sea-query = { version = "=1.0.0-rc.31", default-features = false, features = ["backend-sqlite", "derive"] }
 sea-query-rusqlite = "=0.8.0-rc.15"
 selectors = { git = "https://github.com/oxhq/stylo", rev = "a7c44dc54a3f0f4b84163ad2947a39dc5018285a" }

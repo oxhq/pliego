@@ -6608,6 +6608,7 @@ dependencies = [
  "imagesize",
  "krilla",
  "libc",
+ "same-file",
  "serde",
  "serde_json",
  "servo",
