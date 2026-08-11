@@ -170,7 +170,7 @@ pub enum DocumentTimeControlCommand {
     /// A typed rejection guarantees that neither the clock nor timer queue mutated. A matching
     /// `TimerActivated` response is committed even if Constellation observes a later navigation
     /// before forwarding the response.
-    AdvanceTo(DocumentTimeAdvanceToken),
+    AdvanceTo(Box<DocumentTimeAdvanceToken>),
     /// Process one queued event-loop event and its normal checkpoint/render tail.
     ///
     /// If no page event is queued, the driver runs one existing no-op ScriptThread wake turn so
@@ -308,7 +308,7 @@ pub struct DocumentTimeControlObservation {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum DocumentTimeControlOutcome {
     /// ScriptThread completed the command and returned its authoritative observation.
-    Completed(DocumentTimeControlObservation),
+    Completed(Box<DocumentTimeControlObservation>),
     /// The command was definitively rejected before a guarded clock mutation. This does not make a
     /// submitted single-use token reusable.
     Rejected(DocumentTimeControlError),
@@ -725,7 +725,7 @@ mod tests {
     #[test]
     fn guarded_timeout_is_terminal_and_consumes_the_receiver() {
         let token = advance_token();
-        let command = DocumentTimeControlCommand::AdvanceTo(token.clone());
+        let command = DocumentTimeControlCommand::AdvanceTo(Box::new(token.clone()));
         let (_response, receiver) = GenericCallback::new_blocking()
             .expect("test control callback channel should be created");
         let receiver = DocumentTimeControlReceiver::new(receiver, &command);
@@ -736,7 +736,7 @@ mod tests {
     #[test]
     fn guarded_execution_terminal_response_is_a_definitive_rejection() {
         let token = advance_token();
-        let command = DocumentTimeControlCommand::AdvanceTo(token);
+        let command = DocumentTimeControlCommand::AdvanceTo(Box::new(token));
         let (response, receiver) = GenericCallback::new_blocking()
             .expect("test control callback channel should be created");
         let receiver = DocumentTimeControlReceiver::new(receiver, &command);
@@ -764,7 +764,7 @@ mod tests {
     #[test]
     fn guarded_disconnect_is_indeterminate() {
         let token = advance_token();
-        let command = DocumentTimeControlCommand::AdvanceTo(token.clone());
+        let command = DocumentTimeControlCommand::AdvanceTo(Box::new(token.clone()));
         let (response, receiver) = GenericCallback::new_blocking()
             .expect("test control callback channel should be created");
         let receiver = DocumentTimeControlReceiver::new(receiver, &command);
@@ -776,7 +776,7 @@ mod tests {
     #[test]
     fn guarded_deserialization_failure_is_indeterminate() {
         let token = advance_token();
-        let command = DocumentTimeControlCommand::AdvanceTo(token.clone());
+        let command = DocumentTimeControlCommand::AdvanceTo(Box::new(token.clone()));
         let (_response, receiver) = GenericCallback::new_blocking()
             .expect("test control callback channel should be created");
         let receiver = DocumentTimeControlReceiver::new(receiver, &command);

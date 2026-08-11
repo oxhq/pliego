@@ -581,7 +581,7 @@ impl PendingDocumentTimeControl {
         result: Result<DocumentTimeControlObservation, DocumentTimeControlError>,
     ) {
         let outcome = match result {
-            Ok(observation) => DocumentTimeControlOutcome::Completed(observation),
+            Ok(observation) => DocumentTimeControlOutcome::Completed(Box::new(observation)),
             Err(error) => DocumentTimeControlOutcome::Rejected(error),
         };
         let _ = self.response.send(outcome);
@@ -1044,7 +1044,7 @@ mod controlled_document_time_tests {
                 stability: DocumentProducerStability::StableEmpty,
             },
         );
-        let command = DocumentTimeControlCommand::AdvanceTo(token);
+        let command = DocumentTimeControlCommand::AdvanceTo(Box::new(token));
         let mut changed_target = expected_target.clone();
         changed_target.fully_active_pipelines.clear();
 
