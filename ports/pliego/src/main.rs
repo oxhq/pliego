@@ -360,12 +360,12 @@ fn parse_http_root(value: &OsString) -> Result<url::Url, String> {
         .to_str()
         .ok_or_else(|| "HTTP root must be valid UTF-8".to_owned())?;
     let mut root = url::Url::parse(value).map_err(|error| format!("invalid HTTP root: {error}"))?;
-    if !matches!(root.scheme(), "http" | "https")
-        || root.host_str().is_none()
-        || !root.username().is_empty()
-        || root.password().is_some()
-        || root.query().is_some()
-        || root.fragment().is_some()
+    if !matches!(root.scheme(), "http" | "https") ||
+        root.host_str().is_none() ||
+        !root.username().is_empty() ||
+        root.password().is_some() ||
+        root.query().is_some() ||
+        root.fragment().is_some()
     {
         return Err(
             "HTTP root must be an http(s) URL without credentials, query, or fragment".into(),
@@ -1906,11 +1906,11 @@ fn persist_document_session_resources(
     resource_failure: Option<&ResourcePolicyFailure>,
 ) -> Result<ResourceCapture, SceneArtifactError> {
     let post_retain_failure = resource_failure.filter(|failure| {
-        failure.code == "RESOURCE_METADATA_LIMIT_EXCEEDED"
-            && failure.status == "denied"
-            && failure.fatal
-            && failure.reason
-                == format!(
+        failure.code == "RESOURCE_METADATA_LIMIT_EXCEEDED" &&
+            failure.status == "denied" &&
+            failure.fatal &&
+            failure.reason ==
+                format!(
                     "resource evidence exceeds the {}-byte metadata bound",
                     MAX_RESOURCE_METADATA_BYTES
                 )
@@ -2016,24 +2016,24 @@ fn validate_document_session_resource<'a>(
     evidence: &ResourceEvidence,
     resource_store: &'a OwnedResourceStore,
 ) -> Result<Option<&'a [u8]>, SceneArtifactError> {
-    let has_response_metadata = evidence.response_status.is_some()
-        || evidence.content_type.is_some()
-        || evidence.bytes.is_some()
-        || evidence.sha256.is_some()
-        || evidence.content_address.is_some()
-        || evidence.response_headers.is_some();
+    let has_response_metadata = evidence.response_status.is_some() ||
+        evidence.content_type.is_some() ||
+        evidence.bytes.is_some() ||
+        evidence.sha256.is_some() ||
+        evidence.content_address.is_some() ||
+        evidence.response_headers.is_some();
     match evidence.status {
         "loaded" => {
-            if !matches!(evidence.request.method.as_str(), "GET" | "HEAD")
-                || evidence.request.is_redirect
-                || evidence.source.is_none()
-                || evidence.fatal
-                || evidence.failure.is_some()
-                || evidence.response_status.is_none()
-                || evidence.bytes.is_none()
-                || evidence.sha256.is_none()
-                || evidence.content_address.is_none()
-                || evidence.response_headers.is_none()
+            if !matches!(evidence.request.method.as_str(), "GET" | "HEAD") ||
+                evidence.request.is_redirect ||
+                evidence.source.is_none() ||
+                evidence.fatal ||
+                evidence.failure.is_some() ||
+                evidence.response_status.is_none() ||
+                evidence.bytes.is_none() ||
+                evidence.sha256.is_none() ||
+                evidence.content_address.is_none() ||
+                evidence.response_headers.is_none()
             {
                 return Err(invalid_resource_evidence(
                     "loaded resource has an invalid terminal evidence shape",
@@ -2055,24 +2055,24 @@ fn validate_document_session_resource<'a>(
                 .as_deref()
                 .expect("loaded shape checked above");
             let body = owned.body();
-            if evidence.response_status != Some(owned.status())
-                || evidence.content_type.as_deref() != owned.content_type()
-                || content_address != owned.content_address()
-                || evidence.response_headers.as_ref() != Some(owned.response_headers())
-                || evidence.source != Some(owned.source())
-                || evidence.bytes != Some(body.len() as u64)
-                || sha256_hex(body) != digest
-                || content_address != format!("sha256:{digest}")
+            if evidence.response_status != Some(owned.status()) ||
+                evidence.content_type.as_deref() != owned.content_type() ||
+                content_address != owned.content_address() ||
+                evidence.response_headers.as_ref() != Some(owned.response_headers()) ||
+                evidence.source != Some(owned.source()) ||
+                evidence.bytes != Some(body.len() as u64) ||
+                sha256_hex(body) != digest ||
+                content_address != format!("sha256:{digest}")
             {
                 return Err(invalid_resource_evidence(
                     "loaded resource metadata does not match its owned response",
                 ));
             }
-            if evidence.request.method != "HEAD"
-                && resource_store
+            if evidence.request.method != "HEAD" &&
+                resource_store
                     .resolve_url(evidence.request.url.as_str())
-                    .as_deref()
-                    != Some(content_address)
+                    .as_deref() !=
+                    Some(content_address)
             {
                 return Err(invalid_resource_evidence(
                     "loaded resource URL is not bound to its owned content address",
@@ -2088,17 +2088,17 @@ fn validate_document_session_resource<'a>(
                 invalid_resource_evidence("cancelled resource has no failure evidence")
             })?;
             let referrer = evidence.request.referrer_url.as_ref().map(url::Url::as_str);
-            if evidence.source.is_some()
-                || evidence.fatal != failure.fatal
-                || !failure.is_optional_metadata_failure()
-                || failure.url != evidence.request.url.as_str()
-                || failure.method != evidence.request.method
-                || failure.destination != evidence.request.destination
-                || failure.load_role != evidence.request.load_role
-                || failure.referrer_url.as_deref() != referrer
-                || failure.is_for_main_frame != evidence.request.is_for_main_frame
-                || failure.is_redirect != evidence.request.is_redirect
-                || has_response_metadata
+            if evidence.source.is_some() ||
+                evidence.fatal != failure.fatal ||
+                !failure.is_optional_metadata_failure() ||
+                failure.url != evidence.request.url.as_str() ||
+                failure.method != evidence.request.method ||
+                failure.destination != evidence.request.destination ||
+                failure.load_role != evidence.request.load_role ||
+                failure.referrer_url.as_deref() != referrer ||
+                failure.is_for_main_frame != evidence.request.is_for_main_frame ||
+                failure.is_redirect != evidence.request.is_redirect ||
+                has_response_metadata
             {
                 return Err(invalid_resource_evidence(
                     "cancelled resource has an invalid terminal evidence shape",
@@ -2202,22 +2202,22 @@ fn bind_document_session_input(
         .as_deref()
         .and_then(|resource| resource_store.resolve_content(resource));
     let stored_identity = resource_store.resolve_url(expected.url.as_str());
-    let matches = evidence.request.method == "GET"
-        && evidence.request.url == expected.url
-        && evidence.request.destination == "Document"
-        && evidence.request.load_role == WebResourceLoadRole::DocumentContent
-        && evidence.request.referrer_url.is_none()
-        && !evidence.request.is_redirect
-        && evidence.source == Some(ResourceSource::DocumentRoot)
-        && evidence.status == "loaded"
-        && !evidence.fatal
-        && evidence.failure.is_none()
-        && evidence.response_status == Some(200)
-        && evidence.bytes == Some(expected.bytes)
-        && evidence.sha256.as_deref() == Some(expected.sha256.as_str())
-        && evidence.content_address.as_deref() == Some(expected.content_address.as_str())
-        && stored_identity.as_deref() == Some(expected.content_address.as_str())
-        && body.is_some_and(|body| {
+    let matches = evidence.request.method == "GET" &&
+        evidence.request.url == expected.url &&
+        evidence.request.destination == "Document" &&
+        evidence.request.load_role == WebResourceLoadRole::DocumentContent &&
+        evidence.request.referrer_url.is_none() &&
+        !evidence.request.is_redirect &&
+        evidence.source == Some(ResourceSource::DocumentRoot) &&
+        evidence.status == "loaded" &&
+        !evidence.fatal &&
+        evidence.failure.is_none() &&
+        evidence.response_status == Some(200) &&
+        evidence.bytes == Some(expected.bytes) &&
+        evidence.sha256.as_deref() == Some(expected.sha256.as_str()) &&
+        evidence.content_address.as_deref() == Some(expected.content_address.as_str()) &&
+        stored_identity.as_deref() == Some(expected.content_address.as_str()) &&
+        body.is_some_and(|body| {
             body.len() as u64 == expected.bytes && sha256_hex(body) == expected.sha256
         });
     if !matches {
@@ -2295,10 +2295,10 @@ fn stable_render_id(
     if allow_host_fonts {
         update_hash_field(&mut hasher, b"pliego.host-fonts.v1");
     }
-    if !resource_policy.allowed_http_roots.is_empty()
-        || !resource_policy.virtual_resources.is_empty()
-        || resource_policy.asset_manifest.is_some()
-        || resource_policy.timeout_ms != DEFAULT_RESOURCE_TIMEOUT_MS
+    if !resource_policy.allowed_http_roots.is_empty() ||
+        !resource_policy.virtual_resources.is_empty() ||
+        resource_policy.asset_manifest.is_some() ||
+        resource_policy.timeout_ms != DEFAULT_RESOURCE_TIMEOUT_MS
     {
         update_hash_field(&mut hasher, RESOURCE_POLICY_ID.as_bytes());
         update_hash_field(&mut hasher, &resource_policy.timeout_ms.to_be_bytes());
@@ -2626,8 +2626,8 @@ fn record_resources(
 
     for resource in resources {
         match resource.event {
-            servoshell::NetworkEvent::HttpRequest(request)
-            | servoshell::NetworkEvent::HttpRequestUpdate(request) => {
+            servoshell::NetworkEvent::HttpRequest(request) |
+            servoshell::NetworkEvent::HttpRequestUpdate(request) => {
                 let method = request.method.to_string();
                 let url = request.url.into_string();
                 let pending_resource = pending.entry(resource.request_id.clone()).or_default();
@@ -2820,8 +2820,8 @@ fn incomplete_resource_failure(
             if capture.url_to_resource.contains_key(&url) {
                 continue;
             }
-            let controlled = url.starts_with("file:")
-                || policy.allowed_http_roots.iter().any(|root| {
+            let controlled = url.starts_with("file:") ||
+                policy.allowed_http_roots.iter().any(|root| {
                     url::Url::parse(&url).is_ok_and(|requested| http_root_allows(root, &requested))
                 });
             if controlled {
@@ -2862,8 +2862,8 @@ fn complete_resource(
     request_id: &str,
     body: Option<Vec<u8>>,
 ) -> Option<CompletedResource> {
-    if body.is_none()
-        && !pending
+    if body.is_none() &&
+        !pending
             .get(request_id)?
             .response_status
             .is_some_and(|status| (200..300).contains(&status))

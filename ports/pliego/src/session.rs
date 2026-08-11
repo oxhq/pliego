@@ -873,8 +873,8 @@ impl SessionArtifacts {
 
     fn write_resource_digest(&self, digest: &str, body: &[u8]) -> io::Result<String> {
         self.require_current()?;
-        if digest.len() != 64
-            || !digest
+        if digest.len() != 64 ||
+            !digest
                 .bytes()
                 .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
         {
@@ -1365,6 +1365,7 @@ fn owned_file_options() -> OpenOptions {
 #[cfg(windows)]
 fn owned_file_options() -> OpenOptions {
     use std::os::windows::fs::OpenOptionsExt;
+
     use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE};
     use windows_sys::Win32::Storage::FileSystem::{DELETE, FILE_SHARE_READ};
 
@@ -1574,8 +1575,8 @@ fn prepare_artifact_file(
     absolute_destination: PathBuf,
     artifact_root: BoundDirectory,
 ) -> io::Result<PreparedDocumentPdf> {
-    if source != absolute_destination
-        || source.parent() != Some(artifact_root.requested_path.as_path())
+    if source != absolute_destination ||
+        source.parent() != Some(artifact_root.requested_path.as_path())
     {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
