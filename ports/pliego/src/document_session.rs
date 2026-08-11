@@ -1188,7 +1188,7 @@ impl DocumentDelegate {
         let resource = match self
             .resource_store
             .borrow_mut()
-            .retain(&request, resource, &headers)
+            .retain_with_source(&request, source, resource, &headers)
         {
             Ok(resource) => resource,
             Err(failure) => {
