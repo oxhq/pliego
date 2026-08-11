@@ -170,24 +170,33 @@ unsafe extern "C" fn reduce_microsecond_time_precision(
     _caller_type: RTPCallerTypeToken,
     cx: *mut RawJSContext,
 ) -> f64 {
-    let Some(cx) = NonNull::new(cx) else {
-        return f64::NAN;
-    };
-    // SAFETY: SpiderMonkey calls this hook with its currently-entered JSContext.
-    let mut cx = unsafe { JSContext::from_ptr(cx) };
-    let mut realm = CurrentRealm::assert(&mut cx);
-    let global_object = realm.global().get();
-    // SAFETY: the current realm roots a valid, non-null global object.
-    if unsafe { get_dom_class(global_object) }.is_err() {
-        return host_time;
-    }
-    let global = GlobalScope::from_current_realm(&mut realm);
-    let Some(window) = global.downcast::<Window>() else {
-        // Controlled worker/worklet event loops are separately blocked. Their existing realtime
-        // realms must retain SpiderMonkey's host wall time.
-        return host_time;
-    };
-    window_date_time_microseconds(host_time, &window.as_global_scope().document_clock())
+    // An unclassifiable realm must not leak host time into a controlled Window. The callback only
+    // restores `host_time` after it has positively identified an existing realtime/non-Window
+    // realm, or computes controlled wall time from that Window's document clock.
+    let mut reduced_time = f64::NAN;
+    wrap_panic(&mut || {
+        let Some(cx) = NonNull::new(cx) else {
+            return;
+        };
+        // SAFETY: SpiderMonkey calls this hook with its currently-entered JSContext.
+        let mut cx = unsafe { JSContext::from_ptr(cx) };
+        let mut realm = CurrentRealm::assert(&mut cx);
+        let global_object = realm.global().get();
+        // SAFETY: the current realm roots a valid, non-null global object.
+        if unsafe { get_dom_class(global_object) }.is_err() {
+            return;
+        }
+        let global = GlobalScope::from_current_realm(&mut realm);
+        let Some(window) = global.downcast::<Window>() else {
+            // Controlled worker/worklet event loops are separately blocked. Their existing
+            // realtime realms must retain SpiderMonkey's host wall time.
+            reduced_time = host_time;
+            return;
+        };
+        reduced_time =
+            window_date_time_microseconds(host_time, &window.as_global_scope().document_clock());
+    });
+    reduced_time
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, JSTraceable, MallocSizeOf, PartialEq)]

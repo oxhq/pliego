@@ -1924,7 +1924,8 @@ impl ScriptThread {
         result: Result<DocumentTimeControlObservation, DocumentTimeControlError>,
     ) -> bool {
         let Some(source_pipeline_id) = request.target.pipelines.first().copied() else {
-            return false;
+            warn!("Cannot route controlled document-time response for an empty pipeline target");
+            return true;
         };
         self.senders
             .pipeline_to_constellation_sender
@@ -2972,9 +2973,12 @@ impl ScriptThread {
                     self.handle_web_font_loaded(pipeline_id)
                 }
                 if let Some(producer_lease_id) = acknowledgement.producer_lease_id() {
-                    self.document_producer_fence
+                    if let Err(error) = self
+                        .document_producer_fence
                         .complete_lease(producer_lease_id)
-                        .expect("web-font completion named an unknown producer lease");
+                    {
+                        warn!("Ignoring stale web-font producer lease: {error}");
+                    }
                 }
             },
             ScriptThreadMessage::DispatchIFrameLoadEvent {

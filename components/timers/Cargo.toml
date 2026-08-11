@@ -17,4 +17,4 @@ path = "lib.rs"
 crossbeam-channel = { workspace = true }
 malloc_size_of = { workspace = true }
 malloc_size_of_derive = { workspace = true }
-serde = { workspace = true }
+serde = { workspace = true, features = ["derive"] }

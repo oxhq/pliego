@@ -8,6 +8,7 @@ use embedder_traits::EmbedderMsg;
 use html5ever::{local_name, ns};
 use js::context::JSContext;
 use js::realm::CurrentRealm;
+use log::warn;
 use servo_config::pref;
 
 use crate::dom::bindings::codegen::Bindings::NodeBinding::GetRootNodeOptions;
@@ -142,7 +143,16 @@ impl Document {
             Some(pipeline_id),
             TaskSourceName::DOMManipulation,
         );
-        self.window().event_loop_sender().send(script_msg).unwrap();
+        if self.window().event_loop_sender().send(script_msg).is_err() {
+            warn!("Could not queue fullscreen-enter task during ScriptThread shutdown");
+            if !error {
+                self.send_to_embedder(EmbedderMsg::NotifyFullscreenStateChanged(
+                    self.webview_id(),
+                    false,
+                ));
+            }
+            promise.reject_error(cx, Error::Abort(None));
+        }
 
         promise
     }
@@ -191,7 +201,10 @@ impl Document {
             pipeline_id,
             TaskSourceName::DOMManipulation,
         );
-        window.event_loop_sender().send(script_msg).unwrap();
+        if window.event_loop_sender().send(script_msg).is_err() {
+            warn!("Could not queue fullscreen-exit task during ScriptThread shutdown");
+            promise.reject_error(cx, Error::Abort(None));
+        }
 
         promise
     }

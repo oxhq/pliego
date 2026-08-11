@@ -37,6 +37,24 @@ impl DocumentTimeControlRequestId {
     }
 }
 
+/// Exact trusted-channel correlation nonce for abandoning one control response.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[doc(hidden)]
+pub struct DocumentTimeControlCancellationId(u64);
+
+impl DocumentTimeControlCancellationId {
+    /// Construct an identifier from the checked per-WebView sequence.
+    #[doc(hidden)]
+    pub const fn new(sequence: u64) -> Self {
+        Self(sequence)
+    }
+
+    /// Return the underlying abandonment-correlation sequence.
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
 /// One immutable identity snapshot used to reject navigation races.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DocumentTimeControlTarget {
@@ -163,7 +181,13 @@ impl DocumentTimeAdvanceToken {
 /// A single mechanical operation. None of these operations imply visual settlement.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum DocumentTimeControlCommand {
-    /// Observe state without processing an event or advancing time.
+    /// Observe page state without running page work, advancing the clock, or mutating the timer
+    /// queue.
+    ///
+    /// Observation clears any previously issued advance token, performs bounded control-input
+    /// intake that may advance the input revision, and advances producer qualification. A
+    /// successful observation may issue one replacement token; if its response is lost, callers
+    /// must treat the old token as stale and the replacement as unavailable.
     Observe,
     /// Conditionally advance to and activate the exact deadline bound by a fresh token.
     ///
@@ -363,16 +387,17 @@ impl From<TryReceiveError> for DocumentTimeControlTransportFailure {
 
 /// The sole result of consuming a bounded document-time receiver.
 ///
-/// A missing `Observe` response is a transport failure only: observing never mutates the event
-/// loop. A missing `DriveOneTurn` response is indeterminate because the turn may complete after the
-/// caller stops waiting; callers must not retry it as though no event was processed. Guarded
-/// advances retain their exact-token [`DocumentTimeControlOutcome::AdvanceOutcomeIndeterminate`].
+/// A missing `Observe` response cannot hide page work or a clock advance, though the command may
+/// have consumed a prior token and updated internal control bookkeeping. A missing `DriveOneTurn`
+/// response is indeterminate because the turn may complete after the caller stops waiting; callers
+/// must not retry it as though no event was processed. Guarded advances retain their exact-token
+/// [`DocumentTimeControlOutcome::AdvanceOutcomeIndeterminate`].
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[doc(hidden)]
 pub enum DocumentTimeControlReceiveOutcome {
     /// Constellation delivered a typed command outcome.
     CommandOutcome(DocumentTimeControlOutcome),
-    /// No observation was delivered; the `Observe` command itself was non-mutating.
+    /// No observation was delivered; `Observe` ran no page work and did not advance the clock.
     ObserveTransportFailure(DocumentTimeControlTransportFailure),
     /// The caller cannot know whether the requested event-loop turn completed.
     DriveOneTurnOutcomeIndeterminate(DocumentTimeControlTransportFailure),
@@ -387,13 +412,18 @@ enum DocumentTimeControlTransportSemantics {
 /// One bounded, single-result receiver for a submitted document-time command.
 ///
 /// The receiver consumes itself so a timeout or transport failure is terminal for the caller and a
-/// late response cannot be mistaken for a second result. For `AdvanceTo`, every timeout,
-/// disconnection, I/O failure, or deserialization failure is conservatively indeterminate and the
-/// submitted token must not be retried.
+/// late response cannot be mistaken for a second result. A production receiver also carries an
+/// exact trusted-channel abandonment action that runs on timeout, transport failure, or receiver
+/// drop. A successor submitted after the bounded receive returns is ordered after that
+/// abandonment; concurrent receiver drop and successor submission have no ordering guarantee and
+/// may observe `CommandAlreadyPending`. For `AdvanceTo`, every timeout, disconnection, I/O
+/// failure, or deserialization failure is conservatively indeterminate and the submitted token
+/// must not be retried.
 #[doc(hidden)]
 pub struct DocumentTimeControlReceiver {
     receiver: GenericReceiver<DocumentTimeControlOutcome>,
     transport_semantics: DocumentTimeControlTransportSemantics,
+    cancellation: Option<Box<dyn FnOnce() + Send + 'static>>,
 }
 
 impl DocumentTimeControlReceiver {
@@ -402,6 +432,24 @@ impl DocumentTimeControlReceiver {
     pub fn new(
         receiver: GenericReceiver<DocumentTimeControlOutcome>,
         command: &DocumentTimeControlCommand,
+    ) -> Self {
+        Self::new_internal(receiver, command, None)
+    }
+
+    /// Bind an exact abandonment action to timeout, transport failure, or receiver drop.
+    #[doc(hidden)]
+    pub fn new_cancellable(
+        receiver: GenericReceiver<DocumentTimeControlOutcome>,
+        command: &DocumentTimeControlCommand,
+        cancellation: impl FnOnce() + Send + 'static,
+    ) -> Self {
+        Self::new_internal(receiver, command, Some(Box::new(cancellation)))
+    }
+
+    fn new_internal(
+        receiver: GenericReceiver<DocumentTimeControlOutcome>,
+        command: &DocumentTimeControlCommand,
+        cancellation: Option<Box<dyn FnOnce() + Send + 'static>>,
     ) -> Self {
         let transport_semantics = match command {
             DocumentTimeControlCommand::AdvanceTo(token) => {
@@ -421,6 +469,7 @@ impl DocumentTimeControlReceiver {
         Self {
             receiver,
             transport_semantics,
+            cancellation,
         }
     }
 
@@ -431,14 +480,22 @@ impl DocumentTimeControlReceiver {
     }
 
     fn resolve(
-        self,
+        mut self,
         result: Result<DocumentTimeControlOutcome, TryReceiveError>,
     ) -> DocumentTimeControlReceiveOutcome {
         match result {
-            Ok(outcome) => DocumentTimeControlReceiveOutcome::CommandOutcome(outcome),
+            Ok(outcome) => {
+                // Constellation already removed the matching pending request before sending its
+                // terminal outcome, so a successful receive must not enqueue a late cancellation.
+                self.cancellation.take();
+                DocumentTimeControlReceiveOutcome::CommandOutcome(outcome)
+            },
             Err(error) => {
                 let failure = error.into();
-                match self.transport_semantics {
+                if let Some(cancellation) = self.cancellation.take() {
+                    cancellation();
+                }
+                match &self.transport_semantics {
                     DocumentTimeControlTransportSemantics::Observe => {
                         DocumentTimeControlReceiveOutcome::ObserveTransportFailure(failure)
                     },
@@ -446,10 +503,18 @@ impl DocumentTimeControlReceiver {
                         DocumentTimeControlReceiveOutcome::DriveOneTurnOutcomeIndeterminate(failure)
                     },
                     DocumentTimeControlTransportSemantics::GuardedAdvance(outcome) => {
-                        DocumentTimeControlReceiveOutcome::CommandOutcome(outcome)
+                        DocumentTimeControlReceiveOutcome::CommandOutcome(outcome.clone())
                     },
                 }
             },
+        }
+    }
+}
+
+impl Drop for DocumentTimeControlReceiver {
+    fn drop(&mut self) {
+        if let Some(cancellation) = self.cancellation.take() {
+            cancellation();
         }
     }
 }
@@ -537,10 +602,15 @@ pub enum DocumentTimeControlError {
     QueueLengthOverflow,
     /// The selected ScriptThread channel was closed.
     ChannelClosed,
+    /// The per-WebView abandonment-correlation sequence could not be incremented.
+    CancellationSequenceOverflow,
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use servo_base::generic_channel::{GenericCallback, ReceiveError, TryReceiveError};
     use servo_base::id::{TEST_PIPELINE_ID, TEST_SCRIPT_EVENT_LOOP_ID, TEST_WEBVIEW_ID};
     use timers::{DocumentClock, DocumentProducerFence, TimerEventRequest, TimerScheduler};
@@ -608,7 +678,7 @@ mod tests {
     }
 
     #[test]
-    fn observe_timeout_is_a_non_mutating_transport_failure() {
+    fn observe_timeout_cannot_hide_page_work_or_clock_mutation() {
         let command = DocumentTimeControlCommand::Observe;
         let (_response, receiver) = GenericCallback::new_blocking()
             .expect("test control callback channel should be created");
@@ -620,6 +690,65 @@ mod tests {
                 DocumentTimeControlTransportFailure::TimedOut
             )
         );
+    }
+
+    #[test]
+    fn receiver_cancels_on_timeout_or_drop_but_not_after_a_terminal_outcome() {
+        let timeout_cancellations = Arc::new(AtomicUsize::new(0));
+        let (_response, receiver) = GenericCallback::new_blocking()
+            .expect("test timeout callback channel should be created");
+        let cancellation_counter = timeout_cancellations.clone();
+        let receiver = DocumentTimeControlReceiver::new_cancellable(
+            receiver,
+            &DocumentTimeControlCommand::Observe,
+            move || {
+                cancellation_counter.fetch_add(1, Ordering::SeqCst);
+            },
+        );
+        assert!(matches!(
+            receiver.recv_timeout(Duration::ZERO),
+            DocumentTimeControlReceiveOutcome::ObserveTransportFailure(
+                DocumentTimeControlTransportFailure::TimedOut
+            )
+        ));
+        assert_eq!(timeout_cancellations.load(Ordering::SeqCst), 1);
+
+        let drop_cancellations = Arc::new(AtomicUsize::new(0));
+        let (_response, receiver) = GenericCallback::new_blocking()
+            .expect("test dropped callback channel should be created");
+        let cancellation_counter = drop_cancellations.clone();
+        drop(DocumentTimeControlReceiver::new_cancellable(
+            receiver,
+            &DocumentTimeControlCommand::DriveOneTurn,
+            move || {
+                cancellation_counter.fetch_add(1, Ordering::SeqCst);
+            },
+        ));
+        assert_eq!(drop_cancellations.load(Ordering::SeqCst), 1);
+
+        let completed_cancellations = Arc::new(AtomicUsize::new(0));
+        let (response, receiver) = GenericCallback::new_blocking()
+            .expect("test completed callback channel should be created");
+        let cancellation_counter = completed_cancellations.clone();
+        let receiver = DocumentTimeControlReceiver::new_cancellable(
+            receiver,
+            &DocumentTimeControlCommand::Observe,
+            move || {
+                cancellation_counter.fetch_add(1, Ordering::SeqCst);
+            },
+        );
+        response
+            .send(DocumentTimeControlOutcome::Rejected(
+                DocumentTimeControlError::ChannelClosed,
+            ))
+            .expect("test terminal outcome should be sent");
+        assert!(matches!(
+            receiver.recv_timeout(Duration::from_secs(1)),
+            DocumentTimeControlReceiveOutcome::CommandOutcome(
+                DocumentTimeControlOutcome::Rejected(DocumentTimeControlError::ChannelClosed)
+            )
+        ));
+        assert_eq!(completed_cancellations.load(Ordering::SeqCst), 0);
     }
 
     #[test]

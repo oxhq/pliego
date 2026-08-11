@@ -110,6 +110,7 @@ impl ConstellationWebView {
     pub(crate) fn bind_controlled_event_loop(
         &mut self,
         event_loop_id: ScriptEventLoopId,
+        surface: DocumentTimeSurface,
     ) -> Result<(), DocumentTimeSurface> {
         if self.document_clock == DocumentClockConfiguration::Realtime {
             return Ok(());
@@ -124,8 +125,8 @@ impl ConstellationWebView {
             },
             Some(bound) if bound == event_loop_id => Ok(()),
             Some(_) => {
-                self.document_time_failure = Some(DocumentTimeSurface::CrossEventLoopIframe);
-                Err(DocumentTimeSurface::CrossEventLoopIframe)
+                self.document_time_failure = Some(surface);
+                Err(surface)
             },
         }
     }
@@ -274,32 +275,44 @@ mod tests {
         assert_eq!(webview.controlled_event_loop_id(), None);
         assert!(
             webview
-                .bind_controlled_event_loop(TEST_SCRIPT_EVENT_LOOP_ID)
+                .bind_controlled_event_loop(
+                    TEST_SCRIPT_EVENT_LOOP_ID,
+                    DocumentTimeSurface::CrossEventLoopIframe,
+                )
                 .is_ok()
         );
         assert!(
             webview
-                .bind_controlled_event_loop(TEST_SCRIPT_EVENT_LOOP_ID)
+                .bind_controlled_event_loop(
+                    TEST_SCRIPT_EVENT_LOOP_ID,
+                    DocumentTimeSurface::CrossEventLoopIframe,
+                )
                 .is_ok()
         );
 
         let other_event_loop = ScriptEventLoopId::new();
         assert_ne!(other_event_loop, TEST_SCRIPT_EVENT_LOOP_ID);
         assert_eq!(
-            webview.bind_controlled_event_loop(other_event_loop),
-            Err(DocumentTimeSurface::CrossEventLoopIframe)
+            webview.bind_controlled_event_loop(
+                other_event_loop,
+                DocumentTimeSurface::CrossEventLoopNavigation,
+            ),
+            Err(DocumentTimeSurface::CrossEventLoopNavigation)
         );
         assert_eq!(
             webview.document_time_failure,
-            Some(DocumentTimeSurface::CrossEventLoopIframe)
+            Some(DocumentTimeSurface::CrossEventLoopNavigation)
         );
         assert_eq!(
             webview.controlled_event_loop_id(),
             Some(TEST_SCRIPT_EVENT_LOOP_ID)
         );
         assert_eq!(
-            webview.bind_controlled_event_loop(TEST_SCRIPT_EVENT_LOOP_ID),
-            Err(DocumentTimeSurface::CrossEventLoopIframe)
+            webview.bind_controlled_event_loop(
+                TEST_SCRIPT_EVENT_LOOP_ID,
+                DocumentTimeSurface::AuxiliaryWebView,
+            ),
+            Err(DocumentTimeSurface::CrossEventLoopNavigation)
         );
     }
 }

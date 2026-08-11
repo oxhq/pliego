@@ -1177,9 +1177,6 @@ pub struct NewWebViewDetails {
     pub webview_id: WebViewId,
     pub viewport_details: ViewportDetails,
     pub user_content_manager_id: Option<UserContentManagerId>,
-    /// The document-clock mode installed before the initial navigation starts.
-    #[doc(hidden)]
-    pub document_clock: DocumentClockConfiguration,
 }
 
 #[derive(Serialize, Deserialize, Debug)]

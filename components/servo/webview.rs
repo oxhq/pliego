@@ -13,11 +13,11 @@ use accesskit::{
 use dpi::PhysicalSize;
 use embedder_traits::{
     ContextMenuAction, ContextMenuItem, Cursor, DocumentClockConfiguration,
-    DocumentTimeControlCommand, DocumentTimeControlError, DocumentTimeControlReceiver,
-    EmbedderControlId, EmbedderControlRequest, Image, InputEvent, InputEventAndId, InputEventId,
-    JSValue, JavaScriptEvaluationError, LoadStatus, MediaSessionActionType, NewWebViewDetails,
-    ScreenGeometry, ScreenshotCaptureError, Scroll, Theme, TraversalId, UrlRequest,
-    ViewportDetails, WebViewPoint, WebViewRect,
+    DocumentTimeControlCancellationId, DocumentTimeControlCommand, DocumentTimeControlError,
+    DocumentTimeControlReceiver, EmbedderControlId, EmbedderControlRequest, Image, InputEvent,
+    InputEventAndId, InputEventId, JSValue, JavaScriptEvaluationError, LoadStatus,
+    MediaSessionActionType, NewWebViewDetails, ScreenGeometry, ScreenshotCaptureError, Scroll,
+    Theme, TraversalId, UrlRequest, ViewportDetails, WebViewPoint, WebViewRect,
 };
 use euclid::{Scale, Size2D};
 use image::RgbaImage;
@@ -117,6 +117,7 @@ pub(crate) struct WebViewInner {
     rendering_context: Rc<dyn RenderingContext>,
     user_content_manager: Option<Rc<UserContentManager>>,
     document_clock: DocumentClockConfiguration,
+    next_document_time_control_cancellation_id: u64,
     hidpi_scale_factor: Scale<f32, DeviceIndependentPixel, DevicePixel>,
     load_status: LoadStatus,
     status_text: Option<String>,
@@ -177,6 +178,7 @@ impl WebView {
             back_forward_list_index: 0,
             user_content_manager: builder.user_content_manager.clone(),
             document_clock: builder.document_clock,
+            next_document_time_control_cancellation_id: 0,
         })));
 
         let viewport_details = webview.viewport_details();
@@ -201,7 +203,6 @@ impl WebView {
             webview_id: webview.id(),
             viewport_details,
             user_content_manager_id,
-            document_clock: builder.document_clock,
         };
 
         // There are two possibilities here. Either the WebView is a new toplevel
@@ -219,12 +220,19 @@ impl WebView {
                         .expect("Should always be able to parse 'about:blank'."),
                 );
 
-                servo
-                    .constellation_proxy()
-                    .send(EmbedderToConstellationMessage::NewWebView(
-                        url.into(),
-                        new_webview_details,
-                    ));
+                let message = match builder.document_clock {
+                    DocumentClockConfiguration::Realtime => {
+                        EmbedderToConstellationMessage::NewWebView(url.into(), new_webview_details)
+                    },
+                    document_clock @ DocumentClockConfiguration::Controlled { .. } => {
+                        EmbedderToConstellationMessage::NewWebViewWithDocumentClock(
+                            url.into(),
+                            new_webview_details,
+                            document_clock,
+                        )
+                    },
+                };
+                servo.constellation_proxy().send(message);
             },
         }
 
@@ -796,10 +804,12 @@ impl WebView {
     /// Submit one internal mechanical command to an opt-in controlled ScriptThread.
     ///
     /// The returned receiver consumes itself after one bounded wait and preserves timeout,
-    /// disconnect, decoding, and I/O failures distinctly. A missing `Observe` response is
-    /// non-mutating; a missing `DriveOneTurn` response may have completed late and must not be
-    /// retried as a no-op. A guarded failure remains exact-token indeterminate. This API neither
-    /// decides visual settlement nor captures output.
+    /// disconnect, decoding, and I/O failures distinctly. Timeout, transport failure, or dropping
+    /// the receiver sends an exact correlated abandonment so the WebView cannot remain permanently
+    /// occupied. A missing `Observe` response cannot hide page work or clock advance,
+    /// though internal control bookkeeping may have changed. A missing `DriveOneTurn` response may
+    /// have completed late and must not be retried as a no-op. A guarded failure remains
+    /// exact-token indeterminate. This API neither decides visual settlement nor captures output.
     #[doc(hidden)]
     pub fn request_controlled_document_time(
         &self,
@@ -807,10 +817,38 @@ impl WebView {
     ) -> Result<DocumentTimeControlReceiver, DocumentTimeControlError> {
         let (response, receiver) =
             GenericCallback::new_blocking().map_err(|_| DocumentTimeControlError::ChannelClosed)?;
-        let receiver = DocumentTimeControlReceiver::new(receiver, &command);
-        self.inner().servo.constellation_proxy().send(
-            EmbedderToConstellationMessage::ControlDocumentTime(self.id(), command, response),
-        );
+        let (webview_id, cancellation_id, constellation_proxy) = {
+            let mut inner = self.inner_mut();
+            let Some(next_id) = inner
+                .next_document_time_control_cancellation_id
+                .checked_add(1)
+            else {
+                return Err(DocumentTimeControlError::CancellationSequenceOverflow);
+            };
+            let cancellation_id = DocumentTimeControlCancellationId::new(
+                inner.next_document_time_control_cancellation_id,
+            );
+            inner.next_document_time_control_cancellation_id = next_id;
+            (
+                inner.id,
+                cancellation_id,
+                inner.servo.constellation_proxy().clone(),
+            )
+        };
+        let cancellation_proxy = constellation_proxy.clone();
+        let receiver =
+            DocumentTimeControlReceiver::new_cancellable(receiver, &command, move || {
+                cancellation_proxy.send(EmbedderToConstellationMessage::CancelDocumentTimeControl(
+                    webview_id,
+                    cancellation_id,
+                ));
+            });
+        constellation_proxy.send(EmbedderToConstellationMessage::ControlDocumentTime(
+            webview_id,
+            cancellation_id,
+            command,
+            response,
+        ));
         Ok(receiver)
     }
 

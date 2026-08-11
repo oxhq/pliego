@@ -19,10 +19,10 @@ use embedder_traits::user_contents::{
     UserContentManagerId, UserScript, UserScriptId, UserStyleSheet, UserStyleSheetId,
 };
 use embedder_traits::{
-    DocumentTimeControlCommand, DocumentTimeControlOutcome, EmbedderControlId,
-    EmbedderControlResponse, InputEventAndId, JavaScriptEvaluationId, MediaSessionActionType,
-    NewWebViewDetails, PaintHitTestResult, Theme, TraversalId, UrlRequest, ViewportDetails,
-    WebDriverCommandMsg,
+    DocumentClockConfiguration, DocumentTimeControlCancellationId, DocumentTimeControlCommand,
+    DocumentTimeControlOutcome, EmbedderControlId, EmbedderControlResponse, InputEventAndId,
+    JavaScriptEvaluationId, MediaSessionActionType, NewWebViewDetails, PaintHitTestResult, Theme,
+    TraversalId, UrlRequest, ViewportDetails, WebDriverCommandMsg,
 };
 pub use from_script_message::*;
 use malloc_size_of_derive::MallocSizeOf;
@@ -105,6 +105,7 @@ pub enum EmbedderToConstellationMessage {
     /// Mechanically drive or observe one opt-in controlled document event loop.
     ControlDocumentTime(
         WebViewId,
+        DocumentTimeControlCancellationId,
         DocumentTimeControlCommand,
         GenericCallback<DocumentTimeControlOutcome>,
     ),
@@ -125,6 +126,15 @@ pub enum EmbedderToConstellationMessage {
     UpdatePinchZoomInfos(PipelineId, PinchZoomInfos),
     /// Activate or deactivate accessibility features for the given `WebView`.
     SetAccessibilityActive(WebViewId, bool),
+    /// Create a top-level WebView with an internal document-clock configuration.
+    ///
+    /// This appended route preserves the source and wire shape of the legacy
+    /// [`NewWebView`](Self::NewWebView) payload, whose public details remain realtime.
+    #[doc(hidden)]
+    NewWebViewWithDocumentClock(ServoUrl, NewWebViewDetails, DocumentClockConfiguration),
+    /// Abandon response tracking for one exact controlled document-time request.
+    #[doc(hidden)]
+    CancelDocumentTimeControl(WebViewId, DocumentTimeControlCancellationId),
 }
 
 pub enum UserContentManagerAction {
