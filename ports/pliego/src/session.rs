@@ -461,6 +461,13 @@ impl SessionArtifacts {
         render_id: impl Into<String>,
     ) -> io::Result<Self> {
         let requested_directory = std::path::absolute(directory.as_ref())?;
+        let requested_parent = requested_directory.parent().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "session artifact path has no parent directory",
+            )
+        })?;
+        require_path_without_aliases(requested_parent)?;
         let render_id = render_id.into();
         if render_id.is_empty() {
             return Err(io::Error::new(
@@ -2077,6 +2084,32 @@ mod tests {
 
         drop(artifacts);
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_an_aliased_artifact_parent_without_leaving_a_directory() {
+        use std::os::unix::fs::symlink;
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let sandbox = test_temp_dir().join(format!(
+            "pliego-artifact-parent-alias-{}-{unique}",
+            std::process::id()
+        ));
+        let real_parent = sandbox.join("real-parent");
+        let alias = sandbox.join("alias");
+        fs::create_dir_all(&real_parent).unwrap();
+        symlink(&real_parent, &alias).unwrap();
+        let requested = alias.join("artifacts");
+
+        let error = SessionArtifacts::create(&requested).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(!real_parent.join("artifacts").exists());
+
+        fs::remove_dir_all(sandbox).unwrap();
     }
 
     #[test]
