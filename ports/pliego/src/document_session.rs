@@ -371,14 +371,48 @@ impl ConsoleEvidenceLog {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+struct SessionHostDeadline {
+    started: Instant,
+    deadline: Instant,
+}
+
+impl SessionHostDeadline {
+    fn start(timeout: Duration) -> Result<Self, SessionError> {
+        Self::from_started(Instant::now(), timeout)
+    }
+
+    fn from_started(started: Instant, timeout: Duration) -> Result<Self, SessionError> {
+        let deadline = started
+            .checked_add(timeout)
+            .ok_or_else(|| SessionError::new("INVALID_REQUEST", "timeout is too large"))?;
+        Ok(Self { started, deadline })
+    }
+
+    fn remaining_at(self, now: Instant) -> Duration {
+        self.deadline.saturating_duration_since(now)
+    }
+
+    fn is_elapsed_at(self, now: Instant) -> bool {
+        self.remaining_at(now).is_zero()
+    }
+
+    fn is_elapsed(self) -> bool {
+        self.is_elapsed_at(Instant::now())
+    }
+
+    fn elapsed_ms(self) -> f64 {
+        self.started.elapsed().as_secs_f64() * 1000.0
+    }
+}
+
 pub(crate) struct DocumentSession {
     webview: WebView,
     servo: Servo,
     delegate: Rc<DocumentDelegate>,
     environment: RenderEnvironment,
     allow_host_fonts: bool,
-    stable_render_timeout: Duration,
-    controlled_runtime_started: Instant,
+    host_deadline: SessionHostDeadline,
     _canvas_retention: servo_canvas::retained_canvas::CanvasRetentionGuard,
     _rendering_context: Rc<SoftwareRenderingContext>,
 }
@@ -411,7 +445,8 @@ impl DocumentSession {
         allow_host_fonts: bool,
         readiness: ReadinessPolicy,
     ) -> Result<Self, SessionError> {
-        let stable_render_timeout =
+        validate_resolved_resource_policy(document, &resource_policy)?;
+        let session_host_timeout =
             validate_session_timeouts(readiness, resource_policy.timeout_ms)?;
         Self::new_resolved_with_canvas_retention(
             document.path().to_owned(),
@@ -421,7 +456,7 @@ impl DocumentSession {
             page,
             allow_host_fonts,
             readiness,
-            stable_render_timeout,
+            session_host_timeout,
             servo_canvas::retained_canvas::start_retaining_canvas_commands,
         )
     }
@@ -476,7 +511,7 @@ impl DocumentSession {
         readiness: ReadinessPolicy,
         start_canvas_retention: impl FnOnce() -> servo_canvas::retained_canvas::CanvasRetentionGuard,
     ) -> Result<Self, SessionError> {
-        let stable_render_timeout = validate_session_timeouts(readiness, resources.timeout_ms)?;
+        let session_host_timeout = validate_session_timeouts(readiness, resources.timeout_ms)?;
         let input = input.as_ref().canonicalize().map_err(|error| {
             SessionError::new(
                 "INVALID_REQUEST",
@@ -502,7 +537,7 @@ impl DocumentSession {
             page,
             allow_host_fonts,
             readiness,
-            stable_render_timeout,
+            session_host_timeout,
             start_canvas_retention,
         )
     }
@@ -516,7 +551,7 @@ impl DocumentSession {
         page: PageDefinition,
         allow_host_fonts: bool,
         readiness: ReadinessPolicy,
-        stable_render_timeout: Duration,
+        session_host_timeout: Duration,
         start_canvas_retention: impl FnOnce() -> servo_canvas::retained_canvas::CanvasRetentionGuard,
     ) -> Result<Self, SessionError> {
         validate_resource_policy(&resource_policy)?;
@@ -537,7 +572,7 @@ impl DocumentSession {
         })?;
         apply_timezone(environment.timezone)
             .map_err(|error| SessionError::new("ENVIRONMENT_CONFIGURATION_FAILED", error))?;
-        let controlled_runtime_started = Instant::now();
+        let host_deadline = SessionHostDeadline::start(session_host_timeout)?;
 
         let rendering_context = Rc::new(
             SoftwareRenderingContext::new(PhysicalSize::new(
@@ -594,8 +629,7 @@ impl DocumentSession {
             delegate,
             environment,
             allow_host_fonts,
-            stable_render_timeout,
-            controlled_runtime_started,
+            host_deadline,
             _canvas_retention: canvas_retention,
             _rendering_context: rendering_context,
         })
@@ -638,7 +672,7 @@ impl DocumentSession {
             error
                 .capture_evidence
                 .controlled_runtime_ms
-                .get_or_insert(self.controlled_runtime_started.elapsed().as_secs_f64() * 1000.0);
+                .get_or_insert(self.host_deadline.elapsed_ms());
             error.with_evidence(
                 std::mem::take(&mut self.delegate.resources.borrow_mut().entries),
                 self.delegate.resource_store.take(),
@@ -658,16 +692,14 @@ impl DocumentSession {
     ) -> Result<DocumentCaptureOutcome, SessionError> {
         let mut capture_evidence = SessionCaptureEvidence::default();
         self.webview.show();
-        self.spin_until("document load", || self.delegate.load_complete.get())?;
+        self.spin_until_host_deadline("document load", || self.delegate.load_complete.get())?;
 
         let screenshot = Rc::new(RefCell::new(None));
         let screenshot_result = screenshot.clone();
         self.webview.take_screenshot(None, move |result| {
             *screenshot_result.borrow_mut() = Some(result.map_err(|error| format!("{error:?}")));
         });
-        self.spin_until_for("stable render", self.stable_render_timeout, || {
-            screenshot.borrow().is_some()
-        })?;
+        self.spin_until_host_deadline("stable render", || screenshot.borrow().is_some())?;
         let screenshot = screenshot
             .borrow_mut()
             .take()
@@ -721,8 +753,7 @@ impl DocumentSession {
             },
         };
         capture_evidence.layout_debug = Some(layout_debug);
-        capture_evidence.controlled_runtime_ms =
-            Some(self.controlled_runtime_started.elapsed().as_secs_f64() * 1000.0);
+        capture_evidence.controlled_runtime_ms = Some(self.host_deadline.elapsed_ms());
         let scene_capture_started = Instant::now();
         let capture = {
             let resources = self.delegate.resource_store.borrow();
@@ -783,9 +814,6 @@ impl DocumentSession {
     }
 
     fn evaluate_readiness(&self) -> Result<serde_json::Value, SessionError> {
-        let deadline = Instant::now()
-            .checked_add(self.stable_render_timeout)
-            .ok_or_else(|| SessionError::new("INVALID_REQUEST", "timeout is too large"))?;
         loop {
             let result = Rc::new(RefCell::new(None));
             let callback_result = result.clone();
@@ -793,11 +821,7 @@ impl DocumentSession {
                 .evaluate_javascript(readiness::HOST_EVALUATION_EXPRESSION, move |value| {
                     *callback_result.borrow_mut() = Some(value)
                 });
-            self.spin_until_for(
-                "readiness evaluation",
-                deadline.saturating_duration_since(Instant::now()),
-                || result.borrow().is_some(),
-            )?;
+            self.spin_until_host_deadline("readiness evaluation", || result.borrow().is_some())?;
             let value = result.borrow_mut().take().ok_or_else(|| {
                 SessionError::new(
                     "READINESS_EVALUATION_FAILED",
@@ -838,7 +862,7 @@ impl DocumentSession {
                             ..Default::default()
                         }));
                 },
-                Readiness::Pending if Instant::now() >= deadline => {
+                Readiness::Pending if self.host_deadline.is_elapsed() => {
                     return Err(SessionError::new(
                         "READINESS_TIMEOUT",
                         "document readiness did not settle before the host deadline",
@@ -856,31 +880,27 @@ impl DocumentSession {
         }
     }
 
-    fn spin_until(&self, label: &str, done: impl Fn() -> bool) -> Result<(), SessionError> {
-        self.spin_until_for(label, TIMEOUT, done)
-    }
-
-    fn spin_until_for(
+    fn spin_until_host_deadline(
         &self,
         label: &str,
-        timeout: Duration,
         done: impl Fn() -> bool,
     ) -> Result<(), SessionError> {
-        let deadline = Instant::now()
-            .checked_add(timeout)
-            .ok_or_else(|| SessionError::new("INVALID_REQUEST", "timeout is too large"))?;
-        while !done() {
+        loop {
+            // Preserve specific terminal failures, but never accept a callback after the hard
+            // session deadline: one slow event-loop turn must not extend the aggregate budget.
             self.check_failure(label)?;
-            if Instant::now() >= deadline {
+            if self.host_deadline.is_elapsed() {
                 return Err(SessionError::new(
                     "RENDER_TIMEOUT",
                     format!("timed out waiting for {label}"),
                 ));
             }
+            if done() {
+                return Ok(());
+            }
             self.servo.spin_event_loop();
             std::thread::sleep(Duration::from_millis(1));
         }
-        self.check_failure(label)
     }
 
     fn check_failure(&self, label: &str) -> Result<(), SessionError> {
@@ -931,7 +951,7 @@ fn validate_resource_policy(policy: &ResourcePolicy) -> Result<(), SessionError>
     }
 }
 
-fn stable_render_timeout(readiness: ReadinessPolicy) -> Result<Duration, SessionError> {
+fn session_host_timeout(readiness: ReadinessPolicy) -> Result<Duration, SessionError> {
     TIMEOUT
         .checked_add(Duration::from_millis(readiness.timeout_ms))
         .ok_or_else(|| SessionError::new("INVALID_REQUEST", "readiness timeout is too large"))
@@ -941,7 +961,7 @@ fn validate_session_timeouts(
     readiness: ReadinessPolicy,
     resource_timeout_ms: u64,
 ) -> Result<Duration, SessionError> {
-    let stable_render_timeout = stable_render_timeout(readiness)?;
+    let session_host_timeout = session_host_timeout(readiness)?;
     if !(1..=MAX_RESOURCE_TIMEOUT_MS).contains(&resource_timeout_ms) {
         return Err(SessionError::new(
             "INVALID_REQUEST",
@@ -950,7 +970,24 @@ fn validate_session_timeouts(
             ),
         ));
     }
-    Ok(stable_render_timeout)
+    Ok(session_host_timeout)
+}
+
+fn validate_resolved_resource_policy(
+    document: &LocalDocument,
+    resource_policy: &ResourcePolicy,
+) -> Result<(), SessionError> {
+    match resource_policy.resolved_document_root() {
+        Some(root) if root == document.root() => Ok(()),
+        Some(_) => Err(SessionError::new(
+            "INVALID_REQUEST",
+            "resource policy document root does not match the resolved document root",
+        )),
+        None => Err(SessionError::new(
+            "INVALID_REQUEST",
+            "resource policy has no resolved document root",
+        )),
+    }
 }
 
 #[derive(Default)]
@@ -1294,8 +1331,8 @@ mod tests {
         ConsoleEvidenceLog, ConsoleLogLevel, DocumentSession, MAX_CONSOLE_BYTES,
         MAX_CONSOLE_EVENTS, RESOURCE_EVIDENCE_ENTRY_OVERHEAD_BYTES, ReadinessPolicy,
         RenderEnvironment, ResourceEvidenceLog, ResourcePolicyConfig, SessionError,
-        console_log_level_name, stable_render_timeout, validate_host_font_policy,
-        validate_resource_policy,
+        SessionHostDeadline, console_log_level_name, session_host_timeout,
+        validate_host_font_policy, validate_resolved_resource_policy, validate_resource_policy,
     };
 
     const ISOLATED_CASE_ENV: &str = "PLIEGO_DOCUMENT_SESSION_FIXTURE";
@@ -1946,15 +1983,69 @@ window.pliego?.defer();
     }
 
     #[test]
-    fn stable_render_timeout_covers_the_readiness_budget() {
+    fn session_host_deadline_is_one_non_resetting_budget() {
         let readiness = ReadinessPolicy {
             timeout_ms: 60_000,
             wait_for_fonts: true,
         };
-        assert!(
-            stable_render_timeout(readiness).unwrap() >
-                std::time::Duration::from_millis(readiness.timeout_ms)
+        let timeout = session_host_timeout(readiness).unwrap();
+        assert_eq!(
+            timeout,
+            super::TIMEOUT + std::time::Duration::from_millis(readiness.timeout_ms)
         );
+
+        let started = Instant::now();
+        let host_deadline = SessionHostDeadline::from_started(started, timeout).unwrap();
+        let after_document_load = started + std::time::Duration::from_secs(20);
+        let after_stable_render = after_document_load + std::time::Duration::from_secs(35);
+
+        assert_eq!(
+            host_deadline.remaining_at(after_document_load),
+            timeout - std::time::Duration::from_secs(20)
+        );
+        assert_eq!(
+            host_deadline.remaining_at(after_stable_render),
+            timeout - std::time::Duration::from_secs(55)
+        );
+        assert_eq!(host_deadline.deadline, started + timeout);
+        assert!(!host_deadline.is_elapsed_at(started + timeout - Duration::from_nanos(1)));
+        assert!(host_deadline.is_elapsed_at(started + timeout));
+    }
+
+    #[test]
+    fn resolved_resource_policy_root_mismatch_fails_before_servo_construction() {
+        let document_bundle = TempBundle::new("resolved-root-document");
+        document_bundle.write("input.html", "<!doctype html><p>document</p>");
+        let policy_bundle = TempBundle::new("resolved-root-policy");
+        let document = LocalDocument::resolve(&document_bundle.0, "input.html").unwrap();
+        let matching_policy =
+            ResourcePolicy::resolve(&ResourcePolicyConfig::default(), document.root());
+        assert_eq!(
+            matching_policy.resolved_document_root(),
+            Some(document.root())
+        );
+        assert!(validate_resolved_resource_policy(&document, &matching_policy).is_ok());
+        let resource_policy =
+            ResourcePolicy::resolve(&ResourcePolicyConfig::default(), &policy_bundle.0);
+
+        let error = DocumentSession::from_resolved(
+            &document,
+            resource_policy,
+            RenderEnvironment::default(),
+            a4(),
+            false,
+            ReadinessPolicy::default(),
+        )
+        .err()
+        .expect("mismatched roots must fail before Servo construction");
+
+        assert_eq!(error.code, "INVALID_REQUEST");
+        assert_eq!(
+            error.message,
+            "resource policy document root does not match the resolved document root"
+        );
+        assert!(error.resources.is_empty());
+        assert!(error.console.is_empty());
     }
 
     #[test]
@@ -1996,6 +2087,7 @@ window.pliego?.defer();
         for case in [
             "constructor-recovery",
             "console-evidence",
+            "console-overflow",
             "local-success",
             "resolved-root",
             "virtual-success",
@@ -2124,6 +2216,17 @@ window.pliego?.defer();
                 let input = bundle.write(
                     "input.html",
                     "<!doctype html><script>console.info('capture-first');console.error('capture-second');window.pliego?.ready({fixture:'console-evidence'});</script>",
+                );
+                _bundle = Some(bundle);
+                input
+            },
+            "console-overflow" => {
+                let bundle = TempBundle::new(case.as_str());
+                let input = bundle.write(
+                    "input.html",
+                    format!(
+                        "<!doctype html><script>for(let index=0;index<={MAX_CONSOLE_EVENTS};index+=1){{console.info('overflow-'+index);}}window.pliego?.ready({{fixture:'console-overflow'}});</script>"
+                    ),
                 );
                 _bundle = Some(bundle);
                 input
@@ -2476,6 +2579,34 @@ window.pliego?.defer();
         });
 
         match case.as_str() {
+            "console-overflow" => {
+                let Err(error) = result else {
+                    panic!("console overflow returned a DocumentOutcome containing PDF bytes")
+                };
+                assert_eq!(error.code, "CONSOLE_OUTPUT_LIMIT_EXCEEDED");
+                assert_eq!(error.console.len(), MAX_CONSOLE_EVENTS);
+                assert_eq!(
+                    error
+                        .console
+                        .first()
+                        .map(|(level, message)| (level.as_str(), message.as_str())),
+                    Some(("info", "overflow-0"))
+                );
+                let expected_last = format!("overflow-{}", MAX_CONSOLE_EVENTS - 1);
+                assert_eq!(
+                    error
+                        .console
+                        .last()
+                        .map(|(level, message)| (level.as_str(), message.as_str())),
+                    Some(("info", expected_last.as_str()))
+                );
+                assert!(
+                    !error
+                        .console
+                        .iter()
+                        .any(|(_, message)| message == &format!("overflow-{MAX_CONSOLE_EVENTS}"))
+                );
+            },
             "local-success" => {
                 let outcome = result.expect("local resource fixture should render");
                 let script = session_fixture("local-success.js");

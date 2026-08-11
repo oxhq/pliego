@@ -72,6 +72,7 @@ pub struct VirtualResourceSpec {
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
 #[derive(Clone, Debug)]
 pub(crate) struct ResourcePolicy {
+    resolved_document_root: Option<PathBuf>,
     pub(crate) allowed_http_roots: Vec<url::Url>,
     pub(crate) virtual_resources: Vec<VirtualResource>,
     pub(crate) asset_manifest: Option<PathBuf>,
@@ -98,6 +99,7 @@ pub(crate) enum ResourcePolicySetupFailure<'a> {
 impl Default for ResourcePolicy {
     fn default() -> Self {
         Self {
+            resolved_document_root: None,
             allowed_http_roots: Vec::new(),
             virtual_resources: Vec::new(),
             asset_manifest: None,
@@ -587,6 +589,7 @@ impl ResourcePolicy {
             resident_bytes += assets.resident_bytes();
         }
         Self {
+            resolved_document_root: Some(document_root.to_owned()),
             allowed_http_roots: config.allowed_http_roots.clone(),
             virtual_resources,
             asset_manifest,
@@ -596,6 +599,10 @@ impl ResourcePolicy {
             aggregate_limit: aggregate_limit_exceeded.then_some(max_resident_bytes),
             timeout_ms: config.timeout_ms,
         }
+    }
+
+    pub(crate) fn resolved_document_root(&self) -> Option<&Path> {
+        self.resolved_document_root.as_deref()
     }
 
     pub(crate) fn aggregate_limit_error(&self) -> Option<(&'static str, String)> {
