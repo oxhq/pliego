@@ -1944,7 +1944,7 @@ impl ScriptThread {
                 source_pipeline_id,
                 ScriptToConstellationMessage::ControlledDocumentTimeResponse(
                     request.request_id,
-                    result,
+                    Box::new(result),
                 ),
             ))
             .is_ok()

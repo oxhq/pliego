@@ -793,7 +793,7 @@ pub enum ScriptToConstellationMessage {
     /// Return a post-turn observation or a committed guarded-advance acknowledgement.
     ControlledDocumentTimeResponse(
         DocumentTimeControlRequestId,
-        Result<DocumentTimeControlObservation, DocumentTimeControlError>,
+        Box<Result<DocumentTimeControlObservation, DocumentTimeControlError>>,
     ),
     /// Forward a keyboard scroll operation from an `<iframe>` to a parent pipeline.
     ForwardKeyboardScroll(PipelineId, KeyboardScroll),
@@ -855,4 +855,37 @@ pub enum RemoteFocusOperation {
     /// Do sequential focus navigation using the `<iframe>` element with the given
     /// [`BrowsingContextId`] as the starting point and in the given direction.
     Sequential(SequentialFocusDirection, Option<BrowsingContextId>),
+}
+
+#[cfg(test)]
+mod tests {
+    use embedder_traits::{DocumentTimeControlError, DocumentTimeControlRequestId};
+
+    use super::ScriptToConstellationMessage;
+
+    #[test]
+    fn controlled_document_time_response_round_trips_through_ipc() {
+        let (sender, receiver) =
+            ipc_channel::ipc::channel::<ScriptToConstellationMessage>().unwrap();
+        sender
+            .send(
+                ScriptToConstellationMessage::ControlledDocumentTimeResponse(
+                    DocumentTimeControlRequestId::new(7),
+                    Box::new(Err(DocumentTimeControlError::WebViewUnavailable)),
+                ),
+            )
+            .unwrap();
+
+        let response = receiver.recv().unwrap();
+        let ScriptToConstellationMessage::ControlledDocumentTimeResponse(request_id, result) =
+            response
+        else {
+            panic!("unexpected Script-to-Constellation response variant")
+        };
+        assert_eq!(request_id.get(), 7);
+        assert!(matches!(
+            *result,
+            Err(DocumentTimeControlError::WebViewUnavailable)
+        ));
+    }
 }

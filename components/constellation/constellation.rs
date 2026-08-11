@@ -3075,7 +3075,7 @@ where
                     webview_id,
                     source_pipeline_id,
                     request_id,
-                    result,
+                    *result,
                 )
             },
             ScriptToConstellationMessage::ForwardKeyboardScroll(pipeline_id, scroll) => {
