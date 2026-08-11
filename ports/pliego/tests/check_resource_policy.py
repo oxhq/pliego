@@ -463,6 +463,11 @@ def self_test() -> None:
                 fail(f"resource log checker accepted invalid evidence: {invalid!r}")
 
         expect_rejection({**row, "response": {"body": "inline payload"}}, "inline body field")
+        expect_rejection({**row, "body": "top-level inline payload"}, "inline body field")
+        expect_rejection(
+            {**row, "chain": [{"body": "list-nested inline payload"}]},
+            "inline body field",
+        )
         expect_rejection({**row, "source": "inline source payload"}, "invalid source classification")
         expect_rejection({**row, "source": {"kind": "document_root"}}, "invalid source classification")
     with fixture_server() as server:

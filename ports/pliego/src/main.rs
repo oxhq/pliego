@@ -7,6 +7,8 @@ compile_error!(
     "the pliego binary requires either the default document-session runtime or the explicit shell-oracle feature"
 );
 
+// Rust keeps type-checking after `compile_error!`. These fallback page types keep the no-runtime
+// CI contract focused on the deliberate feature error instead of emitting secondary type errors.
 #[cfg(not(any(feature = "document-session", feature = "shell-oracle")))]
 mod no_runtime_page_types {
     #[derive(Clone, Copy, Debug, PartialEq)]
@@ -232,6 +234,8 @@ const DEFAULT_PAGE_HEIGHT_CSS_PX: f32 = 1122.5197;
 const DEFAULT_PAGE_MARGIN_VERTICAL_CSS_PX: f32 = 45.3543;
 const DEFAULT_PAGE_MARGIN_HORIZONTAL_CSS_PX: f32 = 60.4724;
 const RENDER_ID_SCHEMA_MARKER: &[u8] = b"pliego.render-id.v1";
+// Runtime identity is part of recovery identity. This version deliberately invalidates prepared
+// transactions from the pre-cutover fingerprint instead of resuming them under another runtime.
 const PUBLICATION_REQUEST_SCHEMA_MARKER: &[u8] = b"pliego.publication-request.v3";
 
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]

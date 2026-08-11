@@ -69,7 +69,7 @@ try {
         "{$root}/success.pdf",
         "{$root}/success-artifacts",
     );
-    expectProductionBridge(str_starts_with($success->bytes(), '%PDF-'), 'production PDF is readable');
+    expectProductionBridge(str_starts_with($success->bytes(), '%PDF-'), 'production PDF is not readable');
     expectProductionBridge(
         ($success->metadata['environment']['runtime']['adapter'] ?? null) === 'document-session',
         'PHP bridge did not execute the production document-session runtime',
