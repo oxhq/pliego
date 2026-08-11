@@ -196,13 +196,16 @@ jobs:
           mkdir -p target/pliego-paged-reference
           set -o pipefail
           {
-            # Match the preceding mach build so Cargo reuses Servo dependencies.
-            # Pliego's intentionally narrow servoshell feature set leaves
-            # upstream feature-gated APIs unused; the workspace lint job owns
-            # warning enforcement for the normal Servo feature graph.
+            # Match the preceding mach build's Servo options without enabling
+            # Pliego's nonproduction servoshell oracle.
             python ports/pliego/tests/check_paged_reference.py --self-test &&
+            tree="$(cargo tree -p pliego --locked --edges normal --prefix none \
+              --features servo/crown,servo/media-gstreamer)" &&
+            printf '%s\n' "$tree" &&
+            grep -Eq '^servo v[0-9]' <<< "$tree" &&
+            ! grep -Eq '^servoshell v[0-9]' <<< "$tree" &&
             cargo build -p pliego --locked --profile ${{ inputs.profile }} \
-              --features servoshell/crown,servoshell/media-gstreamer &&
+              --features servo/crown,servo/media-gstreamer &&
             xvfb-run python ports/pliego/tests/check_paged_reference.py \
               target/${{ inputs.profile }}/pliego
           } 2>&1 | tee target/pliego-paged-reference/output.log

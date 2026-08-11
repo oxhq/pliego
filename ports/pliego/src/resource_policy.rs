@@ -152,7 +152,10 @@ pub(crate) enum ResourceSource {
     VirtualResource,
 }
 
-#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+#[cfg(all(
+    any(feature = "document-session", feature = "shell-oracle", test),
+    not(any(target_os = "android", target_env = "ohos"))
+))]
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ControlledResource {
     pub(crate) status: u16,
@@ -1068,7 +1071,10 @@ pub(crate) fn classify_controlled_http_status(
     }
 }
 
-#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+#[cfg(all(
+    any(feature = "shell-oracle", test),
+    not(any(target_os = "android", target_env = "ohos"))
+))]
 pub(crate) fn retain_controlled_resource(
     resources: &mut std::collections::BTreeMap<(String, String), ControlledResource>,
     resident_bytes: &mut u64,

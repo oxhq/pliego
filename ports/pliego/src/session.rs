@@ -1322,6 +1322,7 @@ impl SessionArtifacts {
         )
     }
 
+    #[cfg(any(feature = "shell-oracle", test))]
     pub fn record_loaded_resource(
         &self,
         request_id: &str,

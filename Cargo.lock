@@ -6618,6 +6618,7 @@ dependencies = [
  "servo-net",
  "servoshell",
  "sha2 0.11.0",
+ "surfman",
  "tokio",
  "toml_edit",
  "ttf-parser",
