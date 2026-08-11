@@ -4,10 +4,9 @@
 
 use std::path::PathBuf;
 
-use layout::pages::PageDefinition;
-
 pub use super::render_environment::RenderEnvironment;
 use super::resource_policy::ResourcePolicyConfig;
+use crate::PageDefinition;
 
 #[derive(Debug, PartialEq)]
 pub struct ExplicitRenderPaths {
@@ -119,21 +118,25 @@ impl From<super::document_session::SessionError> for RenderError {
 pub struct DocumentEngine;
 
 impl DocumentEngine {
+    /// Render with the selected runtime. DocumentSession wins whenever it is
+    /// enabled; an oracle-only build preserves the pre-cutover explicit API.
+    #[cfg(any(feature = "document-session", feature = "shell-oracle"))]
     pub fn render(request: RenderRequest) -> Result<RenderOutcome, RenderError> {
-        crate::render(request)
+        #[cfg(feature = "document-session")]
+        {
+            crate::render(request)
+        }
+        #[cfg(all(not(feature = "document-session"), feature = "shell-oracle"))]
+        {
+            crate::render_with_shell_oracle(request)
+        }
     }
 
-    /// Exercise the Pliego-owned direct Servo runtime through the production
-    /// artifact publisher without changing the CLI's default engine yet.
-    #[cfg(all(
-        feature = "document-session",
-        not(any(target_os = "android", target_env = "ohos"))
-    ))]
-    #[allow(dead_code)]
-    pub fn render_with_document_session(
-        request: RenderRequest,
-    ) -> Result<RenderOutcome, RenderError> {
-        crate::render_with_document_session(request)
+    /// Exercise the pre-cutover servoshell path as an explicit, nonproduction
+    /// parity oracle. This entrypoint does not participate in default builds.
+    #[cfg(feature = "shell-oracle")]
+    pub fn render_with_shell_oracle(request: RenderRequest) -> Result<RenderOutcome, RenderError> {
+        crate::render_with_shell_oracle(request)
     }
 }
 
@@ -141,6 +144,15 @@ impl DocumentEngine {
 mod tests {
     use super::*;
 
+    #[cfg(all(feature = "shell-oracle", not(feature = "document-session")))]
+    #[test]
+    fn oracle_only_build_preserves_the_render_api_and_typed_oracle_entrypoint() {
+        let _: fn(RenderRequest) -> Result<RenderOutcome, RenderError> = DocumentEngine::render;
+        let _: fn(RenderRequest) -> Result<RenderOutcome, RenderError> =
+            DocumentEngine::render_with_shell_oracle;
+    }
+
+    #[cfg(feature = "document-session")]
     #[test]
     fn missing_input_returns_the_exact_typed_request_error() {
         let input = PathBuf::from("__pliego_document_engine_missing__.html");
@@ -153,6 +165,38 @@ mod tests {
                 .display()
         );
         let error = DocumentEngine::render(RenderRequest {
+            input,
+            environment: RenderEnvironment::default(),
+            page: crate::default_page(),
+            resources: ResourcePolicyConfig::default(),
+            allow_host_fonts: false,
+            allow_partial_scene: false,
+            explicit_paths: None,
+        })
+        .unwrap_err();
+
+        assert_eq!(error.code, "INVALID_REQUEST");
+        assert_eq!(error.message, expected_message);
+        assert_eq!(error.exit_code, 2);
+        assert_eq!(error.artifacts, None);
+        assert_eq!(error.document_pdf, None);
+        assert_eq!(error.render_id, None);
+        assert!(error.warnings.is_empty());
+    }
+
+    #[cfg(feature = "shell-oracle")]
+    #[test]
+    fn shell_oracle_missing_input_returns_the_exact_typed_request_error() {
+        let input = PathBuf::from("__pliego_shell_oracle_missing__.html");
+        let expected_message = format!(
+            "document is unavailable: {}",
+            std::path::Path::new(".")
+                .canonicalize()
+                .unwrap()
+                .join(&input)
+                .display()
+        );
+        let error = DocumentEngine::render_with_shell_oracle(RenderRequest {
             input,
             environment: RenderEnvironment::default(),
             page: crate::default_page(),

@@ -9,7 +9,9 @@ use std::process::Command;
 
 mod build_support;
 
-use build_support::{normalize_git_path, servo_workspace_version_from_manifest};
+use build_support::{
+    normalize_git_path, servo_workspace_version_from_manifest, windows_gpu_export_link_args,
+};
 
 fn git_output(workspace_root: &Path, args: &[&str]) -> Result<String, String> {
     let output = Command::new("git")
@@ -65,6 +67,13 @@ fn emit_servo_build_identity(workspace_root: &Path) -> Result<(), Box<dyn Error>
     Ok(())
 }
 
+fn emit_windows_gpu_exports(target_os: &str, target_env: &str, document_session_enabled: bool) {
+    // Keep the linker flags bin-scoped. The Pliego binary owns the data
+    // symbols; libraries and the nonproduction shell oracle do not.
+    for link_arg in windows_gpu_export_link_args(target_os, target_env, document_session_enabled) {
+        println!("cargo:rustc-link-arg-bin=pliego={link_arg}");
+    }
+}
 fn main() -> Result<(), Box<dyn Error>> {
     let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR")?);
     let workspace_root = manifest_dir
@@ -73,7 +82,15 @@ fn main() -> Result<(), Box<dyn Error>> {
         .ok_or("Pliego must live below the Servo workspace root")?;
     emit_servo_build_identity(workspace_root)?;
 
-    if std::env::var("CARGO_CFG_TARGET_OS")? != "windows" {
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS")?;
+    let target_env = std::env::var("CARGO_CFG_TARGET_ENV")?;
+    emit_windows_gpu_exports(
+        &target_os,
+        &target_env,
+        std::env::var_os("CARGO_FEATURE_DOCUMENT_SESSION").is_some(),
+    );
+
+    if target_os != "windows" {
         return Ok(());
     }
 

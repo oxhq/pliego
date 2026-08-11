@@ -123,6 +123,17 @@ jobs:
           @("LIBCLANG_PATH=C:\Program Files\LLVM\bin", "CC=clang-cl.exe", "CXX=clang-cl.exe") | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           .\mach fetch
 
+      - name: Check production dependency boundary
+        shell: bash
+        run: |
+          tree="$(cargo tree -p pliego --edges normal --prefix none --locked)"
+          printf '%s\n' "$tree"
+          grep -Eq '^servo v[0-9]' <<< "$tree"
+          if grep -Eq '^servoshell v[0-9]' <<< "$tree"; then
+            echo 'default package graph pulled in the nonproduction shell oracle' >&2
+            exit 1
+          fi
+
       - name: Build Pliego only
         run: cargo build -p pliego --locked --profile checked-release
 
@@ -166,6 +177,13 @@ jobs:
           python python/check_pliego_release_archive.py --native-inventory '${{ matrix.bundle }}' > "dist/$bundle/NATIVE-LIBRARIES.txt"
           printf '%s\n' '1. Verify the adjacent SHA-256 file.' '2. Put pliego on PATH or set PLIEGO_BINARY.' '3. Run pliego --version.' > "dist/$bundle/INSTALL.txt"
           revision="$(git rev-parse --short HEAD)"
+          help_stdout="$RUNNER_TEMP/pliego-help-${{ matrix.bundle }}.txt"
+          "dist/$bundle/pliego" --help > "$help_stdout"
+          grep -F 'Runtime: document-session' "$help_stdout"
+          if grep -F 'NONPRODUCTION ORACLE BUILD' "$help_stdout"; then
+            echo 'release bundle contains the nonproduction shell oracle' >&2
+            exit 1
+          fi
           version_stderr="$RUNNER_TEMP/pliego-version-${{ matrix.bundle }}.stderr"
           "dist/$bundle/pliego" --version 2>"$version_stderr" | tee "dist/$bundle/VERSION.txt"
           if [[ -s "$version_stderr" ]]; then
@@ -206,6 +224,38 @@ jobs:
           @('1. Verify the adjacent SHA-256 file.', '2. Put pliego.exe on PATH or set PLIEGO_BINARY.', '3. Run pliego.exe --version.') | Set-Content "$directory\INSTALL.txt" -Encoding ascii
           $revision = git rev-parse --short HEAD
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $help = (& "$directory\pliego.exe" --help | Out-String)
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not $help.Contains('Runtime: document-session')) {
+            throw 'release bundle did not select the document-session runtime'
+          }
+          if ($help.Contains('NONPRODUCTION ORACLE BUILD')) {
+            throw 'release bundle contains the nonproduction shell oracle'
+          }
+          $llvmReadObj = Join-Path $env:LIBCLANG_PATH 'llvm-readobj.exe'
+          if (-not (Test-Path -LiteralPath $llvmReadObj -PathType Leaf)) {
+            throw "LLVM PE reader does not exist: $llvmReadObj"
+          }
+          $exports = (& $llvmReadObj --coff-exports "$directory\pliego.exe" | Out-String)
+          $readObjExitCode = $LASTEXITCODE
+          if ($readObjExitCode -ne 0) {
+            throw "llvm-readobj failed with exit code $readObjExitCode"
+          }
+          $exports | Write-Output
+          $exportNames = @(
+            $exports -split "`r?`n" | ForEach-Object {
+              if ($_ -cmatch '^\s*Name:\s+(\S+)\s*$') { $Matches[1] }
+            }
+          )
+          foreach ($symbol in @('NvOptimusEnablement', 'AmdPowerXpressRequestHighPerformance')) {
+            $count = @($exportNames | Where-Object { $_ -ceq $symbol }).Count
+            if ($count -ne 1) {
+              throw "release bundle export table contains $count exact entries for GPU selection symbol $symbol"
+            }
+          }
+          if ($exportNames -ccontains '_SURFMAN_LINK_ARGS') {
+            throw 'release bundle unexpectedly exports _SURFMAN_LINK_ARGS'
+          }
           $versionStderr = Join-Path $env:RUNNER_TEMP 'pliego-version-${{ matrix.bundle }}.stderr'
           & "$directory\pliego.exe" --version 2> $versionStderr | Tee-Object -FilePath "$directory\VERSION.txt"
           $versionExitCode = $LASTEXITCODE

@@ -7,6 +7,7 @@
 import hashlib
 import html
 import http.client
+import io
 import json
 import os
 import shutil
@@ -16,7 +17,7 @@ import sys
 import tempfile
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stderr
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Iterator
@@ -35,6 +36,15 @@ LEAK_MARKERS = (
     "VIRTUAL_RESOURCE_BODY_SECRET",
     "HTTP_RESOURCE_BODY_SECRET",
     "CACHE_RESOURCE_BODY_SECRET",
+)
+RESOURCE_SOURCES = frozenset(
+    (
+        "asset_cache",
+        "data_url",
+        "document_root",
+        "http",
+        "virtual_resource",
+    )
 )
 
 
@@ -69,6 +79,20 @@ def final_json(result: subprocess.CompletedProcess[str]) -> dict[str, Any]:
     return value
 
 
+def inline_body_field(value: Any) -> str | None:
+    if isinstance(value, dict):
+        for name, nested in value.items():
+            if name == "body":
+                return name
+            if leaked := inline_body_field(nested):
+                return leaked
+    elif isinstance(value, list):
+        for nested in value:
+            if leaked := inline_body_field(nested):
+                return leaked
+    return None
+
+
 def resource_rows(artifacts: Path, render_id: str) -> list[dict[str, Any]]:
     path = artifacts / "resources.jsonl"
     require(path.is_file(), f"resource log does not exist: {path}")
@@ -84,7 +108,12 @@ def resource_rows(artifacts: Path, render_id: str) -> list[dict[str, Any]]:
         require(isinstance(row, dict), f"resource log line {line_number} is not an object")
         require(row.get("policy") == POLICY, f"resource log omitted policy: {row!r}")
         require(row.get("render_id") == render_id, f"resource log omitted render_id: {row!r}")
-        require("body" not in row and "source" not in row, f"resource log leaked source fields: {row!r}")
+        require(inline_body_field(row) is None, f"resource log leaked an inline body field: {row!r}")
+        source = row.get("source")
+        require(
+            source is None or (isinstance(source, str) and source in RESOURCE_SOURCES),
+            f"resource log has an invalid source classification: {row!r}",
+        )
         rows.append(row)
     require(bool(rows), "resources.jsonl is empty")
     return rows
@@ -404,6 +433,43 @@ def self_test() -> None:
         parsed = read_object(manifest)
         require(cached_url == "https://assets.invalid/asset-000.js", cached_url)
         require(len(parsed.get("assets", [])) == MAX_CACHE_ENTRIES + 1, repr(parsed))
+    with tempfile.TemporaryDirectory(prefix="pliego-resource-log-self-test-") as temp:
+        artifacts = Path(temp)
+        render_id = "sha256:" + "1" * 64
+        row = {
+            "policy": POLICY,
+            "render_id": render_id,
+            "url": "file:///document.html",
+            "urls": ["file:///document.html"],
+            "status": "loaded",
+            "source": "document_root",
+            "bytes": 16,
+            "sha256": "2" * 64,
+            "resource": "sha256:" + "2" * 64,
+        }
+        resource_log = artifacts / "resources.jsonl"
+        resource_log.write_text(json.dumps(row) + "\n", encoding="utf-8")
+        require(resource_rows(artifacts, render_id) == [row], "provenance metadata was rejected")
+
+        def expect_rejection(invalid: dict[str, Any], message: str) -> None:
+            resource_log.write_text(json.dumps(invalid) + "\n", encoding="utf-8")
+            stderr = io.StringIO()
+            try:
+                with redirect_stderr(stderr):
+                    resource_rows(artifacts, render_id)
+            except SystemExit as error:
+                require(error.code == 1 and message in stderr.getvalue(), stderr.getvalue())
+            else:
+                fail(f"resource log checker accepted invalid evidence: {invalid!r}")
+
+        expect_rejection({**row, "response": {"body": "inline payload"}}, "inline body field")
+        expect_rejection({**row, "body": "top-level inline payload"}, "inline body field")
+        expect_rejection(
+            {**row, "chain": [{"body": "list-nested inline payload"}]},
+            "inline body field",
+        )
+        expect_rejection({**row, "source": "inline source payload"}, "invalid source classification")
+        expect_rejection({**row, "source": {"kind": "document_root"}}, "invalid source classification")
     with fixture_server() as server:
         for path, status, body in (
             ("/ok.js", 200, HTTP_BODY),

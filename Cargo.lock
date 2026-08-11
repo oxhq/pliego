@@ -6618,6 +6618,7 @@ dependencies = [
  "servo-net",
  "servoshell",
  "sha2 0.11.0",
+ "surfman",
  "tokio",
  "toml_edit",
  "ttf-parser",
@@ -6625,6 +6626,17 @@ dependencies = [
  "url",
  "vello_cpu 0.0.9",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "pliego-core-benchmark"
+version = "0.1.1"
+dependencies = [
+ "criterion",
+ "flate2",
+ "pliego",
+ "sha2 0.11.0",
+ "ttf-parser",
 ]
 
 [[package]]

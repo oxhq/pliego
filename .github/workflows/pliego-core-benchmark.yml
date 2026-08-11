@@ -7,6 +7,7 @@ on:
       - ".github/workflows/pliego-core-benchmark.yml"
       - "Cargo.lock"
       - "Cargo.toml"
+      - "ports/pliego-core-benchmark/Cargo.toml"
       - "ports/pliego/Cargo.toml"
       - "ports/pliego/benches/document_scene_pdf.rs"
       - "ports/pliego/src/image_limits.rs"
@@ -19,6 +20,7 @@ on:
       - ".github/workflows/pliego-core-benchmark.yml"
       - "Cargo.lock"
       - "Cargo.toml"
+      - "ports/pliego-core-benchmark/Cargo.toml"
       - "ports/pliego/Cargo.toml"
       - "ports/pliego/benches/document_scene_pdf.rs"
       - "ports/pliego/src/image_limits.rs"
@@ -55,12 +57,42 @@ jobs:
           rustup toolchain install 1.95.0 --profile minimal
           rustup override set 1.95.0
 
+      - name: Check the binless benchmark runner boundary
+        run: |
+          python - <<'PY'
+          import json
+          import subprocess
+          from pathlib import Path
+
+          metadata = json.loads(subprocess.check_output(
+              ["cargo", "metadata", "--no-deps", "--format-version", "1", "--locked"],
+              text=True,
+          ))
+          runner = next(
+              package
+              for package in metadata["packages"]
+              if package["name"] == "pliego-core-benchmark"
+          )
+          targets = [
+              (target["name"], target["kind"], Path(target["src_path"]).resolve().as_posix())
+              for target in runner["targets"]
+          ]
+          expected_source = "/ports/pliego/benches/document_scene_pdf.rs"
+          if len(targets) != 1 or targets[0][:2] != ("document_scene_pdf", ["bench"]):
+              raise SystemExit(f"benchmark runner must expose one bench and no bins: {targets!r}")
+          if not targets[0][2].endswith(expected_source):
+              raise SystemExit(f"benchmark runner selected the wrong source: {targets[0][2]!r}")
+          pliego = next(dependency for dependency in runner["dependencies"] if dependency["name"] == "pliego")
+          if pliego["uses_default_features"]:
+              raise SystemExit("benchmark runner enabled Pliego's production runtime by default")
+          PY
+
       - name: Check core boundary and correctness preflight
         run: |
-          tree=$(cargo tree -p pliego --no-default-features --edges normal --locked)
+          tree=$(cargo tree -p pliego-core-benchmark --locked)
           if grep -E '(^|[[:space:]])(servo-layout|servoshell|mozjs) v' <<< "$tree"; then
             echo "core benchmark pulled in the shell, layout, or JavaScript runtime" >&2
             exit 1
           fi
           cargo test -p pliego --lib --no-default-features --locked
-          cargo test -p pliego --bench document_scene_pdf --no-default-features --locked
+          cargo test -p pliego-core-benchmark --bench document_scene_pdf --locked

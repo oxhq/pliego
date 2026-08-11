@@ -63,7 +63,7 @@ on:
         required: false
         default: "checked-release"
         type: choice
-        options: ["checked-release", "release", "debug", "production"]
+        options: ["checked-release", "dev", "release", "production"]
       wpt-args:
         default: ""
         required: false
@@ -145,6 +145,28 @@ jobs:
       artifact_ids: ${{ steps.artifact_ids.outputs.artifact_ids }}
     steps:
       - uses: servo/ci-runners/actions/checkout@f0b81b95522256c64ee207b4236ec71fc23b99a1
+      - name: Validate Cargo profile
+        id: cargo-profile
+        env:
+          CARGO_PROFILE_INPUT: ${{ inputs.profile }}
+        run: |
+          case "$CARGO_PROFILE_INPUT" in
+            dev)
+              profile_directory=debug
+              ;;
+            checked-release|release|production)
+              profile_directory="$CARGO_PROFILE_INPUT"
+              ;;
+            *)
+              printf 'unsupported Cargo profile: %s\n' "$CARGO_PROFILE_INPUT" >&2
+              exit 2
+              ;;
+          esac
+          {
+            printf 'CARGO_PROFILE=%s\n' "$CARGO_PROFILE_INPUT"
+            printf 'CARGO_PROFILE_DIR=%s\n' "$profile_directory"
+          } >> "$GITHUB_ENV"
+          printf 'output-directory=%s\n' "$profile_directory" >> "$GITHUB_OUTPUT"
       - name: Free Disk Space (Ubuntu)
         uses: jlumbroso/free-disk-space@main
         if: ${{ runner.environment != 'self-hosted' }}
@@ -183,12 +205,44 @@ jobs:
 
       - name: Build (${{ inputs.profile }})
         env:
+          CARGO_BUILD_ARGS_INPUT: ${{ inputs.build-args }}
           RUSTFLAGS: ${{ inputs.profile == 'checked-release' && '-D warnings' || '' }}
         run: |
-          ./mach build --use-crown --locked --profile ${{ inputs.profile }} ${{ inputs.build-args }}
+          python - "$CARGO_PROFILE" "$CARGO_BUILD_ARGS_INPUT" <<'PY'
+          import os
+          import shlex
+          import sys
+
+          profile, raw_build_args = sys.argv[1:]
+          try:
+              build_args = shlex.split(raw_build_args)
+          except ValueError as error:
+              raise SystemExit(f"invalid build arguments: {error}") from error
+          build_type_options = {
+              "--profile",
+              "--dev",
+              "--debug",
+              "-d",
+              "--release",
+              "-r",
+              "--prod",
+              "--production",
+          }
+          for argument in build_args:
+              # Mach's argparse parser accepts unique long-option abbreviations, so `--prof`
+              # and longer prefixes can also replace the earlier validated `--profile` value.
+              if argument in build_type_options or argument.startswith("--prof"):
+                  raise SystemExit(
+                      f"build arguments must not override the validated Cargo profile: {argument!r}"
+                  )
+          os.execv(
+              "./mach",
+              ["./mach", "build", "--use-crown", "--locked", "--profile", profile, *build_args],
+          )
+          PY
           mv target/cargo-timings target/cargo-timings-linux
       - name: Smoketest
-        run: xvfb-run ./mach smoketest --profile ${{ inputs.profile  }}
+        run: xvfb-run ./mach smoketest --profile "$CARGO_PROFILE"
       - name: Pliego paged reference
         env:
           CARGO_BUILD_RUSTC: crown
@@ -196,15 +250,18 @@ jobs:
           mkdir -p target/pliego-paged-reference
           set -o pipefail
           {
-            # Match the preceding mach build so Cargo reuses Servo dependencies.
-            # Pliego's intentionally narrow servoshell feature set leaves
-            # upstream feature-gated APIs unused; the workspace lint job owns
-            # warning enforcement for the normal Servo feature graph.
+            # Match the preceding mach build's Servo options without enabling
+            # Pliego's nonproduction servoshell oracle.
             python ports/pliego/tests/check_paged_reference.py --self-test &&
-            cargo build -p pliego --locked --profile ${{ inputs.profile }} \
-              --features servoshell/crown,servoshell/media-gstreamer &&
+            tree="$(cargo tree -p pliego --locked --edges normal --prefix none \
+              --features servo/crown,servo/media-gstreamer)" &&
+            printf '%s\n' "$tree" &&
+            grep -Eq '^servo v[0-9]' <<< "$tree" &&
+            ! grep -Eq '^servoshell v[0-9]' <<< "$tree" &&
+            cargo build -p pliego --locked --profile "$CARGO_PROFILE" \
+              --features servo/crown,servo/media-gstreamer &&
             xvfb-run python ports/pliego/tests/check_paged_reference.py \
-              target/${{ inputs.profile }}/pliego
+              "target/$CARGO_PROFILE_DIR/pliego"
           } 2>&1 | tee target/pliego-paged-reference/output.log
       - name: Retain Pliego paged reference output
         if: always()
@@ -222,7 +279,7 @@ jobs:
           {
             python ports/pliego/tests/check_scene_vertical.py --self-test &&
             xvfb-run python ports/pliego/tests/check_scene_vertical.py \
-              target/${{ inputs.profile }}/pliego "$output"
+              "target/$CARGO_PROFILE_DIR/pliego" "$output"
           } 2>&1 | tee "$output/output.log"
       - name: Retain Pliego canonical vertical slice
         if: always()
@@ -239,7 +296,7 @@ jobs:
           {
             python ports/pliego/tests/check_font_resolution.py --self-test &&
             xvfb-run python ports/pliego/tests/check_font_resolution.py \
-              target/${{ inputs.profile }}/pliego
+              "target/$CARGO_PROFILE_DIR/pliego"
           } 2>&1 | tee target/pliego-font-resolution/output.log
       - name: Retain Pliego font resolution proof
         if: always()
@@ -255,7 +312,7 @@ jobs:
           mkdir -p "$(dirname "$output")"
           python ports/pliego/tests/check_paged_typography.py --self-test
           xvfb-run python ports/pliego/tests/check_paged_typography.py \
-            target/${{ inputs.profile }}/pliego "$output"
+            "target/$CARGO_PROFILE_DIR/pliego" "$output"
       - name: Retain Pliego paged typography proof
         if: always()
         uses: actions/upload-artifact@v7
@@ -271,8 +328,17 @@ jobs:
       - name: Pliego paged product gates
         run: |
           export PATH="$PWD/.venv/bin:$PATH"
+          python - <<'PY'
+          import sys
+
+          if sys.version_info < (3, 10):
+              raise SystemExit(
+                  f"Pliego's deterministic-environment gate requires Python >=3.10; found {sys.version.split()[0]}"
+              )
+          print(f"Pliego gate Python: {sys.version.split()[0]}")
+          PY
           python -c "import sys; from PIL import Image; print(sys.executable, Image.__version__)"
-          binary=target/${{ inputs.profile }}/pliego
+          binary="target/$CARGO_PROFILE_DIR/pliego"
           output=target/pliego-product-gates/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}
           mkdir -p "$output"
           set -o pipefail
@@ -301,7 +367,7 @@ jobs:
             xvfb-run python ports/pliego/tests/check_table_borders.py "$binary" &&
             python ports/pliego/tests/check_document_gate.py --self-test &&
             xvfb-run python ports/pliego/tests/check_document_gate.py \
-              "$binary" "$output/document-gate" "${{ inputs.profile }}" &&
+              "$binary" "$output/document-gate" "$CARGO_PROFILE" &&
             xvfb-run python ports/pliego/tests/check_deterministic_environment.py "$binary" &&
             python ports/pliego/tests/check_resource_policy.py --self-test &&
             xvfb-run python ports/pliego/tests/check_resource_policy.py "$binary" "$output/resource-policy" &&
@@ -330,7 +396,7 @@ jobs:
           mkdir -p "$(dirname "$output")"
           python ports/pliego/tests/check_image_limits.py --self-test
           xvfb-run python ports/pliego/tests/check_image_limits.py \
-            target/${{ inputs.profile }}/pliego "$output"
+            "target/$CARGO_PROFILE_DIR/pliego" "$output"
       - name: Retain Pliego image limit proof
         if: always()
         uses: actions/upload-artifact@v7
@@ -348,8 +414,8 @@ jobs:
           NEXTEST_RETRIES: 2 # https://github.com/servo/servo/issues/30683
           LANG: en-US
         run: |
-          ./mach test-unit --profile ${{ inputs.profile }} --nextest-profile ci
-          ./mach test-unit --profile ${{ inputs.profile }} --doc
+          ./mach test-unit --profile "$CARGO_PROFILE" --nextest-profile ci
+          ./mach test-unit --profile "$CARGO_PROFILE" --doc
       # We upload the test-results to Codecov to help us identify flaky unit-tests.
       - name: Upload test results to Codecov
         # Upload test results to Codecov, also for failed unit-tests, but only
@@ -365,7 +431,7 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
       - name: Devtools tests
         if: ${{ inputs.devtools-tests }}
-        run: ./mach test-devtools --profile ${{ inputs.profile }}
+        run: ./mach test-devtools --profile "$CARGO_PROFILE"
       - name: Archive build timing
         uses: actions/upload-artifact@v7
         with:
@@ -374,13 +440,13 @@ jobs:
           path: target/cargo-timings-*
           if-no-files-found: error
       - name: Build mach package
-        run: ./mach package --profile ${{ inputs.profile }}
+        run: ./mach package --profile "$CARGO_PROFILE"
       - name: Upload artifact for mach package
         uses: actions/upload-artifact@v7
         id: upload-tarball
         with:
           name: ${{ inputs.profile }}-binary-linux
-          path: target/${{ inputs.profile }}/servo-tech-demo.tar.gz
+          path: target/${{ steps.cargo-profile.outputs.output-directory }}/servo-tech-demo.tar.gz
           if-no-files-found: error
       - name: Collect artifact IDs needed by the release workflow
         id: artifact_ids
@@ -403,7 +469,7 @@ jobs:
 
   bencher:
     needs: ["build"]
-    if: ${{ inputs.bencher && inputs.profile != 'debug' && github.event_name != 'workflow_dispatch' && github.event_name != 'merge_group' }}
+    if: ${{ inputs.bencher && inputs.profile != 'dev' && github.event_name != 'workflow_dispatch' && github.event_name != 'merge_group' }}
     uses: ./.github/workflows/bencher.yml
     with:
       target: "linux"

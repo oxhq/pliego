@@ -19,6 +19,7 @@ on:
       - "components/shared/canvas/**"
       - "components/shared/fonts/**"
       - "components/shared/script/**"
+      - "sdk/php/**"
       - "benchmarks/fixtures/minimal-static/**"
   pull_request:
     paths: *document-session-paths
@@ -37,7 +38,7 @@ env:
   SCCACHE_GHA_ENABLED: "true"
 
 jobs:
-  direct-session:
+  production-session:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
 
@@ -73,18 +74,24 @@ jobs:
           printf 'Using libclang: %s\n' "$libclang"
           ./mach bootstrap --yes --skip-lints --skip-nextest
 
-      - name: Check the direct dependency boundary
+      - name: Check the production dependency boundary
         run: |
-          tree="$(cargo tree -p pliego --no-default-features --features document-session --edges normal --prefix none --locked)"
-          printf '%s\n' "$tree"
-          grep -Eq '^servo v[0-9]' <<< "$tree"
-          if grep -Eq '^servoshell v[0-9]' <<< "$tree"; then
-            echo "direct document-session graph pulled in servoshell" >&2
-            exit 1
-          fi
+          for feature_set in default direct; do
+            if [[ "$feature_set" == default ]]; then
+              tree="$(cargo tree -p pliego --edges normal --prefix none --locked)"
+            else
+              tree="$(cargo tree -p pliego --no-default-features --features document-session --edges normal --prefix none --locked)"
+            fi
+            printf '%s graph:\n%s\n' "$feature_set" "$tree"
+            grep -Eq '^servo v[0-9]' <<< "$tree"
+            if grep -Eq '^servoshell v[0-9]' <<< "$tree"; then
+              echo "$feature_set document-session graph pulled in servoshell" >&2
+              exit 1
+            fi
+          done
 
-      - name: Test the direct document session and build identity helpers
-        run: cargo test -p pliego --test document_session --test build_script --no-default-features --features document-session --locked
+      - name: Test the production document session and build identity helpers
+        run: cargo test -p pliego --test document_session --test build_script --locked
 
       - name: Test Canvas retention and capture accounting
         run: |
@@ -106,8 +113,7 @@ jobs:
           cp "$font" "$fixture/ReportSans.ttf"
           npm ci --prefix "$fixture" --ignore-scripts --no-audit --no-fund
           PLIEGO_DOCUMENT_SESSION_CHARTJS_INPUT="$fixture/index.html" \
-            cargo test -p pliego --test document_session \
-              --no-default-features --features document-session --locked \
+            cargo test -p pliego --test document_session --locked \
               document_session::tests::installed_chartjs_fixture_matches_the_legacy_oracle_twice \
               -- --exact --ignored --nocapture
 
@@ -120,10 +126,52 @@ jobs:
             "$PWD/target/debug/pliego" \
             "$RUNNER_TEMP/pliego-resource-policy"
 
-      - name: Test the CLI error boundary
-        run: cargo test -p pliego --bin pliego --features document-session session_failures_preserve_the_engine_error_classes --locked
+      - name: Test the PHP bridge against the production binary
+        run: |
+          composer --no-interaction --no-plugins --no-scripts --working-dir=sdk/php install --no-progress
+          php sdk/php/tests/production_binary_test.php "$PWD/target/debug/pliego"
 
-      - name: Check default and combined binaries
+      - name: Test the CLI error boundary
+        run: cargo test -p pliego --bin pliego session_failures_preserve_the_engine_error_classes --locked
+
+      - name: Check runtime feature matrices
         run: |
           cargo check -p pliego --bin pliego --locked
-          cargo check -p pliego --bin pliego --no-default-features --features shell,document-session --locked
+          cargo check -p pliego --bin pliego --no-default-features --features document-session --locked
+          cargo check -p pliego --bin pliego --no-default-features --features shell-oracle --locked
+          cargo check -p pliego --bin pliego --no-default-features --features shell --locked
+          cargo check -p pliego --bin pliego --no-default-features --features document-session,shell-oracle --locked
+
+      - name: Test the explicit nonproduction shell oracle
+        run: |
+          tree="$(cargo tree -p pliego --no-default-features --features shell-oracle --edges normal --prefix none --locked)"
+          printf '%s\n' "$tree"
+          grep -Eq '^servoshell v[0-9]' <<< "$tree"
+          cargo test -p pliego --bin pliego --no-default-features --features shell-oracle --locked
+          cargo run -p pliego --bin pliego --no-default-features --features shell-oracle --locked -- --help > shell-oracle-help.txt
+          grep -F 'NONPRODUCTION ORACLE BUILD' shell-oracle-help.txt
+          grep -F 'Runtime: servoshell-oracle' shell-oracle-help.txt
+
+      - name: Prove combined runtime selection and recovery isolation
+        run: |
+          cargo test -p pliego --bin pliego --no-default-features --features document-session,shell-oracle --locked tests::runtime_selection_is_explicit_and_direct_wins_combined_builds -- --exact
+          cargo test -p pliego --bin pliego --no-default-features --features document-session,shell-oracle --locked tests::cross_runtime_publication_recovery_is_rejected_without_mutation -- --exact
+          cargo run -p pliego --bin pliego --no-default-features --features document-session,shell-oracle --locked -- --help > combined-help.txt
+          grep -F 'Runtime: document-session' combined-help.txt
+          if grep -F 'NONPRODUCTION ORACLE BUILD' combined-help.txt; then
+            echo 'combined build selected the shell oracle instead of DocumentSession' >&2
+            exit 1
+          fi
+
+      - name: Reject a binary with no runtime selected
+        run: |
+          if cargo check -p pliego --bin pliego --no-default-features --locked 2> no-runtime.stderr; then
+            echo 'runtime-free Pliego binary unexpectedly compiled' >&2
+            exit 1
+          fi
+          cat no-runtime.stderr
+          grep -F 'requires either the default document-session runtime or the explicit shell-oracle feature' no-runtime.stderr
+          if grep -Eq '^error\[E[0-9]+\]:' no-runtime.stderr; then
+            echo 'runtime-free Pliego emitted a secondary Rust type or resolution error' >&2
+            exit 1
+          fi

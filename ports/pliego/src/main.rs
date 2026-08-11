@@ -2,15 +2,122 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+#[cfg(not(any(feature = "document-session", feature = "shell-oracle")))]
+compile_error!(
+    "the pliego binary requires either the default document-session runtime or the explicit shell-oracle feature"
+);
+
+// Rust keeps type-checking after `compile_error!`. These fallback page types keep the no-runtime
+// CI contract focused on the deliberate feature error instead of emitting secondary type errors.
+#[cfg(not(any(feature = "document-session", feature = "shell-oracle")))]
+mod no_runtime_page_types {
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub(super) struct PageMargins {
+        pub(super) top: f32,
+        pub(super) right: f32,
+        pub(super) bottom: f32,
+        pub(super) left: f32,
+    }
+
+    impl PageMargins {
+        pub(super) const fn new(top: f32, right: f32, bottom: f32, left: f32) -> Self {
+            Self {
+                top,
+                right,
+                bottom,
+                left,
+            }
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub(super) struct PageDefinition {
+        width: f32,
+        height: f32,
+        margins: PageMargins,
+    }
+
+    impl PageDefinition {
+        pub(super) fn new(
+            width: f32,
+            height: f32,
+            margins: PageMargins,
+        ) -> Result<Self, &'static str> {
+            if !width.is_finite() || width <= 0.0 || !height.is_finite() || height <= 0.0 {
+                return Err("invalid page size");
+            }
+            if [margins.top, margins.right, margins.bottom, margins.left]
+                .into_iter()
+                .any(|margin| !margin.is_finite() || margin < 0.0) ||
+                margins.left + margins.right >= width ||
+                margins.top + margins.bottom >= height
+            {
+                return Err("invalid page margins");
+            }
+            Ok(Self {
+                width,
+                height,
+                margins,
+            })
+        }
+
+        pub(super) const fn width(&self) -> f32 {
+            self.width
+        }
+
+        pub(super) const fn height(&self) -> f32 {
+            self.height
+        }
+
+        pub(super) const fn margins(&self) -> PageMargins {
+            self.margins
+        }
+    }
+}
+
+// The direct binary is now Servo's top-level Windows embedder. Own the GPU
+// selection symbols instead of inheriting them from a shell. Surfman's macro
+// stores its export directives in a named `.drectve` static, which `lld-link`
+// can consume while leaving the static's retention reference unresolved.
+// `build.rs` exports these data symbols without that intermediary owner.
+#[cfg(all(
+    target_os = "windows",
+    target_env = "msvc",
+    feature = "document-session"
+))]
+#[allow(non_upper_case_globals)]
+#[unsafe(no_mangle)]
+pub static mut NvOptimusEnablement: i32 = 1;
+
+#[cfg(all(
+    target_os = "windows",
+    target_env = "msvc",
+    feature = "document-session"
+))]
+#[allow(non_upper_case_globals)]
+#[unsafe(no_mangle)]
+pub static mut AmdPowerXpressRequestHighPerformance: i32 = 1;
+
+#[cfg(all(
+    feature = "shell-oracle",
+    not(any(target_os = "android", target_env = "ohos"))
+))]
 use std::cell::{Cell, OnceCell, RefCell};
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
+#[cfg(all(
+    feature = "shell-oracle",
+    not(any(target_os = "android", target_env = "ohos"))
+))]
+use std::collections::HashMap;
 use std::ffi::OsString;
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
 use std::path::Path;
 use std::path::PathBuf;
-#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+#[cfg(all(
+    feature = "shell-oracle",
+    not(any(target_os = "android", target_env = "ohos"))
+))]
 use std::rc::Rc;
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -21,11 +128,19 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
 use embedder_traits::WebResourceLoadRole;
+#[cfg(any(feature = "document-session", feature = "shell-oracle"))]
 use layout::pages::{PageDefinition, PageMargins};
+#[cfg(not(any(feature = "document-session", feature = "shell-oracle")))]
+use no_runtime_page_types::{PageDefinition, PageMargins};
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
 use pliego::Operation;
+#[cfg(all(
+    feature = "shell-oracle",
+    not(any(target_os = "android", target_env = "ohos"))
+))]
+use pliego::capture::capture_document_scene_with_canvas;
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
-use pliego::capture::{CapturedFontSource, SceneCapture, capture_document_scene_with_canvas};
+use pliego::capture::{CapturedFontSource, SceneCapture};
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
 use pliego::pdf::{CSS_PX_TO_PDF_PT, PdfFontResource, PdfFontVariation, render_document_pdf};
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
@@ -74,13 +189,20 @@ use owned_resource_store::OwnedResourceStore;
 use render_environment::{DEFAULT_LOCALE, DEFAULT_TIMEZONE};
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
 use render_environment::{apply_timezone, unexpected_host_font};
+#[cfg(all(
+    any(feature = "shell-oracle", test),
+    not(any(target_os = "android", target_env = "ohos"))
+))]
+use resource_policy::ResourceRequest;
 #[cfg(all(test, not(any(target_os = "android", target_env = "ohos"))))]
 use resource_policy::classify_controlled_http_status;
-#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+#[cfg(all(
+    feature = "shell-oracle",
+    not(any(target_os = "android", target_env = "ohos"))
+))]
 use resource_policy::{
-    ControlledResource, RESOURCE_POLICY_ID, ResourcePolicy, ResourcePolicyDecision,
-    ResourcePolicyFailure, ResourcePolicySetupFailure, ResourceRequest,
-    create_controlled_http_client, fetch_controlled_http, http_root_allows,
+    ControlledResource, ResourcePolicyDecision, create_controlled_http_client,
+    fetch_controlled_http, http_root_allows,
     retain_controlled_resource as retain_shared_controlled_resource,
 };
 use resource_policy::{
@@ -92,6 +214,10 @@ use resource_policy::{
 ))]
 use resource_policy::{
     MAX_RESOURCE_METADATA_BYTES, ResourceAccounting, ResourceEvidence, ResourceSource,
+};
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+use resource_policy::{
+    RESOURCE_POLICY_ID, ResourcePolicy, ResourcePolicyFailure, ResourcePolicySetupFailure,
 };
 
 const SERVO_BASE_SHA: &str = "313b6d5ecc113b08010ce434140db3ca5abcc71c";
@@ -108,10 +234,41 @@ const DEFAULT_PAGE_HEIGHT_CSS_PX: f32 = 1122.5197;
 const DEFAULT_PAGE_MARGIN_VERTICAL_CSS_PX: f32 = 45.3543;
 const DEFAULT_PAGE_MARGIN_HORIZONTAL_CSS_PX: f32 = 60.4724;
 const RENDER_ID_SCHEMA_MARKER: &[u8] = b"pliego.render-id.v1";
-const PUBLICATION_REQUEST_SCHEMA_MARKER: &[u8] = b"pliego.publication-request.v2";
-const RESOLVED_INPUT_HASH_SCHEMA_MARKER: &[u8] = b"pliego.resolved-input.v1";
+// Runtime identity is part of recovery identity. This version deliberately invalidates prepared
+// transactions from the pre-cutover fingerprint instead of resuming them under another runtime.
+const PUBLICATION_REQUEST_SCHEMA_MARKER: &[u8] = b"pliego.publication-request.v3";
 
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PublicationRuntimeIdentity {
+    #[cfg(feature = "document-session")]
+    DocumentSession,
+    #[cfg(feature = "shell-oracle")]
+    ServoshellOracle,
+}
+
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+impl PublicationRuntimeIdentity {
+    fn fingerprint_field(self) -> &'static [u8] {
+        match self {
+            #[cfg(feature = "document-session")]
+            Self::DocumentSession => b"document-session",
+            #[cfg(feature = "shell-oracle")]
+            Self::ServoshellOracle => b"servoshell-oracle",
+        }
+    }
+
+    #[cfg(feature = "shell-oracle")]
+    fn uses_shell_oracle(self) -> bool {
+        self == Self::ServoshellOracle
+    }
+}
+const RESOLVED_INPUT_HASH_SCHEMA_MARKER: &[u8] = b"pliego.resolved-input.v1";
+
+#[cfg(all(
+    feature = "shell-oracle",
+    not(any(target_os = "android", target_env = "ohos"))
+))]
 fn resource_request(request: &servoshell::WebResourceRequest) -> ResourceRequest {
     ResourceRequest {
         method: request.method.to_string(),
@@ -124,7 +281,10 @@ fn resource_request(request: &servoshell::WebResourceRequest) -> ResourceRequest
     }
 }
 
-#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+#[cfg(all(
+    feature = "shell-oracle",
+    not(any(target_os = "android", target_env = "ohos"))
+))]
 fn decide_resource_policy(
     policy: &ResourcePolicy,
     document_root: &Path,
@@ -133,7 +293,10 @@ fn decide_resource_policy(
     policy.decide(document_root, &resource_request(request))
 }
 
-#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+#[cfg(all(
+    feature = "shell-oracle",
+    not(any(target_os = "android", target_env = "ohos"))
+))]
 fn first_fatal_policy_failure(
     failures: &[ResourcePolicyFailure],
 ) -> Option<&ResourcePolicyFailure> {
@@ -142,7 +305,10 @@ fn first_fatal_policy_failure(
         .find(|failure| !failure.is_optional_metadata_failure())
 }
 
-#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+#[cfg(all(
+    feature = "shell-oracle",
+    not(any(target_os = "android", target_env = "ohos"))
+))]
 fn policy_failure_for_pending(url: String, response_status: Option<u16>) -> ResourcePolicyFailure {
     let (code, status, reason) =
         if response_status.is_some_and(|status| matches!(status, 404 | 410)) {
@@ -499,7 +665,7 @@ fn main() {
     match command {
         Command::Help => print_help(),
         Command::Version => print_version(),
-        Command::Render(request) => match DocumentEngine::render(request) {
+        Command::Render(request) => match render_command(request) {
             Ok(outcome) => {
                 let mut stdout = std::io::stdout().lock();
                 write_render_outcome(&mut stdout, &outcome)
@@ -507,6 +673,37 @@ fn main() {
             },
             Err(error) => print_render_error(&error),
         },
+    }
+}
+
+fn render_command(request: RenderRequest) -> Result<RenderOutcome, RenderError> {
+    #[cfg(feature = "document-session")]
+    {
+        DocumentEngine::render(request)
+    }
+    #[cfg(all(not(feature = "document-session"), feature = "shell-oracle"))]
+    {
+        DocumentEngine::render_with_shell_oracle(request)
+    }
+    #[cfg(not(any(feature = "document-session", feature = "shell-oracle")))]
+    {
+        let _ = request;
+        unreachable!("the crate-level runtime selection error prevents this binary from running")
+    }
+}
+
+fn active_runtime_name() -> &'static str {
+    #[cfg(feature = "document-session")]
+    {
+        "document-session"
+    }
+    #[cfg(all(not(feature = "document-session"), feature = "shell-oracle"))]
+    {
+        "servoshell-oracle"
+    }
+    #[cfg(not(any(feature = "document-session", feature = "shell-oracle")))]
+    {
+        unreachable!("the crate-level runtime selection error prevents this binary from running")
     }
 }
 
@@ -518,8 +715,13 @@ fn write_render_outcome(
 }
 
 fn print_help() {
+    #[cfg(all(not(feature = "document-session"), feature = "shell-oracle"))]
     println!(
-        "Pliego — native document rendering on Servo\n\nUsage:\n  pliego render <document.html> --output <document.pdf> --artifacts <directory> [options]\n  pliego [options] <document.html>\n  pliego --version\n\nOptions:\n  --locale en-US|es-MX\n  --timezone UTC|PST8PDT\n  --page-size WIDTHxHEIGHT\n  --page-margins TOP,RIGHT,BOTTOM,LEFT\n  --allow-host-fonts          Opt in to observable system-font resolution\n  --allow-partial-scene       Retain diagnostic output for unsupported paint\n  --allow-http-root URL       Allow GET/HEAD below one explicit http(s) URL root\n  --virtual-resource URL=FILE Serve one exact URL from a host-provided file\n  --asset-manifest FILE       Verify and cache manifest-backed assets locally\n  --resource-timeout-ms MS    Bound controlled network connection time (1..60000)\n\nHost fonts, partial scenes, network, redirects, and asset caching are disabled by default. The shorthand form writes outputs to a temporary artifact directory. Page geometry is expressed in CSS pixels."
+        "NONPRODUCTION ORACLE BUILD — servoshell is enabled only for explicit parity diagnostics."
+    );
+    println!(
+        "Pliego — native document rendering on Servo\nRuntime: {}\n\nUsage:\n  pliego render <document.html> --output <document.pdf> --artifacts <directory> [options]\n  pliego [options] <document.html>\n  pliego --version\n\nOptions:\n  --locale en-US|es-MX\n  --timezone UTC|PST8PDT\n  --page-size WIDTHxHEIGHT\n  --page-margins TOP,RIGHT,BOTTOM,LEFT\n  --allow-host-fonts          Opt in to observable system-font resolution\n  --allow-partial-scene       Retain diagnostic output for unsupported paint\n  --allow-http-root URL       Allow GET/HEAD below one explicit http(s) URL root\n  --virtual-resource URL=FILE Serve one exact URL from a host-provided file\n  --asset-manifest FILE       Verify and cache manifest-backed assets locally\n  --resource-timeout-ms MS    Bound controlled network connection time (1..60000)\n\nHost fonts, partial scenes, network, redirects, and asset caching are disabled by default. The shorthand form writes outputs to a temporary artifact directory. Page geometry is expressed in CSS pixels.",
+        active_runtime_name()
     );
 }
 
@@ -602,7 +804,8 @@ struct PublicationTransaction {
     artifacts: SessionArtifacts,
     journal: PublicationJournal,
     proof: PathBuf,
-    userscripts: PathBuf,
+    #[cfg(feature = "shell-oracle")]
+    userscripts: Option<PathBuf>,
     document_pdf_path: PathBuf,
     environment_path: PathBuf,
     environment: serde_json::Value,
@@ -623,14 +826,54 @@ fn publication_recovery_required_message(state: &PublicationRecoveryState) -> St
     format!("publication transaction requires recovery before rendering: {state}")
 }
 
-#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+#[cfg(all(
+    feature = "document-session",
+    not(any(target_os = "android", target_env = "ohos"))
+))]
 fn begin_publication(
     request: &RenderRequest,
     resource_policy: &ResourcePolicy,
     render_id: &str,
     resolved_input: &Path,
 ) -> Result<PublicationStart, RenderError> {
+    begin_publication_for_runtime(
+        request,
+        resource_policy,
+        render_id,
+        resolved_input,
+        PublicationRuntimeIdentity::DocumentSession,
+    )
+}
+
+#[cfg(all(
+    feature = "shell-oracle",
+    not(any(target_os = "android", target_env = "ohos"))
+))]
+fn begin_shell_oracle_publication(
+    request: &RenderRequest,
+    resource_policy: &ResourcePolicy,
+    render_id: &str,
+    resolved_input: &Path,
+) -> Result<PublicationStart, RenderError> {
+    begin_publication_for_runtime(
+        request,
+        resource_policy,
+        render_id,
+        resolved_input,
+        PublicationRuntimeIdentity::ServoshellOracle,
+    )
+}
+
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+fn begin_publication_for_runtime(
+    request: &RenderRequest,
+    resource_policy: &ResourcePolicy,
+    render_id: &str,
+    resolved_input: &Path,
+    runtime: PublicationRuntimeIdentity,
+) -> Result<PublicationStart, RenderError> {
     let request_fingerprint = publication_request_fingerprint(
+        runtime,
         render_id,
         request.allow_partial_scene,
         &request.input,
@@ -854,18 +1097,25 @@ fn begin_publication(
             &error,
         )
     })?;
-    let userscripts = artifacts.directory().join("userscripts");
-    record_session_artifact(std::fs::create_dir_all(&userscripts))?;
-    record_session_artifact(std::fs::write(
-        userscripts.join("00-pliego-readiness.js"),
-        ReadinessPolicy::default().document_start_script(),
-    ))?;
+    #[cfg(feature = "shell-oracle")]
+    let userscripts = if runtime.uses_shell_oracle() {
+        let userscripts = artifacts.directory().join("userscripts");
+        record_session_artifact(std::fs::create_dir_all(&userscripts))?;
+        record_session_artifact(std::fs::write(
+            userscripts.join("00-pliego-readiness.js"),
+            ReadinessPolicy::default().document_start_script(),
+        ))?;
+        Some(userscripts)
+    } else {
+        None
+    };
     record_session_artifact(artifacts.record_state("started", None))?;
 
     Ok(PublicationStart::New(PublicationTransaction {
         artifacts,
         journal,
         proof,
+        #[cfg(feature = "shell-oracle")]
         userscripts,
         document_pdf_path,
         environment_path,
@@ -873,8 +1123,11 @@ fn begin_publication(
     }))
 }
 
-#[cfg(not(any(target_os = "android", target_env = "ohos")))]
-fn render(request: RenderRequest) -> Result<RenderOutcome, RenderError> {
+#[cfg(all(
+    feature = "shell-oracle",
+    not(any(target_os = "android", target_env = "ohos"))
+))]
+fn render_with_shell_oracle(request: RenderRequest) -> Result<RenderOutcome, RenderError> {
     layout::pages::configure_for_process(request.page).map_err(|_| {
         RenderError::request(
             "LAYOUT_CONFIGURATION_FAILED",
@@ -906,11 +1159,15 @@ fn render(request: RenderRequest) -> Result<RenderOutcome, RenderError> {
             "cannot convert document path to a file URL",
         )
     })?;
-    let publication =
-        match begin_publication(&request, &resource_policy, &render_id, document.path())? {
-            PublicationStart::New(publication) => publication,
-            PublicationStart::Recovered(outcome) => return Ok(outcome),
-        };
+    let publication = match begin_shell_oracle_publication(
+        &request,
+        &resource_policy,
+        &render_id,
+        document.path(),
+    )? {
+        PublicationStart::New(publication) => publication,
+        PublicationStart::Recovered(outcome) => return Ok(outcome),
+    };
     let PublicationTransaction {
         artifacts,
         journal,
@@ -920,6 +1177,7 @@ fn render(request: RenderRequest) -> Result<RenderOutcome, RenderError> {
         environment_path,
         mut environment,
     } = publication;
+    let userscripts = userscripts.expect("shell oracle publication must prepare its userscripts");
     let record_session_artifact = |result| record_artifact(&artifacts, &document_pdf_path, result);
 
     let servo_args = [
@@ -1250,7 +1508,7 @@ fn render(request: RenderRequest) -> Result<RenderOutcome, RenderError> {
             artifacts,
             journal,
             proof,
-            userscripts,
+            userscripts: Some(userscripts),
             document_pdf_path,
             environment_path,
             environment,
@@ -1288,7 +1546,8 @@ fn publish_captured_document(
         artifacts,
         journal,
         proof,
-        userscripts: _,
+        #[cfg(feature = "shell-oracle")]
+            userscripts: _,
         document_pdf_path,
         environment_path,
         mut environment,
@@ -1641,8 +1900,7 @@ enum PreparedDocumentSessionStart {
     feature = "document-session",
     not(any(target_os = "android", target_env = "ohos"))
 ))]
-#[allow(dead_code)]
-fn render_with_document_session(request: RenderRequest) -> Result<RenderOutcome, RenderError> {
+fn render(request: RenderRequest) -> Result<RenderOutcome, RenderError> {
     let prepared = match prepare_document_session_render(request)? {
         PreparedDocumentSessionStart::New(prepared) => prepared,
         PreparedDocumentSessionStart::Recovered(outcome) => return Ok(outcome),
@@ -2520,9 +2778,11 @@ fn stable_render_id(
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
 /// Bind every `RenderRequest` identity field before reusing a sealed outcome.
 ///
-/// `render_id` binds the input bytes, environment, page, semantic resource content, and
-/// `allow_host_fonts`. The requested and canonical input paths are bound separately so a
-/// recovered summary cannot report a different request spelling. The captured manifest path is
+/// `runtime` prevents a transaction from crossing between the production document session and
+/// the explicit shell oracle. `render_id` binds the input bytes, environment, page, semantic
+/// resource content, and `allow_host_fonts`. The requested and canonical input paths are bound
+/// separately so a recovered summary cannot report a different request spelling. The captured
+/// manifest path is
 /// also bound because the sealed resource-policy artifact names it even when two manifests have
 /// identical asset content. `allow_partial_scene` is the remaining render-policy field.
 /// `explicit_paths` is bound by the publication plan's artifact root, requested output, canonical
@@ -2530,6 +2790,7 @@ fn stable_render_id(
 /// sealed-summary representation must be covered here, by `render_id`, or by the immutable
 /// publication plan before recovery may reuse an outcome.
 fn publication_request_fingerprint(
+    runtime: PublicationRuntimeIdentity,
     render_id: &str,
     allow_partial_scene: bool,
     requested_input: &Path,
@@ -2538,6 +2799,8 @@ fn publication_request_fingerprint(
 ) -> String {
     let mut hasher = Sha256::new();
     update_hash_field(&mut hasher, PUBLICATION_REQUEST_SCHEMA_MARKER);
+    update_hash_field(&mut hasher, b"runtime");
+    update_hash_field(&mut hasher, runtime.fingerprint_field());
     update_hash_field(&mut hasher, b"render-id");
     update_hash_field(&mut hasher, render_id.as_bytes());
     update_hash_field(&mut hasher, b"requested-input");
@@ -2694,7 +2957,10 @@ fn create_session_artifacts(base: PathBuf, render_id: &str) -> std::io::Result<S
     ))
 }
 
-#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+#[cfg(all(
+    feature = "shell-oracle",
+    not(any(target_os = "android", target_env = "ohos"))
+))]
 #[derive(Debug, Default, PartialEq)]
 struct PendingResource {
     urls: Vec<String>,
@@ -2703,7 +2969,10 @@ struct PendingResource {
     content_type: Option<String>,
 }
 
-#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+#[cfg(all(
+    feature = "shell-oracle",
+    not(any(target_os = "android", target_env = "ohos"))
+))]
 impl PendingResource {
     fn observe_url(&mut self, url: String) -> bool {
         if self.urls.iter().any(|observed| observed == &url) {
@@ -2714,7 +2983,10 @@ impl PendingResource {
     }
 }
 
-#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+#[cfg(all(
+    feature = "shell-oracle",
+    not(any(target_os = "android", target_env = "ohos"))
+))]
 #[derive(Debug, PartialEq)]
 struct CompletedResource {
     urls: Vec<String>,
@@ -2725,7 +2997,10 @@ struct CompletedResource {
     body: Vec<u8>,
 }
 
-#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+#[cfg(all(
+    feature = "shell-oracle",
+    not(any(target_os = "android", target_env = "ohos"))
+))]
 fn retain_controlled_resource(
     resources: &mut BTreeMap<(String, String), ControlledResource>,
     resident_bytes: &Cell<u64>,
@@ -2742,11 +3017,13 @@ fn retain_controlled_resource(
 #[derive(Debug, Default, PartialEq)]
 struct ResourceCapture {
     url_to_resource: BTreeMap<String, String>,
+    #[cfg(feature = "shell-oracle")]
     failure: Option<ResourcePolicyFailure>,
 }
 
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
 impl ResourceCapture {
+    #[cfg(feature = "shell-oracle")]
     fn retain_completed(
         &mut self,
         completed: &CompletedResource,
@@ -2770,7 +3047,10 @@ impl ResourceCapture {
     }
 }
 
-#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+#[cfg(all(
+    feature = "shell-oracle",
+    not(any(target_os = "android", target_env = "ohos"))
+))]
 #[derive(Debug, PartialEq)]
 struct ResourceMapConflict {
     url: String,
@@ -2778,7 +3058,10 @@ struct ResourceMapConflict {
     second: String,
 }
 
-#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+#[cfg(all(
+    feature = "shell-oracle",
+    not(any(target_os = "android", target_env = "ohos"))
+))]
 impl std::fmt::Display for ResourceMapConflict {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -2789,10 +3072,16 @@ impl std::fmt::Display for ResourceMapConflict {
     }
 }
 
-#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+#[cfg(all(
+    feature = "shell-oracle",
+    not(any(target_os = "android", target_env = "ohos"))
+))]
 impl std::error::Error for ResourceMapConflict {}
 
-#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+#[cfg(all(
+    any(feature = "shell-oracle", test),
+    not(any(target_os = "android", target_env = "ohos"))
+))]
 fn resolve_scene_resource(
     artifacts: &SessionArtifacts,
     capture: &ResourceCapture,
@@ -2818,7 +3107,10 @@ fn resolve_scene_resource(
     Ok(Some(resource))
 }
 
-#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+#[cfg(all(
+    any(feature = "shell-oracle", test),
+    not(any(target_os = "android", target_env = "ohos"))
+))]
 fn decode_data_url(url: &str) -> Result<Option<Vec<u8>>, String> {
     let Some(scheme) = url.get(..5) else {
         return Ok(None);
@@ -2844,7 +3136,10 @@ fn decode_data_url(url: &str) -> Result<Option<Vec<u8>>, String> {
     }
 }
 
-#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+#[cfg(all(
+    any(feature = "shell-oracle", test),
+    not(any(target_os = "android", target_env = "ohos"))
+))]
 fn percent_decode_data(value: &str) -> Result<Vec<u8>, String> {
     let input = value.as_bytes();
     let mut output = Vec::with_capacity(input.len());
@@ -2869,7 +3164,10 @@ fn percent_decode_data(value: &str) -> Result<Vec<u8>, String> {
     Ok(output)
 }
 
-#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+#[cfg(all(
+    any(feature = "shell-oracle", test),
+    not(any(target_os = "android", target_env = "ohos"))
+))]
 fn hex_value(byte: u8) -> Option<u8> {
     match byte {
         b'0'..=b'9' => Some(byte - b'0'),
@@ -2879,7 +3177,10 @@ fn hex_value(byte: u8) -> Option<u8> {
     }
 }
 
-#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+#[cfg(all(
+    feature = "shell-oracle",
+    not(any(target_os = "android", target_env = "ohos"))
+))]
 fn record_resources(
     artifacts: &SessionArtifacts,
     resources: Vec<servoshell::ResourceEvent>,
@@ -3043,7 +3344,10 @@ fn record_resources(
     Ok(capture)
 }
 
-#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+#[cfg(all(
+    feature = "shell-oracle",
+    not(any(target_os = "android", target_env = "ohos"))
+))]
 fn incomplete_resource_failure(
     pending: HashMap<String, PendingResource>,
     capture: &ResourceCapture,
@@ -3124,7 +3428,10 @@ fn incomplete_resource_failure(
         })
 }
 
-#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+#[cfg(all(
+    feature = "shell-oracle",
+    not(any(target_os = "android", target_env = "ohos"))
+))]
 fn complete_resource(
     pending: &mut HashMap<String, PendingResource>,
     request_id: &str,
@@ -3802,8 +4109,22 @@ fn fail_session_with_readiness_policy(
     error
 }
 
-#[cfg(any(target_os = "android", target_env = "ohos"))]
+#[cfg(all(
+    feature = "document-session",
+    any(target_os = "android", target_env = "ohos")
+))]
 fn render(_request: RenderRequest) -> Result<RenderOutcome, RenderError> {
+    Err(RenderError::request(
+        "UNSUPPORTED_TARGET",
+        "the command-line renderer is only available on desktop targets",
+    ))
+}
+
+#[cfg(all(
+    feature = "shell-oracle",
+    any(target_os = "android", target_env = "ohos")
+))]
+fn render_with_shell_oracle(_request: RenderRequest) -> Result<RenderOutcome, RenderError> {
     Err(RenderError::request(
         "UNSUPPORTED_TARGET",
         "the command-line renderer is only available on desktop targets",
@@ -3812,7 +4133,9 @@ fn render(_request: RenderRequest) -> Result<RenderOutcome, RenderError> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "shell-oracle")]
     use std::cell::Cell;
+    #[cfg(feature = "shell-oracle")]
     use std::collections::{BTreeMap, HashMap};
     use std::ffi::OsString;
     use std::fs;
@@ -3830,25 +4153,37 @@ mod tests {
         Color, DocumentScene, Glyph, Operation, OperationMeta, Page, Rect, Size, Utf8Range,
     };
 
+    #[cfg(all(
+        feature = "document-session",
+        feature = "shell-oracle",
+        not(any(target_os = "android", target_env = "ohos"))
+    ))]
+    use super::begin_shell_oracle_publication;
     #[cfg(feature = "document-session")]
     use super::{
-        CapturedPublication, ExpectedInputIdentity, finish_document_session_render,
+        CapturedPublication, ExpectedInputIdentity, RenderOutcome, finish_document_session_render,
         publish_captured_document,
     };
     use super::{
-        Command, ControlledResource, DEFAULT_LOCALE, DEFAULT_TIMEZONE, ExplicitRenderPaths,
-        PageDefinition, PageMargins, PendingResource, RenderEnvironment, RenderError,
-        RenderOutcome, RenderRequest, ResourceCapture, ResourcePolicy, ResourcePolicyConfig,
-        ResourcePolicyDecision, ResourcePolicyFailure, ResourceRequest, SERVO_BUILD_VERSION,
-        WebResourceLoadRole, classify_controlled_http_status, cli_render_error, complete_resource,
-        create_session_artifacts, decide_resource_policy, default_page, first_fatal_policy_failure,
-        incomplete_resource_failure, page_artifact, parse_args, persist_scene_capture,
-        resolve_scene_resource, retain_controlled_resource, set_document_pdf_environment,
-        sha256_hex, stable_render_id,
+        Command, DEFAULT_LOCALE, DEFAULT_TIMEZONE, ExplicitRenderPaths, PageDefinition,
+        PageMargins, RenderEnvironment, RenderError, RenderRequest, ResourceCapture,
+        ResourcePolicy, ResourcePolicyConfig, ResourcePolicyFailure, ResourceRequest,
+        WebResourceLoadRole, classify_controlled_http_status, cli_render_error,
+        create_session_artifacts, default_page, page_artifact, parse_args, persist_scene_capture,
+        resolve_scene_resource, set_document_pdf_environment, sha256_hex, stable_render_id,
     };
-    #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+    #[cfg(feature = "shell-oracle")]
     use super::{
-        PublicationStart, PublicationTransaction, begin_publication,
+        PendingResource, ResourcePolicyDecision, SERVO_BUILD_VERSION, complete_resource,
+        decide_resource_policy, first_fatal_policy_failure, incomplete_resource_failure,
+        retain_controlled_resource,
+    };
+    #[cfg(all(
+        feature = "document-session",
+        not(any(target_os = "android", target_env = "ohos"))
+    ))]
+    use super::{
+        PublicationRuntimeIdentity, PublicationStart, PublicationTransaction, begin_publication,
         publication_recovery_required_message, publication_request_fingerprint, render,
         write_render_outcome,
     };
@@ -3856,10 +4191,15 @@ mod tests {
     use crate::document_session::{DocumentCaptureOutcome, SessionError};
     #[cfg(feature = "document-session")]
     use crate::owned_resource_store::OwnedResourceStore;
+    #[cfg(any(feature = "document-session", feature = "shell-oracle"))]
+    use crate::resource_policy::ControlledResource;
     #[cfg(feature = "document-session")]
     use crate::resource_policy::{ResourceAccounting, ResourceEvidence, ResourceSource};
     use crate::session::SessionArtifacts;
-    #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+    #[cfg(all(
+        feature = "document-session",
+        not(any(target_os = "android", target_env = "ohos"))
+    ))]
     use crate::session::{LocalDocument, PublicationRecoveryState};
 
     #[cfg(feature = "document-session")]
@@ -3877,7 +4217,10 @@ mod tests {
         "/../../components/fonts/tests/support/dejavu-fonts-ttf-2.37/ttf/DejaVuSans.ttf"
     ));
 
-    #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+    #[cfg(all(
+        feature = "document-session",
+        not(any(target_os = "android", target_env = "ohos"))
+    ))]
     fn expect_new_publication(start: PublicationStart) -> PublicationTransaction {
         match start {
             PublicationStart::New(publication) => publication,
@@ -3885,7 +4228,10 @@ mod tests {
         }
     }
 
-    #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+    #[cfg(all(
+        feature = "document-session",
+        not(any(target_os = "android", target_env = "ohos"))
+    ))]
     fn recovery_process_request(root: &std::path::Path) -> RenderRequest {
         RenderRequest {
             input: PathBuf::from("input.html"),
@@ -3901,7 +4247,10 @@ mod tests {
         }
     }
 
-    #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+    #[cfg(all(
+        feature = "document-session",
+        not(any(target_os = "android", target_env = "ohos"))
+    ))]
     #[test]
     fn publication_recovery_error_uses_stable_non_sensitive_state_labels() {
         assert_eq!(
@@ -3925,7 +4274,10 @@ mod tests {
         assert!(!message.contains(sensitive_bytes));
     }
 
-    #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+    #[cfg(all(
+        feature = "document-session",
+        not(any(target_os = "android", target_env = "ohos"))
+    ))]
     fn snapshot_test_tree(root: &std::path::Path) -> Vec<(String, Vec<u8>)> {
         fn visit(
             root: &std::path::Path,
@@ -3959,7 +4311,10 @@ mod tests {
         snapshot
     }
 
-    #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+    #[cfg(all(
+        feature = "document-session",
+        not(any(target_os = "android", target_env = "ohos"))
+    ))]
     struct PreservedRecoveryTransaction {
         artifact_path: PathBuf,
         staging: PathBuf,
@@ -3968,7 +4323,10 @@ mod tests {
         transaction_before: Vec<(String, Vec<u8>)>,
     }
 
-    #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+    #[cfg(all(
+        feature = "document-session",
+        not(any(target_os = "android", target_env = "ohos"))
+    ))]
     fn write_equivalent_asset_manifest(directory: &std::path::Path) -> PathBuf {
         let asset = b"body { color: #123; }";
         fs::create_dir(directory).unwrap();
@@ -3991,7 +4349,10 @@ mod tests {
         manifest.canonicalize().unwrap()
     }
 
-    #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+    #[cfg(all(
+        feature = "document-session",
+        not(any(target_os = "android", target_env = "ohos"))
+    ))]
     fn recovery_request_with_manifest(
         root: &std::path::Path,
         manifest: &std::path::Path,
@@ -4001,7 +4362,10 @@ mod tests {
         request
     }
 
-    #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+    #[cfg(all(
+        feature = "document-session",
+        not(any(target_os = "android", target_env = "ohos"))
+    ))]
     fn preserve_recovery_transaction(
         request: &RenderRequest,
         resource_policy: &ResourcePolicy,
@@ -4056,7 +4420,10 @@ mod tests {
         }
     }
 
-    #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+    #[cfg(all(
+        feature = "document-session",
+        not(any(target_os = "android", target_env = "ohos"))
+    ))]
     fn assert_recovery_identity_rejected_without_mutation(
         fixture: &PreservedRecoveryTransaction,
         request: &RenderRequest,
@@ -4077,7 +4444,10 @@ mod tests {
         assert!(!fixture.document_pdf_path.exists());
     }
 
-    #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+    #[cfg(all(
+        feature = "document-session",
+        not(any(target_os = "android", target_env = "ohos"))
+    ))]
     #[test]
     fn recovery_rejects_equivalent_assets_from_a_different_manifest_without_mutation() {
         let root = temporary_artifacts("pliego-manifest-recovery-identity");
@@ -4122,6 +4492,7 @@ mod tests {
         assert_eq!(first_render_id, second_render_id);
         assert_ne!(
             publication_request_fingerprint(
+                PublicationRuntimeIdentity::DocumentSession,
                 &first_render_id,
                 first_request.allow_partial_scene,
                 &first_request.input,
@@ -4129,6 +4500,7 @@ mod tests {
                 first_policy.summary_asset_manifest_path(),
             ),
             publication_request_fingerprint(
+                PublicationRuntimeIdentity::DocumentSession,
                 &second_render_id,
                 second_request.allow_partial_scene,
                 &second_request.input,
@@ -4161,7 +4533,11 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
-    #[cfg(all(unix, not(any(target_os = "android", target_env = "ohos"))))]
+    #[cfg(all(
+        feature = "document-session",
+        unix,
+        not(any(target_os = "android", target_env = "ohos"))
+    ))]
     #[test]
     fn recovery_identity_uses_the_manifest_captured_before_symlink_retarget() {
         use std::os::unix::fs::symlink;
@@ -4210,6 +4586,7 @@ mod tests {
         assert_eq!(first_render_id, second_render_id);
         assert_ne!(
             publication_request_fingerprint(
+                PublicationRuntimeIdentity::DocumentSession,
                 &first_render_id,
                 first_request.allow_partial_scene,
                 &first_request.input,
@@ -4217,6 +4594,7 @@ mod tests {
                 first_policy.summary_asset_manifest_path(),
             ),
             publication_request_fingerprint(
+                PublicationRuntimeIdentity::DocumentSession,
                 &second_render_id,
                 second_request.allow_partial_scene,
                 &second_request.input,
@@ -4242,7 +4620,10 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
-    #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+    #[cfg(all(
+        feature = "document-session",
+        not(any(target_os = "android", target_env = "ohos"))
+    ))]
     #[test]
     fn fresh_process_cli_path_recovers_prepared_transaction_with_exact_stdout() {
         const CHILD_MARKER: &str = "PLIEGO_TEST_PUBLICATION_RECOVERY_CHILD";
@@ -4350,6 +4731,7 @@ mod tests {
         assert_eq!(same_render_id, render_id);
         assert_ne!(
             publication_request_fingerprint(
+                PublicationRuntimeIdentity::DocumentSession,
                 &render_id,
                 request.allow_partial_scene,
                 &request.input,
@@ -4357,6 +4739,7 @@ mod tests {
                 resource_policy.summary_asset_manifest_path(),
             ),
             publication_request_fingerprint(
+                PublicationRuntimeIdentity::DocumentSession,
                 &same_render_id,
                 other_spelling_request.allow_partial_scene,
                 &other_spelling_request.input,
@@ -4394,6 +4777,7 @@ mod tests {
         assert_eq!(other_render_id, render_id);
         assert_ne!(
             publication_request_fingerprint(
+                PublicationRuntimeIdentity::DocumentSession,
                 &render_id,
                 request.allow_partial_scene,
                 &request.input,
@@ -4401,6 +4785,7 @@ mod tests {
                 resource_policy.summary_asset_manifest_path(),
             ),
             publication_request_fingerprint(
+                PublicationRuntimeIdentity::DocumentSession,
                 &other_render_id,
                 other_input_request.allow_partial_scene,
                 &other_input_request.input,
@@ -4466,6 +4851,158 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    #[cfg(all(
+        feature = "document-session",
+        feature = "shell-oracle",
+        not(any(target_os = "android", target_env = "ohos"))
+    ))]
+    #[test]
+    fn cross_runtime_publication_recovery_is_rejected_without_mutation() {
+        fn begin_for_runtime(
+            runtime: PublicationRuntimeIdentity,
+            request: &RenderRequest,
+            resource_policy: &ResourcePolicy,
+            render_id: &str,
+            resolved_input: &std::path::Path,
+        ) -> Result<PublicationStart, RenderError> {
+            match runtime {
+                PublicationRuntimeIdentity::DocumentSession => {
+                    begin_publication(request, resource_policy, render_id, resolved_input)
+                },
+                PublicationRuntimeIdentity::ServoshellOracle => begin_shell_oracle_publication(
+                    request,
+                    resource_policy,
+                    render_id,
+                    resolved_input,
+                ),
+            }
+        }
+
+        for (source_runtime, recovery_runtime, label) in [
+            (
+                PublicationRuntimeIdentity::DocumentSession,
+                PublicationRuntimeIdentity::ServoshellOracle,
+                "oracle-after-direct",
+            ),
+            (
+                PublicationRuntimeIdentity::ServoshellOracle,
+                PublicationRuntimeIdentity::DocumentSession,
+                "direct-after-oracle",
+            ),
+        ] {
+            let root = temporary_artifacts(&format!("pliego-cross-runtime-{label}"));
+            fs::create_dir(&root).unwrap();
+            let input = b"<!doctype html><title>Cross runtime recovery</title>";
+            fs::write(root.join("input.html"), input).unwrap();
+            let request = recovery_process_request(&root);
+            let document = LocalDocument::resolve(&root, "input.html").unwrap();
+            let resource_policy = ResourcePolicy::resolve(&request.resources, document.root());
+            let render_id = stable_render_id(
+                input,
+                request.environment,
+                request.page,
+                &resource_policy,
+                request.allow_host_fonts,
+            );
+            assert_ne!(
+                publication_request_fingerprint(
+                    source_runtime,
+                    &render_id,
+                    request.allow_partial_scene,
+                    &request.input,
+                    document.path(),
+                    resource_policy.summary_asset_manifest_path(),
+                ),
+                publication_request_fingerprint(
+                    recovery_runtime,
+                    &render_id,
+                    request.allow_partial_scene,
+                    &request.input,
+                    document.path(),
+                    resource_policy.summary_asset_manifest_path(),
+                ),
+            );
+
+            let PublicationTransaction {
+                artifacts,
+                journal,
+                document_pdf_path,
+                ..
+            } = expect_new_publication(
+                begin_for_runtime(
+                    source_runtime,
+                    &request,
+                    &resource_policy,
+                    &render_id,
+                    document.path(),
+                )
+                .unwrap(),
+            );
+            let pdf_bytes = format!("%PDF-cross-runtime-{label}").into_bytes();
+            artifacts.write_document_pdf(&pdf_bytes).unwrap();
+            artifacts.record_state("rendered", None).unwrap();
+            let prepared = artifacts.prepare_document_pdf(&document_pdf_path).unwrap();
+            let bundle = artifacts.write_prepared_bundle(&prepared).unwrap();
+            let outcome = RenderOutcome::from_summary(serde_json::json!({
+                "artifacts": artifacts.directory().to_string_lossy(),
+                "bundle": bundle.path().to_string_lossy(),
+                "document_pdf": document_pdf_path.to_string_lossy(),
+                "input": request.input.to_string_lossy(),
+                "render_id": render_id,
+                "status": "rendered",
+            }))
+            .unwrap();
+            journal
+                .record_prepared(&prepared, &bundle, &outcome.cli_bytes)
+                .unwrap();
+            let artifact_root = artifacts.directory().to_owned();
+            let publication_root = artifact_root.join("publication");
+            let planned_path = publication_root.join("plan.json");
+            let prepared_path = publication_root.join("prepared.json");
+            let prepared_receipt: serde_json::Value =
+                serde_json::from_slice(&fs::read(&prepared_path).unwrap()).unwrap();
+            let staging = PathBuf::from(prepared_receipt["staging"]["path"].as_str().unwrap());
+            prepared.preserve_for_recovery();
+            bundle.preserve();
+            drop(journal);
+            drop(artifacts);
+
+            let artifact_tree_before = snapshot_test_tree(&artifact_root);
+            let staging_before = fs::read(&staging).unwrap();
+            let output_before = document_pdf_path
+                .try_exists()
+                .unwrap()
+                .then(|| fs::read(&document_pdf_path).unwrap());
+            let planned_before = fs::read(&planned_path).unwrap();
+            let prepared_before = fs::read(&prepared_path).unwrap();
+
+            let error = match begin_for_runtime(
+                recovery_runtime,
+                &request,
+                &resource_policy,
+                &render_id,
+                document.path(),
+            ) {
+                Ok(_) => panic!("{label} must not recover a transaction from another runtime"),
+                Err(error) => error,
+            };
+            assert_eq!(error.code, "PUBLICATION_RECOVERY_FAILED");
+            assert_eq!(snapshot_test_tree(&artifact_root), artifact_tree_before);
+            assert_eq!(fs::read(&staging).unwrap(), staging_before);
+            assert_eq!(
+                document_pdf_path
+                    .try_exists()
+                    .unwrap()
+                    .then(|| fs::read(&document_pdf_path).unwrap()),
+                output_before,
+            );
+            assert_eq!(fs::read(&planned_path).unwrap(), planned_before);
+            assert_eq!(fs::read(&prepared_path).unwrap(), prepared_before);
+
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
     #[test]
     fn accepts_only_help_version_or_one_document() {
         assert_eq!(parse_args(vec![]).unwrap(), Command::Help);
@@ -4497,7 +5034,30 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "shell")]
+    #[test]
+    fn runtime_selection_is_explicit_and_direct_wins_combined_builds() {
+        #[cfg(feature = "document-session")]
+        assert_eq!(super::active_runtime_name(), "document-session");
+        #[cfg(all(not(feature = "document-session"), feature = "shell-oracle"))]
+        assert_eq!(super::active_runtime_name(), "servoshell-oracle");
+    }
+
+    #[cfg(all(
+        target_os = "windows",
+        target_env = "msvc",
+        feature = "document-session"
+    ))]
+    #[test]
+    fn direct_windows_binary_owns_surfman_gpu_selection_symbols() {
+        let nvidia = unsafe { std::ptr::addr_of!(super::NvOptimusEnablement).read_volatile() };
+        let amd = unsafe {
+            std::ptr::addr_of!(super::AmdPowerXpressRequestHighPerformance).read_volatile()
+        };
+        assert_eq!(nvidia, 1);
+        assert_eq!(amd, 1);
+    }
+
+    #[cfg(feature = "shell-oracle")]
     #[test]
     fn pliego_owned_servo_build_identity_matches_the_shell_oracle() {
         assert_eq!(SERVO_BUILD_VERSION, servoshell::VERSION);
@@ -4681,7 +5241,7 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(all(feature = "document-session", unix))]
     #[test]
     fn publication_request_fingerprint_is_lossless_for_non_utf8_paths() {
         use std::os::unix::ffi::OsStringExt;
@@ -4701,6 +5261,7 @@ mod tests {
 
         assert_ne!(
             publication_request_fingerprint(
+                PublicationRuntimeIdentity::DocumentSession,
                 "sha256:same-content",
                 false,
                 &first_requested,
@@ -4708,6 +5269,7 @@ mod tests {
                 None,
             ),
             publication_request_fingerprint(
+                PublicationRuntimeIdentity::DocumentSession,
                 "sha256:same-content",
                 false,
                 &second_requested,
@@ -4717,6 +5279,7 @@ mod tests {
         );
         assert_ne!(
             publication_request_fingerprint(
+                PublicationRuntimeIdentity::DocumentSession,
                 "sha256:same-content",
                 false,
                 &first_requested,
@@ -4724,6 +5287,7 @@ mod tests {
                 None,
             ),
             publication_request_fingerprint(
+                PublicationRuntimeIdentity::DocumentSession,
                 "sha256:same-content",
                 false,
                 &first_requested,
@@ -4733,6 +5297,7 @@ mod tests {
         );
         assert_ne!(
             publication_request_fingerprint(
+                PublicationRuntimeIdentity::DocumentSession,
                 "sha256:same-content",
                 false,
                 &first_requested,
@@ -4740,6 +5305,7 @@ mod tests {
                 Some(&first),
             ),
             publication_request_fingerprint(
+                PublicationRuntimeIdentity::DocumentSession,
                 "sha256:same-content",
                 false,
                 &first_requested,
@@ -4837,6 +5403,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "shell-oracle")]
     #[test]
     fn web_resource_load_roles_default_and_round_trip_through_serialization() {
         let legacy: servoshell::WebResourceRequest = serde_json::from_value(serde_json::json!({
@@ -4859,6 +5426,7 @@ mod tests {
         assert!(round_trip.is_redirect);
     }
 
+    #[cfg(feature = "shell-oracle")]
     #[test]
     fn legacy_resource_path_ignores_metadata_denials_but_not_budget_failures() {
         let request = ResourceRequest {
@@ -4903,6 +5471,7 @@ mod tests {
         assert!(first_fatal_policy_failure(std::slice::from_ref(&malformed_content)).is_some());
     }
 
+    #[cfg(feature = "shell-oracle")]
     #[test]
     fn legacy_incomplete_capture_does_not_refatalize_a_metadata_cancellation() {
         let url = "file:///document/escape.css";
@@ -4975,6 +5544,7 @@ mod tests {
         assert!(content_failure.fatal);
     }
 
+    #[cfg(feature = "shell-oracle")]
     #[test]
     fn resource_policy_is_rooted_typed_and_can_synthesize_host_resources() {
         fn request_with_method(
@@ -5297,6 +5867,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "shell-oracle")]
     #[test]
     fn completes_a_resource_and_hashes_exact_bytes() {
         let mut resource = PendingResource {
@@ -5352,6 +5923,7 @@ mod tests {
         assert_eq!(capture.url_to_resource.len(), 2);
     }
 
+    #[cfg(feature = "shell-oracle")]
     #[test]
     fn retains_synthesized_resource_bytes_and_rejects_changes() {
         let request: servoshell::WebResourceRequest = serde_json::from_value(serde_json::json!({
@@ -5394,6 +5966,7 @@ mod tests {
         assert_eq!(resources.get(&key), Some(&original));
     }
 
+    #[cfg(feature = "shell-oracle")]
     #[test]
     fn represents_a_successful_response_without_a_body_as_zero_bytes() {
         let mut resource = PendingResource {
@@ -5870,6 +6443,7 @@ mod tests {
         fs::remove_dir_all(directory).unwrap();
     }
 
+    #[cfg(feature = "shell-oracle")]
     #[test]
     fn legacy_shell_failure_environment_keeps_the_resolved_input_hash() {
         let directory = temporary_artifacts("pliego-shell-failure-input-hash");
@@ -6985,6 +7559,21 @@ mod tests {
         }
     }
 
+    #[cfg(all(feature = "document-session", feature = "shell-oracle"))]
+    #[test]
+    fn combined_direct_publication_does_not_prepare_shell_userscripts() {
+        let fixture = direct_publication_fixture(
+            "pliego-combined-direct-publication",
+            b"<!doctype html><title>Combined direct</title>",
+        );
+        assert!(fixture.publication.userscripts.is_none());
+        assert!(!fixture.root.join("artifacts/userscripts").exists());
+
+        let root = fixture.root.clone();
+        drop(fixture);
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[cfg(feature = "document-session")]
     #[test]
     fn shorthand_publication_keeps_the_owned_pdf_inside_its_artifact_bundle() {
@@ -7061,6 +7650,7 @@ mod tests {
         assert_eq!(outcome.cli_bytes, sealed_cli_bytes);
 
         let request_fingerprint = publication_request_fingerprint(
+            PublicationRuntimeIdentity::DocumentSession,
             &render_id,
             request.allow_partial_scene,
             &request.input,

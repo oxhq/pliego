@@ -5,6 +5,7 @@ members = [
     "components/xpath",
     "ffi/capi",
     "ports/pliego",
+    "ports/pliego-core-benchmark",
     "ports/servoshell",
     "tests/capi",
     "tests/unit/*",
@@ -298,6 +299,8 @@ zeroize = "1.8"
 ############################################################################################
 ## Workspace-local dependencies
 ############################################################################################
+pliego = { version = "=0.1.1", path = "ports/pliego", default-features = false }
+
 # All local path dependencies in the servo workspace, that use the workspace version, should
 # be listed here, between the `Begin` and `End` comments, so that we can easily find and
 # update the version requirements when bumping the workspace version.
