@@ -6629,6 +6629,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "pliego-core-benchmark"
+version = "0.1.1"
+dependencies = [
+ "criterion",
+ "flate2",
+ "pliego",
+ "sha2 0.11.0",
+ "ttf-parser",
+]
+
+[[package]]
 name = "plotters"
 version = "0.3.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"

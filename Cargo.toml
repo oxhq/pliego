@@ -5,6 +5,7 @@ members = [
     "components/xpath",
     "ffi/capi",
     "ports/pliego",
+    "ports/pliego-core-benchmark",
     "ports/servoshell",
     "tests/capi",
     "tests/unit/*",
