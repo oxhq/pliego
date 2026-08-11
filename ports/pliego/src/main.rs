@@ -102,7 +102,7 @@ const DEFAULT_PAGE_HEIGHT_CSS_PX: f32 = 1122.5197;
 const DEFAULT_PAGE_MARGIN_VERTICAL_CSS_PX: f32 = 45.3543;
 const DEFAULT_PAGE_MARGIN_HORIZONTAL_CSS_PX: f32 = 60.4724;
 const RENDER_ID_SCHEMA_MARKER: &[u8] = b"pliego.render-id.v1";
-const PUBLICATION_REQUEST_SCHEMA_MARKER: &[u8] = b"pliego.publication-request.v1";
+const PUBLICATION_REQUEST_SCHEMA_MARKER: &[u8] = b"pliego.publication-request.v2";
 const RESOLVED_INPUT_HASH_SCHEMA_MARKER: &[u8] = b"pliego.resolved-input.v1";
 
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
@@ -609,14 +609,28 @@ enum PublicationStart {
 }
 
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+fn publication_recovery_required_message(state: &PublicationRecoveryState) -> String {
+    let state = match state {
+        PublicationRecoveryState::Planned => "planned",
+        PublicationRecoveryState::Committed { .. } => "committed",
+    };
+    format!("publication transaction requires recovery before rendering: {state}")
+}
+
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
 fn begin_publication(
     request: &RenderRequest,
     resource_policy: &ResourcePolicy,
     render_id: &str,
     resolved_input: &Path,
 ) -> Result<PublicationStart, RenderError> {
-    let request_fingerprint =
-        publication_request_fingerprint(render_id, request.allow_partial_scene, resolved_input);
+    let request_fingerprint = publication_request_fingerprint(
+        render_id,
+        request.allow_partial_scene,
+        &request.input,
+        resolved_input,
+        resource_policy.summary_asset_manifest_path(),
+    );
     let (artifacts, resuming) = if let Some(paths) = &request.explicit_paths {
         match SessionArtifacts::create_with_render_id(&paths.artifacts, render_id) {
             Ok(artifacts) => (artifacts, false),
@@ -823,9 +837,7 @@ fn begin_publication(
             &document_pdf_path,
             render_id,
             "PUBLICATION_RECOVERY_REQUIRED",
-            format!(
-                "publication transaction requires recovery before rendering: {recovery_state:?}"
-            ),
+            publication_recovery_required_message(&recovery_state),
         ));
     }
     apply_timezone(request.environment.timezone).map_err(|error| {
@@ -2500,15 +2512,41 @@ fn stable_render_id(
 }
 
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+/// Bind every `RenderRequest` identity field before reusing a sealed outcome.
+///
+/// `render_id` binds the input bytes, environment, page, semantic resource content, and
+/// `allow_host_fonts`. The requested and canonical input paths are bound separately so a
+/// recovered summary cannot report a different request spelling. The captured manifest path is
+/// also bound because the sealed resource-policy artifact names it even when two manifests have
+/// identical asset content. `allow_partial_scene` is the remaining render-policy field.
+/// `explicit_paths` is bound by the publication plan's artifact root, requested output, canonical
+/// output, and directory identities. When `RenderRequest` gains a field, its render semantics and
+/// sealed-summary representation must be covered here, by `render_id`, or by the immutable
+/// publication plan before recovery may reuse an outcome.
 fn publication_request_fingerprint(
     render_id: &str,
     allow_partial_scene: bool,
+    requested_input: &Path,
     resolved_input: &Path,
+    summary_asset_manifest: Option<&Path>,
 ) -> String {
     let mut hasher = Sha256::new();
     update_hash_field(&mut hasher, PUBLICATION_REQUEST_SCHEMA_MARKER);
+    update_hash_field(&mut hasher, b"render-id");
     update_hash_field(&mut hasher, render_id.as_bytes());
+    update_hash_field(&mut hasher, b"requested-input");
+    update_hash_path(&mut hasher, requested_input);
+    update_hash_field(&mut hasher, b"resolved-input");
     update_hash_path(&mut hasher, resolved_input);
+    update_hash_field(&mut hasher, b"asset-manifest");
+    match summary_asset_manifest {
+        None => update_hash_field(&mut hasher, b"none"),
+        Some(path) => {
+            update_hash_field(&mut hasher, b"some");
+            update_hash_path(&mut hasher, path);
+        },
+    }
+    update_hash_field(&mut hasher, b"allow-partial-scene");
     update_hash_field(
         &mut hasher,
         if allow_partial_scene {
@@ -3805,7 +3843,8 @@ mod tests {
     #[cfg(not(any(target_os = "android", target_env = "ohos")))]
     use super::{
         PublicationStart, PublicationTransaction, begin_publication,
-        publication_request_fingerprint, render, write_render_outcome,
+        publication_recovery_required_message, publication_request_fingerprint, render,
+        write_render_outcome,
     };
     #[cfg(feature = "document-session")]
     use crate::document_session::{DocumentCaptureOutcome, SessionError};
@@ -3857,6 +3896,30 @@ mod tests {
     }
 
     #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+    #[test]
+    fn publication_recovery_error_uses_stable_non_sensitive_state_labels() {
+        assert_eq!(
+            publication_recovery_required_message(&PublicationRecoveryState::Planned),
+            "publication transaction requires recovery before rendering: planned"
+        );
+
+        let sensitive_path = "/private/customer/invoice.pdf";
+        let sensitive_bytes = "sealed customer outcome";
+        let state = PublicationRecoveryState::Committed {
+            summary: serde_json::json!({ "document_pdf": sensitive_path }),
+            cli_bytes: sensitive_bytes.as_bytes().to_vec(),
+            recovered: true,
+        };
+        let message = publication_recovery_required_message(&state);
+        assert_eq!(
+            message,
+            "publication transaction requires recovery before rendering: committed"
+        );
+        assert!(!message.contains(sensitive_path));
+        assert!(!message.contains(sensitive_bytes));
+    }
+
+    #[cfg(not(any(target_os = "android", target_env = "ohos")))]
     fn snapshot_test_tree(root: &std::path::Path) -> Vec<(String, Vec<u8>)> {
         fn visit(
             root: &std::path::Path,
@@ -3891,6 +3954,289 @@ mod tests {
     }
 
     #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+    struct PreservedRecoveryTransaction {
+        artifact_path: PathBuf,
+        staging: PathBuf,
+        staging_before: Vec<u8>,
+        document_pdf_path: PathBuf,
+        transaction_before: Vec<(String, Vec<u8>)>,
+    }
+
+    #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+    fn write_equivalent_asset_manifest(directory: &std::path::Path) -> PathBuf {
+        let asset = b"body { color: #123; }";
+        fs::create_dir(directory).unwrap();
+        fs::write(directory.join("asset.css"), asset).unwrap();
+        let manifest = directory.join("assets.json");
+        fs::write(
+            &manifest,
+            serde_json::to_vec(&serde_json::json!({
+                "schema": "pliego.asset-manifest",
+                "version": 1,
+                "assets": [{
+                    "url": "https://assets.test/shared.css",
+                    "path": "asset.css",
+                    "sha256": sha256_hex(asset),
+                }],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        manifest.canonicalize().unwrap()
+    }
+
+    #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+    fn recovery_request_with_manifest(
+        root: &std::path::Path,
+        manifest: &std::path::Path,
+    ) -> RenderRequest {
+        let mut request = recovery_process_request(root);
+        request.resources.asset_manifest = Some(manifest.to_owned());
+        request
+    }
+
+    #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+    fn preserve_recovery_transaction(
+        request: &RenderRequest,
+        resource_policy: &ResourcePolicy,
+        render_id: &str,
+        document: &LocalDocument,
+    ) -> PreservedRecoveryTransaction {
+        let PublicationTransaction {
+            artifacts,
+            journal,
+            document_pdf_path,
+            ..
+        } = expect_new_publication(
+            begin_publication(request, resource_policy, render_id, document.path()).unwrap(),
+        );
+        artifacts
+            .write_document_pdf(b"%PDF-manifest-identity")
+            .unwrap();
+        artifacts.record_state("rendered", None).unwrap();
+        let prepared = artifacts.prepare_document_pdf(&document_pdf_path).unwrap();
+        let bundle = artifacts.write_prepared_bundle(&prepared).unwrap();
+        let outcome = RenderOutcome::from_summary(serde_json::json!({
+            "environment": {
+                "resource_policy": resource_policy.artifact(render_id),
+            },
+            "input": request.input.to_string_lossy(),
+            "render_id": render_id,
+            "status": "rendered",
+        }))
+        .unwrap();
+        journal
+            .record_prepared(&prepared, &bundle, &outcome.cli_bytes)
+            .unwrap();
+        let prepared_receipt: serde_json::Value = serde_json::from_slice(
+            &fs::read(artifacts.directory().join("publication/prepared.json")).unwrap(),
+        )
+        .unwrap();
+        let staging = PathBuf::from(prepared_receipt["staging"]["path"].as_str().unwrap());
+        prepared.preserve_for_recovery();
+        bundle.preserve();
+        let artifact_path = artifacts.directory().to_owned();
+        drop(journal);
+        drop(artifacts);
+        assert!(!document_pdf_path.exists());
+        assert!(staging.exists());
+
+        PreservedRecoveryTransaction {
+            transaction_before: snapshot_test_tree(&artifact_path),
+            staging_before: fs::read(&staging).unwrap(),
+            artifact_path,
+            staging,
+            document_pdf_path,
+        }
+    }
+
+    #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+    fn assert_recovery_identity_rejected_without_mutation(
+        fixture: &PreservedRecoveryTransaction,
+        request: &RenderRequest,
+        resource_policy: &ResourcePolicy,
+        render_id: &str,
+        document: &LocalDocument,
+    ) {
+        let error = match begin_publication(request, resource_policy, render_id, document.path()) {
+            Ok(_) => panic!("different summary identity must not resume a transaction"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code, "PUBLICATION_RECOVERY_FAILED");
+        assert_eq!(
+            snapshot_test_tree(&fixture.artifact_path),
+            fixture.transaction_before
+        );
+        assert_eq!(fs::read(&fixture.staging).unwrap(), fixture.staging_before);
+        assert!(!fixture.document_pdf_path.exists());
+    }
+
+    #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+    #[test]
+    fn recovery_rejects_equivalent_assets_from_a_different_manifest_without_mutation() {
+        let root = temporary_artifacts("pliego-manifest-recovery-identity");
+        fs::create_dir(&root).unwrap();
+        let input = b"<!doctype html><title>Manifest recovery identity</title>";
+        fs::write(root.join("input.html"), input).unwrap();
+        let first_manifest = write_equivalent_asset_manifest(&root.join("first-assets"));
+        let second_manifest = write_equivalent_asset_manifest(&root.join("second-assets"));
+        assert_ne!(first_manifest, second_manifest);
+        assert_eq!(
+            fs::read(&first_manifest).unwrap(),
+            fs::read(&second_manifest).unwrap()
+        );
+
+        let document = LocalDocument::resolve(&root, "input.html").unwrap();
+        let first_request = recovery_request_with_manifest(&root, &first_manifest);
+        let second_request = recovery_request_with_manifest(&root, &second_manifest);
+        let first_policy = ResourcePolicy::resolve(&first_request.resources, document.root());
+        let second_policy = ResourcePolicy::resolve(&second_request.resources, document.root());
+        assert_eq!(
+            first_policy.summary_asset_manifest_path(),
+            Some(first_manifest.as_path())
+        );
+        assert_eq!(
+            second_policy.summary_asset_manifest_path(),
+            Some(second_manifest.as_path())
+        );
+        let first_render_id = stable_render_id(
+            input,
+            first_request.environment,
+            first_request.page,
+            &first_policy,
+            first_request.allow_host_fonts,
+        );
+        let second_render_id = stable_render_id(
+            input,
+            second_request.environment,
+            second_request.page,
+            &second_policy,
+            second_request.allow_host_fonts,
+        );
+        assert_eq!(first_render_id, second_render_id);
+        assert_ne!(
+            publication_request_fingerprint(
+                &first_render_id,
+                first_request.allow_partial_scene,
+                &first_request.input,
+                document.path(),
+                first_policy.summary_asset_manifest_path(),
+            ),
+            publication_request_fingerprint(
+                &second_render_id,
+                second_request.allow_partial_scene,
+                &second_request.input,
+                document.path(),
+                second_policy.summary_asset_manifest_path(),
+            )
+        );
+
+        let fixture = preserve_recovery_transaction(
+            &first_request,
+            &first_policy,
+            &first_render_id,
+            &document,
+        );
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(
+                &fs::read(fixture.artifact_path.join("publication/outcome.json")).unwrap()
+            )
+            .unwrap()["environment"]["resource_policy"]["asset_manifest"]["manifest"],
+            serde_json::json!(first_manifest)
+        );
+        assert_recovery_identity_rejected_without_mutation(
+            &fixture,
+            &second_request,
+            &second_policy,
+            &second_render_id,
+            &document,
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(all(unix, not(any(target_os = "android", target_env = "ohos"))))]
+    #[test]
+    fn recovery_identity_uses_the_manifest_captured_before_symlink_retarget() {
+        use std::os::unix::fs::symlink;
+
+        let root = temporary_artifacts("pliego-manifest-symlink-recovery-identity");
+        fs::create_dir(&root).unwrap();
+        let input = b"<!doctype html><title>Manifest symlink identity</title>";
+        fs::write(root.join("input.html"), input).unwrap();
+        let first_manifest = write_equivalent_asset_manifest(&root.join("first-assets"));
+        let second_manifest = write_equivalent_asset_manifest(&root.join("second-assets"));
+        let requested_manifest = root.join("current-assets.json");
+        symlink(&first_manifest, &requested_manifest).unwrap();
+
+        let document = LocalDocument::resolve(&root, "input.html").unwrap();
+        let first_request = recovery_request_with_manifest(&root, &requested_manifest);
+        let first_policy = ResourcePolicy::resolve(&first_request.resources, document.root());
+        assert_eq!(
+            first_policy.summary_asset_manifest_path(),
+            Some(first_manifest.as_path())
+        );
+
+        fs::remove_file(&requested_manifest).unwrap();
+        symlink(&second_manifest, &requested_manifest).unwrap();
+        let second_request = recovery_request_with_manifest(&root, &requested_manifest);
+        let second_policy = ResourcePolicy::resolve(&second_request.resources, document.root());
+        assert_eq!(first_request.resources, second_request.resources);
+        assert_eq!(
+            second_policy.summary_asset_manifest_path(),
+            Some(second_manifest.as_path())
+        );
+
+        let first_render_id = stable_render_id(
+            input,
+            first_request.environment,
+            first_request.page,
+            &first_policy,
+            first_request.allow_host_fonts,
+        );
+        let second_render_id = stable_render_id(
+            input,
+            second_request.environment,
+            second_request.page,
+            &second_policy,
+            second_request.allow_host_fonts,
+        );
+        assert_eq!(first_render_id, second_render_id);
+        assert_ne!(
+            publication_request_fingerprint(
+                &first_render_id,
+                first_request.allow_partial_scene,
+                &first_request.input,
+                document.path(),
+                first_policy.summary_asset_manifest_path(),
+            ),
+            publication_request_fingerprint(
+                &second_render_id,
+                second_request.allow_partial_scene,
+                &second_request.input,
+                document.path(),
+                second_policy.summary_asset_manifest_path(),
+            )
+        );
+
+        let fixture = preserve_recovery_transaction(
+            &first_request,
+            &first_policy,
+            &first_render_id,
+            &document,
+        );
+        assert_recovery_identity_rejected_without_mutation(
+            &fixture,
+            &second_request,
+            &second_policy,
+            &second_render_id,
+            &document,
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(not(any(target_os = "android", target_env = "ohos")))]
     #[test]
     fn fresh_process_cli_path_recovers_prepared_transaction_with_exact_stdout() {
         const CHILD_MARKER: &str = "PLIEGO_TEST_PUBLICATION_RECOVERY_CHILD";
@@ -3902,6 +4248,12 @@ mod tests {
             let capture =
                 PathBuf::from(std::env::var_os(CAPTURE_ENV).expect("child capture is set"));
             let outcome = render(recovery_process_request(&root)).unwrap();
+            let sealed_cli_bytes =
+                fs::read(root.join("artifacts/publication/outcome.json")).unwrap();
+            assert_eq!(
+                outcome.cli_bytes, sealed_cli_bytes,
+                "fresh process entered rendering instead of returning the sealed recovery outcome"
+            );
             let mut capture_file = std::fs::File::create(capture).unwrap();
             write_render_outcome(&mut capture_file, &outcome).unwrap();
             return;
@@ -3978,6 +4330,48 @@ mod tests {
         assert_eq!(fs::read(&staging).unwrap(), staging_before);
         assert!(!document_pdf_path.exists());
 
+        let mut other_spelling_request = recovery_process_request(&root);
+        other_spelling_request.input = PathBuf::from("./input.html");
+        let same_document = LocalDocument::resolve(&root, "./input.html").unwrap();
+        assert_eq!(same_document.path(), document.path());
+        let same_render_id = stable_render_id(
+            input,
+            other_spelling_request.environment,
+            other_spelling_request.page,
+            &resource_policy,
+            other_spelling_request.allow_host_fonts,
+        );
+        assert_eq!(same_render_id, render_id);
+        assert_ne!(
+            publication_request_fingerprint(
+                &render_id,
+                request.allow_partial_scene,
+                &request.input,
+                document.path(),
+                resource_policy.summary_asset_manifest_path(),
+            ),
+            publication_request_fingerprint(
+                &same_render_id,
+                other_spelling_request.allow_partial_scene,
+                &other_spelling_request.input,
+                same_document.path(),
+                resource_policy.summary_asset_manifest_path(),
+            )
+        );
+        let other_spelling_error = match begin_publication(
+            &other_spelling_request,
+            &resource_policy,
+            &same_render_id,
+            same_document.path(),
+        ) {
+            Ok(_) => panic!("different requested input spelling must not resume a transaction"),
+            Err(error) => error,
+        };
+        assert_eq!(other_spelling_error.code, "PUBLICATION_RECOVERY_FAILED");
+        assert_eq!(snapshot_test_tree(&artifact_path), transaction_before);
+        assert_eq!(fs::read(&staging).unwrap(), staging_before);
+        assert!(!document_pdf_path.exists());
+
         fs::write(root.join("same-bytes-copy.html"), input).unwrap();
         let mut other_input_request = recovery_process_request(&root);
         other_input_request.input = PathBuf::from("same-bytes-copy.html");
@@ -3996,12 +4390,16 @@ mod tests {
             publication_request_fingerprint(
                 &render_id,
                 request.allow_partial_scene,
+                &request.input,
                 document.path(),
+                resource_policy.summary_asset_manifest_path(),
             ),
             publication_request_fingerprint(
                 &other_render_id,
                 other_input_request.allow_partial_scene,
+                &other_input_request.input,
                 other_document.path(),
+                other_policy.summary_asset_manifest_path(),
             )
         );
         let other_input_error = match begin_publication(
@@ -4267,21 +4665,69 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn publication_request_fingerprint_is_lossless_for_non_utf8_canonical_paths() {
+    fn publication_request_fingerprint_is_lossless_for_non_utf8_paths() {
         use std::os::unix::ffi::OsStringExt;
 
         let root = temporary_artifacts("pliego-non-utf8-request-fingerprint");
         fs::create_dir(&root).unwrap();
-        let first = root.join(std::ffi::OsString::from_vec(vec![b'i', 0x80, b'.', b'h']));
-        let second = root.join(std::ffi::OsString::from_vec(vec![b'i', 0x81, b'.', b'h']));
+        let first_requested =
+            PathBuf::from(std::ffi::OsString::from_vec(vec![b'i', 0x80, b'.', b'h']));
+        let second_requested =
+            PathBuf::from(std::ffi::OsString::from_vec(vec![b'i', 0x81, b'.', b'h']));
+        let first = root.join(&first_requested);
+        let second = root.join(&second_requested);
         fs::write(&first, b"identical").unwrap();
         fs::write(&second, b"identical").unwrap();
         let first = first.canonicalize().unwrap();
         let second = second.canonicalize().unwrap();
 
         assert_ne!(
-            publication_request_fingerprint("sha256:same-content", false, &first),
-            publication_request_fingerprint("sha256:same-content", false, &second)
+            publication_request_fingerprint(
+                "sha256:same-content",
+                false,
+                &first_requested,
+                &first,
+                None,
+            ),
+            publication_request_fingerprint(
+                "sha256:same-content",
+                false,
+                &second_requested,
+                &first,
+                None,
+            )
+        );
+        assert_ne!(
+            publication_request_fingerprint(
+                "sha256:same-content",
+                false,
+                &first_requested,
+                &first,
+                None,
+            ),
+            publication_request_fingerprint(
+                "sha256:same-content",
+                false,
+                &first_requested,
+                &second,
+                None,
+            )
+        );
+        assert_ne!(
+            publication_request_fingerprint(
+                "sha256:same-content",
+                false,
+                &first_requested,
+                &first,
+                Some(&first),
+            ),
+            publication_request_fingerprint(
+                "sha256:same-content",
+                false,
+                &first_requested,
+                &first,
+                Some(&second),
+            )
         );
 
         fs::remove_dir_all(root).unwrap();
@@ -6599,7 +7045,9 @@ mod tests {
         let request_fingerprint = publication_request_fingerprint(
             &render_id,
             request.allow_partial_scene,
+            &request.input,
             document.path(),
+            resource_policy.summary_asset_manifest_path(),
         );
         let document_pdf = artifact_root.join("document.pdf");
         let committed_before = fs::read(publication_directory.join("committed.json")).unwrap();
