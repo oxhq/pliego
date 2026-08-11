@@ -73,10 +73,28 @@ mod no_runtime_page_types {
     }
 }
 
-// The direct binary is now Servo's top-level Windows embedder. Export the GPU
-// selection symbols surfman requires instead of inheriting them from a shell.
-#[cfg(feature = "document-session")]
-surfman::declare_surfman!();
+// The direct binary is now Servo's top-level Windows embedder. Own the GPU
+// selection symbols instead of inheriting them from a shell. Surfman's macro
+// stores its export directives in a named `.drectve` static, which `lld-link`
+// can consume while leaving the static's retention reference unresolved.
+// `build.rs` exports these data symbols without that intermediary owner.
+#[cfg(all(
+    target_os = "windows",
+    target_env = "msvc",
+    feature = "document-session"
+))]
+#[allow(non_upper_case_globals)]
+#[unsafe(no_mangle)]
+pub static mut NvOptimusEnablement: i32 = 1;
+
+#[cfg(all(
+    target_os = "windows",
+    target_env = "msvc",
+    feature = "document-session"
+))]
+#[allow(non_upper_case_globals)]
+#[unsafe(no_mangle)]
+pub static mut AmdPowerXpressRequestHighPerformance: i32 = 1;
 
 #[cfg(all(
     feature = "shell-oracle",
@@ -5020,7 +5038,11 @@ mod tests {
         assert_eq!(super::active_runtime_name(), "servoshell-oracle");
     }
 
-    #[cfg(all(windows, feature = "document-session"))]
+    #[cfg(all(
+        target_os = "windows",
+        target_env = "msvc",
+        feature = "document-session"
+    ))]
     #[test]
     fn direct_windows_binary_owns_surfman_gpu_selection_symbols() {
         let nvidia = unsafe { std::ptr::addr_of!(super::NvOptimusEnablement).read_volatile() };
