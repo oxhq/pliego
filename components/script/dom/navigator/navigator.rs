@@ -178,6 +178,16 @@ impl Navigator {
         self.xr.get()
     }
 
+    /// Return the existing ServiceWorker container without creating observable DOM state.
+    pub(crate) fn get_existing_service_worker(&self) -> Option<DomRoot<ServiceWorkerContainer>> {
+        self.service_worker.get()
+    }
+
+    /// Return the existing MediaSession without creating observable DOM state.
+    pub(crate) fn get_existing_media_session(&self) -> Option<DomRoot<MediaSession>> {
+        self.mediasession.get()
+    }
+
     #[cfg(feature = "gamepad")]
     pub(crate) fn get_gamepad(&self, index: usize) -> Option<DomRoot<Gamepad>> {
         self.gamepads.borrow().get(index).and_then(|g| g.get())
@@ -349,8 +359,9 @@ impl NavigatorMethods<crate::DomTypeHolder> for Navigator {
     // https://webbluetoothcg.github.io/web-bluetooth/#dom-navigator-bluetooth
     #[cfg(feature = "bluetooth")]
     fn Bluetooth(&self, cx: &mut js::context::JSContext) -> DomRoot<Bluetooth> {
-        self.bluetooth
-            .or_init(|| Bluetooth::new(cx, &self.global()))
+        let global = self.global();
+        global.mark_controlled_capture_bluetooth_accessed();
+        self.bluetooth.or_init(|| Bluetooth::new(cx, &global))
     }
 
     /// <https://www.w3.org/TR/credential-management-1/#framework-credential-management>
@@ -472,14 +483,16 @@ impl NavigatorMethods<crate::DomTypeHolder> for Navigator {
     /// <https://immersive-web.github.io/webxr/#dom-navigator-xr>
     #[cfg(feature = "webxr")]
     fn Xr(&self, cx: &mut JSContext) -> DomRoot<XRSystem> {
-        self.xr
-            .or_init(|| XRSystem::new(cx, self.global().as_window()))
+        let global = self.global();
+        global.mark_controlled_capture_web_xr_accessed();
+        self.xr.or_init(|| XRSystem::new(cx, global.as_window()))
     }
 
     /// <https://w3c.github.io/mediacapture-main/#dom-navigator-mediadevices>
     fn MediaDevices(&self, cx: &mut JSContext) -> DomRoot<MediaDevices> {
-        self.mediadevices
-            .or_init(|| MediaDevices::new(cx, &self.global()))
+        let global = self.global();
+        global.mark_controlled_capture_media_stream_used();
+        self.mediadevices.or_init(|| MediaDevices::new(cx, &global))
     }
 
     /// <https://w3c.github.io/mediasession/#dom-navigator-mediasession>
@@ -501,7 +514,9 @@ impl NavigatorMethods<crate::DomTypeHolder> for Navigator {
     // https://gpuweb.github.io/gpuweb/#dom-navigator-gpu
     #[cfg(feature = "webgpu")]
     fn Gpu(&self, cx: &mut JSContext) -> DomRoot<GPU> {
-        self.gpu.or_init(|| GPU::new(cx, &self.global()))
+        let global = self.global();
+        global.mark_controlled_capture_web_gpu_accessed();
+        self.gpu.or_init(|| GPU::new(cx, &global))
     }
 
     /// <https://html.spec.whatwg.org/multipage/#dom-navigator-hardwareconcurrency>
@@ -517,8 +532,9 @@ impl NavigatorMethods<crate::DomTypeHolder> for Navigator {
 
     /// <https://storage.spec.whatwg.org/#api>
     fn Storage(&self, cx: &mut js::context::JSContext) -> DomRoot<StorageManager> {
-        self.storage
-            .or_init(|| StorageManager::new(cx, &self.global()))
+        let global = self.global();
+        global.mark_controlled_capture_storage_manager_accessed();
+        self.storage.or_init(|| StorageManager::new(cx, &global))
     }
 
     /// <https://w3c.github.io/beacon/#sec-processing-model>

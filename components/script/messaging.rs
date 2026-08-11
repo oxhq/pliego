@@ -23,7 +23,7 @@ use servo_base::id::{PipelineId, WebViewId};
 use servo_bluetooth_traits::BluetoothRequest;
 use servo_constellation_traits::ScriptToConstellationMessage;
 use stylo_atoms::Atom;
-use timers::{DocumentProducerFence, DocumentProducerKind, TimerScheduler};
+use timers::{DocumentProducerFence, DocumentProducerGuard, DocumentProducerKind, TimerScheduler};
 #[cfg(feature = "webgpu")]
 use webgpu_traits::WebGPUMsg;
 
@@ -232,6 +232,22 @@ pub(crate) enum ScriptEventLoopSender {
 }
 
 impl ScriptEventLoopSender {
+    /// Begin an externally owned callback that will eventually hand work back to this event loop.
+    ///
+    /// Window callbacks participate in the document producer fence. Worker event loops remain an
+    /// explicitly unsupported controlled-time surface and therefore do not acquire a Window
+    /// producer ticket here.
+    pub(crate) fn begin_external_callback(&self) -> Option<DocumentProducerGuard> {
+        let Self::MainThread { producer_fence, .. } = self else {
+            return None;
+        };
+        Some(
+            producer_fence
+                .begin(DocumentProducerKind::ExternalCallback)
+                .expect("document external-callback producer sequence exhausted"),
+        )
+    }
+
     /// Send a message to the event loop, which might be a main thread event loop or a worker event loop.
     pub(crate) fn send(&self, mut message: CommonScriptMsg) -> Result<(), SendError<()>> {
         match self {
@@ -394,7 +410,10 @@ impl OpaqueSender<CommonScriptMsg> for ScriptEventLoopSender {
 
 #[cfg(test)]
 mod producer_fence_tests {
+    use servo_base::id::TEST_PIPELINE_ID;
+
     use super::*;
+    use crate::task_manager::TaskManager;
 
     struct NeverRunTask;
 
@@ -449,6 +468,127 @@ mod producer_fence_tests {
         let complete = producer_fence.snapshot();
         assert!(complete.is_empty());
         assert_eq!(complete.revision(), 2);
+    }
+
+    #[test]
+    fn dropped_external_callback_completes_its_ticket() {
+        let (sender, _receiver) = crossbeam_channel::unbounded();
+        let producer_fence = DocumentProducerFence::default();
+        let event_loop_sender = ScriptEventLoopSender::MainThread {
+            sender,
+            producer_fence: producer_fence.clone(),
+        };
+
+        let callback = event_loop_sender.begin_external_callback().unwrap();
+        assert_eq!(
+            producer_fence
+                .snapshot()
+                .for_kind(DocumentProducerKind::ExternalCallback)
+                .pending(),
+            1
+        );
+
+        drop(callback);
+        let complete = producer_fence.snapshot();
+        assert!(complete.is_empty());
+        assert_eq!(
+            complete
+                .for_kind(DocumentProducerKind::ExternalCallback)
+                .completed(),
+            1
+        );
+    }
+
+    #[test]
+    fn external_callback_handoff_to_task_has_no_empty_fence_gap() {
+        let (sender, receiver) = crossbeam_channel::unbounded();
+        let producer_fence = DocumentProducerFence::default();
+        let event_loop_sender = ScriptEventLoopSender::MainThread {
+            sender,
+            producer_fence: producer_fence.clone(),
+        };
+
+        let callback = event_loop_sender.begin_external_callback().unwrap();
+        event_loop_sender.send(task_message()).unwrap();
+        let during_handoff = producer_fence.snapshot();
+        assert_eq!(
+            during_handoff
+                .for_kind(DocumentProducerKind::ExternalCallback)
+                .pending(),
+            1
+        );
+        assert_eq!(
+            during_handoff
+                .for_kind(DocumentProducerKind::Task)
+                .pending(),
+            1
+        );
+
+        drop(callback);
+        let after_handoff = producer_fence.snapshot();
+        assert_eq!(after_handoff.pending(), 1);
+        assert_eq!(
+            after_handoff
+                .for_kind(DocumentProducerKind::ExternalCallback)
+                .pending(),
+            0
+        );
+        assert_eq!(
+            after_handoff.for_kind(DocumentProducerKind::Task).pending(),
+            1
+        );
+
+        drop(receiver.recv().unwrap());
+        assert!(producer_fence.snapshot().is_empty());
+    }
+
+    #[test]
+    fn failed_external_callback_handoff_completes_both_tickets() {
+        let (sender, receiver) = crossbeam_channel::unbounded();
+        drop(receiver);
+        let producer_fence = DocumentProducerFence::default();
+        let event_loop_sender = ScriptEventLoopSender::MainThread {
+            sender,
+            producer_fence: producer_fence.clone(),
+        };
+
+        let callback = event_loop_sender.begin_external_callback().unwrap();
+        assert!(event_loop_sender.send(task_message()).is_err());
+        assert_eq!(producer_fence.snapshot().pending(), 1);
+
+        drop(callback);
+        let complete = producer_fence.snapshot();
+        assert!(complete.is_empty());
+        assert_eq!(
+            complete
+                .for_kind(DocumentProducerKind::ExternalCallback)
+                .completed(),
+            1
+        );
+        assert_eq!(complete.for_kind(DocumentProducerKind::Task).completed(), 1);
+    }
+
+    #[test]
+    fn cancelled_external_callback_handoff_releases_without_queuing_a_task() {
+        let (sender, receiver) = crossbeam_channel::unbounded();
+        let producer_fence = DocumentProducerFence::default();
+        let event_loop_sender = ScriptEventLoopSender::MainThread {
+            sender,
+            producer_fence: producer_fence.clone(),
+        };
+        let task_manager = TaskManager::new(Some(event_loop_sender), TEST_PIPELINE_ID, None);
+        let task_source = task_manager.timer_task_source().to_sendable();
+        let callback = task_source.begin_external_callback().unwrap();
+        task_manager.cancel_all_tasks_and_ignore_future_tasks();
+
+        task_source.queue(task!(cancelled_callback_handoff: move || {
+            panic!("a cancelled callback task must never run")
+        }));
+        assert!(receiver.try_recv().is_err());
+        assert_eq!(producer_fence.snapshot().pending(), 1);
+
+        drop(callback);
+        assert!(producer_fence.snapshot().is_empty());
     }
 }
 

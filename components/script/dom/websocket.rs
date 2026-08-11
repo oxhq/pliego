@@ -186,6 +186,11 @@ impl WebSocket {
         self.url.origin()
     }
 
+    /// Whether this retained socket can still produce externally driven work.
+    pub(crate) fn is_controlled_capture_active(&self) -> bool {
+        self.ready_state.get() != WebSocketRequestState::Closed
+    }
+
     /// <https://websockets.spec.whatwg.org/#make-disappear>
     /// Returns true if any action was taken.
     pub(crate) fn make_disappear(&self) -> bool {

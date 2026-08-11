@@ -89,12 +89,11 @@ impl OfflineAudioContext {
         let pipeline_id = window.pipeline_id();
         let context =
             OfflineAudioContext::new_inherited(channel_count, length, sample_rate, pipeline_id)?;
-        Ok(reflect_dom_object_with_proto_and_cx(
-            Box::new(context),
-            window,
-            proto,
-            cx,
-        ))
+        window
+            .as_global_scope()
+            .mark_controlled_capture_web_audio_used();
+        let context = reflect_dom_object_with_proto_and_cx(Box::new(context), window, proto, cx);
+        Ok(context)
     }
 }
 

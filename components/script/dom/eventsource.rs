@@ -564,6 +564,11 @@ impl EventSource {
         self.request.borrow().clone().unwrap()
     }
 
+    /// Whether this retained source can still produce externally driven work.
+    pub(crate) fn is_controlled_capture_active(&self) -> bool {
+        self.ready_state.get() != ReadyState::Closed
+    }
+
     pub(crate) fn url(&self) -> &ServoUrl {
         &self.url
     }

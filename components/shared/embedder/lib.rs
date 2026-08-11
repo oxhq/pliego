@@ -10,6 +10,7 @@
 
 mod document_time;
 pub mod embedder_controls;
+mod generation_capture;
 pub mod input_events;
 pub mod resources;
 pub mod user_contents;
@@ -53,6 +54,7 @@ use webrender_api::units::{
 #[doc(hidden)]
 pub use crate::document_time::*;
 pub use crate::embedder_controls::*;
+pub use crate::generation_capture::*;
 pub use crate::input_events::*;
 use crate::user_contents::UserContentManagerId;
 pub use crate::webdriver::*;

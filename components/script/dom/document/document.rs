@@ -5,7 +5,7 @@
 use std::cell::{Cell, RefCell};
 use std::cmp::Ordering;
 use std::collections::hash_map::Entry::{Occupied, Vacant};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::default::Default;
 use std::ops::Deref;
 use std::rc::Rc;
@@ -22,7 +22,8 @@ use data_url::mime::Mime;
 use devtools_traits::ScriptToDevtoolsControlMsg;
 use dom_struct::dom_struct;
 use embedder_traits::{
-    AllowOrDeny, AnimationState, CustomHandlersAutomationMode, EmbedderMsg, Image, LoadStatus,
+    AllowOrDeny, AnimationState, CustomHandlersAutomationMode, DocumentSettlementSource,
+    DocumentTrackedSourceKind, DocumentUnsupportedSourceReason, EmbedderMsg, Image, LoadStatus,
 };
 use encoding_rs::{Encoding, UTF_8};
 use html5ever::{LocalName, Namespace, QualName, local_name, ns};
@@ -76,10 +77,11 @@ use style::stylesheets::{Origin, OriginSet, Stylesheet};
 use style::stylist::Stylist;
 use stylo_atoms::Atom;
 use time::Duration as TimeDuration;
-use timers::{DocumentRenderingTime, DocumentTimeSurface};
+use timers::{DocumentClockError, DocumentRenderingTime, DocumentTime, DocumentTimeSurface};
 use url::{Host, Position};
 
 use crate::animations::Animations;
+use crate::canvas_context::RenderingContext;
 use crate::document_loader::{DocumentLoader, LoadType};
 use crate::dom::FlatTreeParent;
 use crate::dom::animationtimeline::AnimationTimeline;
@@ -198,7 +200,7 @@ use crate::dom::text::Text;
 use crate::dom::touchevent::TouchEvent as DomTouchEvent;
 use crate::dom::touchlist::TouchList;
 use crate::dom::trustedtypes::trustedhtml::TrustedHTML;
-use crate::dom::types::{HTMLCanvasElement, VisibilityStateEntry};
+use crate::dom::types::{HTMLCanvasElement, HTMLMediaElement, VisibilityStateEntry};
 use crate::dom::uievent::UIEvent;
 use crate::dom::websocket::WebSocket;
 use crate::dom::window::Window;
@@ -219,6 +221,21 @@ use crate::task_manager::TaskManager;
 use crate::task_source::TaskSourceName;
 use crate::timers::{OneshotTimerCallback, OneshotTimers};
 use crate::xpath::parse_expression;
+
+/// Canonicalize tracker-derived unsupported DOM source identities.
+pub(crate) fn controlled_unsupported_dom_sources(
+    pipeline_id: PipelineId,
+    sources: impl IntoIterator<Item = (usize, DocumentUnsupportedSourceReason)>,
+) -> Vec<DocumentSettlementSource> {
+    sources
+        .into_iter()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .map(|(node_id, reason)| {
+            DocumentSettlementSource::unsupported_dom_node_internal(pipeline_id, node_id, reason)
+        })
+        .collect()
+}
 
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum FireMouseEventType {
@@ -657,6 +674,14 @@ pub(crate) struct Document {
     /// All websockets created that are associated with this document.
     websockets: DOMTracker<WebSocket>,
 
+    /// All live canvas elements currently or formerly owned by this document.
+    /// Collection filters current ownership and deduplicates adoption re-registration.
+    capture_canvases: DOMTracker<HTMLCanvasElement>,
+
+    /// All live media elements currently or formerly owned by this document.
+    /// Collection filters current ownership and deduplicates adoption re-registration.
+    capture_media_elements: DOMTracker<HTMLMediaElement>,
+
     /// <https://html.spec.whatwg.org/multipage/#details-name-group>
     details_name_groups: DomRefCell<Option<DetailsNameGroups>>,
 
@@ -760,6 +785,19 @@ impl Document {
 
     pub(crate) fn track_websocket(&self, websocket: &WebSocket) {
         self.websockets.track(websocket);
+    }
+
+    /// Track mutable DOM-backed capture sources independently of tree connectivity.
+    ///
+    /// Nodes are registered after reflection and again when adopted. The weak trackers may
+    /// therefore contain an old-document entry or a duplicate; observation filters current
+    /// ownership and canonicalizes exact node identities.
+    pub(crate) fn track_controlled_capture_node(&self, node: &Node) {
+        if let Some(canvas) = node.downcast::<HTMLCanvasElement>() {
+            self.capture_canvases.track(canvas);
+        } else if let Some(media) = node.downcast::<HTMLMediaElement>() {
+            self.capture_media_elements.track(media);
+        }
     }
 
     fn close_outstanding_websockets(&self) -> bool {
@@ -3860,6 +3898,8 @@ impl Document {
             creation_sandboxing_flag_set: Cell::new(creation_sandboxing_flag_set),
             favicon: RefCell::new(None),
             websockets: DOMTracker::new(),
+            capture_canvases: DOMTracker::new(),
+            capture_media_elements: DOMTracker::new(),
             details_name_groups: Default::default(),
             protocol_handler_automation_mode: Default::default(),
             layout_animations_test_enabled: pref!(layout_animations_test_enabled),
@@ -4650,6 +4690,95 @@ impl Document {
 
     pub(crate) fn animations(&self) -> &Animations {
         &self.animations
+    }
+
+    /// Capture exact Window-owned settlement sources, including detached live DOM objects.
+    pub(crate) fn controlled_settlement_sources(
+        &self,
+        document_now: DocumentTime,
+    ) -> Result<Vec<DocumentSettlementSource>, DocumentClockError> {
+        let pipeline_id = self.pipeline_id();
+        let mut sources = self.animations.controlled_settlement_sources(
+            pipeline_id,
+            self.current_animation_timeline_value(),
+            document_now,
+        );
+        sources.extend(self.timers.controlled_settlement_sources(pipeline_id)?);
+        sources.extend(
+            self.animation_frame_list
+                .borrow()
+                .iter()
+                .map(|(callback_id, callback)| {
+                    DocumentSettlementSource::animation_frame_internal(
+                        pipeline_id,
+                        *callback_id,
+                        callback.is_some(),
+                    )
+                }),
+        );
+
+        let mut active_websockets = 0_u64;
+        self.websockets.for_each(|websocket| {
+            if websocket.is_controlled_capture_active() {
+                active_websockets = active_websockets.saturating_add(1);
+            }
+        });
+        sources.push(DocumentSettlementSource::tracked_presence_internal(
+            pipeline_id,
+            DocumentTrackedSourceKind::WebSocket,
+            active_websockets,
+        ));
+        sources.push(DocumentSettlementSource::tracked_presence_internal(
+            pipeline_id,
+            DocumentTrackedSourceKind::EmbedderControl,
+            u64::try_from(self.embedder_controls.controlled_capture_visible_count())
+                .unwrap_or(u64::MAX),
+        ));
+        sources.extend(
+            self.window
+                .as_global_scope()
+                .controlled_settlement_sources(pipeline_id),
+        );
+
+        // These DOM-owned classes can advance outside the controlled CSS/timer/rAF inventory.
+        // Weak owner trackers, unlike a connected-tree walk, retain detached live objects. Nodes
+        // re-registered after adoption are filtered by current ownership and deduplicated here.
+        let mut unsupported_nodes = Vec::new();
+        self.capture_media_elements.for_each(|media| {
+            if &*media.owner_document() == self {
+                unsupported_nodes.push((
+                    media.upcast::<Node>().to_opaque().id(),
+                    DocumentUnsupportedSourceReason::MediaElement,
+                ));
+            }
+        });
+        self.capture_canvases.for_each(|canvas| {
+            if &*canvas.owner_document() != self {
+                return;
+            }
+            let Some(reason) = canvas.context().map(|context| match &*context {
+                RenderingContext::Context2d(_) => DocumentUnsupportedSourceReason::Canvas2d,
+                RenderingContext::BitmapRenderer(_) => {
+                    DocumentUnsupportedSourceReason::BitmapRendererCanvas
+                },
+                RenderingContext::WebGL(_) | RenderingContext::WebGL2(_) => {
+                    DocumentUnsupportedSourceReason::WebGlCanvas
+                },
+                #[cfg(feature = "webgpu")]
+                RenderingContext::WebGPU(_) => DocumentUnsupportedSourceReason::WebGpuCanvas,
+                RenderingContext::Placeholder(_) => {
+                    DocumentUnsupportedSourceReason::OffscreenCanvas
+                },
+            }) else {
+                return;
+            };
+            unsupported_nodes.push((canvas.upcast::<Node>().to_opaque().id(), reason));
+        });
+        sources.extend(controlled_unsupported_dom_sources(
+            pipeline_id,
+            unsupported_nodes,
+        ));
+        Ok(sources)
     }
 
     pub(crate) fn update_animations_post_reflow(&self) {

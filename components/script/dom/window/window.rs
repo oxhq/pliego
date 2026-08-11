@@ -500,6 +500,16 @@ impl Window {
         self.upcast::<GlobalScope>()
     }
 
+    /// Return the existing CookieStore without creating observable DOM state.
+    pub(crate) fn get_existing_cookie_store(&self) -> Option<DomRoot<CookieStore>> {
+        self.cookie_store.get()
+    }
+
+    /// Return the existing Navigator without creating observable DOM state.
+    pub(crate) fn get_existing_navigator(&self) -> Option<DomRoot<Navigator>> {
+        self.navigator.get()
+    }
+
     pub(crate) fn layout(&self) -> Ref<'_, Box<dyn Layout>> {
         self.layout.borrow()
     }

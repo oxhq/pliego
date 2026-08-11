@@ -178,6 +178,11 @@ pub(crate) struct SendableTaskSource {
 }
 
 impl SendableTaskSource {
+    /// Fence one outbound callback until it is dropped or synchronously hands off to `queue`.
+    pub(crate) fn begin_external_callback(&self) -> Option<timers::DocumentProducerGuard> {
+        self.sender.begin_external_callback()
+    }
+
     pub(crate) fn queue(&self, task: impl TaskOnce + 'static) {
         if !self.canceller.cancelled() {
             self.queue_unconditionally(self.canceller.wrap_task(task))
