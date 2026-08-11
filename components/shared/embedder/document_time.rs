@@ -13,7 +13,7 @@ use servo_base::id::{PipelineId, ScriptEventLoopId, WebViewId};
 pub use timers::{
     DocumentClockConfiguration, DocumentExecutionBudget, DocumentExecutionCounter,
     DocumentExecutionCounters, DocumentExecutionLimits, DocumentExecutionObservation,
-    DocumentExecutionTerminal,
+    DocumentExecutionTerminal, DocumentUnixTime,
 };
 use timers::{
     DocumentClockError, DocumentClockId, DocumentProducerCheckpoint, DocumentProducerFenceError,
@@ -628,9 +628,13 @@ mod tests {
     }
 
     fn advance_token() -> DocumentTimeAdvanceToken {
+        advance_token_at(0)
+    }
+
+    fn advance_token_at(initial_time_ns: u128) -> DocumentTimeAdvanceToken {
         let clock = DocumentClock::new(DocumentClockConfiguration::Controlled {
-            initial_time_ns: 0,
-            unix_time_origin_ns: 0,
+            initial_time_ns,
+            unix_time_origin_ns: DocumentUnixTime::default(),
             execution_limits: None,
         });
         let mut scheduler = TimerScheduler::with_clock(clock.clone());
@@ -658,6 +662,77 @@ mod tests {
                 stability: DocumentProducerStability::StableEmpty,
             },
         )
+    }
+
+    #[test]
+    fn actual_ipc_round_trips_signed_origin_and_widened_advance_outcome() {
+        const API2_MIN_EPOCH_NS: i128 = -8_640_000_000_000_000_000_000;
+        const API2_MAX_SPAN_NS: u128 = 9_007_199_254_740_991_000_000;
+        let configuration = DocumentClockConfiguration::Controlled {
+            initial_time_ns: API2_MAX_SPAN_NS,
+            unix_time_origin_ns: DocumentUnixTime::from_nanos(API2_MIN_EPOCH_NS),
+            execution_limits: None,
+        };
+        let (configuration_sender, configuration_receiver) =
+            ipc_channel::ipc::channel::<DocumentClockConfiguration>().unwrap();
+        configuration_sender.send(configuration).unwrap();
+        assert_eq!(configuration_receiver.recv().unwrap(), configuration);
+
+        let token = advance_token_at(API2_MAX_SPAN_NS - 10);
+        let command = DocumentTimeControlCommand::AdvanceTo(Box::new(token.clone()));
+        let (command_sender, command_receiver) =
+            ipc_channel::ipc::channel::<DocumentTimeControlCommand>().unwrap();
+        command_sender.send(command.clone()).unwrap();
+        assert_eq!(command_receiver.recv().unwrap(), command);
+
+        let outcome = DocumentTimeControlOutcome::AdvanceOutcomeIndeterminate {
+            token_id: token.id(),
+            target: Box::new(token.target().clone()),
+            deadline: token.deadline(),
+        };
+        let (outcome_sender, outcome_receiver) =
+            ipc_channel::ipc::channel::<DocumentTimeControlOutcome>().unwrap();
+        outcome_sender.send(outcome.clone()).unwrap();
+        assert_eq!(outcome_receiver.recv().unwrap(), outcome);
+
+        let date_clock = DocumentClock::new(DocumentClockConfiguration::Controlled {
+            initial_time_ns: 0,
+            unix_time_origin_ns: DocumentUnixTime::from_nanos(8_639_999_999_999_979_000_000),
+            execution_limits: None,
+        });
+        let date_error = date_clock
+            .javascript_date_time_microseconds()
+            .expect_err("adversarial Date millisecond must fail closed");
+        let date_terminal =
+            DocumentTimeControlOutcome::Rejected(DocumentTimeControlError::Clock(date_error));
+        let (terminal_sender, terminal_receiver) =
+            ipc_channel::ipc::channel::<DocumentTimeControlOutcome>().unwrap();
+        terminal_sender.send(date_terminal.clone()).unwrap();
+        assert_eq!(terminal_receiver.recv().unwrap(), date_terminal);
+
+        let fence = DocumentProducerFence::default();
+        let completed =
+            DocumentTimeControlOutcome::Completed(Box::new(DocumentTimeControlObservation {
+                target: token.target().clone(),
+                now: token.now(),
+                next_deadline: Some(token.deadline()),
+                advance_token: Some(token),
+                pending_events: 0,
+                input_batch_saturated: false,
+                action: DocumentTimeControlAction::Observed,
+                producers: DocumentTimeProducerObservation {
+                    fence_id: fence.id(),
+                    checkpoint: DocumentProducerCheckpoint::ZERO,
+                    snapshot: fence.snapshot(),
+                    stability: DocumentProducerStability::StableEmpty,
+                },
+                documents: Vec::new(),
+                execution: None,
+            }));
+        let (completed_sender, completed_receiver) =
+            ipc_channel::ipc::channel::<DocumentTimeControlOutcome>().unwrap();
+        completed_sender.send(completed.clone()).unwrap();
+        assert_eq!(completed_receiver.recv().unwrap(), completed);
     }
 
     fn assert_indeterminate(

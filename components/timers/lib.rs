@@ -33,15 +33,24 @@ pub struct DocumentExecutionLimits {
     pub rendering_opportunities: u64,
     /// Calls to Servo's central DOM mutation-record hook.
     pub mutations: u64,
+    /// Maximum monotonic time that may elapse from the controlled clock's initial offset.
+    ///
+    /// `None` preserves the pre-API2 execution-ledger behavior.
+    #[serde(default)]
+    pub virtual_span: Option<DocumentTime>,
 }
 
 impl DocumentExecutionLimits {
     /// API 2 version-1 zero-configuration limits for the work classes owned by this slice.
+    ///
+    /// This is the exact engine-side value for an already normalized request; it does not claim
+    /// that the production driver currently maps API 2 request fields into this configuration.
     pub const API2_V1_DEFAULT: Self = Self {
         ordinary_tasks: 100_000,
         microtasks: 1_000_000,
         rendering_opportunities: 10_000,
         mutations: 1_000_000,
+        virtual_span: Some(DocumentTime::from_nanos(86_400_000_000_000)),
     };
 }
 
@@ -87,6 +96,20 @@ pub enum DocumentExecutionTerminal {
     },
     /// An evidence counter exhausted its exact integer representation.
     CounterOverflow(DocumentExecutionCounter),
+    /// A guarded clock advance would exceed the configured monotonic span.
+    VirtualSpanExceeded {
+        /// Maximum elapsed offset from the controlled clock's initial time.
+        limit: DocumentTime,
+        /// Elapsed offset requested by the rejected advance.
+        requested: DocumentTime,
+    },
+    /// A guarded clock advance requested an offset before this ledger's initial clock time.
+    VirtualTimeBeforeInitial {
+        /// Initial monotonic offset bound to this execution ledger.
+        initial: DocumentTime,
+        /// Earlier absolute offset requested by the rejected advance.
+        requested: DocumentTime,
+    },
 }
 
 /// Exact counters retained by one controlled execution ledger.
@@ -121,6 +144,7 @@ pub struct DocumentExecutionObservation {
 #[derive(Debug)]
 struct DocumentExecutionLedgerState {
     limits: DocumentExecutionLimits,
+    initial_time: DocumentTime,
     counters: DocumentExecutionCounters,
     terminal: Option<DocumentExecutionTerminal>,
 }
@@ -143,9 +167,15 @@ pub struct DocumentExecutionActiveGuard<'a> {
 impl DocumentExecutionLedger {
     /// Create an empty ledger with immutable limits.
     pub fn new(limits: DocumentExecutionLimits) -> Self {
+        Self::new_at(limits, DocumentTime::ZERO)
+    }
+
+    /// Create an empty ledger bound to one controlled clock's initial offset.
+    pub fn new_at(limits: DocumentExecutionLimits, initial_time: DocumentTime) -> Self {
         Self {
             inner: Arc::new(Mutex::new(DocumentExecutionLedgerState {
                 limits,
+                initial_time,
                 counters: DocumentExecutionCounters::default(),
                 terminal: None,
             })),
@@ -177,6 +207,49 @@ impl DocumentExecutionLedger {
             .expect("document execution ledger poisoned");
         if let Some(terminal) = state.terminal {
             return Err(terminal);
+        }
+        Ok(DocumentExecutionActiveGuard { _state: state })
+    }
+
+    /// Lock this ledger only if an exact controlled advance remains within its virtual span.
+    ///
+    /// The returned guard is the same lock acquisition that latches an over-span terminal, so the
+    /// caller can keep it alive through clock mutation without a check-then-act race.
+    /// ScriptThread's conditional-advance path is the current production authority that combines
+    /// this policy guard with scheduler validation; raw clock/scheduler mechanisms do not enforce
+    /// the execution policy by themselves.
+    pub fn active_guard_for_time(
+        &self,
+        requested: DocumentTime,
+    ) -> Result<DocumentExecutionActiveGuard<'_>, DocumentExecutionTerminal> {
+        let mut state = self
+            .inner
+            .lock()
+            .expect("document execution ledger poisoned");
+        if let Some(terminal) = state.terminal {
+            return Err(terminal);
+        }
+        let Some(elapsed) = requested
+            .as_nanos()
+            .checked_sub(state.initial_time.as_nanos())
+        else {
+            let terminal = DocumentExecutionTerminal::VirtualTimeBeforeInitial {
+                initial: state.initial_time,
+                requested,
+            };
+            state.terminal = Some(terminal);
+            return Err(terminal);
+        };
+        if let Some(limit) = state.limits.virtual_span {
+            let requested_elapsed = DocumentTime::from_nanos(elapsed);
+            if requested_elapsed > limit {
+                let terminal = DocumentExecutionTerminal::VirtualSpanExceeded {
+                    limit,
+                    requested: requested_elapsed,
+                };
+                state.terminal = Some(terminal);
+                return Err(terminal);
+            }
         }
         Ok(DocumentExecutionActiveGuard { _state: state })
     }
@@ -341,13 +414,13 @@ pub enum DocumentClockConfiguration {
     /// Start a controlled clock at the supplied integer nanosecond offset.
     Controlled {
         /// Initial monotonic time in this document-clock domain.
-        initial_time_ns: u64,
+        initial_time_ns: u128,
         /// Unix time, in nanoseconds, corresponding to [`DocumentTime::ZERO`].
         ///
         /// This is deliberately configuration rather than host time so JavaScript wall time and
         /// monotonic DOM time advance together without consulting the host clock.
         #[serde(default)]
-        unix_time_origin_ns: u64,
+        unix_time_origin_ns: DocumentUnixTime,
         /// Optional execution policy installed before navigation. `None` preserves the U1-U3
         /// controlled-clock behavior without accounting or enforcement.
         #[serde(default)]
@@ -359,27 +432,34 @@ pub enum DocumentClockConfiguration {
 #[derive(
     Clone, Copy, Debug, Deserialize, Eq, MallocSizeOf, Ord, PartialEq, PartialOrd, Serialize,
 )]
-pub struct DocumentTime(u64);
+pub struct DocumentTime(u128);
 
 impl DocumentTime {
     /// The zero offset.
     pub const ZERO: Self = Self(0);
 
     /// Construct an offset from an integer number of nanoseconds.
-    pub const fn from_nanos(nanos: u64) -> Self {
+    pub const fn from_nanos(nanos: u128) -> Self {
         Self(nanos)
     }
 
     /// Return this offset as integer nanoseconds.
-    pub const fn as_nanos(self) -> u64 {
+    pub const fn as_nanos(self) -> u128 {
         self.0
     }
 
     /// Convert a duration without truncating or wrapping it.
     pub fn checked_from_duration(duration: Duration) -> Result<Self, DocumentClockError> {
-        u64::try_from(duration.as_nanos())
-            .map(Self)
-            .map_err(|_| DocumentClockError::Overflow)
+        Ok(Self(duration.as_nanos()))
+    }
+
+    /// Convert this offset into a standard duration without truncating or wrapping it.
+    pub fn checked_to_duration(self) -> Result<Duration, DocumentClockError> {
+        let seconds =
+            u64::try_from(self.0 / 1_000_000_000).map_err(|_| DocumentClockError::Overflow)?;
+        let nanoseconds =
+            u32::try_from(self.0 % 1_000_000_000).map_err(|_| DocumentClockError::Overflow)?;
+        Ok(Duration::new(seconds, nanoseconds))
     }
 
     /// Add a duration without truncating or wrapping it.
@@ -400,21 +480,132 @@ impl DocumentTime {
             .ok_or(DocumentClockError::Overflow)
     }
 
-    /// Return the non-negative duration since an earlier offset.
-    pub fn saturating_duration_since(self, earlier: Self) -> Duration {
-        Duration::from_nanos(self.0.saturating_sub(earlier.0))
-    }
-
     /// Return the duration since an earlier offset without hiding a mismatched or future origin.
     pub fn checked_duration_since(self, earlier: Self) -> Result<Duration, DocumentClockError> {
-        self.0
-            .checked_sub(earlier.0)
-            .map(Duration::from_nanos)
-            .ok_or(DocumentClockError::TimeMovedBackwards {
-                current: earlier,
-                requested: self,
-            })
+        let elapsed =
+            self.0
+                .checked_sub(earlier.0)
+                .ok_or(DocumentClockError::TimeMovedBackwards {
+                    current: earlier,
+                    requested: self,
+                })?;
+        Self(elapsed).checked_to_duration()
     }
+}
+
+/// A signed Unix timestamp in integer nanoseconds.
+///
+/// This is deliberately distinct from [`DocumentTime`]: wall time can precede the Unix epoch,
+/// while the monotonic document-clock offset cannot be negative.
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    Deserialize,
+    Eq,
+    MallocSizeOf,
+    Ord,
+    PartialEq,
+    PartialOrd,
+    Serialize,
+)]
+pub struct DocumentUnixTime(i128);
+
+impl DocumentUnixTime {
+    /// Construct a signed Unix timestamp from an integer number of nanoseconds.
+    pub const fn from_nanos(nanos: i128) -> Self {
+        Self(nanos)
+    }
+
+    /// Return this Unix timestamp as signed integer nanoseconds.
+    pub const fn as_nanos(self) -> i128 {
+        self.0
+    }
+
+    fn checked_add_document_time(self, time: DocumentTime) -> Result<Self, DocumentClockError> {
+        let time = i128::try_from(time.as_nanos()).map_err(|_| DocumentClockError::Overflow)?;
+        self.0
+            .checked_add(time)
+            .map(Self)
+            .ok_or(DocumentClockError::Overflow)
+    }
+}
+
+const TIME_CLIP_LIMIT_MILLISECONDS: i128 = 8_640_000_000_000_000;
+const NANOSECONDS_PER_MILLISECOND: i128 = 1_000_000;
+
+fn checked_javascript_date_time_microseconds(
+    unix_time: DocumentUnixTime,
+) -> Result<f64, DocumentClockError> {
+    let nanoseconds = unix_time.as_nanos();
+    let whole_microseconds = nanoseconds.div_euclid(1000);
+    let sub_microsecond_nanoseconds = nanoseconds.rem_euclid(1000);
+    let exact_candidate_microseconds =
+        whole_microseconds as f64 + sub_microsecond_nanoseconds as f64 / 1000.0;
+    let time_clip_limit_nanoseconds = TIME_CLIP_LIMIT_MILLISECONDS * NANOSECONDS_PER_MILLISECOND;
+    if nanoseconds < -time_clip_limit_nanoseconds || nanoseconds > time_clip_limit_nanoseconds {
+        // Return the spec result directly: rounding this exact out-of-range value through f64
+        // microseconds could otherwise collapse it back onto a finite TimeClip boundary.
+        return Ok(f64::NAN);
+    }
+
+    let expected_milliseconds = nanoseconds / NANOSECONDS_PER_MILLISECOND;
+    let millisecond_anchor = expected_milliseconds as f64 * 1000.0;
+    let mut best = None;
+    for anchor in [exact_candidate_microseconds, millisecond_anchor] {
+        for candidate in [anchor, f64_next_down(anchor), f64_next_up(anchor)] {
+            let observed_time_clip = simulated_javascript_date_time_clip(candidate);
+            if !observed_time_clip.is_finite() ||
+                observed_time_clip as i128 != expected_milliseconds
+            {
+                continue;
+            }
+            let distance = (candidate - exact_candidate_microseconds).abs();
+            if best.is_none_or(|(_, best_distance)| distance < best_distance) {
+                best = Some((candidate, distance));
+            }
+        }
+    }
+    if let Some((candidate, _)) = best {
+        return Ok(candidate);
+    }
+
+    Err(DocumentClockError::JavaScriptDatePrecisionLoss {
+        unix_time,
+        expected_milliseconds,
+        observed_milliseconds: (exact_candidate_microseconds / 1000.0).trunc() as i128,
+    })
+}
+
+fn simulated_javascript_date_time_clip(candidate_microseconds: f64) -> f64 {
+    let milliseconds = candidate_microseconds / 1000.0;
+    if !milliseconds.is_finite() || milliseconds.abs() > TIME_CLIP_LIMIT_MILLISECONDS as f64 {
+        return f64::NAN;
+    }
+    milliseconds.trunc() + 0.0
+}
+
+fn f64_next_up(value: f64) -> f64 {
+    if value.is_nan() || value == f64::INFINITY {
+        return value;
+    }
+    if value == 0.0 {
+        return f64::from_bits(1);
+    }
+    let bits = value.to_bits();
+    f64::from_bits(if value > 0.0 { bits + 1 } else { bits - 1 })
+}
+
+fn f64_next_down(value: f64) -> f64 {
+    if value.is_nan() || value == f64::NEG_INFINITY {
+        return value;
+    }
+    if value == 0.0 {
+        return f64::from_bits((1_u64 << 63) | 1);
+    }
+    let bits = value.to_bits();
+    f64::from_bits(if value > 0.0 { bits - 1 } else { bits + 1 })
 }
 
 /// One immutable timestamp captured for an "update the rendering" invocation.
@@ -504,13 +695,24 @@ pub enum DocumentClockError {
     TimeChanged {
         /// Offset bound by the conditional scheduling precondition.
         expected: DocumentTime,
-        /// Offset observed by the atomic comparison.
+        /// Offset observed at the controlled clock's linearization point.
         observed: DocumentTime,
     },
     /// An integer nanosecond conversion or calculation overflowed.
     Overflow,
     /// The current clock slices do not yet control the requested observable surface.
     UnsupportedSurface(DocumentTimeSurface),
+    /// SpiderMonkey's f64-microsecond Date hook cannot preserve this otherwise-valid TimeClip
+    /// millisecond.
+    JavaScriptDatePrecisionLoss {
+        /// Exact signed wall time that could not be transported without rounding to another
+        /// page-visible millisecond.
+        unix_time: DocumentUnixTime,
+        /// Millisecond that exact TimeClip truncation would produce.
+        expected_milliseconds: i128,
+        /// Millisecond produced after the f64-microsecond callback transport and truncation.
+        observed_milliseconds: i128,
+    },
 }
 
 impl fmt::Display for DocumentClockError {
@@ -529,13 +731,26 @@ impl fmt::Display for DocumentClockError {
                 expected.as_nanos(),
                 observed.as_nanos()
             ),
-            Self::Overflow => formatter.write_str("document time exceeds the u64 nanosecond range"),
+            Self::Overflow => {
+                formatter.write_str("document time conversion or calculation overflowed")
+            },
             Self::UnsupportedSurface(surface) => {
                 write!(
                     formatter,
                     "controlled document time does not yet support {surface:?}"
                 )
             },
+            Self::JavaScriptDatePrecisionLoss {
+                unix_time,
+                expected_milliseconds,
+                observed_milliseconds,
+            } => write!(
+                formatter,
+                "controlled JavaScript Date wall time {}ns would round from exact {}ms to {}ms",
+                unix_time.as_nanos(),
+                expected_milliseconds,
+                observed_milliseconds
+            ),
         }
     }
 }
@@ -555,13 +770,19 @@ impl DocumentClockId {
     }
 }
 
+#[derive(Debug)]
+struct ControlledClockState {
+    now: DocumentTime,
+    terminal: Option<DocumentClockError>,
+}
+
 enum DocumentClockInner {
     Realtime {
         origin: Instant,
     },
     Controlled {
-        now_ns: AtomicU64,
-        unix_time_origin_ns: u64,
+        state: Mutex<ControlledClockState>,
+        unix_time_origin_ns: DocumentUnixTime,
         unsupported_surface: AtomicU8,
         execution_ledger: Option<DocumentExecutionLedger>,
     },
@@ -584,6 +805,34 @@ impl Default for DocumentClock {
 impl DocumentClock {
     /// Construct a clock from its immutable mode configuration.
     pub fn new(configuration: DocumentClockConfiguration) -> Self {
+        Self::try_new(configuration).expect("invalid document clock configuration")
+    }
+
+    /// Construct a clock after validating every controlled-time representation boundary.
+    pub fn try_new(configuration: DocumentClockConfiguration) -> Result<Self, DocumentClockError> {
+        let inner = match configuration {
+            DocumentClockConfiguration::Realtime => DocumentClockInner::Realtime {
+                origin: Instant::now(),
+            },
+            DocumentClockConfiguration::Controlled {
+                initial_time_ns,
+                unix_time_origin_ns,
+                execution_limits,
+            } => {
+                let initial_time = DocumentTime::from_nanos(initial_time_ns);
+                unix_time_origin_ns.checked_add_document_time(initial_time)?;
+                DocumentClockInner::Controlled {
+                    state: Mutex::new(ControlledClockState {
+                        now: initial_time,
+                        terminal: None,
+                    }),
+                    unix_time_origin_ns,
+                    unsupported_surface: AtomicU8::new(0),
+                    execution_ledger: execution_limits
+                        .map(|limits| DocumentExecutionLedger::new_at(limits, initial_time)),
+                }
+            },
+        };
         let id = DocumentClockId(
             NEXT_DOCUMENT_CLOCK_ID
                 .fetch_update(
@@ -593,25 +842,10 @@ impl DocumentClock {
                 )
                 .expect("document clock identifier exhausted"),
         );
-        let inner = match configuration {
-            DocumentClockConfiguration::Realtime => DocumentClockInner::Realtime {
-                origin: Instant::now(),
-            },
-            DocumentClockConfiguration::Controlled {
-                initial_time_ns,
-                unix_time_origin_ns,
-                execution_limits,
-            } => DocumentClockInner::Controlled {
-                now_ns: AtomicU64::new(initial_time_ns),
-                unix_time_origin_ns,
-                unsupported_surface: AtomicU8::new(0),
-                execution_ledger: execution_limits.map(DocumentExecutionLedger::new),
-            },
-        };
-        Self {
+        Ok(Self {
             id,
             inner: Arc::new(inner),
-        }
+        })
     }
 
     /// Return the identity shared by every clone in this clock domain.
@@ -634,21 +868,36 @@ impl DocumentClock {
         }
     }
 
+    /// Return the first sticky controlled-clock terminal, if one has been latched.
+    pub fn terminal_error(&self) -> Option<DocumentClockError> {
+        match &*self.inner {
+            DocumentClockInner::Realtime { .. } => None,
+            DocumentClockInner::Controlled { state, .. } => {
+                state
+                    .lock()
+                    .expect("controlled document clock poisoned")
+                    .terminal
+            },
+        }
+    }
+
     /// Return the current offset, checking the host-duration conversion.
     pub fn try_now(&self) -> Result<DocumentTime, DocumentClockError> {
         match &*self.inner {
             DocumentClockInner::Realtime { origin } => {
                 DocumentTime::checked_from_duration(origin.elapsed())
             },
-            DocumentClockInner::Controlled { now_ns, .. } => Ok(DocumentTime::from_nanos(
-                now_ns.load(AtomicOrdering::Acquire),
-            )),
+            DocumentClockInner::Controlled { state, .. } => Ok(state
+                .lock()
+                .expect("controlled document clock poisoned")
+                .now),
         }
     }
 
     /// Return the current offset.
     ///
-    /// A real monotonic clock would need to run for roughly 584 years to exceed this U1 range.
+    /// Realtime conversion remains checked even though the document-time representation is wider
+    /// than a standard duration.
     pub fn now(&self) -> DocumentTime {
         self.try_now()
             .expect("document clock exceeded its checked integer nanosecond range")
@@ -682,28 +931,31 @@ impl DocumentClock {
 
     /// Advance a controlled clock monotonically without sleeping.
     pub fn advance_to(&self, requested: DocumentTime) -> Result<(), DocumentClockError> {
-        let DocumentClockInner::Controlled { now_ns, .. } = &*self.inner else {
+        let DocumentClockInner::Controlled {
+            state,
+            unix_time_origin_ns,
+            ..
+        } = &*self.inner
+        else {
             return Err(DocumentClockError::RealtimeClock);
         };
 
-        let mut current = now_ns.load(AtomicOrdering::Acquire);
-        loop {
-            if requested.as_nanos() < current {
-                return Err(DocumentClockError::TimeMovedBackwards {
-                    current: DocumentTime::from_nanos(current),
-                    requested,
-                });
-            }
-            match now_ns.compare_exchange_weak(
-                current,
-                requested.as_nanos(),
-                AtomicOrdering::AcqRel,
-                AtomicOrdering::Acquire,
-            ) {
-                Ok(_) => return Ok(()),
-                Err(observed) => current = observed,
-            }
+        let mut state = state.lock().expect("controlled document clock poisoned");
+        if let Some(terminal) = state.terminal {
+            return Err(terminal);
         }
+        if requested < state.now {
+            return Err(DocumentClockError::TimeMovedBackwards {
+                current: state.now,
+                requested,
+            });
+        }
+        if let Err(error) = unix_time_origin_ns.checked_add_document_time(requested) {
+            state.terminal = Some(error);
+            return Err(error);
+        }
+        state.now = requested;
+        Ok(())
     }
 
     /// Atomically advance only if the clock still equals an observed scheduling precondition.
@@ -712,31 +964,43 @@ impl DocumentClock {
         expected: DocumentTime,
         requested: DocumentTime,
     ) -> Result<(), DocumentClockError> {
-        let DocumentClockInner::Controlled { now_ns, .. } = &*self.inner else {
+        let DocumentClockInner::Controlled {
+            state,
+            unix_time_origin_ns,
+            ..
+        } = &*self.inner
+        else {
             return Err(DocumentClockError::RealtimeClock);
         };
+        let mut state = state.lock().expect("controlled document clock poisoned");
+        if let Some(terminal) = state.terminal {
+            return Err(terminal);
+        }
         if requested < expected {
             return Err(DocumentClockError::TimeMovedBackwards {
                 current: expected,
                 requested,
             });
         }
-        now_ns
-            .compare_exchange(
-                expected.as_nanos(),
-                requested.as_nanos(),
-                AtomicOrdering::AcqRel,
-                AtomicOrdering::Acquire,
-            )
-            .map(|_| ())
-            .map_err(|observed| DocumentClockError::TimeChanged {
+        if state.now != expected {
+            return Err(DocumentClockError::TimeChanged {
                 expected,
-                observed: DocumentTime::from_nanos(observed),
-            })
+                observed: state.now,
+            });
+        }
+        if let Err(error) = unix_time_origin_ns.checked_add_document_time(requested) {
+            state.terminal = Some(error);
+            return Err(error);
+        }
+        state.now = requested;
+        Ok(())
     }
 
     /// Return Unix time at a point in a controlled clock domain, checking integer overflow.
-    pub fn unix_time_ns_at(&self, time: DocumentTime) -> Result<u64, DocumentClockError> {
+    pub fn unix_time_ns_at(
+        &self,
+        time: DocumentTime,
+    ) -> Result<DocumentUnixTime, DocumentClockError> {
         let DocumentClockInner::Controlled {
             unix_time_origin_ns,
             ..
@@ -744,14 +1008,43 @@ impl DocumentClock {
         else {
             return Err(DocumentClockError::RealtimeClock);
         };
-        unix_time_origin_ns
-            .checked_add(time.as_nanos())
-            .ok_or(DocumentClockError::Overflow)
+        unix_time_origin_ns.checked_add_document_time(time)
     }
 
     /// Return current Unix time in a controlled clock domain, checking integer overflow.
-    pub fn unix_time_ns(&self) -> Result<u64, DocumentClockError> {
+    pub fn unix_time_ns(&self) -> Result<DocumentUnixTime, DocumentClockError> {
         self.unix_time_ns_at(self.try_now()?)
+    }
+
+    /// Return the f64-microsecond value consumed by SpiderMonkey's JavaScript Date hook.
+    ///
+    /// A value inside ECMAScript's TimeClip domain is returned only when the hook's later
+    /// millisecond conversion preserves exact truncation. Otherwise this method latches and
+    /// returns a typed terminal before rounded wall time can reach the page. An exact value outside
+    /// TimeClip returns NaN directly without latching: that is the specified page-visible result,
+    /// not a representation failure.
+    pub fn javascript_date_time_microseconds(&self) -> Result<f64, DocumentClockError> {
+        self.require_surface(DocumentTimeSurface::JavaScriptDate)?;
+        let DocumentClockInner::Controlled {
+            state,
+            unix_time_origin_ns,
+            ..
+        } = &*self.inner
+        else {
+            return Err(DocumentClockError::RealtimeClock);
+        };
+        let mut state = state.lock().expect("controlled document clock poisoned");
+        if let Some(terminal) = state.terminal {
+            return Err(terminal);
+        }
+        let unix_time = unix_time_origin_ns.checked_add_document_time(state.now)?;
+        match checked_javascript_date_time_microseconds(unix_time) {
+            Ok(microseconds) => Ok(microseconds),
+            Err(error) => {
+                state.terminal = Some(error);
+                Err(error)
+            },
+        }
     }
 
     /// Check whether this slice controls an observable surface.
@@ -814,7 +1107,7 @@ impl DocumentClock {
             return Ok(None);
         };
         origin
-            .checked_add(Duration::from_nanos(deadline.as_nanos()))
+            .checked_add(deadline.checked_to_duration()?)
             .map(Some)
             .ok_or(DocumentClockError::Overflow)
     }
@@ -1510,6 +1803,18 @@ impl TimerScheduler {
         }))
     }
 
+    /// Require one exact finite deadline snapshot without mutating the scheduler or clock.
+    pub fn validate_deadline_snapshot(
+        &self,
+        expected: TimerDeadlineSnapshot,
+    ) -> Result<(), TimerControlError> {
+        let observed = self.finite_deadline_snapshot()?;
+        if observed != Some(expected) {
+            return Err(TimerControlError::StaleDeadline { expected, observed });
+        }
+        Ok(())
+    }
+
     /// Advance the shared controlled clock monotonically without activating a timer.
     pub fn advance_controlled_time_to(&self, now: DocumentTime) -> Result<(), TimerControlError> {
         self.clock.advance_to(now).map_err(Into::into)
@@ -1535,23 +1840,18 @@ impl TimerScheduler {
         &self,
         expected: TimerDeadlineSnapshot,
     ) -> Result<(), TimerControlError> {
-        let observed = self.finite_deadline_snapshot()?;
-        if observed != Some(expected) {
-            return Err(TimerControlError::StaleDeadline { expected, observed });
-        }
+        self.validate_deadline_snapshot(expected)?;
         self.clock.advance_to(expected.deadline).map_err(Into::into)
     }
 
-    /// Validate one deadline and atomically require the previously observed clock offset.
+    /// Validate one deadline and require the previously observed clock offset at one linearization
+    /// point.
     pub fn validate_and_advance_from(
         &self,
         expected_now: DocumentTime,
         expected: TimerDeadlineSnapshot,
     ) -> Result<(), TimerControlError> {
-        let observed = self.finite_deadline_snapshot()?;
-        if observed != Some(expected) {
-            return Err(TimerControlError::StaleDeadline { expected, observed });
-        }
+        self.validate_deadline_snapshot(expected)?;
         self.clock
             .advance_from_to(expected_now, expected.deadline)
             .map_err(Into::into)
@@ -1609,10 +1909,10 @@ mod tests {
 
     use super::*;
 
-    fn controlled_clock(initial_time_ns: u64) -> DocumentClock {
+    fn controlled_clock(initial_time_ns: u128) -> DocumentClock {
         DocumentClock::new(DocumentClockConfiguration::Controlled {
             initial_time_ns,
-            unix_time_origin_ns: 0,
+            unix_time_origin_ns: DocumentUnixTime::default(),
             execution_limits: None,
         })
     }
@@ -1623,6 +1923,7 @@ mod tests {
             microtasks: 3,
             rendering_opportunities: 1,
             mutations: 1,
+            virtual_span: None,
         }
     }
 
@@ -1633,7 +1934,7 @@ mod tests {
 
         let clock = DocumentClock::new(DocumentClockConfiguration::Controlled {
             initial_time_ns: 0,
-            unix_time_origin_ns: 0,
+            unix_time_origin_ns: DocumentUnixTime::default(),
             execution_limits: Some(execution_limits()),
         });
         assert_eq!(
@@ -1643,6 +1944,21 @@ mod tests {
                 counters: DocumentExecutionCounters::default(),
                 terminal: None,
             }
+        );
+    }
+
+    #[test]
+    fn api2_execution_defaults_include_the_exact_one_day_virtual_span() {
+        assert_eq!(
+            DocumentExecutionLimits::API2_V1_DEFAULT.virtual_span,
+            Some(DocumentTime::from_nanos(86_400_000_000_000))
+        );
+        assert_eq!(
+            DocumentExecutionLimits::API2_V1_DEFAULT
+                .virtual_span
+                .unwrap()
+                .checked_to_duration(),
+            Ok(Duration::from_millis(86_400_000))
         );
     }
 
@@ -1676,7 +1992,7 @@ mod tests {
     fn terminal_active_guard_prevents_controlled_clock_mutation() {
         let clock = DocumentClock::new(DocumentClockConfiguration::Controlled {
             initial_time_ns: 0,
-            unix_time_origin_ns: 0,
+            unix_time_origin_ns: DocumentUnixTime::default(),
             execution_limits: Some(execution_limits()),
         });
         let ledger = clock.execution_ledger().unwrap();
@@ -1702,6 +2018,89 @@ mod tests {
         assert_eq!(
             scheduler.finite_deadline_snapshot().unwrap(),
             Some(deadline)
+        );
+    }
+
+    #[test]
+    fn virtual_span_terminal_is_exact_sticky_and_precedes_clock_mutation() {
+        const API2_VIRTUAL_SPAN_MAX_MS: u64 = 9_007_199_254_740_991;
+        let span = DocumentTime::from_nanos(
+            u128::from(API2_VIRTUAL_SPAN_MAX_MS)
+                .checked_mul(1_000_000)
+                .unwrap(),
+        );
+        let mut limits = execution_limits();
+        limits.virtual_span = Some(span);
+
+        let exact_clock = DocumentClock::new(DocumentClockConfiguration::Controlled {
+            initial_time_ns: 0,
+            unix_time_origin_ns: DocumentUnixTime::default(),
+            execution_limits: Some(limits),
+        });
+        let exact_ledger = exact_clock.execution_ledger().unwrap();
+        let mut exact_scheduler = TimerScheduler::with_clock(exact_clock.clone());
+        exact_scheduler.schedule_timer(TimerEventRequest {
+            callback: Box::new(|| {}),
+            duration: Duration::from_millis(API2_VIRTUAL_SPAN_MAX_MS),
+        });
+        let exact_deadline = exact_scheduler.finite_deadline_snapshot().unwrap().unwrap();
+        let exact_guard = exact_ledger
+            .active_guard_for_time(exact_deadline.deadline)
+            .unwrap();
+        exact_scheduler
+            .validate_and_advance_from(DocumentTime::ZERO, exact_deadline)
+            .unwrap();
+        drop(exact_guard);
+        assert_eq!(exact_clock.now(), span);
+        assert_eq!(exact_ledger.observation().terminal, None);
+
+        let over_clock = DocumentClock::new(DocumentClockConfiguration::Controlled {
+            initial_time_ns: 0,
+            unix_time_origin_ns: DocumentUnixTime::default(),
+            execution_limits: Some(limits),
+        });
+        let over_ledger = over_clock.execution_ledger().unwrap();
+        let mut over_scheduler = TimerScheduler::with_clock(over_clock.clone());
+        over_scheduler.schedule_timer(TimerEventRequest {
+            callback: Box::new(|| {}),
+            duration: Duration::from_millis(API2_VIRTUAL_SPAN_MAX_MS + 1),
+        });
+        let over_deadline = over_scheduler.finite_deadline_snapshot().unwrap().unwrap();
+        let terminal = DocumentExecutionTerminal::VirtualSpanExceeded {
+            limit: span,
+            requested: DocumentTime::from_nanos(span.as_nanos() + 1_000_000),
+        };
+        assert!(matches!(
+            over_ledger.active_guard_for_time(over_deadline.deadline),
+            Err(observed) if observed == terminal
+        ));
+        assert_eq!(over_clock.now(), DocumentTime::ZERO);
+        assert_eq!(
+            over_scheduler.finite_deadline_snapshot().unwrap(),
+            Some(over_deadline)
+        );
+        assert!(matches!(
+            over_ledger.active_guard(),
+            Err(observed) if observed == terminal
+        ));
+        assert_eq!(over_ledger.observation().terminal, Some(terminal));
+
+        let initial = DocumentTime::from_nanos(100);
+        let before_initial_ledger = DocumentExecutionLedger::new_at(limits, initial);
+        let requested = DocumentTime::from_nanos(99);
+        let before_initial =
+            DocumentExecutionTerminal::VirtualTimeBeforeInitial { initial, requested };
+        assert!(matches!(
+            before_initial_ledger.active_guard_for_time(requested),
+            Err(observed) if observed == before_initial
+        ));
+        assert!(matches!(
+            before_initial_ledger.active_guard_for_time(initial),
+            Err(observed) if observed == before_initial
+        ));
+        assert_eq!(
+            before_initial_ledger.observation().terminal,
+            Some(before_initial)
         );
     }
 
@@ -2187,27 +2586,39 @@ mod tests {
 
     #[test]
     fn controlled_time_is_monotonic_and_deadline_math_is_checked() {
+        let beyond_duration = DocumentTime::from_nanos(Duration::MAX.as_nanos() + 1);
         assert_eq!(
-            DocumentTime::checked_from_duration(Duration::MAX),
+            beyond_duration.checked_to_duration(),
             Err(DocumentClockError::Overflow)
         );
 
-        let clock = controlled_clock(u64::MAX - 1);
+        let beyond_u64 = u128::from(u64::MAX) + 1;
+        let clock = controlled_clock(beyond_u64);
         assert_eq!(
-            clock.advance_to(DocumentTime::from_nanos(u64::MAX - 2)),
+            clock.advance_to(DocumentTime::from_nanos(beyond_u64 - 1)),
             Err(DocumentClockError::TimeMovedBackwards {
-                current: DocumentTime::from_nanos(u64::MAX - 1),
-                requested: DocumentTime::from_nanos(u64::MAX - 2),
+                current: DocumentTime::from_nanos(beyond_u64),
+                requested: DocumentTime::from_nanos(beyond_u64 - 1),
             })
         );
 
         let mut scheduler = TimerScheduler::with_clock(clock);
         let events = Arc::new(Mutex::new(Vec::new()));
+        scheduler
+            .try_schedule_timer(recording_request(&events, 1, Duration::from_nanos(2)))
+            .unwrap();
         assert_eq!(
             scheduler
-                .try_schedule_timer(recording_request(&events, 1, Duration::from_nanos(2)))
-                .unwrap_err(),
-            TimerControlError::DeadlineOverflow
+                .finite_deadline_snapshot()
+                .unwrap()
+                .unwrap()
+                .deadline,
+            DocumentTime::from_nanos(beyond_u64 + 2)
+        );
+
+        assert_eq!(
+            DocumentTime::from_nanos(u128::MAX).checked_add(Duration::from_nanos(1)),
+            Err(DocumentClockError::Overflow)
         );
     }
 
@@ -2308,16 +2719,19 @@ mod tests {
     fn controlled_wall_and_monotonic_time_advance_in_exact_order() {
         let clock = DocumentClock::new(DocumentClockConfiguration::Controlled {
             initial_time_ns: 7_000_000,
-            unix_time_origin_ns: 1_700_000_000_000_000_000,
+            unix_time_origin_ns: DocumentUnixTime::from_nanos(1_700_000_000_000_000_000),
             execution_limits: None,
         });
         let navigation_origin = clock.now();
 
         assert_eq!(
             clock.unix_time_ns_at(navigation_origin),
-            Ok(1_700_000_000_007_000_000)
+            Ok(DocumentUnixTime::from_nanos(1_700_000_000_007_000_000))
         );
-        assert_eq!(clock.unix_time_ns(), Ok(1_700_000_000_007_000_000));
+        assert_eq!(
+            clock.unix_time_ns(),
+            Ok(DocumentUnixTime::from_nanos(1_700_000_000_007_000_000))
+        );
 
         clock
             .advance_to(DocumentTime::from_nanos(12_000_000))
@@ -2329,19 +2743,48 @@ mod tests {
                 .unwrap(),
             Duration::from_millis(5)
         );
-        assert_eq!(clock.unix_time_ns(), Ok(1_700_000_000_012_000_000));
+        assert_eq!(
+            clock.unix_time_ns(),
+            Ok(DocumentUnixTime::from_nanos(1_700_000_000_012_000_000))
+        );
     }
 
     #[test]
-    fn controlled_wall_time_overflow_is_checked_without_corrupting_monotonic_time() {
+    fn controlled_wall_time_overflow_is_sticky_and_precedes_monotonic_mutation() {
+        assert!(matches!(
+            DocumentClock::try_new(DocumentClockConfiguration::Controlled {
+                initial_time_ns: 1,
+                unix_time_origin_ns: DocumentUnixTime::from_nanos(i128::MAX),
+                execution_limits: None,
+            }),
+            Err(DocumentClockError::Overflow)
+        ));
+
         let clock = DocumentClock::new(DocumentClockConfiguration::Controlled {
-            initial_time_ns: 1,
-            unix_time_origin_ns: u64::MAX,
+            initial_time_ns: 0,
+            unix_time_origin_ns: DocumentUnixTime::from_nanos(i128::MAX),
             execution_limits: None,
         });
+        assert_eq!(
+            clock.advance_to(DocumentTime::from_nanos(1)),
+            Err(DocumentClockError::Overflow)
+        );
+        assert_eq!(clock.try_now(), Ok(DocumentTime::ZERO));
+        assert_eq!(clock.terminal_error(), Some(DocumentClockError::Overflow));
+        assert_eq!(
+            clock.advance_to(DocumentTime::ZERO),
+            Err(DocumentClockError::Overflow)
+        );
+        assert_eq!(
+            clock.advance_from_to(DocumentTime::from_nanos(1), DocumentTime::ZERO),
+            Err(DocumentClockError::Overflow)
+        );
 
-        assert_eq!(clock.unix_time_ns(), Err(DocumentClockError::Overflow));
-        assert_eq!(clock.now(), DocumentTime::from_nanos(1));
+        let ordinary = DocumentClock::new(DocumentClockConfiguration::Controlled {
+            initial_time_ns: 1,
+            unix_time_origin_ns: DocumentUnixTime::default(),
+            execution_limits: None,
+        });
         assert_eq!(
             DocumentTime::from_nanos(1).checked_duration_since(DocumentTime::from_nanos(2)),
             Err(DocumentClockError::TimeMovedBackwards {
@@ -2349,6 +2792,237 @@ mod tests {
                 requested: DocumentTime::from_nanos(1),
             })
         );
+        assert_eq!(ordinary.now(), DocumentTime::from_nanos(1));
+    }
+
+    #[test]
+    fn javascript_date_transport_is_exact_or_latches_a_typed_terminal() {
+        const ADVERSARIAL_MILLISECONDS: i128 = 8_639_999_999_999_979;
+        const LIMIT_NANOSECONDS: i128 = TIME_CLIP_LIMIT_MILLISECONDS * NANOSECONDS_PER_MILLISECOND;
+
+        for milliseconds in [ADVERSARIAL_MILLISECONDS, -ADVERSARIAL_MILLISECONDS] {
+            let unix_time =
+                DocumentUnixTime::from_nanos(milliseconds * NANOSECONDS_PER_MILLISECOND);
+            let clock = DocumentClock::new(DocumentClockConfiguration::Controlled {
+                initial_time_ns: 0,
+                unix_time_origin_ns: unix_time,
+                execution_limits: None,
+            });
+            let error = clock
+                .javascript_date_time_microseconds()
+                .expect_err("unreachable TimeClip millisecond must fail closed");
+            assert!(matches!(
+                error,
+                DocumentClockError::JavaScriptDatePrecisionLoss {
+                    unix_time: observed_time,
+                    expected_milliseconds,
+                    observed_milliseconds,
+                } if observed_time == unix_time &&
+                    expected_milliseconds == milliseconds &&
+                    observed_milliseconds != expected_milliseconds
+            ));
+            assert_eq!(clock.terminal_error(), Some(error));
+            assert_eq!(clock.try_now(), Ok(DocumentTime::ZERO));
+            assert_eq!(clock.advance_to(DocumentTime::from_nanos(1)), Err(error));
+
+            let encoded = postcard::to_stdvec(&error).unwrap();
+            let decoded: DocumentClockError = postcard::from_bytes(&encoded).unwrap();
+            assert_eq!(decoded, error);
+        }
+
+        for nanoseconds in [-1, -999_999, 0, 1, 999_999] {
+            let clock = DocumentClock::new(DocumentClockConfiguration::Controlled {
+                initial_time_ns: 0,
+                unix_time_origin_ns: DocumentUnixTime::from_nanos(nanoseconds),
+                execution_limits: None,
+            });
+            let candidate = clock.javascript_date_time_microseconds().unwrap();
+            let clipped = simulated_javascript_date_time_clip(candidate);
+            assert_eq!(clipped, 0.0);
+            assert!(!clipped.is_sign_negative());
+            assert_eq!(clock.terminal_error(), None);
+        }
+
+        for (nanoseconds, expected_milliseconds) in
+            [(-1_000_001, -1), (1_000_001, 1), (2_000_000_000, 2000)]
+        {
+            let clock = DocumentClock::new(DocumentClockConfiguration::Controlled {
+                initial_time_ns: 0,
+                unix_time_origin_ns: DocumentUnixTime::from_nanos(nanoseconds),
+                execution_limits: None,
+            });
+            let candidate = clock.javascript_date_time_microseconds().unwrap();
+            assert_eq!(
+                simulated_javascript_date_time_clip(candidate),
+                expected_milliseconds as f64
+            );
+            assert_eq!(clock.terminal_error(), None);
+        }
+
+        for nanoseconds in [
+            -LIMIT_NANOSECONDS,
+            -LIMIT_NANOSECONDS + 1,
+            LIMIT_NANOSECONDS - 1,
+            LIMIT_NANOSECONDS,
+            -LIMIT_NANOSECONDS - 1,
+            LIMIT_NANOSECONDS + 1,
+        ] {
+            let clock = DocumentClock::new(DocumentClockConfiguration::Controlled {
+                initial_time_ns: 0,
+                unix_time_origin_ns: DocumentUnixTime::from_nanos(nanoseconds),
+                execution_limits: None,
+            });
+            let candidate = clock.javascript_date_time_microseconds().unwrap();
+            if nanoseconds.abs() <= LIMIT_NANOSECONDS {
+                let clipped = simulated_javascript_date_time_clip(candidate);
+                assert_eq!(clipped as i128, nanoseconds / NANOSECONDS_PER_MILLISECOND);
+            } else {
+                assert!(candidate.is_nan());
+            }
+            assert_eq!(clock.terminal_error(), None);
+        }
+
+        let crossing = DocumentClock::new(DocumentClockConfiguration::Controlled {
+            initial_time_ns: 0,
+            unix_time_origin_ns: DocumentUnixTime::from_nanos(LIMIT_NANOSECONDS),
+            execution_limits: None,
+        });
+        assert_eq!(
+            simulated_javascript_date_time_clip(
+                crossing.javascript_date_time_microseconds().unwrap()
+            ),
+            TIME_CLIP_LIMIT_MILLISECONDS as f64
+        );
+        crossing.advance_to(DocumentTime::from_nanos(1)).unwrap();
+        assert!(
+            crossing
+                .javascript_date_time_microseconds()
+                .unwrap()
+                .is_nan()
+        );
+        assert_eq!(crossing.terminal_error(), None);
+    }
+
+    #[test]
+    fn api2_time_boundaries_preserve_signed_epoch_and_full_virtual_span() {
+        const API2_EPOCH_LIMIT_MS: i128 = 8_640_000_000_000_000;
+        const API2_VIRTUAL_SPAN_MAX_MS: u128 = 9_007_199_254_740_991;
+        const NANOS_PER_MILLISECOND: i128 = 1_000_000;
+
+        let epoch_ns = API2_EPOCH_LIMIT_MS
+            .checked_mul(NANOS_PER_MILLISECOND)
+            .unwrap();
+        let span_ns = API2_VIRTUAL_SPAN_MAX_MS
+            .checked_mul(NANOS_PER_MILLISECOND as u128)
+            .unwrap();
+        assert!(span_ns > u128::from(u64::MAX));
+
+        let negative = DocumentClock::new(DocumentClockConfiguration::Controlled {
+            initial_time_ns: span_ns,
+            unix_time_origin_ns: DocumentUnixTime::from_nanos(-epoch_ns),
+            execution_limits: None,
+        });
+        assert_eq!(
+            negative.unix_time_ns(),
+            Ok(DocumentUnixTime::from_nanos(-epoch_ns + span_ns as i128))
+        );
+
+        let positive = DocumentClock::new(DocumentClockConfiguration::Controlled {
+            initial_time_ns: span_ns,
+            unix_time_origin_ns: DocumentUnixTime::from_nanos(epoch_ns),
+            execution_limits: None,
+        });
+        assert_eq!(
+            positive.unix_time_ns(),
+            Ok(DocumentUnixTime::from_nanos(epoch_ns + span_ns as i128))
+        );
+        assert_eq!(
+            DocumentTime::from_nanos(span_ns).checked_to_duration(),
+            Ok(Duration::new(
+                u64::try_from(span_ns / 1_000_000_000).unwrap(),
+                u32::try_from(span_ns % 1_000_000_000).unwrap(),
+            ))
+        );
+    }
+
+    #[test]
+    fn postcard_round_trips_widened_controlled_time_endpoints() {
+        const API2_MIN_EPOCH_NS: i128 = -8_640_000_000_000_000_000_000;
+        const API2_MAX_SPAN_NS: u128 = 9_007_199_254_740_991_000_000;
+        let configuration = DocumentClockConfiguration::Controlled {
+            initial_time_ns: API2_MAX_SPAN_NS,
+            unix_time_origin_ns: DocumentUnixTime::from_nanos(API2_MIN_EPOCH_NS),
+            execution_limits: Some(DocumentExecutionLimits {
+                virtual_span: Some(DocumentTime::from_nanos(API2_MAX_SPAN_NS)),
+                ..DocumentExecutionLimits::API2_V1_DEFAULT
+            }),
+        };
+
+        let encoded = postcard::to_stdvec(&configuration).unwrap();
+        let decoded: DocumentClockConfiguration = postcard::from_bytes(&encoded).unwrap();
+        assert_eq!(decoded, configuration);
+
+        let terminal = DocumentExecutionTerminal::VirtualSpanExceeded {
+            limit: DocumentTime::from_nanos(API2_MAX_SPAN_NS),
+            requested: DocumentTime::from_nanos(API2_MAX_SPAN_NS + 1),
+        };
+        let encoded = postcard::to_stdvec(&terminal).unwrap();
+        let decoded: DocumentExecutionTerminal = postcard::from_bytes(&encoded).unwrap();
+        assert_eq!(decoded, terminal);
+    }
+
+    #[test]
+    fn postcard_preserves_existing_controlled_time_discriminants() {
+        let realtime = DocumentClockConfiguration::Realtime;
+        let controlled = DocumentClockConfiguration::Controlled {
+            initial_time_ns: 0,
+            unix_time_origin_ns: DocumentUnixTime::default(),
+            execution_limits: None,
+        };
+        let budget = DocumentExecutionTerminal::BudgetExceeded {
+            budget: DocumentExecutionBudget::OrdinaryTasks,
+            limit: 1,
+            observed: 2,
+        };
+        let counter =
+            DocumentExecutionTerminal::CounterOverflow(DocumentExecutionCounter::OrdinaryTasks);
+        let span = DocumentExecutionTerminal::VirtualSpanExceeded {
+            limit: DocumentTime::from_nanos(1),
+            requested: DocumentTime::from_nanos(2),
+        };
+        let before_initial = DocumentExecutionTerminal::VirtualTimeBeforeInitial {
+            initial: DocumentTime::from_nanos(1),
+            requested: DocumentTime::ZERO,
+        };
+        let realtime_error = DocumentClockError::RealtimeClock;
+        let backwards_error = DocumentClockError::TimeMovedBackwards {
+            current: DocumentTime::from_nanos(1),
+            requested: DocumentTime::ZERO,
+        };
+        let changed_error = DocumentClockError::TimeChanged {
+            expected: DocumentTime::ZERO,
+            observed: DocumentTime::from_nanos(1),
+        };
+        let overflow_error = DocumentClockError::Overflow;
+        let surface_error = DocumentClockError::UnsupportedSurface(DocumentTimeSurface::Worker);
+        let date_error = DocumentClockError::JavaScriptDatePrecisionLoss {
+            unix_time: DocumentUnixTime::from_nanos(1),
+            expected_milliseconds: 1,
+            observed_milliseconds: 0,
+        };
+
+        assert_eq!(postcard::to_stdvec(&realtime).unwrap()[0], 0);
+        assert_eq!(postcard::to_stdvec(&controlled).unwrap()[0], 1);
+        assert_eq!(postcard::to_stdvec(&budget).unwrap()[0], 0);
+        assert_eq!(postcard::to_stdvec(&counter).unwrap()[0], 1);
+        assert_eq!(postcard::to_stdvec(&span).unwrap()[0], 2);
+        assert_eq!(postcard::to_stdvec(&before_initial).unwrap()[0], 3);
+        assert_eq!(postcard::to_stdvec(&realtime_error).unwrap()[0], 0);
+        assert_eq!(postcard::to_stdvec(&backwards_error).unwrap()[0], 1);
+        assert_eq!(postcard::to_stdvec(&changed_error).unwrap()[0], 2);
+        assert_eq!(postcard::to_stdvec(&overflow_error).unwrap()[0], 3);
+        assert_eq!(postcard::to_stdvec(&surface_error).unwrap()[0], 4);
+        assert_eq!(postcard::to_stdvec(&date_error).unwrap()[0], 5);
     }
 
     #[test]

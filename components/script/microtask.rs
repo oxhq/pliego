@@ -322,6 +322,7 @@ mod tests {
             microtasks,
             rendering_opportunities: 1,
             mutations: 1,
+            virtual_span: None,
         }
     }
 

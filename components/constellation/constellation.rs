@@ -782,7 +782,7 @@ mod controlled_document_time_tests {
     fn deadline() -> TimerDeadlineSnapshot {
         let clock = DocumentClock::new(DocumentClockConfiguration::Controlled {
             initial_time_ns: 0,
-            unix_time_origin_ns: 0,
+            unix_time_origin_ns: timers::DocumentUnixTime::default(),
             execution_limits: None,
         });
         let mut scheduler = TimerScheduler::with_clock(clock);
@@ -1208,7 +1208,7 @@ mod controlled_document_time_tests {
     fn stale_target_token_is_rejected_before_routing() {
         let clock = DocumentClock::new(DocumentClockConfiguration::Controlled {
             initial_time_ns: 0,
-            unix_time_origin_ns: 0,
+            unix_time_origin_ns: timers::DocumentUnixTime::default(),
             execution_limits: None,
         });
         let fence = DocumentProducerFence::default();

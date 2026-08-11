@@ -137,19 +137,18 @@ impl WindowPerformanceClock {
 
     fn relative_now(&self) -> Result<Duration, DocumentClockError> {
         let elapsed = self.clock.try_now()?.checked_duration_since(self.origin)?;
-        Ok(Duration::nanoseconds_i128(elapsed.as_nanos() as i128))
+        Duration::try_from(elapsed).map_err(|_| DocumentClockError::Overflow)
     }
 
     fn now(&self) -> Result<DOMHighResTimeStamp, DocumentClockError> {
-        self.relative_now()
-            .map(|duration| duration.to_dom_high_res_time_stamp())
+        let elapsed = self.clock.try_now()?.checked_duration_since(self.origin)?;
+        Ok(document_duration_to_dom_high_res_time_stamp(elapsed))
     }
 
     fn time_origin(&self) -> Result<DOMHighResTimeStamp, DocumentClockError> {
-        Ok(
-            Duration::nanoseconds_i128(self.clock.unix_time_ns_at(self.origin)? as i128)
-                .to_dom_high_res_time_stamp(),
-        )
+        Ok(signed_nanoseconds_to_dom_high_res_time_stamp(
+            self.clock.unix_time_ns_at(self.origin)?.as_nanos(),
+        ))
     }
 
     fn accepts_host_timestamp(&self) -> bool {
@@ -157,6 +156,35 @@ impl WindowPerformanceClock {
             .require_surface(DocumentTimeSurface::HostTimestamp)
             .is_ok()
     }
+}
+
+pub(crate) fn document_duration_to_dom_high_res_time_stamp(
+    duration: std::time::Duration,
+) -> DOMHighResTimeStamp {
+    unsigned_microseconds_to_dom_high_res_time_stamp(duration.as_micros())
+}
+
+fn unsigned_microseconds_to_dom_high_res_time_stamp(
+    whole_microseconds: u128,
+) -> DOMHighResTimeStamp {
+    let whole_milliseconds = whole_microseconds / 1000;
+    let rounded_submillisecond_microseconds = whole_microseconds % 1000 / 10 * 10;
+    Finite::wrap(whole_milliseconds as f64 + rounded_submillisecond_microseconds as f64 / 1000.0)
+}
+
+fn signed_nanoseconds_to_dom_high_res_time_stamp(nanoseconds: i128) -> DOMHighResTimeStamp {
+    signed_microseconds_to_dom_high_res_time_stamp(nanoseconds / 1000)
+}
+
+fn signed_microseconds_to_dom_high_res_time_stamp(whole_microseconds: i128) -> DOMHighResTimeStamp {
+    let whole_milliseconds = whole_microseconds / 1000;
+    let submillisecond_microseconds = whole_microseconds % 1000;
+    let rounded_submillisecond_microseconds = if submillisecond_microseconds >= 0 {
+        submillisecond_microseconds / 10 * 10
+    } else {
+        submillisecond_microseconds.div_euclid(10) * 10
+    };
+    Finite::wrap(whole_milliseconds as f64 + rounded_submillisecond_microseconds as f64 / 1000.0)
 }
 
 fn controlled_window_performance_clock(
@@ -265,8 +293,9 @@ impl Performance {
             .is_some_and(|clock| !clock.accepts_host_timestamp())
         {
             // Host- and cross-process-stamped entries need a producer-side document timestamp.
-            // Until that upstream slice lands, do not expose nondeterministic host time through a
-            // controlled Window realm.
+            // Until that upstream slice lands, latch UnsupportedSurface and return the only finite
+            // neutral sentinel available to this WebIDL type. The control-plane terminal prevents
+            // publication, so this value is never valid settlement evidence.
             return Finite::wrap(0.0);
         }
         (instant - self.time_origin).to_dom_high_res_time_stamp()
@@ -716,7 +745,9 @@ impl PerformanceMethods<crate::DomTypeHolder> for Performance {
         if let Some(clock) = &self.window_clock &&
             clock.clock.is_controlled()
         {
-            return clock.time_origin().unwrap_or_else(|_| Finite::wrap(0.0));
+            return clock
+                .time_origin()
+                .expect("controlled performance.timeOrigin must use validated signed wall time");
         }
         (self.time_origin - CrossProcessInstant::epoch()).to_dom_high_res_time_stamp()
     }
@@ -990,14 +1021,13 @@ impl ToDOMHighResTimeStamp for Duration {
         // exactly representable f64 so WPT tests might occasionally corner-case on
         // rounding.  web-platform-tests/wpt#21526 wants us to use an integer number of
         // microseconds; the next divisor of milliseconds up from 5 microseconds is 10.
-        let microseconds_rounded = (self.whole_microseconds() as f64 / 10.).floor() * 10.;
-        Finite::wrap(microseconds_rounded / 1000.)
+        signed_microseconds_to_dom_high_res_time_stamp(self.whole_microseconds())
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use timers::DocumentClockConfiguration;
+    use timers::{DocumentClockConfiguration, DocumentUnixTime};
 
     use super::*;
 
@@ -1005,7 +1035,7 @@ mod tests {
     fn controlled_window_performance_is_monotonic_and_exactly_ordered() {
         let clock = DocumentClock::new(DocumentClockConfiguration::Controlled {
             initial_time_ns: 7_000_000,
-            unix_time_origin_ns: 1_700_000_000_000_000_000,
+            unix_time_origin_ns: DocumentUnixTime::from_nanos(1_700_000_000_000_000_000),
             execution_limits: None,
         });
         let performance_clock =
@@ -1023,13 +1053,17 @@ mod tests {
         assert_eq!(performance_clock.now(), Ok(Finite::wrap(5.0)));
         assert_eq!(performance_clock.now(), Ok(Finite::wrap(5.0)));
         assert!(!performance_clock.accepts_host_timestamp());
+        assert_eq!(
+            clock.unsupported_surface(),
+            Some(DocumentTimeSurface::HostTimestamp)
+        );
     }
 
     #[test]
     fn controlled_user_timing_does_not_advance_with_host_time() {
         let clock = DocumentClock::new(DocumentClockConfiguration::Controlled {
             initial_time_ns: 7_000_000,
-            unix_time_origin_ns: 1_700_000_000_000_000_000,
+            unix_time_origin_ns: DocumentUnixTime::from_nanos(1_700_000_000_000_000_000),
             execution_limits: None,
         });
         let performance_clock = WindowPerformanceClock::new(clock.clone(), clock.now());
@@ -1063,10 +1097,10 @@ mod tests {
     }
 
     #[test]
-    fn controlled_window_performance_checks_origin_and_wall_overflow() {
+    fn controlled_window_performance_checks_future_origin() {
         let clock = DocumentClock::new(DocumentClockConfiguration::Controlled {
             initial_time_ns: 1,
-            unix_time_origin_ns: u64::MAX,
+            unix_time_origin_ns: DocumentUnixTime::default(),
             execution_limits: None,
         });
         let future_origin = WindowPerformanceClock::new(clock.clone(), DocumentTime::from_nanos(2));
@@ -1078,9 +1112,105 @@ mod tests {
                 requested: DocumentTime::from_nanos(1),
             })
         );
+        assert_eq!(future_origin.time_origin(), Ok(Finite::wrap(0.0)));
+    }
+
+    #[test]
+    fn controlled_window_performance_preserves_negative_api2_epoch() {
+        const API2_MIN_EPOCH_NS: i128 = -8_640_000_000_000_000_000_000;
+        let clock = DocumentClock::new(DocumentClockConfiguration::Controlled {
+            initial_time_ns: 0,
+            unix_time_origin_ns: DocumentUnixTime::from_nanos(API2_MIN_EPOCH_NS),
+            execution_limits: None,
+        });
+        let performance_clock = WindowPerformanceClock::new(clock, DocumentTime::ZERO);
+
         assert_eq!(
-            future_origin.time_origin(),
-            Err(DocumentClockError::Overflow)
+            performance_clock.time_origin(),
+            Ok(Finite::wrap(-8_640_000_000_000_000.0))
+        );
+        assert_eq!(performance_clock.now(), Ok(Finite::wrap(0.0)));
+    }
+
+    #[test]
+    fn controlled_window_performance_preserves_the_full_api2_virtual_span() {
+        const API2_MAX_EPOCH_NS: i128 = 8_640_000_000_000_000_000_000;
+        const API2_MAX_SPAN_NS: u128 = 9_007_199_254_740_991_000_000;
+        let clock = DocumentClock::new(DocumentClockConfiguration::Controlled {
+            initial_time_ns: 0,
+            unix_time_origin_ns: DocumentUnixTime::from_nanos(API2_MAX_EPOCH_NS),
+            execution_limits: None,
+        });
+        let performance_clock = WindowPerformanceClock::new(clock.clone(), DocumentTime::ZERO);
+        clock
+            .advance_to(DocumentTime::from_nanos(API2_MAX_SPAN_NS))
+            .unwrap();
+
+        assert_eq!(
+            performance_clock.time_origin(),
+            Ok(Finite::wrap(8_640_000_000_000_000.0))
+        );
+        assert_eq!(
+            performance_clock.now(),
+            Ok(Finite::wrap(9_007_199_254_740_991.0))
+        );
+    }
+
+    #[test]
+    fn controlled_window_performance_preserves_adversarial_exact_milliseconds() {
+        const EPOCH_MS: i128 = 8_639_999_999_999_979;
+        const SPAN_MS: u128 = 9_007_199_254_740_971;
+        const NANOS_PER_MILLISECOND: i128 = 1_000_000;
+        let clock = DocumentClock::new(DocumentClockConfiguration::Controlled {
+            initial_time_ns: 0,
+            unix_time_origin_ns: DocumentUnixTime::from_nanos(EPOCH_MS * NANOS_PER_MILLISECOND),
+            execution_limits: None,
+        });
+        let performance_clock = WindowPerformanceClock::new(clock.clone(), DocumentTime::ZERO);
+        clock
+            .advance_to(DocumentTime::from_nanos(
+                SPAN_MS * NANOS_PER_MILLISECOND as u128,
+            ))
+            .unwrap();
+
+        assert_eq!(
+            performance_clock.time_origin(),
+            Ok(Finite::wrap(EPOCH_MS as f64))
+        );
+        assert_eq!(performance_clock.now(), Ok(Finite::wrap(SPAN_MS as f64)));
+
+        let negative_clock = DocumentClock::new(DocumentClockConfiguration::Controlled {
+            initial_time_ns: 0,
+            unix_time_origin_ns: DocumentUnixTime::from_nanos(-EPOCH_MS * NANOS_PER_MILLISECOND),
+            execution_limits: None,
+        });
+        let negative_performance_clock =
+            WindowPerformanceClock::new(negative_clock, DocumentTime::ZERO);
+        assert_eq!(
+            negative_performance_clock.time_origin(),
+            Ok(Finite::wrap(-(EPOCH_MS as f64)))
+        );
+    }
+
+    #[test]
+    fn performance_entry_duration_casts_integer_milliseconds_before_fractional_precision() {
+        const NEAR_MAX_MS: i64 = 9_007_199_254_740_971;
+
+        assert_eq!(
+            Duration::milliseconds(NEAR_MAX_MS).to_dom_high_res_time_stamp(),
+            Finite::wrap(NEAR_MAX_MS as f64)
+        );
+        assert_eq!(
+            Duration::milliseconds(-NEAR_MAX_MS).to_dom_high_res_time_stamp(),
+            Finite::wrap(-(NEAR_MAX_MS as f64))
+        );
+        assert_eq!(
+            Duration::microseconds(-1).to_dom_high_res_time_stamp(),
+            Finite::wrap(-0.01)
+        );
+        assert_eq!(
+            Duration::microseconds(-1001).to_dom_high_res_time_stamp(),
+            Finite::wrap(-1.01)
         );
     }
 

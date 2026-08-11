@@ -33,6 +33,9 @@ SCHEMAS: dict[str, dict[str, Any]] = {}
 I32_MIN = -(2**31)
 I32_MAX = 2**31 - 1
 U32_MAX = 2**32 - 1
+API2_EPOCH_LIMIT_MS = 8_640_000_000_000_000
+API2_VIRTUAL_SPAN_MAX_MS = 2**53 - 1
+NANOSECONDS_PER_MILLISECOND = 1_000_000
 A4_APP_UNITS = (47622, 67351)
 PROTOCOL_FIELDS = (
     "input_manifest",
@@ -878,6 +881,62 @@ def assert_minimal_pdf_fixture(path: Path) -> None:
         raise AssertionError(f"{path}: stream length is not self-consistent")
 
 
+def assert_controlled_time_boundaries(request: dict[str, Any], input_manifest: dict[str, Any]) -> None:
+    for name, epoch_ms in (
+        ("minimum controlled epoch", -API2_EPOCH_LIMIT_MS),
+        ("maximum controlled epoch", API2_EPOCH_LIMIT_MS),
+    ):
+        boundary = copy.deepcopy(request)
+        boundary["time"]["epoch_unix_ms"] = epoch_ms
+        assert_valid(name, "request", boundary, request_semantics(boundary, input_manifest))
+
+    for name, epoch_ms, expected in (
+        ("epoch below minimum", -API2_EPOCH_LIMIT_MS - 1, f"minimum {-API2_EPOCH_LIMIT_MS}"),
+        ("epoch above maximum", API2_EPOCH_LIMIT_MS + 1, f"maximum {API2_EPOCH_LIMIT_MS}"),
+    ):
+        outside = copy.deepcopy(request)
+        outside["time"]["epoch_unix_ms"] = epoch_ms
+        assert_rejected(name, "request", outside, expected)
+
+    for name, span_ms in (
+        ("minimum virtual span", 1),
+        ("maximum virtual span", API2_VIRTUAL_SPAN_MAX_MS),
+    ):
+        boundary = copy.deepcopy(request)
+        boundary["settlement"]["limits"]["virtual_span_ms"] = span_ms
+        assert_valid(name, "request", boundary, request_semantics(boundary, input_manifest))
+
+    for name, span_ms, expected in (
+        ("virtual span below minimum", 0, "minimum 1"),
+        (
+            "virtual span above maximum",
+            API2_VIRTUAL_SPAN_MAX_MS + 1,
+            f"maximum {API2_VIRTUAL_SPAN_MAX_MS}",
+        ),
+    ):
+        outside = copy.deepcopy(request)
+        outside["settlement"]["limits"]["virtual_span_ms"] = span_ms
+        assert_rejected(name, "request", outside, expected)
+
+    combined = copy.deepcopy(request)
+    combined["time"]["epoch_unix_ms"] = API2_EPOCH_LIMIT_MS
+    combined["settlement"]["limits"]["virtual_span_ms"] = API2_VIRTUAL_SPAN_MAX_MS
+    assert_valid(
+        "maximum epoch and span combination",
+        "request",
+        combined,
+        request_semantics(combined, input_manifest),
+    )
+    epoch_ns = API2_EPOCH_LIMIT_MS * NANOSECONDS_PER_MILLISECOND
+    span_ns = API2_VIRTUAL_SPAN_MAX_MS * NANOSECONDS_PER_MILLISECOND
+    if epoch_ns != 8_640_000_000_000_000_000_000:
+        raise AssertionError("maximum epoch must scale exactly to signed integer nanoseconds")
+    if span_ns != 9_007_199_254_740_991_000_000:
+        raise AssertionError("maximum virtual span must scale exactly to integer nanoseconds")
+    if epoch_ns + span_ns != 17_647_199_254_740_991_000_000:
+        raise AssertionError("maximum accepted wall-time arithmetic must not narrow through u64")
+
+
 def main() -> None:
     load_schemas()
     for name, schema in SCHEMAS.items():
@@ -941,6 +1000,7 @@ def main() -> None:
         request_a4,
         request_semantics(request_a4, input_manifest) + request_runtime_semantics(request_a4, runtime),
     )
+    assert_controlled_time_boundaries(request_a4, input_manifest)
     if success["request"] != request_a4 or failure["request"] != request_a4:
         raise AssertionError("both result branches must retain the exact normalized request")
     if runtime["engine"] != success["engine"] or runtime["engine"] != failure["engine"]:
