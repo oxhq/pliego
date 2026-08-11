@@ -499,9 +499,9 @@ impl PreparedBundle {
     }
 
     fn matches_output(&self, output: &PublicationArtifact, requested_output: &str) -> bool {
-        self.output.path == requested_output
-            && self.output.sha256 == output.sha256
-            && self.output.bytes == output.bytes
+        self.output.path == requested_output &&
+            self.output.sha256 == output.sha256 &&
+            self.output.bytes == output.bytes
     }
 
     fn publication_artifact(&self) -> io::Result<PublicationArtifact> {
@@ -707,8 +707,8 @@ impl PublicationJournal {
         self.artifact_root.require_current()?;
         self.output_parent.require_current()?;
         self.directory.require_current()?;
-        if self.artifact_root.identity()? != self.plan.artifact_root_identity
-            || self.output_parent.identity()? != self.plan.output_parent_identity
+        if self.artifact_root.identity()? != self.plan.artifact_root_identity ||
+            self.output_parent.identity()? != self.plan.output_parent_identity
         {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -823,9 +823,9 @@ impl PublicationJournal {
         output.verify_staged()?;
         bundle.verify()?;
         let output_artifact = output.publication_artifact()?;
-        if output_artifact.path != self.plan.output
-            || output.output_parent_identity()? != self.plan.output_parent_identity
-            || !bundle.matches_output(&output_artifact, &self.plan.requested_output)
+        if output_artifact.path != self.plan.output ||
+            output.output_parent_identity()? != self.plan.output_parent_identity ||
+            !bundle.matches_output(&output_artifact, &self.plan.requested_output)
         {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -943,23 +943,23 @@ impl PublicationJournal {
         let output = Path::new(&receipt.output.path);
         let staging = Path::new(&receipt.staging.path);
         let staging_is_output = staging == output;
-        let staging_is_owned_temporary = staging.parent() == output.parent()
-            && staging
+        let staging_is_owned_temporary = staging.parent() == output.parent() &&
+            staging
                 .file_name()
                 .and_then(|name| name.to_str())
                 .is_some_and(|name| {
                     name.starts_with('.') && name.contains(".pliego-") && name.ends_with(".tmp")
                 });
-        if receipt.schema != "pliego.publication-prepared"
-            || receipt.version != 1
-            || receipt.transaction_id != self.plan.transaction_id
-            || receipt.plan_sha256 != self.plan_sha256
-            || receipt.output.path != self.plan.output
-            || receipt.bundle.path != expected_bundle
-            || receipt.outcome.path != expected_outcome
-            || (!staging_is_output && !staging_is_owned_temporary)
-            || receipt.staging.sha256 != receipt.output.sha256
-            || receipt.staging.bytes != receipt.output.bytes
+        if receipt.schema != "pliego.publication-prepared" ||
+            receipt.version != 1 ||
+            receipt.transaction_id != self.plan.transaction_id ||
+            receipt.plan_sha256 != self.plan_sha256 ||
+            receipt.output.path != self.plan.output ||
+            receipt.bundle.path != expected_bundle ||
+            receipt.outcome.path != expected_outcome ||
+            (!staging_is_output && !staging_is_owned_temporary) ||
+            receipt.staging.sha256 != receipt.output.sha256 ||
+            receipt.staging.bytes != receipt.output.bytes
         {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -1036,10 +1036,10 @@ impl PublicationJournal {
         receipt: &PublicationCommittedReceipt,
         prepared_sha256: &str,
     ) -> io::Result<()> {
-        if receipt.schema != "pliego.publication-committed"
-            || receipt.version != 1
-            || receipt.transaction_id != self.plan.transaction_id
-            || receipt.prepared_sha256 != prepared_sha256
+        if receipt.schema != "pliego.publication-committed" ||
+            receipt.version != 1 ||
+            receipt.transaction_id != self.plan.transaction_id ||
+            receipt.prepared_sha256 != prepared_sha256
         {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -1767,9 +1767,9 @@ fn collect_bundle_entries(
             ));
         }
         if metadata.is_dir() {
-            if path.parent() == Some(root)
-                && path.file_name().and_then(|name| name.to_str())
-                    == Some(PUBLICATION_DIRECTORY_NAME)
+            if path.parent() == Some(root) &&
+                path.file_name().and_then(|name| name.to_str()) ==
+                    Some(PUBLICATION_DIRECTORY_NAME)
             {
                 continue;
             }
@@ -2038,8 +2038,8 @@ fn read_receipt_bytes(directory: &BoundDirectory, name: &str) -> io::Result<Vec<
             format!("publication receipt grew while reading: {}", path.display()),
         ));
     }
-    if !path_matches_handle(&path, &handle)?
-        || bytes.len() as u64 != handle.as_file().metadata()?.len()
+    if !path_matches_handle(&path, &handle)? ||
+        bytes.len() as u64 != handle.as_file().metadata()?.len()
     {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -2090,11 +2090,11 @@ fn read_publication_summary(
         .try_clone()?
         .take(MAX_PUBLICATION_OUTCOME_BYTES + 1)
         .read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > MAX_PUBLICATION_OUTCOME_BYTES
-        || bytes.len() as u64 != handle.as_file().metadata()?.len()
-        || !path_matches_handle(path, &handle)?
-        || receipt_sha256(&bytes) != artifact.sha256
-        || bytes.len() as u64 != artifact.bytes
+    if bytes.len() as u64 > MAX_PUBLICATION_OUTCOME_BYTES ||
+        bytes.len() as u64 != handle.as_file().metadata()?.len() ||
+        !path_matches_handle(path, &handle)? ||
+        receipt_sha256(&bytes) != artifact.sha256 ||
+        bytes.len() as u64 != artifact.bytes
     {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -2296,10 +2296,10 @@ fn verify_bundle_closure(
         }
         bytes.extend_from_slice(&buffer[..read]);
     }
-    if offset != artifact.bytes
-        || handle.as_file().metadata()?.len() != artifact.bytes
-        || receipt_sha256(&bytes) != artifact.sha256
-        || !path_matches_handle(&bundle_path, handle)?
+    if offset != artifact.bytes ||
+        handle.as_file().metadata()?.len() != artifact.bytes ||
+        receipt_sha256(&bytes) != artifact.sha256 ||
+        !path_matches_handle(&bundle_path, handle)?
     {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -2313,11 +2313,11 @@ fn verify_bundle_closure(
             format!("prepared bundle is invalid JSON: {error}"),
         )
     })?;
-    if manifest.schema != "pliego.bundle"
-        || manifest.version != 1
-        || manifest.render_id != render_id
-        || manifest.output != *output
-        || manifest
+    if manifest.schema != "pliego.bundle" ||
+        manifest.version != 1 ||
+        manifest.render_id != render_id ||
+        manifest.output != *output ||
+        manifest
             .entries
             .windows(2)
             .any(|entries| entries[0].path >= entries[1].path)
