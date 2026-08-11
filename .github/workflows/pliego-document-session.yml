@@ -83,8 +83,8 @@ jobs:
             exit 1
           fi
 
-      - name: Test the direct document session
-        run: cargo test -p pliego --test document_session --no-default-features --features document-session --locked
+      - name: Test the direct document session and build identity helpers
+        run: cargo test -p pliego --test document_session --test build_script --no-default-features --features document-session --locked
 
       - name: Test Canvas retention and capture accounting
         run: |

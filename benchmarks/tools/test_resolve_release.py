@@ -22,9 +22,14 @@ def main() -> None:
     platform = "linux-x86_64"
     repository = "https://github.com/oxhq/pliego"
     root = f"pliego-{version}-{platform}"
-    files = _fixture_files(version, platform, repository)
+    commit = "b" * 40
+    identity = {
+        "servo_version": "0.4.0",
+        "git_sha": commit[:7],
+        "servo_base_sha": "a" * 40,
+    }
+    files = _fixture_files(version, platform, repository, **identity)
     files["pliego"] = b"verified fake binary\n"
-    files["VERSION.txt"] = b"pliego 9.9.9\npliego-api 1\nServo test-build\nServo base " + b"a" * 40 + b"\n"
 
     with tempfile.TemporaryDirectory() as temporary:
         directory = Path(temporary)
@@ -35,8 +40,8 @@ def main() -> None:
             "version": version,
             "repository": repository,
             "release_tag": f"v{version}",
-            "commit": "b" * 40,
-            "servo_build": "test-build",
+            "commit": commit,
+            "servo_build": f"{identity['servo_version']}-{identity['git_sha']}",
             "servo_base": "a" * 40,
             "platform": platform,
             "profile": "checked-release",

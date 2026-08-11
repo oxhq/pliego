@@ -5,6 +5,11 @@ on:
   pull_request:
     paths:
       - .github/workflows/pliego-package.yml
+      - Cargo.lock
+      - Cargo.toml
+      - ports/pliego/**
+      - python/check_pliego_release_archive.py
+      - python/check_pliego_version.py
   push:
     branches:
       - "release-proof/**"
@@ -20,6 +25,7 @@ env:
   CARGO_INCREMENTAL: 0
   RUSTC_WRAPPER: sccache
   SCCACHE_GHA_ENABLED: "true"
+  SERVO_BASE_SHA: "313b6d5ecc113b08010ce434140db3ca5abcc71c"
 
 jobs:
   archive-contract:
@@ -38,7 +44,9 @@ jobs:
           python-version-file: .python-version
 
       - name: Check release archive contract and source assets
-        run: python python/check_pliego_release_archive.py --self-test --check-source-assets .
+        run: |
+          python python/check_pliego_version.py --self-test
+          python python/check_pliego_release_archive.py --self-test --check-source-assets .
 
   package:
     name: ${{ matrix.name }}
@@ -89,10 +97,10 @@ jobs:
           version: "0.11.16"
           enable-cache: false
 
-      - name: Resolve Pliego version
+      - name: Resolve package versions
         shell: bash
         run: |
-          python -c 'import json, os, subprocess; m=json.loads(subprocess.check_output(["cargo", "metadata", "--no-deps", "--format-version", "1"])); v=next(p["version"] for p in m["packages"] if p["name"] == "pliego"); open(os.environ["GITHUB_ENV"], "a", encoding="utf-8").write(f"PLIEGO_VERSION={v}\n")'
+          python -c 'import json, os, subprocess; m=json.loads(subprocess.check_output(["cargo", "metadata", "--no-deps", "--format-version", "1"])); pliego=next(p["version"] for p in m["packages"] if p["name"] == "pliego"); servo=next(p["version"] for p in m["packages"] if p["name"] == "servo"); open(os.environ["GITHUB_ENV"], "a", encoding="utf-8").write(f"PLIEGO_VERSION={pliego}\nSERVO_VERSION={servo}\n")'
 
       - name: Cache Rust compilation
         uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
@@ -157,10 +165,17 @@ jobs:
           printf 'Repository: %s/%s\nSource: %s/%s/tree/v%s\n' "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$PLIEGO_VERSION" > "dist/$bundle/SOURCE.txt"
           python python/check_pliego_release_archive.py --native-inventory '${{ matrix.bundle }}' > "dist/$bundle/NATIVE-LIBRARIES.txt"
           printf '%s\n' '1. Verify the adjacent SHA-256 file.' '2. Put pliego on PATH or set PLIEGO_BINARY.' '3. Run pliego --version.' > "dist/$bundle/INSTALL.txt"
-          "dist/$bundle/pliego" --version | tee "dist/$bundle/VERSION.txt"
-          grep -Fqx 'pliego-api 1' "dist/$bundle/VERSION.txt"
+          revision="$(git rev-parse --short HEAD)"
+          version_stderr="$RUNNER_TEMP/pliego-version-${{ matrix.bundle }}.stderr"
+          "dist/$bundle/pliego" --version 2>"$version_stderr" | tee "dist/$bundle/VERSION.txt"
+          if [[ -s "$version_stderr" ]]; then
+            echo 'pliego --version must not write to stderr' >&2
+            cat "$version_stderr" >&2
+            exit 1
+          fi
+          python python/check_pliego_version.py "dist/$bundle/VERSION.txt" --pliego-version "$PLIEGO_VERSION" --servo-version "$SERVO_VERSION" --git-sha "$revision" --servo-base-sha "$SERVO_BASE_SHA"
           tar -C dist -czf "dist/$archive" "$bundle"
-          python python/check_pliego_release_archive.py "dist/$archive" --version "$PLIEGO_VERSION" --bundle '${{ matrix.bundle }}' --repository-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
+          python python/check_pliego_release_archive.py "dist/$archive" --version "$PLIEGO_VERSION" --bundle '${{ matrix.bundle }}' --repository-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" --servo-version "$SERVO_VERSION" --git-sha "$revision" --servo-base-sha "$SERVO_BASE_SHA"
           python -c 'import hashlib, pathlib, sys; p = pathlib.Path(sys.argv[1]); print(f"{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.name}")' "dist/$archive" > "dist/$archive.sha256"
 
       - name: Package and smoke-test Windows bundle
@@ -189,11 +204,23 @@ jobs:
           @("Repository: $env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY", "Source: $env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/tree/v$env:PLIEGO_VERSION") | Set-Content "$directory\SOURCE.txt" -Encoding utf8
           python python/check_pliego_release_archive.py --native-inventory '${{ matrix.bundle }}' | Set-Content "$directory\NATIVE-LIBRARIES.txt" -Encoding utf8
           @('1. Verify the adjacent SHA-256 file.', '2. Put pliego.exe on PATH or set PLIEGO_BINARY.', '3. Run pliego.exe --version.') | Set-Content "$directory\INSTALL.txt" -Encoding ascii
-          & "$directory\pliego.exe" --version | Tee-Object -FilePath "$directory\VERSION.txt"
+          $revision = git rev-parse --short HEAD
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          if ((Get-Content -LiteralPath "$directory\VERSION.txt") -cnotcontains 'pliego-api 1') { throw 'VERSION.txt must contain pliego-api 1' }
+          $versionStderr = Join-Path $env:RUNNER_TEMP 'pliego-version-${{ matrix.bundle }}.stderr'
+          & "$directory\pliego.exe" --version 2> $versionStderr | Tee-Object -FilePath "$directory\VERSION.txt"
+          $versionExitCode = $LASTEXITCODE
+          if ($versionExitCode -ne 0) {
+            Get-Content -LiteralPath $versionStderr | Write-Error
+            exit $versionExitCode
+          }
+          if ((Get-Item -LiteralPath $versionStderr).Length -ne 0) {
+            $versionError = [System.IO.File]::ReadAllText($versionStderr)
+            throw "pliego.exe --version must not write to stderr: $versionError"
+          }
+          python python/check_pliego_version.py "$directory\VERSION.txt" --pliego-version "$env:PLIEGO_VERSION" --servo-version "$env:SERVO_VERSION" --git-sha "$revision" --servo-base-sha "$env:SERVO_BASE_SHA"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Compress-Archive -Path $directory -DestinationPath "dist/$archive"
-          python python/check_pliego_release_archive.py "dist/$archive" --version "$env:PLIEGO_VERSION" --bundle '${{ matrix.bundle }}' --repository-url "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY"
+          python python/check_pliego_release_archive.py "dist/$archive" --version "$env:PLIEGO_VERSION" --bundle '${{ matrix.bundle }}' --repository-url "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY" --servo-version "$env:SERVO_VERSION" --git-sha "$revision" --servo-base-sha "$env:SERVO_BASE_SHA"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $hash = (Get-FileHash "dist/$archive" -Algorithm SHA256).Hash.ToLowerInvariant()
           "$hash  $archive" | Set-Content "dist/$archive.sha256" -Encoding ascii

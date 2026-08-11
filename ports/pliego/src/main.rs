@@ -96,6 +96,12 @@ use resource_policy::{
 
 const SERVO_BASE_SHA: &str = "313b6d5ecc113b08010ce434140db3ca5abcc71c";
 const PLIEGO_API_VERSION: u32 = 1;
+const SERVO_BUILD_VERSION: &str = concat!(
+    "Servo ",
+    env!("PLIEGO_SERVO_VERSION"),
+    "-",
+    env!("PLIEGO_GIT_SHA")
+);
 const SESSION_CREATE_ATTEMPTS: u32 = 32;
 const DEFAULT_PAGE_WIDTH_CSS_PX: f32 = 793.7008;
 const DEFAULT_PAGE_HEIGHT_CSS_PX: f32 = 1122.5197;
@@ -522,7 +528,7 @@ fn print_version() {
         "pliego {}\npliego-api {}\n{}\nServo base {}",
         env!("CARGO_PKG_VERSION"),
         PLIEGO_API_VERSION,
-        servoshell::VERSION,
+        SERVO_BUILD_VERSION,
         SERVO_BASE_SHA
     );
 }
@@ -1516,7 +1522,7 @@ fn publish_captured_document(
             "pdf_serialize": scene_artifacts.pdf_ms,
         },
         "servo_base_sha": SERVO_BASE_SHA,
-        "servo_build": servoshell::VERSION,
+        "servo_build": SERVO_BUILD_VERSION,
         "rendered_bytes": rendered_bytes,
         "status": "rendered"
     });
@@ -3833,8 +3839,8 @@ mod tests {
         Command, ControlledResource, DEFAULT_LOCALE, DEFAULT_TIMEZONE, ExplicitRenderPaths,
         PageDefinition, PageMargins, PendingResource, RenderEnvironment, RenderError,
         RenderOutcome, RenderRequest, ResourceCapture, ResourcePolicy, ResourcePolicyConfig,
-        ResourcePolicyDecision, ResourcePolicyFailure, ResourceRequest, WebResourceLoadRole,
-        classify_controlled_http_status, cli_render_error, complete_resource,
+        ResourcePolicyDecision, ResourcePolicyFailure, ResourceRequest, SERVO_BUILD_VERSION,
+        WebResourceLoadRole, classify_controlled_http_status, cli_render_error, complete_resource,
         create_session_artifacts, decide_resource_policy, default_page, first_fatal_policy_failure,
         incomplete_resource_failure, page_artifact, parse_args, persist_scene_capture,
         resolve_scene_resource, retain_controlled_resource, set_document_pdf_environment,
@@ -4489,6 +4495,18 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[cfg(feature = "shell")]
+    #[test]
+    fn pliego_owned_servo_build_identity_matches_the_shell_oracle() {
+        assert_eq!(SERVO_BUILD_VERSION, servoshell::VERSION);
+        assert!(SERVO_BUILD_VERSION.starts_with(concat!(
+            "Servo ",
+            env!("PLIEGO_SERVO_VERSION"),
+            "-"
+        )));
+        assert!(!SERVO_BUILD_VERSION.ends_with("-nogit"));
     }
 
     #[test]

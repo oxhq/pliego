@@ -6,10 +6,14 @@ on:
     paths:
       - ".github/workflows/pliego-benchmark.yml"
       - "benchmarks/**"
+      - "python/check_pliego_release_archive.py"
+      - "python/check_pliego_version.py"
   pull_request:
     paths:
       - ".github/workflows/pliego-benchmark.yml"
       - "benchmarks/**"
+      - "python/check_pliego_release_archive.py"
+      - "python/check_pliego_version.py"
 
 permissions:
   contents: read

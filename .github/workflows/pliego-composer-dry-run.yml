@@ -12,6 +12,7 @@ on:
       - licenses/**
       - ports/pliego/Cargo.toml
       - python/check_pliego_release_archive.py
+      - python/check_pliego_version.py
       - resources/resource_protocol/license.html
       - sdk/php/**
       - sdk/laravel/**
