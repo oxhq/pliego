@@ -1113,7 +1113,7 @@ impl DocumentClock {
     }
 }
 
-const DOCUMENT_PRODUCER_KIND_COUNT: usize = 4;
+const DOCUMENT_PRODUCER_KIND_COUNT: usize = 5;
 static NEXT_DOCUMENT_PRODUCER_FENCE_ID: AtomicU64 = AtomicU64::new(1);
 
 /// A class of asynchronous work that can later affect a document's rendered result.
@@ -1132,6 +1132,8 @@ pub enum DocumentProducerKind {
     Font = 2,
     /// An image-cache or vector-rasterization completion listener.
     Image = 3,
+    /// An outbound one-shot callback whose reply will be handed off to a Window task.
+    ExternalCallback = 4,
 }
 
 impl DocumentProducerKind {
@@ -2134,6 +2136,38 @@ mod tests {
     }
 
     #[test]
+    fn external_callback_error_drop_and_task_handoff_never_false_green() {
+        let fence = DocumentProducerFence::default();
+
+        let failed_callback = fence.begin(DocumentProducerKind::ExternalCallback).unwrap();
+        assert_eq!(fence.snapshot().pending(), 1);
+        drop(failed_callback);
+        assert!(fence.snapshot().is_empty());
+
+        let callback = fence.begin(DocumentProducerKind::ExternalCallback).unwrap();
+        let task = fence.begin(DocumentProducerKind::Task).unwrap();
+        let during_handoff = fence.snapshot();
+        assert_eq!(during_handoff.pending(), 2);
+        assert_eq!(
+            during_handoff
+                .for_kind(DocumentProducerKind::ExternalCallback)
+                .pending(),
+            1
+        );
+        assert_eq!(
+            during_handoff
+                .for_kind(DocumentProducerKind::Task)
+                .pending(),
+            1
+        );
+
+        drop(callback);
+        assert_eq!(fence.snapshot().pending(), 1);
+        drop(task);
+        assert!(fence.snapshot().is_empty());
+    }
+
+    #[test]
     fn controlled_clock_latches_the_first_unsupported_surface() {
         let clock = controlled_clock(0);
         assert_eq!(clock.unsupported_surface(), None);
@@ -2308,6 +2342,7 @@ mod tests {
             DocumentProducerKind::Resource,
             DocumentProducerKind::Font,
             DocumentProducerKind::Image,
+            DocumentProducerKind::ExternalCallback,
         ] {
             let watermark = complete.for_kind(kind);
             assert_eq!(watermark.enqueued(), watermark.completed());

@@ -476,10 +476,19 @@ impl EventTarget {
     pub(crate) fn remove_all_listeners(&self) {
         let mut handlers = self.handlers.borrow_mut();
         for (ty, entries) in handlers.iter() {
-            entries
-                .iter()
-                .for_each(|entry| entry.borrow_mut().removed = true);
-            self.notify_listener_removed(ty);
+            let mut live_entries = 0_usize;
+            for entry in entries {
+                let mut entry = entry.borrow_mut();
+                if !entry.removed {
+                    entry.removed = true;
+                    live_entries += 1;
+                }
+            }
+            // GlobalScope tracks one constellation-interest registration per live listener, not
+            // one per event type. Bulk teardown must mirror every earlier registration exactly.
+            for _ in 0..live_entries {
+                self.notify_listener_removed(ty);
+            }
         }
 
         *handlers = Default::default();

@@ -21,7 +21,8 @@ use crossbeam_channel::Sender;
 use devtools_traits::{PageError, ScriptToDevtoolsControlMsg, get_time_stamp};
 use dom_struct::dom_struct;
 use embedder_traits::{
-    ConsoleLogLevel, EmbedderMsg, JavaScriptEvaluationError, ScriptToEmbedderChan,
+    ConsoleLogLevel, DocumentSettlementSource, DocumentTrackedSourceKind, EmbedderMsg,
+    JavaScriptEvaluationError, ScriptToEmbedderChan,
 };
 use fonts::FontContext;
 use indexmap::IndexSet;
@@ -304,6 +305,33 @@ pub(crate) struct GlobalScope {
     /// Vector storing references of all eventsources.
     event_source_tracker: DOMTracker<EventSource>,
 
+    /// Conservative capture-specific latch set when WebXR is exposed to script.
+    controlled_capture_web_xr_accessed: Cell<bool>,
+
+    /// Conservative capture-specific latch set when StorageManager is exposed to script.
+    controlled_capture_storage_manager_accessed: Cell<bool>,
+
+    /// Conservative capture-specific latch set when Web Bluetooth is exposed to script.
+    controlled_capture_bluetooth_accessed: Cell<bool>,
+
+    /// Conservative capture-specific latch set when WebRTC is invoked.
+    controlled_capture_rtc_peer_connection_used: Cell<bool>,
+
+    /// Conservative capture-specific latch set when an externally driven media stream is created.
+    controlled_capture_media_stream_used: Cell<bool>,
+
+    /// Conservative capture-specific latch set when a Web Audio context is created.
+    controlled_capture_web_audio_used: Cell<bool>,
+
+    /// Conservative capture-specific latch set when a Notification is constructed.
+    controlled_capture_notification_used: Cell<bool>,
+
+    /// Conservative capture-specific latch set when WebGPU is exposed to script.
+    controlled_capture_web_gpu_accessed: Cell<bool>,
+
+    /// Conservative capture-specific latch set when an OffscreenCanvas is created.
+    controlled_capture_offscreen_canvas_used: Cell<bool>,
+
     /// Dependent AbortSignals that must be kept alive per
     /// <https://dom.spec.whatwg.org/#abort-signal-garbage-collection?
     abort_signal_dependents: DomRefCell<IndexSet<Dom<AbortSignal>>>,
@@ -481,6 +509,8 @@ pub(crate) struct ManagedMessagePort {
     /// and only add them, and ask the constellation to complete the transfer,
     /// in a subsequent task if the port hasn't been re-transfered.
     pending: bool,
+    /// Whether transfer completion was requested but not yet consumed by its event-loop task.
+    transfer_completion_outstanding: bool,
     /// Whether the port has been closed by script in this global,
     /// so it can be removed.
     explicitly_closed: bool,
@@ -517,6 +547,105 @@ pub(crate) enum MessagePortState {
     ),
     /// This global is not managing any ports at this time.
     UnManaged,
+}
+
+fn message_port_blocks_controlled_capture(
+    pending: bool,
+    transfer_completion_outstanding: bool,
+    entangled: bool,
+) -> bool {
+    pending || transfer_completion_outstanding || entangled
+}
+
+/// Convert authoritative GlobalScope tracker counts into canonical capture source entries.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct ControlledGlobalSourceCounts {
+    pub(crate) event_sources: u64,
+    pub(crate) broadcast_channels: u64,
+    pub(crate) message_ports: u64,
+    pub(crate) media_session_action_handlers: u64,
+    pub(crate) dedicated_workers: u64,
+    pub(crate) indexed_db_factories: u64,
+    pub(crate) gpu_devices: u64,
+    pub(crate) storage_event_listeners: u64,
+    pub(crate) cookie_store_pending: u64,
+    pub(crate) service_worker_pending: u64,
+    pub(crate) service_worker_messaging: u64,
+    pub(crate) web_xr: u64,
+    pub(crate) storage_manager: u64,
+    pub(crate) bluetooth: u64,
+    pub(crate) rtc_peer_connection: u64,
+    pub(crate) media_stream: u64,
+    pub(crate) web_audio: u64,
+    pub(crate) notification: u64,
+    pub(crate) web_gpu_api: u64,
+    pub(crate) offscreen_canvas: u64,
+}
+
+pub(crate) fn controlled_global_presence_sources(
+    pipeline_id: PipelineId,
+    counts: ControlledGlobalSourceCounts,
+) -> Vec<DocumentSettlementSource> {
+    [
+        (DocumentTrackedSourceKind::EventSource, counts.event_sources),
+        (
+            DocumentTrackedSourceKind::BroadcastChannel,
+            counts.broadcast_channels,
+        ),
+        (DocumentTrackedSourceKind::MessagePort, counts.message_ports),
+        (
+            DocumentTrackedSourceKind::MediaSessionActionHandler,
+            counts.media_session_action_handlers,
+        ),
+        (
+            DocumentTrackedSourceKind::DedicatedWorker,
+            counts.dedicated_workers,
+        ),
+        (
+            DocumentTrackedSourceKind::IndexedDb,
+            counts.indexed_db_factories,
+        ),
+        (DocumentTrackedSourceKind::GpuDevice, counts.gpu_devices),
+        (
+            DocumentTrackedSourceKind::StorageEventListener,
+            counts.storage_event_listeners,
+        ),
+        (
+            DocumentTrackedSourceKind::CookieStorePending,
+            counts.cookie_store_pending,
+        ),
+        (
+            DocumentTrackedSourceKind::ServiceWorkerPending,
+            counts.service_worker_pending,
+        ),
+        (
+            DocumentTrackedSourceKind::ServiceWorkerMessaging,
+            counts.service_worker_messaging,
+        ),
+        (DocumentTrackedSourceKind::WebXr, counts.web_xr),
+        (
+            DocumentTrackedSourceKind::StorageManager,
+            counts.storage_manager,
+        ),
+        (DocumentTrackedSourceKind::Bluetooth, counts.bluetooth),
+        (
+            DocumentTrackedSourceKind::RtcPeerConnection,
+            counts.rtc_peer_connection,
+        ),
+        (DocumentTrackedSourceKind::MediaStream, counts.media_stream),
+        (DocumentTrackedSourceKind::WebAudio, counts.web_audio),
+        (DocumentTrackedSourceKind::Notification, counts.notification),
+        (DocumentTrackedSourceKind::WebGpuApi, counts.web_gpu_api),
+        (
+            DocumentTrackedSourceKind::OffscreenCanvas,
+            counts.offscreen_canvas,
+        ),
+    ]
+    .into_iter()
+    .map(|(kind, blocking_count)| {
+        DocumentSettlementSource::tracked_presence_internal(pipeline_id, kind, blocking_count)
+    })
+    .collect()
 }
 
 impl BroadcastListener {
@@ -815,6 +944,15 @@ impl GlobalScope {
             permission_state_invocation_results: Default::default(),
             list_auto_close_worker: Default::default(),
             event_source_tracker: DOMTracker::new(),
+            controlled_capture_web_xr_accessed: Cell::new(false),
+            controlled_capture_storage_manager_accessed: Cell::new(false),
+            controlled_capture_bluetooth_accessed: Cell::new(false),
+            controlled_capture_rtc_peer_connection_used: Cell::new(false),
+            controlled_capture_media_stream_used: Cell::new(false),
+            controlled_capture_web_audio_used: Cell::new(false),
+            controlled_capture_notification_used: Cell::new(false),
+            controlled_capture_web_gpu_accessed: Cell::new(false),
+            controlled_capture_offscreen_canvas_used: Cell::new(false),
             abort_signal_dependents: Default::default(),
             uncaught_rejections: Default::default(),
             consumed_rejections: Default::default(),
@@ -971,7 +1109,9 @@ impl GlobalScope {
                             port_impl.disentangle();
                             managed_port.dom_port.disentangle();
                         }
-                        port_impl.enabled()
+                        let enabled = port_impl.enabled();
+                        managed_port.transfer_completion_outstanding = false;
+                        enabled
                     } else {
                         panic!("managed-port has no port-impl.");
                     }
@@ -1619,10 +1759,20 @@ impl GlobalScope {
                     panic!("Only pending ports should be found in to_be_added")
                 }
                 managed_port.pending = false;
+                // Set this before the request escapes. Completion clears it only from the task
+                // which consumes the returned transfer buffer. Send failure stays fail-closed.
+                managed_port.transfer_completion_outstanding = true;
             }
-            let _ = self.script_to_constellation_chan().send(
-                ScriptToConstellationMessage::CompleteMessagePortTransfer(*router_id, to_be_added),
-            );
+            if self
+                .script_to_constellation_chan()
+                .send(ScriptToConstellationMessage::CompleteMessagePortTransfer(
+                    *router_id,
+                    to_be_added,
+                ))
+                .is_err()
+            {
+                warn!("Could not request MessagePort transfer completion; ports remain blocked");
+            }
         } else {
             warn!("maybe_add_pending_ports called on a global not managing any ports.");
         }
@@ -1636,7 +1786,10 @@ impl GlobalScope {
             let to_be_removed: Vec<MessagePortId> = message_ports
                 .iter()
                 .filter_map(|(id, managed_port)| {
-                    if managed_port.explicitly_closed {
+                    if managed_port.explicitly_closed &&
+                        !managed_port.pending &&
+                        !managed_port.transfer_completion_outstanding
+                    {
                         Some(*id)
                     } else {
                         None
@@ -1789,6 +1942,7 @@ impl GlobalScope {
                         port_impl: Some(port_impl),
                         dom_port: Dom::from_ref(dom_port),
                         pending: true,
+                        transfer_completion_outstanding: false,
                         explicitly_closed: false,
                         cross_realm_transform: None,
                     },
@@ -1812,6 +1966,7 @@ impl GlobalScope {
                         port_impl: Some(port_impl),
                         dom_port: Dom::from_ref(dom_port),
                         pending: false,
+                        transfer_completion_outstanding: false,
                         explicitly_closed: false,
                         cross_realm_transform: None,
                     },
@@ -2331,6 +2486,171 @@ impl GlobalScope {
 
     pub(crate) fn track_event_source(&self, event_source: &EventSource) {
         self.event_source_tracker.track(event_source);
+    }
+
+    /// Fail closed once WebXR is exposed; its backend callback lifecycle is not fully inventoried.
+    #[cfg(feature = "webxr")]
+    pub(crate) fn mark_controlled_capture_web_xr_accessed(&self) {
+        self.controlled_capture_web_xr_accessed.set(true);
+    }
+
+    /// Fail closed once StorageManager is exposed; its backend callbacks lack pending guards.
+    pub(crate) fn mark_controlled_capture_storage_manager_accessed(&self) {
+        self.controlled_capture_storage_manager_accessed.set(true);
+    }
+
+    /// Fail closed once Web Bluetooth is exposed; callbacks and subscriptions are not inventoried.
+    #[cfg(feature = "bluetooth")]
+    pub(crate) fn mark_controlled_capture_bluetooth_accessed(&self) {
+        self.controlled_capture_bluetooth_accessed.set(true);
+    }
+
+    /// Fail closed once WebRTC is invoked; callbacks and media state are not inventoried.
+    pub(crate) fn mark_controlled_capture_rtc_peer_connection_used(&self) {
+        self.controlled_capture_rtc_peer_connection_used.set(true);
+    }
+
+    /// Fail closed once an externally driven media stream exists.
+    pub(crate) fn mark_controlled_capture_media_stream_used(&self) {
+        self.controlled_capture_media_stream_used.set(true);
+    }
+
+    /// Fail closed once Web Audio is invoked; its clock and callbacks are not owned.
+    pub(crate) fn mark_controlled_capture_web_audio_used(&self) {
+        self.controlled_capture_web_audio_used.set(true);
+    }
+
+    /// Fail closed once Notification may start untracked resource decoding or delivery.
+    pub(crate) fn mark_controlled_capture_notification_used(&self) {
+        self.controlled_capture_notification_used.set(true);
+    }
+
+    /// Fail closed once WebGPU is exposed; adapter/device request gaps are not producer-guarded.
+    #[cfg(feature = "webgpu")]
+    pub(crate) fn mark_controlled_capture_web_gpu_accessed(&self) {
+        self.controlled_capture_web_gpu_accessed.set(true);
+    }
+
+    /// Fail closed once an OffscreenCanvas exists without a bound Paint generation.
+    pub(crate) fn mark_controlled_capture_offscreen_canvas_used(&self) {
+        self.controlled_capture_offscreen_canvas_used.set(true);
+    }
+
+    /// Capture authoritative live external-source presence for one controlled Window pipeline.
+    ///
+    /// Every non-zero class blocks capture, so typed exact counts are sufficient and make each
+    /// open/close transition visible without exposing DOM pointers in the embedder protocol.
+    pub(crate) fn controlled_settlement_sources(
+        &self,
+        pipeline_id: PipelineId,
+    ) -> Vec<DocumentSettlementSource> {
+        let count = |value: usize| u64::try_from(value).unwrap_or(u64::MAX);
+
+        let mut event_sources = 0_u64;
+        self.event_source_tracker.for_each(|event_source| {
+            if event_source.is_controlled_capture_active() {
+                event_sources = event_sources.saturating_add(1);
+            }
+        });
+        let broadcast_channels = match &*self.broadcast_channel_state.borrow() {
+            BroadcastChannelState::Managed(_, channels) => count(
+                channels
+                    .values()
+                    .flat_map(|channels| channels.iter())
+                    .filter(|channel| !channel.closed())
+                    .count(),
+            ),
+            BroadcastChannelState::UnManaged => 0,
+        };
+        let message_ports = match &*self.message_port_state.borrow() {
+            MessagePortState::Managed(_, ports) => count(
+                ports
+                    .iter()
+                    .filter(|(_, port)| {
+                        message_port_blocks_controlled_capture(
+                            port.pending,
+                            port.transfer_completion_outstanding,
+                            port.port_impl
+                                .as_ref()
+                                .is_some_and(|port_impl| port_impl.entangled_port_id().is_some()),
+                        )
+                    })
+                    .count(),
+            ),
+            MessagePortState::UnManaged => 0,
+        };
+        let media_session_action_handlers = self
+            .downcast::<Window>()
+            .and_then(Window::get_existing_navigator)
+            .and_then(|navigator| navigator.get_existing_media_session())
+            .map(|media_session| count(media_session.controlled_capture_action_handler_count()))
+            .unwrap_or(0);
+        let dedicated_workers = count(self.list_auto_close_worker.borrow().len());
+        // IDBFactory connection bookkeeping intentionally retains stale entries, and its backend
+        // callbacks have no producer guard spanning request to reply. Factory creation is therefore
+        // a conservative capture-specific sticky latch until that lifecycle is owned.
+        let indexed_db_factories = u64::from(self.get_existing_indexeddb().is_some());
+        #[cfg(feature = "webgpu")]
+        let gpu_devices = count(
+            self.gpu_devices
+                .borrow()
+                .iter()
+                .filter(|(_, device)| device.root().is_some())
+                .count(),
+        );
+        #[cfg(not(feature = "webgpu"))]
+        let gpu_devices = 0;
+        let storage_event_listeners = count(
+            self.constellation_interest_counts
+                .borrow()
+                .get(&ConstellationInterest::StorageEvent)
+                .copied()
+                .unwrap_or(0),
+        );
+        let cookie_store_pending = self
+            .downcast::<Window>()
+            .and_then(Window::get_existing_cookie_store)
+            .map(|store| count(store.controlled_capture_pending_count()))
+            .unwrap_or(0);
+        let (service_worker_pending, service_worker_messaging) = self
+            .downcast::<Window>()
+            .and_then(Window::get_existing_navigator)
+            .and_then(|navigator| navigator.get_existing_service_worker())
+            .map(|container| {
+                (
+                    count(container.controlled_capture_pending_count()),
+                    u64::from(container.controlled_capture_messaging_active()),
+                )
+            })
+            .unwrap_or((0, 0));
+
+        controlled_global_presence_sources(
+            pipeline_id,
+            ControlledGlobalSourceCounts {
+                event_sources,
+                broadcast_channels,
+                message_ports,
+                media_session_action_handlers,
+                dedicated_workers,
+                indexed_db_factories,
+                gpu_devices,
+                storage_event_listeners,
+                cookie_store_pending,
+                service_worker_pending,
+                service_worker_messaging,
+                web_xr: u64::from(self.controlled_capture_web_xr_accessed.get()),
+                storage_manager: u64::from(self.controlled_capture_storage_manager_accessed.get()),
+                bluetooth: u64::from(self.controlled_capture_bluetooth_accessed.get()),
+                rtc_peer_connection: u64::from(
+                    self.controlled_capture_rtc_peer_connection_used.get(),
+                ),
+                media_stream: u64::from(self.controlled_capture_media_stream_used.get()),
+                web_audio: u64::from(self.controlled_capture_web_audio_used.get()),
+                notification: u64::from(self.controlled_capture_notification_used.get()),
+                web_gpu_api: u64::from(self.controlled_capture_web_gpu_accessed.get()),
+                offscreen_canvas: u64::from(self.controlled_capture_offscreen_canvas_used.get()),
+            },
+        )
     }
 
     pub(crate) fn close_event_sources(&self) -> bool {
@@ -3638,5 +3958,49 @@ impl GlobalScopeHelpers<crate::DomTypeHolder> for GlobalScope {
 
     fn is_secure_context(&self) -> bool {
         self.is_secure_context()
+    }
+}
+
+#[cfg(test)]
+mod controlled_capture_source_tests {
+    use super::message_port_blocks_controlled_capture;
+
+    #[test]
+    fn message_port_source_tracks_entanglement_and_transfer_handoffs() {
+        let cases = [
+            (false, false, false, false),
+            (true, false, false, true),
+            (false, true, false, true),
+            (false, false, true, true),
+            (true, true, true, true),
+        ];
+
+        for (pending, outstanding, entangled, expected) in cases {
+            assert_eq!(
+                message_port_blocks_controlled_capture(pending, outstanding, entangled),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn same_global_close_clears_both_disentangled_peer_sources() {
+        let before_close = [(false, false, true), (false, false, true)];
+        assert!(
+            before_close
+                .into_iter()
+                .all(|(pending, outstanding, entangled)| {
+                    message_port_blocks_controlled_capture(pending, outstanding, entangled)
+                })
+        );
+
+        let after_close = [(false, false, false), (false, false, false)];
+        assert!(
+            after_close
+                .into_iter()
+                .all(|(pending, outstanding, entangled)| {
+                    !message_port_blocks_controlled_capture(pending, outstanding, entangled)
+                })
+        );
     }
 }

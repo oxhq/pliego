@@ -109,6 +109,25 @@ impl CookieListener {
             }
         }));
     }
+
+    fn handle_error(&self) {
+        let context = self.context.clone();
+        self.task_source
+            .queue(task!(cookie_listener_error: move |cx| {
+                // The callback channel is shared by all outstanding requests. Once it fails, none of
+                // those promises can receive a backend reply; reject and remove every entry in the
+                // fenced task so the advertised exact pending count becomes zero.
+                let promises = context
+                    .root()
+                    .in_flight
+                    .safe_borrow_mut(cx.no_gc())
+                    .drain(..)
+                    .collect::<Vec<_>>();
+                for promise in promises {
+                    promise.reject_error(cx, Error::Operation(None));
+                }
+            }));
+    }
 }
 
 impl CookieStore {
@@ -135,6 +154,11 @@ impl CookieStore {
         store
     }
 
+    /// Exact number of requests whose backend reply has not yet been handled on this global.
+    pub(crate) fn controlled_capture_pending_count(&self) -> usize {
+        self.in_flight.borrow().len()
+    }
+
     fn setup_route(&self) {
         let context = Trusted::new(self);
         let cs_listener = CookieListener {
@@ -148,7 +172,10 @@ impl CookieStore {
 
         let callback = GenericCallback::new(move |message| match message {
             Ok(msg) => cs_listener.handle(msg),
-            Err(err) => warn!("Error receiving a CookieStore message: {:?}", err),
+            Err(err) => {
+                warn!("Error receiving a CookieStore message: {:?}", err);
+                cs_listener.handle_error();
+            },
         })
         .expect("Could not create cookie store callback");
 

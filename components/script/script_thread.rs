@@ -41,13 +41,17 @@ use devtools_traits::{
 };
 use embedder_traits::user_contents::{UserContentManagerId, UserContents, UserScript};
 use embedder_traits::{
-    DocumentProducerStability, DocumentTimeAdvanceToken, DocumentTimeAdvanceTokenId,
-    DocumentTimeControlAction, DocumentTimeControlCommand, DocumentTimeControlError,
-    DocumentTimeControlObservation, DocumentTimeControlRequestId, DocumentTimeControlTarget,
-    DocumentTimeDocumentObservation, DocumentTimeProducerObservation, DocumentTimeReadinessBlocker,
-    EmbedderControlId, EmbedderControlResponse, EmbedderMsg, FocusSequenceNumber,
-    InputEventOutcome, JavaScriptEvaluationError, JavaScriptEvaluationId, MediaSessionActionType,
-    Theme, ViewportDetails, WebDriverScriptCommand,
+    DocumentCaptureDocumentEpoch, DocumentCapturePrecondition, DocumentCapturePreconditionId,
+    DocumentCapturePreparation, DocumentCaptureQuietFence, DocumentCaptureSurfaceFingerprint,
+    DocumentProducerStability, DocumentSettlementSource, DocumentSettlementSourceDisposition,
+    DocumentSettlementSourceEpoch, DocumentSettlementSourceSnapshot, DocumentTimeAdvanceToken,
+    DocumentTimeAdvanceTokenId, DocumentTimeControlAction, DocumentTimeControlCommand,
+    DocumentTimeControlError, DocumentTimeControlObservation, DocumentTimeControlRequestId,
+    DocumentTimeControlTarget, DocumentTimeDocumentObservation, DocumentTimeProducerObservation,
+    DocumentTimeReadinessBlocker, DocumentTrackedSourceKind, EmbedderControlId,
+    EmbedderControlResponse, EmbedderMsg, FocusSequenceNumber, InputEventOutcome,
+    JavaScriptEvaluationError, JavaScriptEvaluationId, MediaSessionActionType, Theme,
+    ViewportDetails, WebDriverScriptCommand, capture_blockers_internal, capture_producers_internal,
 };
 use encoding_rs::Encoding;
 use fonts::{FontContext, SystemFontServiceProxy, WebFontLoadEvent};
@@ -114,10 +118,11 @@ use style::stylesheets::{AllowImportRules, DocumentStyleSheet, Origin, Styleshee
 use style::thread_state::{self, ThreadState};
 use stylo_atoms::Atom;
 use timers::{
-    DocumentClock, DocumentClockError, DocumentExecutionLedger, DocumentProducerCheckpoint,
-    DocumentProducerFence, DocumentProducerFenceError, DocumentProducerObservation,
-    DocumentProducerObserver, DocumentProducerSnapshot, DocumentTime, DocumentTimeSurface,
-    TimerControlError, TimerDeadlineSnapshot, TimerEventRequest, TimerId, TimerScheduler,
+    DocumentClock, DocumentClockError, DocumentClockId, DocumentExecutionLedger,
+    DocumentProducerCheckpoint, DocumentProducerFence, DocumentProducerFenceError,
+    DocumentProducerFenceId, DocumentProducerObservation, DocumentProducerObserver,
+    DocumentProducerSnapshot, DocumentTime, DocumentTimeSurface, TimerControlError,
+    TimerDeadlineSnapshot, TimerEventRequest, TimerId, TimerScheduler,
 };
 use url::Position;
 #[cfg(feature = "webgpu")]
@@ -226,6 +231,101 @@ struct ControlledDocumentTimeState {
     input_revision_overflowed: bool,
     next_advance_token_id: u64,
     issued_advance_token: Option<DocumentTimeAdvanceToken>,
+    next_capture_precondition_id: u64,
+    issued_capture_precondition: Option<DocumentCapturePrecondition>,
+    capture_quiet_state: ControlledCaptureQuietState,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ControlledCaptureRevision {
+    target: DocumentTimeControlTarget,
+    clock_id: DocumentClockId,
+    now: DocumentTime,
+    input_revision: u64,
+    pending_events: u64,
+    input_batch_saturated: bool,
+    producer_fence_id: DocumentProducerFenceId,
+    producer_snapshot: DocumentProducerSnapshot,
+    documents: Vec<DocumentTimeDocumentObservation>,
+    execution: Option<timers::DocumentExecutionObservation>,
+    next_deadline: Option<TimerDeadlineSnapshot>,
+    sources: Vec<DocumentSettlementSource>,
+}
+
+#[derive(Default)]
+struct ControlledCaptureQuietState {
+    source_epoch: u64,
+    source_epoch_initialized: bool,
+    source_epoch_overflowed: bool,
+    last_sources: Option<Vec<DocumentSettlementSource>>,
+    quiet_fence: DocumentCaptureQuietFence<ControlledCaptureRevision>,
+}
+
+impl ControlledCaptureQuietState {
+    fn observe(
+        &mut self,
+        checkpoint: DocumentProducerCheckpoint,
+        revision: ControlledCaptureRevision,
+        mechanically_qualified: bool,
+    ) -> Result<(DocumentSettlementSourceSnapshot, bool), DocumentTimeControlError> {
+        if self.source_epoch_overflowed {
+            self.quiet_fence.invalidate_revision();
+            return Err(DocumentTimeControlError::CaptureSourceEpochOverflow);
+        }
+
+        if self.last_sources.as_ref() != Some(&revision.sources) {
+            // A source change invalidates the retained quiet revision before the fallible epoch
+            // increment. Otherwise an overflow could return early while leaving the prior source
+            // generation qualified.
+            self.quiet_fence.invalidate_revision();
+            if self.source_epoch_initialized {
+                let Some(source_epoch) = self.source_epoch.checked_add(1) else {
+                    self.source_epoch_overflowed = true;
+                    return Err(DocumentTimeControlError::CaptureSourceEpochOverflow);
+                };
+                self.source_epoch = source_epoch;
+            } else {
+                self.source_epoch_initialized = true;
+            }
+            self.last_sources = Some(revision.sources.clone());
+        }
+
+        let quiet_checkpoints_qualified =
+            self.quiet_fence
+                .observe(checkpoint, revision.clone(), mechanically_qualified);
+        Ok((
+            DocumentSettlementSourceSnapshot::new_internal(
+                DocumentSettlementSourceEpoch::new(self.source_epoch),
+                revision.sources,
+            ),
+            quiet_checkpoints_qualified,
+        ))
+    }
+
+    fn invalidate(&mut self) {
+        // Navigation/candidate invalidation cannot make an exhausted source-epoch domain usable
+        // again; `source_epoch_overflowed` remains sticky for this ScriptThread.
+        self.quiet_fence.invalidate_revision();
+    }
+}
+
+fn capture_revision_is_mechanically_qualified(revision: &ControlledCaptureRevision) -> bool {
+    revision.target.fully_active_pipelines.len() == 1 &&
+        revision.pending_events == 0 &&
+        !revision.input_batch_saturated &&
+        revision.producer_snapshot.is_empty() &&
+        revision
+            .execution
+            .is_some_and(|execution| execution.terminal.is_none()) &&
+        revision.next_deadline.is_none() &&
+        revision.documents.len() == 1 &&
+        revision.documents.iter().all(|document| {
+            document.script_rendering_epoch.is_some() && document.readiness_blockers.is_empty()
+        }) &&
+        revision
+            .sources
+            .iter()
+            .all(|source| source.disposition() == DocumentSettlementSourceDisposition::Inert)
 }
 
 impl ControlledDocumentTimeState {
@@ -250,6 +350,62 @@ impl ControlledDocumentTimeState {
 
     fn clear_advance_token(&mut self) {
         self.issued_advance_token = None;
+    }
+
+    fn invalidate_capture_precondition(&mut self) {
+        self.issued_capture_precondition = None;
+    }
+
+    fn invalidate_capture_authority(&mut self) {
+        self.invalidate_capture_precondition();
+        self.capture_quiet_state.invalidate();
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn issue_capture_precondition(
+        &mut self,
+        target: &DocumentTimeControlTarget,
+        clock: &DocumentClock,
+        now: DocumentTime,
+        input_revision: u64,
+        pending_events: u64,
+        input_batch_saturated: bool,
+        producers: DocumentTimeProducerObservation,
+        execution: timers::DocumentExecutionObservation,
+        next_deadline: Option<TimerDeadlineSnapshot>,
+        sources: DocumentSettlementSourceSnapshot,
+        documents: Vec<DocumentCaptureDocumentEpoch>,
+        surface: DocumentCaptureSurfaceFingerprint,
+    ) -> Result<DocumentCapturePrecondition, DocumentTimeControlError> {
+        let next = self
+            .next_capture_precondition_id
+            .checked_add(1)
+            .ok_or(DocumentTimeControlError::CapturePreconditionSequenceOverflow)?;
+        let precondition = DocumentCapturePrecondition::new_internal(
+            DocumentCapturePreconditionId::new(self.next_capture_precondition_id),
+            target.clone(),
+            clock.id(),
+            now,
+            input_revision,
+            pending_events,
+            input_batch_saturated,
+            producers,
+            execution,
+            next_deadline,
+            sources,
+            documents,
+            surface,
+        );
+        self.next_capture_precondition_id = next;
+        self.issued_capture_precondition = Some(precondition.clone());
+        Ok(precondition)
+    }
+
+    #[cfg(test)]
+    fn consume_capture_precondition(&mut self, observed: &DocumentCapturePrecondition) -> bool {
+        self.issued_capture_precondition
+            .take()
+            .is_some_and(|expected| expected == *observed)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -411,6 +567,18 @@ fn drain_controlled_input_batch(
 
 const fn command_requires_exact_target_before_action(command: &DocumentTimeControlCommand) -> bool {
     !matches!(command, DocumentTimeControlCommand::DriveOneTurn)
+}
+
+fn begin_controlled_document_time_command(
+    state: &mut ControlledDocumentTimeState,
+    command: &DocumentTimeControlCommand,
+) {
+    // Commands always supersede issued capture authority. Only conditional advance consumes its
+    // already-issued advance token; every other command also supersedes advance authority.
+    state.invalidate_capture_precondition();
+    if !matches!(command, DocumentTimeControlCommand::AdvanceTo(_)) {
+        state.clear_advance_token();
+    }
 }
 
 fn controlled_advance_execution_guard(
@@ -1899,16 +2067,18 @@ impl ScriptThread {
             &mut self.controlled_pending_requests.borrow_mut(),
             event,
         );
-        self.controlled_document_time_state
-            .borrow_mut()
-            .record_ordinary_inputs(u64::from(ordinary_event));
+        let mut state = self.controlled_document_time_state.borrow_mut();
+        state.record_ordinary_inputs(u64::from(ordinary_event));
+        if ordinary_event {
+            state.invalidate_capture_authority();
+        }
     }
 
     fn queue_controlled_page_event(&self, event: MixedMessage) {
         self.controlled_pending_events.borrow_mut().push_back(event);
-        self.controlled_document_time_state
-            .borrow_mut()
-            .record_ordinary_inputs(1);
+        let mut state = self.controlled_document_time_state.borrow_mut();
+        state.record_ordinary_inputs(1);
+        state.invalidate_capture_authority();
     }
 
     fn drain_ready_controlled_inputs(&self) -> bool {
@@ -1922,10 +2092,18 @@ impl ScriptThread {
             &mut self.controlled_pending_requests.borrow_mut(),
             &mut input,
         );
+        let mut state = self.controlled_document_time_state.borrow_mut();
+        state.record_ordinary_inputs(batch.ordinary_events);
+        if batch.ordinary_events != 0 {
+            state.invalidate_capture_authority();
+        }
+        batch.saturated
+    }
+
+    fn invalidate_controlled_capture_authority(&self) {
         self.controlled_document_time_state
             .borrow_mut()
-            .record_ordinary_inputs(batch.ordinary_events);
-        batch.saturated
+            .invalidate_capture_authority();
     }
 
     fn send_controlled_document_time_response(
@@ -1958,6 +2136,7 @@ impl ScriptThread {
             self.controlled_document_producer_observer
                 .borrow_mut()
                 .invalidate();
+            self.invalidate_controlled_capture_authority();
             return Err(DocumentTimeControlError::TargetChanged {
                 expected: Box::new(target.clone()),
                 observed: None,
@@ -1973,6 +2152,7 @@ impl ScriptThread {
             self.controlled_document_producer_observer
                 .borrow_mut()
                 .invalidate();
+            self.invalidate_controlled_capture_authority();
             return Err(DocumentTimeControlError::UnsupportedSurface(surface));
         }
         if target.pipelines.iter().any(|pipeline_id| {
@@ -1984,6 +2164,7 @@ impl ScriptThread {
             self.controlled_document_producer_observer
                 .borrow_mut()
                 .invalidate();
+            self.invalidate_controlled_capture_authority();
             return Err(DocumentTimeControlError::TargetChanged {
                 expected: Box::new(target.clone()),
                 observed: None,
@@ -2006,6 +2187,7 @@ impl ScriptThread {
             self.controlled_document_producer_observer
                 .borrow_mut()
                 .invalidate();
+            self.invalidate_controlled_capture_authority();
             return Err(DocumentTimeControlError::TargetChanged {
                 expected: Box::new(target.clone()),
                 observed: None,
@@ -2020,6 +2202,7 @@ impl ScriptThread {
         target: &DocumentTimeControlTarget,
         action: DocumentTimeControlAction,
         input_batch_saturated: bool,
+        capture_surface: Option<DocumentCaptureSurfaceFingerprint>,
     ) -> Result<DocumentTimeControlObservation, DocumentTimeControlError> {
         self.validate_controlled_document_time_target(target)?;
 
@@ -2082,6 +2265,37 @@ impl ScriptThread {
         };
         let execution_terminal =
             execution.is_some_and(|observation| observation.terminal.is_some());
+        let mut settlement_sources = self.controlled_document_settlement_sources(target, now)?;
+        settlement_sources.sort_unstable();
+        let input_revision = self
+            .controlled_document_time_state
+            .borrow()
+            .input_revision()?;
+        let capture_revision = ControlledCaptureRevision {
+            target: target.clone(),
+            clock_id: self.document_clock.id(),
+            now,
+            input_revision,
+            pending_events,
+            input_batch_saturated,
+            producer_fence_id: producers.fence_id,
+            producer_snapshot: producers.snapshot,
+            documents: documents.clone(),
+            execution,
+            next_deadline,
+            sources: settlement_sources,
+        };
+        let mechanically_qualified = capture_revision_is_mechanically_qualified(&capture_revision);
+        let (source_snapshot, quiet_checkpoints_qualified) = self
+            .controlled_document_time_state
+            .borrow_mut()
+            .capture_quiet_state
+            .observe(checkpoint, capture_revision, mechanically_qualified)?;
+        // `PrepareCapture` does not run a checkpoint, so the producer observer reports
+        // `UnchangedCheckpoint` when preparation follows the second quiet DriveOneTurn. Preserve
+        // (but never strengthen) that already-qualified StableEmpty fact only when the separate
+        // normalized quiet fence still matches the exact current observation.
+        let capture_producers = capture_producers_internal(producers, quiet_checkpoints_qualified);
         let advance_token = {
             let mut state = self.controlled_document_time_state.borrow_mut();
             state.clear_advance_token();
@@ -2110,6 +2324,61 @@ impl ScriptThread {
                 None
             }
         };
+        let capture_preparation = capture_surface
+            .map(|surface| {
+                let blockers = capture_blockers_internal(
+                    target,
+                    &surface,
+                    pending_events,
+                    input_batch_saturated,
+                    capture_producers,
+                    &documents,
+                    execution,
+                    next_deadline.is_some(),
+                    &source_snapshot,
+                    quiet_checkpoints_qualified,
+                );
+                let precondition = if blockers.is_empty() {
+                    let document_epochs = documents
+                        .iter()
+                        .map(|document| DocumentCaptureDocumentEpoch {
+                            pipeline_id: document.pipeline_id,
+                            script_rendering_epoch: document
+                                .script_rendering_epoch
+                                .expect("qualified capture document must have an epoch"),
+                            readiness_blockers: document.readiness_blockers.clone(),
+                        })
+                        .collect();
+                    Some(Box::new(
+                        self.controlled_document_time_state
+                            .borrow_mut()
+                            .issue_capture_precondition(
+                                target,
+                                &self.document_clock,
+                                now,
+                                input_revision,
+                                pending_events,
+                                input_batch_saturated,
+                                capture_producers,
+                                execution
+                                    .expect("qualified capture must have an execution observation"),
+                                next_deadline,
+                                source_snapshot.clone(),
+                                document_epochs,
+                                surface,
+                            )?,
+                    ))
+                } else {
+                    None
+                };
+                Ok(DocumentCapturePreparation {
+                    surface,
+                    sources: source_snapshot.clone(),
+                    blockers,
+                    precondition,
+                })
+            })
+            .transpose()?;
 
         Ok(DocumentTimeControlObservation {
             target: target.clone(),
@@ -2122,7 +2391,42 @@ impl ScriptThread {
             producers,
             documents,
             execution,
+            capture_preparation,
         })
+    }
+
+    fn controlled_document_settlement_sources(
+        &self,
+        target: &DocumentTimeControlTarget,
+        now: DocumentTime,
+    ) -> Result<Vec<DocumentSettlementSource>, DocumentTimeControlError> {
+        let mut sources = Vec::new();
+        for pipeline_id in &target.fully_active_pipelines {
+            let Some(document) = self.documents.borrow().find_document(*pipeline_id) else {
+                continue;
+            };
+            if document.webview_id() != target.webview_id {
+                return Err(DocumentTimeControlError::TargetChanged {
+                    expected: Box::new(target.clone()),
+                    observed: None,
+                });
+            }
+            sources.extend(Self::map_controlled_settlement_sources(
+                document.controlled_settlement_sources(now),
+            )?);
+            sources.push(DocumentSettlementSource::tracked_presence_internal(
+                *pipeline_id,
+                DocumentTrackedSourceKind::Worklet,
+                u64::from(self.worklet_thread_pool.borrow().is_some()),
+            ));
+        }
+        Ok(sources)
+    }
+
+    fn map_controlled_settlement_sources(
+        sources: Result<Vec<DocumentSettlementSource>, DocumentClockError>,
+    ) -> Result<Vec<DocumentSettlementSource>, DocumentTimeControlError> {
+        sources.map_err(DocumentTimeControlError::Clock)
     }
 
     fn controlled_document_observations(
@@ -2295,6 +2599,7 @@ impl ScriptThread {
                 .document_execution_ledger
                 .as_ref()
                 .map(DocumentExecutionLedger::observation),
+            capture_preparation: None,
         })
     }
 
@@ -2338,6 +2643,13 @@ impl ScriptThread {
         request: ControlledDocumentTimeRequest,
         prior_input_batch_saturated: bool,
     ) -> bool {
+        // Every control command invalidates any previously issued single-use capture authority.
+        // This intentionally does not erase quiet-checkpoint history: two successive no-op drives
+        // must be able to qualify the same normalized revision.
+        begin_controlled_document_time_command(
+            &mut self.controlled_document_time_state.borrow_mut(),
+            &request.command,
+        );
         match &request.command {
             DocumentTimeControlCommand::AdvanceTo(token) => {
                 if let Err(error) = self
@@ -2348,11 +2660,9 @@ impl ScriptThread {
                     return self.send_controlled_document_time_response(&request, Err(error));
                 }
             },
-            DocumentTimeControlCommand::Observe | DocumentTimeControlCommand::DriveOneTurn => {
-                self.controlled_document_time_state
-                    .borrow_mut()
-                    .clear_advance_token();
-            },
+            DocumentTimeControlCommand::Observe |
+            DocumentTimeControlCommand::DriveOneTurn |
+            DocumentTimeControlCommand::PrepareCapture(_) => {},
         }
 
         self.task_queue.start_event_loop_iteration();
@@ -2375,6 +2685,9 @@ impl ScriptThread {
         let before_checkpoint = self.document_producer_checkpoint();
         let action = match &request.command {
             DocumentTimeControlCommand::Observe => Ok(DocumentTimeControlAction::Observed),
+            DocumentTimeControlCommand::PrepareCapture(_) => {
+                Ok(DocumentTimeControlAction::CapturePrepared)
+            },
             DocumentTimeControlCommand::AdvanceTo(_) => {
                 unreachable!("guarded advance returned through its committed response path")
             },
@@ -2419,12 +2732,17 @@ impl ScriptThread {
         };
 
         input_batch_saturated |= self.drain_ready_controlled_inputs();
+        let capture_surface = match &request.command {
+            DocumentTimeControlCommand::PrepareCapture(surface) => Some(*surface),
+            _ => None,
+        };
         let result = action.and_then(|action| {
             self.controlled_document_time_observation(
                 cx,
                 &request.target,
                 action,
                 input_batch_saturated,
+                capture_surface,
             )
         });
         self.send_controlled_document_time_response(&request, result)
@@ -5670,30 +5988,44 @@ mod tests {
     use std::time::Duration;
 
     use embedder_traits::{
-        DocumentProducerStability, DocumentTimeAdvanceToken, DocumentTimeControlCommand,
+        DocumentCaptureBlocker, DocumentCaptureDocumentEpoch, DocumentCapturePrecondition,
+        DocumentCaptureQuietFence, DocumentCaptureSurfaceFingerprint, DocumentProducerStability,
+        DocumentSettlementSource, DocumentSettlementSourceDisposition,
+        DocumentSettlementSourceEpoch, DocumentSettlementSourceIdentity,
+        DocumentSettlementSourceSnapshot, DocumentTimeAdvanceToken, DocumentTimeControlCommand,
         DocumentTimeControlError, DocumentTimeControlRequestId, DocumentTimeControlTarget,
-        DocumentTimeProducerObservation,
+        DocumentTimeDocumentObservation, DocumentTimeProducerObservation,
+        DocumentTrackedSourceKind, DocumentUnsupportedSourceReason, capture_blockers_internal,
+        capture_producers_internal,
     };
+    use euclid::{Box2D, Point2D, Size2D};
     use script_traits::ScriptThreadMessage;
     use servo_base::Epoch;
     use servo_base::id::{TEST_PIPELINE_ID, TEST_SCRIPT_EVENT_LOOP_ID, TEST_WEBVIEW_ID};
+    use servo_geometry::DeviceIndependentPixel;
     use timers::{
         DocumentClock, DocumentClockConfiguration, DocumentClockError, DocumentExecutionLedger,
         DocumentExecutionLimits, DocumentProducerCheckpoint, DocumentProducerFence,
         DocumentProducerFenceError, DocumentProducerKind, DocumentProducerObservation,
-        DocumentTime, TimerControlError, TimerEventRequest, TimerScheduler,
+        DocumentTime, DocumentUnixTime, TimerControlError, TimerEventRequest, TimerScheduler,
     };
 
     use super::{
-        CONTROLLED_INPUT_BATCH_LIMIT, ControlledDocumentProducerObserver,
-        ControlledDocumentTimeRequest, ControlledDocumentTimeState, MixedMessage,
+        CONTROLLED_INPUT_BATCH_LIMIT, ControlledCaptureQuietState, ControlledCaptureRevision,
+        ControlledDocumentProducerObserver, ControlledDocumentTimeRequest,
+        ControlledDocumentTimeState, MixedMessage, ScriptThread,
         advance_document_producer_checkpoint_after_microtasks,
+        begin_controlled_document_time_command, capture_revision_is_mechanically_qualified,
         command_requires_exact_target_before_action, controlled_advance_execution_guard,
         controlled_document_time_now, controlled_event_consumes_ordinary_task_budget,
         dirty_document_before_unblocking_web_fonts, drain_controlled_input_batch,
         enqueue_controlled_input, remaining_rendering_opportunity_delay,
         renderer_may_drive_rendering, take_controlled_exit, take_controlled_turn,
         validate_conditional_advance_state,
+    };
+    use crate::dom::document::controlled_unsupported_dom_sources;
+    use crate::dom::globalscope::{
+        ControlledGlobalSourceCounts, controlled_global_presence_sources,
     };
     use crate::messaging::{CommonScriptMsg, MainThreadScriptMsg};
     use crate::microtask::MicrotaskCheckpointResult;
@@ -5721,6 +6053,105 @@ mod tests {
             pipelines: vec![TEST_PIPELINE_ID],
             fully_active_pipelines: vec![TEST_PIPELINE_ID],
         }
+    }
+
+    fn capture_surface() -> DocumentCaptureSurfaceFingerprint {
+        DocumentCaptureSurfaceFingerprint::new(
+            Size2D::<i32, DeviceIndependentPixel>::new(800, 600),
+            Box2D::new(Point2D::new(0, 0), Point2D::new(800, 600)),
+            1.0,
+        )
+        .unwrap()
+    }
+
+    fn settled_collector_sources() -> Vec<DocumentSettlementSource> {
+        let mut sources = controlled_global_presence_sources(
+            TEST_PIPELINE_ID,
+            ControlledGlobalSourceCounts::default(),
+        );
+        sources.push(DocumentSettlementSource::tracked_presence_internal(
+            TEST_PIPELINE_ID,
+            DocumentTrackedSourceKind::WebSocket,
+            0,
+        ));
+        sources.push(DocumentSettlementSource::tracked_presence_internal(
+            TEST_PIPELINE_ID,
+            DocumentTrackedSourceKind::Worklet,
+            0,
+        ));
+        sources
+    }
+
+    fn capture_revision(
+        clock: &DocumentClock,
+        fence: &DocumentProducerFence,
+        input_revision: u64,
+        sources: Vec<DocumentSettlementSource>,
+    ) -> ControlledCaptureRevision {
+        ControlledCaptureRevision {
+            target: control_target(),
+            clock_id: clock.id(),
+            now: clock.now(),
+            input_revision,
+            pending_events: 0,
+            input_batch_saturated: false,
+            producer_fence_id: fence.id(),
+            producer_snapshot: fence.snapshot(),
+            documents: vec![DocumentTimeDocumentObservation {
+                pipeline_id: TEST_PIPELINE_ID,
+                script_rendering_epoch: Some(Epoch::default()),
+                readiness_blockers: Vec::new(),
+            }],
+            execution: clock.execution_ledger().map(|ledger| ledger.observation()),
+            next_deadline: None,
+            sources,
+        }
+    }
+
+    fn controlled_capture_clock() -> DocumentClock {
+        DocumentClock::new(DocumentClockConfiguration::Controlled {
+            initial_time_ns: 0,
+            unix_time_origin_ns: DocumentUnixTime::default(),
+            execution_limits: Some(DocumentExecutionLimits::API2_V1_DEFAULT),
+        })
+    }
+
+    fn issue_test_capture_precondition(
+        state: &mut ControlledDocumentTimeState,
+        clock: &DocumentClock,
+        fence: &DocumentProducerFence,
+        sources: DocumentSettlementSourceSnapshot,
+    ) -> DocumentCapturePrecondition {
+        let checkpoint = DocumentProducerCheckpoint::ZERO
+            .checked_next()
+            .unwrap()
+            .checked_next()
+            .unwrap();
+        state
+            .issue_capture_precondition(
+                &control_target(),
+                clock,
+                clock.now(),
+                state.input_revision().unwrap(),
+                0,
+                false,
+                DocumentTimeProducerObservation {
+                    fence_id: fence.id(),
+                    checkpoint,
+                    snapshot: fence.snapshot(),
+                    stability: DocumentProducerStability::StableEmpty,
+                },
+                clock.execution_ledger().unwrap().observation(),
+                None,
+                sources,
+                vec![DocumentCaptureDocumentEpoch {
+                    pipeline_id: TEST_PIPELINE_ID,
+                    script_rendering_epoch: Epoch::default(),
+                    readiness_blockers: Vec::new(),
+                }],
+                capture_surface(),
+            )
+            .unwrap()
     }
 
     struct GuardedAdvanceFixture {
@@ -6232,6 +6663,447 @@ mod tests {
             successful.state.consume_advance_token(&token),
             Err(DocumentTimeControlError::AdvanceTokenUnavailable { .. })
         ));
+    }
+
+    #[test]
+    fn two_fresh_drive_checkpoints_then_same_checkpoint_prepare_issues_capture() {
+        let clock = controlled_capture_clock();
+        let fence = DocumentProducerFence::with_execution_ledger(clock.execution_ledger());
+        let revision = capture_revision(&clock, &fence, 0, settled_collector_sources());
+        assert!(capture_revision_is_mechanically_qualified(&revision));
+        let checkpoint_1 = DocumentProducerCheckpoint::ZERO.checked_next().unwrap();
+        let checkpoint_2 = checkpoint_1.checked_next().unwrap();
+        let mut quiet = ControlledCaptureQuietState::default();
+
+        let (first_sources, first_qualified) =
+            quiet.observe(checkpoint_1, revision.clone(), true).unwrap();
+        assert!(!first_qualified);
+        let (second_sources, second_qualified) =
+            quiet.observe(checkpoint_2, revision.clone(), true).unwrap();
+        assert!(second_qualified);
+        assert_eq!(first_sources.source_epoch(), second_sources.source_epoch());
+
+        // PrepareCapture performs no microtask checkpoint. Re-observing checkpoint two must
+        // preserve, but cannot create, the qualification established by the two drives.
+        let (prepare_sources, prepare_qualified) =
+            quiet.observe(checkpoint_2, revision.clone(), true).unwrap();
+        assert!(prepare_qualified);
+        let observed_producers = DocumentTimeProducerObservation {
+            fence_id: fence.id(),
+            checkpoint: checkpoint_2,
+            snapshot: fence.snapshot(),
+            stability: DocumentProducerStability::UnchangedCheckpoint,
+        };
+        let capture_producers = capture_producers_internal(observed_producers, prepare_qualified);
+        assert_eq!(
+            capture_producers.stability,
+            DocumentProducerStability::StableEmpty
+        );
+        let blockers = capture_blockers_internal(
+            &revision.target,
+            &capture_surface(),
+            0,
+            false,
+            capture_producers,
+            &revision.documents,
+            revision.execution,
+            false,
+            &prepare_sources,
+            prepare_qualified,
+        );
+        assert!(blockers.is_empty());
+
+        let mut state = ControlledDocumentTimeState::default();
+        let precondition =
+            issue_test_capture_precondition(&mut state, &clock, &fence, prepare_sources);
+        assert!(state.consume_capture_precondition(&precondition));
+    }
+
+    #[test]
+    fn source_epoch_change_requires_two_new_fresh_drive_checkpoints() {
+        let clock = controlled_capture_clock();
+        let fence = DocumentProducerFence::with_execution_ledger(clock.execution_ledger());
+        let checkpoint_1 = DocumentProducerCheckpoint::ZERO.checked_next().unwrap();
+        let checkpoint_2 = checkpoint_1.checked_next().unwrap();
+        let checkpoint_3 = checkpoint_2.checked_next().unwrap();
+        let checkpoint_4 = checkpoint_3.checked_next().unwrap();
+        let mut quiet = ControlledCaptureQuietState::default();
+        let initial = capture_revision(&clock, &fence, 0, settled_collector_sources());
+
+        assert!(
+            !quiet
+                .observe(checkpoint_1, initial.clone(), true)
+                .unwrap()
+                .1
+        );
+        let (initial_snapshot, qualified) = quiet.observe(checkpoint_2, initial, true).unwrap();
+        assert!(qualified);
+
+        let mut changed_sources = settled_collector_sources();
+        changed_sources.push(DocumentSettlementSource::animation_frame_internal(
+            TEST_PIPELINE_ID,
+            17,
+            false,
+        ));
+        let changed = capture_revision(&clock, &fence, 0, changed_sources);
+        let (changed_snapshot, changed_qualified) =
+            quiet.observe(checkpoint_3, changed.clone(), true).unwrap();
+        assert!(!changed_qualified, "changed checkpoint is candidate one");
+        assert_eq!(
+            changed_snapshot.source_epoch().get(),
+            initial_snapshot.source_epoch().get() + 1
+        );
+        assert!(
+            !quiet
+                .observe(checkpoint_3, changed.clone(), true)
+                .unwrap()
+                .1,
+            "same-checkpoint Observe/Prepare cannot strengthen candidate one"
+        );
+        assert!(quiet.observe(checkpoint_4, changed, true).unwrap().1);
+    }
+
+    #[test]
+    fn source_epoch_overflow_is_sticky_and_clears_the_previously_qualified_revision() {
+        let clock = controlled_capture_clock();
+        let fence = DocumentProducerFence::with_execution_ledger(clock.execution_ledger());
+        let checkpoint_1 = DocumentProducerCheckpoint::ZERO.checked_next().unwrap();
+        let checkpoint_2 = checkpoint_1.checked_next().unwrap();
+        let checkpoint_3 = checkpoint_2.checked_next().unwrap();
+        let checkpoint_4 = checkpoint_3.checked_next().unwrap();
+        let initial = capture_revision(&clock, &fence, 0, settled_collector_sources());
+        let mut quiet = ControlledCaptureQuietState {
+            source_epoch: u64::MAX,
+            source_epoch_initialized: true,
+            source_epoch_overflowed: false,
+            last_sources: Some(initial.sources.clone()),
+            quiet_fence: DocumentCaptureQuietFence::default(),
+        };
+
+        let first = quiet.observe(checkpoint_1, initial.clone(), true).unwrap();
+        assert_eq!(first.0.source_epoch().get(), u64::MAX);
+        assert!(!first.1);
+        assert!(
+            quiet
+                .observe(checkpoint_2, initial.clone(), true)
+                .unwrap()
+                .1
+        );
+
+        let mut changed_sources = initial.sources.clone();
+        changed_sources.push(DocumentSettlementSource::animation_frame_internal(
+            TEST_PIPELINE_ID,
+            19,
+            false,
+        ));
+        let changed = capture_revision(&clock, &fence, 0, changed_sources);
+        assert_eq!(
+            quiet.observe(checkpoint_3, changed.clone(), true),
+            Err(DocumentTimeControlError::CaptureSourceEpochOverflow)
+        );
+        assert!(quiet.source_epoch_overflowed);
+        assert_eq!(quiet.source_epoch, u64::MAX);
+        assert_eq!(quiet.last_sources.as_ref(), Some(&initial.sources));
+
+        // An intervening Observe/Prepare attempt cannot clear the terminal epoch state, and
+        // returning to the formerly qualified source vector cannot resurrect its quiet revision.
+        assert_eq!(
+            quiet.observe(checkpoint_3, changed, true),
+            Err(DocumentTimeControlError::CaptureSourceEpochOverflow)
+        );
+        assert_eq!(
+            quiet.observe(checkpoint_4, initial.clone(), true),
+            Err(DocumentTimeControlError::CaptureSourceEpochOverflow)
+        );
+
+        // Test-only fault injection proves the failed R -> R2 transition invalidated the fence
+        // before the checked increment: even if the terminal latch were cleared incorrectly, R
+        // would have to start qualification again rather than reusing its former stable state.
+        quiet.source_epoch_overflowed = false;
+        assert!(
+            !quiet.observe(checkpoint_4, initial, true).unwrap().1,
+            "overflow invalidated the formerly stable quiet revision"
+        );
+    }
+
+    #[test]
+    fn actual_collector_entries_cover_detached_dom_and_live_external_sources() {
+        // The DOM helper consumes owner-tracker facts, not connected-tree traversal facts. These
+        // identities therefore model live detached media/canvas nodes exactly as production does.
+        let mut sources = controlled_global_presence_sources(
+            TEST_PIPELINE_ID,
+            ControlledGlobalSourceCounts {
+                event_sources: 1,
+                broadcast_channels: 1,
+                message_ports: 1,
+                media_session_action_handlers: 1,
+                dedicated_workers: 1,
+                indexed_db_factories: 1,
+                gpu_devices: 1,
+                storage_event_listeners: 1,
+                cookie_store_pending: 1,
+                service_worker_pending: 1,
+                service_worker_messaging: 1,
+                web_xr: 1,
+                storage_manager: 1,
+                bluetooth: 1,
+                rtc_peer_connection: 1,
+                media_stream: 1,
+                web_audio: 1,
+                notification: 1,
+                web_gpu_api: 1,
+                offscreen_canvas: 1,
+            },
+        );
+        sources.push(DocumentSettlementSource::tracked_presence_internal(
+            TEST_PIPELINE_ID,
+            DocumentTrackedSourceKind::WebSocket,
+            1,
+        ));
+        sources.push(DocumentSettlementSource::tracked_presence_internal(
+            TEST_PIPELINE_ID,
+            DocumentTrackedSourceKind::EmbedderControl,
+            1,
+        ));
+        sources.push(DocumentSettlementSource::tracked_presence_internal(
+            TEST_PIPELINE_ID,
+            DocumentTrackedSourceKind::Worklet,
+            1,
+        ));
+        sources.extend(controlled_unsupported_dom_sources(
+            TEST_PIPELINE_ID,
+            [
+                (41, DocumentUnsupportedSourceReason::MediaElement),
+                (42, DocumentUnsupportedSourceReason::Canvas2d),
+                (42, DocumentUnsupportedSourceReason::Canvas2d),
+            ],
+        ));
+        let snapshot = DocumentSettlementSourceSnapshot::new_internal(
+            DocumentSettlementSourceEpoch::new(7),
+            sources,
+        );
+
+        let tracked_kinds = snapshot
+            .sources()
+            .iter()
+            .filter_map(|source| match source.identity() {
+                DocumentSettlementSourceIdentity::TrackedPresence { kind, .. } => Some(*kind),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            tracked_kinds,
+            vec![
+                DocumentTrackedSourceKind::WebSocket,
+                DocumentTrackedSourceKind::EventSource,
+                DocumentTrackedSourceKind::BroadcastChannel,
+                DocumentTrackedSourceKind::MessagePort,
+                DocumentTrackedSourceKind::EmbedderControl,
+                DocumentTrackedSourceKind::MediaSessionActionHandler,
+                DocumentTrackedSourceKind::DedicatedWorker,
+                DocumentTrackedSourceKind::Worklet,
+                DocumentTrackedSourceKind::IndexedDb,
+                DocumentTrackedSourceKind::GpuDevice,
+                DocumentTrackedSourceKind::StorageEventListener,
+                DocumentTrackedSourceKind::CookieStorePending,
+                DocumentTrackedSourceKind::ServiceWorkerPending,
+                DocumentTrackedSourceKind::ServiceWorkerMessaging,
+                DocumentTrackedSourceKind::WebXr,
+                DocumentTrackedSourceKind::StorageManager,
+                DocumentTrackedSourceKind::Bluetooth,
+                DocumentTrackedSourceKind::RtcPeerConnection,
+                DocumentTrackedSourceKind::MediaStream,
+                DocumentTrackedSourceKind::WebAudio,
+                DocumentTrackedSourceKind::Notification,
+                DocumentTrackedSourceKind::WebGpuApi,
+                DocumentTrackedSourceKind::OffscreenCanvas,
+            ]
+        );
+
+        assert_eq!(
+            snapshot.sources().len(),
+            25,
+            "duplicate node ids are canonicalized"
+        );
+        assert_eq!(
+            snapshot
+                .sources()
+                .iter()
+                .filter(|source| matches!(
+                    source.disposition(),
+                    DocumentSettlementSourceDisposition::OpenEnded(_)
+                ))
+                .count(),
+            7
+        );
+        assert_eq!(
+            snapshot
+                .sources()
+                .iter()
+                .filter(|source| matches!(
+                    source.disposition(),
+                    DocumentSettlementSourceDisposition::Unsupported(_)
+                ))
+                .count(),
+            18
+        );
+
+        let clock = controlled_capture_clock();
+        let fence = DocumentProducerFence::with_execution_ledger(clock.execution_ledger());
+        let revision = capture_revision(&clock, &fence, 0, snapshot.sources().to_vec());
+        let producers = DocumentTimeProducerObservation {
+            fence_id: fence.id(),
+            checkpoint: DocumentProducerCheckpoint::ZERO.checked_next().unwrap(),
+            snapshot: fence.snapshot(),
+            stability: DocumentProducerStability::StableEmpty,
+        };
+        let blockers = capture_blockers_internal(
+            &revision.target,
+            &capture_surface(),
+            0,
+            false,
+            producers,
+            &revision.documents,
+            revision.execution,
+            false,
+            &snapshot,
+            true,
+        );
+        assert!(blockers.contains(&DocumentCaptureBlocker::OpenEndedSource));
+        assert!(blockers.contains(&DocumentCaptureBlocker::UnsupportedSource));
+    }
+
+    #[test]
+    fn dom_timer_source_overflow_maps_to_the_control_protocol_clock_error() {
+        assert_eq!(
+            ScriptThread::map_controlled_settlement_sources(Err(DocumentClockError::Overflow)),
+            Err(DocumentTimeControlError::Clock(
+                DocumentClockError::Overflow
+            ))
+        );
+    }
+
+    #[test]
+    fn input_control_and_navigation_invalidate_capture_authority() {
+        let clock = controlled_capture_clock();
+        let fence = DocumentProducerFence::with_execution_ledger(clock.execution_ledger());
+        let source_snapshot = || {
+            DocumentSettlementSourceSnapshot::new_internal(
+                DocumentSettlementSourceEpoch::new(0),
+                settled_collector_sources(),
+            )
+        };
+        let mut state = ControlledDocumentTimeState::default();
+        let commands = [
+            DocumentTimeControlCommand::Observe,
+            DocumentTimeControlCommand::DriveOneTurn,
+            DocumentTimeControlCommand::PrepareCapture(capture_surface()),
+        ];
+        for command in commands {
+            let issued =
+                issue_test_capture_precondition(&mut state, &clock, &fence, source_snapshot());
+            begin_controlled_document_time_command(&mut state, &command);
+            assert!(!state.consume_capture_precondition(&issued));
+        }
+
+        let advance_fixture = GuardedAdvanceFixture::new();
+        let issued = issue_test_capture_precondition(&mut state, &clock, &fence, source_snapshot());
+        begin_controlled_document_time_command(
+            &mut state,
+            &DocumentTimeControlCommand::AdvanceTo(Box::new(advance_fixture.token)),
+        );
+        assert!(!state.consume_capture_precondition(&issued));
+
+        let checkpoint_1 = DocumentProducerCheckpoint::ZERO.checked_next().unwrap();
+        let checkpoint_2 = checkpoint_1.checked_next().unwrap();
+        let revision = capture_revision(&clock, &fence, 0, settled_collector_sources());
+        assert!(
+            !state
+                .capture_quiet_state
+                .observe(checkpoint_1, revision.clone(), true)
+                .unwrap()
+                .1
+        );
+        assert!(
+            state
+                .capture_quiet_state
+                .observe(checkpoint_2, revision.clone(), true)
+                .unwrap()
+                .1
+        );
+
+        // A control command invalidates only issued authority; it preserves already-proven quiet
+        // history at the same checkpoint.
+        begin_controlled_document_time_command(&mut state, &DocumentTimeControlCommand::Observe);
+        assert!(
+            state
+                .capture_quiet_state
+                .observe(checkpoint_2, revision, true)
+                .unwrap()
+                .1
+        );
+
+        let issued = issue_test_capture_precondition(&mut state, &clock, &fence, source_snapshot());
+        state.record_ordinary_inputs(1);
+        state.invalidate_capture_authority();
+        assert!(!state.consume_capture_precondition(&issued));
+        let after_input = capture_revision(&clock, &fence, 1, settled_collector_sources());
+        let checkpoint_3 = checkpoint_2.checked_next().unwrap();
+        assert!(
+            !state
+                .capture_quiet_state
+                .observe(checkpoint_3, after_input, true)
+                .unwrap()
+                .1,
+            "ordinary input resets candidate history"
+        );
+
+        let issued = issue_test_capture_precondition(&mut state, &clock, &fence, source_snapshot());
+        state.invalidate_capture_authority();
+        assert!(
+            !state.consume_capture_precondition(&issued),
+            "navigation/authority loss invalidates the issued precondition"
+        );
+    }
+
+    #[test]
+    fn superseded_and_consumed_capture_preconditions_are_single_use() {
+        let fixture = GuardedAdvanceFixture::new();
+        let mut state = ControlledDocumentTimeState::default();
+        let issue = |state: &mut ControlledDocumentTimeState| {
+            state
+                .issue_capture_precondition(
+                    &control_target(),
+                    &fixture.clock,
+                    fixture.clock.now(),
+                    0,
+                    0,
+                    false,
+                    fixture.token.producers(),
+                    fixture.execution_ledger.observation(),
+                    None,
+                    DocumentSettlementSourceSnapshot::new_internal(
+                        DocumentSettlementSourceEpoch::new(0),
+                        Vec::new(),
+                    ),
+                    vec![DocumentCaptureDocumentEpoch {
+                        pipeline_id: TEST_PIPELINE_ID,
+                        script_rendering_epoch: Epoch::default(),
+                        readiness_blockers: Vec::new(),
+                    }],
+                    capture_surface(),
+                )
+                .unwrap()
+        };
+
+        let first = issue(&mut state);
+        let second = issue(&mut state);
+        assert!(!state.consume_capture_precondition(&first));
+        assert!(!state.consume_capture_precondition(&second));
+
+        let successful = issue(&mut state);
+        assert!(state.consume_capture_precondition(&successful));
+        assert!(!state.consume_capture_precondition(&successful));
     }
 
     #[test]

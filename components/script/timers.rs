@@ -10,6 +10,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use deny_public_fields::DenyPublicFields;
+use embedder_traits::{DocumentSettlementSource, DocumentUnsupportedSourceReason};
 use js::context::JSContext;
 use js::jsapi::Heap;
 use js::jsval::{JSVal, UndefinedValue};
@@ -134,6 +135,60 @@ struct OneshotTimer {
 struct TimerTimebase {
     suspended_at: Option<DocumentTime>,
     suspension_offset: Duration,
+}
+
+fn adjusted_timer_deadline(
+    scheduled_for: DocumentTime,
+    suspension_offset: Duration,
+) -> Result<DocumentTime, DocumentClockError> {
+    scheduled_for.checked_add(suspension_offset)
+}
+
+fn collect_controlled_settlement_sources<'a>(
+    timers: impl Iterator<Item = &'a OneshotTimer>,
+    timebase: TimerTimebase,
+    pipeline_id: PipelineId,
+) -> Result<Vec<DocumentSettlementSource>, DocumentClockError> {
+    timers
+        .map(|timer| {
+            let deadline =
+                adjusted_timer_deadline(timer.scheduled_for, timebase.suspension_offset)?;
+            Ok(match (&timer.source, &timer.callback) {
+                (
+                    TimerSource::FromWindow(source_pipeline_id),
+                    OneshotTimerCallback::JsTimer(task),
+                ) if *source_pipeline_id == pipeline_id => {
+                    DocumentSettlementSource::timer_internal(
+                        pipeline_id,
+                        timer.handle.0,
+                        task.handle.0,
+                        timer.creation_sequence,
+                        deadline,
+                        task.is_interval == IsInterval::Interval,
+                    )
+                },
+                (TimerSource::FromWorker, _) |
+                (TimerSource::FromWindow(_), OneshotTimerCallback::JsTimer(_)) => {
+                    DocumentSettlementSource::unsupported_timer_internal(
+                        pipeline_id,
+                        timer.handle.0,
+                        timer.creation_sequence,
+                        deadline,
+                        DocumentUnsupportedSourceReason::NonWindowTimer,
+                    )
+                },
+                (TimerSource::FromWindow(_), _) => {
+                    DocumentSettlementSource::unsupported_timer_internal(
+                        pipeline_id,
+                        timer.handle.0,
+                        timer.creation_sequence,
+                        deadline,
+                        DocumentUnsupportedSourceReason::NonDomTimerCallback,
+                    )
+                },
+            })
+        })
+        .collect()
 }
 
 impl TimerTimebase {
@@ -272,6 +327,16 @@ impl OneshotTimers {
             runsteps_start_seq: Cell::new(0),
             creation_sequence: Cell::new(0),
         }
+    }
+
+    /// Capture the full ordered Window timer inventory used by settlement qualification.
+    pub(crate) fn controlled_settlement_sources(
+        &self,
+        pipeline_id: PipelineId,
+    ) -> Result<Vec<DocumentSettlementSource>, DocumentClockError> {
+        let timebase = self.timebase.get();
+        let timers = self.timers.borrow();
+        collect_controlled_settlement_sources(timers.iter(), timebase, pipeline_id)
     }
 
     /// <https://html.spec.whatwg.org/multipage/#run-steps-after-a-timeout>
@@ -1056,6 +1121,7 @@ fn active_script_fetch_info(cx: &mut JSContext, global: &GlobalScope) -> Initiat
 
 #[cfg(test)]
 mod tests {
+    use servo_base::id::TEST_PIPELINE_ID;
     use timers::DocumentClockConfiguration;
 
     use super::*;
@@ -1083,6 +1149,34 @@ mod tests {
         assert_eq!(
             original_deadline.checked_duration_since(timebase.now(&clock).unwrap()),
             Ok(Duration::from_nanos(5))
+        );
+    }
+
+    #[test]
+    fn suspended_dom_timer_deadline_overflow_is_checked() {
+        let timebase = TimerTimebase {
+            suspended_at: None,
+            suspension_offset: Duration::from_nanos(2),
+        };
+        let timer = OneshotTimer {
+            handle: OneshotTimerHandle(1),
+            source: TimerSource::FromWindow(TEST_PIPELINE_ID),
+            callback: OneshotTimerCallback::RunStepsAfterTimeout {
+                timer_key: 1,
+                ordering_id: DOMString::new(),
+                milliseconds: 0,
+                completion: Box::new(|_, _| {}),
+            },
+            scheduled_for: DocumentTime::from_nanos(u128::MAX - 1),
+            creation_sequence: 1,
+        };
+        assert_eq!(
+            collect_controlled_settlement_sources(
+                std::iter::once(&timer),
+                timebase,
+                TEST_PIPELINE_ID,
+            ),
+            Err(DocumentClockError::Overflow)
         );
     }
 

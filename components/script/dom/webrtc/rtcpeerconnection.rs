@@ -183,6 +183,9 @@ impl RTCPeerConnection {
         proto: Option<HandleObject>,
         config: &RTCConfiguration,
     ) -> DomRoot<RTCPeerConnection> {
+        window
+            .as_global_scope()
+            .mark_controlled_capture_rtc_peer_connection_used();
         let this = reflect_dom_object_with_proto_and_cx(
             Box::new(RTCPeerConnection::new_inherited()),
             window,

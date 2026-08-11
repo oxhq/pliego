@@ -592,9 +592,9 @@ impl PendingDocumentTimeControl {
         if let Some(outcome) = self.completion.unresolved_outcome(self.target) {
             let _ = self.response.send(outcome);
         }
-        // DriveOneTurn has no same-build protocol outcome for an unobserved completion. Dropping
-        // its sole callback disconnects the local receiver, which maps that transport fact to the
-        // receiver-local indeterminate variant.
+        // DriveOneTurn and PrepareCapture have receiver-local semantics for an unobserved
+        // completion. Dropping the sole callback lets the receiver classify the transport fact
+        // without changing the same-build protocol enum.
     }
 }
 
@@ -664,6 +664,7 @@ fn reject_document_time_control_during_shutdown(
 enum DocumentTimeControlCompletion {
     Observe,
     DriveOneTurn,
+    PrepareCapture,
     GuardedAdvance {
         token_id: embedder_traits::DocumentTimeAdvanceTokenId,
         deadline: TimerDeadlineSnapshot,
@@ -679,6 +680,7 @@ impl DocumentTimeControlCompletion {
             },
             DocumentTimeControlCommand::Observe => Self::Observe,
             DocumentTimeControlCommand::DriveOneTurn => Self::DriveOneTurn,
+            DocumentTimeControlCommand::PrepareCapture(_) => Self::PrepareCapture,
         }
     }
 
@@ -708,6 +710,7 @@ impl DocumentTimeControlCompletion {
                 DocumentTimeControlError::ChannelClosed,
             )),
             Self::DriveOneTurn => None,
+            Self::PrepareCapture => None,
             Self::GuardedAdvance { token_id, deadline } => {
                 Some(DocumentTimeControlOutcome::AdvanceOutcomeIndeterminate {
                     token_id,
@@ -823,6 +826,7 @@ mod controlled_document_time_tests {
             },
             documents: Vec::new(),
             execution: None,
+            capture_preparation: None,
         }
     }
 
@@ -847,6 +851,7 @@ mod controlled_document_time_tests {
         assert!(completion.is_guarded_advance());
         assert!(!DocumentTimeControlCompletion::Observe.is_guarded_advance());
         assert!(!DocumentTimeControlCompletion::DriveOneTurn.is_guarded_advance());
+        assert!(!DocumentTimeControlCompletion::PrepareCapture.is_guarded_advance());
     }
 
     #[test]
@@ -859,6 +864,10 @@ mod controlled_document_time_tests {
         );
         assert_eq!(
             DocumentTimeControlCompletion::DriveOneTurn.unresolved_outcome(target()),
+            None
+        );
+        assert_eq!(
+            DocumentTimeControlCompletion::PrepareCapture.unresolved_outcome(target()),
             None
         );
         assert!(matches!(

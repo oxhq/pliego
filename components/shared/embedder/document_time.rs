@@ -21,6 +21,8 @@ use timers::{
     TimerControlError, TimerDeadlineSnapshot,
 };
 
+use crate::generation_capture::{DocumentCapturePreparation, DocumentCaptureSurfaceFingerprint};
+
 /// Stable identity for one in-flight controlled document-time request.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub struct DocumentTimeControlRequestId(u64);
@@ -200,6 +202,11 @@ pub enum DocumentTimeControlCommand {
     /// If no page event is queued, the driver runs one existing no-op ScriptThread wake turn so
     /// that producer stability can advance across a fresh microtask checkpoint without host time.
     DriveOneTurn,
+    /// Observe and qualify one exact ScriptThread generation for a later capture attempt.
+    ///
+    /// This command does not contact Paint or capture pixels. It invalidates any previously
+    /// issued capture precondition before collecting the new source inventory.
+    PrepareCapture(DocumentCaptureSurfaceFingerprint),
 }
 
 /// The operation completed before an observation was captured.
@@ -221,6 +228,8 @@ pub enum DocumentTimeControlAction {
     },
     /// Sticky execution failure prevented the requested ordinary turn from starting.
     ExecutionTerminated,
+    /// Capture qualification was evaluated without running page work.
+    CapturePrepared,
 }
 
 /// Qualification of one producer snapshot at the latest completed microtask checkpoint.
@@ -317,6 +326,11 @@ pub struct DocumentTimeControlObservation {
     ///
     /// `None` preserves the pre-ledger controlled protocol for a clock configured without limits.
     pub execution: Option<DocumentExecutionObservation>,
+    /// Present only for [`DocumentTimeControlCommand::PrepareCapture`].
+    ///
+    /// A contained precondition is ScriptThread generation proof only; it does not prove Paint
+    /// presentation or successful artifact capture.
+    pub capture_preparation: Option<DocumentCapturePreparation>,
 }
 
 /// Definitive or explicitly indeterminate completion of one mechanical control command.
@@ -401,11 +415,14 @@ pub enum DocumentTimeControlReceiveOutcome {
     ObserveTransportFailure(DocumentTimeControlTransportFailure),
     /// The caller cannot know whether the requested event-loop turn completed.
     DriveOneTurnOutcomeIndeterminate(DocumentTimeControlTransportFailure),
+    /// No preparation result was delivered. A later command invalidates any unseen issued token.
+    CapturePreparationTransportFailure(DocumentTimeControlTransportFailure),
 }
 
 enum DocumentTimeControlTransportSemantics {
     Observe,
     DriveOneTurn,
+    PrepareCapture,
     GuardedAdvance(DocumentTimeControlOutcome),
 }
 
@@ -465,6 +482,9 @@ impl DocumentTimeControlReceiver {
             DocumentTimeControlCommand::DriveOneTurn => {
                 DocumentTimeControlTransportSemantics::DriveOneTurn
             },
+            DocumentTimeControlCommand::PrepareCapture(_) => {
+                DocumentTimeControlTransportSemantics::PrepareCapture
+            },
         };
         Self {
             receiver,
@@ -501,6 +521,11 @@ impl DocumentTimeControlReceiver {
                     },
                     DocumentTimeControlTransportSemantics::DriveOneTurn => {
                         DocumentTimeControlReceiveOutcome::DriveOneTurnOutcomeIndeterminate(failure)
+                    },
+                    DocumentTimeControlTransportSemantics::PrepareCapture => {
+                        DocumentTimeControlReceiveOutcome::CapturePreparationTransportFailure(
+                            failure,
+                        )
                     },
                     DocumentTimeControlTransportSemantics::GuardedAdvance(outcome) => {
                         DocumentTimeControlReceiveOutcome::CommandOutcome(outcome.clone())
@@ -604,6 +629,11 @@ pub enum DocumentTimeControlError {
     ChannelClosed,
     /// The per-WebView abandonment-correlation sequence could not be incremented.
     CancellationSequenceOverflow,
+    /// The ScriptThread capture-precondition sequence could not be incremented.
+    CapturePreconditionSequenceOverflow,
+    /// The canonical source-inventory epoch overflowed and is permanently terminal for this
+    /// ScriptThread.
+    CaptureSourceEpochOverflow,
 }
 
 #[cfg(test)]
@@ -611,11 +641,17 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    use euclid::{Box2D, Point2D, Size2D};
     use servo_base::generic_channel::{GenericCallback, ReceiveError, TryReceiveError};
     use servo_base::id::{TEST_PIPELINE_ID, TEST_SCRIPT_EVENT_LOOP_ID, TEST_WEBVIEW_ID};
+    use servo_geometry::DeviceIndependentPixel;
     use timers::{DocumentClock, DocumentProducerFence, TimerEventRequest, TimerScheduler};
 
     use super::*;
+    use crate::generation_capture::{
+        DocumentCaptureDocumentEpoch, DocumentCapturePrecondition, DocumentCapturePreconditionId,
+        DocumentSettlementSourceEpoch, DocumentSettlementSourceSnapshot,
+    };
 
     fn target() -> DocumentTimeControlTarget {
         DocumentTimeControlTarget {
@@ -728,11 +764,99 @@ mod tests {
                 },
                 documents: Vec::new(),
                 execution: None,
+                capture_preparation: None,
             }));
         let (completed_sender, completed_receiver) =
             ipc_channel::ipc::channel::<DocumentTimeControlOutcome>().unwrap();
         completed_sender.send(completed.clone()).unwrap();
         assert_eq!(completed_receiver.recv().unwrap(), completed);
+    }
+
+    fn capture_surface() -> DocumentCaptureSurfaceFingerprint {
+        DocumentCaptureSurfaceFingerprint::new(
+            Size2D::<i32, DeviceIndependentPixel>::new(800, 600),
+            Box2D::new(Point2D::new(0, 0), Point2D::new(800, 600)),
+            1.0,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn actual_ipc_round_trips_generation_bound_capture_candidate() {
+        let surface = capture_surface();
+        let command = DocumentTimeControlCommand::PrepareCapture(surface);
+        let (command_sender, command_receiver) =
+            ipc_channel::ipc::channel::<DocumentTimeControlCommand>().unwrap();
+        command_sender.send(command.clone()).unwrap();
+        assert_eq!(command_receiver.recv().unwrap(), command);
+
+        let clock = DocumentClock::new(DocumentClockConfiguration::Controlled {
+            initial_time_ns: 19_000_000_000_000_000_000,
+            unix_time_origin_ns: DocumentUnixTime::default(),
+            execution_limits: Some(DocumentExecutionLimits::API2_V1_DEFAULT),
+        });
+        let fence = DocumentProducerFence::with_execution_ledger(clock.execution_ledger());
+        let producers = DocumentTimeProducerObservation {
+            fence_id: fence.id(),
+            checkpoint: DocumentProducerCheckpoint::ZERO,
+            snapshot: fence.snapshot(),
+            stability: DocumentProducerStability::StableEmpty,
+        };
+        let execution = clock
+            .execution_ledger()
+            .expect("controlled test clock has an execution ledger")
+            .observation();
+        let sources = DocumentSettlementSourceSnapshot::new_internal(
+            DocumentSettlementSourceEpoch::new(u64::MAX),
+            Vec::new(),
+        );
+        let document_epoch = DocumentCaptureDocumentEpoch {
+            pipeline_id: TEST_PIPELINE_ID,
+            script_rendering_epoch: Epoch::default(),
+            readiness_blockers: Vec::new(),
+        };
+        let precondition = DocumentCapturePrecondition::new_internal(
+            DocumentCapturePreconditionId::new(u64::MAX),
+            target(),
+            clock.id(),
+            clock.now(),
+            u64::MAX,
+            0,
+            false,
+            producers,
+            execution,
+            None,
+            sources.clone(),
+            vec![document_epoch.clone()],
+            surface,
+        );
+        let completed =
+            DocumentTimeControlOutcome::Completed(Box::new(DocumentTimeControlObservation {
+                target: target(),
+                now: clock.now(),
+                next_deadline: None,
+                advance_token: None,
+                pending_events: 0,
+                input_batch_saturated: false,
+                action: DocumentTimeControlAction::CapturePrepared,
+                producers,
+                documents: vec![DocumentTimeDocumentObservation {
+                    pipeline_id: TEST_PIPELINE_ID,
+                    script_rendering_epoch: Some(document_epoch.script_rendering_epoch),
+                    readiness_blockers: Vec::new(),
+                }],
+                execution: Some(execution),
+                capture_preparation: Some(DocumentCapturePreparation {
+                    surface,
+                    sources,
+                    blockers: Vec::new(),
+                    precondition: Some(Box::new(precondition)),
+                }),
+            }));
+        let (outcome_sender, outcome_receiver) =
+            ipc_channel::ipc::channel::<DocumentTimeControlOutcome>().unwrap();
+        outcome_sender.send(completed.clone()).unwrap();
+        assert_eq!(outcome_receiver.recv().unwrap(), completed);
     }
 
     fn assert_indeterminate(
@@ -836,6 +960,21 @@ mod tests {
         assert_eq!(
             receiver.recv_timeout(Duration::ZERO),
             DocumentTimeControlReceiveOutcome::DriveOneTurnOutcomeIndeterminate(
+                DocumentTimeControlTransportFailure::TimedOut
+            )
+        );
+    }
+
+    #[test]
+    fn capture_preparation_timeout_is_a_distinct_transport_failure() {
+        let command = DocumentTimeControlCommand::PrepareCapture(capture_surface());
+        let (_response, receiver) = GenericCallback::new_blocking()
+            .expect("test capture-preparation callback channel should be created");
+        let receiver = DocumentTimeControlReceiver::new(receiver, &command);
+
+        assert_eq!(
+            receiver.recv_timeout(Duration::ZERO),
+            DocumentTimeControlReceiveOutcome::CapturePreparationTransportFailure(
                 DocumentTimeControlTransportFailure::TimedOut
             )
         );

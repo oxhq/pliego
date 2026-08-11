@@ -370,6 +370,7 @@ impl NotificationMethods<crate::DomTypeHolder> for Notification {
         // step 3: Create a notification with a settings object
         let notification =
             create_notification_with_settings_object(cx, global, title, options, proto)?;
+        global.mark_controlled_capture_notification_used();
 
         // TODO: Run step 5.1, 5.2 in parallel
         // step 5.1: If the result of getting the notifications permission state is not "granted",

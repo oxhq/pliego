@@ -52,6 +52,10 @@ pub(crate) struct ServiceWorkerContainer {
     callback: DomRefCell<Option<GenericCallback<ServiceWorkerAlgorithmResult>>>,
 }
 
+fn take_failed_algorithm_submission<T>(pending: &mut VecDeque<T>) -> Option<T> {
+    pending.pop_back()
+}
+
 impl ServiceWorkerContainer {
     fn new_inherited() -> ServiceWorkerContainer {
         ServiceWorkerContainer {
@@ -68,6 +72,16 @@ impl ServiceWorkerContainer {
             global,
             cx,
         )
+    }
+
+    /// Exact number of ServiceWorker algorithms awaiting a backend result.
+    pub(crate) fn controlled_capture_pending_count(&self) -> usize {
+        self.pending_algorithm_results.borrow().len()
+    }
+
+    /// Whether the retained backend callback can still deliver unsolicited worker messages.
+    pub(crate) fn controlled_capture_messaging_active(&self) -> bool {
+        self.callback.borrow().is_some()
     }
 
     /// <https://w3c.github.io/ServiceWorker/#reject-job-promise>
@@ -276,7 +290,7 @@ impl ServiceWorkerContainer {
         promise: Rc<Promise>,
     ) {
         let global = self.global();
-        let result_handler = self.get_or_setup_callback(promise);
+        let result_handler = self.get_or_setup_callback(promise.clone());
 
         // Step 3: Let job be the result of running Create Job with unregister,
         // registration’s storage key, registration’s scope url, null, promise,
@@ -300,17 +314,40 @@ impl ServiceWorkerContainer {
             .is_err()
         {
             // Note: pop the promise we just pushed, since we will not get a result back to handle it.
-            self.pending_algorithm_results.borrow_mut().pop_back();
-
+            let failed_promise =
+                take_failed_algorithm_submission(&mut self.pending_algorithm_results.borrow_mut());
             debug_assert!(
-                false,
-                "Failed to send Unregister algorithm message to the constellation."
+                failed_promise
+                    .as_ref()
+                    .is_some_and(|failed| Rc::ptr_eq(failed, &promise)),
+                "failed unregister must remove only its own newest pending promise"
             );
-            self.handle_algorithm_result(
+
+            error!("Failed to send Unregister algorithm message to the constellation.");
+            promise.reject_error(
                 cx,
-                ServiceWorkerAlgorithmResult::Job(JobResult::RejectPromise(JobError::TypeError)),
+                Error::Type(c"Failed to unregister a ServiceWorker".to_owned()),
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::VecDeque;
+
+    use super::take_failed_algorithm_submission;
+
+    #[test]
+    fn unregister_send_failure_leaves_older_pending_reply_in_fifo() {
+        let mut pending = VecDeque::from(["older", "failed unregister"]);
+
+        assert_eq!(
+            take_failed_algorithm_submission(&mut pending),
+            Some("failed unregister")
+        );
+        assert_eq!(pending.pop_front(), Some("older"));
+        assert!(pending.is_empty());
     }
 }
 

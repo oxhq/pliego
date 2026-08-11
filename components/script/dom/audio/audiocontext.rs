@@ -92,6 +92,9 @@ impl AudioContext {
     ) -> Fallible<DomRoot<AudioContext>> {
         let pipeline_id = window.pipeline_id();
         let context = AudioContext::new_inherited(options, pipeline_id)?;
+        window
+            .as_global_scope()
+            .mark_controlled_capture_web_audio_used();
         let context = reflect_dom_object_with_proto_and_cx(Box::new(context), window, proto, cx);
         context.resume();
         Ok(context)
