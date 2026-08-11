@@ -28,7 +28,23 @@ pub struct RenderRequest {
 
 #[derive(Debug)]
 pub struct RenderOutcome {
+    #[allow(dead_code)]
+    // Direct renderer callers consume the structured result; the CLI writes cli_bytes.
     pub summary: serde_json::Value,
+    pub(crate) cli_bytes: Vec<u8>,
+}
+
+impl RenderOutcome {
+    pub(crate) fn from_summary(summary: serde_json::Value) -> Result<Self, serde_json::Error> {
+        let mut cli_bytes = serde_json::to_vec(&summary)?;
+        cli_bytes.push(b'\n');
+        let summary = serde_json::from_slice(&cli_bytes)?;
+        Ok(Self { summary, cli_bytes })
+    }
+
+    pub(crate) fn from_sealed(summary: serde_json::Value, cli_bytes: Vec<u8>) -> Self {
+        Self { summary, cli_bytes }
+    }
 }
 
 #[derive(Debug, PartialEq)]

@@ -624,6 +624,23 @@ impl ResourcePolicy {
             .map(|(code, message)| ResourcePolicySetupFailure::Aggregate { code, message })
     }
 
+    /// Return the exact asset-manifest path retained by `artifact()`.
+    ///
+    /// A successful store owns the canonical path captured while it read the manifest. The
+    /// request path may be a symlink that has since changed, so recovery identity must never
+    /// reconstruct this value by canonicalizing `asset_manifest` again.
+    pub(crate) fn summary_asset_manifest_path(&self) -> Option<&Path> {
+        match (
+            &self.assets,
+            &self.asset_error,
+            self.asset_manifest.as_deref(),
+        ) {
+            (Some(assets), _, _) => Some(assets.manifest_path()),
+            (None, Some(_), Some(path)) => Some(path),
+            _ => None,
+        }
+    }
+
     pub(crate) fn decide(
         &self,
         document_root: &Path,
