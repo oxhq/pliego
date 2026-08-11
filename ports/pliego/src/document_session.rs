@@ -154,6 +154,7 @@ pub(crate) struct DocumentOutcome {
     pub(crate) environment: RenderEnvironment,
     pub(crate) allow_host_fonts: bool,
     pub(crate) readiness: serde_json::Value,
+    pub(crate) console: Vec<(String, String)>,
     pub(crate) resources: Vec<ResourceEvidence>,
     pub(crate) resource_accounting: ResourceAccounting,
     pub(crate) resource_store: OwnedResourceStore,
@@ -197,6 +198,7 @@ impl DocumentCaptureOutcome {
             environment: self.environment,
             allow_host_fonts: self.allow_host_fonts,
             readiness: self.readiness,
+            console: self.console,
             resource_accounting: self.resource_accounting,
             resources: self.resources,
             resource_store: self.resource_store,
@@ -972,7 +974,7 @@ impl WebViewDelegate for DocumentDelegate {
     fn show_console_message(&self, _webview: WebView, level: ConsoleLogLevel, message: String) {
         self.console
             .borrow_mut()
-            .push(format!("{level:?}").to_ascii_lowercase(), message);
+            .push(console_log_level_name(level).into(), message);
     }
 
     fn notify_new_frame_ready(&self, webview: WebView) {
@@ -1087,6 +1089,18 @@ impl WebViewDelegate for DocumentDelegate {
             },
             ResourcePolicyDecision::Fail(failure) => self.deny_resource(load, request, failure),
         }
+    }
+}
+
+fn console_log_level_name(level: ConsoleLogLevel) -> &'static str {
+    match level {
+        ConsoleLogLevel::Log => "log",
+        ConsoleLogLevel::Debug => "debug",
+        ConsoleLogLevel::Info => "info",
+        ConsoleLogLevel::Warn => "warn",
+        ConsoleLogLevel::Error => "error",
+        ConsoleLogLevel::Trace => "trace",
+        ConsoleLogLevel::Dir => "dir",
     }
 }
 
@@ -1277,10 +1291,11 @@ mod tests {
     };
     use super::super::session::LocalDocument;
     use super::{
-        ConsoleEvidenceLog, DocumentSession, MAX_CONSOLE_BYTES, MAX_CONSOLE_EVENTS,
-        RESOURCE_EVIDENCE_ENTRY_OVERHEAD_BYTES, ReadinessPolicy, RenderEnvironment,
-        ResourceEvidenceLog, ResourcePolicyConfig, SessionError, stable_render_timeout,
-        validate_host_font_policy, validate_resource_policy,
+        ConsoleEvidenceLog, ConsoleLogLevel, DocumentSession, MAX_CONSOLE_BYTES,
+        MAX_CONSOLE_EVENTS, RESOURCE_EVIDENCE_ENTRY_OVERHEAD_BYTES, ReadinessPolicy,
+        RenderEnvironment, ResourceEvidenceLog, ResourcePolicyConfig, SessionError,
+        console_log_level_name, stable_render_timeout, validate_host_font_policy,
+        validate_resource_policy,
     };
 
     const ISOLATED_CASE_ENV: &str = "PLIEGO_DOCUMENT_SESSION_FIXTURE";
@@ -1961,6 +1976,21 @@ window.pliego?.defer();
     }
 
     #[test]
+    fn console_levels_use_the_serialized_contract_names() {
+        for (level, expected) in [
+            (ConsoleLogLevel::Log, "log"),
+            (ConsoleLogLevel::Debug, "debug"),
+            (ConsoleLogLevel::Info, "info"),
+            (ConsoleLogLevel::Warn, "warn"),
+            (ConsoleLogLevel::Error, "error"),
+            (ConsoleLogLevel::Trace, "trace"),
+            (ConsoleLogLevel::Dir, "dir"),
+        ] {
+            assert_eq!(console_log_level_name(level), expected);
+        }
+    }
+
+    #[test]
     fn resource_and_readiness_fixtures_are_evidenced_and_fail_closed() {
         let mut server = FixtureServer::start();
         for case in [
@@ -2412,11 +2442,11 @@ window.pliego?.defer();
             }));
         }
         if case == "console-evidence" {
-            let capture = session
+            let outcome = session
                 .expect("console evidence fixture should construct")
-                .capture()
-                .expect("console evidence fixture should capture");
-            let console = capture
+                .render()
+                .expect("console evidence fixture should render");
+            let console = outcome
                 .console
                 .iter()
                 .filter(|(_, message)| message.starts_with("capture-"))
@@ -2429,7 +2459,8 @@ window.pliego?.defer();
                     ("error".into(), "capture-second".into()),
                 ]
             );
-            assert_eq!(capture.readiness["payload"]["fixture"], "console-evidence");
+            assert!(outcome.pdf.starts_with(b"%PDF-"));
+            assert_eq!(outcome.readiness["payload"]["fixture"], "console-evidence");
             return;
         }
         let result = session.and_then(|session| {
