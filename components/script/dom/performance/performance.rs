@@ -1006,6 +1006,7 @@ mod tests {
         let clock = DocumentClock::new(DocumentClockConfiguration::Controlled {
             initial_time_ns: 7_000_000,
             unix_time_origin_ns: 1_700_000_000_000_000_000,
+            execution_limits: None,
         });
         let performance_clock =
             controlled_window_performance_clock(clock.clone(), Some(clock.now())).unwrap();
@@ -1029,6 +1030,7 @@ mod tests {
         let clock = DocumentClock::new(DocumentClockConfiguration::Controlled {
             initial_time_ns: 7_000_000,
             unix_time_origin_ns: 1_700_000_000_000_000_000,
+            execution_limits: None,
         });
         let performance_clock = WindowPerformanceClock::new(clock.clone(), clock.now());
         let host_time = CrossProcessInstant::epoch() + Duration::seconds(1);
@@ -1065,6 +1067,7 @@ mod tests {
         let clock = DocumentClock::new(DocumentClockConfiguration::Controlled {
             initial_time_ns: 1,
             unix_time_origin_ns: u64::MAX,
+            execution_limits: None,
         });
         let future_origin = WindowPerformanceClock::new(clock.clone(), DocumentTime::from_nanos(2));
 

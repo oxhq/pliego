@@ -263,6 +263,7 @@ mod tests {
             DocumentClockConfiguration::Controlled {
                 initial_time_ns: 7,
                 unix_time_origin_ns: 11,
+                execution_limits: None,
             },
         )
     }

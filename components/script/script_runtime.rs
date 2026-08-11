@@ -98,7 +98,9 @@ use crate::dom::response::Response;
 use crate::dom::trustedtypes::trustedscript::TrustedScript;
 use crate::dom::window::Window;
 use crate::messaging::{CommonScriptMsg, ScriptEventLoopSender};
-use crate::microtask::{EnqueuedPromiseCallback, Microtask, MicrotaskQueue};
+use crate::microtask::{
+    EnqueuedPromiseCallback, Microtask, MicrotaskExecutionLedgerSlot, MicrotaskQueue,
+};
 use crate::realms::enter_auto_realm;
 use crate::script_module::EnsureModuleHooksInitialized;
 use crate::task_source::TaskSourceName;
@@ -394,7 +396,7 @@ unsafe extern "C" fn run_jobs(microtask_queue: *const c_void, cx: *mut RawJSCont
         let microtask_queue = unsafe { &*(microtask_queue as *const MicrotaskQueue) };
         // TODO: run Promise- and User-variant Microtasks, and do #notify-about-rejected-promises.
         // Those will require real `target_provider` and `globalscopes` values.
-        microtask_queue.checkpoint(&mut cx, |_| None, vec![]);
+        let _ = microtask_queue.checkpoint(&mut cx, |_| None, vec![]);
     });
 }
 
@@ -408,15 +410,24 @@ unsafe extern "C" fn empty(extra: *const c_void) -> bool {
     result
 }
 
+struct InterruptQueueState {
+    /// Live nested queues in SpiderMonkey's interruption stack order.
+    queues: Vec<Rc<MicrotaskQueue>>,
+    /// Exact slot shared by the main queue, every live nested queue, and future pushes.
+    execution_ledger: MicrotaskExecutionLedgerSlot,
+}
+
 #[expect(unsafe_code)]
 unsafe extern "C" fn push_new_interrupt_queue(interrupt_queues: *mut c_void) -> *const c_void {
     let mut result = std::ptr::null();
     wrap_panic(&mut || {
         let mut interrupt_queues =
-            unsafe { Box::from_raw(interrupt_queues as *mut Vec<Rc<MicrotaskQueue>>) };
-        let new_queue = Rc::new(MicrotaskQueue::default());
+            unsafe { Box::from_raw(interrupt_queues as *mut InterruptQueueState) };
+        let new_queue = Rc::new(MicrotaskQueue::with_execution_ledger_slot(
+            interrupt_queues.execution_ledger.clone(),
+        ));
         result = Rc::as_ptr(&new_queue) as *const c_void;
-        interrupt_queues.push(new_queue);
+        interrupt_queues.queues.push(new_queue);
         std::mem::forget(interrupt_queues);
     });
     result
@@ -427,9 +438,12 @@ unsafe extern "C" fn pop_interrupt_queue(interrupt_queues: *mut c_void) -> *cons
     let mut result = std::ptr::null();
     wrap_panic(&mut || {
         let mut interrupt_queues =
-            unsafe { Box::from_raw(interrupt_queues as *mut Vec<Rc<MicrotaskQueue>>) };
-        let popped_queue: Rc<MicrotaskQueue> =
-            interrupt_queues.pop().expect("Guaranteed by SpiderMonkey?");
+            unsafe { Box::from_raw(interrupt_queues as *mut InterruptQueueState) };
+        let popped_queue: Rc<MicrotaskQueue> = interrupt_queues
+            .queues
+            .pop()
+            .expect("Guaranteed by SpiderMonkey?");
+        // Any queue SpiderMonkey restores beneath this pop was built from the same policy slot.
         // Dangling, but jsglue.cpp will only use this for pointer comparison.
         result = Rc::as_ptr(&popped_queue) as *const c_void;
         std::mem::forget(interrupt_queues);
@@ -441,7 +455,7 @@ unsafe extern "C" fn pop_interrupt_queue(interrupt_queues: *mut c_void) -> *cons
 unsafe extern "C" fn drop_interrupt_queues(interrupt_queues: *mut c_void) {
     wrap_panic(&mut || {
         let interrupt_queues =
-            unsafe { Box::from_raw(interrupt_queues as *mut Vec<Rc<MicrotaskQueue>>) };
+            unsafe { Box::from_raw(interrupt_queues as *mut InterruptQueueState) };
         drop(interrupt_queues);
     });
 }
@@ -958,7 +972,10 @@ impl Runtime {
         // Extra queues for debugger scripts (“interrupts”) via AutoDebuggerJobQueueInterruption and saveJobQueue().
         // Moved indefinitely to mozjs via CreateJobQueue(), borrowed from mozjs via JobQueueTraps, and moved back from
         // mozjs for dropping via DeleteJobQueue().
-        let interrupt_queues: Box<Vec<Rc<MicrotaskQueue>>> = Box::default();
+        let interrupt_queues = Box::new(InterruptQueueState {
+            queues: Vec::new(),
+            execution_ledger: microtask_queue.execution_ledger_slot(),
+        });
 
         let cx_opts;
         let job_queue;
@@ -1646,6 +1663,7 @@ mod tests {
         let clock = DocumentClock::new(DocumentClockConfiguration::Controlled {
             initial_time_ns: 2_000,
             unix_time_origin_ns: 5_000,
+            execution_limits: None,
         });
 
         assert_eq!(window_date_time_microseconds(99.0, &clock), 7.0);
@@ -1659,6 +1677,7 @@ mod tests {
         let clock = DocumentClock::new(DocumentClockConfiguration::Controlled {
             initial_time_ns: 1,
             unix_time_origin_ns: u64::MAX,
+            execution_limits: None,
         });
 
         assert!(window_date_time_microseconds(123.0, &clock).is_nan());

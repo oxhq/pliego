@@ -114,10 +114,10 @@ use style::stylesheets::{AllowImportRules, DocumentStyleSheet, Origin, Styleshee
 use style::thread_state::{self, ThreadState};
 use stylo_atoms::Atom;
 use timers::{
-    DocumentClock, DocumentClockError, DocumentProducerCheckpoint, DocumentProducerFence,
-    DocumentProducerFenceError, DocumentProducerObservation, DocumentProducerObserver,
-    DocumentProducerSnapshot, DocumentTime, DocumentTimeSurface, TimerControlError,
-    TimerDeadlineSnapshot, TimerEventRequest, TimerId, TimerScheduler,
+    DocumentClock, DocumentClockError, DocumentExecutionLedger, DocumentProducerCheckpoint,
+    DocumentProducerFence, DocumentProducerFenceError, DocumentProducerObservation,
+    DocumentProducerObserver, DocumentProducerSnapshot, DocumentTime, DocumentTimeSurface,
+    TimerControlError, TimerDeadlineSnapshot, TimerEventRequest, TimerId, TimerScheduler,
 };
 use url::Position;
 #[cfg(feature = "webgpu")]
@@ -165,7 +165,7 @@ use crate::messaging::{
     CommonScriptMsg, MainThreadScriptMsg, MixedMessage, ScriptEventLoopSender,
     ScriptThreadReceivers, ScriptThreadSenders,
 };
-use crate::microtask::{Microtask, MicrotaskQueue};
+use crate::microtask::{Microtask, MicrotaskCheckpointResult, MicrotaskQueue};
 use crate::mime::{APPLICATION, CHARSET, MimeExt, TEXT, XML};
 use crate::navigation::{InProgressLoad, NavigationListener};
 use crate::network_listener::{FetchResponseListener, submit_timing};
@@ -312,18 +312,21 @@ struct ControlledDocumentProducerObserver {
     target: Option<DocumentTimeControlTarget>,
     observer: DocumentProducerObserver,
     last_checkpoint: Option<DocumentProducerCheckpoint>,
+    last_execution: Option<timers::DocumentExecutionObservation>,
 }
 
 impl ControlledDocumentProducerObserver {
     fn invalidate(&mut self) {
         self.target = None;
         self.observer = DocumentProducerObserver::default();
+        self.last_execution = None;
     }
 
     fn observe_with(
         &mut self,
         target: &DocumentTimeControlTarget,
         checkpoint: DocumentProducerCheckpoint,
+        execution: Option<timers::DocumentExecutionObservation>,
         observe: impl FnOnce(
             &mut DocumentProducerObserver,
         ) -> Result<DocumentProducerObservation, DocumentProducerFenceError>,
@@ -331,6 +334,13 @@ impl ControlledDocumentProducerObserver {
         if self.target.as_ref() != Some(target) {
             self.target = Some(target.clone());
             self.observer = DocumentProducerObserver::default();
+            self.last_execution = execution;
+        } else if execution.is_some() && self.last_execution != execution {
+            // Producer watermarks alone cannot qualify a task/microtask/render/mutation that did
+            // not acquire a producer ticket. With an execution ledger enabled, any exact counter
+            // or terminal change invalidates the previous empty candidate.
+            self.observer = DocumentProducerObserver::default();
+            self.last_execution = execution;
         }
         if let Some(previous) = self.last_checkpoint &&
             checkpoint <= previous
@@ -343,6 +353,9 @@ impl ControlledDocumentProducerObserver {
         let result = observe(&mut self.observer);
         if result.is_ok() {
             self.last_checkpoint = Some(checkpoint);
+            if execution.is_some() {
+                self.last_execution = execution;
+            }
         }
         result
     }
@@ -398,6 +411,15 @@ fn drain_controlled_input_batch(
 
 const fn command_requires_exact_target_before_action(command: &DocumentTimeControlCommand) -> bool {
     !matches!(command, DocumentTimeControlCommand::DriveOneTurn)
+}
+
+fn controlled_advance_execution_guard(
+    ledger: Option<&DocumentExecutionLedger>,
+) -> Result<Option<timers::DocumentExecutionActiveGuard<'_>>, DocumentTimeControlError> {
+    ledger
+        .map(DocumentExecutionLedger::active_guard)
+        .transpose()
+        .map_err(DocumentTimeControlError::ExecutionTerminated)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -475,6 +497,34 @@ fn take_controlled_turn(pending_events: &mut VecDeque<MixedMessage>) -> (MixedMe
         Some(event) => (event, false),
         None => (MixedMessage::FromScript(MainThreadScriptMsg::WakeUp), true),
     }
+}
+
+fn controlled_event_consumes_ordinary_task_budget(event: &MixedMessage) -> bool {
+    // These messages only pump the existing event-loop tail in controlled mode. TaskQueue emits
+    // Inactive while retaining a task and WakeUp while promoting throttled work; neither executes
+    // that retained task. TimerFired follows scheduler activation, which separately enqueues the
+    // actual timer task. Host animation ticks are ignored by a controlled document clock.
+    !matches!(
+        event,
+        MixedMessage::TimerFired |
+            MixedMessage::FromScript(MainThreadScriptMsg::Inactive | MainThreadScriptMsg::WakeUp) |
+            MixedMessage::FromConstellation(ScriptThreadMessage::TickAllAnimations(_))
+    )
+}
+
+fn advance_document_producer_checkpoint_after_microtasks(
+    checkpoint: &Cell<DocumentProducerCheckpoint>,
+    result: MicrotaskCheckpointResult,
+) {
+    if result != MicrotaskCheckpointResult::Completed {
+        return;
+    }
+    checkpoint.set(
+        checkpoint
+            .get()
+            .checked_next()
+            .expect("document producer checkpoint sequence exhausted"),
+    );
 }
 
 #[derive(Serialize)]
@@ -635,6 +685,10 @@ pub struct ScriptThread {
     /// The document-observable clock shared by this event loop's Window realms and timer queue.
     #[no_trace]
     document_clock: DocumentClock,
+
+    /// Optional sticky execution ledger installed with the controlled document clock.
+    #[no_trace]
+    document_execution_ledger: Option<DocumentExecutionLedger>,
 
     /// Linearizable watermarks for same-event-loop producers that can affect document visuals.
     #[no_trace]
@@ -1261,11 +1315,17 @@ impl ScriptThread {
         background_hang_monitor_register: Box<dyn BackgroundHangMonitorRegister>,
     ) -> (Rc<ScriptThread>, js::context::JSContext) {
         let (self_sender, self_receiver) = unbounded();
-        let document_producer_fence = DocumentProducerFence::default();
+        let document_clock = DocumentClock::new(state.document_clock);
+        let document_execution_ledger = document_clock.execution_ledger();
+        let document_producer_fence =
+            DocumentProducerFence::with_execution_ledger(document_execution_ledger.clone());
         let mut runtime = Runtime::new(Some(ScriptEventLoopSender::MainThread {
             sender: self_sender.clone(),
             producer_fence: document_producer_fence.clone(),
         }));
+        runtime
+            .microtask_queue
+            .install_execution_ledger(document_execution_ledger.clone());
 
         // SAFETY: We ensure that only one JSContext exists in this thread.
         // This is the first one and the only one
@@ -1303,8 +1363,6 @@ impl ScriptThread {
         );
 
         let (image_cache_sender, image_cache_receiver) = unbounded();
-
-        let document_clock = DocumentClock::new(state.document_clock);
 
         let receivers = ScriptThreadReceivers {
             constellation_receiver,
@@ -1383,6 +1441,7 @@ impl ScriptThread {
                         document_clock.clone(),
                     )),
                     document_clock,
+                    document_execution_ledger,
                     document_producer_fence,
                     document_producer_checkpoint: Cell::new(DocumentProducerCheckpoint::ZERO),
                     event_loop_id: state.id,
@@ -1516,6 +1575,9 @@ impl ScriptThread {
     ///
     /// Returns true if any reflows produced a new display list.
     pub(crate) fn update_the_rendering(&self, cx: &mut js::context::JSContext) -> bool {
+        if !self.begin_controlled_rendering_opportunity() {
+            return false;
+        }
         let frame_time = self
             .document_clock
             .rendering_time()
@@ -1792,6 +1854,35 @@ impl ScriptThread {
         }
     }
 
+    fn document_execution_is_terminal(&self) -> bool {
+        self.document_execution_ledger
+            .as_ref()
+            .is_some_and(|ledger| ledger.observation().terminal.is_some())
+    }
+
+    fn begin_controlled_ordinary_task(&self) -> bool {
+        self.document_execution_ledger
+            .as_ref()
+            .is_none_or(|ledger| ledger.begin_ordinary_task().is_ok())
+    }
+
+    fn begin_controlled_rendering_opportunity(&self) -> bool {
+        self.document_execution_ledger
+            .as_ref()
+            .is_none_or(|ledger| ledger.begin_rendering_opportunity().is_ok())
+    }
+
+    /// Account one non-rejecting invocation of the central DOM mutation-record hook.
+    pub(crate) fn record_document_mutation_record() {
+        with_optional_script_thread(|script_thread| {
+            if let Some(ledger) = script_thread
+                .and_then(|script_thread| script_thread.document_execution_ledger.as_ref())
+            {
+                ledger.record_mutation_record();
+            }
+        });
+    }
+
     fn queue_controlled_input(&self, event: MixedMessage) {
         let ordinary_event = enqueue_controlled_input(
             &mut self.controlled_pending_events.borrow_mut(),
@@ -1915,6 +2006,10 @@ impl ScriptThread {
     ) -> Result<DocumentTimeControlObservation, DocumentTimeControlError> {
         self.validate_controlled_document_time_target(target)?;
 
+        let execution = self
+            .document_execution_ledger
+            .as_ref()
+            .map(DocumentExecutionLedger::observation);
         let checkpoint = self.document_producer_checkpoint();
         let (snapshot, stability) = if checkpoint == DocumentProducerCheckpoint::ZERO {
             (
@@ -1924,7 +2019,7 @@ impl ScriptThread {
         } else {
             let observation = {
                 let mut observer = self.controlled_document_producer_observer.borrow_mut();
-                observer.observe_with(target, checkpoint, |observer| {
+                observer.observe_with(target, checkpoint, execution, |observer| {
                     self.observe_document_producers(observer)
                 })
             };
@@ -1971,10 +2066,13 @@ impl ScriptThread {
             snapshot,
             stability,
         };
+        let execution_terminal =
+            execution.is_some_and(|observation| observation.terminal.is_some());
         let advance_token = {
             let mut state = self.controlled_document_time_state.borrow_mut();
             state.clear_advance_token();
-            if pending_events == 0 &&
+            if !execution_terminal &&
+                pending_events == 0 &&
                 !input_batch_saturated &&
                 snapshot.is_empty() &&
                 stability == DocumentProducerStability::StableEmpty
@@ -2009,6 +2107,7 @@ impl ScriptThread {
             action,
             producers,
             documents,
+            execution,
         })
     }
 
@@ -2060,6 +2159,14 @@ impl ScriptThread {
         token: &DocumentTimeAdvanceToken,
         prior_input_batch_saturated: bool,
     ) -> Result<DocumentTimeControlObservation, DocumentTimeControlError> {
+        if let Some(terminal) = self
+            .document_execution_ledger
+            .as_ref()
+            .and_then(|ledger| ledger.observation().terminal)
+        {
+            return Err(DocumentTimeControlError::ExecutionTerminated(terminal));
+        }
+
         // Exercise every fallible document/readiness path before the conditional mutation. Timer
         // activation does not run page script; the exact post-activation values are recaptured.
         let _ = self.controlled_document_observations(cx, target)?;
@@ -2096,6 +2203,11 @@ impl ScriptThread {
                     checkpoint,
                     expected_producers.snapshot,
                 )?;
+                // Hold the execution-ledger lock across the exact scheduler validation and clock
+                // mutation. A future asynchronous terminal hook must linearize on one side of this
+                // guard rather than racing a stale token past a separate observation.
+                let _execution_guard =
+                    controlled_advance_execution_guard(self.document_execution_ledger.as_ref())?;
                 self.timer_scheduler
                     .borrow()
                     .validate_and_advance_from(token.now(), token.deadline())
@@ -2156,6 +2268,10 @@ impl ScriptThread {
             action: DocumentTimeControlAction::TimerActivated(token.deadline()),
             producers,
             documents,
+            execution: self
+                .document_execution_ledger
+                .as_ref()
+                .map(DocumentExecutionLedger::observation),
         })
     }
 
@@ -2241,25 +2357,41 @@ impl ScriptThread {
                 unreachable!("guarded advance returned through its committed response path")
             },
             DocumentTimeControlCommand::DriveOneTurn => {
-                let (event, is_checkpoint_turn) =
-                    take_controlled_turn(&mut self.controlled_pending_events.borrow_mut());
-                if !self.process_one_controlled_event(cx, event) {
-                    let _ = self.send_controlled_document_time_response(
-                        &request,
-                        Err(DocumentTimeControlError::ChannelClosed),
-                    );
-                    return false;
-                }
-                let microtask_checkpoint_advanced =
-                    self.document_producer_checkpoint() > before_checkpoint;
-                if is_checkpoint_turn {
-                    Ok(DocumentTimeControlAction::CheckpointTurnProcessed {
-                        microtask_checkpoint_advanced,
-                    })
+                if self.document_execution_is_terminal() {
+                    Ok(DocumentTimeControlAction::ExecutionTerminated)
                 } else {
-                    Ok(DocumentTimeControlAction::TurnProcessed {
-                        microtask_checkpoint_advanced,
-                    })
+                    let next_is_ordinary_task = self
+                        .controlled_pending_events
+                        .borrow()
+                        .front()
+                        .is_some_and(controlled_event_consumes_ordinary_task_budget);
+                    if next_is_ordinary_task && !self.begin_controlled_ordinary_task() {
+                        // Admission happens before the event is removed or any timer/task work
+                        // runs. The sticky terminal observation is definitive, not a rejection or
+                        // an indeterminate transport outcome.
+                        Ok(DocumentTimeControlAction::ExecutionTerminated)
+                    } else {
+                        let (event, is_checkpoint_turn) =
+                            take_controlled_turn(&mut self.controlled_pending_events.borrow_mut());
+                        if !self.process_one_controlled_event(cx, event) {
+                            let _ = self.send_controlled_document_time_response(
+                                &request,
+                                Err(DocumentTimeControlError::ChannelClosed),
+                            );
+                            return false;
+                        }
+                        let microtask_checkpoint_advanced =
+                            self.document_producer_checkpoint() > before_checkpoint;
+                        if is_checkpoint_turn {
+                            Ok(DocumentTimeControlAction::CheckpointTurnProcessed {
+                                microtask_checkpoint_advanced,
+                            })
+                        } else {
+                            Ok(DocumentTimeControlAction::TurnProcessed {
+                                microtask_checkpoint_advanced,
+                            })
+                        }
+                    }
                 }
             },
         };
@@ -2476,6 +2608,10 @@ impl ScriptThread {
     }
 
     fn finish_event_loop_turn(&self, cx: &mut js::context::JSContext) {
+        if self.document_execution_is_terminal() {
+            return;
+        }
+
         for (_, doc) in self.documents.borrow().iter() {
             let window = doc.window();
             window
@@ -2499,6 +2635,10 @@ impl ScriptThread {
 
         let built_any_display_lists =
             self.needs_rendering_update.load(Ordering::Relaxed) && self.update_the_rendering(cx);
+
+        if self.document_execution_is_terminal() {
+            return;
+        }
 
         self.maybe_fulfill_font_ready_promises(cx);
         self.maybe_resolve_pending_screenshot_readiness_requests(cx);
@@ -5338,16 +5478,14 @@ impl ScriptThread {
                 .map(|(_id, document)| DomRoot::from_ref(document.window().upcast()))
                 .collect();
 
-            self.microtask_queue.checkpoint(
+            let result = self.microtask_queue.checkpoint(
                 cx,
                 |id| self.documents.borrow().find_global(id),
                 globals,
             );
-            self.document_producer_checkpoint.set(
-                self.document_producer_checkpoint
-                    .get()
-                    .checked_next()
-                    .expect("document producer checkpoint sequence exhausted"),
+            advance_document_producer_checkpoint_after_microtasks(
+                &self.document_producer_checkpoint,
+                result,
             );
         }
     }
@@ -5516,21 +5654,39 @@ mod tests {
     use servo_base::Epoch;
     use servo_base::id::{TEST_PIPELINE_ID, TEST_SCRIPT_EVENT_LOOP_ID, TEST_WEBVIEW_ID};
     use timers::{
-        DocumentClock, DocumentClockConfiguration, DocumentClockError, DocumentProducerCheckpoint,
-        DocumentProducerFence, DocumentProducerFenceError, DocumentProducerKind,
-        DocumentProducerObservation, DocumentTime, TimerControlError, TimerEventRequest,
-        TimerScheduler,
+        DocumentClock, DocumentClockConfiguration, DocumentClockError, DocumentExecutionLedger,
+        DocumentExecutionLimits, DocumentProducerCheckpoint, DocumentProducerFence,
+        DocumentProducerFenceError, DocumentProducerKind, DocumentProducerObservation,
+        DocumentTime, TimerControlError, TimerEventRequest, TimerScheduler,
     };
 
     use super::{
         CONTROLLED_INPUT_BATCH_LIMIT, ControlledDocumentProducerObserver,
         ControlledDocumentTimeRequest, ControlledDocumentTimeState, MixedMessage,
-        command_requires_exact_target_before_action, dirty_document_before_unblocking_web_fonts,
+        advance_document_producer_checkpoint_after_microtasks,
+        command_requires_exact_target_before_action, controlled_advance_execution_guard,
+        controlled_event_consumes_ordinary_task_budget, dirty_document_before_unblocking_web_fonts,
         drain_controlled_input_batch, enqueue_controlled_input,
         remaining_rendering_opportunity_delay, renderer_may_drive_rendering, take_controlled_exit,
         take_controlled_turn, validate_conditional_advance_state,
     };
-    use crate::messaging::MainThreadScriptMsg;
+    use crate::messaging::{CommonScriptMsg, MainThreadScriptMsg};
+    use crate::microtask::MicrotaskCheckpointResult;
+    use crate::script_runtime::ScriptThreadEventCategory;
+    use crate::task::TaskBox;
+    use crate::task_source::TaskSourceName;
+
+    struct NeverRunClassifierTask;
+
+    impl TaskBox for NeverRunClassifierTask {
+        fn name(&self) -> &'static str {
+            "NeverRunClassifierTask"
+        }
+
+        fn run_box(self: Box<Self>, _: &mut js::context::JSContext) {
+            panic!("classifier tests never execute tasks")
+        }
+    }
 
     fn control_target() -> DocumentTimeControlTarget {
         DocumentTimeControlTarget {
@@ -5546,6 +5702,7 @@ mod tests {
         state: ControlledDocumentTimeState,
         token: DocumentTimeAdvanceToken,
         clock: DocumentClock,
+        execution_ledger: DocumentExecutionLedger,
         fence: DocumentProducerFence,
         checkpoint: DocumentProducerCheckpoint,
         scheduler: TimerScheduler,
@@ -5557,8 +5714,18 @@ mod tests {
             let clock = DocumentClock::new(DocumentClockConfiguration::Controlled {
                 initial_time_ns: 0,
                 unix_time_origin_ns: 0,
+                execution_limits: Some(DocumentExecutionLimits {
+                    ordinary_tasks: 0,
+                    microtasks: 1,
+                    rendering_opportunities: 1,
+                    mutations: 1,
+                }),
             });
-            let fence = DocumentProducerFence::default();
+            let execution_ledger = clock
+                .execution_ledger()
+                .expect("fixture installs controlled execution limits");
+            let fence =
+                DocumentProducerFence::with_execution_ledger(Some(execution_ledger.clone()));
             let checkpoint = DocumentProducerCheckpoint::ZERO
                 .checked_next()
                 .unwrap()
@@ -5595,6 +5762,7 @@ mod tests {
                 state,
                 token,
                 clock,
+                execution_ledger,
                 fence,
                 checkpoint,
                 scheduler,
@@ -5626,6 +5794,8 @@ mod tests {
                         self.checkpoint,
                         expected_producers.snapshot,
                     )?;
+                    let _execution_guard =
+                        controlled_advance_execution_guard(Some(&self.execution_ledger))?;
                     self.scheduler
                         .validate_and_advance_from(token.now(), token.deadline())
                         .map_err(DocumentTimeControlError::Timer)
@@ -5723,6 +5893,56 @@ mod tests {
     }
 
     #[test]
+    fn controlled_task_classifier_excludes_only_pump_markers() {
+        let pump_markers = [
+            MixedMessage::TimerFired,
+            MixedMessage::FromScript(MainThreadScriptMsg::Inactive),
+            MixedMessage::FromScript(MainThreadScriptMsg::WakeUp),
+            MixedMessage::FromConstellation(ScriptThreadMessage::TickAllAnimations(vec![])),
+        ];
+        assert!(
+            pump_markers
+                .iter()
+                .all(|event| !controlled_event_consumes_ordinary_task_budget(event))
+        );
+
+        let real_task =
+            MixedMessage::FromScript(MainThreadScriptMsg::Common(CommonScriptMsg::Task(
+                ScriptThreadEventCategory::TimerEvent,
+                Box::new(NeverRunClassifierTask),
+                Some(TEST_PIPELINE_ID),
+                TaskSourceName::Timer,
+            )));
+        assert!(controlled_event_consumes_ordinary_task_budget(&real_task));
+    }
+
+    #[test]
+    fn only_a_completed_microtask_checkpoint_mints_a_producer_checkpoint() {
+        let checkpoint = Cell::new(DocumentProducerCheckpoint::ZERO);
+
+        advance_document_producer_checkpoint_after_microtasks(
+            &checkpoint,
+            MicrotaskCheckpointResult::AlreadyPerforming,
+        );
+        assert_eq!(checkpoint.get(), DocumentProducerCheckpoint::ZERO);
+
+        advance_document_producer_checkpoint_after_microtasks(
+            &checkpoint,
+            MicrotaskCheckpointResult::ExecutionTerminated,
+        );
+        assert_eq!(checkpoint.get(), DocumentProducerCheckpoint::ZERO);
+
+        advance_document_producer_checkpoint_after_microtasks(
+            &checkpoint,
+            MicrotaskCheckpointResult::Completed,
+        );
+        assert_eq!(
+            checkpoint.get(),
+            DocumentProducerCheckpoint::ZERO.checked_next().unwrap()
+        );
+    }
+
+    #[test]
     fn controlled_input_batch_is_bounded_under_a_continuously_ready_source() {
         let mut events = VecDeque::new();
         let mut requests = VecDeque::new();
@@ -5758,6 +5978,22 @@ mod tests {
                 input_batch_saturated: false,
             })
         ));
+        fixture.assert_unchanged();
+    }
+
+    #[test]
+    fn terminal_execution_rejects_guarded_advance_before_clock_mutation() {
+        let mut fixture = GuardedAdvanceFixture::new();
+        let token = fixture.token.clone();
+        let terminal = fixture
+            .execution_ledger
+            .begin_ordinary_task()
+            .expect_err("zero task budget must latch terminal state");
+
+        assert_eq!(
+            fixture.attempt(&token, &control_target(), 0, false),
+            Err(DocumentTimeControlError::ExecutionTerminated(terminal))
+        );
         fixture.assert_unchanged();
     }
 
@@ -5997,14 +6233,14 @@ mod tests {
 
         assert!(matches!(
             observer
-                .observe_with(&first_target, first_checkpoint, |observer| {
+                .observe_with(&first_target, first_checkpoint, None, |observer| {
                     observer.observe(&fence, first_checkpoint)
                 })
                 .unwrap(),
             DocumentProducerObservation::FirstEmpty(_)
         ));
         assert!(matches!(
-            observer.observe_with(&second_target, first_checkpoint, |observer| {
+            observer.observe_with(&second_target, first_checkpoint, None, |observer| {
                 observer.observe(&fence, first_checkpoint)
             }),
             Err(DocumentProducerFenceError::StaleCheckpoint {
@@ -6014,7 +6250,7 @@ mod tests {
         ));
         assert!(matches!(
             observer
-                .observe_with(&second_target, second_checkpoint, |observer| {
+                .observe_with(&second_target, second_checkpoint, None, |observer| {
                     observer.observe(&fence, second_checkpoint)
                 })
                 .unwrap(),
@@ -6022,7 +6258,7 @@ mod tests {
         ));
         assert!(matches!(
             observer
-                .observe_with(&second_target, third_checkpoint, |observer| {
+                .observe_with(&second_target, third_checkpoint, None, |observer| {
                     observer.observe(&fence, third_checkpoint)
                 })
                 .unwrap(),
@@ -6041,7 +6277,7 @@ mod tests {
 
         assert!(matches!(
             observer
-                .observe_with(&target, first_checkpoint, |observer| {
+                .observe_with(&target, first_checkpoint, None, |observer| {
                     observer.observe(&fence, first_checkpoint)
                 })
                 .unwrap(),
@@ -6053,7 +6289,7 @@ mod tests {
         observer.invalidate();
         assert!(matches!(
             observer
-                .observe_with(&target, second_checkpoint, |observer| {
+                .observe_with(&target, second_checkpoint, None, |observer| {
                     observer.observe(&fence, second_checkpoint)
                 })
                 .unwrap(),
@@ -6061,10 +6297,66 @@ mod tests {
         ));
         assert!(matches!(
             observer
-                .observe_with(&target, third_checkpoint, |observer| {
+                .observe_with(&target, third_checkpoint, None, |observer| {
                     observer.observe(&fence, third_checkpoint)
                 })
                 .unwrap(),
+            DocumentProducerObservation::StableEmpty(_)
+        ));
+    }
+
+    #[test]
+    fn producer_stability_restarts_when_controlled_execution_changes() {
+        let fence = DocumentProducerFence::default();
+        let ledger = DocumentExecutionLedger::new(DocumentExecutionLimits::API2_V1_DEFAULT);
+        let target = control_target();
+        let mut observer = ControlledDocumentProducerObserver::default();
+        let mut checkpoint = DocumentProducerCheckpoint::ZERO;
+        let mut observe = |observer: &mut ControlledDocumentProducerObserver| {
+            checkpoint = checkpoint.checked_next().unwrap();
+            observer
+                .observe_with(
+                    &target,
+                    checkpoint,
+                    Some(ledger.observation()),
+                    |producer_observer| producer_observer.observe(&fence, checkpoint),
+                )
+                .unwrap()
+        };
+
+        assert!(matches!(
+            observe(&mut observer),
+            DocumentProducerObservation::FirstEmpty(_)
+        ));
+
+        // An admitted ordinary task can change page state without acquiring a producer ticket.
+        ledger.begin_ordinary_task().unwrap();
+        assert!(matches!(
+            observe(&mut observer),
+            DocumentProducerObservation::FirstEmpty(_)
+        ));
+        assert!(matches!(
+            observe(&mut observer),
+            DocumentProducerObservation::StableEmpty(_)
+        ));
+
+        ledger.begin_microtask().unwrap();
+        assert!(matches!(
+            observe(&mut observer),
+            DocumentProducerObservation::FirstEmpty(_)
+        ));
+        ledger.begin_rendering_opportunity().unwrap();
+        assert!(matches!(
+            observe(&mut observer),
+            DocumentProducerObservation::FirstEmpty(_)
+        ));
+        ledger.record_mutation_record();
+        assert!(matches!(
+            observe(&mut observer),
+            DocumentProducerObservation::FirstEmpty(_)
+        ));
+        assert!(matches!(
+            observe(&mut observer),
             DocumentProducerObservation::StableEmpty(_)
         ));
     }
@@ -6121,6 +6413,7 @@ mod tests {
         let controlled = DocumentClock::new(DocumentClockConfiguration::Controlled {
             initial_time_ns: 0,
             unix_time_origin_ns: 0,
+            execution_limits: None,
         });
 
         assert!(!renderer_may_drive_rendering(&controlled));

@@ -10,7 +10,11 @@ use serde::{Deserialize, Serialize};
 use servo_base::Epoch;
 use servo_base::generic_channel::{GenericReceiver, ReceiveError, TryReceiveError};
 use servo_base::id::{PipelineId, ScriptEventLoopId, WebViewId};
-pub use timers::DocumentClockConfiguration;
+pub use timers::{
+    DocumentClockConfiguration, DocumentExecutionBudget, DocumentExecutionCounter,
+    DocumentExecutionCounters, DocumentExecutionLimits, DocumentExecutionObservation,
+    DocumentExecutionTerminal,
+};
 use timers::{
     DocumentClockError, DocumentClockId, DocumentProducerCheckpoint, DocumentProducerFenceError,
     DocumentProducerFenceId, DocumentProducerSnapshot, DocumentTime, DocumentTimeSurface,
@@ -191,6 +195,8 @@ pub enum DocumentTimeControlAction {
         /// Whether that event caused at least one microtask checkpoint to complete.
         microtask_checkpoint_advanced: bool,
     },
+    /// Sticky execution failure prevented the requested ordinary turn from starting.
+    ExecutionTerminated,
 }
 
 /// Qualification of one producer snapshot at the latest completed microtask checkpoint.
@@ -283,6 +289,10 @@ pub struct DocumentTimeControlObservation {
     pub producers: DocumentTimeProducerObservation,
     /// Per-pipeline script readiness and rendering generations.
     pub documents: Vec<DocumentTimeDocumentObservation>,
+    /// Controlled execution policy, counters, and sticky terminal failure when enabled.
+    ///
+    /// `None` preserves the pre-ledger controlled protocol for a clock configured without limits.
+    pub execution: Option<DocumentExecutionObservation>,
 }
 
 /// Definitive or explicitly indeterminate completion of one mechanical control command.
@@ -477,6 +487,8 @@ pub enum DocumentTimeControlError {
         /// Token supplied by the caller.
         observed: DocumentTimeAdvanceTokenId,
     },
+    /// A sticky controlled-execution terminal was observed before guarded clock mutation.
+    ExecutionTerminated(DocumentExecutionTerminal),
     /// Buffered or ready ordinary input changed after token issuance.
     AdvanceInputChanged {
         /// Input revision bound by the token.
@@ -549,6 +561,7 @@ mod tests {
         let clock = DocumentClock::new(DocumentClockConfiguration::Controlled {
             initial_time_ns: 0,
             unix_time_origin_ns: 0,
+            execution_limits: None,
         });
         let mut scheduler = TimerScheduler::with_clock(clock.clone());
         scheduler.schedule_timer(TimerEventRequest {
@@ -718,6 +731,34 @@ mod tests {
         let receiver = DocumentTimeControlReceiver::new(receiver, &command);
 
         assert_indeterminate(receiver.recv_timeout(Duration::ZERO), &token);
+    }
+
+    #[test]
+    fn guarded_execution_terminal_response_is_a_definitive_rejection() {
+        let token = advance_token();
+        let command = DocumentTimeControlCommand::AdvanceTo(token);
+        let (response, receiver) = GenericCallback::new_blocking()
+            .expect("test control callback channel should be created");
+        let receiver = DocumentTimeControlReceiver::new(receiver, &command);
+        let terminal = DocumentExecutionTerminal::BudgetExceeded {
+            budget: DocumentExecutionBudget::OrdinaryTasks,
+            limit: 1,
+            observed: 2,
+        };
+        response
+            .send(DocumentTimeControlOutcome::Rejected(
+                DocumentTimeControlError::ExecutionTerminated(terminal),
+            ))
+            .unwrap();
+
+        assert_eq!(
+            receiver.recv_timeout(Duration::from_secs(1)),
+            DocumentTimeControlReceiveOutcome::CommandOutcome(
+                DocumentTimeControlOutcome::Rejected(
+                    DocumentTimeControlError::ExecutionTerminated(terminal)
+                )
+            )
+        );
     }
 
     #[test]

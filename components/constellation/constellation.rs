@@ -744,6 +744,7 @@ mod controlled_document_time_tests {
         let clock = DocumentClock::new(DocumentClockConfiguration::Controlled {
             initial_time_ns: 0,
             unix_time_origin_ns: 0,
+            execution_limits: None,
         });
         let mut scheduler = TimerScheduler::with_clock(clock);
         scheduler.schedule_timer(TimerEventRequest {
@@ -782,6 +783,7 @@ mod controlled_document_time_tests {
                 stability: DocumentProducerStability::UnchangedCheckpoint,
             },
             documents: Vec::new(),
+            execution: None,
         }
     }
 
@@ -1019,6 +1021,7 @@ mod controlled_document_time_tests {
         let clock = DocumentClock::new(DocumentClockConfiguration::Controlled {
             initial_time_ns: 0,
             unix_time_origin_ns: 0,
+            execution_limits: None,
         });
         let fence = DocumentProducerFence::default();
         let checkpoint = DocumentProducerCheckpoint::ZERO

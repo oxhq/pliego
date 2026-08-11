@@ -1056,6 +1056,7 @@ mod tests {
         let clock = DocumentClock::new(DocumentClockConfiguration::Controlled {
             initial_time_ns: 10,
             unix_time_origin_ns: 0,
+            execution_limits: None,
         });
         let mut timebase = TimerTimebase::default();
         assert_eq!(timebase.now(&clock).unwrap(), DocumentTime::from_nanos(10));

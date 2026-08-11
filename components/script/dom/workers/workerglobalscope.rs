@@ -438,7 +438,7 @@ impl WorkerGlobalScope {
     pub(crate) fn perform_a_microtask_checkpoint(&self, cx: &mut JSContext) {
         // Only perform the checkpoint if we're not shutting down.
         if !self.is_closing() {
-            self.microtask_queue.checkpoint(
+            let _ = self.microtask_queue.checkpoint(
                 cx,
                 |_| Some(DomRoot::from_ref(&self.globalscope)),
                 vec![DomRoot::from_ref(&self.globalscope)],
