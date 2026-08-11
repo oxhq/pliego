@@ -99,6 +99,14 @@ pub(crate) struct PublicationJournal {
     plan_sha256: String,
 }
 
+impl Drop for PublicationJournal {
+    fn drop(&mut self) {
+        // Closing only this descriptor can leave a `flock` held by a concurrently forked or
+        // duplicated descriptor. Explicitly release the logical owner's lease before close.
+        let _ = self.lease.as_file().unlock();
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 struct BundleEntry {
@@ -3380,6 +3388,55 @@ mod tests {
             .resume_publication(&output, "sha256:different-request")
             .unwrap_err();
         assert_eq!(mismatch.kind(), std::io::ErrorKind::InvalidData);
+        drop(artifacts);
+        fs::remove_dir_all(sandbox).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dropping_publication_journal_unlocks_a_duplicated_descriptor() {
+        use std::os::fd::{AsRawFd, FromRawFd};
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let sandbox = test_temp_dir().join(format!(
+            "pliego-publication-duplicated-lease-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir(&sandbox).unwrap();
+        let artifact_path = sandbox.join("artifacts");
+        let render_id = "sha256:duplicated-lease-fixture";
+        let request_fingerprint = "sha256:duplicated-lease-request";
+        let artifacts = SessionArtifacts::create_with_render_id(&artifact_path, render_id).unwrap();
+        let output = sandbox.join("invoice.pdf");
+        let journal = artifacts
+            .begin_publication(&output, request_fingerprint)
+            .unwrap();
+
+        // SAFETY: `journal` owns this live descriptor for the duration of `dup`.
+        let duplicated_fd = unsafe { libc::dup(journal.lease.as_file().as_raw_fd()) };
+        assert!(
+            duplicated_fd >= 0,
+            "cannot duplicate publication lease: {}",
+            std::io::Error::last_os_error()
+        );
+        // SAFETY: `duplicated_fd` is a fresh owned descriptor returned by `dup` above.
+        let inherited_lease = unsafe { std::fs::File::from_raw_fd(duplicated_fd) };
+
+        drop(journal);
+        let reopened = artifacts
+            .resume_publication(&output, request_fingerprint)
+            .unwrap();
+        assert_eq!(
+            reopened.recover().unwrap(),
+            PublicationRecoveryState::Planned
+        );
+        assert!(inherited_lease.metadata().unwrap().is_file());
+
+        drop(reopened);
+        drop(inherited_lease);
         drop(artifacts);
         fs::remove_dir_all(sandbox).unwrap();
     }
