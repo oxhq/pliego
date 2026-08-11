@@ -8,12 +8,51 @@ use script_bindings::reflector::Reflector;
 use servo_base::cross_process_instant::CrossProcessInstant;
 use strum::VariantArray;
 use time::Duration;
+use timers::DocumentTimeSurface;
 
 use super::performance::ToDOMHighResTimeStamp;
 use crate::dom::bindings::codegen::Bindings::PerformanceBinding::DOMHighResTimeStamp;
 use crate::dom::bindings::codegen::Bindings::PerformanceEntryBinding::PerformanceEntryMethods;
+use crate::dom::bindings::num::Finite;
 use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::str::DOMString;
+
+/// The clock domain that produced a performance-entry timestamp.
+///
+/// Controlled Window time is stored as a signed offset from that Window's time origin. Host and
+/// cross-process producers remain explicitly distinct so they cannot silently enter the controlled
+/// document-time domain.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PerformanceEntryTime {
+    Host(CrossProcessInstant),
+    Document(Duration),
+}
+
+impl PartialOrd for PerformanceEntryTime {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        match (self, other) {
+            (Self::Host(left), Self::Host(right)) => left.partial_cmp(right),
+            (Self::Document(left), Self::Document(right)) => left.partial_cmp(right),
+            _ => None,
+        }
+    }
+}
+
+/// The clock domain that produced a performance-entry duration.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PerformanceEntryDuration {
+    Host(Duration),
+    Document(Duration),
+}
+
+impl PerformanceEntryDuration {
+    pub(crate) fn for_time(time: PerformanceEntryTime, duration: Duration) -> Self {
+        match time {
+            PerformanceEntryTime::Host(_) => Self::Host(duration),
+            PerformanceEntryTime::Document(_) => Self::Document(duration),
+        }
+    }
+}
 
 /// All supported entry types, in alphabetical order.
 #[derive(Clone, Copy, JSTraceable, MallocSizeOf, PartialEq, VariantArray)]
@@ -71,23 +110,24 @@ pub(crate) struct PerformanceEntry {
 
     /// <https://www.w3.org/TR/performance-timeline/#dom-performanceentry-starttime>
     #[no_trace]
-    start_time: Option<CrossProcessInstant>,
+    #[ignore_malloc_size_of = "The timestamp provenance has no heap allocations"]
+    start_time: Option<PerformanceEntryTime>,
 
     /// The duration of this [`PerformanceEntry`]. This is a [`time::Duration`],
     /// because it can be negative and `std::time::Duration` cannot be.
     ///
     /// <https://www.w3.org/TR/performance-timeline/#dom-performanceentry-duration>
     #[no_trace]
-    #[ignore_malloc_size_of = "No MallocSizeOf support for `time` crate"]
-    duration: Duration,
+    #[ignore_malloc_size_of = "The duration provenance has no heap allocations"]
+    duration: PerformanceEntryDuration,
 }
 
 impl PerformanceEntry {
     pub(crate) fn new_inherited(
         name: DOMString,
         entry_type: EntryType,
-        start_time: Option<CrossProcessInstant>,
-        duration: Duration,
+        start_time: Option<PerformanceEntryTime>,
+        duration: PerformanceEntryDuration,
     ) -> PerformanceEntry {
         PerformanceEntry {
             reflector_: Reflector::new(),
@@ -109,8 +149,44 @@ impl PerformanceEntry {
     }
 
     /// <https://www.w3.org/TR/performance-timeline/#dom-performanceentry-starttime>
-    pub(crate) fn start_time(&self) -> Option<CrossProcessInstant> {
+    pub(crate) fn start_time(&self) -> Option<PerformanceEntryTime> {
         self.start_time
+    }
+
+    /// Return the start time in the same domain exposed to this entry's global.
+    pub(crate) fn start_time_for_sorting(&self) -> Option<PerformanceEntryTime> {
+        observable_start_time(self.start_time, self.accepts_host_timestamp())
+    }
+
+    fn accepts_host_timestamp(&self) -> bool {
+        self.global()
+            .document_clock()
+            .require_surface(DocumentTimeSurface::HostTimestamp)
+            .is_ok()
+    }
+}
+
+fn observable_start_time(
+    start_time: Option<PerformanceEntryTime>,
+    accepts_host_timestamp: bool,
+) -> Option<PerformanceEntryTime> {
+    match start_time {
+        Some(PerformanceEntryTime::Host(_)) if !accepts_host_timestamp => {
+            Some(PerformanceEntryTime::Document(Duration::ZERO))
+        },
+        start_time => start_time,
+    }
+}
+
+fn observable_duration(
+    duration: PerformanceEntryDuration,
+    accepts_host_timestamp: bool,
+) -> DOMHighResTimeStamp {
+    match duration {
+        PerformanceEntryDuration::Host(_) if !accepts_host_timestamp => Finite::wrap(0.0),
+        PerformanceEntryDuration::Host(duration) | PerformanceEntryDuration::Document(duration) => {
+            duration.to_dom_high_res_time_stamp()
+        },
     }
 }
 
@@ -127,13 +203,60 @@ impl PerformanceEntryMethods<crate::DomTypeHolder> for PerformanceEntry {
 
     /// <https://w3c.github.io/performance-timeline/#dom-performanceentry-starttime>
     fn StartTime(&self, cx: &mut JSContext) -> DOMHighResTimeStamp {
-        self.global()
-            .performance(cx)
-            .maybe_to_dom_high_res_time_stamp(self.start_time)
+        let performance = self.global().performance(cx);
+        self.start_time.map_or_else(
+            || Finite::wrap(0.0),
+            |time| performance.entry_time_to_dom_high_res_time_stamp(time),
+        )
     }
 
     /// <https://w3c.github.io/performance-timeline/#dom-performanceentry-duration>
     fn Duration(&self) -> DOMHighResTimeStamp {
-        self.duration.to_dom_high_res_time_stamp()
+        observable_duration(self.duration, self.accepts_host_timestamp())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn controlled_entries_suppress_host_time_without_hiding_document_time() {
+        let duration = Duration::milliseconds(37);
+        let host_time = CrossProcessInstant::epoch() + duration;
+
+        assert_eq!(
+            observable_start_time(Some(PerformanceEntryTime::Host(host_time)), false),
+            Some(PerformanceEntryTime::Document(Duration::ZERO))
+        );
+        assert_eq!(
+            observable_start_time(Some(PerformanceEntryTime::Document(duration)), false,),
+            Some(PerformanceEntryTime::Document(duration))
+        );
+
+        assert_eq!(
+            observable_duration(PerformanceEntryDuration::Host(duration), false),
+            Finite::wrap(0.0)
+        );
+        assert_eq!(
+            observable_duration(PerformanceEntryDuration::Document(duration), false),
+            Finite::wrap(37.0)
+        );
+    }
+
+    #[test]
+    fn realtime_entries_preserve_existing_host_values() {
+        let duration = Duration::milliseconds(37);
+        let host_time = CrossProcessInstant::epoch() + duration;
+
+        assert_eq!(
+            observable_start_time(Some(PerformanceEntryTime::Host(host_time)), true),
+            Some(PerformanceEntryTime::Host(host_time))
+        );
+
+        assert_eq!(
+            observable_duration(PerformanceEntryDuration::Host(duration), true),
+            Finite::wrap(37.0)
+        );
     }
 }

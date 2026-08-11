@@ -107,6 +107,10 @@ impl MutationObserver {
     ) where
         F: FnOnce() -> Mutation<'a>,
     {
+        // Count the central record hook without turning it into an admission decision. Servo DOM
+        // algorithms do not all call this on the same side of the underlying write, so a breach
+        // latches terminal state but never suppresses or claims to roll back the DOM algorithm.
+        ScriptThread::record_document_mutation_record();
         if !target.global().as_window().get_exists_mut_observer() {
             return;
         }

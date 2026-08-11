@@ -9,14 +9,14 @@ use js::jsapi::Heap;
 use js::jsval::JSVal;
 use js::rust::MutableHandleValue;
 use script_bindings::reflector::reflect_dom_object_with_cx;
-use servo_base::cross_process_instant::CrossProcessInstant;
-use time::Duration;
 
 use crate::dom::bindings::codegen::Bindings::PerformanceMeasureBinding::PerformanceMeasureMethods;
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::bindings::str::DOMString;
 use crate::dom::globalscope::GlobalScope;
-use crate::dom::performance::performanceentry::{EntryType, PerformanceEntry};
+use crate::dom::performance::performanceentry::{
+    EntryType, PerformanceEntry, PerformanceEntryDuration, PerformanceEntryTime,
+};
 
 #[dom_struct]
 pub(crate) struct PerformanceMeasure {
@@ -28,8 +28,8 @@ pub(crate) struct PerformanceMeasure {
 impl PerformanceMeasure {
     fn new_inherited(
         name: DOMString,
-        start_time: CrossProcessInstant,
-        duration: Duration,
+        start_time: PerformanceEntryTime,
+        duration: PerformanceEntryDuration,
     ) -> PerformanceMeasure {
         PerformanceMeasure {
             entry: PerformanceEntry::new_inherited(
@@ -46,8 +46,8 @@ impl PerformanceMeasure {
         cx: &mut JSContext,
         global: &GlobalScope,
         name: DOMString,
-        start_time: CrossProcessInstant,
-        duration: Duration,
+        start_time: PerformanceEntryTime,
+        duration: PerformanceEntryDuration,
     ) -> DomRoot<PerformanceMeasure> {
         reflect_dom_object_with_cx(
             Box::new(PerformanceMeasure::new_inherited(

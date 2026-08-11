@@ -76,6 +76,7 @@ use style::stylesheets::{Origin, OriginSet, Stylesheet};
 use style::stylist::Stylist;
 use stylo_atoms::Atom;
 use time::Duration as TimeDuration;
+use timers::{DocumentRenderingTime, DocumentTimeSurface};
 use url::{Host, Position};
 
 use crate::animations::Animations;
@@ -96,7 +97,6 @@ use crate::dom::bindings::codegen::Bindings::HTMLIFrameElementBinding::HTMLIFram
 use crate::dom::bindings::codegen::Bindings::NavigatorBinding::Navigator_Binding::NavigatorMethods;
 use crate::dom::bindings::codegen::Bindings::NodeBinding::NodeMethods;
 use crate::dom::bindings::codegen::Bindings::NodeFilterBinding::NodeFilter;
-use crate::dom::bindings::codegen::Bindings::PerformanceBinding::PerformanceMethods;
 use crate::dom::bindings::codegen::Bindings::PermissionStatusBinding::PermissionName;
 use crate::dom::bindings::codegen::Bindings::SanitizerBinding::{
     SetHTMLOptions, SetHTMLUnsafeOptions,
@@ -142,7 +142,7 @@ use crate::dom::documentfragment::DocumentFragment;
 use crate::dom::documentorshadowroot::{
     DocumentOrShadowRoot, ServoStylesheetInDocument, StylesheetSource,
 };
-use crate::dom::documenttimeline::DocumentTimeline;
+use crate::dom::documenttimeline::{DocumentTimeline, rendering_timestamp_from_elapsed};
 use crate::dom::documenttype::DocumentType;
 use crate::dom::domimplementation::DOMImplementation;
 use crate::dom::element::attributes::storage::AttrRef;
@@ -1767,17 +1767,26 @@ impl Document {
     }
 
     /// <https://html.spec.whatwg.org/multipage/#run-the-animation-frame-callbacks>
-    pub(crate) fn run_the_animation_frame_callbacks(&self, cx: &mut CurrentRealm) {
+    pub(crate) fn run_the_animation_frame_callbacks(
+        &self,
+        cx: &mut CurrentRealm,
+        frame_time: DocumentRenderingTime,
+    ) {
         self.running_animation_callbacks.set(true);
-        let timing = self.global().performance(cx).Now();
+        let timing = self
+            .window()
+            .document_time_since_navigation(
+                frame_time.document_time(),
+                DocumentTimeSurface::AnimationFrame,
+            )
+            .map(rendering_timestamp_from_elapsed)
+            .expect("animation-frame time cannot precede the Window navigation origin");
 
-        let num_callbacks = self.animation_frame_list.borrow().len();
-        for _ in 0..num_callbacks {
-            let (_, maybe_callback) = self.animation_frame_list.borrow_mut().pop_front().unwrap();
-            if let Some(callback) = maybe_callback {
-                callback.call(cx, self, *timing);
-            }
-        }
+        run_animation_frame_callback_snapshot(
+            &self.animation_frame_list,
+            timing,
+            |callback, timestamp| callback.call(cx, self, *timestamp),
+        );
         self.running_animation_callbacks.set(false);
 
         if self.animation_frame_list.borrow().is_empty() {
@@ -4660,10 +4669,14 @@ impl Document {
     }
 
     /// An implementation of <https://drafts.csswg.org/web-animations-1/#update-animations-and-send-events>.
-    pub(crate) fn update_animations_and_send_events(&self, cx: &mut CurrentRealm) {
+    pub(crate) fn update_animations_and_send_events(
+        &self,
+        cx: &mut CurrentRealm,
+        frame_time: DocumentRenderingTime,
+    ) {
         // Only update the time if it isn't being managed by a test.
         if !self.layout_animations_test_enabled {
-            self.timeline.update(self.window());
+            self.timeline.update(self.window(), frame_time);
         }
 
         // > 1. Update the current time of all timelines associated with doc passing now
@@ -4988,6 +5001,99 @@ impl Document {
 
     pub(crate) fn set_iframe_load_in_progress(&self, value: bool) {
         self.iframe_load_in_progress.set(value)
+    }
+}
+
+fn run_animation_frame_callback_snapshot<T, Timestamp: Copy>(
+    callbacks: &DomRefCell<VecDeque<(u32, Option<T>)>>,
+    timestamp: Timestamp,
+    mut invoke: impl FnMut(T, Timestamp),
+) {
+    // Snapshot only the list length. Keeping the remaining entries in the live list lets an
+    // earlier callback cancel a later callback in this same snapshot, while callbacks appended by
+    // a callback remain beyond this bound for the next rendering opportunity.
+    let callback_count = callbacks.borrow().len();
+    for _ in 0..callback_count {
+        let (_, callback) = callbacks
+            .borrow_mut()
+            .pop_front()
+            .expect("the snapshotted animation-frame callback must remain in the list");
+        if let Some(callback) = callback {
+            invoke(callback, timestamp);
+        }
+    }
+}
+
+#[cfg(test)]
+mod animation_frame_callback_tests {
+    use style::thread_state::{self, ThreadState};
+
+    use super::*;
+
+    struct ScriptThreadStateGuard {
+        entered_script: bool,
+    }
+
+    impl ScriptThreadStateGuard {
+        fn enter() -> Self {
+            let entered_script = !thread_state::get().is_script();
+            if entered_script {
+                thread_state::enter(ThreadState::SCRIPT);
+            }
+            Self { entered_script }
+        }
+    }
+
+    impl Drop for ScriptThreadStateGuard {
+        fn drop(&mut self) {
+            if self.entered_script {
+                thread_state::exit(ThreadState::SCRIPT);
+            }
+        }
+    }
+
+    #[test]
+    fn same_deadline_callbacks_share_timestamp_and_nested_raf_waits_for_next_snapshot() {
+        let _script_thread_state = ScriptThreadStateGuard::enter();
+        let callbacks = DomRefCell::new(VecDeque::from([(1, Some(1)), (2, Some(2))]));
+        let observed = RefCell::new(Vec::new());
+
+        run_animation_frame_callback_snapshot(&callbacks, 50_u64, |callback, timestamp| {
+            observed.borrow_mut().push((callback, timestamp));
+            if callback == 1 {
+                callbacks.borrow_mut().push_back((3, Some(3)));
+            }
+        });
+
+        assert_eq!(*observed.borrow(), vec![(1, 50), (2, 50)]);
+        assert_eq!(*callbacks.borrow(), VecDeque::from([(3, Some(3))]));
+
+        run_animation_frame_callback_snapshot(&callbacks, 70_u64, |callback, timestamp| {
+            observed.borrow_mut().push((callback, timestamp));
+        });
+        assert_eq!(*observed.borrow(), vec![(1, 50), (2, 50), (3, 70)]);
+    }
+
+    #[test]
+    fn callback_can_cancel_a_later_entry_in_the_current_snapshot() {
+        let _script_thread_state = ScriptThreadStateGuard::enter();
+        let callbacks = DomRefCell::new(VecDeque::from([(1, Some(1)), (2, Some(2))]));
+        let observed = RefCell::new(Vec::new());
+
+        run_animation_frame_callback_snapshot(&callbacks, 50_u64, |callback, timestamp| {
+            observed.borrow_mut().push((callback, timestamp));
+            if callback == 1 {
+                callbacks
+                    .borrow_mut()
+                    .iter_mut()
+                    .find(|(identifier, _)| *identifier == 2)
+                    .unwrap()
+                    .1 = None;
+            }
+        });
+
+        assert_eq!(*observed.borrow(), vec![(1, 50)]);
+        assert!(callbacks.borrow().is_empty());
     }
 }
 
@@ -6450,8 +6556,9 @@ impl DocumentMethods<crate::DomTypeHolder> for Document {
         // document.close() before emitting an end-of-file token). The encoding confidence is
         // irrelevant.
         let resource_threads = self.window.as_global_scope().resource_threads().clone();
+        let producer_fence = self.loader().producer_fence();
         *self.loader.borrow_mut() =
-            DocumentLoader::new_with_threads(resource_threads, Some(self.url()));
+            DocumentLoader::new_with_threads(resource_threads, Some(self.url()), producer_fence);
         ServoParser::parse_html_script_input(cx, self, self.url());
 
         // Step 17. Set the insertion point to point at just before the end of the input stream

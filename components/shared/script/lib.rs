@@ -15,12 +15,13 @@ use crossbeam_channel::RecvTimeoutError;
 use devtools_traits::ScriptToDevtoolsControlMsg;
 use embedder_traits::user_contents::{UserContentManagerId, UserContents};
 use embedder_traits::{
+    DocumentTimeControlCommand, DocumentTimeControlRequestId, DocumentTimeControlTarget,
     EmbedderControlId, EmbedderControlResponse, FocusSequenceNumber, InputEventAndId,
     JavaScriptEvaluationId, MediaSessionActionType, PaintHitTestResult, ScriptToEmbedderChan,
     Theme, ViewportDetails, WebDriverScriptCommand,
 };
 use euclid::{Scale, Size2D};
-use fonts_traits::{SystemFontServiceProxySender, WebFontLoadEvent};
+use fonts_traits::{SystemFontServiceProxySender, WebFontLoadFinishedAck};
 use keyboard_types::Modifiers;
 use malloc_size_of_derive::MallocSizeOf;
 use media::WindowGLContext;
@@ -52,6 +53,7 @@ use storage_traits::webstorage_thread::WebStorageType;
 use strum::IntoStaticStr;
 use style_traits::{CSSPixel, SpeculativePainter};
 use stylo_atoms::Atom;
+use timers::DocumentClockConfiguration;
 #[cfg(feature = "webgpu")]
 use webgpu_traits::WebGPUMsg;
 use webrender_api::ImageKey;
@@ -185,6 +187,12 @@ pub enum ScriptThreadMessage {
     GetDocumentOrigin(PipelineId, GenericSender<Option<String>>),
     /// Return the cached layout debug snapshot for a pipeline without triggering layout.
     GetLayoutDebugSnapshot(PipelineId, GenericCallback<Option<String>>),
+    /// Run one internal controlled-time command on this ScriptThread.
+    ControlDocumentTime(
+        DocumentTimeControlRequestId,
+        DocumentTimeControlTarget,
+        DocumentTimeControlCommand,
+    ),
     /// Notifies script thread of a change to one of its document's activity
     SetDocumentActivity(PipelineId, DocumentActivity),
     /// Set whether to use less resources by running timers at a heavily limited rate.
@@ -254,7 +262,7 @@ pub enum ScriptThreadMessage {
     /// This is sent if either the web font loaded successfully, or to notify the script thread
     /// that it should try to resolve `document.fonts.ready` because the font was the last one
     /// loading.
-    WebFontLoadFinished(PipelineId, WebFontLoadEvent),
+    WebFontLoadFinished(PipelineId, WebFontLoadFinishedAck),
     /// Cause a `load` event to be dispatched at the appropriate iframe element.
     DispatchIFrameLoadEvent {
         /// The frame that has been marked as loaded.
@@ -375,6 +383,11 @@ pub struct InitialScriptState {
     /// The id of the script event loop that this state will start. This is used to uniquely
     /// identify an event loop.
     pub id: ScriptEventLoopId,
+    /// Configuration for the document-observable clock owned by this event loop.
+    ///
+    /// The default interactive path uses host time. A controlled clock is intentionally not
+    /// exposed through the embedding API until its U2 event-loop control plane is available.
+    pub document_clock: DocumentClockConfiguration,
     /// The sender to use to install the `Pipeline` namespace into this process (if necessary).
     pub namespace_request_sender: GenericSender<PipelineNamespaceRequest>,
     /// A channel with which messages can be sent to us (the script thread).

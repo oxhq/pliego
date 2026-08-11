@@ -2179,7 +2179,13 @@ window.pliego?.defer();
         let case = std::env::var(ISOLATED_CASE_ENV).expect("isolated fixture case should be set");
         let http_base = std::env::var(HTTP_BASE_ENV).expect("HTTP fixture base should be set");
         let mut readiness = ReadinessPolicy {
-            timeout_ms: if case == "defer-timeout" { 25 } else { 1_000 },
+            timeout_ms: match case.as_str() {
+                "defer-timeout" => 25,
+                "metadata-denied-non-icon" | "same-url-role-split" | "metadata-allowed-icon" => {
+                    10_000
+                },
+                _ => 1_000,
+            },
             wait_for_fonts: false,
         };
         let mut resources = ResourcePolicyConfig::default();

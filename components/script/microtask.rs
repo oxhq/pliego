@@ -6,7 +6,7 @@
 //! microtask queues. It is up to implementations of event loops to store a queue and
 //! perform checkpoints at appropriate times, as well as enqueue microtasks as required.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::mem;
 use std::rc::Rc;
 
@@ -15,6 +15,7 @@ use js::realm::AutoRealm;
 use js::rust::wrappers2::JobQueueMayNotBeEmpty;
 use script_bindings::cell::DomRefCell;
 use servo_base::id::PipelineId;
+use timers::DocumentExecutionLedger;
 
 use crate::dom::bindings::callback::ExceptionHandling;
 use crate::dom::bindings::codegen::Bindings::PromiseBinding::PromiseJobCallback;
@@ -32,6 +33,22 @@ use crate::realms::enter_auto_realm;
 use crate::script_runtime::notify_about_rejected_promises;
 use crate::script_thread::ScriptThread;
 
+/// Policy slot shared by the main SpiderMonkey job queue and every nested interrupt queue.
+#[derive(Clone, Default)]
+pub(crate) struct MicrotaskExecutionLedgerSlot(Rc<RefCell<Option<DocumentExecutionLedger>>>);
+
+/// Outcome of attempting one HTML microtask checkpoint.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[must_use]
+pub(crate) enum MicrotaskCheckpointResult {
+    /// A surrounding checkpoint already owns this queue; no work or checkpoint completed.
+    AlreadyPerforming,
+    /// The queue drained and all end-of-checkpoint steps completed.
+    Completed,
+    /// Controlled execution became terminal and all remaining work was discarded.
+    ExecutionTerminated,
+}
+
 /// A collection of microtasks in FIFO order.
 #[derive(Default, JSTraceable, MallocSizeOf)]
 pub(crate) struct MicrotaskQueue {
@@ -39,6 +56,10 @@ pub(crate) struct MicrotaskQueue {
     microtask_queue: DomRefCell<Vec<Microtask>>,
     /// <https://html.spec.whatwg.org/multipage/#performing-a-microtask-checkpoint>
     performing_a_microtask_checkpoint: Cell<bool>,
+    /// Controlled-session accounting installed before the first navigation.
+    #[no_trace]
+    #[ignore_malloc_size_of = "The execution ledger is shared with the document clock"]
+    execution_ledger: MicrotaskExecutionLedgerSlot,
 }
 
 #[derive(JSTraceable, MallocSizeOf)]
@@ -82,6 +103,29 @@ pub(crate) struct UserMicrotask {
 }
 
 impl MicrotaskQueue {
+    /// Construct an empty SpiderMonkey interrupt queue bound to the main queue's policy slot.
+    pub(crate) fn with_execution_ledger_slot(
+        execution_ledger: MicrotaskExecutionLedgerSlot,
+    ) -> Self {
+        Self {
+            microtask_queue: Default::default(),
+            performing_a_microtask_checkpoint: Default::default(),
+            execution_ledger,
+        }
+    }
+
+    /// Clone the policy slot used to construct nested SpiderMonkey interrupt queues.
+    pub(crate) fn execution_ledger_slot(&self) -> MicrotaskExecutionLedgerSlot {
+        self.execution_ledger.clone()
+    }
+
+    /// Install the execution ledger before any page microtask can be queued.
+    pub(crate) fn install_execution_ledger(&self, ledger: Option<DocumentExecutionLedger>) {
+        debug_assert!(self.microtask_queue.borrow().is_empty());
+        debug_assert!(!self.performing_a_microtask_checkpoint.get());
+        *self.execution_ledger.0.borrow_mut() = ledger;
+    }
+
     /// Add a new microtask to this queue. It will be invoked as part of the next
     /// microtask checkpoint.
     #[expect(unsafe_code)]
@@ -98,16 +142,14 @@ impl MicrotaskQueue {
         cx: &mut JSContext,
         target_provider: F,
         globalscopes: Vec<DomRoot<GlobalScope>>,
-    ) where
+    ) -> MicrotaskCheckpointResult
+    where
         F: Fn(PipelineId) -> Option<DomRoot<GlobalScope>>,
     {
-        // Step 1. If the event loop's performing a microtask checkpoint is true, then return.
-        if self.performing_a_microtask_checkpoint.get() {
-            return;
+        // Steps 1-2. Enter only when no surrounding checkpoint already owns this queue.
+        if let Err(result) = self.begin_checkpoint() {
+            return result;
         }
-
-        // Step 2. Set the event loop's performing a microtask checkpoint to true.
-        self.performing_a_microtask_checkpoint.set(true);
 
         debug!("Now performing a microtask checkpoint");
 
@@ -117,6 +159,14 @@ impl MicrotaskQueue {
             mem::swap(&mut *pending_queue, &mut *self.microtask_queue.borrow_mut());
 
             for (idx, job) in pending_queue.iter().enumerate() {
+                // Controlled mode counts every individual job before invoking it. A sticky
+                // failure stops this checkpoint even when the preceding job requeued itself;
+                // the terminal session never resumes or publishes the discarded queue suffix.
+                if !self.begin_microtask_job() {
+                    return self.abort_terminal_checkpoint(|| unsafe {
+                        js::rust::wrappers2::JobQueueIsEmpty(cx)
+                    });
+                }
                 if idx == pending_queue.len() - 1 && self.microtask_queue.borrow().is_empty() {
                     unsafe { js::rust::wrappers2::JobQueueIsEmpty(cx) };
                 }
@@ -175,6 +225,15 @@ impl MicrotaskQueue {
                         task.microtask_chunk_steps(cx)
                     },
                 }
+
+                // Central mutation-record accounting is non-rejecting and can therefore latch
+                // during a job. Stop before invoking another queued job; individual DOM call sites
+                // decide whether their underlying write precedes or follows the record hook.
+                if self.execution_is_terminal() {
+                    return self.abort_terminal_checkpoint(|| unsafe {
+                        js::rust::wrappers2::JobQueueIsEmpty(cx)
+                    });
+                }
             }
         }
 
@@ -199,6 +258,44 @@ impl MicrotaskQueue {
         // Step 7. Set the event loop's performing a microtask checkpoint to false.
         self.performing_a_microtask_checkpoint.set(false);
         // TODO: Step 8. Record timing info for microtask checkpoint.
+        MicrotaskCheckpointResult::Completed
+    }
+
+    fn begin_checkpoint(&self) -> Result<(), MicrotaskCheckpointResult> {
+        if self.performing_a_microtask_checkpoint.get() {
+            return Err(MicrotaskCheckpointResult::AlreadyPerforming);
+        }
+        self.performing_a_microtask_checkpoint.set(true);
+        Ok(())
+    }
+
+    fn abort_terminal_checkpoint(
+        &self,
+        notify_job_queue_empty: impl FnOnce(),
+    ) -> MicrotaskCheckpointResult {
+        // Jobs moved into the local pending queue are dropped by the caller's early return. Jobs
+        // requeued by an already-run job remain in this active queue, so clear them explicitly.
+        // This same method runs for main and SpiderMonkey interrupt queues.
+        self.microtask_queue.borrow_mut().clear();
+        notify_job_queue_empty();
+        self.performing_a_microtask_checkpoint.set(false);
+        MicrotaskCheckpointResult::ExecutionTerminated
+    }
+
+    fn begin_microtask_job(&self) -> bool {
+        self.execution_ledger
+            .0
+            .borrow()
+            .as_ref()
+            .is_none_or(|ledger| ledger.begin_microtask().is_ok())
+    }
+
+    fn execution_is_terminal(&self) -> bool {
+        self.execution_ledger
+            .0
+            .borrow()
+            .as_ref()
+            .is_some_and(|ledger| ledger.observation().terminal.is_some())
     }
 
     pub(crate) fn empty(&self) -> bool {
@@ -207,5 +304,117 @@ impl MicrotaskQueue {
 
     pub(crate) fn clear(&self) {
         self.microtask_queue.borrow_mut().clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+    use std::collections::VecDeque;
+
+    use timers::{DocumentExecutionBudget, DocumentExecutionLimits, DocumentExecutionTerminal};
+
+    use super::{Microtask, MicrotaskCheckpointResult, MicrotaskQueue};
+
+    fn execution_limits(microtasks: u64) -> DocumentExecutionLimits {
+        DocumentExecutionLimits {
+            ordinary_tasks: 1,
+            microtasks,
+            rendering_opportunities: 1,
+            mutations: 1,
+        }
+    }
+
+    #[test]
+    fn self_rescheduling_microtask_is_cut_off_inside_one_checkpoint() {
+        let queue = MicrotaskQueue::default();
+        let ledger = timers::DocumentExecutionLedger::new(execution_limits(3));
+        queue.install_execution_ledger(Some(ledger.clone()));
+
+        let mut pending = VecDeque::from([()]);
+        let mut invoked = 0;
+        while pending.pop_front().is_some() {
+            if !queue.begin_microtask_job() {
+                break;
+            }
+            invoked += 1;
+            pending.push_back(());
+        }
+
+        assert_eq!(invoked, 3);
+        assert_eq!(ledger.observation().counters.microtasks, 3);
+        assert!(matches!(
+            ledger.observation().terminal,
+            Some(DocumentExecutionTerminal::BudgetExceeded {
+                budget: DocumentExecutionBudget::Microtasks,
+                limit: 3,
+                observed: 4,
+            })
+        ));
+    }
+
+    #[test]
+    fn interrupt_queue_created_before_install_shares_the_exact_ledger() {
+        let main_queue = MicrotaskQueue::default();
+        let interrupt_queue =
+            MicrotaskQueue::with_execution_ledger_slot(main_queue.execution_ledger_slot());
+        let ledger = timers::DocumentExecutionLedger::new(execution_limits(2));
+        main_queue.install_execution_ledger(Some(ledger.clone()));
+
+        assert!(interrupt_queue.begin_microtask_job());
+        assert!(main_queue.begin_microtask_job());
+        assert!(!interrupt_queue.begin_microtask_job());
+        assert_eq!(ledger.observation().counters.microtasks, 2);
+        assert!(matches!(
+            ledger.observation().terminal,
+            Some(DocumentExecutionTerminal::BudgetExceeded {
+                budget: DocumentExecutionBudget::Microtasks,
+                limit: 2,
+                observed: 3,
+            })
+        ));
+    }
+
+    #[test]
+    fn reentrant_checkpoint_reports_already_performing() {
+        let queue = MicrotaskQueue::default();
+        assert_eq!(queue.begin_checkpoint(), Ok(()));
+        assert_eq!(
+            queue.begin_checkpoint(),
+            Err(MicrotaskCheckpointResult::AlreadyPerforming)
+        );
+    }
+
+    #[test]
+    fn terminal_abort_discards_work_requeued_by_the_last_admitted_job() {
+        let queue = MicrotaskQueue::default();
+        let ledger = timers::DocumentExecutionLedger::new(DocumentExecutionLimits {
+            mutations: 0,
+            ..execution_limits(1)
+        });
+        queue.install_execution_ledger(Some(ledger.clone()));
+        queue.performing_a_microtask_checkpoint.set(true);
+
+        // Model the last admitted job requeueing work before a non-rejecting mutation hook latches
+        // the terminal. The pending suffix is local to checkpoint(); this is the active suffix that
+        // previously survived its early return.
+        assert!(queue.begin_microtask_job());
+        queue
+            .microtask_queue
+            .borrow_mut()
+            .push(Microtask::CustomElementReaction);
+        ledger.record_mutation_record();
+        assert!(queue.execution_is_terminal());
+
+        let empty_notifications = Cell::new(0);
+        assert_eq!(
+            queue.abort_terminal_checkpoint(|| {
+                empty_notifications.set(empty_notifications.get() + 1)
+            }),
+            MicrotaskCheckpointResult::ExecutionTerminated
+        );
+        assert!(queue.empty());
+        assert!(!queue.performing_a_microtask_checkpoint.get());
+        assert_eq!(empty_notifications.get(), 1);
     }
 }

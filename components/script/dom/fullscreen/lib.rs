@@ -8,6 +8,7 @@ use embedder_traits::EmbedderMsg;
 use html5ever::{local_name, ns};
 use js::context::JSContext;
 use js::realm::CurrentRealm;
+use log::warn;
 use servo_config::pref;
 
 use crate::dom::bindings::codegen::Bindings::NodeBinding::GetRootNodeOptions;
@@ -29,7 +30,7 @@ use crate::dom::node::node::Node;
 use crate::dom::promise::Promise;
 use crate::dom::shadowroot::ShadowRoot;
 use crate::dom::types::HTMLDialogElement;
-use crate::messaging::{CommonScriptMsg, MainThreadScriptMsg};
+use crate::messaging::CommonScriptMsg;
 use crate::script_runtime::ScriptThreadEventCategory;
 use crate::task::TaskOnce;
 use crate::task_source::TaskSourceName;
@@ -142,8 +143,16 @@ impl Document {
             Some(pipeline_id),
             TaskSourceName::DOMManipulation,
         );
-        let msg = MainThreadScriptMsg::Common(script_msg);
-        self.window().main_thread_script_chan().send(msg).unwrap();
+        if self.window().event_loop_sender().send(script_msg).is_err() {
+            warn!("Could not queue fullscreen-enter task during ScriptThread shutdown");
+            if !error {
+                self.send_to_embedder(EmbedderMsg::NotifyFullscreenStateChanged(
+                    self.webview_id(),
+                    false,
+                ));
+            }
+            promise.reject_error(cx, Error::Abort(None));
+        }
 
         promise
     }
@@ -192,8 +201,10 @@ impl Document {
             pipeline_id,
             TaskSourceName::DOMManipulation,
         );
-        let msg = MainThreadScriptMsg::Common(script_msg);
-        window.main_thread_script_chan().send(msg).unwrap();
+        if window.event_loop_sender().send(script_msg).is_err() {
+            warn!("Could not queue fullscreen-exit task during ScriptThread shutdown");
+            promise.reject_error(cx, Error::Abort(None));
+        }
 
         promise
     }

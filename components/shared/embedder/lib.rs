@@ -8,6 +8,7 @@
 //! is not exposed in the API or doesn't involve messages sent to the embedding/libservo layer, it
 //! is probably a better fit for the `servo_constellation_traits` crate.
 
+mod document_time;
 pub mod embedder_controls;
 pub mod input_events;
 pub mod resources;
@@ -49,11 +50,12 @@ use webrender_api::units::{
     DeviceVector2D, LayoutPoint, LayoutRect, LayoutSize, LayoutVector2D,
 };
 
+#[doc(hidden)]
+pub use crate::document_time::*;
 pub use crate::embedder_controls::*;
 pub use crate::input_events::*;
 use crate::user_contents::UserContentManagerId;
 pub use crate::webdriver::*;
-
 /// A point in a `WebView`, either expressed in device pixels or page pixels.
 /// Page pixels are CSS pixels, which take into account device pixel scale,
 /// page zoom, and pinch zoom.

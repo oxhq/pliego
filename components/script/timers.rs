@@ -7,7 +7,7 @@ use std::cmp::{Ord, Ordering};
 use std::collections::VecDeque;
 use std::default::Default;
 use std::rc::Rc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use deny_public_fields::DenyPublicFields;
 use js::context::JSContext;
@@ -23,7 +23,9 @@ use serde::{Deserialize, Serialize};
 use servo_base::id::PipelineId;
 use servo_config::pref;
 use servo_url::ServoUrl;
-use timers::{BoxedTimerCallback, TimerEventRequest};
+use timers::{
+    BoxedTimerCallback, DocumentClock, DocumentClockError, DocumentTime, TimerEventRequest, TimerId,
+};
 
 use crate::dom::bindings::callback::ExceptionHandling::Report;
 use crate::dom::bindings::codegen::Bindings::FunctionBinding::Function;
@@ -50,7 +52,7 @@ use crate::script_thread::ScriptThread;
 use crate::task_source::SendableTaskSource;
 
 type TimerKey = i32;
-type RunStepsDeadline = Instant;
+type RunStepsDeadline = DocumentTime;
 type CompletionStep = Box<dyn FnOnce(&mut JSContext, &GlobalScope) + 'static>;
 
 /// <https://html.spec.whatwg.org/multipage/#run-steps-after-a-timeout>
@@ -80,12 +82,10 @@ pub(crate) struct OneshotTimers {
     js_timers: JsTimers,
     next_timer_handle: Cell<OneshotTimerHandle>,
     timers: DomRefCell<VecDeque<OneshotTimer>>,
-    suspended_since: Cell<Option<Instant>>,
-    /// Initially 0, increased whenever the associated document is reactivated
-    /// by the amount of ms the document was inactive. The current time can be
-    /// offset back by this amount for a coherent time across document
-    /// activations.
-    suspension_offset: Cell<Duration>,
+    #[no_trace]
+    document_clock: DocumentClock,
+    #[no_trace]
+    timebase: Cell<TimerTimebase>,
     /// Calls to `fire_timer` with a different argument than this get ignored.
     /// They were previously scheduled and got invalidated when
     ///  - timers were suspended,
@@ -94,9 +94,13 @@ pub(crate) struct OneshotTimers {
     ///    original timer is rescheduled when it is the next one to get called.
     #[no_trace]
     expected_event_id: Cell<TimerEventId>,
+    /// The outer scheduler event for the current earliest DOM timer.
+    #[no_trace]
+    scheduled_timer_id: Cell<Option<TimerId>>,
     /// <https://html.spec.whatwg.org/multipage/#map-of-active-timers>
     /// TODO this should also be used for the other timers
     /// as per <html.spec.whatwg.org/multipage/#map-of-settimeout-and-setinterval-ids>Z.
+    #[no_trace]
     map_of_active_timers: DomRefCell<RunStepsActiveMap>,
 
     /// <https://html.spec.whatwg.org/multipage/#run-steps-after-a-timeout>
@@ -110,6 +114,9 @@ pub(crate) struct OneshotTimers {
     /// <https://html.spec.whatwg.org/multipage/#run-steps-after-a-timeout>
     /// Start order sequence to break ties for Step 4.2.
     runsteps_start_seq: Cell<u64>,
+
+    /// Stable creation order for timers that share a deadline.
+    creation_sequence: Cell<u64>,
 }
 
 #[derive(DenyPublicFields, JSTraceable, MallocSizeOf)]
@@ -118,7 +125,44 @@ struct OneshotTimer {
     #[no_trace]
     source: TimerSource,
     callback: OneshotTimerCallback,
-    scheduled_for: Instant,
+    #[no_trace]
+    scheduled_for: DocumentTime,
+    creation_sequence: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, MallocSizeOf, PartialEq)]
+struct TimerTimebase {
+    suspended_at: Option<DocumentTime>,
+    suspension_offset: Duration,
+}
+
+impl TimerTimebase {
+    fn now(self, clock: &DocumentClock) -> Result<DocumentTime, DocumentClockError> {
+        self.suspended_at
+            .unwrap_or(clock.try_now()?)
+            .checked_sub(self.suspension_offset)
+    }
+
+    fn suspend(&mut self, clock: &DocumentClock) -> Result<bool, DocumentClockError> {
+        if self.suspended_at.is_some() {
+            return Ok(false);
+        }
+        self.suspended_at = Some(clock.try_now()?);
+        Ok(true)
+    }
+
+    fn resume(&mut self, clock: &DocumentClock) -> Result<bool, DocumentClockError> {
+        let Some(suspended_at) = self.suspended_at else {
+            return Ok(false);
+        };
+        let paused_for = clock.try_now()?.saturating_duration_since(suspended_at);
+        self.suspension_offset = self
+            .suspension_offset
+            .checked_add(paused_for)
+            .ok_or(DocumentClockError::Overflow)?;
+        self.suspended_at = None;
+        Ok(true)
+    }
 }
 
 // This enum is required to work around the fact that trait objects do not support generic methods.
@@ -167,10 +211,24 @@ impl OneshotTimerCallback {
 
 impl Ord for OneshotTimer {
     fn cmp(&self, other: &OneshotTimer) -> Ordering {
-        match self.scheduled_for.cmp(&other.scheduled_for).reverse() {
-            Ordering::Equal => self.handle.cmp(&other.handle).reverse(),
-            res => res,
-        }
+        compare_timer_order(
+            self.scheduled_for,
+            self.creation_sequence,
+            other.scheduled_for,
+            other.creation_sequence,
+        )
+    }
+}
+
+fn compare_timer_order(
+    left_deadline: DocumentTime,
+    left_sequence: u64,
+    right_deadline: DocumentTime,
+    right_sequence: u64,
+) -> Ordering {
+    match left_deadline.cmp(&right_deadline).reverse() {
+        Ordering::Equal => left_sequence.cmp(&right_sequence).reverse(),
+        ordering => ordering,
     }
 }
 
@@ -191,22 +249,24 @@ impl OneshotTimers {
     pub(crate) fn new(global_scope: &GlobalScope) -> OneshotTimers {
         OneshotTimers {
             global_scope: Dom::from_ref(global_scope),
+            document_clock: global_scope.document_clock(),
             js_timers: JsTimers::default(),
             next_timer_handle: Cell::new(OneshotTimerHandle(1)),
             timers: DomRefCell::new(VecDeque::new()),
-            suspended_since: Cell::new(None),
-            suspension_offset: Cell::new(Duration::ZERO),
+            timebase: Cell::new(TimerTimebase::default()),
             expected_event_id: Cell::new(TimerEventId(0)),
+            scheduled_timer_id: Cell::new(None),
             map_of_active_timers: Default::default(),
             runsteps_queues: Default::default(),
             next_runsteps_key: Cell::new(1),
             runsteps_start_seq: Cell::new(0),
+            creation_sequence: Cell::new(0),
         }
     }
 
     /// <https://html.spec.whatwg.org/multipage/#run-steps-after-a-timeout>
     #[inline]
-    pub(crate) fn now_for_runsteps(&self) -> Instant {
+    pub(crate) fn now_for_runsteps(&self) -> DocumentTime {
         // Step 2. Let startTime be the current high resolution time given global.
         self.base_time()
     }
@@ -270,14 +330,28 @@ impl OneshotTimers {
         source: TimerSource,
     ) -> OneshotTimerHandle {
         let new_handle = self.next_timer_handle.get();
-        self.next_timer_handle
-            .set(OneshotTimerHandle(new_handle.0 + 1));
+        self.next_timer_handle.set(OneshotTimerHandle(
+            new_handle
+                .0
+                .checked_add(1)
+                .expect("DOM timer handle sequence exhausted"),
+        ));
+        let creation_sequence = self.creation_sequence.get();
+        self.creation_sequence.set(
+            creation_sequence
+                .checked_add(1)
+                .expect("DOM timer creation sequence exhausted"),
+        );
 
         let timer = OneshotTimer {
             handle: new_handle,
             source,
             callback,
-            scheduled_for: self.base_time() + duration,
+            scheduled_for: self
+                .base_time()
+                .checked_add(duration)
+                .expect("validated DOM timer duration exceeded the document clock"),
+            creation_sequence,
         };
 
         // https://html.spec.whatwg.org/multipage/#run-steps-after-a-timeout
@@ -334,7 +408,7 @@ impl OneshotTimers {
             return;
         }
 
-        assert!(self.suspended_since.get().is_none());
+        assert!(self.timebase.get().suspended_at.is_none());
 
         let base_time = self.base_time();
 
@@ -344,21 +418,16 @@ impl OneshotTimers {
             return;
         }
 
-        // select timers to run to prevent firing timers
-        // that were installed during fire of another timer
-        let mut timers_to_run = Vec::new();
-
-        loop {
+        // Pop exactly one timer. Each due DOM timer must become its own event-loop task so the
+        // existing task path performs the required microtask checkpoint before another timer.
+        let timer = {
             let mut timers = self.timers.borrow_mut();
+            timers
+                .pop_back()
+                .expect("an expected timer event must have one due DOM timer")
+        };
 
-            if timers.is_empty() || timers.back().unwrap().scheduled_for > base_time {
-                break;
-            }
-
-            timers_to_run.push(timers.pop_back().unwrap());
-        }
-
-        for timer in timers_to_run {
+        for timer in [timer] {
             // Since timers can be coalesced together inside a task,
             // this loop can keep running, including after an interrupt of the JS,
             // and prevent a clean-shutdown of a JS-running thread.
@@ -386,6 +455,7 @@ impl OneshotTimers {
                             source: timer.source,
                             callback: timer.callback,
                             scheduled_for: self.base_time(),
+                            creation_sequence: timer.creation_sequence,
                         };
                         let mut timers = self.timers.borrow_mut();
                         let idx = timers.binary_search(&rein).err().unwrap();
@@ -434,12 +504,11 @@ impl OneshotTimers {
         self.schedule_timer_call();
     }
 
-    fn base_time(&self) -> Instant {
-        let offset = self.suspension_offset.get();
-        match self.suspended_since.get() {
-            Some(suspend_time) => suspend_time - offset,
-            None => Instant::now() - offset,
-        }
+    fn base_time(&self) -> DocumentTime {
+        self.timebase
+            .get()
+            .now(&self.document_clock)
+            .expect("DOM timer suspension offset exceeded the document clock")
     }
 
     pub(crate) fn slow_down(&self) {
@@ -454,33 +523,38 @@ impl OneshotTimers {
 
     pub(crate) fn suspend(&self) {
         // Suspend is idempotent: do nothing if the timers are already suspended.
-        if self.suspended_since.get().is_some() {
+        let mut timebase = self.timebase.get();
+        if !timebase
+            .suspend(&self.document_clock)
+            .expect("document clock failed while suspending DOM timers")
+        {
             return warn!("Suspending an already suspended timer.");
         }
 
         debug!("Suspending timers.");
-        self.suspended_since.set(Some(Instant::now()));
+        self.timebase.set(timebase);
         self.invalidate_expected_event_id();
     }
 
     pub(crate) fn resume(&self) {
         // Resume is idempotent: do nothing if the timers are already resumed.
-        let additional_offset = match self.suspended_since.get() {
-            Some(suspended_since) => Instant::now() - suspended_since,
-            None => return warn!("Resuming an already resumed timer."),
-        };
+        let mut timebase = self.timebase.get();
+        if !timebase
+            .resume(&self.document_clock)
+            .expect("document clock failed while resuming DOM timers")
+        {
+            return warn!("Resuming an already resumed timer.");
+        }
 
         debug!("Resuming timers.");
-        self.suspension_offset
-            .set(self.suspension_offset.get() + additional_offset);
-        self.suspended_since.set(None);
+        self.timebase.set(timebase);
 
         self.schedule_timer_call();
     }
 
     /// <https://html.spec.whatwg.org/multipage/#timer-initialisation-steps>
     fn schedule_timer_call(&self) {
-        if self.suspended_since.get().is_some() {
+        if self.timebase.get().suspended_at.is_some() {
             // The timer will be scheduled when the pipeline is fully activated.
             return;
         }
@@ -507,15 +581,25 @@ impl OneshotTimers {
 
         let event_request = TimerEventRequest {
             callback,
-            duration: timer.scheduled_for - self.base_time(),
+            duration: timer
+                .scheduled_for
+                .saturating_duration_since(self.base_time()),
         };
 
-        self.global_scope.schedule_timer(event_request);
+        self.scheduled_timer_id
+            .set(self.global_scope.schedule_timer(event_request));
     }
 
     fn invalidate_expected_event_id(&self) -> TimerEventId {
+        if let Some(timer_id) = self.scheduled_timer_id.take() {
+            self.global_scope.cancel_timer(timer_id);
+        }
         let TimerEventId(currently_expected) = self.expected_event_id.get();
-        let next_id = TimerEventId(currently_expected + 1);
+        let next_id = TimerEventId(
+            currently_expected
+                .checked_add(1)
+                .expect("DOM timer event sequence exhausted"),
+        );
         debug!(
             "invalidating expected timer (was {:?}, now {:?}",
             currently_expected, next_id
@@ -958,5 +1042,58 @@ fn active_script_fetch_info(cx: &mut JSContext, global: &GlobalScope) -> Initiat
     InitiatingScriptFetchInfo {
         fetch_options,
         base_url,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use timers::DocumentClockConfiguration;
+
+    use super::*;
+
+    #[test]
+    fn suspension_freezes_dom_timer_time_and_resume_excludes_the_pause() {
+        let clock = DocumentClock::new(DocumentClockConfiguration::Controlled {
+            initial_time_ns: 10,
+            unix_time_origin_ns: 0,
+            execution_limits: None,
+        });
+        let mut timebase = TimerTimebase::default();
+        assert_eq!(timebase.now(&clock).unwrap(), DocumentTime::from_nanos(10));
+
+        assert!(timebase.suspend(&clock).unwrap());
+        assert!(!timebase.suspend(&clock).unwrap());
+        clock.advance_to(DocumentTime::from_nanos(20)).unwrap();
+        assert_eq!(timebase.now(&clock).unwrap(), DocumentTime::from_nanos(10));
+
+        assert!(timebase.resume(&clock).unwrap());
+        assert!(!timebase.resume(&clock).unwrap());
+        clock.advance_to(DocumentTime::from_nanos(25)).unwrap();
+        assert_eq!(timebase.now(&clock).unwrap(), DocumentTime::from_nanos(15));
+        let original_deadline = DocumentTime::from_nanos(20);
+        assert_eq!(
+            original_deadline.saturating_duration_since(timebase.now(&clock).unwrap()),
+            Duration::from_nanos(5)
+        );
+    }
+
+    #[test]
+    fn dom_timer_order_is_deadline_then_creation_sequence() {
+        let early = DocumentTime::from_nanos(5);
+        let late = DocumentTime::from_nanos(10);
+        assert_eq!(compare_timer_order(early, 9, late, 0), Ordering::Greater);
+        assert_eq!(compare_timer_order(late, 0, early, 9), Ordering::Less);
+        assert_eq!(compare_timer_order(early, 0, early, 1), Ordering::Greater);
+        assert_eq!(compare_timer_order(early, 1, early, 0), Ordering::Less);
+    }
+
+    #[test]
+    fn timer_nesting_preserves_the_existing_minimum_delay_boundary() {
+        assert_eq!(clamp_duration(5, Duration::ZERO), Duration::ZERO);
+        assert_eq!(clamp_duration(6, Duration::ZERO), Duration::from_millis(4));
+        assert_eq!(
+            clamp_duration(6, Duration::from_millis(9)),
+            Duration::from_millis(9)
+        );
     }
 }

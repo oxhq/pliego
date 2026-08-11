@@ -60,6 +60,7 @@ mod from_embedder {
                 Self::Reload(..) => target!("Reload"),
                 Self::LogEntry(..) => target!("LogEntry"),
                 Self::NewWebView(..) => target!("NewWebView"),
+                Self::NewWebViewWithDocumentClock(..) => target!("NewWebViewWithDocumentClock"),
                 Self::CloseWebView(..) => target!("CloseWebView"),
                 Self::FocusWebView(..) => target!("FocusWebView"),
                 Self::BlurWebView => target!("BlurWebView"),
@@ -73,6 +74,8 @@ mod from_embedder {
                 Self::PaintMetric(..) => target!("PaintMetric"),
                 Self::EvaluateJavaScript(..) => target!("EvaluateJavaScript"),
                 Self::RequestLayoutDebugSnapshot(..) => target!("RequestLayoutDebugSnapshot"),
+                Self::ControlDocumentTime(..) => target!("ControlDocumentTime"),
+                Self::CancelDocumentTimeControl(..) => target!("CancelDocumentTimeControl"),
                 Self::CreateMemoryReport(..) => target!("CreateMemoryReport"),
                 Self::SendImageKeysForPipeline(..) => target!("SendImageKeysForPipeline"),
                 Self::PreferencesUpdated(..) => target!("PreferencesUpdated"),
@@ -186,6 +189,9 @@ mod from_script {
                 Self::IFrameSizes(..) => target!("IFrameSizes"),
                 Self::ReportMemory(..) => target!("ReportMemory"),
                 Self::FinishJavaScriptEvaluation(..) => target!("FinishJavaScriptEvaluation"),
+                Self::ControlledDocumentTimeResponse(..) => {
+                    target!("ControlledDocumentTimeResponse")
+                },
                 Self::ForwardKeyboardScroll(..) => target!("ForwardKeyboardScroll"),
                 Self::RespondToScreenshotReadinessRequest(..) => {
                     target!("RespondToScreenshotReadinessRequest")

@@ -73,7 +73,7 @@ use servo_constellation_traits::{
 use servo_url::{ImmutableOrigin, MutableOrigin, ServoUrl};
 use storage_traits::StorageThreads;
 use strum::VariantArray;
-use timers::{TimerEventRequest, TimerId};
+use timers::{DocumentClock, TimerEventRequest, TimerId};
 use uuid::Uuid;
 #[cfg(feature = "webgpu")]
 use webgpu_traits::{DeviceLostReason, WebGPUDevice};
@@ -147,6 +147,7 @@ use crate::fetch::{DeferredFetchRecordId, FetchGroup, QueuedDeferredFetchRecord}
 use crate::messaging::{CommonScriptMsg, ScriptEventLoopReceiver, ScriptEventLoopSender};
 use crate::microtask::Microtask;
 use crate::network_listener::{FetchResponseListener, NetworkListener};
+use crate::producer_fence::fence_fetch_until_eof;
 use crate::realms::enter_auto_realm;
 use crate::script_module::{
     ImportMap, ModuleRequest, ModuleStatus, ResolvedModule, ScriptFetchOptions,
@@ -2600,6 +2601,22 @@ impl GlobalScope {
         }
     }
 
+    /// Cancel an outer scheduler event previously returned by [`Self::schedule_timer`].
+    pub(crate) fn cancel_timer(&self, timer_id: TimerId) {
+        match self.downcast::<WorkerGlobalScope>() {
+            Some(worker_global) => worker_global.timer_scheduler().cancel_timer(timer_id),
+            _ => with_script_thread(|script_thread| script_thread.cancel_timer(timer_id)),
+        }
+    }
+
+    /// Return the clock shared by this global's DOM timers and outer timer scheduler.
+    pub(crate) fn document_clock(&self) -> DocumentClock {
+        match self.downcast::<WorkerGlobalScope>() {
+            Some(worker_global) => worker_global.document_clock(),
+            _ => ScriptThread::current_document_clock(),
+        }
+    }
+
     /// <https://html.spec.whatwg.org/multipage/#nested-browsing-context>
     pub(crate) fn is_nested_browsing_context(&self) -> bool {
         self.downcast::<Window>()
@@ -3362,11 +3379,17 @@ impl GlobalScope {
         request_builder: RequestBuilder,
         network_listener: NetworkListener<Listener>,
     ) {
+        let callback = network_listener.into_callback();
+        let callback = if let Some(window) = self.downcast::<Window>() {
+            fence_fetch_until_eof(&window.script_thread().document_producer_fence(), callback)
+        } else {
+            callback
+        };
         fetch_async(
             &self.core_resource_thread(),
             request_builder,
             None,
-            network_listener.into_callback(),
+            callback,
         );
     }
 
@@ -3524,7 +3547,9 @@ impl GlobalScope {
             let start_time = timers.now_for_runsteps();
 
             // Step 3. Set global's map of active timers[timerKey] to startTime plus milliseconds.
-            let deadline = start_time + delay;
+            let deadline = start_time
+                .checked_add(delay)
+                .expect("run-steps timer exceeded the checked document clock");
             timers.runsteps_set_active(timer_key, deadline);
 
             // Step 4. Run the following steps in parallel:

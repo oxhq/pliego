@@ -10,7 +10,9 @@ use servo_base::cross_process_instant::CrossProcessInstant;
 use servo_url::ServoUrl;
 use time::Duration;
 
-use super::performanceentry::{EntryType, PerformanceEntry};
+use super::performanceentry::{
+    EntryType, PerformanceEntry, PerformanceEntryDuration, PerformanceEntryTime,
+};
 use crate::dom::bindings::codegen::Bindings::PerformanceBinding::DOMHighResTimeStamp;
 use crate::dom::bindings::codegen::Bindings::PerformanceResourceTimingBinding::PerformanceResourceTimingMethods;
 use crate::dom::bindings::reflector::DomGlobal;
@@ -93,8 +95,8 @@ impl PerformanceResourceTiming {
             entry: PerformanceEntry::new_inherited(
                 DOMString::from(url.into_string()),
                 entry_type,
-                start_time,
-                duration,
+                start_time.map(PerformanceEntryTime::Host),
+                PerformanceEntryDuration::Host(duration),
             ),
             initiator_type,
             next_hop: None,

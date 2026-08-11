@@ -8,6 +8,8 @@ use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use timers::DocumentProducerGuard;
+
 macro_rules! task {
     ($name:ident: |$($field:ident: $field_type:ty$(,)*)*| $body:tt) => {{
         #[allow(non_camel_case_types)]
@@ -126,6 +128,30 @@ pub(crate) trait TaskBox: Send {
     fn name(&self) -> &'static str;
 
     fn run_box(self: Box<Self>, cx: &mut js::context::JSContext);
+}
+
+/// Keeps a producer ticket live until a boxed task has either run or been discarded.
+pub(crate) struct ProducerFencedTaskBox {
+    inner: Box<dyn TaskBox>,
+    guard: DocumentProducerGuard,
+}
+
+impl ProducerFencedTaskBox {
+    pub(crate) fn new(inner: Box<dyn TaskBox>, guard: DocumentProducerGuard) -> Self {
+        Self { inner, guard }
+    }
+}
+
+impl TaskBox for ProducerFencedTaskBox {
+    fn name(&self) -> &'static str {
+        self.inner.name()
+    }
+
+    fn run_box(self: Box<Self>, cx: &mut js::context::JSContext) {
+        let Self { inner, guard } = *self;
+        inner.run_box(cx);
+        drop(guard);
+    }
 }
 
 /// A boxed version of `NonSendTaskOnce`.

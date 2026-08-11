@@ -9,7 +9,9 @@ use servo_base::cross_process_instant::CrossProcessInstant;
 use servo_url::ServoUrl;
 use time::Duration;
 
-use super::performanceentry::{EntryType, PerformanceEntry};
+use super::performanceentry::{
+    EntryType, PerformanceEntry, PerformanceEntryDuration, PerformanceEntryTime,
+};
 use crate::dom::bindings::codegen::Bindings::LargestContentfulPaintBinding::LargestContentfulPaintMethods;
 use crate::dom::bindings::codegen::Bindings::PerformanceBinding::DOMHighResTimeStamp;
 use crate::dom::bindings::reflector::DomGlobal;
@@ -40,8 +42,8 @@ impl LargestContentfulPaint {
             entry: PerformanceEntry::new_inherited(
                 DOMString::from(""),
                 EntryType::LargestContentfulPaint,
-                Some(render_time),
-                Duration::ZERO,
+                Some(PerformanceEntryTime::Host(render_time)),
+                PerformanceEntryDuration::Host(Duration::ZERO),
             ),
             load_time: CrossProcessInstant::epoch(),
             render_time,

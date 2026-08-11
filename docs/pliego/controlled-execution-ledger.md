@@ -1,0 +1,51 @@
+# Controlled execution ledger
+
+This U4 slice adds an opt-in, session-scoped execution ledger to Servo's controlled document-clock
+domain. Realtime WebViews and controlled clocks configured without limits retain the existing path:
+they do not construct, update, or expose a DocumentExecutionLedger.
+
+The ledger enforces only work with a truthful engine-owned boundary:
+
+- an ordinary controlled task is counted before its queued event is removed or processed. Servo's
+  TimerFired, TaskQueue Inactive/WakeUp, and ignored host-animation pump markers are not charged;
+  the retained or actual timer task is counted when it reaches the queue;
+- each microtask is counted inside MicrotaskQueue before that individual job runs, so a job that
+  continually requeues itself reaches the microtask limit within the same DriveOneTurn. The main
+  SpiderMonkey queue and every nested debugger interrupt queue share the exact policy slot;
+- an update-the-rendering invocation is counted before it samples the frame time or runs callbacks,
+  style, layout, or paint; and
+- each invocation of Servo's central DOM mutation-record hook is counted without becoming an
+  admission decision. Crossing this limit is terminal, but the engine neither suppresses nor claims
+  to roll back the DOM algorithm.
+
+The first limit breach is sticky. Counters freeze at that boundary, later controlled work is not
+admitted, and the next authoritative control response carries the limits, counters, and typed
+terminal reason. A DriveOneTurn that observes the boundary remains a completed observation; it does
+not turn committed work into a control-plane rejection. A guarded AdvanceTo presented after a
+terminal is definitively rejected while the ledger is locked and before clock mutation. Missing
+DriveOneTurn or AdvanceTo responses retain their existing indeterminate transport semantics.
+
+When the ledger is enabled, producer empty-checkpoint qualification is also bound to the exact
+execution observation. Any task, microtask, rendering, mutation-record, resource-evidence, or
+terminal counter change discards the previous empty candidate even if no producer ticket changed;
+two new unchanged checkpoints are required. A clock without a ledger retains the U1-U3 producer
+observer behavior.
+
+The ScriptThread-owned producer fence also records a clearly named owned_resource_events total. It
+is evidence, not enforcement of API 2's post_readiness_resources budget: this slice has no truthful
+readiness-phase transition from which to start that counter.
+
+## Remaining seams
+
+This slice does not claim:
+
+- CPU or host-wall hard interruption of JavaScript already running inside one task or microtask;
+- a post-readiness resource budget, until readiness is a typed phase transition;
+- a universal post-DOM-write generation (CharacterData deliberately queues its record before the
+  write), or complete style, Canvas, image, font, or worker mutation generations;
+- generation-bound capture or stale-capture recovery;
+- classification of infinite timers, RAF loops, declarative animations, workers, or resources; or
+- full visual settlement, producer-fenced quiescence, or API 2 terminal artifact integration.
+
+Those are separate fail-closed gates. A ledger terminal must prevent publication, but wiring that
+terminal through the Pliego-owned settlement and publication state machine belongs to later slices.
