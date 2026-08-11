@@ -1247,13 +1247,21 @@ mod tests {
         );
         assert!(!store.loaded_evidence_is_complete(&[], Some(&mismatched_failure)));
 
-        store
+        let metadata_bytes = store.metadata_bytes;
+        let repeated = store
             .retain(
                 &exact,
                 resource("text/javascript", b"window.ready = true;".to_vec()),
                 &headers("text/javascript"),
             )
             .unwrap();
+        assert_eq!(store.metadata_bytes, metadata_bytes);
+        assert_eq!(store.requests.len(), 1);
+        assert_eq!(store.resources.len(), 1);
+        assert_eq!(
+            evidence.content_address.as_deref(),
+            Some(repeated.content_address())
+        );
         assert!(!store.loaded_evidence_is_complete(&[], Some(&failure)));
     }
 
