@@ -232,12 +232,29 @@ jobs:
           if ($help.Contains('NONPRODUCTION ORACLE BUILD')) {
             throw 'release bundle contains the nonproduction shell oracle'
           }
-          $exports = (& link.exe /dump /exports "$directory\pliego.exe" | Out-String)
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          foreach ($symbol in @('NvOptimusEnablement', 'AmdPowerXpressRequestHighPerformance')) {
-            if (-not $exports.Contains($symbol)) {
-              throw "release bundle does not export the surfman GPU selection symbol $symbol"
+          $llvmReadObj = Join-Path $env:LIBCLANG_PATH 'llvm-readobj.exe'
+          if (-not (Test-Path -LiteralPath $llvmReadObj -PathType Leaf)) {
+            throw "LLVM PE reader does not exist: $llvmReadObj"
+          }
+          $exports = (& $llvmReadObj --coff-exports "$directory\pliego.exe" | Out-String)
+          $readObjExitCode = $LASTEXITCODE
+          if ($readObjExitCode -ne 0) {
+            throw "llvm-readobj failed with exit code $readObjExitCode"
+          }
+          $exports | Write-Output
+          $exportNames = @(
+            $exports -split "`r?`n" | ForEach-Object {
+              if ($_ -cmatch '^\s*Name:\s+(\S+)\s*$') { $Matches[1] }
             }
+          )
+          foreach ($symbol in @('NvOptimusEnablement', 'AmdPowerXpressRequestHighPerformance')) {
+            $count = @($exportNames | Where-Object { $_ -ceq $symbol }).Count
+            if ($count -ne 1) {
+              throw "release bundle export table contains $count exact entries for GPU selection symbol $symbol"
+            }
+          }
+          if ($exportNames -ccontains '_SURFMAN_LINK_ARGS') {
+            throw 'release bundle unexpectedly exports _SURFMAN_LINK_ARGS'
           }
           $versionStderr = Join-Path $env:RUNNER_TEMP 'pliego-version-${{ matrix.bundle }}.stderr'
           & "$directory\pliego.exe" --version 2> $versionStderr | Tee-Object -FilePath "$directory\VERSION.txt"
