@@ -3588,6 +3588,16 @@ mod tests {
     use crate::session::LocalDocument;
     use crate::session::SessionArtifacts;
 
+    #[cfg(feature = "document-session")]
+    struct RemoveFileOnDrop(PathBuf);
+
+    #[cfg(feature = "document-session")]
+    impl Drop for RemoveFileOnDrop {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.0);
+        }
+    }
+
     const DEJAVU_SANS: &[u8] = include_bytes!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../components/fonts/tests/support/dejavu-fonts-ttf-2.37/ttf/DejaVuSans.ttf"
@@ -6107,6 +6117,8 @@ mod tests {
             ".pliego-relative-output-{}-{unique}.pdf",
             std::process::id()
         ));
+        let absolute_output = std::env::current_dir().unwrap().join(&output);
+        let _output_cleanup = RemoveFileOnDrop(absolute_output.clone());
         let request = RenderRequest {
             input: PathBuf::from("input.html"),
             environment: RenderEnvironment::default(),
@@ -6157,9 +6169,9 @@ mod tests {
             bundle["output"]["path"],
             serde_json::json!(output.to_string_lossy())
         );
-        assert!(output.is_file());
+        assert!(absolute_output.is_file());
 
-        fs::remove_file(output).unwrap();
+        fs::remove_file(absolute_output).unwrap();
         fs::remove_dir_all(root).unwrap();
     }
 

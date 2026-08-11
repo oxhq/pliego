@@ -1234,6 +1234,9 @@ fn read_open_file_at(file: &File, buffer: &mut [u8], offset: u64) -> io::Result<
 fn read_open_file_at(file: &File, buffer: &mut [u8], offset: u64) -> io::Result<usize> {
     use std::os::windows::fs::FileExt;
 
+    // Unlike Unix read_at, seek_read sets the handle's shared cursor to the end
+    // of each read. Do not write through this handle after verification unless
+    // the cursor is restored or synchronized; concurrent use also needs synchronization.
     file.seek_read(buffer, offset)
 }
 
@@ -1440,6 +1443,52 @@ fn publish_owned_file(
     Ok(())
 }
 
+#[cfg(any(target_os = "macos", test))]
+#[derive(Debug)]
+struct DestinationVolumeCloneUnsupported {
+    destination: PathBuf,
+    source: io::Error,
+}
+
+#[cfg(any(target_os = "macos", test))]
+impl fmt::Display for DestinationVolumeCloneUnsupported {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "destination volume does not support fclonefileat cloning required for fail-closed publication at {}: {}",
+            self.destination.display(),
+            self.source
+        )
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+impl Error for DestinationVolumeCloneUnsupported {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn contextualize_clonefileat_error(
+    error: io::Error,
+    destination: &Path,
+    enotsup: i32,
+) -> io::Error {
+    if error.raw_os_error() != Some(enotsup) {
+        return error;
+    }
+
+    let kind = error.kind();
+    io::Error::new(
+        kind,
+        DestinationVolumeCloneUnsupported {
+            destination: destination.to_owned(),
+            source: error,
+        },
+    )
+}
+
 #[cfg(target_os = "macos")]
 fn publish_owned_file(
     source: &OwnedFile,
@@ -1480,7 +1529,11 @@ fn publish_owned_file(
         )
     };
     if result != 0 {
-        return Err(io::Error::last_os_error());
+        return Err(contextualize_clonefileat_error(
+            io::Error::last_os_error(),
+            destination,
+            libc::ENOTSUP,
+        ));
     }
     Ok(())
 }
@@ -1787,8 +1840,41 @@ mod tests {
 
     use super::{
         BUNDLE_FILE_NAME, LocalDocument, OwnedFile, SessionArtifacts, SessionFailure,
-        WebResourceLoadRole,
+        WebResourceLoadRole, contextualize_clonefileat_error,
     };
+
+    #[test]
+    fn clonefileat_enotsup_reports_destination_volume_without_reclassifying_other_errors() {
+        const SYNTHETIC_ENOTSUP: i32 = 45;
+        let destination = PathBuf::from("volume/report.pdf");
+        let unsupported = std::io::Error::from_raw_os_error(SYNTHETIC_ENOTSUP);
+        let expected_kind = unsupported.kind();
+
+        let contextualized =
+            contextualize_clonefileat_error(unsupported, &destination, SYNTHETIC_ENOTSUP);
+        assert_eq!(contextualized.kind(), expected_kind);
+        assert!(contextualized.to_string().contains("destination volume"));
+        assert!(contextualized.to_string().contains("fclonefileat"));
+        assert!(
+            contextualized
+                .to_string()
+                .contains(&destination.display().to_string())
+        );
+        let source = contextualized
+            .get_ref()
+            .unwrap()
+            .downcast_ref::<super::DestinationVolumeCloneUnsupported>()
+            .unwrap();
+        assert_eq!(source.source.raw_os_error(), Some(SYNTHETIC_ENOTSUP));
+
+        let passthrough = contextualize_clonefileat_error(
+            std::io::Error::from_raw_os_error(5),
+            &destination,
+            SYNTHETIC_ENOTSUP,
+        );
+        assert_eq!(passthrough.raw_os_error(), Some(5));
+        assert!(!passthrough.to_string().contains("destination volume"));
+    }
 
     fn replace_open_file(file: &mut std::fs::File, bytes: &[u8]) {
         file.set_len(0).unwrap();
