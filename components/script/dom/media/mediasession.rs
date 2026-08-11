@@ -78,7 +78,7 @@ impl MediaSession {
     /// A bare MediaSession is inert for capture. Default actions require a live media element,
     /// whose authoritative Document owner tracker already blocks generation capture separately.
     pub(crate) fn controlled_capture_action_handler_count(&self) -> usize {
-        self.action_handlers.borrow().len()
+        self.action_handlers.borrow().0.len()
     }
 
     pub(crate) fn handle_action(

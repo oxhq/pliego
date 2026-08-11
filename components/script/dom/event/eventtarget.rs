@@ -477,7 +477,7 @@ impl EventTarget {
         let mut handlers = self.handlers.borrow_mut();
         for (ty, entries) in handlers.iter() {
             let mut live_entries = 0_usize;
-            for entry in entries {
+            for entry in entries.iter() {
                 let mut entry = entry.borrow_mut();
                 if !entry.removed {
                     entry.removed = true;

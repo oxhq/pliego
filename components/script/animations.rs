@@ -23,6 +23,7 @@ use style::animation::{
 };
 use style::dom::OpaqueNode;
 use style::selector_parser::PseudoElement;
+use style_traits::ToCss as _;
 use timers::DocumentTime;
 
 use crate::dom::animationevent::AnimationEvent;
