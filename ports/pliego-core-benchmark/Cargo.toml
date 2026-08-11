@@ -21,7 +21,7 @@ path = "../pliego/benches/document_scene_pdf.rs"
 harness = false
 
 [dependencies]
-pliego = { path = "../pliego", default-features = false }
+pliego = { workspace = true, default-features = false }
 
 [dev-dependencies]
 criterion = { workspace = true }
