@@ -5563,7 +5563,9 @@ mod tests {
             assert_eq!(error.code, "INPUT_RESOURCE_IDENTITY_MISMATCH");
         }
 
-        fs::remove_dir_all(fixture.root).unwrap();
+        let root = fixture.root.clone();
+        drop(fixture);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
