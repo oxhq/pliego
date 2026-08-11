@@ -65,8 +65,8 @@ fn emit_servo_build_identity(workspace_root: &Path) -> Result<(), Box<dyn Error>
         let head_path = normalize_git_path(workspace_root, &head_path);
         println!("cargo:rerun-if-changed={}", head_path.display());
     }
-    if let Ok(reference) = git_output(workspace_root, &["symbolic-ref", "-q", "HEAD"])
-        && let Ok(reference_path) =
+    if let Ok(reference) = git_output(workspace_root, &["symbolic-ref", "-q", "HEAD"]) &&
+        let Ok(reference_path) =
             git_output(workspace_root, &["rev-parse", "--git-path", &reference])
     {
         let reference_path = normalize_git_path(workspace_root, &reference_path);
