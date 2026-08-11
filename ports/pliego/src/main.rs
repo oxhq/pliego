@@ -32,9 +32,9 @@ use pliego::pdf::{CSS_PX_TO_PDF_PT, PdfFontResource, PdfFontVariation, render_do
 use pliego::raster::{RasterFontResource, RasterFontVariation, render_pages_png_with_images};
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
 use readiness::{Readiness, ReadinessPolicy, parse_snapshot};
-#[cfg(not(any(target_os = "android", target_env = "ohos")))]
-use session::PreparedPublicationError;
 use session::{LocalDocument, SessionArtifacts};
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+use session::{PreparedPublicationError, PublicationJournal, PublicationRecoveryState};
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
 use sha2::{Digest, Sha256};
 
@@ -102,6 +102,7 @@ const DEFAULT_PAGE_HEIGHT_CSS_PX: f32 = 1122.5197;
 const DEFAULT_PAGE_MARGIN_VERTICAL_CSS_PX: f32 = 45.3543;
 const DEFAULT_PAGE_MARGIN_HORIZONTAL_CSS_PX: f32 = 60.4724;
 const RENDER_ID_SCHEMA_MARKER: &[u8] = b"pliego.render-id.v1";
+const PUBLICATION_REQUEST_SCHEMA_MARKER: &[u8] = b"pliego.publication-request.v1";
 const RESOLVED_INPUT_HASH_SCHEMA_MARKER: &[u8] = b"pliego.resolved-input.v1";
 
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
@@ -493,10 +494,21 @@ fn main() {
         Command::Help => print_help(),
         Command::Version => print_version(),
         Command::Render(request) => match DocumentEngine::render(request) {
-            Ok(outcome) => println!("{}", outcome.summary),
+            Ok(outcome) => {
+                let mut stdout = std::io::stdout().lock();
+                write_render_outcome(&mut stdout, &outcome)
+                    .expect("failed to write the render outcome to stdout");
+            },
             Err(error) => print_render_error(&error),
         },
     }
+}
+
+fn write_render_outcome(
+    writer: &mut impl std::io::Write,
+    outcome: &RenderOutcome,
+) -> std::io::Result<()> {
+    writer.write_all(&outcome.cli_bytes)
 }
 
 fn print_help() {
@@ -582,6 +594,7 @@ fn print_render_error(error: &RenderError) -> ! {
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
 struct PublicationTransaction {
     artifacts: SessionArtifacts,
+    journal: PublicationJournal,
     proof: PathBuf,
     userscripts: PathBuf,
     document_pdf_path: PathBuf,
@@ -590,29 +603,51 @@ struct PublicationTransaction {
 }
 
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+enum PublicationStart {
+    New(PublicationTransaction),
+    Recovered(RenderOutcome),
+}
+
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
 fn begin_publication(
     request: &RenderRequest,
     resource_policy: &ResourcePolicy,
     render_id: &str,
-) -> Result<PublicationTransaction, RenderError> {
-    let artifacts = if let Some(paths) = &request.explicit_paths {
-        SessionArtifacts::create_with_render_id(&paths.artifacts, render_id).map_err(|error| {
-            let code = if error.kind() == std::io::ErrorKind::AlreadyExists {
-                "ARTIFACTS_ALREADY_EXISTS"
-            } else {
-                "ARTIFACTS_CREATE_FAILED"
-            };
-            RenderError::session(
-                &paths.artifacts,
-                &paths.output,
-                render_id,
-                code,
-                format!(
-                    "cannot create exclusive artifact directory {}: {error}",
-                    paths.artifacts.display()
-                ),
-            )
-        })?
+    resolved_input: &Path,
+) -> Result<PublicationStart, RenderError> {
+    let request_fingerprint =
+        publication_request_fingerprint(render_id, request.allow_partial_scene, resolved_input);
+    let (artifacts, resuming) = if let Some(paths) = &request.explicit_paths {
+        match SessionArtifacts::create_with_render_id(&paths.artifacts, render_id) {
+            Ok(artifacts) => (artifacts, false),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => (
+                SessionArtifacts::open_for_publication_recovery(&paths.artifacts, render_id)
+                    .map_err(|recovery_error| {
+                        RenderError::session(
+                            &paths.artifacts,
+                            &paths.output,
+                            render_id,
+                            "PUBLICATION_RECOVERY_FAILED",
+                            format!(
+                                "existing artifact root cannot be opened for publication recovery: {recovery_error}"
+                            ),
+                        )
+                    })?,
+                true,
+            ),
+            Err(error) => {
+                return Err(RenderError::session(
+                    &paths.artifacts,
+                    &paths.output,
+                    render_id,
+                    "ARTIFACTS_CREATE_FAILED",
+                    format!(
+                        "cannot create exclusive artifact directory {}: {error}",
+                        paths.artifacts.display()
+                    ),
+                ));
+            },
+        }
     } else {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -626,15 +661,18 @@ fn begin_publication(
         })?;
         let session_path =
             temporary_root.join(format!("pliego-session-{}-{unique}", std::process::id()));
-        create_session_artifacts(session_path.clone(), render_id).map_err(|error| {
-            RenderError::session(
-                &session_path,
-                &session_path.join("document.pdf"),
-                render_id,
-                "ARTIFACTS_CREATE_FAILED",
-                format!("cannot create session artifacts: {error}"),
-            )
-        })?
+        (
+            create_session_artifacts(session_path.clone(), render_id).map_err(|error| {
+                RenderError::session(
+                    &session_path,
+                    &session_path.join("document.pdf"),
+                    render_id,
+                    "ARTIFACTS_CREATE_FAILED",
+                    format!("cannot create session artifacts: {error}"),
+                )
+            })?,
+            false,
+        )
     };
     if let Some(paths) = &request.explicit_paths {
         match output_overlaps_artifacts(&paths.output, artifacts.directory()) {
@@ -665,6 +703,41 @@ fn begin_publication(
         .as_ref()
         .map(|paths| paths.output.clone())
         .unwrap_or_else(|| artifacts.directory().join("document.pdf"));
+    if resuming {
+        let journal = artifacts
+            .resume_publication(&document_pdf_path, &request_fingerprint)
+            .map_err(|error| {
+                RenderError::session(
+                    artifacts.directory(),
+                    &document_pdf_path,
+                    render_id,
+                    "PUBLICATION_RECOVERY_FAILED",
+                    format!("cannot resume publication transaction: {error}"),
+                )
+            })?;
+        return match journal.recover().map_err(|error| {
+            RenderError::session(
+                artifacts.directory(),
+                &document_pdf_path,
+                render_id,
+                "PUBLICATION_RECOVERY_FAILED",
+                format!("cannot recover publication transaction: {error}"),
+            )
+        })? {
+            PublicationRecoveryState::Planned => Err(RenderError::session(
+                artifacts.directory(),
+                &document_pdf_path,
+                render_id,
+                "PUBLICATION_RESTART_REQUIRED",
+                "publication stopped before sealing; choose a new artifact path to restart without mutating partial evidence",
+            )),
+            PublicationRecoveryState::Committed {
+                summary, cli_bytes, ..
+            } => Ok(PublicationStart::Recovered(RenderOutcome::from_sealed(
+                summary, cli_bytes,
+            ))),
+        };
+    }
     let record_session_artifact = |result| record_artifact(&artifacts, &document_pdf_path, result);
     let environment_path = artifacts.directory().join("environment.json");
     let mut environment = request.environment.artifact();
@@ -724,6 +797,37 @@ fn begin_publication(
             },
         }
     }
+    let journal = artifacts
+        .begin_publication(&document_pdf_path, &request_fingerprint)
+        .map_err(|error| {
+            RenderError::session(
+                artifacts.directory(),
+                &document_pdf_path,
+                render_id,
+                "PUBLICATION_TRANSACTION_FAILED",
+                format!("cannot begin publication transaction: {error}"),
+            )
+        })?;
+    let recovery_state = journal.recover().map_err(|error| {
+        RenderError::session(
+            artifacts.directory(),
+            &document_pdf_path,
+            render_id,
+            "PUBLICATION_RECOVERY_FAILED",
+            format!("cannot inspect publication recovery state: {error}"),
+        )
+    })?;
+    if !matches!(recovery_state, PublicationRecoveryState::Planned) {
+        return Err(RenderError::session(
+            artifacts.directory(),
+            &document_pdf_path,
+            render_id,
+            "PUBLICATION_RECOVERY_REQUIRED",
+            format!(
+                "publication transaction requires recovery before rendering: {recovery_state:?}"
+            ),
+        ));
+    }
     apply_timezone(request.environment.timezone).map_err(|error| {
         fail_session(
             &artifacts,
@@ -740,14 +844,15 @@ fn begin_publication(
     ))?;
     record_session_artifact(artifacts.record_state("started", None))?;
 
-    Ok(PublicationTransaction {
+    Ok(PublicationStart::New(PublicationTransaction {
         artifacts,
+        journal,
         proof,
         userscripts,
         document_pdf_path,
         environment_path,
         environment,
-    })
+    }))
 }
 
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
@@ -783,14 +888,20 @@ fn render(request: RenderRequest) -> Result<RenderOutcome, RenderError> {
             "cannot convert document path to a file URL",
         )
     })?;
+    let publication =
+        match begin_publication(&request, &resource_policy, &render_id, document.path())? {
+            PublicationStart::New(publication) => publication,
+            PublicationStart::Recovered(outcome) => return Ok(outcome),
+        };
     let PublicationTransaction {
         artifacts,
+        journal,
         proof,
         userscripts,
         document_pdf_path,
         environment_path,
         mut environment,
-    } = begin_publication(&request, &resource_policy, &render_id)?;
+    } = publication;
     let record_session_artifact = |result| record_artifact(&artifacts, &document_pdf_path, result);
 
     let servo_args = [
@@ -1119,6 +1230,7 @@ fn render(request: RenderRequest) -> Result<RenderOutcome, RenderError> {
         &render_id,
         PublicationTransaction {
             artifacts,
+            journal,
             proof,
             userscripts,
             document_pdf_path,
@@ -1156,6 +1268,7 @@ fn publish_captured_document(
 ) -> Result<RenderOutcome, RenderError> {
     let PublicationTransaction {
         artifacts,
+        journal,
         proof,
         userscripts: _,
         document_pdf_path,
@@ -1288,24 +1401,25 @@ fn publish_captured_document(
             "Servo did not produce a rendered image",
         ));
     }
-    let prepared_output = artifacts
-        .prepare_document_pdf(&document_pdf_path)
-        .map_err(|error| {
-            let code = if error.kind() == std::io::ErrorKind::AlreadyExists {
-                "OUTPUT_ALREADY_EXISTS"
-            } else {
-                "OUTPUT_PUBLISH_FAILED"
-            };
-            fail_before_output_commit(
-                &mut environment,
-                code,
-                format!(
-                    "cannot prepare requested output {}: {error}",
-                    document_pdf_path.display()
-                ),
-                None,
-            )
-        })?;
+    let mut prepared_output =
+        artifacts
+            .prepare_document_pdf(&document_pdf_path)
+            .map_err(|error| {
+                let code = if error.kind() == std::io::ErrorKind::AlreadyExists {
+                    "OUTPUT_ALREADY_EXISTS"
+                } else {
+                    "OUTPUT_PUBLISH_FAILED"
+                };
+                fail_before_output_commit(
+                    &mut environment,
+                    code,
+                    format!(
+                        "cannot prepare requested output {}: {error}",
+                        document_pdf_path.display()
+                    ),
+                    None,
+                )
+            })?;
     set_document_pdf_environment(
         &mut environment,
         &document_pdf_path,
@@ -1347,61 +1461,85 @@ fn publish_captured_document(
     };
     let bundle_path = prepared_bundle.path().to_owned();
 
-    let outcome = RenderOutcome {
-        summary: serde_json::json!({
-            "artifacts": artifacts.directory().to_string_lossy(),
-            "bundle": bundle_path.to_string_lossy(),
-            "engine": "pliego",
-            "document_root": document.root().to_string_lossy(),
-            "environment": environment.clone(),
-            "environment_artifact": environment_path.to_string_lossy(),
-            "input": request.input.to_string_lossy(),
-            "resolved_input": document.path().to_string_lossy(),
-            "layout_debug": layout_debug_path.to_string_lossy(),
-            "pages_artifact": scene_artifacts.pages_path.to_string_lossy(),
-            "readiness": readiness_payload,
-            "render_id": render_id,
-            "resolved_input_hash": resolved_input_hash,
-            "rendered_image": proof.to_string_lossy(),
-            "scene": {
-                "schema": scene_capture.scene.schema,
-                "version": scene_capture.scene.version,
-                "hash": scene_artifacts.scene_hash,
-                "validation": "valid",
-                "capture_status": scene_artifacts.capture_status,
-                "capture_code": scene_artifacts.capture_code,
-                "preview_status": scene_artifacts.preview_status,
-                "unsupported_event_count": scene_capture.unsupported_events.len(),
-                "text_mapping_gap_count": scene_capture.text_mapping_gaps.len(),
-            },
-            "scene_artifact": scene_artifacts.scene_path.to_string_lossy(),
-            "fonts_artifact": scene_artifacts.fonts_path.to_string_lossy(),
-            "scene_report": scene_artifacts.report_path.to_string_lossy(),
-            "scene_preview": scene_preview,
-            "scene_previews": scene_previews,
-            "document_pdf": document_pdf_path.to_string_lossy(),
-            "document_pdf_status": scene_artifacts.pdf_status,
-            "pdf_structure": scene_artifacts.pdf_structure_path.to_string_lossy(),
-            "pdf_structure_status": scene_artifacts.pdf_structure_status,
-            "phase_timings_ms": {
-                "controlled_runtime": controlled_runtime_ms,
-                "scene_capture": scene_capture_ms,
-                "scene_setup": scene_artifacts.scene_setup_ms,
-                "preview_raster": scene_artifacts.preview_ms,
-                "pdf_serialize": scene_artifacts.pdf_ms,
-            },
-            "servo_base_sha": SERVO_BASE_SHA,
-            "servo_build": servoshell::VERSION,
-            "rendered_bytes": rendered_bytes,
-            "status": "rendered"
-        }),
+    let summary = serde_json::json!({
+        "artifacts": artifacts.directory().to_string_lossy(),
+        "bundle": bundle_path.to_string_lossy(),
+        "engine": "pliego",
+        "document_root": document.root().to_string_lossy(),
+        "environment": environment.clone(),
+        "environment_artifact": environment_path.to_string_lossy(),
+        "input": request.input.to_string_lossy(),
+        "resolved_input": document.path().to_string_lossy(),
+        "layout_debug": layout_debug_path.to_string_lossy(),
+        "pages_artifact": scene_artifacts.pages_path.to_string_lossy(),
+        "readiness": readiness_payload,
+        "render_id": render_id,
+        "resolved_input_hash": resolved_input_hash,
+        "rendered_image": proof.to_string_lossy(),
+        "scene": {
+            "schema": scene_capture.scene.schema,
+            "version": scene_capture.scene.version,
+            "hash": scene_artifacts.scene_hash,
+            "validation": "valid",
+            "capture_status": scene_artifacts.capture_status,
+            "capture_code": scene_artifacts.capture_code,
+            "preview_status": scene_artifacts.preview_status,
+            "unsupported_event_count": scene_capture.unsupported_events.len(),
+            "text_mapping_gap_count": scene_capture.text_mapping_gaps.len(),
+        },
+        "scene_artifact": scene_artifacts.scene_path.to_string_lossy(),
+        "fonts_artifact": scene_artifacts.fonts_path.to_string_lossy(),
+        "scene_report": scene_artifacts.report_path.to_string_lossy(),
+        "scene_preview": scene_preview,
+        "scene_previews": scene_previews,
+        "document_pdf": document_pdf_path.to_string_lossy(),
+        "document_pdf_status": scene_artifacts.pdf_status,
+        "pdf_structure": scene_artifacts.pdf_structure_path.to_string_lossy(),
+        "pdf_structure_status": scene_artifacts.pdf_structure_status,
+        "phase_timings_ms": {
+            "controlled_runtime": controlled_runtime_ms,
+            "scene_capture": scene_capture_ms,
+            "scene_setup": scene_artifacts.scene_setup_ms,
+            "preview_raster": scene_artifacts.preview_ms,
+            "pdf_serialize": scene_artifacts.pdf_ms,
+        },
+        "servo_base_sha": SERVO_BASE_SHA,
+        "servo_build": servoshell::VERSION,
+        "rendered_bytes": rendered_bytes,
+        "status": "rendered"
+    });
+    let outcome = match RenderOutcome::from_summary(summary) {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            return Err(fail_before_output_commit(
+                &mut environment,
+                "PUBLICATION_PREPARE_FAILED",
+                format!("cannot serialize publication outcome: {error}"),
+                None,
+            ));
+        },
+    };
+    let prepared_receipt = match journal.record_prepared(
+        &prepared_output,
+        &prepared_bundle,
+        &outcome.cli_bytes,
+    ) {
+        Ok(receipt) => receipt,
+        Err(error) => {
+            let bundle_cleanup_warning = prepared_bundle.discard().err().map(|cleanup_error| {
+                format!(
+                    "cannot remove invalidated owned bundle after failed publication preparation: {cleanup_error}"
+                )
+            });
+            return Err(fail_before_output_commit(
+                &mut environment,
+                "PUBLICATION_PREPARE_FAILED",
+                format!("cannot seal prepared publication receipt: {error}"),
+                bundle_cleanup_warning,
+            ));
+        },
     };
     if let Err(error) = prepared_output.commit(&prepared_bundle) {
-        let bundle_cleanup_warning = prepared_bundle.discard().err().map(|cleanup_error| {
-            format!(
-                "cannot remove invalidated owned bundle after failed PDF publication: {cleanup_error}"
-            )
-        });
         let (code, message) = match error {
             PreparedPublicationError::Bundle(error) => (
                 "BUNDLE_INVALID",
@@ -1422,11 +1560,26 @@ fn publish_captured_document(
                 )
             },
         };
-        return Err(fail_before_output_commit(
-            &mut environment,
-            code,
-            message,
-            bundle_cleanup_warning,
+        prepared_output.preserve_for_recovery();
+        prepared_bundle.preserve();
+        return Err(RenderError::session(
+            artifacts.directory(),
+            &document_pdf_path,
+            render_id,
+            "OUTPUT_COMMIT_RECOVERY_REQUIRED",
+            format!("sealed publication could not commit ({code}): {message}"),
+        ));
+    }
+    if let Err(error) = journal.record_committed(&prepared_receipt, Some(&prepared_bundle)) {
+        prepared_bundle.preserve();
+        return Err(RenderError::session(
+            artifacts.directory(),
+            &document_pdf_path,
+            render_id,
+            "OUTPUT_COMMIT_RECOVERY_REQUIRED",
+            format!(
+                "output is visible but its committed publication receipt could not be recorded: {error}"
+            ),
         ));
     }
     prepared_bundle.preserve();
@@ -1461,8 +1614,21 @@ struct PreparedDocumentSessionRender {
     feature = "document-session",
     not(any(target_os = "android", target_env = "ohos"))
 ))]
+enum PreparedDocumentSessionStart {
+    New(PreparedDocumentSessionRender),
+    Recovered(RenderOutcome),
+}
+
+#[cfg(all(
+    feature = "document-session",
+    not(any(target_os = "android", target_env = "ohos"))
+))]
 #[allow(dead_code)]
 fn render_with_document_session(request: RenderRequest) -> Result<RenderOutcome, RenderError> {
+    let prepared = match prepare_document_session_render(request)? {
+        PreparedDocumentSessionStart::New(prepared) => prepared,
+        PreparedDocumentSessionStart::Recovered(outcome) => return Ok(outcome),
+    };
     let PreparedDocumentSessionRender {
         request,
         document,
@@ -1470,7 +1636,7 @@ fn render_with_document_session(request: RenderRequest) -> Result<RenderOutcome,
         render_id,
         expected_input,
         publication,
-    } = prepare_document_session_render(request)?;
+    } = prepared;
     let result = DocumentSession::from_resolved(
         &document,
         resource_policy,
@@ -1497,7 +1663,7 @@ fn render_with_document_session(request: RenderRequest) -> Result<RenderOutcome,
 ))]
 fn prepare_document_session_render(
     request: RenderRequest,
-) -> Result<PreparedDocumentSessionRender, RenderError> {
+) -> Result<PreparedDocumentSessionStart, RenderError> {
     let document = LocalDocument::resolve(".", &request.input)
         .map_err(|error| RenderError::request("INVALID_REQUEST", error.to_string()))?;
     let input_bytes = std::fs::read(document.path()).map_err(|error| {
@@ -1530,16 +1696,24 @@ fn prepare_document_session_render(
         sha256: input_sha256,
         bytes: input_bytes.len() as u64,
     };
-    let publication = begin_publication(&request, &resource_policy, &render_id)?;
+    let publication =
+        match begin_publication(&request, &resource_policy, &render_id, document.path())? {
+            PublicationStart::New(publication) => publication,
+            PublicationStart::Recovered(outcome) => {
+                return Ok(PreparedDocumentSessionStart::Recovered(outcome));
+            },
+        };
 
-    Ok(PreparedDocumentSessionRender {
-        request,
-        document,
-        resource_policy,
-        render_id,
-        expected_input,
-        publication,
-    })
+    Ok(PreparedDocumentSessionStart::New(
+        PreparedDocumentSessionRender {
+            request,
+            document,
+            resource_policy,
+            render_id,
+            expected_input,
+            publication,
+        },
+    ))
 }
 
 #[cfg(all(
@@ -2323,6 +2497,56 @@ fn stable_render_id(
         }
     }
     format!("sha256:{}", lowercase_hex(&hasher.finalize()))
+}
+
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+fn publication_request_fingerprint(
+    render_id: &str,
+    allow_partial_scene: bool,
+    resolved_input: &Path,
+) -> String {
+    let mut hasher = Sha256::new();
+    update_hash_field(&mut hasher, PUBLICATION_REQUEST_SCHEMA_MARKER);
+    update_hash_field(&mut hasher, render_id.as_bytes());
+    update_hash_path(&mut hasher, resolved_input);
+    update_hash_field(
+        &mut hasher,
+        if allow_partial_scene {
+            b"partial"
+        } else {
+            b"complete"
+        },
+    );
+    format!("sha256:{}", lowercase_hex(&hasher.finalize()))
+}
+
+#[cfg(all(unix, not(any(target_os = "android", target_env = "ohos"))))]
+fn update_hash_path(hasher: &mut Sha256, path: &Path) {
+    use std::os::unix::ffi::OsStrExt;
+
+    update_hash_field(hasher, b"pliego.os-path.unix-bytes.v1");
+    update_hash_field(hasher, path.as_os_str().as_bytes());
+}
+
+#[cfg(all(windows, not(any(target_os = "android", target_env = "ohos"))))]
+fn update_hash_path(hasher: &mut Sha256, path: &Path) {
+    use std::os::windows::ffi::OsStrExt;
+
+    update_hash_field(hasher, b"pliego.os-path.windows-utf16le.v1");
+    let mut encoded = Vec::new();
+    for unit in path.as_os_str().encode_wide() {
+        encoded.extend_from_slice(&unit.to_le_bytes());
+    }
+    update_hash_field(hasher, &encoded);
+}
+
+#[cfg(all(
+    not(any(unix, windows)),
+    not(any(target_os = "android", target_env = "ohos"))
+))]
+fn update_hash_path(hasher: &mut Sha256, path: &Path) {
+    update_hash_field(hasher, b"pliego.os-path.encoded-bytes.v1");
+    update_hash_field(hasher, path.as_os_str().as_encoded_bytes());
 }
 
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
@@ -3564,13 +3788,13 @@ mod tests {
 
     #[cfg(feature = "document-session")]
     use super::{
-        CapturedPublication, ExpectedInputIdentity, PublicationTransaction, begin_publication,
-        finish_document_session_render, publish_captured_document,
+        CapturedPublication, ExpectedInputIdentity, finish_document_session_render,
+        publish_captured_document,
     };
     use super::{
         Command, ControlledResource, DEFAULT_LOCALE, DEFAULT_TIMEZONE, ExplicitRenderPaths,
         PageDefinition, PageMargins, PendingResource, RenderEnvironment, RenderError,
-        RenderRequest, ResourceCapture, ResourcePolicy, ResourcePolicyConfig,
+        RenderOutcome, RenderRequest, ResourceCapture, ResourcePolicy, ResourcePolicyConfig,
         ResourcePolicyDecision, ResourcePolicyFailure, ResourceRequest, WebResourceLoadRole,
         classify_controlled_http_status, cli_render_error, complete_resource,
         create_session_artifacts, decide_resource_policy, default_page, first_fatal_policy_failure,
@@ -3578,15 +3802,20 @@ mod tests {
         resolve_scene_resource, retain_controlled_resource, set_document_pdf_environment,
         sha256_hex, stable_render_id,
     };
+    #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+    use super::{
+        PublicationStart, PublicationTransaction, begin_publication,
+        publication_request_fingerprint, render, write_render_outcome,
+    };
     #[cfg(feature = "document-session")]
     use crate::document_session::{DocumentCaptureOutcome, SessionError};
     #[cfg(feature = "document-session")]
     use crate::owned_resource_store::OwnedResourceStore;
     #[cfg(feature = "document-session")]
     use crate::resource_policy::{ResourceAccounting, ResourceEvidence, ResourceSource};
-    #[cfg(feature = "document-session")]
-    use crate::session::LocalDocument;
     use crate::session::SessionArtifacts;
+    #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+    use crate::session::{LocalDocument, PublicationRecoveryState};
 
     #[cfg(feature = "document-session")]
     struct RemoveFileOnDrop(PathBuf);
@@ -3602,6 +3831,236 @@ mod tests {
         env!("CARGO_MANIFEST_DIR"),
         "/../../components/fonts/tests/support/dejavu-fonts-ttf-2.37/ttf/DejaVuSans.ttf"
     ));
+
+    #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+    fn expect_new_publication(start: PublicationStart) -> PublicationTransaction {
+        match start {
+            PublicationStart::New(publication) => publication,
+            PublicationStart::Recovered(_) => panic!("fixture unexpectedly recovered publication"),
+        }
+    }
+
+    #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+    fn recovery_process_request(root: &std::path::Path) -> RenderRequest {
+        RenderRequest {
+            input: PathBuf::from("input.html"),
+            environment: RenderEnvironment::default(),
+            page: default_page(),
+            resources: ResourcePolicyConfig::default(),
+            allow_host_fonts: false,
+            allow_partial_scene: false,
+            explicit_paths: Some(ExplicitRenderPaths {
+                output: root.join("output.pdf"),
+                artifacts: root.join("artifacts"),
+            }),
+        }
+    }
+
+    #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+    fn snapshot_test_tree(root: &std::path::Path) -> Vec<(String, Vec<u8>)> {
+        fn visit(
+            root: &std::path::Path,
+            directory: &std::path::Path,
+            snapshot: &mut Vec<(String, Vec<u8>)>,
+        ) {
+            let mut entries: Vec<_> = fs::read_dir(directory)
+                .unwrap()
+                .map(Result::unwrap)
+                .collect();
+            entries.sort_by_key(|entry| entry.file_name());
+            for entry in entries {
+                let path = entry.path();
+                let relative = path
+                    .strip_prefix(root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                let metadata = fs::symlink_metadata(&path).unwrap();
+                if metadata.is_dir() {
+                    snapshot.push((format!("{relative}/"), Vec::new()));
+                    visit(root, &path, snapshot);
+                } else {
+                    snapshot.push((relative, fs::read(path).unwrap()));
+                }
+            }
+        }
+
+        let mut snapshot = Vec::new();
+        visit(root, root, &mut snapshot);
+        snapshot
+    }
+
+    #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+    #[test]
+    fn fresh_process_cli_path_recovers_prepared_transaction_with_exact_stdout() {
+        const CHILD_MARKER: &str = "PLIEGO_TEST_PUBLICATION_RECOVERY_CHILD";
+        const ROOT_ENV: &str = "PLIEGO_TEST_PUBLICATION_RECOVERY_ROOT";
+        const CAPTURE_ENV: &str = "PLIEGO_TEST_PUBLICATION_RECOVERY_CAPTURE";
+
+        if std::env::var_os(CHILD_MARKER).is_some() {
+            let root = PathBuf::from(std::env::var_os(ROOT_ENV).expect("child root is set"));
+            let capture =
+                PathBuf::from(std::env::var_os(CAPTURE_ENV).expect("child capture is set"));
+            let outcome = render(recovery_process_request(&root)).unwrap();
+            let mut capture_file = std::fs::File::create(capture).unwrap();
+            write_render_outcome(&mut capture_file, &outcome).unwrap();
+            return;
+        }
+
+        let root = temporary_artifacts("pliego-fresh-process-recovery");
+        fs::create_dir(&root).unwrap();
+        let input = b"<!doctype html><title>Prepared recovery</title>";
+        fs::write(root.join("input.html"), input).unwrap();
+        let request = recovery_process_request(&root);
+        let document = LocalDocument::resolve(&root, "input.html").unwrap();
+        let resource_policy = ResourcePolicy::resolve(&request.resources, document.root());
+        let render_id = stable_render_id(
+            input,
+            request.environment,
+            request.page,
+            &resource_policy,
+            request.allow_host_fonts,
+        );
+        let PublicationTransaction {
+            artifacts,
+            journal,
+            document_pdf_path,
+            ..
+        } = expect_new_publication(
+            begin_publication(&request, &resource_policy, &render_id, document.path()).unwrap(),
+        );
+        artifacts.write_document_pdf(b"%PDF-fresh-process").unwrap();
+        artifacts.record_state("rendered", None).unwrap();
+        let prepared = artifacts.prepare_document_pdf(&document_pdf_path).unwrap();
+        let bundle = artifacts.write_prepared_bundle(&prepared).unwrap();
+        let summary = serde_json::json!({
+            "artifacts": artifacts.directory().to_string_lossy(),
+            "bundle": bundle.path().to_string_lossy(),
+            "document_pdf": document_pdf_path.to_string_lossy(),
+            "input": request.input.to_string_lossy(),
+            "render_id": render_id,
+            "status": "rendered",
+        });
+        let original_outcome = RenderOutcome::from_summary(summary.clone()).unwrap();
+        let mut expected_stdout = Vec::new();
+        write_render_outcome(&mut expected_stdout, &original_outcome).unwrap();
+        journal
+            .record_prepared(&prepared, &bundle, &original_outcome.cli_bytes)
+            .unwrap();
+        let prepared_receipt: serde_json::Value = serde_json::from_slice(
+            &fs::read(artifacts.directory().join("publication/prepared.json")).unwrap(),
+        )
+        .unwrap();
+        let staging = PathBuf::from(prepared_receipt["staging"]["path"].as_str().unwrap());
+        prepared.preserve_for_recovery();
+        bundle.preserve();
+        let artifact_path = artifacts.directory().to_owned();
+        drop(journal);
+        drop(artifacts);
+        assert!(!document_pdf_path.exists());
+        assert!(staging.exists());
+
+        let transaction_before = snapshot_test_tree(&artifact_path);
+        let staging_before = fs::read(&staging).unwrap();
+        let mut partial_request = recovery_process_request(&root);
+        partial_request.allow_partial_scene = true;
+        let partial_error = match begin_publication(
+            &partial_request,
+            &resource_policy,
+            &render_id,
+            document.path(),
+        ) {
+            Ok(_) => panic!("changed partial-scene policy must not resume a transaction"),
+            Err(error) => error,
+        };
+        assert_eq!(partial_error.code, "PUBLICATION_RECOVERY_FAILED");
+        assert_eq!(snapshot_test_tree(&artifact_path), transaction_before);
+        assert_eq!(fs::read(&staging).unwrap(), staging_before);
+        assert!(!document_pdf_path.exists());
+
+        fs::write(root.join("same-bytes-copy.html"), input).unwrap();
+        let mut other_input_request = recovery_process_request(&root);
+        other_input_request.input = PathBuf::from("same-bytes-copy.html");
+        let other_document = LocalDocument::resolve(&root, "same-bytes-copy.html").unwrap();
+        let other_policy =
+            ResourcePolicy::resolve(&other_input_request.resources, other_document.root());
+        let other_render_id = stable_render_id(
+            input,
+            other_input_request.environment,
+            other_input_request.page,
+            &other_policy,
+            other_input_request.allow_host_fonts,
+        );
+        assert_eq!(other_render_id, render_id);
+        assert_ne!(
+            publication_request_fingerprint(
+                &render_id,
+                request.allow_partial_scene,
+                document.path(),
+            ),
+            publication_request_fingerprint(
+                &other_render_id,
+                other_input_request.allow_partial_scene,
+                other_document.path(),
+            )
+        );
+        let other_input_error = match begin_publication(
+            &other_input_request,
+            &other_policy,
+            &other_render_id,
+            other_document.path(),
+        ) {
+            Ok(_) => panic!("different canonical input must not resume a transaction"),
+            Err(error) => error,
+        };
+        assert_eq!(other_input_error.code, "PUBLICATION_RECOVERY_FAILED");
+        assert_eq!(snapshot_test_tree(&artifact_path), transaction_before);
+        assert_eq!(fs::read(&staging).unwrap(), staging_before);
+        assert!(!document_pdf_path.exists());
+
+        let test_executable = std::env::current_exe().unwrap();
+        let test_name =
+            "tests::fresh_process_cli_path_recovers_prepared_transaction_with_exact_stdout";
+        let first_capture = root.join("recovered-stdout-1.json");
+        let first = std::process::Command::new(&test_executable)
+            .arg("--exact")
+            .arg(test_name)
+            .arg("--nocapture")
+            .current_dir(&root)
+            .env(CHILD_MARKER, "1")
+            .env(ROOT_ENV, &root)
+            .env(CAPTURE_ENV, &first_capture)
+            .status()
+            .unwrap();
+        assert!(first.success());
+        assert_eq!(fs::read(&first_capture).unwrap(), expected_stdout);
+        assert_eq!(
+            fs::read(artifact_path.join("publication/outcome.json")).unwrap(),
+            expected_stdout
+        );
+        assert_eq!(fs::read(&document_pdf_path).unwrap(), b"%PDF-fresh-process");
+        assert!(!staging.exists());
+        let committed_path = artifact_path.join("publication/committed.json");
+        let committed_bytes = fs::read(&committed_path).unwrap();
+
+        let second_capture = root.join("recovered-stdout-2.json");
+        let second = std::process::Command::new(&test_executable)
+            .arg("--exact")
+            .arg(test_name)
+            .arg("--nocapture")
+            .current_dir(&root)
+            .env(CHILD_MARKER, "1")
+            .env(ROOT_ENV, &root)
+            .env(CAPTURE_ENV, &second_capture)
+            .status()
+            .unwrap();
+        assert!(second.success());
+        assert_eq!(fs::read(&second_capture).unwrap(), expected_stdout);
+        assert_eq!(fs::read(&committed_path).unwrap(), committed_bytes);
+
+        fs::remove_file(document_pdf_path).unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn accepts_only_help_version_or_one_document() {
@@ -3804,6 +4263,28 @@ mod tests {
             render_id,
             stable_render_id(input, first.environment, first.page, &policy, true)
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn publication_request_fingerprint_is_lossless_for_non_utf8_canonical_paths() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let root = temporary_artifacts("pliego-non-utf8-request-fingerprint");
+        fs::create_dir(&root).unwrap();
+        let first = root.join(std::ffi::OsString::from_vec(vec![b'i', 0x80, b'.', b'h']));
+        let second = root.join(std::ffi::OsString::from_vec(vec![b'i', 0x81, b'.', b'h']));
+        fs::write(&first, b"identical").unwrap();
+        fs::write(&second, b"identical").unwrap();
+        let first = first.canonicalize().unwrap();
+        let second = second.canonicalize().unwrap();
+
+        assert_ne!(
+            publication_request_fingerprint("sha256:same-content", false, &first),
+            publication_request_fingerprint("sha256:same-content", false, &second)
+        );
+
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -6027,7 +6508,9 @@ mod tests {
             sha256,
             bytes: input_bytes.len() as u64,
         };
-        let publication = begin_publication(&request, &resource_policy, &render_id).unwrap();
+        let publication = expect_new_publication(
+            begin_publication(&request, &resource_policy, &render_id, document.path()).unwrap(),
+        );
         DirectPublicationFixture {
             root,
             request,
@@ -6063,7 +6546,9 @@ mod tests {
             &resource_policy,
             false,
         );
-        let publication = begin_publication(&request, &resource_policy, &render_id).unwrap();
+        let publication = expect_new_publication(
+            begin_publication(&request, &resource_policy, &render_id, document.path()).unwrap(),
+        );
         let artifact_root = publication.artifacts.directory().to_owned();
         fs::write(&publication.proof, stable_png()).unwrap();
 
@@ -6096,6 +6581,59 @@ mod tests {
                 .to_string_lossy()
                 .contains(".pliego-")
         }));
+
+        let publication_directory = artifact_root.join("publication");
+        let sealed_cli_bytes = fs::read(publication_directory.join("outcome.json")).unwrap();
+        let parsed_sealed_summary: serde_json::Value =
+            serde_json::from_slice(&sealed_cli_bytes).unwrap();
+        assert_eq!(parsed_sealed_summary["status"], "rendered");
+        assert!(parsed_sealed_summary["phase_timings_ms"]["scene_setup"].is_number());
+        assert_eq!(outcome.summary, parsed_sealed_summary);
+        let first_summary = outcome.summary.clone();
+
+        let mut ordinary_cli_bytes = Vec::new();
+        write_render_outcome(&mut ordinary_cli_bytes, &outcome).unwrap();
+        assert_eq!(ordinary_cli_bytes, sealed_cli_bytes);
+        assert_eq!(outcome.cli_bytes, sealed_cli_bytes);
+
+        let request_fingerprint = publication_request_fingerprint(
+            &render_id,
+            request.allow_partial_scene,
+            document.path(),
+        );
+        let document_pdf = artifact_root.join("document.pdf");
+        let committed_before = fs::read(publication_directory.join("committed.json")).unwrap();
+        let tree_before = snapshot_test_tree(&artifact_root);
+        for recovery_index in 0..2 {
+            let artifacts =
+                SessionArtifacts::open_for_publication_recovery(&artifact_root, &render_id)
+                    .unwrap();
+            let journal = artifacts
+                .resume_publication(&document_pdf, &request_fingerprint)
+                .unwrap();
+            let PublicationRecoveryState::Committed {
+                summary,
+                cli_bytes,
+                recovered,
+            } = journal.recover().unwrap()
+            else {
+                panic!("sealed shorthand publication must recover as committed");
+            };
+            assert!(!recovered, "recovery {recovery_index} must be idempotent");
+            assert_eq!(summary, first_summary);
+            assert_eq!(cli_bytes, sealed_cli_bytes);
+            let recovered_outcome = RenderOutcome::from_sealed(summary, cli_bytes);
+            let mut recovered_cli_bytes = Vec::new();
+            write_render_outcome(&mut recovered_cli_bytes, &recovered_outcome).unwrap();
+            assert_eq!(recovered_cli_bytes, sealed_cli_bytes);
+            drop(journal);
+            drop(artifacts);
+            assert_eq!(snapshot_test_tree(&artifact_root), tree_before);
+            assert_eq!(
+                fs::read(publication_directory.join("committed.json")).unwrap(),
+                committed_before
+            );
+        }
 
         fs::remove_dir_all(artifact_root).unwrap();
         fs::remove_dir_all(root).unwrap();
@@ -6139,7 +6677,9 @@ mod tests {
             &resource_policy,
             false,
         );
-        let publication = begin_publication(&request, &resource_policy, &render_id).unwrap();
+        let publication = expect_new_publication(
+            begin_publication(&request, &resource_policy, &render_id, document.path()).unwrap(),
+        );
         let artifact_root = publication.artifacts.directory().to_owned();
         fs::write(&publication.proof, stable_png()).unwrap();
 

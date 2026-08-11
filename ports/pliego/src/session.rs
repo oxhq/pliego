@@ -12,12 +12,95 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use embedder_traits::WebResourceLoadRole;
 use same_file::Handle;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 const BUNDLE_FILE_NAME: &str = "bundle.json";
+const PUBLICATION_DIRECTORY_NAME: &str = "publication";
+const PUBLICATION_LEASE_FILE_NAME: &str = "lease";
+const PUBLICATION_PLAN_FILE_NAME: &str = "plan.json";
+const PUBLICATION_OUTCOME_FILE_NAME: &str = "outcome.json";
+const PUBLICATION_PREPARED_FILE_NAME: &str = "prepared.json";
+const PUBLICATION_COMMITTED_FILE_NAME: &str = "committed.json";
+const MAX_PUBLICATION_BUNDLE_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_PUBLICATION_OUTCOME_BYTES: u64 = 1024 * 1024;
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct PublicationArtifact {
+    path: String,
+    sha256: String,
+    bytes: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct PublicationPlanReceipt {
+    schema: String,
+    version: u32,
+    transaction_id: String,
+    render_id: String,
+    request_fingerprint: String,
+    artifact_root: String,
+    artifact_root_identity: String,
+    requested_output: String,
+    output: String,
+    output_parent_identity: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct PublicationPreparedReceipt {
+    schema: String,
+    version: u32,
+    transaction_id: String,
+    plan_sha256: String,
+    output: PublicationArtifact,
+    staging: PublicationArtifact,
+    bundle: PublicationArtifact,
+    outcome: PublicationArtifact,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct PublicationCommittedReceipt {
+    schema: String,
+    version: u32,
+    transaction_id: String,
+    prepared_sha256: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum PublicationRecoveryState {
+    Planned,
+    Committed {
+        summary: serde_json::Value,
+        cli_bytes: Vec<u8>,
+        recovered: bool,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct PreparedPublicationReceipt {
+    sha256: String,
+}
+
+/// Owns the process lease and immutable receipt chain for one output publication.
+///
+/// Receipt links provide atomic visibility. This slice does not claim sudden-power-loss
+/// durability; native kill and filesystem durability barriers remain separate proof gates.
+#[derive(Debug)]
+pub(crate) struct PublicationJournal {
+    artifact_root: BoundDirectory,
+    output_parent: BoundDirectory,
+    directory: BoundDirectory,
+    lease: Handle,
+    plan: PublicationPlanReceipt,
+    plan_sha256: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 struct BundleEntry {
     path: String,
     sha256: String,
@@ -33,10 +116,20 @@ struct BundleManifest<'a> {
     output: BundleEntry,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OwnedBundleManifest {
+    schema: String,
+    version: u32,
+    render_id: String,
+    entries: Vec<BundleEntry>,
+    output: BundleEntry,
+}
+
 #[derive(Debug)]
 pub(crate) struct PreparedDocumentPdf {
     destination: PathBuf,
-    storage: PreparedDocumentPdfStorage,
+    storage: Option<PreparedDocumentPdfStorage>,
     sha256: String,
     bytes: u64,
 }
@@ -58,6 +151,8 @@ enum PreparedDocumentPdfStorage {
 pub(crate) struct PreparedBundle {
     file: Option<OwnedFile>,
     artifact_root: BoundDirectory,
+    render_id: String,
+    output: BundleEntry,
     sha256: String,
     bytes: u64,
 }
@@ -101,7 +196,7 @@ impl BoundDirectory {
     fn require_current(&self) -> io::Result<()> {
         for path in [&self.requested_path, &self.path] {
             let metadata = std::fs::symlink_metadata(path)?;
-            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            if path_metadata_is_alias(&metadata) || !metadata.is_dir() {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!(
@@ -131,6 +226,11 @@ impl BoundDirectory {
             path: self.path.clone(),
             handle: Handle::from_file(self.handle.as_file().try_clone()?)?,
         })
+    }
+
+    fn identity(&self) -> io::Result<String> {
+        self.require_current()?;
+        open_file_identity(self.handle.as_file(), &self.path)
     }
 }
 
@@ -221,7 +321,7 @@ impl PreparedDocumentPdf {
     }
 
     fn verify_staged(&self) -> io::Result<()> {
-        match &self.storage {
+        match self.storage.as_ref().expect("prepared output is present") {
             PreparedDocumentPdfStorage::External {
                 destination_parent,
                 staged,
@@ -245,24 +345,29 @@ impl PreparedDocumentPdf {
 
     /// Make the prepared bytes visible at the caller-owned path without replacing it.
     ///
-    /// A successful handle-source link is the publication commit. Cleanup after that
-    /// point is best-effort so committed output can never be reported as a failed render.
-    pub(crate) fn commit(self, bundle: &PreparedBundle) -> Result<(), PreparedPublicationError> {
+    /// A successful handle-source link makes the output visible. The caller must then
+    /// record the committed receipt or report that transaction recovery is required.
+    pub(crate) fn commit(
+        &mut self,
+        bundle: &PreparedBundle,
+    ) -> Result<(), PreparedPublicationError> {
         self.verify_staged()
             .map_err(PreparedPublicationError::Output)?;
         bundle.verify().map_err(PreparedPublicationError::Bundle)?;
         self.commit_validated()
-            .map_err(PreparedPublicationError::Output)
+            .map_err(PreparedPublicationError::Output)?;
+        self.storage.take();
+        Ok(())
     }
 
     #[cfg(test)]
-    fn commit_for_test(self) -> io::Result<()> {
+    fn commit_for_test(mut self) -> io::Result<()> {
         self.verify_staged()?;
         self.commit_validated()
     }
 
-    fn commit_validated(self) -> io::Result<()> {
-        match &self.storage {
+    fn commit_validated(&mut self) -> io::Result<()> {
+        match self.storage.as_ref().expect("prepared output is present") {
             PreparedDocumentPdfStorage::External {
                 publication_destination,
                 destination_parent,
@@ -279,9 +384,9 @@ impl PreparedDocumentPdf {
                 }
                 destination_parent.require_current()?;
 
-                // This must remain the final fallible publication action. The platform
-                // implementation names the held file through the held destination directory
-                // and never resolves the mutable staging pathname.
+                // This must remain the final fallible output-visibility action. The
+                // platform implementation names the held file through the held destination
+                // directory and never resolves the mutable staging pathname.
                 publish_owned_file(staged, destination_parent, publication_destination)?;
                 let _ = destination_parent.handle.as_file().sync_all();
                 Ok(())
@@ -299,9 +404,52 @@ impl PreparedDocumentPdf {
         }
     }
 
+    fn publication_artifact(&self) -> io::Result<PublicationArtifact> {
+        let path = match self.storage.as_ref().expect("prepared output is present") {
+            PreparedDocumentPdfStorage::External {
+                publication_destination,
+                ..
+            } => publication_destination,
+            PreparedDocumentPdfStorage::Artifact { file, .. } => &file.path,
+        };
+        Ok(PublicationArtifact {
+            path: receipt_path(path)?,
+            sha256: self.sha256.clone(),
+            bytes: self.bytes,
+        })
+    }
+
+    fn staging_artifact(&self) -> io::Result<PublicationArtifact> {
+        let file = match self.storage.as_ref().expect("prepared output is present") {
+            PreparedDocumentPdfStorage::External { staged, .. } => staged,
+            PreparedDocumentPdfStorage::Artifact { file, .. } => file,
+        };
+        Ok(PublicationArtifact {
+            path: receipt_path(&file.path)?,
+            sha256: self.sha256.clone(),
+            bytes: self.bytes,
+        })
+    }
+
+    fn output_parent_identity(&self) -> io::Result<String> {
+        match self.storage.as_ref().expect("prepared output is present") {
+            PreparedDocumentPdfStorage::External {
+                destination_parent, ..
+            } => destination_parent.identity(),
+            PreparedDocumentPdfStorage::Artifact { artifact_root, .. } => artifact_root.identity(),
+        }
+    }
+
+    pub(crate) fn preserve_for_recovery(mut self) {
+        match self.storage.take().expect("prepared output is present") {
+            PreparedDocumentPdfStorage::External { staged, .. } => staged.preserve(),
+            PreparedDocumentPdfStorage::Artifact { file, .. } => file.preserve(),
+        }
+    }
+
     #[cfg(test)]
     fn prepared_file_mut(&mut self) -> &mut OwnedFile {
-        match &mut self.storage {
+        match self.storage.as_mut().expect("prepared output is present") {
             PreparedDocumentPdfStorage::External { staged, .. } => staged,
             PreparedDocumentPdfStorage::Artifact { file, .. } => file,
         }
@@ -309,7 +457,7 @@ impl PreparedDocumentPdf {
 
     #[cfg(test)]
     fn prepared_file_path(&self) -> &Path {
-        match &self.storage {
+        match self.storage.as_ref().expect("prepared output is present") {
             PreparedDocumentPdfStorage::External { staged, .. } => &staged.path,
             PreparedDocumentPdfStorage::Artifact { file, .. } => &file.path,
         }
@@ -339,9 +487,30 @@ impl PreparedBundle {
         self.artifact_root.require_current()?;
         let file = self.file.as_ref().expect("prepared bundle is present");
         file.require_current()?;
-        file.verify_content(&self.sha256, self.bytes)?;
+        verify_bundle_closure(
+            &self.artifact_root,
+            &self.publication_artifact()?,
+            Some(file),
+            &self.render_id,
+            &self.output,
+        )?;
         file.require_current()?;
         self.artifact_root.require_current()
+    }
+
+    fn matches_output(&self, output: &PublicationArtifact, requested_output: &str) -> bool {
+        self.output.path == requested_output
+            && self.output.sha256 == output.sha256
+            && self.output.bytes == output.bytes
+    }
+
+    fn publication_artifact(&self) -> io::Result<PublicationArtifact> {
+        let file = self.file.as_ref().expect("prepared bundle is present");
+        Ok(PublicationArtifact {
+            path: receipt_path(&file.path)?,
+            sha256: self.sha256.clone(),
+            bytes: self.bytes,
+        })
     }
 
     pub(crate) fn preserve(mut self) {
@@ -362,6 +531,522 @@ impl Drop for PreparedBundle {
         } else {
             file.preserve();
         }
+    }
+}
+
+impl PublicationJournal {
+    fn begin(
+        artifact_root: &BoundDirectory,
+        render_id: &str,
+        request_fingerprint: &str,
+        output: &Path,
+    ) -> io::Result<Self> {
+        let (plan, output_parent) =
+            Self::expected_plan(artifact_root, render_id, request_fingerprint, output)?;
+        let publication_directory = artifact_root
+            .requested_path
+            .join(PUBLICATION_DIRECTORY_NAME);
+        create_private_directory(&publication_directory)?;
+        let directory = BoundDirectory::open(publication_directory)?;
+        artifact_root.require_current()?;
+        Self::open(artifact_root, output_parent, directory, plan, true)
+    }
+
+    fn resume(
+        artifact_root: &BoundDirectory,
+        render_id: &str,
+        request_fingerprint: &str,
+        output: &Path,
+    ) -> io::Result<Self> {
+        let (plan, output_parent) =
+            Self::expected_plan(artifact_root, render_id, request_fingerprint, output)?;
+        let directory = BoundDirectory::open(
+            artifact_root
+                .requested_path
+                .join(PUBLICATION_DIRECTORY_NAME),
+        )?;
+        artifact_root.require_current()?;
+        Self::open(artifact_root, output_parent, directory, plan, false)
+    }
+
+    fn expected_plan(
+        artifact_root: &BoundDirectory,
+        render_id: &str,
+        request_fingerprint: &str,
+        output: &Path,
+    ) -> io::Result<(PublicationPlanReceipt, BoundDirectory)> {
+        artifact_root.require_current()?;
+        let requested_output = output.to_str().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("output path is not valid UTF-8: {}", output.display()),
+            )
+        })?;
+        let output = std::path::absolute(output)?;
+        let output_parent_path = output
+            .parent()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "output has no parent"))?
+            .to_owned();
+        let output_name = output.file_name().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "output path has no final component",
+            )
+        })?;
+        let output_name = output_name.to_str().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("output path is not valid UTF-8: {}", output.display()),
+            )
+        })?;
+        let output_parent = BoundDirectory::open(output_parent_path)?;
+        let artifact_root_identity = artifact_root.identity()?;
+        let output_parent_identity = output_parent.identity()?;
+        let transaction_id = publication_transaction_id(
+            render_id,
+            request_fingerprint,
+            &artifact_root_identity,
+            &output_parent_identity,
+            requested_output,
+            output_name,
+        );
+        Ok((
+            PublicationPlanReceipt {
+                schema: "pliego.publication-plan".into(),
+                version: 1,
+                transaction_id,
+                render_id: render_id.to_owned(),
+                request_fingerprint: request_fingerprint.to_owned(),
+                artifact_root: receipt_path(&artifact_root.requested_path)?,
+                artifact_root_identity,
+                requested_output: requested_output.to_owned(),
+                output: receipt_path(&output)?,
+                output_parent_identity,
+            },
+            output_parent,
+        ))
+    }
+
+    fn open(
+        artifact_root: &BoundDirectory,
+        output_parent: BoundDirectory,
+        directory: BoundDirectory,
+        plan: PublicationPlanReceipt,
+        create: bool,
+    ) -> io::Result<Self> {
+        directory.require_current()?;
+
+        let lease_path = directory.requested_path.join(PUBLICATION_LEASE_FILE_NAME);
+        if !create {
+            let metadata = std::fs::symlink_metadata(&lease_path)?;
+            if path_metadata_is_alias(&metadata) || !metadata.is_file() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "publication lease is not a regular file: {}",
+                        lease_path.display()
+                    ),
+                ));
+            }
+        }
+        let mut lease_options = private_file_options();
+        lease_options.read(true).write(true);
+        if create {
+            lease_options.create_new(true);
+        }
+        let lease_file = lease_options.open(&lease_path)?;
+        let lease = Handle::from_file(lease_file)?;
+        if !path_matches_handle(&lease_path, &lease)? {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "publication lease path changed while opening it: {}",
+                    lease_path.display()
+                ),
+            ));
+        }
+        lease.as_file().try_lock().map_err(|error| {
+            let error = io::Error::from(error);
+            io::Error::new(
+                error.kind(),
+                format!(
+                    "publication transaction is already leased at {}: {error}",
+                    lease_path.display()
+                ),
+            )
+        })?;
+
+        let plan_sha256 = if create {
+            write_immutable_receipt(&directory, PUBLICATION_PLAN_FILE_NAME, &plan)?
+        } else {
+            let (existing, sha256) = read_required_receipt::<PublicationPlanReceipt>(
+                &directory,
+                PUBLICATION_PLAN_FILE_NAME,
+            )?;
+            if existing != plan {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "existing publication plan does not match the requested render and output",
+                ));
+            }
+            sha256
+        };
+        let journal = Self {
+            artifact_root: artifact_root.try_clone()?,
+            output_parent,
+            directory,
+            lease,
+            plan,
+            plan_sha256,
+        };
+        journal.require_current()?;
+        Ok(journal)
+    }
+
+    fn require_current(&self) -> io::Result<()> {
+        self.artifact_root.require_current()?;
+        self.output_parent.require_current()?;
+        self.directory.require_current()?;
+        if self.artifact_root.identity()? != self.plan.artifact_root_identity
+            || self.output_parent.identity()? != self.plan.output_parent_identity
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "publication transaction directory identity changed",
+            ));
+        }
+        let lease_path = self
+            .directory
+            .requested_path
+            .join(PUBLICATION_LEASE_FILE_NAME);
+        if !path_matches_handle(&lease_path, &self.lease)? {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "publication lease path no longer names the held lease: {}",
+                    lease_path.display()
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn recover(&self) -> io::Result<PublicationRecoveryState> {
+        self.require_current()?;
+        let (plan, plan_sha256) = read_required_receipt::<PublicationPlanReceipt>(
+            &self.directory,
+            PUBLICATION_PLAN_FILE_NAME,
+        )?;
+        if plan != self.plan || plan_sha256 != self.plan_sha256 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "publication plan changed after the lease was acquired",
+            ));
+        }
+
+        let prepared = read_optional_receipt::<PublicationPreparedReceipt>(
+            &self.directory,
+            PUBLICATION_PREPARED_FILE_NAME,
+        )?;
+        let committed = read_optional_receipt::<PublicationCommittedReceipt>(
+            &self.directory,
+            PUBLICATION_COMMITTED_FILE_NAME,
+        )?;
+        let Some((prepared, prepared_sha256)) = prepared else {
+            if committed.is_some() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "committed publication receipt has no prepared receipt",
+                ));
+            }
+            return Ok(PublicationRecoveryState::Planned);
+        };
+        self.validate_prepared(&prepared)?;
+
+        let (summary, cli_bytes) = read_publication_summary(&prepared.outcome)?;
+        if let Some((committed, _)) = committed {
+            self.validate_committed(&committed, &prepared_sha256)?;
+            verify_publication_artifact(&prepared.output)?;
+            verify_bundle_closure(
+                &self.artifact_root,
+                &prepared.bundle,
+                None,
+                &self.plan.render_id,
+                &BundleEntry {
+                    path: self.plan.requested_output.clone(),
+                    sha256: prepared.output.sha256.clone(),
+                    bytes: prepared.output.bytes,
+                },
+            )?;
+            return Ok(PublicationRecoveryState::Committed {
+                summary,
+                cli_bytes,
+                recovered: false,
+            });
+        }
+
+        verify_bundle_closure(
+            &self.artifact_root,
+            &prepared.bundle,
+            None,
+            &self.plan.render_id,
+            &BundleEntry {
+                path: self.plan.requested_output.clone(),
+                sha256: prepared.output.sha256.clone(),
+                bytes: prepared.output.bytes,
+            },
+        )?;
+        if publication_artifact_exists(&prepared.output)? {
+            verify_publication_artifact(&prepared.output)?;
+            self.cleanup_recovered_staging(&prepared);
+        } else {
+            self.publish_recovered_staging(&prepared)?;
+        }
+        let token = PreparedPublicationReceipt {
+            sha256: prepared_sha256,
+        };
+        self.record_committed(&token, None)?;
+        Ok(PublicationRecoveryState::Committed {
+            summary,
+            cli_bytes,
+            recovered: true,
+        })
+    }
+
+    pub(crate) fn record_prepared(
+        &self,
+        output: &PreparedDocumentPdf,
+        bundle: &PreparedBundle,
+        outcome_bytes: &[u8],
+    ) -> io::Result<PreparedPublicationReceipt> {
+        self.require_current()?;
+        output.verify_staged()?;
+        bundle.verify()?;
+        let output_artifact = output.publication_artifact()?;
+        if output_artifact.path != self.plan.output
+            || output.output_parent_identity()? != self.plan.output_parent_identity
+            || !bundle.matches_output(&output_artifact, &self.plan.requested_output)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "prepared output does not match the publication plan",
+            ));
+        }
+        if outcome_bytes.len() as u64 > MAX_PUBLICATION_OUTCOME_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "publication outcome exceeds the {MAX_PUBLICATION_OUTCOME_BYTES}-byte limit"
+                ),
+            ));
+        }
+        if !outcome_bytes.ends_with(b"\n") {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "publication outcome must end with a newline",
+            ));
+        }
+        serde_json::from_slice::<serde_json::Value>(outcome_bytes).map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("publication outcome is invalid JSON: {error}"),
+            )
+        })?;
+        let outcome_sha256 = write_immutable_bytes(
+            &self.directory,
+            PUBLICATION_OUTCOME_FILE_NAME,
+            outcome_bytes,
+        )?;
+        let receipt = PublicationPreparedReceipt {
+            schema: "pliego.publication-prepared".into(),
+            version: 1,
+            transaction_id: self.plan.transaction_id.clone(),
+            plan_sha256: self.plan_sha256.clone(),
+            output: output_artifact,
+            staging: output.staging_artifact()?,
+            bundle: bundle.publication_artifact()?,
+            outcome: PublicationArtifact {
+                path: receipt_path(
+                    &self
+                        .directory
+                        .requested_path
+                        .join(PUBLICATION_OUTCOME_FILE_NAME),
+                )?,
+                sha256: outcome_sha256,
+                bytes: outcome_bytes.len() as u64,
+            },
+        };
+        let sha256 =
+            write_immutable_receipt(&self.directory, PUBLICATION_PREPARED_FILE_NAME, &receipt)?;
+        Ok(PreparedPublicationReceipt { sha256 })
+    }
+
+    pub(crate) fn record_committed(
+        &self,
+        prepared_token: &PreparedPublicationReceipt,
+        live_bundle: Option<&PreparedBundle>,
+    ) -> io::Result<()> {
+        self.require_current()?;
+        let (prepared, prepared_sha256) = read_required_receipt::<PublicationPreparedReceipt>(
+            &self.directory,
+            PUBLICATION_PREPARED_FILE_NAME,
+        )?;
+        self.validate_prepared(&prepared)?;
+        if prepared_sha256 != prepared_token.sha256 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "prepared publication receipt changed before commit",
+            ));
+        }
+        verify_publication_artifact(&prepared.output)?;
+        if let Some(bundle) = live_bundle {
+            bundle.verify()?;
+            if bundle.publication_artifact()? != prepared.bundle {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "held bundle does not match the prepared publication receipt",
+                ));
+            }
+        } else {
+            verify_bundle_closure(
+                &self.artifact_root,
+                &prepared.bundle,
+                None,
+                &self.plan.render_id,
+                &BundleEntry {
+                    path: self.plan.requested_output.clone(),
+                    sha256: prepared.output.sha256.clone(),
+                    bytes: prepared.output.bytes,
+                },
+            )?;
+        }
+        read_publication_summary(&prepared.outcome)?;
+        let receipt = PublicationCommittedReceipt {
+            schema: "pliego.publication-committed".into(),
+            version: 1,
+            transaction_id: self.plan.transaction_id.clone(),
+            prepared_sha256,
+        };
+        write_immutable_receipt(&self.directory, PUBLICATION_COMMITTED_FILE_NAME, &receipt)?;
+        Ok(())
+    }
+
+    fn validate_prepared(&self, receipt: &PublicationPreparedReceipt) -> io::Result<()> {
+        let artifact_root = Path::new(&self.plan.artifact_root);
+        let expected_bundle = receipt_path(&artifact_root.join(BUNDLE_FILE_NAME))?;
+        let expected_outcome = receipt_path(
+            &self
+                .directory
+                .requested_path
+                .join(PUBLICATION_OUTCOME_FILE_NAME),
+        )?;
+        let output = Path::new(&receipt.output.path);
+        let staging = Path::new(&receipt.staging.path);
+        let staging_is_output = staging == output;
+        let staging_is_owned_temporary = staging.parent() == output.parent()
+            && staging
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| {
+                    name.starts_with('.') && name.contains(".pliego-") && name.ends_with(".tmp")
+                });
+        if receipt.schema != "pliego.publication-prepared"
+            || receipt.version != 1
+            || receipt.transaction_id != self.plan.transaction_id
+            || receipt.plan_sha256 != self.plan_sha256
+            || receipt.output.path != self.plan.output
+            || receipt.bundle.path != expected_bundle
+            || receipt.outcome.path != expected_outcome
+            || (!staging_is_output && !staging_is_owned_temporary)
+            || receipt.staging.sha256 != receipt.output.sha256
+            || receipt.staging.bytes != receipt.output.bytes
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "prepared publication receipt does not match its plan",
+            ));
+        }
+        Ok(())
+    }
+
+    fn publish_recovered_staging(&self, receipt: &PublicationPreparedReceipt) -> io::Result<()> {
+        let staging_path = PathBuf::from(&receipt.staging.path);
+        let output_path = PathBuf::from(&receipt.output.path);
+        if staging_path == output_path {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "artifact-owned prepared output is missing during recovery",
+            ));
+        }
+        let metadata = std::fs::symlink_metadata(&staging_path)?;
+        if path_metadata_is_alias(&metadata) || !metadata.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "prepared staging path is not a regular file: {}",
+                    staging_path.display()
+                ),
+            ));
+        }
+        let staging_file = owned_file_options()
+            .read(true)
+            .write(true)
+            .open(&staging_path)?;
+        let staging = OwnedFile::bind_retained(staging_path, staging_file)?;
+        staging.verify_content(&receipt.staging.sha256, receipt.staging.bytes)?;
+        self.require_current()?;
+        match publish_owned_file(&staging, &self.output_parent, &output_path) {
+            Ok(()) => {},
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                verify_publication_artifact(&receipt.output)?;
+            },
+            Err(error) => return Err(error),
+        }
+        let _ = self.output_parent.handle.as_file().sync_all();
+        let _ = staging.remove();
+        Ok(())
+    }
+
+    fn cleanup_recovered_staging(&self, receipt: &PublicationPreparedReceipt) {
+        if receipt.staging.path == receipt.output.path {
+            return;
+        }
+        let staging_path = PathBuf::from(&receipt.staging.path);
+        let staging_file = match owned_file_options()
+            .read(true)
+            .write(true)
+            .open(&staging_path)
+        {
+            Ok(file) => file,
+            Err(_) => return,
+        };
+        let Ok(staging) = OwnedFile::bind_retained(staging_path, staging_file) else {
+            return;
+        };
+        if staging
+            .verify_content(&receipt.staging.sha256, receipt.staging.bytes)
+            .is_ok()
+        {
+            let _ = staging.remove();
+        }
+    }
+
+    fn validate_committed(
+        &self,
+        receipt: &PublicationCommittedReceipt,
+        prepared_sha256: &str,
+    ) -> io::Result<()> {
+        if receipt.schema != "pliego.publication-committed"
+            || receipt.version != 1
+            || receipt.transaction_id != self.plan.transaction_id
+            || receipt.prepared_sha256 != prepared_sha256
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "committed publication receipt does not match its prepared receipt",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -492,6 +1177,34 @@ impl SessionArtifacts {
         })
     }
 
+    pub(crate) fn open_for_publication_recovery(
+        directory: impl AsRef<Path>,
+        render_id: impl Into<String>,
+    ) -> io::Result<Self> {
+        let requested_directory = std::path::absolute(directory.as_ref())?;
+        let requested_parent = requested_directory.parent().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "session artifact path has no parent directory",
+            )
+        })?;
+        require_path_without_aliases(requested_parent)?;
+        let render_id = render_id.into();
+        if render_id.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "render ID may not be empty",
+            ));
+        }
+        let directory_binding = BoundDirectory::open(requested_directory)?;
+        let directory = directory_binding.requested_path.clone();
+        Ok(Self {
+            directory,
+            directory_binding,
+            render_id,
+        })
+    }
+
     pub fn directory(&self) -> &Path {
         &self.directory
     }
@@ -502,6 +1215,34 @@ impl SessionArtifacts {
 
     fn require_current(&self) -> io::Result<()> {
         self.directory_binding.require_current()
+    }
+
+    pub(crate) fn begin_publication(
+        &self,
+        output: impl AsRef<Path>,
+        request_fingerprint: &str,
+    ) -> io::Result<PublicationJournal> {
+        self.require_current()?;
+        PublicationJournal::begin(
+            &self.directory_binding,
+            &self.render_id,
+            request_fingerprint,
+            output.as_ref(),
+        )
+    }
+
+    pub(crate) fn resume_publication(
+        &self,
+        output: impl AsRef<Path>,
+        request_fingerprint: &str,
+    ) -> io::Result<PublicationJournal> {
+        self.require_current()?;
+        PublicationJournal::resume(
+            &self.directory_binding,
+            &self.render_id,
+            request_fingerprint,
+            output.as_ref(),
+        )
     }
 
     pub fn record_state(&self, state: &str, message: Option<&str>) -> io::Result<()> {
@@ -788,12 +1529,13 @@ impl SessionArtifacts {
                 "staged document.pdf changed after output preparation",
             ));
         }
+        let output_entry = output.bundle_entry()?;
         let manifest = BundleManifest {
             schema: "pliego.bundle",
             version: 1,
             render_id: &self.render_id,
             entries,
-            output: output.bundle_entry()?,
+            output: output_entry.clone(),
         };
 
         let bundle_path = self.directory.join(BUNDLE_FILE_NAME);
@@ -822,9 +1564,17 @@ impl SessionArtifacts {
         }
         self.require_current()?;
         let (sha256, bytes) = hash_open_file(bundle.handle.as_file(), &bundle.path)?;
+        if bytes > MAX_PUBLICATION_BUNDLE_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("bundle manifest exceeds the {MAX_PUBLICATION_BUNDLE_BYTES}-byte limit"),
+            ));
+        }
         Ok(PreparedBundle {
             file: Some(bundle),
             artifact_root: self.directory_binding.try_clone()?,
+            render_id: self.render_id.clone(),
+            output: output_entry,
             sha256,
             bytes,
         })
@@ -957,7 +1707,7 @@ fn require_rendered_terminal_state(path: &Path) -> io::Result<()> {
 
 fn require_directory_without_symlink(path: &Path) -> io::Result<()> {
     let metadata = std::fs::symlink_metadata(path)?;
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+    if path_metadata_is_alias(&metadata) || !metadata.is_dir() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!(
@@ -1007,7 +1757,7 @@ fn collect_bundle_entries(
     for entry in std::fs::read_dir(directory)? {
         let path = entry?.path();
         let metadata = std::fs::symlink_metadata(&path)?;
-        if metadata.file_type().is_symlink() {
+        if path_metadata_is_alias(&metadata) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
@@ -1017,6 +1767,12 @@ fn collect_bundle_entries(
             ));
         }
         if metadata.is_dir() {
+            if path.parent() == Some(root)
+                && path.file_name().and_then(|name| name.to_str())
+                    == Some(PUBLICATION_DIRECTORY_NAME)
+            {
+                continue;
+            }
             collect_bundle_entries(root, &path, entries)?;
             continue;
         }
@@ -1090,16 +1846,514 @@ fn normalized_relative_path(root: &Path, path: &Path) -> io::Result<String> {
 }
 
 fn is_bundle_excluded(relative: &str) -> bool {
-    if relative == BUNDLE_FILE_NAME {
-        return true;
+    relative == BUNDLE_FILE_NAME
+}
+
+fn receipt_path(path: &Path) -> io::Result<String> {
+    let path = std::path::absolute(path)?;
+    path.to_str().map(str::to_owned).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "publication receipt path is not valid UTF-8: {}",
+                path.display()
+            ),
+        )
+    })
+}
+
+fn publication_transaction_id(
+    render_id: &str,
+    request_fingerprint: &str,
+    artifact_root_identity: &str,
+    output_parent_identity: &str,
+    requested_output: &str,
+    output_name: &str,
+) -> String {
+    let mut hasher = Sha256::new();
+    for field in [
+        "pliego.publication-transaction.v1",
+        render_id,
+        request_fingerprint,
+        artifact_root_identity,
+        output_parent_identity,
+        requested_output,
+        output_name,
+    ] {
+        hasher.update((field.len() as u64).to_le_bytes());
+        hasher.update(field.as_bytes());
     }
-    let file_name = relative.rsplit('/').next().unwrap_or(relative);
-    file_name.starts_with('.') && file_name.contains(".pliego-") && file_name.ends_with(".tmp")
+    format!("sha256:{}", lowercase_hex(&hasher.finalize()))
+}
+
+fn receipt_sha256(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("sha256:{}", lowercase_hex(&hasher.finalize()))
+}
+
+fn serialize_receipt(receipt: &impl Serialize) -> io::Result<Vec<u8>> {
+    let mut bytes = serde_json::to_vec_pretty(receipt).map_err(io::Error::other)?;
+    bytes.push(b'\n');
+    Ok(bytes)
+}
+
+#[cfg(test)]
+fn serialize_publication_outcome(summary: &serde_json::Value) -> io::Result<Vec<u8>> {
+    let mut bytes = serde_json::to_vec(summary).map_err(io::Error::other)?;
+    bytes.push(b'\n');
+    Ok(bytes)
+}
+
+fn write_immutable_receipt(
+    directory: &BoundDirectory,
+    name: &str,
+    receipt: &impl Serialize,
+) -> io::Result<String> {
+    let expected = serialize_receipt(receipt)?;
+    write_immutable_bytes(directory, name, &expected)
+}
+
+fn write_immutable_bytes(
+    directory: &BoundDirectory,
+    name: &str,
+    expected: &[u8],
+) -> io::Result<String> {
+    directory.require_current()?;
+    let expected_sha256 = receipt_sha256(&expected);
+    let final_path = directory.requested_path.join(name);
+    if final_path.try_exists()? {
+        let existing = read_receipt_bytes(directory, name)?;
+        if existing != expected {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!(
+                    "immutable publication receipt already exists with different bytes: {}",
+                    final_path.display()
+                ),
+            ));
+        }
+        return Ok(expected_sha256);
+    }
+
+    for attempt in 0..32 {
+        let temporary_path = directory.requested_path.join(format!(
+            ".{name}.pliego-receipt-{}-{attempt}.tmp",
+            std::process::id()
+        ));
+        let temporary_file = match owned_file_options()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&temporary_path)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        };
+        let mut temporary = OwnedFile::bind(temporary_path, temporary_file)?;
+        temporary.handle.as_file_mut().write_all(&expected)?;
+        temporary.handle.as_file().sync_all()?;
+        temporary.verify_content(&expected_sha256, expected.len() as u64)?;
+        directory.require_current()?;
+        match publish_owned_file(&temporary, directory, &final_path) {
+            Ok(()) => {},
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                let existing = read_receipt_bytes(directory, name)?;
+                if existing != expected {
+                    return Err(io::Error::new(
+                        io::ErrorKind::AlreadyExists,
+                        format!(
+                            "immutable publication receipt raced with different bytes: {}",
+                            final_path.display()
+                        ),
+                    ));
+                }
+            },
+            Err(error) => return Err(error),
+        }
+        let _ = directory.handle.as_file().sync_all();
+        // The handle-source link above is the final reported fallible action. The
+        // held bytes were already synced and verified, so later recovery validates
+        // the visible receipt instead of turning a successful link into an error.
+        return Ok(expected_sha256);
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        format!(
+            "all temporary receipt names already exist beside {}",
+            final_path.display()
+        ),
+    ))
+}
+
+fn read_receipt_bytes(directory: &BoundDirectory, name: &str) -> io::Result<Vec<u8>> {
+    const MAX_RECEIPT_BYTES: u64 = 1024 * 1024;
+
+    directory.require_current()?;
+    let path = directory.requested_path.join(name);
+    let metadata = std::fs::symlink_metadata(&path)?;
+    if path_metadata_is_alias(&metadata) || !metadata.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "publication receipt is not a regular file: {}",
+                path.display()
+            ),
+        ));
+    }
+    if metadata.len() > MAX_RECEIPT_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("publication receipt is too large: {}", path.display()),
+        ));
+    }
+    let handle = Handle::from_file(File::open(&path)?)?;
+    if !path_matches_handle(&path, &handle)? {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "publication receipt path changed while opening it: {}",
+                path.display()
+            ),
+        ));
+    }
+    let held_bytes = handle.as_file().metadata()?.len();
+    if held_bytes > MAX_RECEIPT_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("publication receipt is too large: {}", path.display()),
+        ));
+    }
+    let mut bytes = Vec::with_capacity(held_bytes as usize);
+    handle
+        .as_file()
+        .try_clone()?
+        .take(MAX_RECEIPT_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_RECEIPT_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("publication receipt grew while reading: {}", path.display()),
+        ));
+    }
+    if !path_matches_handle(&path, &handle)?
+        || bytes.len() as u64 != handle.as_file().metadata()?.len()
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "publication receipt changed while reading: {}",
+                path.display()
+            ),
+        ));
+    }
+    directory.require_current()?;
+    Ok(bytes)
+}
+
+fn read_publication_summary(
+    artifact: &PublicationArtifact,
+) -> io::Result<(serde_json::Value, Vec<u8>)> {
+    let path = Path::new(&artifact.path);
+    let metadata = std::fs::symlink_metadata(path)?;
+    if path_metadata_is_alias(&metadata) || !metadata.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "publication outcome is not a regular file: {}",
+                path.display()
+            ),
+        ));
+    }
+    let handle = Handle::from_file(File::open(path)?)?;
+    if !path_matches_handle(path, &handle)? {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "publication outcome path changed while opening it: {}",
+                path.display()
+            ),
+        ));
+    }
+    let held_bytes = handle.as_file().metadata()?.len();
+    if held_bytes > MAX_PUBLICATION_OUTCOME_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("publication outcome is too large: {}", path.display()),
+        ));
+    }
+    let mut bytes = Vec::with_capacity(held_bytes as usize);
+    handle
+        .as_file()
+        .try_clone()?
+        .take(MAX_PUBLICATION_OUTCOME_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_PUBLICATION_OUTCOME_BYTES
+        || bytes.len() as u64 != handle.as_file().metadata()?.len()
+        || !path_matches_handle(path, &handle)?
+        || receipt_sha256(&bytes) != artifact.sha256
+        || bytes.len() as u64 != artifact.bytes
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "publication outcome changed while reading: {}",
+                path.display()
+            ),
+        ));
+    }
+    let summary = serde_json::from_slice(&bytes).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("invalid publication outcome {}: {error}", path.display()),
+        )
+    })?;
+    Ok((summary, bytes))
+}
+
+fn read_optional_receipt<T>(
+    directory: &BoundDirectory,
+    name: &str,
+) -> io::Result<Option<(T, String)>>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    let path = directory.requested_path.join(name);
+    match std::fs::symlink_metadata(&path) {
+        Ok(_) => {},
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    }
+    let bytes = read_receipt_bytes(directory, name)?;
+    let receipt = serde_json::from_slice(&bytes).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("invalid publication receipt {}: {error}", path.display()),
+        )
+    })?;
+    let sha256 = receipt_sha256(&bytes);
+    Ok(Some((receipt, sha256)))
+}
+
+fn read_required_receipt<T>(directory: &BoundDirectory, name: &str) -> io::Result<(T, String)>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    read_optional_receipt(directory, name)?.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "publication receipt is missing: {}",
+                directory.requested_path.join(name).display()
+            ),
+        )
+    })
+}
+
+fn publication_artifact_exists(artifact: &PublicationArtifact) -> io::Result<bool> {
+    let path = Path::new(&artifact.path);
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_file() && !path_metadata_is_alias(&metadata) => Ok(true),
+        Ok(_) => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "publication destination is a symlink or special file: {}",
+                path.display()
+            ),
+        )),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+fn verify_publication_artifact(artifact: &PublicationArtifact) -> io::Result<()> {
+    let path = Path::new(&artifact.path);
+    let metadata = std::fs::symlink_metadata(path)?;
+    if path_metadata_is_alias(&metadata) || !metadata.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "publication artifact is not a regular file: {}",
+                path.display()
+            ),
+        ));
+    }
+    let handle = Handle::from_file(File::open(path)?)?;
+    if !path_matches_handle(path, &handle)? {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "publication artifact path changed while opening it: {}",
+                path.display()
+            ),
+        ));
+    }
+    let (sha256, bytes) = hash_open_file(handle.as_file(), path)?;
+    if !path_matches_handle(path, &handle)? {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "publication artifact path changed while verifying it: {}",
+                path.display()
+            ),
+        ));
+    }
+    if sha256 != artifact.sha256 || bytes != artifact.bytes {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "publication artifact does not match its prepared receipt: {}",
+                path.display()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn verify_bundle_closure(
+    artifact_root: &BoundDirectory,
+    artifact: &PublicationArtifact,
+    live_file: Option<&OwnedFile>,
+    render_id: &str,
+    output: &BundleEntry,
+) -> io::Result<()> {
+    artifact_root.require_current()?;
+    let bundle_path = artifact_root.requested_path.join(BUNDLE_FILE_NAME);
+    if artifact.path != receipt_path(&bundle_path)? {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "prepared bundle path does not match the bound artifact root",
+        ));
+    }
+
+    let opened;
+    let handle = if let Some(file) = live_file {
+        file.require_current()?;
+        if receipt_path(&file.path)? != artifact.path {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "held bundle path does not match the prepared receipt",
+            ));
+        }
+        &file.handle
+    } else {
+        let metadata = std::fs::symlink_metadata(&bundle_path)?;
+        if path_metadata_is_alias(&metadata) || !metadata.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "prepared bundle is not a regular file: {}",
+                    bundle_path.display()
+                ),
+            ));
+        }
+        opened = Handle::from_file(File::open(&bundle_path)?)?;
+        &opened
+    };
+    if !path_matches_handle(&bundle_path, handle)? {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "prepared bundle path changed while opening it: {}",
+                bundle_path.display()
+            ),
+        ));
+    }
+    let held_len = handle.as_file().metadata()?.len();
+    if artifact.bytes > MAX_PUBLICATION_BUNDLE_BYTES || held_len != artifact.bytes {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "prepared bundle length does not match its receipt",
+        ));
+    }
+    let capacity = usize::try_from(artifact.bytes).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "prepared bundle is too large to address in this process",
+        )
+    })?;
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(capacity)
+        .map_err(io::Error::other)?;
+    let mut offset = 0_u64;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = read_open_file_at(handle.as_file(), &mut buffer, offset)?;
+        if read == 0 {
+            break;
+        }
+        offset = offset.checked_add(read as u64).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "prepared bundle is too large")
+        })?;
+        if offset > artifact.bytes {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "prepared bundle grew while reading",
+            ));
+        }
+        bytes.extend_from_slice(&buffer[..read]);
+    }
+    if offset != artifact.bytes
+        || handle.as_file().metadata()?.len() != artifact.bytes
+        || receipt_sha256(&bytes) != artifact.sha256
+        || !path_matches_handle(&bundle_path, handle)?
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "prepared bundle changed while reading",
+        ));
+    }
+
+    let manifest: OwnedBundleManifest = serde_json::from_slice(&bytes).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("prepared bundle is invalid JSON: {error}"),
+        )
+    })?;
+    if manifest.schema != "pliego.bundle"
+        || manifest.version != 1
+        || manifest.render_id != render_id
+        || manifest.output != *output
+        || manifest
+            .entries
+            .windows(2)
+            .any(|entries| entries[0].path >= entries[1].path)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "prepared bundle manifest does not match the publication transaction",
+        ));
+    }
+
+    let mut current_entries = Vec::new();
+    collect_bundle_entries(
+        &artifact_root.requested_path,
+        &artifact_root.requested_path,
+        &mut current_entries,
+    )?;
+    current_entries.sort_by(|left, right| left.path.cmp(&right.path));
+    if current_entries != manifest.entries {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "artifact bundle entries changed after preparation",
+        ));
+    }
+    artifact_root.require_current()?;
+    if !path_matches_handle(&bundle_path, handle)? {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "prepared bundle path changed during closure verification",
+        ));
+    }
+    Ok(())
 }
 
 fn hash_regular_file(path: &Path) -> io::Result<(String, u64)> {
     let metadata = std::fs::symlink_metadata(path)?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
+    if path_metadata_is_alias(&metadata) || !metadata.is_file() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!(
@@ -1109,33 +2363,24 @@ fn hash_regular_file(path: &Path) -> io::Result<(String, u64)> {
         ));
     }
 
-    let mut file = File::open(path)?;
-    let mut hasher = Sha256::new();
-    let mut bytes = 0_u64;
-    let mut buffer = [0_u8; 64 * 1024];
-    loop {
-        let read = file.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-        bytes = bytes.checked_add(read as u64).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("bundle entry is too large to count: {}", path.display()),
-            )
-        })?;
+    let handle = Handle::from_file(File::open(path)?)?;
+    if !path_matches_handle(path, &handle)? {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "bundle entry path changed while opening: {}",
+                path.display()
+            ),
+        ));
     }
-    if bytes != metadata.len() {
+    let digest = hash_open_file(handle.as_file(), path)?;
+    if digest.1 != metadata.len() || !path_matches_handle(path, &handle)? {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("bundle entry changed while hashing: {}", path.display()),
         ));
     }
-    Ok((
-        format!("sha256:{}", lowercase_hex(&hasher.finalize())),
-        bytes,
-    ))
+    Ok(digest)
 }
 
 fn hash_open_file(file: &File, path: &Path) -> io::Result<(String, u64)> {
@@ -1181,7 +2426,7 @@ fn path_matches_handle(path: &Path, expected: &Handle) -> io::Result<bool> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
         Err(error) => return Err(error),
     };
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
+    if path_metadata_is_alias(&metadata) || !metadata.is_file() {
         return Ok(false);
     }
     handles_match(&Handle::from_path(path)?, expected)
@@ -1190,6 +2435,32 @@ fn path_matches_handle(path: &Path, expected: &Handle) -> io::Result<bool> {
 #[cfg(not(windows))]
 fn handles_match(left: &Handle, right: &Handle) -> io::Result<bool> {
     Ok(left == right)
+}
+
+#[cfg(unix)]
+fn open_file_identity(file: &File, _path: &Path) -> io::Result<String> {
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata = file.metadata()?;
+    Ok(format!(
+        "unix:{:016x}:{:016x}",
+        metadata.dev(),
+        metadata.ino()
+    ))
+}
+
+#[cfg(windows)]
+fn open_file_identity(file: &File, _path: &Path) -> io::Result<String> {
+    let (volume, identifier) = windows_file_identity(file)?;
+    Ok(format!(
+        "windows:{volume:016x}:{}",
+        lowercase_hex(&identifier)
+    ))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn open_file_identity(_file: &File, path: &Path) -> io::Result<String> {
+    Ok(format!("path:{}", receipt_path(path)?))
 }
 
 #[cfg(windows)]
@@ -1638,7 +2909,7 @@ fn prepare_artifact_file(
     }
     artifact_root.require_current()?;
     let metadata = std::fs::symlink_metadata(&source)?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
+    if path_metadata_is_alias(&metadata) || !metadata.is_file() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("document PDF is not a regular file: {}", source.display()),
@@ -1651,10 +2922,10 @@ fn prepare_artifact_file(
     artifact_root.require_current()?;
     Ok(PreparedDocumentPdf {
         destination,
-        storage: PreparedDocumentPdfStorage::Artifact {
+        storage: Some(PreparedDocumentPdfStorage::Artifact {
             artifact_root,
             file,
-        },
+        }),
         sha256,
         bytes,
     })
@@ -1684,7 +2955,7 @@ fn prepare_new_file(source: &Path, destination: &Path) -> io::Result<PreparedDoc
         ));
     }
     let source_path_metadata = std::fs::symlink_metadata(&source)?;
-    if source_path_metadata.file_type().is_symlink() || !source_path_metadata.is_file() {
+    if path_metadata_is_alias(&source_path_metadata) || !source_path_metadata.is_file() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("document PDF is not a regular file: {}", source.display()),
@@ -1744,11 +3015,11 @@ fn prepare_new_file(source: &Path, destination: &Path) -> io::Result<PreparedDoc
         temporary.verify_content(&sha256, bytes)?;
         return Ok(PreparedDocumentPdf {
             destination: destination.to_owned(),
-            storage: PreparedDocumentPdfStorage::External {
+            storage: Some(PreparedDocumentPdfStorage::External {
                 publication_destination,
                 destination_parent,
                 staged: temporary,
-            },
+            }),
             sha256,
             bytes,
         });
@@ -1839,8 +3110,11 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
-        BUNDLE_FILE_NAME, LocalDocument, OwnedFile, SessionArtifacts, SessionFailure,
-        WebResourceLoadRole, contextualize_clonefileat_error,
+        BUNDLE_FILE_NAME, LocalDocument, MAX_PUBLICATION_OUTCOME_BYTES, OwnedFile,
+        PUBLICATION_COMMITTED_FILE_NAME, PUBLICATION_DIRECTORY_NAME, PUBLICATION_LEASE_FILE_NAME,
+        PUBLICATION_OUTCOME_FILE_NAME, PUBLICATION_PLAN_FILE_NAME, PUBLICATION_PREPARED_FILE_NAME,
+        PublicationRecoveryState, SessionArtifacts, SessionFailure, WebResourceLoadRole,
+        contextualize_clonefileat_error, path_metadata_is_alias, serialize_publication_outcome,
     };
 
     #[test]
@@ -1885,6 +3159,817 @@ mod tests {
 
     fn test_temp_dir() -> PathBuf {
         std::env::temp_dir().canonicalize().unwrap()
+    }
+
+    fn snapshot_tree(root: &std::path::Path) -> Vec<(String, Vec<u8>)> {
+        fn visit(
+            root: &std::path::Path,
+            directory: &std::path::Path,
+            snapshot: &mut Vec<(String, Vec<u8>)>,
+        ) {
+            let mut entries: Vec<_> = fs::read_dir(directory)
+                .unwrap()
+                .map(Result::unwrap)
+                .collect();
+            entries.sort_by_key(|entry| entry.file_name());
+            for entry in entries {
+                let path = entry.path();
+                let relative = path
+                    .strip_prefix(root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                let metadata = fs::symlink_metadata(&path).unwrap();
+                if path_metadata_is_alias(&metadata) {
+                    snapshot.push((
+                        relative,
+                        format!("symlink:{}", fs::read_link(&path).unwrap().display()).into_bytes(),
+                    ));
+                } else if metadata.is_dir() {
+                    snapshot.push((format!("{relative}/"), Vec::new()));
+                    visit(root, &path, snapshot);
+                } else {
+                    let bytes = fs::read(&path).unwrap_or_else(|error| {
+                        format!("unreadable:{:?}:{}", error.kind(), metadata.len()).into_bytes()
+                    });
+                    snapshot.push((relative, bytes));
+                }
+            }
+        }
+
+        let mut snapshot = Vec::new();
+        visit(root, root, &mut snapshot);
+        snapshot
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_junction_metadata_is_rejected_as_an_alias() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let sandbox = test_temp_dir().join(format!(
+            "pliego-junction-metadata-{}-{unique}",
+            std::process::id()
+        ));
+        let target = sandbox.join("target");
+        let junction = sandbox.join("junction");
+        fs::create_dir_all(&target).unwrap();
+        let status = std::process::Command::new("cmd.exe")
+            .args(["/d", "/c", "mklink", "/J"])
+            .arg(&junction)
+            .arg(&target)
+            .status()
+            .unwrap();
+        assert!(status.success(), "failed to create junction fixture");
+
+        let metadata = fs::symlink_metadata(&junction).unwrap();
+        assert!(path_metadata_is_alias(&metadata));
+
+        fs::remove_dir(&junction).unwrap();
+        fs::remove_dir_all(&sandbox).unwrap();
+    }
+
+    struct PreservedPublicationFixture {
+        sandbox: PathBuf,
+        artifacts: PathBuf,
+        output: PathBuf,
+        staging: PathBuf,
+        render_id: String,
+        request_fingerprint: String,
+    }
+
+    fn preserved_publication_fixture(prefix: &str) -> PreservedPublicationFixture {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let sandbox = test_temp_dir().join(format!("{prefix}-{}-{unique}", std::process::id()));
+        fs::create_dir(&sandbox).unwrap();
+        let artifact_path = sandbox.join("artifacts");
+        let output = sandbox.join("invoice.pdf");
+        let render_id = format!("sha256:{prefix}-render");
+        let request_fingerprint = format!("sha256:{prefix}-request");
+        let artifacts =
+            SessionArtifacts::create_with_render_id(&artifact_path, &render_id).unwrap();
+        let journal = artifacts
+            .begin_publication(&output, &request_fingerprint)
+            .unwrap();
+        artifacts.write_scene(br#"{"schema":"fixture"}"#).unwrap();
+        artifacts.write_document_pdf(b"%PDF-preserved").unwrap();
+        artifacts.record_state("rendered", None).unwrap();
+        let prepared = artifacts.prepare_document_pdf(&output).unwrap();
+        let staging = prepared.prepared_file_path().to_owned();
+        let bundle = artifacts.write_prepared_bundle(&prepared).unwrap();
+        journal
+            .record_prepared(
+                &prepared,
+                &bundle,
+                &serialize_publication_outcome(&serde_json::json!({
+                    "document_pdf": output.to_string_lossy(),
+                    "render_id": render_id,
+                    "status": "rendered",
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        prepared.preserve_for_recovery();
+        bundle.preserve();
+        drop(journal);
+        drop(artifacts);
+        PreservedPublicationFixture {
+            sandbox,
+            artifacts: artifact_path,
+            output,
+            staging,
+            render_id,
+            request_fingerprint,
+        }
+    }
+
+    fn assert_recovery_rejects_bundle_change(label: &str, change: impl FnOnce(&std::path::Path)) {
+        let fixture = preserved_publication_fixture(&format!("pliego-bundle-{label}"));
+        change(&fixture.artifacts);
+        let before = snapshot_tree(&fixture.artifacts);
+        let staging_before = fs::read(&fixture.staging).unwrap();
+        let artifacts =
+            SessionArtifacts::open_for_publication_recovery(&fixture.artifacts, &fixture.render_id)
+                .unwrap();
+        let recovery = artifacts
+            .resume_publication(&fixture.output, &fixture.request_fingerprint)
+            .unwrap();
+        let error = recovery.recover().unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        drop(recovery);
+        drop(artifacts);
+        assert_eq!(snapshot_tree(&fixture.artifacts), before);
+        assert_eq!(fs::read(&fixture.staging).unwrap(), staging_before);
+        assert!(!fixture.output.exists());
+        assert!(
+            !fixture
+                .artifacts
+                .join(PUBLICATION_DIRECTORY_NAME)
+                .join(PUBLICATION_COMMITTED_FILE_NAME)
+                .exists()
+        );
+        fs::remove_dir_all(fixture.sandbox).unwrap();
+    }
+
+    #[test]
+    fn publication_lease_is_exclusive_and_plan_is_idempotent() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let sandbox = test_temp_dir().join(format!(
+            "pliego-publication-lease-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir(&sandbox).unwrap();
+        let artifact_path = sandbox.join("artifacts");
+        let render_id = "sha256:lease-fixture";
+        let request_fingerprint = "sha256:lease-request";
+        let artifacts = SessionArtifacts::create_with_render_id(&artifact_path, render_id).unwrap();
+        let output = sandbox.join("invoice.pdf");
+
+        let journal = artifacts
+            .begin_publication(&output, request_fingerprint)
+            .unwrap();
+        assert_eq!(
+            journal.recover().unwrap(),
+            PublicationRecoveryState::Planned
+        );
+        let leased = artifacts
+            .resume_publication(&output, request_fingerprint)
+            .unwrap_err();
+        assert_eq!(leased.kind(), std::io::ErrorKind::WouldBlock);
+        let first_plan = fs::read(
+            artifacts
+                .directory()
+                .join(PUBLICATION_DIRECTORY_NAME)
+                .join(PUBLICATION_PLAN_FILE_NAME),
+        )
+        .unwrap();
+
+        drop(journal);
+        drop(artifacts);
+        let artifacts =
+            SessionArtifacts::open_for_publication_recovery(&artifact_path, render_id).unwrap();
+        let reopened = artifacts
+            .resume_publication(&output, request_fingerprint)
+            .unwrap();
+        assert_eq!(
+            reopened.recover().unwrap(),
+            PublicationRecoveryState::Planned
+        );
+        assert_eq!(
+            fs::read(
+                artifacts
+                    .directory()
+                    .join(PUBLICATION_DIRECTORY_NAME)
+                    .join(PUBLICATION_PLAN_FILE_NAME)
+            )
+            .unwrap(),
+            first_plan
+        );
+
+        drop(reopened);
+        let mismatch = artifacts
+            .resume_publication(&output, "sha256:different-request")
+            .unwrap_err();
+        assert_eq!(mismatch.kind(), std::io::ErrorKind::InvalidData);
+        drop(artifacts);
+        fs::remove_dir_all(sandbox).unwrap();
+    }
+
+    #[test]
+    fn prepared_and_committed_receipts_are_hash_linked_and_excluded_from_bundle() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let sandbox = test_temp_dir().join(format!(
+            "pliego-publication-receipts-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir(&sandbox).unwrap();
+        let artifacts = SessionArtifacts::create_with_render_id(
+            sandbox.join("artifacts"),
+            "sha256:receipt-fixture",
+        )
+        .unwrap();
+        let output = sandbox.join("invoice.pdf");
+        let journal = artifacts
+            .begin_publication(&output, "sha256:receipt-request")
+            .unwrap();
+        artifacts.write_document_pdf(b"%PDF-receipt").unwrap();
+        artifacts.record_state("rendered", None).unwrap();
+        let mut prepared = artifacts.prepare_document_pdf(&output).unwrap();
+        let bundle = artifacts.write_prepared_bundle(&prepared).unwrap();
+        let summary = serde_json::json!({
+            "document_pdf": output.to_string_lossy(),
+            "render_id": "sha256:receipt-fixture",
+            "status": "rendered",
+        });
+        let mut expected_summary_bytes = serde_json::to_vec(&summary).unwrap();
+        expected_summary_bytes.push(b'\n');
+        let prepared_receipt = journal
+            .record_prepared(&prepared, &bundle, &expected_summary_bytes)
+            .unwrap();
+
+        let bundle_json: serde_json::Value =
+            serde_json::from_slice(&fs::read(bundle.path()).unwrap()).unwrap();
+        assert!(
+            bundle_json["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|entry| !entry["path"].as_str().unwrap().starts_with("publication/"))
+        );
+
+        prepared.commit(&bundle).unwrap();
+        journal
+            .record_committed(&prepared_receipt, Some(&bundle))
+            .unwrap();
+        bundle.preserve();
+        let PublicationRecoveryState::Committed {
+            summary: recovered_summary,
+            cli_bytes,
+            recovered,
+        } = journal.recover().unwrap()
+        else {
+            panic!("committed transaction should be terminal")
+        };
+        assert!(!recovered);
+        assert_eq!(recovered_summary, summary);
+        assert_eq!(cli_bytes, expected_summary_bytes);
+        let publication = artifacts.directory().join(PUBLICATION_DIRECTORY_NAME);
+        let prepared_json: serde_json::Value = serde_json::from_slice(
+            &fs::read(publication.join(PUBLICATION_PREPARED_FILE_NAME)).unwrap(),
+        )
+        .unwrap();
+        let committed_json: serde_json::Value = serde_json::from_slice(
+            &fs::read(publication.join(PUBLICATION_COMMITTED_FILE_NAME)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(prepared_json["schema"], "pliego.publication-prepared");
+        assert_eq!(committed_json["prepared_sha256"], prepared_receipt.sha256);
+        assert_eq!(
+            fs::read(publication.join(PUBLICATION_OUTCOME_FILE_NAME)).unwrap(),
+            expected_summary_bytes
+        );
+
+        drop(prepared);
+        drop(journal);
+        drop(artifacts);
+        fs::remove_file(output).unwrap();
+        fs::remove_dir_all(sandbox).unwrap();
+    }
+
+    #[test]
+    fn recovery_finalizes_an_exact_visible_output_without_republishing_it() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let sandbox = test_temp_dir().join(format!(
+            "pliego-publication-recover-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir(&sandbox).unwrap();
+        let artifact_path = sandbox.join("artifacts");
+        let render_id = "sha256:recover-fixture";
+        let request_fingerprint = "sha256:recover-request";
+        let artifacts = SessionArtifacts::create_with_render_id(&artifact_path, render_id).unwrap();
+        let output = sandbox.join("invoice.pdf");
+        let journal = artifacts
+            .begin_publication(&output, request_fingerprint)
+            .unwrap();
+        artifacts.write_document_pdf(b"%PDF-recover").unwrap();
+        artifacts.record_state("rendered", None).unwrap();
+        let mut prepared = artifacts.prepare_document_pdf(&output).unwrap();
+        let bundle = artifacts.write_prepared_bundle(&prepared).unwrap();
+        let summary = serde_json::json!({
+            "document_pdf": output.to_string_lossy(),
+            "render_id": render_id,
+            "status": "rendered",
+        });
+        let mut expected_summary_bytes = serde_json::to_vec(&summary).unwrap();
+        expected_summary_bytes.push(b'\n');
+        journal
+            .record_prepared(&prepared, &bundle, &expected_summary_bytes)
+            .unwrap();
+        prepared.commit(&bundle).unwrap();
+        bundle.preserve();
+        drop(prepared);
+        drop(journal);
+        drop(artifacts);
+
+        let artifacts =
+            SessionArtifacts::open_for_publication_recovery(&artifact_path, render_id).unwrap();
+        let recovery = artifacts
+            .resume_publication(&output, request_fingerprint)
+            .unwrap();
+        let PublicationRecoveryState::Committed {
+            summary: recovered_summary,
+            cli_bytes,
+            recovered,
+        } = recovery.recover().unwrap()
+        else {
+            panic!("prepared transaction should recover")
+        };
+        assert!(recovered);
+        assert_eq!(recovered_summary, summary);
+        assert_eq!(cli_bytes, expected_summary_bytes);
+        let publication = artifact_path.join(PUBLICATION_DIRECTORY_NAME);
+        let committed_before = fs::read(publication.join(PUBLICATION_COMMITTED_FILE_NAME)).unwrap();
+        let second = recovery.recover().unwrap();
+        let PublicationRecoveryState::Committed {
+            summary: second_summary,
+            cli_bytes: second_summary_bytes,
+            recovered: second_recovered,
+        } = second
+        else {
+            panic!("second recovery should remain terminal")
+        };
+        assert!(!second_recovered);
+        assert_eq!(second_summary, summary);
+        assert_eq!(second_summary_bytes, expected_summary_bytes);
+        assert_eq!(
+            fs::read(publication.join(PUBLICATION_COMMITTED_FILE_NAME)).unwrap(),
+            committed_before
+        );
+        assert_eq!(fs::read(&output).unwrap(), b"%PDF-recover");
+
+        drop(recovery);
+        drop(artifacts);
+        fs::remove_file(output).unwrap();
+        fs::remove_dir_all(sandbox).unwrap();
+    }
+
+    #[test]
+    fn process_restart_republishes_prepared_staging_and_returns_exact_summary_bytes() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let sandbox = test_temp_dir().join(format!(
+            "pliego-publication-relink-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir(&sandbox).unwrap();
+        let artifact_path = sandbox.join("artifacts");
+        let render_id = "sha256:relink-fixture";
+        let request_fingerprint = "sha256:relink-request";
+        let output = sandbox.join("invoice.pdf");
+        let artifacts = SessionArtifacts::create_with_render_id(&artifact_path, render_id).unwrap();
+        let journal = artifacts
+            .begin_publication(&output, request_fingerprint)
+            .unwrap();
+        artifacts.write_document_pdf(b"%PDF-relink").unwrap();
+        artifacts.record_state("rendered", None).unwrap();
+        let prepared = artifacts.prepare_document_pdf(&output).unwrap();
+        let staging_path = prepared.prepared_file_path().to_owned();
+        let bundle = artifacts.write_prepared_bundle(&prepared).unwrap();
+        let summary = serde_json::json!({
+            "document_pdf": output.to_string_lossy(),
+            "render_id": render_id,
+            "status": "rendered",
+        });
+        let mut expected_summary_bytes = serde_json::to_vec(&summary).unwrap();
+        expected_summary_bytes.push(b'\n');
+        journal
+            .record_prepared(&prepared, &bundle, &expected_summary_bytes)
+            .unwrap();
+        prepared.preserve_for_recovery();
+        bundle.preserve();
+        drop(journal);
+        drop(artifacts);
+        assert!(!output.exists());
+        assert!(staging_path.exists());
+
+        let artifacts =
+            SessionArtifacts::open_for_publication_recovery(&artifact_path, render_id).unwrap();
+        let recovery = artifacts
+            .resume_publication(&output, request_fingerprint)
+            .unwrap();
+        let PublicationRecoveryState::Committed {
+            summary: recovered_summary,
+            cli_bytes,
+            recovered,
+        } = recovery.recover().unwrap()
+        else {
+            panic!("prepared transaction should recover after restart")
+        };
+        assert!(recovered);
+        assert_eq!(recovered_summary, summary);
+        assert_eq!(cli_bytes, expected_summary_bytes);
+        assert_eq!(fs::read(&output).unwrap(), b"%PDF-relink");
+        assert!(!staging_path.exists());
+        assert!(
+            artifact_path
+                .join(PUBLICATION_DIRECTORY_NAME)
+                .join(PUBLICATION_COMMITTED_FILE_NAME)
+                .is_file()
+        );
+
+        drop(recovery);
+        drop(artifacts);
+        fs::remove_file(output).unwrap();
+        fs::remove_dir_all(sandbox).unwrap();
+    }
+
+    #[test]
+    fn bundle_closure_rejects_live_mutation_before_any_receipt_or_output() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let sandbox = test_temp_dir().join(format!(
+            "pliego-live-bundle-mutation-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir(&sandbox).unwrap();
+        let artifacts = SessionArtifacts::create_with_render_id(
+            sandbox.join("artifacts"),
+            "sha256:live-bundle-mutation",
+        )
+        .unwrap();
+        let output = sandbox.join("invoice.pdf");
+        let journal = artifacts
+            .begin_publication(&output, "sha256:live-bundle-request")
+            .unwrap();
+        artifacts.write_scene(b"sealed scene").unwrap();
+        artifacts.write_document_pdf(b"%PDF-live-mutation").unwrap();
+        artifacts.record_state("rendered", None).unwrap();
+        let prepared = artifacts.prepare_document_pdf(&output).unwrap();
+        let bundle = artifacts.write_prepared_bundle(&prepared).unwrap();
+        fs::write(artifacts.directory().join("scene.json"), b"mutated scene").unwrap();
+        let before = snapshot_tree(artifacts.directory());
+
+        let error = journal
+            .record_prepared(
+                &prepared,
+                &bundle,
+                &serialize_publication_outcome(&serde_json::json!({ "status": "rendered" }))
+                    .unwrap(),
+            )
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(snapshot_tree(artifacts.directory()), before);
+        let publication = artifacts.directory().join(PUBLICATION_DIRECTORY_NAME);
+        assert!(!publication.join(PUBLICATION_OUTCOME_FILE_NAME).exists());
+        assert!(!publication.join(PUBLICATION_PREPARED_FILE_NAME).exists());
+        assert!(!output.exists());
+
+        drop(bundle);
+        drop(prepared);
+        drop(journal);
+        drop(artifacts);
+        fs::remove_dir_all(sandbox).unwrap();
+    }
+
+    #[test]
+    fn recovery_rejects_mutated_added_deleted_and_temp_shaped_bundle_entries_without_mutation() {
+        assert_recovery_rejects_bundle_change("mutated", |artifacts| {
+            fs::write(artifacts.join("scene.json"), b"changed after preparation").unwrap();
+        });
+        assert_recovery_rejects_bundle_change("added", |artifacts| {
+            fs::write(artifacts.join("unexpected.txt"), b"added after preparation").unwrap();
+        });
+        assert_recovery_rejects_bundle_change("temp-shaped-added", |artifacts| {
+            let resources = artifacts.join("resources");
+            fs::create_dir_all(&resources).unwrap();
+            fs::write(
+                resources.join(".x.pliego-hidden.tmp"),
+                b"unsealed temp-shaped artifact",
+            )
+            .unwrap();
+        });
+        assert_recovery_rejects_bundle_change("deleted", |artifacts| {
+            fs::remove_file(artifacts.join("scene.json")).unwrap();
+        });
+    }
+
+    #[test]
+    fn oversized_outcome_is_rejected_before_sealing_or_output_visibility() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let sandbox = test_temp_dir().join(format!(
+            "pliego-oversized-outcome-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir(&sandbox).unwrap();
+        let artifacts = SessionArtifacts::create_with_render_id(
+            sandbox.join("artifacts"),
+            "sha256:oversized-outcome",
+        )
+        .unwrap();
+        let output = sandbox.join("invoice.pdf");
+        let journal = artifacts
+            .begin_publication(&output, "sha256:oversized-outcome-request")
+            .unwrap();
+        artifacts.write_document_pdf(b"%PDF-oversized").unwrap();
+        artifacts.record_state("rendered", None).unwrap();
+        let prepared = artifacts.prepare_document_pdf(&output).unwrap();
+        let bundle = artifacts.write_prepared_bundle(&prepared).unwrap();
+        let summary = serde_json::json!({
+            "readiness": "x".repeat(MAX_PUBLICATION_OUTCOME_BYTES as usize),
+        });
+        let before = snapshot_tree(artifacts.directory());
+
+        let oversized_outcome = serialize_publication_outcome(&summary).unwrap();
+        let error = journal
+            .record_prepared(&prepared, &bundle, &oversized_outcome)
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(snapshot_tree(artifacts.directory()), before);
+        let publication = artifacts.directory().join(PUBLICATION_DIRECTORY_NAME);
+        assert!(!publication.join(PUBLICATION_OUTCOME_FILE_NAME).exists());
+        assert!(!publication.join(PUBLICATION_PREPARED_FILE_NAME).exists());
+        assert!(!output.exists());
+
+        drop(bundle);
+        drop(prepared);
+        drop(journal);
+        drop(artifacts);
+        fs::remove_dir_all(sandbox).unwrap();
+    }
+
+    #[test]
+    fn nonregular_committed_receipt_and_lease_are_rejected_without_mutation() {
+        let fixture = preserved_publication_fixture("pliego-directory-committed");
+        let committed = fixture
+            .artifacts
+            .join(PUBLICATION_DIRECTORY_NAME)
+            .join(PUBLICATION_COMMITTED_FILE_NAME);
+        fs::create_dir(&committed).unwrap();
+        let before = snapshot_tree(&fixture.artifacts);
+        let staging_before = fs::read(&fixture.staging).unwrap();
+        let artifacts =
+            SessionArtifacts::open_for_publication_recovery(&fixture.artifacts, &fixture.render_id)
+                .unwrap();
+        let recovery = artifacts
+            .resume_publication(&fixture.output, &fixture.request_fingerprint)
+            .unwrap();
+        assert_eq!(
+            recovery.recover().unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+        drop(recovery);
+        drop(artifacts);
+        assert_eq!(snapshot_tree(&fixture.artifacts), before);
+        assert_eq!(fs::read(&fixture.staging).unwrap(), staging_before);
+        assert!(!fixture.output.exists());
+        fs::remove_dir_all(fixture.sandbox).unwrap();
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let sandbox = test_temp_dir().join(format!(
+            "pliego-directory-lease-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir(&sandbox).unwrap();
+        let artifact_path = sandbox.join("artifacts");
+        let output = sandbox.join("invoice.pdf");
+        let artifacts =
+            SessionArtifacts::create_with_render_id(&artifact_path, "sha256:directory-lease")
+                .unwrap();
+        let journal = artifacts
+            .begin_publication(&output, "sha256:directory-lease-request")
+            .unwrap();
+        drop(journal);
+        drop(artifacts);
+        let lease = artifact_path
+            .join(PUBLICATION_DIRECTORY_NAME)
+            .join(PUBLICATION_LEASE_FILE_NAME);
+        fs::remove_file(&lease).unwrap();
+        fs::create_dir(&lease).unwrap();
+        let before = snapshot_tree(&artifact_path);
+        let artifacts = SessionArtifacts::open_for_publication_recovery(
+            &artifact_path,
+            "sha256:directory-lease",
+        )
+        .unwrap();
+        let error = artifacts
+            .resume_publication(&output, "sha256:directory-lease-request")
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        drop(artifacts);
+        assert_eq!(snapshot_tree(&artifact_path), before);
+        assert!(!output.exists());
+        fs::remove_dir_all(sandbox).unwrap();
+    }
+
+    #[test]
+    fn visible_exact_output_does_not_hide_a_mutated_bundle_entry() {
+        let fixture = preserved_publication_fixture("pliego-visible-mutated-bundle");
+        fs::write(&fixture.output, b"%PDF-preserved").unwrap();
+        fs::write(
+            fixture.artifacts.join("scene.json"),
+            b"mutated after output visibility",
+        )
+        .unwrap();
+        let before = snapshot_tree(&fixture.artifacts);
+        let staging_before = fs::read(&fixture.staging).unwrap();
+        let output_before = fs::read(&fixture.output).unwrap();
+        let artifacts =
+            SessionArtifacts::open_for_publication_recovery(&fixture.artifacts, &fixture.render_id)
+                .unwrap();
+        let recovery = artifacts
+            .resume_publication(&fixture.output, &fixture.request_fingerprint)
+            .unwrap();
+        assert_eq!(
+            recovery.recover().unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+        drop(recovery);
+        drop(artifacts);
+        assert_eq!(snapshot_tree(&fixture.artifacts), before);
+        assert_eq!(fs::read(&fixture.staging).unwrap(), staging_before);
+        assert_eq!(fs::read(&fixture.output).unwrap(), output_before);
+        assert!(
+            !fixture
+                .artifacts
+                .join(PUBLICATION_DIRECTORY_NAME)
+                .join(PUBLICATION_COMMITTED_FILE_NAME)
+                .exists()
+        );
+        fs::remove_dir_all(fixture.sandbox).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dangling_optional_receipts_and_outcome_fail_before_recovery_mutation() {
+        use std::os::unix::fs::symlink;
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let sandbox = test_temp_dir().join(format!(
+            "pliego-dangling-prepared-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir(&sandbox).unwrap();
+        let artifact_path = sandbox.join("artifacts");
+        let output = sandbox.join("invoice.pdf");
+        let artifacts =
+            SessionArtifacts::create_with_render_id(&artifact_path, "sha256:dangling-prepared")
+                .unwrap();
+        let journal = artifacts
+            .begin_publication(&output, "sha256:dangling-prepared-request")
+            .unwrap();
+        drop(journal);
+        drop(artifacts);
+        let publication = artifact_path.join(PUBLICATION_DIRECTORY_NAME);
+        symlink(
+            "missing-prepared-target",
+            publication.join(PUBLICATION_PREPARED_FILE_NAME),
+        )
+        .unwrap();
+        let before = snapshot_tree(&artifact_path);
+        let artifacts = SessionArtifacts::open_for_publication_recovery(
+            &artifact_path,
+            "sha256:dangling-prepared",
+        )
+        .unwrap();
+        let recovery = artifacts
+            .resume_publication(&output, "sha256:dangling-prepared-request")
+            .unwrap();
+        assert_eq!(
+            recovery.recover().unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+        drop(recovery);
+        drop(artifacts);
+        assert_eq!(snapshot_tree(&artifact_path), before);
+        assert!(!output.exists());
+        fs::remove_dir_all(&sandbox).unwrap();
+
+        for name in [
+            PUBLICATION_COMMITTED_FILE_NAME,
+            PUBLICATION_OUTCOME_FILE_NAME,
+        ] {
+            let fixture = preserved_publication_fixture(&format!("pliego-dangling-{name}"));
+            let path = fixture
+                .artifacts
+                .join(PUBLICATION_DIRECTORY_NAME)
+                .join(name);
+            if name == PUBLICATION_OUTCOME_FILE_NAME {
+                fs::remove_file(&path).unwrap();
+            }
+            symlink(format!("missing-{name}-target"), &path).unwrap();
+            let before = snapshot_tree(&fixture.artifacts);
+            let staging_before = fs::read(&fixture.staging).unwrap();
+            let artifacts = SessionArtifacts::open_for_publication_recovery(
+                &fixture.artifacts,
+                &fixture.render_id,
+            )
+            .unwrap();
+            let recovery = artifacts
+                .resume_publication(&fixture.output, &fixture.request_fingerprint)
+                .unwrap();
+            assert_eq!(
+                recovery.recover().unwrap_err().kind(),
+                std::io::ErrorKind::InvalidData
+            );
+            drop(recovery);
+            drop(artifacts);
+            assert_eq!(snapshot_tree(&fixture.artifacts), before);
+            assert_eq!(fs::read(&fixture.staging).unwrap(), staging_before);
+            assert!(!fixture.output.exists());
+            fs::remove_dir_all(fixture.sandbox).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_lease_is_rejected_without_mutating_the_transaction() {
+        use std::os::unix::fs::symlink;
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let sandbox = test_temp_dir().join(format!(
+            "pliego-symlink-lease-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir(&sandbox).unwrap();
+        let artifact_path = sandbox.join("artifacts");
+        let output = sandbox.join("invoice.pdf");
+        let artifacts =
+            SessionArtifacts::create_with_render_id(&artifact_path, "sha256:symlink-lease")
+                .unwrap();
+        let journal = artifacts
+            .begin_publication(&output, "sha256:symlink-lease-request")
+            .unwrap();
+        drop(journal);
+        drop(artifacts);
+        let lease = artifact_path
+            .join(PUBLICATION_DIRECTORY_NAME)
+            .join(PUBLICATION_LEASE_FILE_NAME);
+        fs::remove_file(&lease).unwrap();
+        symlink(PUBLICATION_PLAN_FILE_NAME, &lease).unwrap();
+        let before = snapshot_tree(&artifact_path);
+
+        let artifacts =
+            SessionArtifacts::open_for_publication_recovery(&artifact_path, "sha256:symlink-lease")
+                .unwrap();
+        let error = artifacts
+            .resume_publication(&output, "sha256:symlink-lease-request")
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        drop(artifacts);
+        assert_eq!(snapshot_tree(&artifact_path), before);
+        assert!(!output.exists());
+        fs::remove_dir_all(sandbox).unwrap();
     }
 
     #[test]
@@ -2356,7 +4441,7 @@ mod tests {
         artifacts.write_document_pdf(b"%PDF-owned").unwrap();
 
         artifacts.record_state("rendered", None).unwrap();
-        let prepared = artifacts
+        let mut prepared = artifacts
             .prepare_document_pdf(artifacts.directory().join("document.pdf"))
             .unwrap();
         let bundle = artifacts.write_prepared_bundle(&prepared).unwrap();
@@ -2570,7 +4655,7 @@ mod tests {
 
         artifacts.write_scene(b"{}\n").unwrap();
         artifacts.write_document_pdf(b"%PDF-bundle").unwrap();
-        let prepared = artifacts.prepare_document_pdf(&output).unwrap();
+        let mut prepared = artifacts.prepare_document_pdf(&output).unwrap();
         assert!(!output.exists());
         artifacts.record_state("started", None).unwrap();
         artifacts.record_state("rendered", None).unwrap();
@@ -2664,7 +4749,7 @@ mod tests {
         let output = sandbox.join("invoice.pdf");
         artifacts.write_document_pdf(b"%PDF-owned").unwrap();
         artifacts.record_state("rendered", None).unwrap();
-        let prepared = artifacts.prepare_document_pdf(&output).unwrap();
+        let mut prepared = artifacts.prepare_document_pdf(&output).unwrap();
         let bundle = artifacts.write_prepared_bundle(&prepared).unwrap();
         let bundle_path = bundle.path().to_owned();
         let moved = artifacts.directory().join("held-bundle.json");
@@ -2703,7 +4788,7 @@ mod tests {
         let output = sandbox.join("invoice.pdf");
         artifacts.write_document_pdf(b"%PDF-owned").unwrap();
         artifacts.record_state("rendered", None).unwrap();
-        let prepared = artifacts.prepare_document_pdf(&output).unwrap();
+        let mut prepared = artifacts.prepare_document_pdf(&output).unwrap();
         let bundle = artifacts.write_prepared_bundle(&prepared).unwrap();
 
         fs::rename(&artifact_root, &moved_root).unwrap();
@@ -2743,7 +4828,7 @@ mod tests {
         let output = sandbox.join("invoice.pdf");
         artifacts.write_document_pdf(b"%PDF-owned").unwrap();
         artifacts.record_state("rendered", None).unwrap();
-        let prepared = artifacts.prepare_document_pdf(&output).unwrap();
+        let mut prepared = artifacts.prepare_document_pdf(&output).unwrap();
         let bundle = artifacts.write_prepared_bundle(&prepared).unwrap();
         let bundle_path = bundle.path().to_owned();
 
