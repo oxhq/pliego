@@ -419,6 +419,19 @@ pub enum DocumentTimeControlReceiveOutcome {
     CapturePreparationTransportFailure(DocumentTimeControlTransportFailure),
 }
 
+/// Result of one consuming, nonblocking document-time receive attempt.
+///
+/// An empty callback channel returns the original receiver in [`Self::Pending`], preserving its
+/// exact cancellation action and command-specific transport semantics for a later attempt. Every
+/// terminal command or transport result consumes the receiver into [`Self::Complete`].
+#[doc(hidden)]
+pub enum DocumentTimeControlTryReceiveOutcome {
+    /// No callback result is ready; the receiver remains armed and may be polled again or dropped.
+    Pending(DocumentTimeControlReceiver),
+    /// The callback produced the receiver's only terminal outcome.
+    Complete(DocumentTimeControlReceiveOutcome),
+}
+
 enum DocumentTimeControlTransportSemantics {
     Observe,
     DriveOneTurn,
@@ -497,6 +510,25 @@ impl DocumentTimeControlReceiver {
     pub fn recv_timeout(self, timeout: Duration) -> DocumentTimeControlReceiveOutcome {
         let result = self.receiver.try_recv_timeout(timeout);
         self.resolve(result)
+    }
+
+    /// Attempt to consume the command's only result without blocking.
+    ///
+    /// Unlike a zero-duration [`Self::recv_timeout`], an empty channel is not a terminal timeout:
+    /// the still-armed receiver is returned in [`DocumentTimeControlTryReceiveOutcome::Pending`].
+    pub fn try_recv(self) -> DocumentTimeControlTryReceiveOutcome {
+        let result = self.receiver.try_recv();
+        self.resolve_nonblocking(result)
+    }
+
+    fn resolve_nonblocking(
+        self,
+        result: Result<DocumentTimeControlOutcome, TryReceiveError>,
+    ) -> DocumentTimeControlTryReceiveOutcome {
+        match result {
+            Err(TryReceiveError::Empty) => DocumentTimeControlTryReceiveOutcome::Pending(self),
+            result => DocumentTimeControlTryReceiveOutcome::Complete(self.resolve(result)),
+        }
     }
 
     fn resolve(
@@ -948,6 +980,166 @@ mod tests {
             )
         ));
         assert_eq!(completed_cancellations.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn nonblocking_receiver_stays_armed_from_empty_to_success() {
+        let cancellations = Arc::new(AtomicUsize::new(0));
+        let (response, receiver) = GenericCallback::new_blocking()
+            .expect("test nonblocking callback channel should be created");
+        let cancellation_counter = cancellations.clone();
+        let receiver = DocumentTimeControlReceiver::new_cancellable(
+            receiver,
+            &DocumentTimeControlCommand::Observe,
+            move || {
+                cancellation_counter.fetch_add(1, Ordering::SeqCst);
+            },
+        );
+
+        let receiver = match receiver.try_recv() {
+            DocumentTimeControlTryReceiveOutcome::Pending(receiver) => receiver,
+            DocumentTimeControlTryReceiveOutcome::Complete(_) => {
+                panic!("an empty callback channel must remain pending")
+            },
+        };
+        assert_eq!(cancellations.load(Ordering::SeqCst), 0);
+
+        response
+            .send(DocumentTimeControlOutcome::Rejected(
+                DocumentTimeControlError::ChannelClosed,
+            ))
+            .expect("test terminal outcome should be sent");
+        assert!(matches!(
+            receiver.try_recv(),
+            DocumentTimeControlTryReceiveOutcome::Complete(
+                DocumentTimeControlReceiveOutcome::CommandOutcome(
+                    DocumentTimeControlOutcome::Rejected(DocumentTimeControlError::ChannelClosed)
+                )
+            )
+        ));
+        assert_eq!(
+            cancellations.load(Ordering::SeqCst),
+            0,
+            "a successful nonblocking receive must disarm cancellation"
+        );
+    }
+
+    #[test]
+    fn dropping_a_pending_nonblocking_receiver_cancels_exactly_once() {
+        let cancellations = Arc::new(AtomicUsize::new(0));
+        let (_response, receiver) = GenericCallback::new_blocking()
+            .expect("test nonblocking callback channel should be created");
+        let cancellation_counter = cancellations.clone();
+        let receiver = DocumentTimeControlReceiver::new_cancellable(
+            receiver,
+            &DocumentTimeControlCommand::DriveOneTurn,
+            move || {
+                cancellation_counter.fetch_add(1, Ordering::SeqCst);
+            },
+        );
+
+        let receiver = match receiver.try_recv() {
+            DocumentTimeControlTryReceiveOutcome::Pending(receiver) => receiver,
+            DocumentTimeControlTryReceiveOutcome::Complete(_) => {
+                panic!("an empty callback channel must remain pending")
+            },
+        };
+        assert_eq!(cancellations.load(Ordering::SeqCst), 0);
+        drop(receiver);
+        assert_eq!(cancellations.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn nonblocking_disconnect_completes_with_each_command_transport_semantics() {
+        let (observe_response, observe_receiver) = GenericCallback::new_blocking()
+            .expect("test observe callback channel should be created");
+        let observe_receiver = DocumentTimeControlReceiver::new(
+            observe_receiver,
+            &DocumentTimeControlCommand::Observe,
+        );
+        drop(observe_response);
+        assert!(matches!(
+            observe_receiver.try_recv(),
+            DocumentTimeControlTryReceiveOutcome::Complete(
+                DocumentTimeControlReceiveOutcome::ObserveTransportFailure(
+                    DocumentTimeControlTransportFailure::Disconnected
+                )
+            )
+        ));
+
+        let (drive_response, drive_receiver) =
+            GenericCallback::new_blocking().expect("test drive callback channel should be created");
+        let drive_receiver = DocumentTimeControlReceiver::new(
+            drive_receiver,
+            &DocumentTimeControlCommand::DriveOneTurn,
+        );
+        drop(drive_response);
+        assert!(matches!(
+            drive_receiver.try_recv(),
+            DocumentTimeControlTryReceiveOutcome::Complete(
+                DocumentTimeControlReceiveOutcome::DriveOneTurnOutcomeIndeterminate(
+                    DocumentTimeControlTransportFailure::Disconnected
+                )
+            )
+        ));
+
+        let (capture_response, capture_receiver) = GenericCallback::new_blocking()
+            .expect("test capture callback channel should be created");
+        let capture_receiver = DocumentTimeControlReceiver::new(
+            capture_receiver,
+            &DocumentTimeControlCommand::PrepareCapture(capture_surface()),
+        );
+        drop(capture_response);
+        assert!(matches!(
+            capture_receiver.try_recv(),
+            DocumentTimeControlTryReceiveOutcome::Complete(
+                DocumentTimeControlReceiveOutcome::CapturePreparationTransportFailure(
+                    DocumentTimeControlTransportFailure::Disconnected
+                )
+            )
+        ));
+
+        let token = advance_token();
+        let command = DocumentTimeControlCommand::AdvanceTo(Box::new(token.clone()));
+        let (advance_response, advance_receiver) = GenericCallback::new_blocking()
+            .expect("test advance callback channel should be created");
+        let advance_receiver = DocumentTimeControlReceiver::new(advance_receiver, &command);
+        drop(advance_response);
+        match advance_receiver.try_recv() {
+            DocumentTimeControlTryReceiveOutcome::Complete(outcome) => {
+                assert_indeterminate(outcome, &token)
+            },
+            DocumentTimeControlTryReceiveOutcome::Pending(_) => {
+                panic!("a disconnected callback channel must complete")
+            },
+        }
+    }
+
+    #[test]
+    fn nonblocking_transport_error_is_terminal_and_runs_cancellation_once() {
+        let cancellations = Arc::new(AtomicUsize::new(0));
+        let (_response, receiver) =
+            GenericCallback::new_blocking().expect("test error callback channel should be created");
+        let cancellation_counter = cancellations.clone();
+        let receiver = DocumentTimeControlReceiver::new_cancellable(
+            receiver,
+            &DocumentTimeControlCommand::Observe,
+            move || {
+                cancellation_counter.fetch_add(1, Ordering::SeqCst);
+            },
+        );
+
+        assert!(matches!(
+            receiver.resolve_nonblocking(Err(TryReceiveError::ReceiveError(
+                ReceiveError::DeserializationFailed("test corruption".to_owned())
+            ))),
+            DocumentTimeControlTryReceiveOutcome::Complete(
+                DocumentTimeControlReceiveOutcome::ObserveTransportFailure(
+                    DocumentTimeControlTransportFailure::DeserializationFailed(message)
+                )
+            ) if message == "test corruption"
+        ));
+        assert_eq!(cancellations.load(Ordering::SeqCst), 1);
     }
 
     #[test]
