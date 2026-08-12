@@ -4229,7 +4229,7 @@ mod tests {
     use std::collections::{BTreeMap, HashMap};
     use std::ffi::OsString;
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use base64::Engine as _;
@@ -4255,12 +4255,14 @@ mod tests {
         publish_captured_document,
     };
     use super::{
-        Command, DEFAULT_LOCALE, DEFAULT_TIMEZONE, ExplicitRenderPaths, PageDefinition,
-        PageMargins, RenderEnvironment, RenderError, RenderRequest, ResourceCapture,
-        ResourcePolicy, ResourcePolicyConfig, ResourcePolicyFailure, ResourceRequest,
-        WebResourceLoadRole, classify_controlled_http_status, cli_render_error,
+        Command, DEFAULT_LOCALE, DEFAULT_TIMEZONE, DeterministicRuntimePolicy, ExplicitRenderPaths,
+        PageDefinition, PageMargins, RenderEnvironment, RenderError, RenderRequest,
+        ResourceCapture, ResourcePolicy, ResourcePolicyConfig, ResourcePolicyFailure,
+        ResourceRequest, WebResourceLoadRole, classify_controlled_http_status, cli_render_error,
         create_session_artifacts, default_page, page_artifact, parse_args, persist_scene_capture,
-        resolve_scene_resource, set_document_pdf_environment, sha256_hex, stable_render_id,
+        publication_request_fingerprint_with_runtime_policy, resolve_scene_resource,
+        runtime_policy, set_document_pdf_environment, sha256_hex, stable_render_id,
+        stable_render_id_with_runtime_policy,
     };
     #[cfg(feature = "shell-oracle")]
     use super::{
