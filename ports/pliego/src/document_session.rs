@@ -2558,6 +2558,12 @@ window.pliego?.defer();
                 stdout.contains("running 1 test") && stdout.contains("1 passed; 0 failed"),
                 "isolated {case} filter did not execute exactly one passing child test:\n{stdout}",
             );
+            if case == "controlled-finite" {
+                assert!(
+                    stdout.contains("controlled-candidate-dropped"),
+                    "controlled candidate did not finish Servo teardown:\n{stdout}",
+                );
+            }
         }
     }
 
@@ -3017,6 +3023,9 @@ window.pliego?.defer();
                             "controlled-end:946684800005:5",
                         ]
                     );
+                    drop(console);
+                    drop(candidate);
+                    println!("controlled-candidate-dropped");
                 },
                 "controlled-interval" => {
                     let error = match controlled.prepare_capture_candidate() {

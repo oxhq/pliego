@@ -721,14 +721,27 @@ fn validate_conditional_advance_state(
     Ok(())
 }
 
-fn take_controlled_exit(pending_events: &mut VecDeque<MixedMessage>) -> Option<MixedMessage> {
-    let exit_index = pending_events.iter().position(|event| {
+fn take_controlled_lifecycle_event(
+    pending_events: &mut VecDeque<MixedMessage>,
+) -> Option<MixedMessage> {
+    let lifecycle_index = pending_events.iter().position(|event| {
         matches!(
             event,
-            MixedMessage::FromConstellation(ScriptThreadMessage::ExitScriptThread)
+            MixedMessage::FromConstellation(
+                ScriptThreadMessage::ExitPipeline(..) | ScriptThreadMessage::ExitScriptThread
+            )
         )
     })?;
-    pending_events.remove(exit_index)
+    pending_events.remove(lifecycle_index)
+}
+
+fn is_controlled_lifecycle_event(event: &MixedMessage) -> bool {
+    matches!(
+        event,
+        MixedMessage::FromConstellation(
+            ScriptThreadMessage::ExitPipeline(..) | ScriptThreadMessage::ExitScriptThread
+        )
+    )
 }
 
 fn take_controlled_turn(pending_events: &mut VecDeque<MixedMessage>) -> (MixedMessage, bool) {
@@ -2866,8 +2879,9 @@ impl ScriptThread {
             return self.execute_controlled_document_time_request(cx, request, false);
         }
 
-        let exit_event = take_controlled_exit(&mut self.controlled_pending_events.borrow_mut());
-        if let Some(event) = exit_event {
+        let lifecycle_event =
+            take_controlled_lifecycle_event(&mut self.controlled_pending_events.borrow_mut());
+        if let Some(event) = lifecycle_event {
             return self.process_one_controlled_event(cx, event);
         }
 
@@ -2883,16 +2897,22 @@ impl ScriptThread {
                 );
             }
 
+            // A bounded drain can receive shutdown while no further control command will ever
+            // arrive. Process lifecycle messages before blocking for another input so Servo's
+            // destructor can complete the pipeline -> event-loop -> ScriptThread shutdown chain.
+            let lifecycle_event =
+                take_controlled_lifecycle_event(&mut self.controlled_pending_events.borrow_mut());
+            if let Some(event) = lifecycle_event {
+                return self.process_one_controlled_event(cx, event);
+            }
+
             let fully_active = self.get_fully_active_document_ids();
             let event = self.receivers.recv_controlled(
                 &self.task_queue,
                 &self.timer_scheduler.borrow(),
                 &fully_active,
             );
-            if matches!(
-                event,
-                MixedMessage::FromConstellation(ScriptThreadMessage::ExitScriptThread)
-            ) {
+            if is_controlled_lifecycle_event(&event) {
                 return self.process_one_controlled_event(cx, event);
             }
             self.queue_controlled_input(event);
@@ -6111,7 +6131,7 @@ mod tests {
         ScriptToEmbedderChan, capture_blockers_internal, capture_producers_internal,
     };
     use euclid::{Box2D, Point2D, Size2D};
-    use script_traits::ScriptThreadMessage;
+    use script_traits::{DiscardBrowsingContext, ScriptThreadMessage};
     use servo_base::Epoch;
     use servo_base::id::{TEST_PIPELINE_ID, TEST_SCRIPT_EVENT_LOOP_ID, TEST_WEBVIEW_ID};
     use servo_geometry::DeviceIndependentPixel;
@@ -6131,9 +6151,10 @@ mod tests {
         command_requires_exact_target_before_action, controlled_advance_execution_guard,
         controlled_document_time_now, controlled_event_consumes_ordinary_task_budget,
         dirty_document_before_unblocking_web_fonts, drain_controlled_input_batch,
-        enqueue_controlled_input, remaining_rendering_opportunity_delay,
-        renderer_may_drive_rendering, take_controlled_exit, take_controlled_turn,
-        validate_conditional_advance_state, wake_controlled_owner_after_ordinary_input,
+        enqueue_controlled_input, is_controlled_lifecycle_event,
+        remaining_rendering_opportunity_delay, renderer_may_drive_rendering,
+        take_controlled_lifecycle_event, take_controlled_turn, validate_conditional_advance_state,
+        wake_controlled_owner_after_ordinary_input,
     };
     use crate::dom::document::controlled_unsupported_dom_sources;
     use crate::dom::globalscope::{
@@ -6472,20 +6493,56 @@ mod tests {
 
     #[test]
     fn controlled_shutdown_cannot_be_stranded_behind_buffered_work() {
-        let mut events = VecDeque::from([
+        let mut events = VecDeque::new();
+        let mut requests = VecDeque::new();
+        let mut input = [
+            MixedMessage::TimerFired,
+            MixedMessage::FromConstellation(ScriptThreadMessage::ExitPipeline(
+                TEST_WEBVIEW_ID,
+                TEST_PIPELINE_ID,
+                DiscardBrowsingContext::Yes,
+            )),
             MixedMessage::TimerFired,
             MixedMessage::FromConstellation(ScriptThreadMessage::ExitScriptThread),
-            MixedMessage::TimerFired,
-        ]);
+        ]
+        .into_iter();
+
+        let batch = drain_controlled_input_batch(&mut events, &mut requests, &mut input);
+        assert!(!batch.saturated);
+        assert_eq!(batch.ordinary_events, 4);
+        assert!(requests.is_empty());
 
         assert!(matches!(
-            take_controlled_exit(&mut events),
+            take_controlled_lifecycle_event(&mut events),
+            Some(MixedMessage::FromConstellation(
+                ScriptThreadMessage::ExitPipeline(..)
+            ))
+        ));
+        assert!(matches!(
+            take_controlled_lifecycle_event(&mut events),
             Some(MixedMessage::FromConstellation(
                 ScriptThreadMessage::ExitScriptThread
             ))
         ));
         assert_eq!(events.len(), 2);
-        assert!(take_controlled_exit(&mut events).is_none());
+        assert!(take_controlled_lifecycle_event(&mut events).is_none());
+        assert!(
+            events
+                .iter()
+                .all(|event| matches!(event, MixedMessage::TimerFired))
+        );
+
+        assert!(is_controlled_lifecycle_event(
+            &MixedMessage::FromConstellation(ScriptThreadMessage::ExitPipeline(
+                TEST_WEBVIEW_ID,
+                TEST_PIPELINE_ID,
+                DiscardBrowsingContext::Yes,
+            ))
+        ));
+        assert!(is_controlled_lifecycle_event(
+            &MixedMessage::FromConstellation(ScriptThreadMessage::ExitScriptThread)
+        ));
+        assert!(!is_controlled_lifecycle_event(&MixedMessage::TimerFired));
     }
 
     #[test]
