@@ -17,11 +17,30 @@ use embedder_traits::EventLoopWaker;
 
 /// One opaque snapshot of the wake sequence.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct EventLoopWakeGeneration(u128);
+pub struct EventLoopWakeGeneration {
+    event_loop: u128,
+    control_response: u128,
+}
 
 impl EventLoopWakeGeneration {
-    fn checked_next(self) -> Option<Self> {
-        self.0.checked_add(1).map(Self)
+    fn checked_event_loop_next(self) -> Option<Self> {
+        Some(Self {
+            event_loop: self.event_loop.checked_add(1)?,
+            control_response: self.control_response,
+        })
+    }
+
+    fn checked_control_response_next(self) -> Option<Self> {
+        Some(Self {
+            event_loop: self.event_loop,
+            control_response: self.control_response.checked_add(1)?,
+        })
+    }
+
+    /// Return whether Servo work changed after an earlier snapshot, excluding a control response
+    /// which merely made its already-computed observation receivable.
+    pub fn event_loop_changed_since(self, earlier: Self) -> bool {
+        self.event_loop != earlier.event_loop
     }
 }
 
@@ -44,7 +63,10 @@ struct EventLoopWakeState {
 impl Default for EventLoopWakeState {
     fn default() -> Self {
         Self {
-            generation: EventLoopWakeGeneration(0),
+            generation: EventLoopWakeGeneration {
+                event_loop: 0,
+                control_response: 0,
+            },
             generation_exhausted: false,
         }
     }
@@ -78,6 +100,12 @@ impl PliegoEventLoopWaker {
     /// Snapshot the current wake generation without consuming it.
     pub fn generation(&self) -> EventLoopWakeGeneration {
         self.lock_state().generation
+    }
+
+    /// Wake the owner after a controlled-command result has entered its local receiver without
+    /// classifying that delivery as new Servo or document-producer work.
+    pub fn notify_control_response(&self) {
+        self.advance_generation(EventLoopWakeGeneration::checked_control_response_next);
     }
 
     /// Wait until the generation differs from `observed` or `deadline` is reached.
@@ -118,11 +146,38 @@ impl PliegoEventLoopWaker {
         }
     }
 
+    /// Run one owner-thread turn, then wait on the generation sampled before that turn.
+    ///
+    /// Keeping these operations together pins the lost-wake invariant used by controlled
+    /// settlement: work committed during the turn must change the generation before the
+    /// condition-variable predicate is inspected.
+    pub fn owner_turn_then_wait<E>(
+        &self,
+        observed: EventLoopWakeGeneration,
+        deadline: Instant,
+        owner_turn: impl FnOnce() -> Result<(), E>,
+    ) -> Result<EventLoopWakeWaitOutcome, E> {
+        owner_turn()?;
+        Ok(self.wait_for_generation(observed, deadline))
+    }
+
     fn lock_state(&self) -> MutexGuard<'_, EventLoopWakeState> {
         self.shared
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn advance_generation(
+        &self,
+        next: fn(EventLoopWakeGeneration) -> Option<EventLoopWakeGeneration>,
+    ) {
+        let mut state = self.lock_state();
+        match next(state.generation) {
+            Some(generation) => state.generation = generation,
+            None => state.generation_exhausted = true,
+        }
+        self.shared.changed.notify_all();
     }
 }
 
@@ -132,12 +187,7 @@ impl EventLoopWaker for PliegoEventLoopWaker {
     }
 
     fn wake(&self) {
-        let mut state = self.lock_state();
-        match state.generation.checked_next() {
-            Some(generation) => state.generation = generation,
-            None => state.generation_exhausted = true,
-        }
-        self.shared.changed.notify_all();
+        self.advance_generation(EventLoopWakeGeneration::checked_event_loop_next);
     }
 }
 
@@ -145,6 +195,9 @@ impl EventLoopWaker for PliegoEventLoopWaker {
 mod tests {
     use std::thread;
     use std::time::{Duration, Instant};
+
+    use crossbeam_channel::{TryRecvError, unbounded};
+    use embedder_traits::ScriptToEmbedderChan;
 
     use super::*;
 
@@ -191,6 +244,43 @@ mod tests {
     }
 
     #[test]
+    fn control_response_wakes_without_forging_servo_work() {
+        let waker = PliegoEventLoopWaker::new();
+        let observed = waker.generation();
+
+        waker.notify_control_response();
+
+        let current = waker.generation();
+        assert_eq!(
+            waker.wait_for_generation(observed, Instant::now()),
+            EventLoopWakeWaitOutcome::Woken(current)
+        );
+        assert!(!current.event_loop_changed_since(observed));
+    }
+
+    #[test]
+    fn owner_turn_commit_after_an_older_wake_cannot_be_lost() {
+        let waker = PliegoEventLoopWaker::new();
+        let (embedder_sender, embedder_receiver) = unbounded();
+        let script_sender = ScriptToEmbedderChan::new(embedder_sender, Box::new(waker.clone()));
+
+        waker.wake();
+        let observed = waker.generation();
+        let outcome = waker
+            .owner_turn_then_wait(observed, Instant::now(), || {
+                script_sender.wake().unwrap();
+                Ok::<(), ()>(())
+            })
+            .unwrap();
+
+        assert_eq!(outcome, EventLoopWakeWaitOutcome::Woken(waker.generation()));
+        assert!(matches!(
+            embedder_receiver.try_recv(),
+            Err(TryRecvError::Empty)
+        ));
+    }
+
+    #[test]
     fn spurious_notification_does_not_mask_timeout() {
         let waker = PliegoEventLoopWaker::new();
         let observed = waker.generation();
@@ -216,7 +306,10 @@ mod tests {
     #[test]
     fn generation_exhaustion_is_typed_instead_of_wrapping_or_sleeping() {
         let waker = PliegoEventLoopWaker::new();
-        let exhausted_generation = EventLoopWakeGeneration(u128::MAX);
+        let exhausted_generation = EventLoopWakeGeneration {
+            event_loop: u128::MAX,
+            control_response: 0,
+        };
         waker.lock_state().generation = exhausted_generation;
 
         waker.wake();

@@ -74,6 +74,43 @@ use crate::generic_channel::{
     GenericReceiver, GenericReceiverVariants, SendError, SendResult, use_ipc,
 };
 
+struct OneShotNotifyingDelivery<T, F: FnOnce()> {
+    sender: Option<crossbeam_channel::Sender<Result<T, ipc_channel::IpcError>>>,
+    notify: Option<F>,
+}
+
+impl<T, F: FnOnce()> OneShotNotifyingDelivery<T, F> {
+    fn new(sender: crossbeam_channel::Sender<Result<T, ipc_channel::IpcError>>, notify: F) -> Self {
+        Self {
+            sender: Some(sender),
+            notify: Some(notify),
+        }
+    }
+
+    fn deliver(&mut self, result: Result<T, ipc_channel::IpcError>) {
+        let Some(sender) = self.sender.take() else {
+            log::error!("One-shot callback received more than one result");
+            return;
+        };
+        if sender.send(result).is_err() {
+            log::error!("Error in callback");
+        }
+        drop(sender);
+        if let Some(notify) = self.notify.take() {
+            notify();
+        }
+    }
+}
+
+impl<T, F: FnOnce()> Drop for OneShotNotifyingDelivery<T, F> {
+    fn drop(&mut self) {
+        drop(self.sender.take());
+        if let Some(notify) = self.notify.take() {
+            notify();
+        }
+    }
+}
+
 /// The callback type of our messages.
 ///
 /// This is equivalent to [TypedRouterHandler][ipc_channel::router::TypedRouterHandler],
@@ -167,6 +204,29 @@ where
             let receiver = GenericReceiver(GenericReceiverVariants::Crossbeam(receiver));
             Ok((generic_callback, receiver))
         }
+    }
+
+    /// Produce a callback and local receiver which notifies an external event loop after every
+    /// delivered value or transport error.
+    ///
+    /// The notification runs only after the result has entered the returned receiver, allowing a
+    /// host to wake and poll without racing ahead of delivery. Cross-process replies are routed
+    /// through the local callback before notification.
+    pub fn new_blocking_notifying<F>(
+        notify: F,
+    ) -> Result<(Self, GenericReceiver<T>), ipc_channel::IpcError>
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        let (sender, receiver) = crossbeam_channel::bounded(1);
+        let mut delivery = OneShotNotifyingDelivery::new(sender, notify);
+        let callback = Self::new(move |result| {
+            delivery.deliver(result);
+        })?;
+        Ok((
+            callback,
+            GenericReceiver(GenericReceiverVariants::Crossbeam(receiver)),
+        ))
     }
 
     /// Send `value` to the callback.
@@ -312,7 +372,7 @@ mod single_process_callback_test {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use crate::generic_channel::GenericCallback;
+    use crate::generic_channel::{GenericCallback, ReceiveError, TryReceiveError};
 
     #[test]
     fn generic_callback() {
@@ -376,5 +436,41 @@ mod single_process_callback_test {
             assert!(callback.send(42).is_ok());
         });
         assert_eq!(receiver.recv().unwrap(), 42);
+    }
+
+    #[test]
+    fn notifying_blocking_callback_wakes_after_delivery() {
+        let notifications = Arc::new(AtomicUsize::new(0));
+        let callback_notifications = notifications.clone();
+        let (callback, receiver) = GenericCallback::new_blocking_notifying(move || {
+            callback_notifications.fetch_add(1, Ordering::SeqCst);
+        })
+        .unwrap();
+
+        callback.send(42).unwrap();
+
+        assert_eq!(notifications.load(Ordering::SeqCst), 1);
+        match receiver.try_recv() {
+            Ok(value) => assert_eq!(value, 42),
+            Err(_) => panic!("notification must follow callback delivery"),
+        }
+    }
+
+    #[test]
+    fn notifying_blocking_callback_wakes_when_response_is_dropped() {
+        let notifications = Arc::new(AtomicUsize::new(0));
+        let callback_notifications = notifications.clone();
+        let (callback, receiver) = GenericCallback::<usize>::new_blocking_notifying(move || {
+            callback_notifications.fetch_add(1, Ordering::SeqCst);
+        })
+        .unwrap();
+
+        drop(callback);
+
+        assert_eq!(notifications.load(Ordering::SeqCst), 1);
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(TryReceiveError::ReceiveError(ReceiveError::Disconnected))
+        ));
     }
 }

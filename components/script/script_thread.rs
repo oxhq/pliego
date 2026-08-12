@@ -50,8 +50,9 @@ use embedder_traits::{
     DocumentTimeControlTarget, DocumentTimeDocumentObservation, DocumentTimeProducerObservation,
     DocumentTimeReadinessBlocker, DocumentTrackedSourceKind, EmbedderControlId,
     EmbedderControlResponse, EmbedderMsg, FocusSequenceNumber, InputEventOutcome,
-    JavaScriptEvaluationError, JavaScriptEvaluationId, MediaSessionActionType, Theme,
-    ViewportDetails, WebDriverScriptCommand, capture_blockers_internal, capture_producers_internal,
+    JavaScriptEvaluationError, JavaScriptEvaluationId, MediaSessionActionType,
+    ScriptToEmbedderChan, Theme, ViewportDetails, WebDriverScriptCommand,
+    capture_blockers_internal, capture_producers_internal,
 };
 use encoding_rs::Encoding;
 use fonts::{FontContext, SystemFontServiceProxy, WebFontLoadEvent};
@@ -352,6 +353,41 @@ impl ControlledDocumentTimeState {
         self.issued_advance_token = None;
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn restore_advance_token_for_preparation(
+        &mut self,
+        retained: Option<DocumentTimeAdvanceToken>,
+        target: &DocumentTimeControlTarget,
+        clock: &DocumentClock,
+        now: DocumentTime,
+        deadline: Option<TimerDeadlineSnapshot>,
+        input_revision: u64,
+        pending_events: u64,
+        input_batch_saturated: bool,
+        producers: DocumentTimeProducerObservation,
+    ) -> Option<DocumentTimeAdvanceToken> {
+        let retained = retained.filter(|token| {
+            let expected_producers = token.producers();
+            token.target() == target &&
+                token.clock_id() == clock.id() &&
+                token.now() == now &&
+                Some(token.deadline()) == deadline &&
+                token.input_revision() == input_revision &&
+                token.pending_events() == pending_events &&
+                token.input_batch_saturated() == input_batch_saturated &&
+                expected_producers.fence_id == producers.fence_id &&
+                expected_producers.checkpoint == producers.checkpoint &&
+                expected_producers.snapshot == producers.snapshot &&
+                expected_producers.stability == DocumentProducerStability::StableEmpty
+        });
+        if let Some(retained) = retained {
+            self.issued_advance_token = Some(retained.clone());
+            return Some(retained);
+        }
+        self.clear_advance_token();
+        None
+    }
+
     fn invalidate_capture_precondition(&mut self) {
         self.issued_capture_precondition = None;
     }
@@ -542,6 +578,14 @@ fn enqueue_controlled_input(
     }
 }
 
+fn wake_controlled_owner_after_ordinary_input(sender: &ScriptToEmbedderChan, ordinary_events: u64) {
+    if ordinary_events != 0 {
+        // This is a wake-only callback. It must not add an EmbedderMsg to the channel whose owner
+        // is about to spin Servo.
+        let _ = sender.wake();
+    }
+}
+
 fn drain_controlled_input_batch(
     pending_events: &mut VecDeque<MixedMessage>,
     pending_requests: &mut VecDeque<ControlledDocumentTimeRequest>,
@@ -573,10 +617,14 @@ fn begin_controlled_document_time_command(
     state: &mut ControlledDocumentTimeState,
     command: &DocumentTimeControlCommand,
 ) {
-    // Commands always supersede issued capture authority. Only conditional advance consumes its
-    // already-issued advance token; every other command also supersedes advance authority.
+    // Commands always supersede issued capture authority. Conditional advance consumes its
+    // already-issued advance token. PrepareCapture may re-emit that token only after exact current
+    // state validation; Observe and DriveOneTurn supersede it immediately.
     state.invalidate_capture_precondition();
-    if !matches!(command, DocumentTimeControlCommand::AdvanceTo(_)) {
+    if !matches!(
+        command,
+        DocumentTimeControlCommand::AdvanceTo(_) | DocumentTimeControlCommand::PrepareCapture(_)
+    ) {
         state.clear_advance_token();
     }
 }
@@ -589,6 +637,19 @@ fn controlled_advance_execution_guard(
         .map(|ledger| ledger.active_guard_for_time(requested))
         .transpose()
         .map_err(DocumentTimeControlError::ExecutionTerminated)
+}
+
+fn controlled_advance_is_qualified(
+    execution_terminal: bool,
+    pending_events: u64,
+    input_batch_saturated: bool,
+    producers: DocumentTimeProducerObservation,
+) -> bool {
+    !execution_terminal &&
+        pending_events == 0 &&
+        !input_batch_saturated &&
+        producers.snapshot.is_empty() &&
+        producers.stability == DocumentProducerStability::StableEmpty
 }
 
 fn controlled_document_time_now(
@@ -1495,8 +1556,16 @@ impl ScriptThread {
         let (self_sender, self_receiver) = unbounded();
         let document_clock = DocumentClock::new(state.document_clock);
         let document_execution_ledger = document_clock.execution_ledger();
-        let document_producer_fence =
-            DocumentProducerFence::with_execution_ledger(document_execution_ledger.clone());
+        let producer_state_change_notifier = document_execution_ledger.as_ref().map(|_| {
+            let script_to_embedder_sender = state.script_to_embedder_sender.clone();
+            Arc::new(move || {
+                let _ = script_to_embedder_sender.wake();
+            }) as Arc<dyn Fn() + Send + Sync>
+        });
+        let document_producer_fence = DocumentProducerFence::with_execution_ledger_and_notifier(
+            document_execution_ledger.clone(),
+            producer_state_change_notifier,
+        );
         let mut runtime = Runtime::new(Some(ScriptEventLoopSender::MainThread {
             sender: self_sender.clone(),
             producer_fence: document_producer_fence.clone(),
@@ -2067,18 +2136,32 @@ impl ScriptThread {
             &mut self.controlled_pending_requests.borrow_mut(),
             event,
         );
-        let mut state = self.controlled_document_time_state.borrow_mut();
-        state.record_ordinary_inputs(u64::from(ordinary_event));
-        if ordinary_event {
-            state.invalidate_capture_authority();
+        {
+            let mut state = self.controlled_document_time_state.borrow_mut();
+            state.record_ordinary_inputs(u64::from(ordinary_event));
+            if ordinary_event {
+                state.invalidate_capture_authority();
+            }
         }
+        // The producer which owns this task may have signalled before the host's latest
+        // observation. Wake again after the controlled pending queue changes so the host cannot
+        // sleep while the task needed to release that producer remains gated here.
+        wake_controlled_owner_after_ordinary_input(
+            &self.senders.pipeline_to_embedder_sender,
+            u64::from(ordinary_event),
+        );
     }
 
     fn queue_controlled_page_event(&self, event: MixedMessage) {
         self.controlled_pending_events.borrow_mut().push_back(event);
-        let mut state = self.controlled_document_time_state.borrow_mut();
-        state.record_ordinary_inputs(1);
-        state.invalidate_capture_authority();
+        {
+            let mut state = self.controlled_document_time_state.borrow_mut();
+            state.record_ordinary_inputs(1);
+            state.invalidate_capture_authority();
+        }
+        // Keep the wake strictly after both RefCell mutations. A host woken before the queue
+        // commit could observe Empty and go back to sleep with no later signal.
+        wake_controlled_owner_after_ordinary_input(&self.senders.pipeline_to_embedder_sender, 1);
     }
 
     fn drain_ready_controlled_inputs(&self) -> bool {
@@ -2097,6 +2180,11 @@ impl ScriptThread {
         if batch.ordinary_events != 0 {
             state.invalidate_capture_authority();
         }
+        drop(state);
+        wake_controlled_owner_after_ordinary_input(
+            &self.senders.pipeline_to_embedder_sender,
+            batch.ordinary_events,
+        );
         batch.saturated
     }
 
@@ -2203,6 +2291,7 @@ impl ScriptThread {
         action: DocumentTimeControlAction,
         input_batch_saturated: bool,
         capture_surface: Option<DocumentCaptureSurfaceFingerprint>,
+        retained_advance_token: Option<DocumentTimeAdvanceToken>,
     ) -> Result<DocumentTimeControlObservation, DocumentTimeControlError> {
         self.validate_controlled_document_time_target(target)?;
 
@@ -2298,13 +2387,28 @@ impl ScriptThread {
         let capture_producers = capture_producers_internal(producers, quiet_checkpoints_qualified);
         let advance_token = {
             let mut state = self.controlled_document_time_state.borrow_mut();
-            state.clear_advance_token();
-            if !execution_terminal &&
-                pending_events == 0 &&
-                !input_batch_saturated &&
-                snapshot.is_empty() &&
-                stability == DocumentProducerStability::StableEmpty
-            {
+            let retained = capture_surface.and_then(|_| {
+                state.restore_advance_token_for_preparation(
+                    retained_advance_token,
+                    target,
+                    &self.document_clock,
+                    now,
+                    next_deadline,
+                    input_revision,
+                    pending_events,
+                    input_batch_saturated,
+                    producers,
+                )
+            });
+            if retained.is_some() {
+                retained
+            } else if controlled_advance_is_qualified(
+                execution_terminal,
+                pending_events,
+                input_batch_saturated,
+                producers,
+            ) {
+                state.clear_advance_token();
                 next_deadline
                     .map(|deadline| {
                         state.issue_advance_token(
@@ -2319,6 +2423,7 @@ impl ScriptThread {
                     })
                     .transpose()?
             } else {
+                state.clear_advance_token();
                 // Still force sticky input-revision overflow into the typed control result.
                 state.input_revision()?;
                 None
@@ -2646,10 +2751,16 @@ impl ScriptThread {
         // Every control command invalidates any previously issued single-use capture authority.
         // This intentionally does not erase quiet-checkpoint history: two successive no-op drives
         // must be able to qualify the same normalized revision.
-        begin_controlled_document_time_command(
-            &mut self.controlled_document_time_state.borrow_mut(),
-            &request.command,
-        );
+        let retained_advance_token = {
+            let mut state = self.controlled_document_time_state.borrow_mut();
+            begin_controlled_document_time_command(&mut state, &request.command);
+            matches!(
+                &request.command,
+                DocumentTimeControlCommand::PrepareCapture(_)
+            )
+            .then(|| state.issued_advance_token.take())
+            .flatten()
+        };
         match &request.command {
             DocumentTimeControlCommand::AdvanceTo(token) => {
                 if let Err(error) = self
@@ -2743,6 +2854,7 @@ impl ScriptThread {
                 action,
                 input_batch_saturated,
                 capture_surface,
+                retained_advance_token,
             )
         });
         self.send_controlled_document_time_response(&request, result)
@@ -5995,8 +6107,8 @@ mod tests {
         DocumentSettlementSourceSnapshot, DocumentTimeAdvanceToken, DocumentTimeControlCommand,
         DocumentTimeControlError, DocumentTimeControlRequestId, DocumentTimeControlTarget,
         DocumentTimeDocumentObservation, DocumentTimeProducerObservation,
-        DocumentTrackedSourceKind, DocumentUnsupportedSourceReason, capture_blockers_internal,
-        capture_producers_internal,
+        DocumentTrackedSourceKind, DocumentUnsupportedSourceReason, EventLoopWaker,
+        ScriptToEmbedderChan, capture_blockers_internal, capture_producers_internal,
     };
     use euclid::{Box2D, Point2D, Size2D};
     use script_traits::ScriptThreadMessage;
@@ -6021,7 +6133,7 @@ mod tests {
         dirty_document_before_unblocking_web_fonts, drain_controlled_input_batch,
         enqueue_controlled_input, remaining_rendering_opportunity_delay,
         renderer_may_drive_rendering, take_controlled_exit, take_controlled_turn,
-        validate_conditional_advance_state,
+        validate_conditional_advance_state, wake_controlled_owner_after_ordinary_input,
     };
     use crate::dom::document::controlled_unsupported_dom_sources;
     use crate::dom::globalscope::{
@@ -6034,6 +6146,19 @@ mod tests {
     use crate::task_source::TaskSourceName;
 
     struct NeverRunClassifierTask;
+
+    #[derive(Clone)]
+    struct CountingEventLoopWaker(Arc<AtomicUsize>);
+
+    impl EventLoopWaker for CountingEventLoopWaker {
+        fn clone_box(&self) -> Box<dyn EventLoopWaker> {
+            Box::new(self.clone())
+        }
+
+        fn wake(&self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
 
     impl TaskBox for NeverRunClassifierTask {
         fn name(&self) -> &'static str {
@@ -6313,6 +6438,36 @@ mod tests {
         let request = requests.pop_front().unwrap();
         assert_eq!(request.request_id.get(), 7);
         assert_eq!(request.command, DocumentTimeControlCommand::DriveOneTurn);
+    }
+
+    #[test]
+    fn ordinary_controlled_input_wakes_after_an_older_producer_signal() {
+        let (embedder_sender, embedder_receiver) = crossbeam_channel::unbounded();
+        let wake_count = Arc::new(AtomicUsize::new(0));
+        let sender = ScriptToEmbedderChan::new(
+            embedder_sender,
+            Box::new(CountingEventLoopWaker(wake_count.clone())),
+        );
+
+        sender.wake().unwrap();
+        let producer_wake = wake_count.load(Ordering::SeqCst);
+        let mut events = VecDeque::new();
+        let mut requests = VecDeque::new();
+        let ordinary =
+            enqueue_controlled_input(&mut events, &mut requests, MixedMessage::TimerFired);
+        wake_controlled_owner_after_ordinary_input(&sender, u64::from(ordinary));
+
+        assert_eq!(events.len(), 1);
+        assert!(requests.is_empty());
+        assert!(wake_count.load(Ordering::SeqCst) > producer_wake);
+        assert_eq!(
+            embedder_receiver.try_recv(),
+            Err(crossbeam_channel::TryRecvError::Empty)
+        );
+
+        let after_ordinary = wake_count.load(Ordering::SeqCst);
+        wake_controlled_owner_after_ordinary_input(&sender, 0);
+        assert_eq!(wake_count.load(Ordering::SeqCst), after_ordinary);
     }
 
     #[test]
@@ -6666,6 +6821,70 @@ mod tests {
     }
 
     #[test]
+    fn prepare_reemits_only_an_exact_prior_finite_advance_token() {
+        let mut fixture = GuardedAdvanceFixture::new();
+        begin_controlled_document_time_command(
+            &mut fixture.state,
+            &DocumentTimeControlCommand::PrepareCapture(capture_surface()),
+        );
+        let observed_producers = DocumentTimeProducerObservation {
+            fence_id: fixture.fence.id(),
+            checkpoint: fixture.checkpoint,
+            snapshot: fixture.fence.snapshot(),
+            stability: DocumentProducerStability::UnchangedCheckpoint,
+        };
+        let prior = fixture.state.issued_advance_token.take();
+        let retained = fixture
+            .state
+            .restore_advance_token_for_preparation(
+                prior,
+                &control_target(),
+                &fixture.clock,
+                fixture.clock.now(),
+                Some(fixture.token.deadline()),
+                fixture.token.input_revision(),
+                0,
+                false,
+                observed_producers,
+            )
+            .expect("unchanged preparation must retain the prior finite authority");
+        assert_eq!(retained, fixture.token);
+        fixture.state.consume_advance_token(&retained).unwrap();
+
+        let mut changed = GuardedAdvanceFixture::new();
+        begin_controlled_document_time_command(
+            &mut changed.state,
+            &DocumentTimeControlCommand::PrepareCapture(capture_surface()),
+        );
+        let prior = changed.state.issued_advance_token.take();
+        assert!(
+            changed
+                .state
+                .restore_advance_token_for_preparation(
+                    prior,
+                    &control_target(),
+                    &changed.clock,
+                    changed.clock.now(),
+                    Some(changed.token.deadline()),
+                    changed.token.input_revision(),
+                    1,
+                    false,
+                    DocumentTimeProducerObservation {
+                        fence_id: changed.fence.id(),
+                        checkpoint: changed.checkpoint,
+                        snapshot: changed.fence.snapshot(),
+                        stability: DocumentProducerStability::UnchangedCheckpoint,
+                    },
+                )
+                .is_none()
+        );
+        assert!(matches!(
+            changed.state.consume_advance_token(&changed.token),
+            Err(DocumentTimeControlError::AdvanceTokenUnavailable { .. })
+        ));
+    }
+
+    #[test]
     fn two_fresh_drive_checkpoints_then_same_checkpoint_prepare_issues_capture() {
         let clock = controlled_capture_clock();
         let fence = DocumentProducerFence::with_execution_ledger(clock.execution_ledger());
@@ -6699,6 +6918,18 @@ mod tests {
             capture_producers.stability,
             DocumentProducerStability::StableEmpty
         );
+        assert!(!controlled_advance_is_qualified(
+            false,
+            0,
+            false,
+            observed_producers,
+        ));
+        assert!(controlled_advance_is_qualified(
+            false,
+            0,
+            false,
+            capture_producers,
+        ));
         let blockers = capture_blockers_internal(
             &revision.target,
             &capture_surface(),
