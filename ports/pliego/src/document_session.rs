@@ -2942,7 +2942,9 @@ window.pliego?.defer();
                     let candidate = controlled
                         .prepare_capture_candidate()
                         .expect("finite controlled work should reach opaque candidate evidence");
-                    assert_eq!(candidate.precondition().now().as_nanos(), 5_000_000);
+                    // The 5 ms timeout runs first, then the pending animation frame consumes
+                    // ScriptThread's deterministic 20 ms rendering-opportunity deadline.
+                    assert_eq!(candidate.precondition().now().as_nanos(), 20_000_000);
                     assert_eq!(candidate.precondition().pending_events(), 0);
                     assert!(candidate.precondition().producers().snapshot.is_empty());
                     assert_eq!(
