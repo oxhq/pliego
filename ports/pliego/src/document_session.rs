@@ -4,10 +4,11 @@
 
 //! Pliego's minimal one-document Servo owner.
 //!
-//! This remains an internal migration seam while the published binary uses the
-//! shell adapter. The screenshot is both the stable-render barrier and a
-//! retained diagnostic. Layout still comes through Servo's temporary, doc-hidden
-//! `debug_layout_snapshot` hook until that upstream seam is made stable.
+//! The default binary owns Servo through this session; the shell remains an explicit
+//! nonproduction oracle. The production capture path is still realtime: its screenshot is both
+//! the stable-render barrier and a retained diagnostic, and layout still comes through Servo's
+//! temporary, doc-hidden `debug_layout_snapshot` hook. The opt-in controlled path added here stops
+//! earlier at opaque candidate evidence and cannot capture or publish.
 
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::BTreeMap;
@@ -19,19 +20,31 @@ use std::time::{Duration, Instant};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use dpi::PhysicalSize;
+use embedder_traits::{
+    DocumentCapturePrecondition, DocumentCaptureSurfaceFingerprint, DocumentClockConfiguration,
+    DocumentTimeControlCommand, DocumentTimeControlReceiveOutcome,
+    DocumentTimeControlTryReceiveOutcome,
+};
 use http::header::CONTENT_TYPE;
 use http::{HeaderMap, HeaderValue};
 use layout::pages::{PageDefinition, reserve_for_process};
 use pliego::capture::{SceneCapture, capture_document_scene_with_canvas};
+use pliego::event_loop_waker::{EventLoopWakeWaitOutcome, PliegoEventLoopWaker};
 use pliego::pdf::{PdfFontResource, PdfFontVariation, render_document_pdf};
 use servo::{
     ConsoleLogLevel, JSValue, LoadStatus, Preferences, RenderingContext, Servo, ServoBuilder,
     SoftwareRenderingContext, UserContentManager, UserScript, WebResourceLoad, WebResourceLoadRole,
     WebResourceResponse, WebView, WebViewBuilder, WebViewDelegate,
 };
+use servo_geometry::{
+    DeviceIndependentIntPoint, DeviceIndependentIntRect, DeviceIndependentIntSize,
+};
 use url::Url;
 
 use super::asset_cache::MAX_CACHE_BYTES;
+use super::controlled_settlement::{
+    ControlledSettlementCoordinator, ControlledSettlementError, ControlledSettlementProgress,
+};
 use super::engine::RenderEnvironment;
 use super::owned_resource_store::{OwnedResourceStore, decode_bounded_data_url};
 use super::readiness::{self, Readiness, ReadinessPolicy};
@@ -43,6 +56,7 @@ use super::resource_policy::{
     ResourceSource, create_controlled_http_client, fetch_controlled_http,
     normalize_controlled_response_headers,
 };
+use super::runtime_policy::DeterministicRuntimePolicy;
 use super::session::LocalDocument;
 
 const RESOURCE_EVIDENCE_ENTRY_OVERHEAD_BYTES: u64 = 256;
@@ -404,6 +418,18 @@ impl SessionHostDeadline {
     fn elapsed_ms(self) -> f64 {
         self.started.elapsed().as_secs_f64() * 1000.0
     }
+
+    fn instant(self) -> Instant {
+        self.deadline
+    }
+}
+
+enum DocumentSessionRuntime {
+    Realtime(ReadinessPolicy),
+    Controlled {
+        clock: DocumentClockConfiguration,
+        waker: PliegoEventLoopWaker,
+    },
 }
 
 pub(crate) struct DocumentSession {
@@ -414,7 +440,40 @@ pub(crate) struct DocumentSession {
     allow_host_fonts: bool,
     host_deadline: SessionHostDeadline,
     _canvas_retention: servo_canvas::retained_canvas::CanvasRetentionGuard,
-    _rendering_context: Rc<SoftwareRenderingContext>,
+    rendering_context: Rc<SoftwareRenderingContext>,
+}
+
+/// A controlled Servo owner which can only prepare opaque capture-candidate evidence.
+pub(crate) struct ControlledDocumentSession {
+    session: DocumentSession,
+    waker: PliegoEventLoopWaker,
+    surface: DocumentCaptureSurfaceFingerprint,
+}
+
+/// One live session paired with its non-authoritative, generation-bound capture candidate.
+pub(crate) struct PreparedDocumentCaptureCandidate {
+    _session: ControlledDocumentSession,
+    precondition: Box<DocumentCapturePrecondition>,
+    trace: Vec<ControlledSettlementStep>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ControlledSettlementStep {
+    Observe,
+    DriveOneTurn,
+    AdvanceTo,
+    PrepareCapture,
+    WaitForWake,
+}
+
+impl PreparedDocumentCaptureCandidate {
+    pub(crate) fn precondition(&self) -> &DocumentCapturePrecondition {
+        &self.precondition
+    }
+
+    pub(crate) fn trace(&self) -> &[ControlledSettlementStep] {
+        &self.trace
+    }
 }
 
 impl DocumentSession {
@@ -455,10 +514,107 @@ impl DocumentSession {
             environment,
             page,
             allow_host_fonts,
-            readiness,
+            DocumentSessionRuntime::Realtime(readiness),
             session_host_timeout,
             servo_canvas::retained_canvas::start_retaining_canvas_commands,
         )
+    }
+
+    /// Build an opt-in controlled session without the legacy readiness bootstrap script.
+    pub(crate) fn new_controlled(
+        input: impl AsRef<Path>,
+        environment: RenderEnvironment,
+        page: PageDefinition,
+        resources: ResourcePolicyConfig,
+        allow_host_fonts: bool,
+        runtime_policy: DeterministicRuntimePolicy,
+    ) -> Result<ControlledDocumentSession, SessionError> {
+        let input = input.as_ref().canonicalize().map_err(|error| {
+            SessionError::new(
+                "INVALID_REQUEST",
+                format!("document is unavailable: {error}"),
+            )
+        })?;
+        if !input.is_file() {
+            return Err(SessionError::new(
+                "INVALID_REQUEST",
+                format!("document is not a file: {}", input.display()),
+            ));
+        }
+        let bundle_root = input
+            .parent()
+            .ok_or_else(|| SessionError::new("INVALID_REQUEST", "document has no bundle root"))?
+            .to_path_buf();
+        let resource_policy = ResourcePolicy::resolve(&resources, &bundle_root);
+        Self::new_resolved_controlled_parts(
+            input,
+            bundle_root,
+            resource_policy,
+            environment,
+            page,
+            allow_host_fonts,
+            runtime_policy,
+        )
+    }
+
+    pub(crate) fn from_resolved_controlled(
+        document: &LocalDocument,
+        resource_policy: ResourcePolicy,
+        environment: RenderEnvironment,
+        page: PageDefinition,
+        allow_host_fonts: bool,
+        runtime_policy: DeterministicRuntimePolicy,
+    ) -> Result<ControlledDocumentSession, SessionError> {
+        validate_resolved_resource_policy(document, &resource_policy)?;
+        Self::new_resolved_controlled_parts(
+            document.path().to_owned(),
+            document.root().to_owned(),
+            resource_policy,
+            environment,
+            page,
+            allow_host_fonts,
+            runtime_policy,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_resolved_controlled_parts(
+        input: PathBuf,
+        bundle_root: PathBuf,
+        resource_policy: ResourcePolicy,
+        environment: RenderEnvironment,
+        page: PageDefinition,
+        allow_host_fonts: bool,
+        runtime_policy: DeterministicRuntimePolicy,
+    ) -> Result<ControlledDocumentSession, SessionError> {
+        let runtime_policy = runtime_policy
+            .validate()
+            .map_err(|error| SessionError::new("INVALID_REQUEST", error.to_string()))?;
+        let host_timeout = runtime_policy.host_wall_duration();
+        let clock = runtime_policy
+            .document_clock_configuration()
+            .map_err(|error| SessionError::new("INVALID_REQUEST", error.to_string()))?;
+        let waker = PliegoEventLoopWaker::new();
+        let session = Self::new_resolved_with_canvas_retention(
+            input,
+            bundle_root,
+            resource_policy,
+            environment,
+            page,
+            allow_host_fonts,
+            DocumentSessionRuntime::Controlled {
+                clock,
+                waker: waker.clone(),
+            },
+            host_timeout,
+            servo_canvas::retained_canvas::start_retaining_canvas_commands,
+        )?;
+        let surface = session.controlled_capture_surface()?;
+        Ok(ControlledDocumentSession {
+            session,
+            waker,
+            surface,
+        })
     }
 
     #[cfg(test)]
@@ -536,7 +692,7 @@ impl DocumentSession {
             environment,
             page,
             allow_host_fonts,
-            readiness,
+            DocumentSessionRuntime::Realtime(readiness),
             session_host_timeout,
             start_canvas_retention,
         )
@@ -550,7 +706,7 @@ impl DocumentSession {
         environment: RenderEnvironment,
         page: PageDefinition,
         allow_host_fonts: bool,
-        readiness: ReadinessPolicy,
+        runtime: DocumentSessionRuntime,
         session_host_timeout: Duration,
         start_canvas_retention: impl FnOnce() -> servo_canvas::retained_canvas::CanvasRetentionGuard,
     ) -> Result<Self, SessionError> {
@@ -605,10 +761,17 @@ impl DocumentSession {
         preferences.network_http_proxy_uri.clear();
         preferences.network_https_proxy_uri.clear();
 
-        let servo = ServoBuilder::default().preferences(preferences).build();
-        let user_content_manager = Rc::new(UserContentManager::new(&servo));
-        user_content_manager
-            .add_script(Rc::new(UserScript::from(readiness.document_start_script())));
+        let (servo_builder, readiness, document_clock) = match runtime {
+            DocumentSessionRuntime::Realtime(readiness) => {
+                (ServoBuilder::default(), Some(readiness), None)
+            },
+            DocumentSessionRuntime::Controlled { clock, waker } => (
+                ServoBuilder::default().event_loop_waker(Box::new(waker)),
+                None,
+                Some(clock),
+            ),
+        };
+        let servo = servo_builder.preferences(preferences).build();
         let resource_store = RefCell::new(OwnedResourceStore::new(resource_policy.resident_bytes));
         let delegate = Rc::new(DocumentDelegate {
             bundle_root,
@@ -617,11 +780,19 @@ impl DocumentSession {
             ..Default::default()
         });
         let canvas_retention = start_canvas_retention();
-        let webview = WebViewBuilder::new(&servo, rendering_context.clone())
+        let mut webview_builder = WebViewBuilder::new(&servo, rendering_context.clone())
             .delegate(delegate.clone())
-            .user_content_manager(user_content_manager)
-            .url(input_url)
-            .build();
+            .url(input_url);
+        if let Some(readiness) = readiness {
+            let user_content_manager = Rc::new(UserContentManager::new(&servo));
+            user_content_manager
+                .add_script(Rc::new(UserScript::from(readiness.document_start_script())));
+            webview_builder = webview_builder.user_content_manager(user_content_manager);
+        }
+        if let Some(document_clock) = document_clock {
+            webview_builder = webview_builder.document_clock(document_clock);
+        }
+        let webview = webview_builder.build();
 
         Ok(Self {
             webview,
@@ -631,8 +802,46 @@ impl DocumentSession {
             allow_host_fonts,
             host_deadline,
             _canvas_retention: canvas_retention,
-            _rendering_context: rendering_context,
+            rendering_context,
         })
+    }
+
+    fn controlled_capture_surface(
+        &self,
+    ) -> Result<DocumentCaptureSurfaceFingerprint, SessionError> {
+        let device_pixel_scale = self.webview.hidpi_scale_factor().get();
+        if device_pixel_scale.to_bits() != 1.0_f32.to_bits() {
+            return Err(SessionError::new(
+                "CAPTURE_SURFACE_INVALID",
+                "controlled candidate currently requires an exact 1.0 device-pixel scale",
+            ));
+        }
+        let size = self.rendering_context.size2d();
+        let width = i32::try_from(size.width).map_err(|_| {
+            SessionError::new(
+                "CAPTURE_SURFACE_INVALID",
+                "capture surface width is not representable",
+            )
+        })?;
+        let height = i32::try_from(size.height).map_err(|_| {
+            SessionError::new(
+                "CAPTURE_SURFACE_INVALID",
+                "capture surface height is not representable",
+            )
+        })?;
+        let viewport = DeviceIndependentIntSize::new(width, height);
+        let capture_rect = DeviceIndependentIntRect::new(
+            DeviceIndependentIntPoint::new(0, 0),
+            DeviceIndependentIntPoint::new(width, height),
+        );
+        DocumentCaptureSurfaceFingerprint::new(viewport, capture_rect, device_pixel_scale).map_err(
+            |error| {
+                SessionError::new(
+                    "CAPTURE_SURFACE_INVALID",
+                    format!("capture surface is invalid: {error:?}"),
+                )
+            },
+        )
     }
 
     pub(crate) fn render(self) -> Result<DocumentOutcome, SessionError> {
@@ -923,6 +1132,188 @@ impl DocumentSession {
         }
         Ok(())
     }
+}
+
+impl ControlledDocumentSession {
+    /// Drive the controlled ScriptThread only until it issues opaque capture-candidate evidence.
+    /// No screenshot, layout snapshot, scene, PDF, or publication artifact is produced here.
+    pub(crate) fn prepare_capture_candidate(
+        self,
+    ) -> Result<PreparedDocumentCaptureCandidate, SessionError> {
+        self.session.webview.show();
+        let coordinator = ControlledSettlementCoordinator::new(self.surface);
+        let mut progress = coordinator.start();
+        let mut wait_generation = None;
+        let mut trace = Vec::new();
+
+        loop {
+            progress = match progress {
+                ControlledSettlementProgress::Command(command) => {
+                    self.session.check_failure("controlled settlement")?;
+                    if self.session.host_deadline.is_elapsed() {
+                        return Err(SessionError::new(
+                            "SETTLEMENT_TIMEOUT",
+                            "controlled settlement exceeded the normalized host-wall limit",
+                        ));
+                    }
+                    trace.push(controlled_settlement_step(&command));
+                    let command_generation = self.waker.generation();
+                    let response_waker = self.waker.clone();
+                    let receiver = self
+                        .session
+                        .webview
+                        .request_controlled_document_time_notifying(command, move || {
+                            response_waker.notify_control_response();
+                        })
+                        .map_err(|error| {
+                            SessionError::new(
+                                "SETTLEMENT_CONTROL_FAILED",
+                                format!("cannot submit controlled command: {error:?}"),
+                            )
+                        })?;
+                    let (outcome, completion_generation) = self.await_control_outcome(receiver)?;
+                    let next = coordinator
+                        .consume_receive_outcome(outcome)
+                        .map_err(settlement_transition_error)?;
+                    if completion_generation.event_loop_changed_since(command_generation) {
+                        wait_generation = None;
+                        ControlledSettlementProgress::Command(DocumentTimeControlCommand::Observe)
+                    } else {
+                        wait_generation = Some(completion_generation);
+                        next
+                    }
+                },
+                ControlledSettlementProgress::WaitForWake => {
+                    trace.push(ControlledSettlementStep::WaitForWake);
+                    self.session.check_failure("controlled settlement")?;
+                    if self.session.host_deadline.is_elapsed() {
+                        return Err(SessionError::new(
+                            "SETTLEMENT_TIMEOUT",
+                            "controlled settlement exceeded the normalized host-wall limit",
+                        ));
+                    }
+                    let observed = wait_generation
+                        .take()
+                        .unwrap_or_else(|| self.waker.generation());
+                    // A producer ticket may belong to a task which was already queued before the
+                    // preceding control command. Give Servo one owner-thread turn before sleeping;
+                    // the pre-spin generation still catches work which arrives after Servo's last
+                    // empty check.
+                    let wait = self.waker.owner_turn_then_wait(
+                        observed,
+                        self.session.host_deadline.instant(),
+                        || {
+                            self.session.servo.spin_event_loop();
+                            self.session.check_failure("controlled settlement")?;
+                            if self.session.host_deadline.is_elapsed() {
+                                return Err(SessionError::new(
+                                    "SETTLEMENT_TIMEOUT",
+                                    "controlled settlement exceeded the normalized host-wall limit",
+                                ));
+                            }
+                            Ok(())
+                        },
+                    )?;
+                    match wait {
+                        EventLoopWakeWaitOutcome::Woken(_) => {
+                            ControlledSettlementProgress::Command(
+                                DocumentTimeControlCommand::Observe,
+                            )
+                        },
+                        EventLoopWakeWaitOutcome::DeadlineReached(_) => {
+                            return Err(SessionError::new(
+                                "SETTLEMENT_TIMEOUT",
+                                "controlled settlement exceeded the normalized host-wall limit",
+                            ));
+                        },
+                        EventLoopWakeWaitOutcome::GenerationExhausted(_) => {
+                            return Err(SessionError::new(
+                                "SETTLEMENT_WAKE_FAILED",
+                                "controlled settlement wake generation was exhausted",
+                            ));
+                        },
+                    }
+                },
+                ControlledSettlementProgress::Candidate(precondition) => {
+                    return Ok(PreparedDocumentCaptureCandidate {
+                        _session: self,
+                        precondition,
+                        trace,
+                    });
+                },
+            };
+        }
+    }
+
+    fn await_control_outcome(
+        &self,
+        mut receiver: embedder_traits::DocumentTimeControlReceiver,
+    ) -> Result<
+        (
+            DocumentTimeControlReceiveOutcome,
+            pliego::event_loop_waker::EventLoopWakeGeneration,
+        ),
+        SessionError,
+    > {
+        loop {
+            self.session.check_failure("controlled settlement")?;
+            if self.session.host_deadline.is_elapsed() {
+                return Err(SessionError::new(
+                    "SETTLEMENT_TIMEOUT",
+                    "controlled settlement exceeded the normalized host-wall limit",
+                ));
+            }
+
+            let before_spin = self.waker.generation();
+            self.session.servo.spin_event_loop();
+            self.session.check_failure("controlled settlement")?;
+            if self.session.host_deadline.is_elapsed() {
+                return Err(SessionError::new(
+                    "SETTLEMENT_TIMEOUT",
+                    "controlled settlement exceeded the normalized host-wall limit",
+                ));
+            }
+
+            match receiver.try_recv() {
+                DocumentTimeControlTryReceiveOutcome::Complete(outcome) => {
+                    return Ok((outcome, self.waker.generation()));
+                },
+                DocumentTimeControlTryReceiveOutcome::Pending(pending) => receiver = pending,
+            }
+
+            match self
+                .waker
+                .wait_for_generation(before_spin, self.session.host_deadline.instant())
+            {
+                EventLoopWakeWaitOutcome::Woken(_) => {},
+                EventLoopWakeWaitOutcome::DeadlineReached(_) => {
+                    return Err(SessionError::new(
+                        "SETTLEMENT_TIMEOUT",
+                        "controlled settlement exceeded the normalized host-wall limit",
+                    ));
+                },
+                EventLoopWakeWaitOutcome::GenerationExhausted(_) => {
+                    return Err(SessionError::new(
+                        "SETTLEMENT_WAKE_FAILED",
+                        "controlled settlement wake generation was exhausted",
+                    ));
+                },
+            }
+        }
+    }
+}
+
+fn controlled_settlement_step(command: &DocumentTimeControlCommand) -> ControlledSettlementStep {
+    match command {
+        DocumentTimeControlCommand::Observe => ControlledSettlementStep::Observe,
+        DocumentTimeControlCommand::DriveOneTurn => ControlledSettlementStep::DriveOneTurn,
+        DocumentTimeControlCommand::AdvanceTo(_) => ControlledSettlementStep::AdvanceTo,
+        DocumentTimeControlCommand::PrepareCapture(_) => ControlledSettlementStep::PrepareCapture,
+    }
+}
+
+fn settlement_transition_error(error: ControlledSettlementError) -> SessionError {
+    SessionError::new("SETTLEMENT_FAILED", error.to_string())
 }
 
 fn validate_host_font_policy(
@@ -1326,12 +1717,13 @@ mod tests {
         ResourceAccounting, ResourceEvidence, ResourcePolicy, ResourcePolicyFailure,
         ResourceRequest, ResourceSource, ResponseHeaderEvidence, VirtualResourceSpec,
     };
+    use super::super::runtime_policy::DeterministicRuntimePolicy;
     use super::super::session::LocalDocument;
     use super::{
-        ConsoleEvidenceLog, ConsoleLogLevel, DocumentSession, MAX_CONSOLE_BYTES,
-        MAX_CONSOLE_EVENTS, RESOURCE_EVIDENCE_ENTRY_OVERHEAD_BYTES, ReadinessPolicy,
-        RenderEnvironment, ResourceEvidenceLog, ResourcePolicyConfig, SessionError,
-        SessionHostDeadline, console_log_level_name, session_host_timeout,
+        ConsoleEvidenceLog, ConsoleLogLevel, ControlledSettlementStep, DocumentSession,
+        MAX_CONSOLE_BYTES, MAX_CONSOLE_EVENTS, RESOURCE_EVIDENCE_ENTRY_OVERHEAD_BYTES,
+        ReadinessPolicy, RenderEnvironment, ResourceEvidenceLog, ResourcePolicyConfig,
+        SessionError, SessionHostDeadline, console_log_level_name, session_host_timeout,
         validate_host_font_policy, validate_resolved_resource_policy, validate_resource_policy,
     };
 
@@ -2152,6 +2544,24 @@ window.pliego?.defer();
     }
 
     #[test]
+    fn controlled_session_issues_only_a_candidate_and_rejects_open_ended_sources() {
+        for case in ["controlled-finite", "controlled-interval"] {
+            let output = run_isolated(case, "http://127.0.0.1:1/");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success(),
+                "isolated {case} fixture failed\nstdout:\n{}\nstderr:\n{}",
+                stdout,
+                String::from_utf8_lossy(&output.stderr),
+            );
+            assert!(
+                stdout.contains("running 1 test") && stdout.contains("1 passed; 0 failed"),
+                "isolated {case} filter did not execute exactly one passing child test:\n{stdout}",
+            );
+        }
+    }
+
+    #[test]
     #[ignore = "requires the lockfile-installed Chart.js fixture input"]
     fn installed_chartjs_fixture_matches_the_legacy_oracle_twice() {
         let input = std::env::var(CHARTJS_INPUT_ENV)
@@ -2233,6 +2643,24 @@ window.pliego?.defer();
                     format!(
                         "<!doctype html><script>for(let index=0;index<={MAX_CONSOLE_EVENTS};index+=1){{console.info('overflow-'+index);}}window.pliego?.ready({{fixture:'console-overflow'}});</script>"
                     ),
+                );
+                _bundle = Some(bundle);
+                input
+            },
+            "controlled-finite" => {
+                let bundle = TempBundle::new(case.as_str());
+                let input = bundle.write(
+                    "input.html",
+                    "<!doctype html><p id='state'>pending</p><script>if(Object.prototype.hasOwnProperty.call(window,'pliego')||Object.prototype.hasOwnProperty.call(window,'__pliegoReadiness')){setInterval(()=>{},1);}console.info(`controlled-start:${Date.now()}:${performance.now()}`);requestAnimationFrame(()=>console.info('controlled-frame'));setTimeout(()=>{document.getElementById('state').textContent='done';console.info(`controlled-end:${Date.now()}:${performance.now()}`);},5);</script>",
+                );
+                _bundle = Some(bundle);
+                input
+            },
+            "controlled-interval" => {
+                let bundle = TempBundle::new(case.as_str());
+                let input = bundle.write(
+                    "input.html",
+                    "<!doctype html><script>setInterval(()=>{},100);</script>",
                 );
                 _bundle = Some(bundle);
                 input
@@ -2484,6 +2912,129 @@ window.pliego?.defer();
             },
             _ => a4(),
         };
+        if matches!(case.as_str(), "controlled-finite" | "controlled-interval") {
+            let bundle_files = || {
+                let mut files = fs::read_dir(input.parent().unwrap())
+                    .unwrap()
+                    .map(|entry| entry.unwrap().file_name())
+                    .collect::<Vec<_>>();
+                files.sort();
+                files
+            };
+            let files_before = bundle_files();
+            let controlled = DocumentSession::new_controlled(
+                &input,
+                environment,
+                page,
+                resources,
+                allow_host_fonts,
+                DeterministicRuntimePolicy::default(),
+            )
+            .expect("controlled fixture should construct without the legacy readiness shim");
+            match case.as_str() {
+                "controlled-finite" => {
+                    let candidate = controlled
+                        .prepare_capture_candidate()
+                        .expect("finite controlled work should reach opaque candidate evidence");
+                    assert_eq!(candidate.precondition().now().as_nanos(), 5_000_000);
+                    assert_eq!(candidate.precondition().pending_events(), 0);
+                    assert!(candidate.precondition().producers().snapshot.is_empty());
+                    assert_eq!(
+                        candidate.precondition().producers().stability,
+                        embedder_traits::DocumentProducerStability::StableEmpty
+                    );
+                    assert!(candidate.precondition().next_deadline().is_none());
+                    assert!(candidate.precondition().sources().sources().iter().all(
+                        |source| matches!(
+                            source.disposition(),
+                            embedder_traits::DocumentSettlementSourceDisposition::Inert
+                        )
+                    ));
+                    assert!(candidate.precondition().execution().terminal.is_none());
+                    let surface = candidate.precondition().surface();
+                    assert_eq!(surface.device_pixel_scale(), 1.0);
+                    assert_eq!(
+                        (surface.viewport().width, surface.viewport().height),
+                        (794, 1123)
+                    );
+                    assert_eq!(surface.capture_rect().min.x, 0);
+                    assert_eq!(surface.capture_rect().min.y, 0);
+                    assert_eq!(surface.capture_rect().max.x, surface.viewport().width);
+                    assert_eq!(surface.capture_rect().max.y, surface.viewport().height);
+                    assert_eq!(
+                        candidate.trace().first(),
+                        Some(&ControlledSettlementStep::Observe)
+                    );
+                    assert_eq!(
+                        candidate.trace().last(),
+                        Some(&ControlledSettlementStep::PrepareCapture)
+                    );
+                    assert!(
+                        candidate
+                            .trace()
+                            .iter()
+                            .filter(|step| **step == ControlledSettlementStep::DriveOneTurn)
+                            .count() >=
+                            2
+                    );
+                    assert!(
+                        candidate
+                            .trace()
+                            .contains(&ControlledSettlementStep::AdvanceTo)
+                    );
+                    assert!(
+                        candidate
+                            .trace()
+                            .contains(&ControlledSettlementStep::PrepareCapture)
+                    );
+                    let messages = candidate
+                        ._session
+                        .session
+                        .delegate
+                        .console
+                        .borrow()
+                        .entries
+                        .iter()
+                        .filter_map(|(_, message)| {
+                            message
+                                .starts_with("controlled-")
+                                .then_some(message.as_str())
+                        })
+                        .collect::<Vec<_>>();
+                    assert_eq!(
+                        messages
+                            .iter()
+                            .filter(|message| **message == "controlled-frame")
+                            .count(),
+                        1
+                    );
+                    assert_eq!(
+                        messages
+                            .into_iter()
+                            .filter(|message| {
+                                message.starts_with("controlled-start:") ||
+                                    message.starts_with("controlled-end:")
+                            })
+                            .collect::<Vec<_>>(),
+                        vec![
+                            "controlled-start:946684800000:0",
+                            "controlled-end:946684800005:5",
+                        ]
+                    );
+                },
+                "controlled-interval" => {
+                    let error = match controlled.prepare_capture_candidate() {
+                        Ok(_) => panic!("an interval issued candidate evidence"),
+                        Err(error) => error,
+                    };
+                    assert_eq!(error.code, "SETTLEMENT_FAILED");
+                    assert!(error.message.contains("OpenEndedSource"));
+                },
+                _ => unreachable!(),
+            }
+            assert_eq!(bundle_files(), files_before);
+            return;
+        }
         let expected_metadata_outcome = match case.as_str() {
             "metadata-denied-non-icon" => Some((
                 url::Url::parse("https://denied.invalid/report.bin").unwrap(),

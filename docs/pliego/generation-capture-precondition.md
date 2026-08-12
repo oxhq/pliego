@@ -56,10 +56,12 @@ remain covered by the live media-element owner tracker.
 
 - This precondition is not a screenshot, PDF, semantic-tree, or PDF/UA result.
 - It is not evidence that Paint presented the bound script/layout epoch. There is no Paint or
-  WebView capture coordinator in this slice, and there is no artifact commit protocol.
-- It is not yet consumable outside ScriptThread. The current test-only retained-value comparison
-  demonstrates single-use supersession mechanics only; a production consume message must add the
-  atomic full reobservation and Paint-generation match described above.
+  artifact capture coordinator or artifact commit protocol. Pliego's internal WebView driver only
+  transports and retains the opaque candidate together with the live session.
+- It is not consumable. The candidate can cross the ScriptThread response boundary, but the current
+  retained-value consumption remains test-only inside ScriptThread and demonstrates single-use
+  supersession mechanics only. A production consume message must add the atomic full reobservation
+  and Paint-generation match described above.
 - It supports only one fully-active painted pipeline. Multi-pipeline frame-tree capture remains
   unsupported.
 - It does not add settlement ownership for media clocks, canvas/graphics generations, workers,

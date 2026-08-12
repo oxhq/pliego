@@ -20,6 +20,7 @@ document-session = [
     "dep:image",
     "dep:layout",
     "dep:servo",
+    "dep:servo-geometry",
     "dep:surfman",
     "servo/js_jit",
 ]
@@ -54,14 +55,18 @@ servo-canvas = { workspace = true }
 servo = { workspace = true, default-features = false, features = ["baked-in-resources", "bundled_freetype"], optional = true }
 servoshell = { workspace = true, features = ["baked-in-resources", "bundled_freetype"], optional = true }
 surfman = { workspace = true, optional = true }
+servo-geometry = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["time"] }
+timers = { workspace = true }
 unicode-segmentation = { workspace = true }
 url = { workspace = true }
 vello_cpu = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
+crossbeam-channel = { workspace = true }
 flate2 = { workspace = true }
+servo-base = { workspace = true }
 servo-canvas = { workspace = true, features = ["document-session-testing"] }
 toml_edit = { version = "=0.25.12", default-features = false, features = ["parse"] }
 ttf-parser = { workspace = true }

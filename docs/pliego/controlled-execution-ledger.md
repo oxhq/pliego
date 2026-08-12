@@ -61,8 +61,11 @@ This slice does not claim:
 - classification of infinite timers, RAF loops, declarative animations, workers, or resources; or
 - full visual settlement, producer-fenced quiescence, or API 2 terminal artifact integration.
 
-Those are separate fail-closed gates. A ledger terminal must prevent publication, but wiring that
-terminal through the Pliego-owned settlement and publication state machine belongs to later slices.
-The same is true of mapping normalized API 2 epoch and limit fields into the production clock
-configuration. The widened serde/IPC shapes are verified for one same-build runtime; they are not a
-backward-wire-compatibility claim for older binaries.
+Those are separate fail-closed gates. An opt-in internal Pliego session now maps the normalized API
+2 epoch, virtual span, task, microtask, rendering, and mutation limits into a controlled clock before
+navigation, and its coordinator can stop at opaque capture-candidate evidence. The default
+production render path still constructs the realtime session and never calls that coordinator.
+Consequently a ledger terminal is not yet wired through production publication, and the CPU,
+host-wall-inside-one-turn, and post-readiness-resource limits above remain unenforced. The widened
+serde/IPC shapes are verified for one same-build runtime; they are not a backward-wire-compatibility
+claim for older binaries.
