@@ -5328,7 +5328,7 @@ mod tests {
                 &policy,
                 false,
             ),
-            "sha256:7e771884747878e76c9e45b6fdb4ad5bf59b15ff33cfe0d9ef0db140fad2f52f"
+            "sha256:a89b2616c570d9ff69c7b12dd97721a6289a1a4f872873e50121565eb5606f04"
         );
         assert_ne!(
             render_id,
