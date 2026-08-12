@@ -5336,6 +5336,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "document-session")]
     #[test]
     fn every_runtime_policy_override_changes_render_and_recovery_identity() {
         let input = b"<!doctype html><title>Controlled</title>";
