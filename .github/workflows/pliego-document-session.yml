@@ -12,13 +12,19 @@ on:
       - "rust-toolchain.toml"
       - "ports/pliego/**"
       - "components/canvas/**"
+      - "components/constellation/**"
       - "components/fonts/**"
       - "components/layout/**"
+      - "components/paint/**"
       - "components/script/**"
       - "components/servo/**"
       - "components/shared/canvas/**"
+      - "components/shared/constellation/**"
+      - "components/shared/embedder/**"
       - "components/shared/fonts/**"
+      - "components/shared/paint/**"
       - "components/shared/script/**"
+      - "components/timers/**"
       - "sdk/php/**"
       - "benchmarks/fixtures/minimal-static/**"
   pull_request:
@@ -61,7 +67,9 @@ jobs:
         timeout-minutes: 30
         run: |
           sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends libclang-dev
+          sudo apt-get install --yes --no-install-recommends \
+            libclang-dev \
+            poppler-utils
           libclang="$(
             find /usr/lib/llvm-* -maxdepth 2 \
               \( -type f -o -type l \) -name libclang.so -print \
@@ -125,6 +133,13 @@ jobs:
           xvfb-run python ports/pliego/tests/check_resource_policy.py \
             "$PWD/target/debug/pliego" \
             "$RUNNER_TEMP/pliego-resource-policy"
+
+      - name: Prove generation-bound controlled capture and fail-closed publication
+        run: |
+          python ports/pliego/tests/check_controlled_capture.py --self-test
+          xvfb-run python ports/pliego/tests/check_controlled_capture.py \
+            "$PWD/target/debug/pliego" \
+            "$RUNNER_TEMP/pliego-controlled-capture"
 
       - name: Test the PHP bridge against the production binary
         run: |

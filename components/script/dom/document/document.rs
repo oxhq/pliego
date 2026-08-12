@@ -62,7 +62,9 @@ use servo_base::generic_channel::GenericSend;
 use servo_base::id::{PipelineId, WebViewId};
 use servo_base::{Epoch, generic_channel};
 use servo_config::pref;
-use servo_constellation_traits::{NavigationHistoryBehavior, ScriptToConstellationMessage};
+use servo_constellation_traits::{
+    NavigationHistoryBehavior, PaintMetricTime, ScriptToConstellationMessage,
+};
 use servo_media::{ClientContextId, ServoMedia};
 use servo_url::{ImmutableOrigin, MutableOrigin, ServoUrl};
 use style::attr::AttrValue;
@@ -184,7 +186,7 @@ use crate::dom::node::{Node, NodeDamage, NodeFlags, NodeTraits};
 use crate::dom::nodeiterator::NodeIterator;
 use crate::dom::nodelist::NodeList;
 use crate::dom::pagetransitionevent::PageTransitionEvent;
-use crate::dom::performance::performanceentry::PerformanceEntry;
+use crate::dom::performance::performanceentry::{PerformanceEntry, PerformanceEntryTime};
 use crate::dom::performance::performancepainttiming::PerformancePaintTiming;
 use crate::dom::processinginstruction::ProcessingInstruction;
 use crate::dom::promise::Promise;
@@ -3464,10 +3466,27 @@ impl Document {
         &self,
         cx: &mut JSContext,
         metric_type: ProgressiveWebMetricType,
-        metric_value: CrossProcessInstant,
+        metric_value: PaintMetricTime,
         first_reflow: bool,
     ) {
         let metrics = self.interactive_time.borrow();
+        let entry_time = match metric_value {
+            PaintMetricTime::Host(instant) => PerformanceEntryTime::Host(instant),
+            PaintMetricTime::Document(time_ns) => {
+                let Ok(relative) = self.window.document_time_since_navigation(
+                    DocumentTime::from_nanos(time_ns),
+                    DocumentTimeSurface::Performance,
+                ) else {
+                    // The controlled-clock terminal is already visible to the control plane. Do
+                    // not invent a host or zero timestamp for a page-visible performance entry.
+                    return;
+                };
+                let Ok(relative) = TimeDuration::try_from(relative) else {
+                    return;
+                };
+                PerformanceEntryTime::Document(relative)
+            },
+        };
         match metric_type {
             ProgressiveWebMetricType::FirstPaint |
             ProgressiveWebMetricType::FirstContentfulPaint => {
@@ -3475,9 +3494,11 @@ impl Document {
                     cx,
                     self.window.as_global_scope(),
                     metric_type.clone(),
-                    metric_value,
+                    entry_time,
                 );
-                metrics.set_performance_paint_metric(metric_value, first_reflow, metric_type);
+                if let PaintMetricTime::Host(metric_value) = metric_value {
+                    metrics.set_performance_paint_metric(metric_value, first_reflow, metric_type);
+                }
                 let entry = binding.upcast::<PerformanceEntry>();
                 self.window.Performance(cx).queue_entry(entry);
             },
@@ -3485,11 +3506,13 @@ impl Document {
                 let binding = LargestContentfulPaint::new(
                     cx,
                     self.window.as_global_scope(),
-                    metric_value,
+                    entry_time,
                     area,
                     url,
                 );
-                metrics.set_largest_contentful_paint(metric_value, area);
+                if let PaintMetricTime::Host(metric_value) = metric_value {
+                    metrics.set_largest_contentful_paint(metric_value, area);
+                }
                 let entry = binding.upcast::<PerformanceEntry>();
                 self.window.Performance(cx).queue_entry(entry);
             },

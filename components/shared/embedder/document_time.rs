@@ -21,7 +21,11 @@ use timers::{
     TimerControlError, TimerDeadlineSnapshot,
 };
 
-use crate::generation_capture::{DocumentCapturePreparation, DocumentCaptureSurfaceFingerprint};
+use crate::generation_capture::{
+    DocumentCaptureCommit, DocumentCaptureConsumeRequest, DocumentCapturePreconditionId,
+    DocumentCapturePreparation, DocumentCaptureSurfaceFingerprint,
+    DocumentPaintPresentationTicketId,
+};
 
 /// Stable identity for one in-flight controlled document-time request.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
@@ -207,6 +211,12 @@ pub enum DocumentTimeControlCommand {
     /// This command does not contact Paint or capture pixels. It invalidates any previously
     /// issued capture precondition before collecting the new source inventory.
     PrepareCapture(DocumentCaptureSurfaceFingerprint),
+    /// Atomically consume one retained ScriptThread capture candidate against Paint's exact
+    /// presentation ticket and serialize the cached layout snapshot in-handler.
+    ///
+    /// This command is single-use. Once submitted, a lost response is outcome-indeterminate and
+    /// neither the candidate nor Paint ticket may be retried.
+    ConsumeCapture(Box<DocumentCaptureConsumeRequest>),
 }
 
 /// The operation completed before an observation was captured.
@@ -230,6 +240,8 @@ pub enum DocumentTimeControlAction {
     ExecutionTerminated,
     /// Capture qualification was evaluated without running page work.
     CapturePrepared,
+    /// One retained candidate was consumed without running page work or advancing document time.
+    CaptureConsumed,
 }
 
 /// Qualification of one producer snapshot at the latest completed microtask checkpoint.
@@ -331,14 +343,19 @@ pub struct DocumentTimeControlObservation {
     /// A contained precondition is ScriptThread generation proof only; it does not prove Paint
     /// presentation or successful artifact capture.
     pub capture_preparation: Option<DocumentCapturePreparation>,
+    /// Present only after a successful [`DocumentTimeControlCommand::ConsumeCapture`].
+    ///
+    /// The commit contains the cached layout bytes and exact candidate/ticket correlation. It does
+    /// not prove that a later artifact write or Paint finalization succeeded.
+    pub capture_commit: Option<Box<DocumentCaptureCommit>>,
 }
 
 /// Definitive or explicitly indeterminate completion of one mechanical control command.
 ///
-/// `AdvanceOutcomeIndeterminate` is intentionally not an error: after submission, shutdown,
-/// transport failure, or a non-authoritative successful envelope can prevent proof of which side of
-/// the clock linearization point won. The caller must not interpret that outcome as proof that time
-/// stayed unchanged or retry the token.
+/// The indeterminate variants are intentionally not errors: after submission, shutdown, transport
+/// failure, or a non-authoritative successful envelope can prevent proof of which side of a
+/// single-use linearization point won. The caller must not interpret either outcome as proof that
+/// no mutation occurred or retry its token, candidate, or presentation ticket.
 ///
 /// This enum crosses Servo's callback channel and is a same-build protocol. Existing variant order
 /// and payloads must remain stable; receiver-local transport states belong in
@@ -358,6 +375,18 @@ pub enum DocumentTimeControlOutcome {
         target: Box<DocumentTimeControlTarget>,
         /// Exact deadline which may or may not have been activated.
         deadline: TimerDeadlineSnapshot,
+    },
+    /// The runtime cannot determine whether ScriptThread consumed this candidate.
+    ///
+    /// The caller must not retry either identity: a successful consume may have crossed its
+    /// linearization point before the response was lost.
+    CaptureConsumeOutcomeIndeterminate {
+        /// Single-use ScriptThread candidate whose outcome cannot be recovered.
+        candidate_id: DocumentCapturePreconditionId,
+        /// Single-use Paint presentation ticket whose outcome cannot be recovered.
+        ticket_id: DocumentPaintPresentationTicketId,
+        /// Exact target bound when Constellation routed the consume request.
+        target: Box<DocumentTimeControlTarget>,
     },
 }
 
@@ -405,7 +434,8 @@ impl From<TryReceiveError> for DocumentTimeControlTransportFailure {
 /// have consumed a prior token and updated internal control bookkeeping. A missing `DriveOneTurn`
 /// response is indeterminate because the turn may complete after the caller stops waiting; callers
 /// must not retry it as though no event was processed. Guarded advances retain their exact-token
-/// [`DocumentTimeControlOutcome::AdvanceOutcomeIndeterminate`].
+/// [`DocumentTimeControlOutcome::AdvanceOutcomeIndeterminate`]; capture consumes retain their exact
+/// candidate/ticket [`DocumentTimeControlOutcome::CaptureConsumeOutcomeIndeterminate`].
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[doc(hidden)]
 pub enum DocumentTimeControlReceiveOutcome {
@@ -437,6 +467,7 @@ enum DocumentTimeControlTransportSemantics {
     DriveOneTurn,
     PrepareCapture,
     GuardedAdvance(DocumentTimeControlOutcome),
+    CaptureConsume(DocumentTimeControlOutcome),
 }
 
 /// One bounded, single-result receiver for a submitted document-time command.
@@ -446,9 +477,9 @@ enum DocumentTimeControlTransportSemantics {
 /// exact trusted-channel abandonment action that runs on timeout, transport failure, or receiver
 /// drop. A successor submitted after the bounded receive returns is ordered after that
 /// abandonment; concurrent receiver drop and successor submission have no ordering guarantee and
-/// may observe `CommandAlreadyPending`. For `AdvanceTo`, every timeout, disconnection, I/O
-/// failure, or deserialization failure is conservatively indeterminate and the submitted token
-/// must not be retried.
+/// may observe `CommandAlreadyPending`. For `AdvanceTo` and `ConsumeCapture`, every timeout,
+/// disconnection, I/O failure, or deserialization failure is conservatively indeterminate and the
+/// submitted token or candidate/ticket pair must not be retried.
 #[doc(hidden)]
 pub struct DocumentTimeControlReceiver {
     receiver: GenericReceiver<DocumentTimeControlOutcome>,
@@ -497,6 +528,15 @@ impl DocumentTimeControlReceiver {
             },
             DocumentTimeControlCommand::PrepareCapture(_) => {
                 DocumentTimeControlTransportSemantics::PrepareCapture
+            },
+            DocumentTimeControlCommand::ConsumeCapture(request) => {
+                DocumentTimeControlTransportSemantics::CaptureConsume(
+                    DocumentTimeControlOutcome::CaptureConsumeOutcomeIndeterminate {
+                        candidate_id: request.precondition().id(),
+                        ticket_id: request.ticket().id(),
+                        target: Box::new(request.precondition().target().clone()),
+                    },
+                )
             },
         };
         Self {
@@ -560,6 +600,9 @@ impl DocumentTimeControlReceiver {
                         )
                     },
                     DocumentTimeControlTransportSemantics::GuardedAdvance(outcome) => {
+                        DocumentTimeControlReceiveOutcome::CommandOutcome(outcome.clone())
+                    },
+                    DocumentTimeControlTransportSemantics::CaptureConsume(outcome) => {
                         DocumentTimeControlReceiveOutcome::CommandOutcome(outcome.clone())
                     },
                 }
@@ -666,6 +709,31 @@ pub enum DocumentTimeControlError {
     /// The canonical source-inventory epoch overflowed and is permanently terminal for this
     /// ScriptThread.
     CaptureSourceEpochOverflow,
+    /// No retained capture candidate remained, including after a replayed consume.
+    CapturePreconditionUnavailable {
+        /// Candidate supplied by the caller.
+        observed: DocumentCapturePreconditionId,
+    },
+    /// The caller did not return the exact latest candidate retained by ScriptThread.
+    StaleCapturePrecondition {
+        /// Latest retained candidate invalidated by this failed attempt.
+        expected: DocumentCapturePreconditionId,
+        /// Candidate supplied by the caller.
+        observed: DocumentCapturePreconditionId,
+    },
+    /// Paint's presentation ticket did not bind every required candidate dimension.
+    CapturePresentationMismatch,
+    /// A candidate-bound ScriptThread dimension changed before the consume linearization point.
+    CaptureStateChanged,
+    /// The exact cached layout snapshot was unavailable for the candidate pipeline.
+    CaptureLayoutUnavailable,
+    /// The cached layout snapshot did not carry the candidate's exact Script/Layout paint epoch.
+    CaptureLayoutEpochMismatch {
+        /// Script/Layout epoch bound by the candidate and Paint ticket.
+        expected: Epoch,
+        /// Paint epoch embedded in the cached layout snapshot.
+        observed: Epoch,
+    },
 }
 
 #[cfg(test)]
@@ -681,8 +749,10 @@ mod tests {
 
     use super::*;
     use crate::generation_capture::{
-        DocumentCaptureDocumentEpoch, DocumentCapturePrecondition, DocumentCapturePreconditionId,
-        DocumentSettlementSourceEpoch, DocumentSettlementSourceSnapshot,
+        DocumentCaptureConsumeRequest, DocumentCaptureDocumentEpoch, DocumentCapturePrecondition,
+        DocumentCapturePreconditionId, DocumentPaintPresentationTicket,
+        DocumentPaintPresentationTicketId, DocumentSettlementSourceEpoch,
+        DocumentSettlementSourceSnapshot,
     };
 
     fn target() -> DocumentTimeControlTarget {
@@ -797,6 +867,7 @@ mod tests {
                 documents: Vec::new(),
                 execution: None,
                 capture_preparation: None,
+                capture_commit: None,
             }));
         let (completed_sender, completed_receiver) =
             ipc_channel::ipc::channel::<DocumentTimeControlOutcome>().unwrap();
@@ -811,6 +882,177 @@ mod tests {
             1.0,
         )
         .unwrap()
+    }
+
+    fn capture_consume_fixture() -> (
+        DocumentTimeControlCommand,
+        DocumentTimeControlOutcome,
+        DocumentCapturePreconditionId,
+        DocumentPaintPresentationTicketId,
+    ) {
+        let surface = capture_surface();
+        let clock = DocumentClock::new(DocumentClockConfiguration::Controlled {
+            initial_time_ns: 7,
+            unix_time_origin_ns: DocumentUnixTime::default(),
+            execution_limits: Some(DocumentExecutionLimits::API2_V1_DEFAULT),
+        });
+        let fence = DocumentProducerFence::with_execution_ledger(clock.execution_ledger());
+        let checkpoint = DocumentProducerCheckpoint::ZERO
+            .checked_next()
+            .expect("test checkpoint is representable");
+        let producers = DocumentTimeProducerObservation {
+            fence_id: fence.id(),
+            checkpoint,
+            snapshot: fence.snapshot(),
+            stability: DocumentProducerStability::StableEmpty,
+        };
+        let execution = clock
+            .execution_ledger()
+            .expect("controlled test clock has an execution ledger")
+            .observation();
+        let sources = DocumentSettlementSourceSnapshot::new_internal(
+            DocumentSettlementSourceEpoch::new(3),
+            Vec::new(),
+        );
+        let script_rendering_epoch = Epoch(11);
+        let candidate_id = DocumentCapturePreconditionId::new(41);
+        let ticket_id = DocumentPaintPresentationTicketId::new(97);
+        let precondition = DocumentCapturePrecondition::new_internal(
+            candidate_id,
+            target(),
+            clock.id(),
+            clock.now(),
+            13,
+            0,
+            false,
+            producers,
+            execution,
+            None,
+            sources,
+            vec![DocumentCaptureDocumentEpoch {
+                pipeline_id: TEST_PIPELINE_ID,
+                script_rendering_epoch,
+                readiness_blockers: Vec::new(),
+            }],
+            surface,
+        );
+        let ticket = DocumentPaintPresentationTicket::new_internal(
+            ticket_id,
+            candidate_id,
+            target(),
+            TEST_PIPELINE_ID,
+            script_rendering_epoch,
+            surface,
+            5,
+            8,
+        );
+        let command = DocumentTimeControlCommand::ConsumeCapture(Box::new(
+            DocumentCaptureConsumeRequest::new_internal(
+                Box::new(precondition.clone()),
+                ticket.clone(),
+            ),
+        ));
+        let commit = DocumentCaptureCommit::new_internal(
+            candidate_id,
+            ticket_id,
+            target(),
+            TEST_PIPELINE_ID,
+            script_rendering_epoch,
+            surface,
+            ticket.presentation_generation(),
+            ticket.publish_generation(),
+            script_rendering_epoch,
+            "{\"paint_epoch\":11}".to_owned(),
+        );
+        let outcome =
+            DocumentTimeControlOutcome::Completed(Box::new(DocumentTimeControlObservation {
+                target: target(),
+                now: clock.now(),
+                next_deadline: None,
+                advance_token: None,
+                pending_events: 0,
+                input_batch_saturated: false,
+                action: DocumentTimeControlAction::CaptureConsumed,
+                producers,
+                documents: vec![DocumentTimeDocumentObservation {
+                    pipeline_id: TEST_PIPELINE_ID,
+                    script_rendering_epoch: Some(script_rendering_epoch),
+                    readiness_blockers: Vec::new(),
+                }],
+                execution: Some(execution),
+                capture_preparation: None,
+                capture_commit: Some(Box::new(commit)),
+            }));
+        (command, outcome, candidate_id, ticket_id)
+    }
+
+    fn assert_capture_consume_indeterminate(
+        outcome: DocumentTimeControlReceiveOutcome,
+        candidate_id: DocumentCapturePreconditionId,
+        ticket_id: DocumentPaintPresentationTicketId,
+    ) {
+        assert!(matches!(
+            outcome,
+            DocumentTimeControlReceiveOutcome::CommandOutcome(
+                DocumentTimeControlOutcome::CaptureConsumeOutcomeIndeterminate {
+                    candidate_id: observed_candidate,
+                    ticket_id: observed_ticket,
+                    target: observed_target,
+                }
+            ) if observed_candidate == candidate_id && observed_ticket == ticket_id &&
+                *observed_target == target()
+        ));
+    }
+
+    #[test]
+    fn capture_consume_command_and_success_round_trip_through_ipc() {
+        let (command, outcome, _, _) = capture_consume_fixture();
+        let (command_sender, command_receiver) =
+            ipc_channel::ipc::channel::<DocumentTimeControlCommand>().unwrap();
+        command_sender.send(command.clone()).unwrap();
+        assert_eq!(command_receiver.recv().unwrap(), command);
+
+        let (outcome_sender, outcome_receiver) =
+            ipc_channel::ipc::channel::<DocumentTimeControlOutcome>().unwrap();
+        outcome_sender.send(outcome.clone()).unwrap();
+        assert_eq!(outcome_receiver.recv().unwrap(), outcome);
+    }
+
+    #[test]
+    fn every_lost_capture_consume_response_is_indeterminate_and_identity_bound() {
+        let (command, _, candidate_id, ticket_id) = capture_consume_fixture();
+        let (response, receiver) = GenericCallback::new_blocking()
+            .expect("test capture-consume callback channel should be created");
+        let receiver = DocumentTimeControlReceiver::new(receiver, &command);
+        drop(response);
+        assert_capture_consume_indeterminate(
+            receiver.recv_timeout(Duration::from_secs(1)),
+            candidate_id,
+            ticket_id,
+        );
+
+        let (_response, receiver) = GenericCallback::new_blocking()
+            .expect("test capture-consume timeout channel should be created");
+        let receiver = DocumentTimeControlReceiver::new(receiver, &command);
+        assert_capture_consume_indeterminate(
+            receiver.recv_timeout(Duration::ZERO),
+            candidate_id,
+            ticket_id,
+        );
+
+        let (_response, receiver) = GenericCallback::new_blocking()
+            .expect("test capture-consume decode channel should be created");
+        let receiver = DocumentTimeControlReceiver::new(receiver, &command);
+        assert_capture_consume_indeterminate(
+            receiver.resolve(Err(TryReceiveError::ReceiveError(
+                ReceiveError::DeserializationFailed("test corruption".to_owned()),
+            ))),
+            candidate_id,
+            ticket_id,
+        );
+
+        // Each receiver above is consumed into one terminal outcome. There is deliberately no
+        // second receive path which could make either single-use identity appear retryable.
     }
 
     #[test]
@@ -884,6 +1126,7 @@ mod tests {
                     blockers: Vec::new(),
                     precondition: Some(Box::new(precondition)),
                 }),
+                capture_commit: None,
             }));
         let (outcome_sender, outcome_receiver) =
             ipc_channel::ipc::channel::<DocumentTimeControlOutcome>().unwrap();

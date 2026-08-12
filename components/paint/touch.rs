@@ -234,6 +234,19 @@ impl TouchHandler {
         }
     }
 
+    pub(crate) fn has_capture_blocking_work(&self) -> bool {
+        !self.pending_touch_input_events.borrow().is_empty() ||
+            self.observing_frames_for_fling.get() ||
+            self.try_get_current_touch_sequence()
+                .is_some_and(|sequence| {
+                    matches!(
+                        sequence.state,
+                        TouchSequenceState::PendingFling { .. } |
+                            TouchSequenceState::Flinging { .. }
+                    )
+                })
+    }
+
     pub(crate) fn set_handling_touch_move_for_touch_id(
         &mut self,
         sequence_id: TouchSequenceId,

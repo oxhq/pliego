@@ -182,7 +182,10 @@ mod session;
     feature = "document-session",
     not(any(target_os = "android", target_env = "ohos"))
 ))]
-use document_session::{DocumentCaptureOutcome, DocumentSession, SessionError};
+use document_session::{
+    ControlledDocumentSession, DocumentCaptureOutcome, DocumentSession,
+    PreparedDocumentCaptureCandidate, SessionError,
+};
 use engine::{
     DocumentEngine, ExplicitRenderPaths, RenderEnvironment, RenderError, RenderOutcome,
     RenderRequest,
@@ -244,12 +247,15 @@ const RENDER_ID_SCHEMA_MARKER: &[u8] = b"pliego.render-id.v2";
 // Runtime identity is part of recovery identity. This version deliberately invalidates prepared
 // transactions from the pre-cutover fingerprint instead of resuming them under another runtime.
 const PUBLICATION_REQUEST_SCHEMA_MARKER: &[u8] = b"pliego.publication-request.v4";
+const CONTROLLED_CAPTURE_RENDER_ID_SCHEMA_MARKER: &[u8] = b"pliego.render-id.controlled-capture.v1";
 
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PublicationRuntimeIdentity {
     #[cfg(feature = "document-session")]
     DocumentSession,
+    #[cfg(feature = "document-session")]
+    DocumentSessionControlledCapture,
     #[cfg(feature = "shell-oracle")]
     ServoshellOracle,
 }
@@ -260,6 +266,8 @@ impl PublicationRuntimeIdentity {
         match self {
             #[cfg(feature = "document-session")]
             Self::DocumentSession => b"document-session",
+            #[cfg(feature = "document-session")]
+            Self::DocumentSessionControlledCapture => b"document-session-controlled-capture-v1",
             #[cfg(feature = "shell-oracle")]
             Self::ServoshellOracle => b"servoshell-oracle",
         }
@@ -351,6 +359,7 @@ enum Command {
     Help,
     Version,
     Render(RenderRequest),
+    RenderControlled(RenderRequest),
 }
 
 fn parse_args(mut args: Vec<OsString>) -> Result<Command, String> {
@@ -365,7 +374,16 @@ fn parse_args(mut args: Vec<OsString>) -> Result<Command, String> {
         return Ok(Command::Version);
     }
 
-    let explicit_render = args.first().is_some_and(|argument| argument == "render");
+    let controlled_render = args
+        .first()
+        .is_some_and(|argument| argument == "render-controlled");
+    let explicit_render =
+        controlled_render || args.first().is_some_and(|argument| argument == "render");
+    let explicit_command = if controlled_render {
+        "pliego render-controlled"
+    } else {
+        "pliego render"
+    };
     if explicit_render {
         args.remove(0);
     }
@@ -486,14 +504,17 @@ fn parse_args(mut args: Vec<OsString>) -> Result<Command, String> {
 
     let explicit_paths = if explicit_render {
         Some(ExplicitRenderPaths {
-            output: output.ok_or_else(|| "`pliego render` requires --output".to_owned())?,
+            output: output.ok_or_else(|| format!("`{explicit_command}` requires --output"))?,
             artifacts: artifacts
-                .ok_or_else(|| "`pliego render` requires --artifacts".to_owned())?,
+                .ok_or_else(|| format!("`{explicit_command}` requires --artifacts"))?,
         })
     } else {
         None
     };
     let input = input.ok_or_else(|| "a document path is required".to_owned())?;
+    if controlled_render && allow_partial_scene {
+        return Err("`pliego render-controlled` does not permit --allow-partial-scene".into());
+    }
     allowed_http_roots.sort_by(|left, right| left.as_str().cmp(right.as_str()));
     allowed_http_roots.dedup();
     virtual_resources.sort_by(|left, right| left.url.as_str().cmp(right.url.as_str()));
@@ -516,7 +537,7 @@ fn parse_args(mut args: Vec<OsString>) -> Result<Command, String> {
             .map_err(|error| format!("invalid page geometry: {error}"))?
         },
     };
-    Ok(Command::Render(RenderRequest {
+    let request = RenderRequest {
         input,
         environment: RenderEnvironment {
             locale: locale.unwrap_or(DEFAULT_LOCALE),
@@ -533,7 +554,12 @@ fn parse_args(mut args: Vec<OsString>) -> Result<Command, String> {
         allow_host_fonts,
         allow_partial_scene,
         explicit_paths,
-    }))
+    };
+    Ok(if controlled_render {
+        Command::RenderControlled(request)
+    } else {
+        Command::Render(request)
+    })
 }
 
 fn parse_http_root(value: &OsString) -> Result<url::Url, String> {
@@ -681,6 +707,14 @@ fn main() {
             },
             Err(error) => print_render_error(&error),
         },
+        Command::RenderControlled(request) => match render_controlled_command(request) {
+            Ok(outcome) => {
+                let mut stdout = std::io::stdout().lock();
+                write_render_outcome(&mut stdout, &outcome)
+                    .expect("failed to write the render outcome to stdout");
+            },
+            Err(error) => print_render_error(&error),
+        },
     }
 }
 
@@ -697,6 +731,22 @@ fn render_command(request: RenderRequest) -> Result<RenderOutcome, RenderError> 
     {
         let _ = request;
         unreachable!("the crate-level runtime selection error prevents this binary from running")
+    }
+}
+
+fn render_controlled_command(request: RenderRequest) -> Result<RenderOutcome, RenderError> {
+    #[cfg(feature = "document-session")]
+    {
+        DocumentEngine::render_controlled(request)
+    }
+    #[cfg(not(feature = "document-session"))]
+    {
+        let _ = request;
+        Err(RenderError::without_publication(
+            "CONTROLLED_CAPTURE_UNAVAILABLE",
+            "controlled capture requires the document-session runtime",
+            1,
+        ))
     }
 }
 
@@ -728,7 +778,7 @@ fn print_help() {
         "NONPRODUCTION ORACLE BUILD — servoshell is enabled only for explicit parity diagnostics."
     );
     println!(
-        "Pliego — native document rendering on Servo\nRuntime: {}\n\nUsage:\n  pliego render <document.html> --output <document.pdf> --artifacts <directory> [options]\n  pliego [options] <document.html>\n  pliego --version\n\nOptions:\n  --locale en-US|es-MX\n  --timezone UTC|PST8PDT\n  --page-size WIDTHxHEIGHT\n  --page-margins TOP,RIGHT,BOTTOM,LEFT\n  --allow-host-fonts          Opt in to observable system-font resolution\n  --allow-partial-scene       Retain diagnostic output for unsupported paint\n  --allow-http-root URL       Allow GET/HEAD below one explicit http(s) URL root\n  --virtual-resource URL=FILE Serve one exact URL from a host-provided file\n  --asset-manifest FILE       Verify and cache manifest-backed assets locally\n  --resource-timeout-ms MS    Bound controlled network connection time (1..60000)\n\nHost fonts, partial scenes, network, redirects, and asset caching are disabled by default. The shorthand form writes outputs to a temporary artifact directory. Page geometry is expressed in CSS pixels.",
+        "Pliego — native document rendering on Servo\nRuntime: {}\n\nUsage:\n  pliego render <document.html> --output <document.pdf> --artifacts <directory> [options]\n  pliego render-controlled <document.html> --output <document.pdf> --artifacts <directory> [options]\n  pliego [options] <document.html>\n  pliego --version\n\nOptions:\n  --locale en-US|es-MX\n  --timezone UTC|PST8PDT\n  --page-size WIDTHxHEIGHT\n  --page-margins TOP,RIGHT,BOTTOM,LEFT\n  --allow-host-fonts          Opt in to observable system-font resolution\n  --allow-partial-scene       Retain diagnostic output (render only; rejected by render-controlled)\n  --allow-http-root URL       Allow GET/HEAD below one explicit http(s) URL root\n  --virtual-resource URL=FILE Serve one exact URL from a host-provided file\n  --asset-manifest FILE       Verify and cache manifest-backed assets locally\n  --resource-timeout-ms MS    Bound controlled network connection time (1..60000)\n\nThe controlled route is fail-closed and currently accepts one root document with no Canvas or other unsupported open-ended source. Host fonts, partial scenes, network, redirects, and asset caching are disabled by default. The shorthand form writes outputs to a temporary artifact directory. Page geometry is expressed in CSS pixels.",
         active_runtime_name()
     );
 }
@@ -1951,8 +2001,90 @@ fn render(request: RenderRequest) -> Result<RenderOutcome, RenderError> {
     feature = "document-session",
     not(any(target_os = "android", target_env = "ohos"))
 ))]
+fn render_controlled(request: RenderRequest) -> Result<RenderOutcome, RenderError> {
+    render_controlled_transaction(request, PreparedDocumentCaptureCandidate::capture)
+}
+
+#[cfg(all(
+    feature = "document-session",
+    not(any(target_os = "android", target_env = "ohos"))
+))]
+fn render_controlled_transaction<C>(
+    request: RenderRequest,
+    capture_candidate: C,
+) -> Result<RenderOutcome, RenderError>
+where
+    C: FnOnce(PreparedDocumentCaptureCandidate) -> Result<DocumentCaptureOutcome, SessionError>,
+{
+    let prepared = match prepare_document_session_render_for_runtime(
+        request,
+        PublicationRuntimeIdentity::DocumentSessionControlledCapture,
+    )? {
+        PreparedDocumentSessionStart::New(prepared) => prepared,
+        PreparedDocumentSessionStart::Recovered(outcome) => return Ok(outcome),
+    };
+    let PreparedDocumentSessionRender {
+        request,
+        document,
+        resource_policy,
+        render_id,
+        expected_input,
+        publication,
+    } = prepared;
+    let result = DocumentSession::from_resolved_controlled(
+        &document,
+        resource_policy,
+        request.environment,
+        request.page,
+        request.allow_host_fonts,
+        request.runtime_policy,
+    )
+    .and_then(ControlledDocumentSession::prepare_capture_candidate)
+    .and_then(capture_candidate);
+
+    finish_document_session_render(
+        &request,
+        &document,
+        &render_id,
+        &expected_input,
+        publication,
+        result,
+    )
+}
+
+#[cfg(all(
+    test,
+    feature = "document-session",
+    not(any(target_os = "android", target_env = "ohos"))
+))]
+fn render_controlled_with_post_reservation_paint_invalidation_for_test(
+    request: RenderRequest,
+) -> Result<RenderOutcome, RenderError> {
+    render_controlled_transaction(request, |candidate| {
+        candidate.capture_with_paint_hook(|webview, _ticket| webview.paint())
+    })
+}
+
+#[cfg(all(
+    feature = "document-session",
+    not(any(target_os = "android", target_env = "ohos"))
+))]
 fn prepare_document_session_render(
     request: RenderRequest,
+) -> Result<PreparedDocumentSessionStart, RenderError> {
+    prepare_document_session_render_for_runtime(
+        request,
+        PublicationRuntimeIdentity::DocumentSession,
+    )
+}
+
+#[cfg(all(
+    feature = "document-session",
+    not(any(target_os = "android", target_env = "ohos"))
+))]
+fn prepare_document_session_render_for_runtime(
+    request: RenderRequest,
+    runtime: PublicationRuntimeIdentity,
 ) -> Result<PreparedDocumentSessionStart, RenderError> {
     request
         .runtime_policy
@@ -1970,7 +2102,7 @@ fn prepare_document_session_render(
         )
     })?;
     let resource_policy = ResourcePolicy::resolve(&request.resources, document.root());
-    let render_id = stable_render_id_with_runtime_policy(
+    let base_render_id = stable_render_id_with_runtime_policy(
         &input_bytes,
         request.environment,
         request.page,
@@ -1978,6 +2110,12 @@ fn prepare_document_session_render(
         request.allow_host_fonts,
         request.runtime_policy,
     );
+    let render_id = match runtime {
+        PublicationRuntimeIdentity::DocumentSessionControlledCapture => {
+            controlled_capture_render_id(&base_render_id)
+        },
+        _ => base_render_id,
+    };
     let input_url = url::Url::from_file_path(document.path()).map_err(|_| {
         RenderError::request(
             "INVALID_REQUEST",
@@ -1991,13 +2129,18 @@ fn prepare_document_session_render(
         sha256: input_sha256,
         bytes: input_bytes.len() as u64,
     };
-    let publication =
-        match begin_publication(&request, &resource_policy, &render_id, document.path())? {
-            PublicationStart::New(publication) => publication,
-            PublicationStart::Recovered(outcome) => {
-                return Ok(PreparedDocumentSessionStart::Recovered(outcome));
-            },
-        };
+    let publication = match begin_publication_for_runtime(
+        &request,
+        &resource_policy,
+        &render_id,
+        document.path(),
+        runtime,
+    )? {
+        PublicationStart::New(publication) => publication,
+        PublicationStart::Recovered(outcome) => {
+            return Ok(PreparedDocumentSessionStart::Recovered(outcome));
+        },
+    };
 
     Ok(PreparedDocumentSessionStart::New(
         PreparedDocumentSessionRender {
@@ -2811,6 +2954,14 @@ fn stable_render_id_with_runtime_policy(
             update_hash_field(&mut hasher, error.message.as_bytes());
         }
     }
+    format!("sha256:{}", lowercase_hex(&hasher.finalize()))
+}
+
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+fn controlled_capture_render_id(base_render_id: &str) -> String {
+    let mut hasher = Sha256::new();
+    update_hash_field(&mut hasher, CONTROLLED_CAPTURE_RENDER_ID_SCHEMA_MARKER);
+    update_hash_field(&mut hasher, base_render_id.as_bytes());
     format!("sha256:{}", lowercase_hex(&hasher.finalize()))
 }
 
@@ -4259,10 +4410,10 @@ mod tests {
         PageDefinition, PageMargins, RenderEnvironment, RenderError, RenderRequest,
         ResourceCapture, ResourcePolicy, ResourcePolicyConfig, ResourcePolicyFailure,
         ResourceRequest, WebResourceLoadRole, classify_controlled_http_status, cli_render_error,
-        create_session_artifacts, default_page, page_artifact, parse_args, persist_scene_capture,
-        publication_request_fingerprint_with_runtime_policy, resolve_scene_resource,
-        runtime_policy, set_document_pdf_environment, sha256_hex, stable_render_id,
-        stable_render_id_with_runtime_policy,
+        controlled_capture_render_id, create_session_artifacts, default_page, page_artifact,
+        parse_args, persist_scene_capture, publication_request_fingerprint_with_runtime_policy,
+        resolve_scene_resource, runtime_policy, set_document_pdf_environment, sha256_hex,
+        stable_render_id, stable_render_id_with_runtime_policy,
     };
     #[cfg(feature = "shell-oracle")]
     use super::{
@@ -4276,8 +4427,9 @@ mod tests {
     ))]
     use super::{
         PublicationRuntimeIdentity, PublicationStart, PublicationTransaction, begin_publication,
-        publication_recovery_required_message, publication_request_fingerprint, render,
-        write_render_outcome,
+        begin_publication_for_runtime, publication_recovery_required_message,
+        publication_request_fingerprint, render,
+        render_controlled_with_post_reservation_paint_invalidation_for_test, write_render_outcome,
     };
     #[cfg(feature = "document-session")]
     use crate::document_session::{DocumentCaptureOutcome, SessionError};
@@ -4958,17 +5110,13 @@ mod tests {
             render_id: &str,
             resolved_input: &std::path::Path,
         ) -> Result<PublicationStart, RenderError> {
-            match runtime {
-                PublicationRuntimeIdentity::DocumentSession => {
-                    begin_publication(request, resource_policy, render_id, resolved_input)
-                },
-                PublicationRuntimeIdentity::ServoshellOracle => begin_shell_oracle_publication(
-                    request,
-                    resource_policy,
-                    render_id,
-                    resolved_input,
-                ),
-            }
+            begin_publication_for_runtime(
+                request,
+                resource_policy,
+                render_id,
+                resolved_input,
+                runtime,
+            )
         }
 
         for (source_runtime, recovery_runtime, label) in [
@@ -4981,6 +5129,26 @@ mod tests {
                 PublicationRuntimeIdentity::ServoshellOracle,
                 PublicationRuntimeIdentity::DocumentSession,
                 "direct-after-oracle",
+            ),
+            (
+                PublicationRuntimeIdentity::DocumentSession,
+                PublicationRuntimeIdentity::DocumentSessionControlledCapture,
+                "controlled-after-realtime",
+            ),
+            (
+                PublicationRuntimeIdentity::DocumentSessionControlledCapture,
+                PublicationRuntimeIdentity::DocumentSession,
+                "realtime-after-controlled",
+            ),
+            (
+                PublicationRuntimeIdentity::ServoshellOracle,
+                PublicationRuntimeIdentity::DocumentSessionControlledCapture,
+                "controlled-after-oracle",
+            ),
+            (
+                PublicationRuntimeIdentity::DocumentSessionControlledCapture,
+                PublicationRuntimeIdentity::ServoshellOracle,
+                "oracle-after-controlled",
             ),
         ] {
             let root = temporary_artifacts(&format!("pliego-cross-runtime-{label}"));
@@ -5206,6 +5374,55 @@ mod tests {
             })
         );
 
+        let Command::RenderControlled(controlled) = parse_args(vec![
+            OsString::from("render-controlled"),
+            OsString::from("invoice.html"),
+            OsString::from("--output"),
+            OsString::from("requested/controlled.pdf"),
+            OsString::from("--artifacts"),
+            OsString::from("diagnostics/controlled"),
+        ])
+        .unwrap() else {
+            panic!("render-controlled did not select the controlled production route")
+        };
+        assert_eq!(controlled.input, PathBuf::from("invoice.html"));
+        assert_eq!(
+            controlled.runtime_policy,
+            DeterministicRuntimePolicy::default()
+        );
+        assert_eq!(
+            controlled.explicit_paths,
+            Some(ExplicitRenderPaths {
+                output: PathBuf::from("requested/controlled.pdf"),
+                artifacts: PathBuf::from("diagnostics/controlled"),
+            })
+        );
+        let controlled_missing_artifacts = parse_args(vec![
+            OsString::from("render-controlled"),
+            OsString::from("invoice.html"),
+            OsString::from("--output"),
+            OsString::from("controlled.pdf"),
+        ])
+        .unwrap_err();
+        assert_eq!(
+            controlled_missing_artifacts,
+            "`pliego render-controlled` requires --artifacts"
+        );
+        let controlled_partial = parse_args(vec![
+            OsString::from("render-controlled"),
+            OsString::from("invoice.html"),
+            OsString::from("--output"),
+            OsString::from("controlled.pdf"),
+            OsString::from("--artifacts"),
+            OsString::from("diagnostics/controlled"),
+            OsString::from("--allow-partial-scene"),
+        ])
+        .unwrap_err();
+        assert_eq!(
+            controlled_partial,
+            "`pliego render-controlled` does not permit --allow-partial-scene"
+        );
+
         for (args, expected) in [
             (
                 vec!["render", "invoice.html", "--output", "invoice.pdf"],
@@ -5247,6 +5464,120 @@ mod tests {
         ])
         .unwrap_err();
         assert!(empty_output.contains("--output may not be empty"));
+    }
+
+    #[cfg(all(
+        feature = "document-session",
+        not(any(target_os = "android", target_env = "ohos"))
+    ))]
+    #[test]
+    fn controlled_paint_invalidation_reaches_the_real_failure_publication() {
+        const ISOLATED_TEST: &str =
+            "tests::isolated_controlled_paint_invalidation_reaches_the_real_failure_publication";
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", ISOLATED_TEST, "--ignored", "--nocapture"])
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success(),
+            "isolated controlled publication failed\nstdout:\n{}\nstderr:\n{}",
+            stdout,
+            String::from_utf8_lossy(&output.stderr),
+        );
+        assert!(
+            stdout.contains("controlled-publication-paint-invalidation-rejected"),
+            "isolated controlled publication did not reach the typed failure path:\n{stdout}",
+        );
+    }
+
+    #[cfg(all(
+        feature = "document-session",
+        not(any(target_os = "android", target_env = "ohos"))
+    ))]
+    #[test]
+    #[ignore = "launched in a fresh process by the controlled publication test"]
+    fn isolated_controlled_paint_invalidation_reaches_the_real_failure_publication() {
+        let root = temporary_artifacts("pliego-controlled-paint-publication");
+        fs::create_dir(&root).unwrap();
+        fs::write(
+            root.join("input.html"),
+            "<!doctype html><p id='state'>pending</p><script>if(Object.prototype.hasOwnProperty.call(window,'pliego')||Object.prototype.hasOwnProperty.call(window,'__pliegoReadiness')){setInterval(()=>{},1);}requestAnimationFrame(()=>{});setTimeout(()=>{document.getElementById('state').textContent='done';},5);</script>",
+        )
+        .unwrap();
+        let output = root.join("requested.pdf");
+        let artifacts = root.join("artifacts");
+        let request = RenderRequest {
+            input: PathBuf::from("input.html"),
+            environment: RenderEnvironment::default(),
+            page: default_page(),
+            resources: ResourcePolicyConfig::default(),
+            runtime_policy: DeterministicRuntimePolicy::default(),
+            allow_host_fonts: false,
+            allow_partial_scene: false,
+            explicit_paths: Some(ExplicitRenderPaths {
+                output: output.clone(),
+                artifacts: artifacts.clone(),
+            }),
+        };
+
+        let original_directory = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&root).unwrap();
+        let result = render_controlled_with_post_reservation_paint_invalidation_for_test(request);
+        std::env::set_current_dir(original_directory).unwrap();
+        let error = result.unwrap_err();
+
+        assert_eq!(error.code, "CONTROLLED_PAINT_FINALIZE_FAILED");
+        assert!(
+            error.message.contains("PresentationInvalidated"),
+            "Paint mutation produced the wrong terminal reason: {}",
+            error.message,
+        );
+        assert_eq!(error.document_pdf.as_deref(), Some(output.as_path()));
+        assert_eq!(error.artifacts.as_deref(), Some(artifacts.as_path()));
+        for path in [
+            output.clone(),
+            artifacts.join("bundle.json"),
+            artifacts.join("document.pdf"),
+            artifacts.join("render.png"),
+            artifacts.join("layout-debug.json"),
+            artifacts.join("fonts.json"),
+            artifacts.join("pages.json"),
+            artifacts.join("scene.json"),
+            artifacts.join("scene-report.json"),
+            artifacts.join("scene-preview.png"),
+            artifacts.join("pdf-structure.json"),
+            artifacts.join("pages"),
+            artifacts.join("publication/outcome.json"),
+            artifacts.join("publication/prepared.json"),
+            artifacts.join("publication/committed.json"),
+        ] {
+            assert!(
+                !path.exists(),
+                "failed capture exposed success artifact {}",
+                path.display(),
+            );
+        }
+        let failure: serde_json::Value =
+            serde_json::from_slice(&fs::read(artifacts.join("failure.json")).unwrap()).unwrap();
+        assert_eq!(failure["status"], "failed");
+        assert_eq!(failure["error"]["code"], "CONTROLLED_PAINT_FINALIZE_FAILED");
+        assert!(
+            failure["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("PresentationInvalidated"))
+        );
+        assert_eq!(failure["render_id"], error.render_id.unwrap());
+        let readiness: serde_json::Value =
+            serde_json::from_slice(&fs::read(artifacts.join("readiness.json")).unwrap()).unwrap();
+        assert_eq!(readiness["status"], "failed");
+        assert_eq!(
+            readiness["error"]["code"],
+            "CONTROLLED_PAINT_FINALIZE_FAILED"
+        );
+        println!("controlled-publication-paint-invalidation-rejected");
+
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -5333,6 +5664,23 @@ mod tests {
         assert_ne!(
             render_id,
             stable_render_id(input, first.environment, first.page, &policy, true)
+        );
+    }
+
+    #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+    #[test]
+    fn controlled_capture_has_a_distinct_stable_render_identity() {
+        let base = "sha256:7e771884747878e76c9e45b6fdb4ad5bf59b15ff33cfe0d9ef0db140fad2f52f";
+        let controlled = controlled_capture_render_id(base);
+        assert_eq!(controlled, controlled_capture_render_id(base));
+        assert_ne!(controlled, base);
+        assert!(controlled.starts_with("sha256:"));
+        assert_eq!(controlled.len(), 71);
+        assert_ne!(
+            controlled,
+            controlled_capture_render_id(
+                "sha256:8e771884747878e76c9e45b6fdb4ad5bf59b15ff33cfe0d9ef0db140fad2f52f"
+            )
         );
     }
 

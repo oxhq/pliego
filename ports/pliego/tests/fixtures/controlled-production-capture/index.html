@@ -1,0 +1,70 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Controlled production capture</title>
+<style>
+  @font-face {
+    font-family: "Controlled Capture Marker";
+    src: url("data:font/ttf;base64,__PLIEGO_CONTROLLED_CAPTURE_FONT_BASE64__");
+  }
+
+  html,
+  body {
+    margin: 0;
+    width: 100%;
+    min-height: 100%;
+  }
+
+  body {
+    background: rgb(17, 34, 51);
+  }
+
+  #controlled-capture-marker {
+    display: block;
+    box-sizing: border-box;
+    width: 176px;
+    height: 28px;
+    margin: 12px;
+    background: rgb(197, 48, 80);
+    color: rgb(255, 255, 255);
+    font: 12px/28px "Controlled Capture Marker";
+    text-align: center;
+  }
+</style>
+<body>
+  <div id="controlled-capture-marker">PLIEGO_FONT_PREWARM</div>
+</body>
+<script>
+  if (
+    Object.prototype.hasOwnProperty.call(window, "pliego") ||
+    Object.prototype.hasOwnProperty.call(window, "__pliegoReadiness")
+  ) {
+    setInterval(() => {}, 1);
+  }
+
+  const paintObserver = new PerformanceObserver((list) => {
+    const fcp = list
+      .getEntries()
+      .find((entry) => entry.name === "first-contentful-paint");
+    if (!fcp) {
+      return;
+    }
+    const marker = document.getElementById("controlled-capture-marker");
+    marker.textContent = `PLIEGO_FCP_${fcp.startTime}`;
+    console.info(
+      `controlled-paint-observed:${fcp.name}:${fcp.startTime}:${fcp.duration}:${performance.now()}`,
+    );
+    paintObserver.disconnect();
+  });
+  paintObserver.observe({ type: "paint" });
+
+  requestAnimationFrame(() => {
+    console.info("controlled-production-frame");
+  });
+  setTimeout(() => {
+    const marker = document.getElementById("controlled-capture-marker");
+    marker.textContent = "PLIEGO_POST5MS_7C4E";
+    document.body.style.background = "rgb(36, 104, 172)";
+    document.body.dataset.controlledTime = `${Date.now()}:${performance.now()}`;
+    console.info(`controlled-production-ready:${Date.now()}:${performance.now()}`);
+  }, 5);
+</script>

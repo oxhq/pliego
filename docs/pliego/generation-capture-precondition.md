@@ -1,7 +1,7 @@
 # Generation-bound capture preconditions
 
-This slice adds ScriptThread-collected preparation evidence for a later document capture
-coordinator. A successful `PrepareCapture` response carries one opaque, immutable, single-use
+ScriptThread collects preparation evidence for Pliego's controlled document-capture coordinator.
+A successful `PrepareCapture` response carries one opaque, immutable, single-use
 candidate bound to the observed controlled target, clock and time, input state, producer snapshot,
 execution counters, canonical source inventory, document rendering epoch, and requested raster
 surface. It does not authenticate its own origin, freeze those dimensions, or establish that an
@@ -14,10 +14,14 @@ blocker, no finite timer deadline, and only inert classified sources. A task, so
 clock, target, or input change restarts the two-checkpoint qualification. Any control command or
 navigation invalidates a previously issued precondition; preparing again supersedes it.
 
-A future consume operation must atomically match the retained ScriptThread candidate, reobserve
-every bound target/time/input/producer/execution/deadline/source/document/surface dimension, and
-require the corresponding presented Paint generation before removing the candidate or starting
-capture. Retained-value equality alone is not current-state or caller authentication. The
+The production consume operation first asks Paint to retain a presentation ticket for the exact
+candidate pipeline, rendering epoch, raster surface, presentation revision, and WebRender publish
+generation, without reading pixels. ScriptThread then matches the retained candidate and ticket,
+reobserves every bound target/time/input/producer/execution/deadline/source/document/surface
+dimension on both sides of layout-snapshot serialization, and consumes the candidate exactly once.
+Only after that commit does Paint revalidate and consume the retained ticket and read pixels. A
+mismatch or lost consume response is terminal for the session and cannot publish or retry the
+candidate. Retained-value equality alone is not current-state or caller authentication. The
 doc-hidden `new_internal` constructor is necessarily public across Servo crates; private fields
 make returned values opaque and immutable through the ordinary API, not unforgeable.
 
@@ -55,13 +59,12 @@ remain covered by the live media-element owner tracker.
 ## Explicit nonclaims
 
 - This precondition is not a screenshot, PDF, semantic-tree, or PDF/UA result.
-- It is not evidence that Paint presented the bound script/layout epoch. There is no Paint or
-  artifact capture coordinator or artifact commit protocol. Pliego's internal WebView driver only
-  transports and retains the opaque candidate together with the live session.
-- It is not consumable. The candidate can cross the ScriptThread response boundary, but the current
-  retained-value consumption remains test-only inside ScriptThread and demonstrates single-use
-  supersession mechanics only. A production consume message must add the atomic full reobservation
-  and Paint-generation match described above.
+- The preparation value by itself is not evidence that Paint presented the bound script/layout
+  epoch. Only the complete retained-ticket, Script consume, Paint-finalize transaction described
+  above binds the resulting pixels and serialized layout to that generation.
+- The transaction does not make a distributed Script/Paint operation one mutex-critical section.
+  It uses opaque single-use values plus full revalidation before each irreversible step, and fails
+  closed without publication whenever an interleaving invalidates either retained value.
 - It supports only one fully-active painted pipeline. Multi-pipeline frame-tree capture remains
   unsupported.
 - It does not add settlement ownership for media clocks, canvas/graphics generations, workers,
@@ -75,5 +78,6 @@ remain covered by the live media-element owner tracker.
 - It does not claim source coverage for future Servo features such as scroll/view timelines. Such
   a feature must add a typed unsupported or owned source entry before generation capture can claim
   it.
-- Default realtime embedding behavior is unchanged; these types and hooks are exercised only by
-  the opt-in controlled document-time protocol.
+- Default realtime embedding behavior is unchanged. Pliego's explicit `render-controlled` route
+  exercises this transaction; the compatibility `render` route remains realtime until its
+  unsupported source classes, including Canvas, have equivalent owned settlement coverage.

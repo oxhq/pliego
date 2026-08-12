@@ -4,11 +4,11 @@
 
 //! Same-build protocol types for generation-bound document capture preparation.
 //!
-//! These types deliberately stop before Paint presentation or artifact capture. A
-//! [`DocumentCapturePrecondition`] is immutable candidate evidence for the ScriptThread
+//! A [`DocumentCapturePrecondition`] is immutable candidate evidence for the ScriptThread
 //! observation from which it was issued; it neither authenticates its own origin nor freezes any
-//! observed state. A later coordinator must atomically reobserve every bound dimension, match the
-//! corresponding presented Paint generation, and only then consume the retained candidate once.
+//! observed state. The same-build consume protocol binds that candidate to an exact Paint
+//! presentation ticket, reobserves every bound dimension around layout serialization, and consumes
+//! the retained candidate once before Paint performs its final exact-generation readback.
 
 use std::cmp::Ordering;
 
@@ -131,6 +131,13 @@ impl<R: Clone + Eq> DocumentCaptureQuietFence<R> {
         self.last_revision_qualified = false;
         self.quiet_candidate = None;
         self.stable_quiet_revision = None;
+    }
+
+    /// Return whether the supplied exact revision remains qualified without advancing the fence.
+    pub fn is_qualified(&self, revision: &R) -> bool {
+        self.last_revision_qualified &&
+            self.last_revision.as_ref() == Some(revision) &&
+            self.stable_quiet_revision.as_ref() == Some(revision)
     }
 }
 
@@ -1352,6 +1359,244 @@ impl DocumentCapturePrecondition {
     }
 }
 
+/// Opaque identity of one Paint presentation reservation for a capture candidate.
+///
+/// This is a correlation value on Servo's trusted internal channels, not cryptographic authority.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+pub struct DocumentPaintPresentationTicketId(u64);
+
+impl DocumentPaintPresentationTicketId {
+    /// Construct an identifier from Paint's checked presentation sequence.
+    #[doc(hidden)]
+    pub const fn new(sequence: u64) -> Self {
+        Self(sequence)
+    }
+
+    /// Return Paint's underlying presentation sequence.
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+/// Paint's exact presentation correlation for one retained ScriptThread capture candidate.
+///
+/// Private fields provide ordinary API immutability and correlation only. Values remain
+/// synthesizable through the doc-hidden cross-crate constructor: ScriptThread validates its
+/// retained candidate, Paint validates its retained ticket, and trusted internal routing is an
+/// explicit assumption rather than cryptographic authority.
+#[doc(hidden)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DocumentPaintPresentationTicket {
+    id: DocumentPaintPresentationTicketId,
+    candidate_id: DocumentCapturePreconditionId,
+    target: DocumentTimeControlTarget,
+    pipeline_id: PipelineId,
+    script_rendering_epoch: Epoch,
+    surface: DocumentCaptureSurfaceFingerprint,
+    presentation_generation: u64,
+    publish_generation: u64,
+}
+
+impl DocumentPaintPresentationTicket {
+    /// Construct a ticket from Paint's checked presentation state.
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub const fn new_internal(
+        id: DocumentPaintPresentationTicketId,
+        candidate_id: DocumentCapturePreconditionId,
+        target: DocumentTimeControlTarget,
+        pipeline_id: PipelineId,
+        script_rendering_epoch: Epoch,
+        surface: DocumentCaptureSurfaceFingerprint,
+        presentation_generation: u64,
+        publish_generation: u64,
+    ) -> Self {
+        Self {
+            id,
+            candidate_id,
+            target,
+            pipeline_id,
+            script_rendering_epoch,
+            surface,
+            presentation_generation,
+            publish_generation,
+        }
+    }
+
+    /// Return this single-use Paint ticket's identity.
+    pub const fn id(&self) -> DocumentPaintPresentationTicketId {
+        self.id
+    }
+
+    /// Return the ScriptThread candidate identity reserved by Paint.
+    pub const fn candidate_id(&self) -> DocumentCapturePreconditionId {
+        self.candidate_id
+    }
+
+    /// Return the exact controlled target reserved by Paint.
+    pub const fn target(&self) -> &DocumentTimeControlTarget {
+        &self.target
+    }
+
+    /// Return the single fully-active pipeline whose presentation was reserved.
+    pub const fn pipeline_id(&self) -> PipelineId {
+        self.pipeline_id
+    }
+
+    /// Return the exact Script/Layout rendering epoch presented by Paint.
+    pub const fn script_rendering_epoch(&self) -> Epoch {
+        self.script_rendering_epoch
+    }
+
+    /// Return the exact raster surface reserved by Paint.
+    pub const fn surface(&self) -> DocumentCaptureSurfaceFingerprint {
+        self.surface
+    }
+
+    /// Return Paint's checked presentation-state generation.
+    pub const fn presentation_generation(&self) -> u64 {
+        self.presentation_generation
+    }
+
+    /// Return the exact renderer publish generation processed for the presentation.
+    pub const fn publish_generation(&self) -> u64 {
+        self.publish_generation
+    }
+}
+
+/// Single-use request to consume an exact retained candidate against a Paint presentation ticket.
+#[doc(hidden)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DocumentCaptureConsumeRequest {
+    precondition: Box<DocumentCapturePrecondition>,
+    ticket: DocumentPaintPresentationTicket,
+}
+
+impl DocumentCaptureConsumeRequest {
+    /// Bind caller-held candidate evidence to Paint's presentation correlation.
+    #[doc(hidden)]
+    pub fn new_internal(
+        precondition: Box<DocumentCapturePrecondition>,
+        ticket: DocumentPaintPresentationTicket,
+    ) -> Self {
+        Self {
+            precondition,
+            ticket,
+        }
+    }
+
+    /// Return the exact caller-held precondition.
+    pub const fn precondition(&self) -> &DocumentCapturePrecondition {
+        &self.precondition
+    }
+
+    /// Return Paint's exact presentation ticket.
+    pub const fn ticket(&self) -> &DocumentPaintPresentationTicket {
+        &self.ticket
+    }
+}
+
+/// ScriptThread's single-use commit of one cached, generation-bound layout snapshot.
+///
+/// A commit correlates the consumed candidate and Paint ticket with the exact cached layout bytes.
+/// It does not by itself prove that a later artifact write or Paint finalization succeeded.
+#[doc(hidden)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DocumentCaptureCommit {
+    candidate_id: DocumentCapturePreconditionId,
+    ticket_id: DocumentPaintPresentationTicketId,
+    target: DocumentTimeControlTarget,
+    pipeline_id: PipelineId,
+    script_rendering_epoch: Epoch,
+    surface: DocumentCaptureSurfaceFingerprint,
+    presentation_generation: u64,
+    publish_generation: u64,
+    layout_paint_epoch: Epoch,
+    serialized_layout_snapshot: String,
+}
+
+impl DocumentCaptureCommit {
+    /// Construct a commit at ScriptThread's candidate-consumption linearization point.
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_internal(
+        candidate_id: DocumentCapturePreconditionId,
+        ticket_id: DocumentPaintPresentationTicketId,
+        target: DocumentTimeControlTarget,
+        pipeline_id: PipelineId,
+        script_rendering_epoch: Epoch,
+        surface: DocumentCaptureSurfaceFingerprint,
+        presentation_generation: u64,
+        publish_generation: u64,
+        layout_paint_epoch: Epoch,
+        serialized_layout_snapshot: String,
+    ) -> Self {
+        Self {
+            candidate_id,
+            ticket_id,
+            target,
+            pipeline_id,
+            script_rendering_epoch,
+            surface,
+            presentation_generation,
+            publish_generation,
+            layout_paint_epoch,
+            serialized_layout_snapshot,
+        }
+    }
+
+    /// Return the consumed ScriptThread candidate identity.
+    pub const fn candidate_id(&self) -> DocumentCapturePreconditionId {
+        self.candidate_id
+    }
+
+    /// Return the correlated Paint ticket identity.
+    pub const fn ticket_id(&self) -> DocumentPaintPresentationTicketId {
+        self.ticket_id
+    }
+
+    /// Return the exact controlled target consumed by ScriptThread.
+    pub const fn target(&self) -> &DocumentTimeControlTarget {
+        &self.target
+    }
+
+    /// Return the captured pipeline.
+    pub const fn pipeline_id(&self) -> PipelineId {
+        self.pipeline_id
+    }
+
+    /// Return the exact Script/Layout rendering epoch committed by ScriptThread.
+    pub const fn script_rendering_epoch(&self) -> Epoch {
+        self.script_rendering_epoch
+    }
+
+    /// Return the exact capture surface committed by ScriptThread.
+    pub const fn surface(&self) -> DocumentCaptureSurfaceFingerprint {
+        self.surface
+    }
+
+    /// Return Paint's correlated presentation-state generation.
+    pub const fn presentation_generation(&self) -> u64 {
+        self.presentation_generation
+    }
+
+    /// Return the correlated renderer publish generation.
+    pub const fn publish_generation(&self) -> u64 {
+        self.publish_generation
+    }
+
+    /// Return the exact paint epoch embedded in the cached layout snapshot.
+    pub const fn layout_paint_epoch(&self) -> Epoch {
+        self.layout_paint_epoch
+    }
+
+    /// Return the serialized cached layout snapshot.
+    pub fn serialized_layout_snapshot(&self) -> &str {
+        &self.serialized_layout_snapshot
+    }
+}
+
 /// Result of one preparation command, whether or not it qualified for issuance.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DocumentCapturePreparation {
@@ -2121,6 +2366,14 @@ mod tests {
                 1.0,
             ),
             Err(DocumentCaptureSurfaceError::CaptureRectOutsideViewport)
+        );
+        assert_eq!(
+            DocumentCaptureSurfaceFingerprint::new(
+                Size2D::new(800, 600),
+                Box2D::new(Point2D::new(-1, 0), Point2D::new(800, 600)),
+                1.0,
+            ),
+            Err(DocumentCaptureSurfaceError::InvalidCaptureRect)
         );
         assert_eq!(
             DocumentCaptureSurfaceFingerprint::new(

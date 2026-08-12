@@ -57,15 +57,21 @@ This slice does not claim:
 - a post-readiness resource budget, until readiness is a typed phase transition;
 - a universal post-DOM-write generation (CharacterData deliberately queues its record before the
   write), or complete style, Canvas, image, font, or worker mutation generations;
-- generation-bound capture or stale-capture recovery;
 - classification of infinite timers, RAF loops, declarative animations, workers, or resources; or
-- full visual settlement, producer-fenced quiescence, or API 2 terminal artifact integration.
+- universal visual settlement for the unsupported source classes below, or stable API 2 terminal
+  artifact integration.
 
 Those are separate fail-closed gates. An opt-in internal Pliego session now maps the normalized API
 2 epoch, virtual span, task, microtask, rendering, and mutation limits into a controlled clock before
-navigation, and its coordinator can stop at opaque capture-candidate evidence. The default
-production render path still constructs the realtime session and never calls that coordinator.
-Consequently a ledger terminal is not yet wired through production publication, and the CPU,
-host-wall-inside-one-turn, and post-readiness-resource limits above remain unenforced. The widened
-serde/IPC shapes are verified for one same-build runtime; they are not a backward-wire-compatibility
-claim for older binaries.
+navigation. The explicit production `render-controlled` route drives that coordinator, obtains an
+opaque candidate, reserves the exact Paint presentation without readback, consumes the candidate
+after two ScriptThread revalidations around layout serialization, and revalidates Paint again before
+pixel readback. A ledger or capture terminal is routed through the existing fail-closed publication
+transaction, so it cannot expose a PDF, scene bundle, or requested output. The compatibility
+`render` route remains realtime until unsupported source classes such as Canvas gain truthful owned
+settlement; there is no realtime fallback from `render-controlled`.
+
+This still does not enforce CPU or host-wall interruption inside one already-running JavaScript
+turn, or the post-readiness resource budget described above. The widened serde/IPC shapes are
+verified for one same-build runtime; they are not a backward-wire-compatibility claim for older
+binaries, and this route alone is not the stable API 2 artifact contract.

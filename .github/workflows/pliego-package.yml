@@ -180,6 +180,7 @@ jobs:
           help_stdout="$RUNNER_TEMP/pliego-help-${{ matrix.bundle }}.txt"
           "dist/$bundle/pliego" --help > "$help_stdout"
           grep -F 'Runtime: document-session' "$help_stdout"
+          grep -F -- '--allow-partial-scene       Retain diagnostic output (render only; rejected by render-controlled)' "$help_stdout"
           if grep -F 'NONPRODUCTION ORACLE BUILD' "$help_stdout"; then
             echo 'release bundle contains the nonproduction shell oracle' >&2
             exit 1
@@ -228,6 +229,9 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           if (-not $help.Contains('Runtime: document-session')) {
             throw 'release bundle did not select the document-session runtime'
+          }
+          if (-not $help.Contains('--allow-partial-scene       Retain diagnostic output (render only; rejected by render-controlled)')) {
+            throw 'Pliego help did not disclose render-controlled partial-scene rejection'
           }
           if ($help.Contains('NONPRODUCTION ORACLE BUILD')) {
             throw 'release bundle contains the nonproduction shell oracle'

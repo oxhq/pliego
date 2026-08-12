@@ -4,11 +4,10 @@
 
 //! Pliego's minimal one-document Servo owner.
 //!
-//! The default binary owns Servo through this session; the shell remains an explicit
-//! nonproduction oracle. The production capture path is still realtime: its screenshot is both
-//! the stable-render barrier and a retained diagnostic, and layout still comes through Servo's
-//! temporary, doc-hidden `debug_layout_snapshot` hook. The opt-in controlled path added here stops
-//! earlier at opaque candidate evidence and cannot capture or publish.
+//! The default compatibility route remains realtime and uses Servo's temporary screenshot/layout
+//! hooks. The explicit controlled route instead settles a bounded document, reserves an exact
+//! Paint presentation, consumes ScriptThread's retained generation once, and reads pixels only
+//! after both sides still match. It never falls back to realtime capture.
 
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::BTreeMap;
@@ -21,9 +20,10 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use dpi::PhysicalSize;
 use embedder_traits::{
-    DocumentCapturePrecondition, DocumentCaptureSurfaceFingerprint, DocumentClockConfiguration,
-    DocumentTimeControlCommand, DocumentTimeControlReceiveOutcome,
-    DocumentTimeControlTryReceiveOutcome,
+    DocumentCaptureCommit, DocumentCaptureConsumeRequest, DocumentCapturePrecondition,
+    DocumentCaptureSurfaceFingerprint, DocumentClockConfiguration, DocumentPaintPresentationTicket,
+    DocumentTimeControlAction, DocumentTimeControlCommand, DocumentTimeControlOutcome,
+    DocumentTimeControlReceiveOutcome, DocumentTimeControlTryReceiveOutcome,
 };
 use http::header::CONTENT_TYPE;
 use http::{HeaderMap, HeaderValue};
@@ -32,9 +32,10 @@ use pliego::capture::{SceneCapture, capture_document_scene_with_canvas};
 use pliego::event_loop_waker::{EventLoopWakeWaitOutcome, PliegoEventLoopWaker};
 use pliego::pdf::{PdfFontResource, PdfFontVariation, render_document_pdf};
 use servo::{
-    ConsoleLogLevel, JSValue, LoadStatus, Preferences, RenderingContext, Servo, ServoBuilder,
-    SoftwareRenderingContext, UserContentManager, UserScript, WebResourceLoad, WebResourceLoadRole,
-    WebResourceResponse, WebView, WebViewBuilder, WebViewDelegate,
+    ConsoleLogLevel, ControlledDocumentCaptureError, ControlledDocumentCaptureReservation,
+    ControlledDocumentCaptureRetry, JSValue, LoadStatus, Preferences, RenderingContext, Servo,
+    ServoBuilder, SoftwareRenderingContext, UserContentManager, UserScript, WebResourceLoad,
+    WebResourceLoadRole, WebResourceResponse, WebView, WebViewBuilder, WebViewDelegate,
 };
 use servo_geometry::{
     DeviceIndependentIntPoint, DeviceIndependentIntRect, DeviceIndependentIntSize,
@@ -443,7 +444,7 @@ pub(crate) struct DocumentSession {
     rendering_context: Rc<SoftwareRenderingContext>,
 }
 
-/// A controlled Servo owner which can only prepare opaque capture-candidate evidence.
+/// A controlled Servo owner which can prepare one generation-bound capture candidate.
 pub(crate) struct ControlledDocumentSession {
     session: DocumentSession,
     waker: PliegoEventLoopWaker,
@@ -452,7 +453,7 @@ pub(crate) struct ControlledDocumentSession {
 
 /// One live session paired with its non-authoritative, generation-bound capture candidate.
 pub(crate) struct PreparedDocumentCaptureCandidate {
-    _session: ControlledDocumentSession,
+    session: ControlledDocumentSession,
     precondition: Box<DocumentCapturePrecondition>,
     trace: Vec<ControlledSettlementStep>,
 }
@@ -463,7 +464,33 @@ pub(crate) enum ControlledSettlementStep {
     DriveOneTurn,
     AdvanceTo,
     PrepareCapture,
+    ConsumeCapture,
     WaitForWake,
+}
+
+enum PresentationReservationProgress {
+    DocumentWorkQueued,
+    Reserved(DocumentPaintPresentationTicket),
+}
+
+/// Unwind-safe owner for a retained Paint ticket. Finalization consumes the ticket first, so the
+/// Drop cleanup is intentionally idempotent on both success and ordinary errors.
+struct PaintTicketAbortGuard<F: FnOnce()> {
+    abort: Option<F>,
+}
+
+impl<F: FnOnce()> PaintTicketAbortGuard<F> {
+    fn new(abort: F) -> Self {
+        Self { abort: Some(abort) }
+    }
+}
+
+impl<F: FnOnce()> Drop for PaintTicketAbortGuard<F> {
+    fn drop(&mut self) {
+        if let Some(abort) = self.abort.take() {
+            abort();
+        }
+    }
 }
 
 impl PreparedDocumentCaptureCandidate {
@@ -473,6 +500,233 @@ impl PreparedDocumentCaptureCandidate {
 
     pub(crate) fn trace(&self) -> &[ControlledSettlementStep] {
         &self.trace
+    }
+
+    /// Consume this candidate through Paint reservation, Script revalidation, and exact readback.
+    pub(crate) fn capture(self) -> Result<DocumentCaptureOutcome, SessionError> {
+        self.capture_with_canvas_freezer_and_hook(
+            |keys| servo_canvas::retained_canvas::freeze_canvas_snapshots(keys),
+            |_, _| {},
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn capture_with_paint_hook(
+        self,
+        after_reservation: impl FnOnce(&WebView, &DocumentPaintPresentationTicket),
+    ) -> Result<DocumentCaptureOutcome, SessionError> {
+        self.capture_with_canvas_freezer_and_hook(
+            |keys| servo_canvas::retained_canvas::freeze_canvas_snapshots(keys),
+            after_reservation,
+        )
+    }
+
+    fn capture_with_canvas_freezer_and_hook(
+        self,
+        freeze_canvas: impl FnOnce(
+            &[(u32, u32)],
+        ) -> Result<
+            servo_canvas::retained_canvas::FrozenCanvasSnapshots,
+            servo_canvas::retained_canvas::FreezeCanvasSnapshotsError,
+        >,
+        after_reservation: impl FnOnce(&WebView, &DocumentPaintPresentationTicket),
+    ) -> Result<DocumentCaptureOutcome, SessionError> {
+        let result = self.capture_inner(freeze_canvas, after_reservation);
+        result.map_err(|mut error| {
+            error
+                .capture_evidence
+                .controlled_runtime_ms
+                .get_or_insert(self.session.session.host_deadline.elapsed_ms());
+            let resources =
+                std::mem::take(&mut self.session.session.delegate.resources.borrow_mut().entries);
+            let resource_store = self.session.session.delegate.resource_store.take();
+            let console =
+                std::mem::take(&mut self.session.session.delegate.console.borrow_mut().entries);
+            error.with_evidence(resources, resource_store, console)
+        })
+    }
+
+    fn capture_inner(
+        &self,
+        freeze_canvas: impl FnOnce(
+            &[(u32, u32)],
+        ) -> Result<
+            servo_canvas::retained_canvas::FrozenCanvasSnapshots,
+            servo_canvas::retained_canvas::FreezeCanvasSnapshotsError,
+        >,
+        after_reservation: impl FnOnce(&WebView, &DocumentPaintPresentationTicket),
+    ) -> Result<DocumentCaptureOutcome, SessionError> {
+        let mut capture_evidence = SessionCaptureEvidence::default();
+        let mut precondition = self.precondition.clone();
+        let ticket = loop {
+            match self.session.reserve_presentation(&precondition)? {
+                PresentationReservationProgress::DocumentWorkQueued => {
+                    let (next, _) = self.session.settle_capture_candidate()?;
+                    precondition = next;
+                },
+                PresentationReservationProgress::Reserved(ticket) => break ticket,
+            }
+        };
+        let _ticket_abort_guard = PaintTicketAbortGuard::new(|| {
+            self.session
+                .session
+                .webview
+                .abort_controlled_document_capture(ticket.id());
+        });
+        after_reservation(&self.session.session.webview, &ticket);
+        self.consume_and_capture(&precondition, &ticket, freeze_canvas, &mut capture_evidence)
+            .map_err(|error| error.with_capture_evidence(capture_evidence))
+    }
+
+    fn consume_and_capture(
+        &self,
+        precondition: &DocumentCapturePrecondition,
+        ticket: &DocumentPaintPresentationTicket,
+        freeze_canvas: impl FnOnce(
+            &[(u32, u32)],
+        ) -> Result<
+            servo_canvas::retained_canvas::FrozenCanvasSnapshots,
+            servo_canvas::retained_canvas::FreezeCanvasSnapshotsError,
+        >,
+        capture_evidence: &mut SessionCaptureEvidence,
+    ) -> Result<DocumentCaptureOutcome, SessionError> {
+        self.session
+            .session
+            .check_failure("controlled capture consume")?;
+        if self.session.session.host_deadline.is_elapsed() {
+            return Err(SessionError::new(
+                "CONTROLLED_CAPTURE_TIMEOUT",
+                "controlled capture exceeded the normalized host-wall limit",
+            ));
+        }
+
+        let command = DocumentTimeControlCommand::ConsumeCapture(Box::new(
+            DocumentCaptureConsumeRequest::new_internal(
+                Box::new(precondition.clone()),
+                ticket.clone(),
+            ),
+        ));
+        let response_waker = self.session.waker.clone();
+        let receiver = self
+            .session
+            .session
+            .webview
+            .request_controlled_document_time_notifying(command, move || {
+                response_waker.notify_control_response();
+            })
+            .map_err(|error| {
+                SessionError::new(
+                    "CONTROLLED_CAPTURE_CONSUME_FAILED",
+                    format!("cannot submit the single-use capture consume: {error:?}"),
+                )
+            })?;
+        let (outcome, _) = self.session.await_control_outcome(receiver)?;
+        let commit = exact_capture_commit(outcome, precondition, ticket)?;
+
+        let screenshot = self
+            .session
+            .session
+            .webview
+            .finalize_controlled_document_capture(ticket, &commit)
+            .map_err(|error| {
+                SessionError::new(
+                    "CONTROLLED_PAINT_FINALIZE_FAILED",
+                    format!("Paint rejected the single-use presentation ticket: {error:?}"),
+                )
+            })?;
+        let mut stable_image_png = Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(screenshot)
+            .write_to(&mut stable_image_png, image::ImageFormat::Png)
+            .map_err(|error| {
+                SessionError::new(
+                    "STABLE_RENDER_ENCODE_FAILED",
+                    format!("cannot encode the generation-bound Servo frame: {error}"),
+                )
+            })?;
+        capture_evidence.stable_image_png = Some(stable_image_png.into_inner());
+
+        let snapshot = commit.serialized_layout_snapshot();
+        let layout_debug = serde_json::from_str(snapshot).map_err(|error| {
+            SessionError::new("SCENE_CAPTURE_LAYOUT_JSON_INVALID", error.to_string())
+                .with_capture_evidence(std::mem::take(capture_evidence))
+        })?;
+        capture_evidence.layout_debug = Some(layout_debug);
+        let readiness = serde_json::json!({
+            "status": "ready",
+            "font_status": "loaded",
+            "payload": {
+                "source": "controlled-generation-capture",
+                "document_time_ns": precondition.now().as_nanos().to_string(),
+                "script_rendering_epoch": ticket.script_rendering_epoch().0,
+                "layout_paint_epoch": commit.layout_paint_epoch().0,
+                "paint_presented_epoch": ticket.script_rendering_epoch().0,
+            }
+        });
+        capture_evidence.readiness = Some(readiness);
+        capture_evidence.controlled_runtime_ms =
+            Some(self.session.session.host_deadline.elapsed_ms());
+
+        let scene_capture_started = Instant::now();
+        let capture = {
+            let resources = self.session.session.delegate.resource_store.borrow();
+            capture_document_scene_with_canvas(
+                snapshot.as_bytes(),
+                |url| resources.resolve_url(url),
+                freeze_canvas,
+            )
+        }
+        .map_err(|error| {
+            SessionError::new("SCENE_CAPTURE_FAILED", error.to_string())
+                .with_capture_evidence(std::mem::take(capture_evidence))
+        })?;
+        capture_evidence.scene_capture_ms =
+            Some(scene_capture_started.elapsed().as_secs_f64() * 1000.0);
+        if let Err(message) = capture.scene.validate() {
+            return Err(SessionError::new("SCENE_CAPTURE_INVALID", message)
+                .with_capture_evidence(std::mem::take(capture_evidence)));
+        }
+        if let Err(error) =
+            validate_host_font_policy(&capture, self.session.session.allow_host_fonts)
+        {
+            return Err(error.with_capture_evidence(std::mem::take(capture_evidence)));
+        }
+        if let Err(error) = self
+            .session
+            .session
+            .check_failure("controlled document capture")
+        {
+            return Err(error.with_capture_evidence(std::mem::take(capture_evidence)));
+        }
+
+        let SessionCaptureEvidence {
+            stable_image_png: Some(stable_image_png),
+            readiness: Some(readiness),
+            layout_debug: Some(layout_debug),
+            controlled_runtime_ms: Some(controlled_runtime_ms),
+            scene_capture_ms: Some(scene_capture_ms),
+        } = std::mem::take(capture_evidence)
+        else {
+            unreachable!("completed controlled capture has complete staged evidence")
+        };
+        let resources =
+            std::mem::take(&mut self.session.session.delegate.resources.borrow_mut().entries);
+        let resource_store = self.session.session.delegate.resource_store.take();
+        let console =
+            std::mem::take(&mut self.session.session.delegate.console.borrow_mut().entries);
+        Ok(DocumentCaptureOutcome {
+            capture,
+            stable_image_png,
+            layout_debug,
+            environment: self.session.session.environment,
+            allow_host_fonts: self.session.session.allow_host_fonts,
+            readiness,
+            console,
+            resource_accounting: ResourceAccounting::from_evidence(&resources),
+            resources,
+            resource_store,
+            controlled_runtime_ms,
+            scene_capture_ms,
+        })
     }
 }
 
@@ -777,6 +1031,7 @@ impl DocumentSession {
             bundle_root,
             resource_policy,
             resource_store,
+            paint_frames_automatically: document_clock.is_none(),
             ..Default::default()
         });
         let canvas_retention = start_canvas_retention();
@@ -1135,12 +1390,80 @@ impl DocumentSession {
 }
 
 impl ControlledDocumentSession {
-    /// Drive the controlled ScriptThread only until it issues opaque capture-candidate evidence.
+    fn reserve_presentation(
+        &self,
+        precondition: &DocumentCapturePrecondition,
+    ) -> Result<PresentationReservationProgress, SessionError> {
+        self.session.check_failure("controlled Paint reservation")?;
+        if self.session.host_deadline.is_elapsed() {
+            return Err(SessionError::new(
+                "CONTROLLED_CAPTURE_TIMEOUT",
+                "controlled Paint reservation exceeded the normalized host-wall limit",
+            ));
+        }
+
+        match self
+            .session
+            .webview
+            .reserve_controlled_document_capture(precondition)
+        {
+            Ok(ControlledDocumentCaptureReservation::Reserved(ticket)) => {
+                Ok(PresentationReservationProgress::Reserved(ticket))
+            },
+            Ok(ControlledDocumentCaptureReservation::DocumentWorkQueued) => {
+                Ok(PresentationReservationProgress::DocumentWorkQueued)
+            },
+            Err(ControlledDocumentCaptureError::Terminal(failure)) => Err(SessionError::new(
+                "CONTROLLED_PAINT_RESERVATION_FAILED",
+                format!("Paint rejected the capture candidate: {failure:?}"),
+            )),
+            Err(ControlledDocumentCaptureError::Retryable(
+                ControlledDocumentCaptureRetry::FramePending,
+            )) => {
+                // Any owner-thread progress can also deliver Script input. Make that progress once,
+                // then require a complete new Script settlement before reusing Paint state.
+                self.session.servo.spin_event_loop();
+                self.session.check_failure("controlled Paint reservation")?;
+                if self.session.host_deadline.is_elapsed() {
+                    return Err(SessionError::new(
+                        "CONTROLLED_CAPTURE_TIMEOUT",
+                        "controlled Paint reservation exceeded the normalized host-wall limit",
+                    ));
+                }
+                Ok(PresentationReservationProgress::DocumentWorkQueued)
+            },
+            Err(ControlledDocumentCaptureError::Retryable(
+                ControlledDocumentCaptureRetry::ReservationOccupied,
+            )) => Err(SessionError::new(
+                "CONTROLLED_PAINT_RESERVATION_FAILED",
+                "Paint already retains another single-use capture reservation",
+            )),
+        }
+    }
+
+    /// Drive the controlled ScriptThread until it issues opaque capture-candidate evidence.
     /// No screenshot, layout snapshot, scene, PDF, or publication artifact is produced here.
     pub(crate) fn prepare_capture_candidate(
         self,
     ) -> Result<PreparedDocumentCaptureCandidate, SessionError> {
         self.session.webview.show();
+        let (precondition, trace) = self.settle_capture_candidate()?;
+        Ok(PreparedDocumentCaptureCandidate {
+            session: self,
+            precondition,
+            trace,
+        })
+    }
+
+    fn settle_capture_candidate(
+        &self,
+    ) -> Result<
+        (
+            Box<DocumentCapturePrecondition>,
+            Vec<ControlledSettlementStep>,
+        ),
+        SessionError,
+    > {
         let coordinator = ControlledSettlementCoordinator::new(self.surface);
         let mut progress = coordinator.start();
         let mut wait_generation = None;
@@ -1235,11 +1558,7 @@ impl ControlledDocumentSession {
                     }
                 },
                 ControlledSettlementProgress::Candidate(precondition) => {
-                    return Ok(PreparedDocumentCaptureCandidate {
-                        _session: self,
-                        precondition,
-                        trace,
-                    });
+                    return Ok((precondition, trace));
                 },
             };
         }
@@ -1309,7 +1628,86 @@ fn controlled_settlement_step(command: &DocumentTimeControlCommand) -> Controlle
         DocumentTimeControlCommand::DriveOneTurn => ControlledSettlementStep::DriveOneTurn,
         DocumentTimeControlCommand::AdvanceTo(_) => ControlledSettlementStep::AdvanceTo,
         DocumentTimeControlCommand::PrepareCapture(_) => ControlledSettlementStep::PrepareCapture,
+        DocumentTimeControlCommand::ConsumeCapture(_) => ControlledSettlementStep::ConsumeCapture,
     }
+}
+
+fn exact_capture_commit(
+    outcome: DocumentTimeControlReceiveOutcome,
+    precondition: &DocumentCapturePrecondition,
+    ticket: &DocumentPaintPresentationTicket,
+) -> Result<DocumentCaptureCommit, SessionError> {
+    let DocumentTimeControlReceiveOutcome::CommandOutcome(outcome) = outcome else {
+        return Err(SessionError::new(
+            "CONTROLLED_CAPTURE_CONSUME_INDETERMINATE",
+            "capture consume transport ended without an authoritative result",
+        ));
+    };
+    let DocumentTimeControlOutcome::Completed(observation) = outcome else {
+        return match outcome {
+            DocumentTimeControlOutcome::Rejected(error) => Err(SessionError::new(
+                "CONTROLLED_CAPTURE_CONSUME_FAILED",
+                format!("ScriptThread rejected the capture consume: {error:?}"),
+            )),
+            DocumentTimeControlOutcome::CaptureConsumeOutcomeIndeterminate { .. } => {
+                Err(SessionError::new(
+                    "CONTROLLED_CAPTURE_CONSUME_INDETERMINATE",
+                    "ScriptThread may have consumed the single-use capture candidate",
+                ))
+            },
+            DocumentTimeControlOutcome::AdvanceOutcomeIndeterminate { .. } => {
+                Err(SessionError::new(
+                    "CONTROLLED_CAPTURE_PROTOCOL_MISMATCH",
+                    "capture consume returned an advance outcome",
+                ))
+            },
+            DocumentTimeControlOutcome::Completed(_) => unreachable!(),
+        };
+    };
+    let mut observation = *observation;
+    let documents_match = observation.documents.len() == precondition.documents().len() &&
+        observation
+            .documents
+            .iter()
+            .zip(precondition.documents())
+            .all(|(observed, expected)| {
+                observed.pipeline_id == expected.pipeline_id &&
+                    observed.script_rendering_epoch == Some(expected.script_rendering_epoch) &&
+                    observed.readiness_blockers == expected.readiness_blockers
+            });
+    let Some(commit) = observation.capture_commit.take() else {
+        return Err(SessionError::new(
+            "CONTROLLED_CAPTURE_PROTOCOL_MISMATCH",
+            "successful capture consume returned no commit",
+        ));
+    };
+    if observation.action != DocumentTimeControlAction::CaptureConsumed ||
+        observation.target != *precondition.target() ||
+        observation.now != precondition.now() ||
+        observation.next_deadline != precondition.next_deadline() ||
+        observation.advance_token.is_some() ||
+        observation.pending_events != precondition.pending_events() ||
+        observation.input_batch_saturated != precondition.input_batch_saturated() ||
+        observation.producers != precondition.producers() ||
+        observation.execution != Some(precondition.execution()) ||
+        observation.capture_preparation.is_some() ||
+        !documents_match ||
+        commit.candidate_id() != precondition.id() ||
+        commit.ticket_id() != ticket.id() ||
+        commit.target() != precondition.target() ||
+        commit.pipeline_id() != ticket.pipeline_id() ||
+        commit.script_rendering_epoch() != ticket.script_rendering_epoch() ||
+        commit.surface() != precondition.surface() ||
+        commit.presentation_generation() != ticket.presentation_generation() ||
+        commit.publish_generation() != ticket.publish_generation() ||
+        commit.layout_paint_epoch() != ticket.script_rendering_epoch()
+    {
+        return Err(SessionError::new(
+            "CONTROLLED_CAPTURE_PROTOCOL_MISMATCH",
+            "capture consume did not preserve the exact candidate and Paint ticket",
+        ));
+    }
+    Ok(*commit)
 }
 
 fn settlement_transition_error(error: ControlledSettlementError) -> SessionError {
@@ -1390,6 +1788,9 @@ struct DocumentDelegate {
     console: RefCell<ConsoleEvidenceLog>,
     crashed: RefCell<Option<String>>,
     frame_ready: Cell<bool>,
+    /// Realtime sessions follow Servo's ordinary embedder repaint contract. Controlled sessions
+    /// reserve and render one exact Paint generation explicitly after Script settlement.
+    paint_frames_automatically: bool,
     load_complete: Cell<bool>,
     resource_failure: RefCell<Option<ResourcePolicyFailure>>,
     delivered_body_bytes: Cell<u64>,
@@ -1407,7 +1808,9 @@ impl WebViewDelegate for DocumentDelegate {
 
     fn notify_new_frame_ready(&self, webview: WebView) {
         self.frame_ready.set(true);
-        webview.paint();
+        if self.paint_frames_automatically {
+            webview.paint();
+        }
     }
 
     fn notify_load_status_changed(&self, _webview: WebView, status: LoadStatus) {
@@ -1694,9 +2097,11 @@ fn checked_delivered_body_bytes(
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
     use std::fs;
     use std::io::{self, Read, Write};
     use std::net::{TcpListener, TcpStream};
+    use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::path::{Path, PathBuf};
     use std::process::{Command, Output, Stdio};
     use std::rc::Rc;
@@ -1721,10 +2126,11 @@ mod tests {
     use super::super::session::LocalDocument;
     use super::{
         ConsoleEvidenceLog, ConsoleLogLevel, ControlledSettlementStep, DocumentSession,
-        MAX_CONSOLE_BYTES, MAX_CONSOLE_EVENTS, RESOURCE_EVIDENCE_ENTRY_OVERHEAD_BYTES,
-        ReadinessPolicy, RenderEnvironment, ResourceEvidenceLog, ResourcePolicyConfig,
-        SessionError, SessionHostDeadline, console_log_level_name, session_host_timeout,
-        validate_host_font_policy, validate_resolved_resource_policy, validate_resource_policy,
+        MAX_CONSOLE_BYTES, MAX_CONSOLE_EVENTS, PaintTicketAbortGuard,
+        RESOURCE_EVIDENCE_ENTRY_OVERHEAD_BYTES, ReadinessPolicy, RenderEnvironment,
+        ResourceEvidenceLog, ResourcePolicyConfig, SessionError, SessionHostDeadline,
+        console_log_level_name, session_host_timeout, validate_host_font_policy,
+        validate_resolved_resource_policy, validate_resource_policy,
     };
 
     const ISOLATED_CASE_ENV: &str = "PLIEGO_DOCUMENT_SESSION_FIXTURE";
@@ -1733,6 +2139,18 @@ mod tests {
     const ISOLATED_TEST: &str = "document_session::tests::isolated_resource_and_readiness_fixture";
     const ALLOWED_HTTP_BODY: &[u8] = b"window.pliego.ready({ http_loaded: true });\n";
     const FIXTURE_PNG_DATA_URL: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+
+    #[test]
+    fn paint_ticket_abort_guard_runs_during_unwind() {
+        let aborts = Cell::new(0);
+        let unwind = catch_unwind(AssertUnwindSafe(|| {
+            let _guard = PaintTicketAbortGuard::new(|| aborts.set(aborts.get() + 1));
+            panic!("exercise retained-ticket unwind cleanup");
+        }));
+
+        assert!(unwind.is_err());
+        assert_eq!(aborts.get(), 1);
+    }
 
     const AHEM_SOURCE_RESOURCE: &str =
         "sha256:b719ecb31c5b21fc573c03f6421c74ac63c271a5a3ff841e34f9705fb94b8448";
@@ -2544,8 +2962,12 @@ window.pliego?.defer();
     }
 
     #[test]
-    fn controlled_session_issues_only_a_candidate_and_rejects_open_ended_sources() {
-        for case in ["controlled-finite", "controlled-interval"] {
+    fn controlled_session_consumes_a_finite_candidate_and_rejects_open_ended_sources() {
+        for case in [
+            "controlled-finite",
+            "controlled-paint-mutation",
+            "controlled-interval",
+        ] {
             let output = run_isolated(case, "http://127.0.0.1:1/");
             let stdout = String::from_utf8_lossy(&output.stdout);
             assert!(
@@ -2560,8 +2982,14 @@ window.pliego?.defer();
             );
             if case == "controlled-finite" {
                 assert!(
-                    stdout.contains("controlled-candidate-dropped"),
-                    "controlled candidate did not finish Servo teardown:\n{stdout}",
+                    stdout.contains("controlled-capture-complete"),
+                    "controlled capture did not finish Servo teardown:\n{stdout}",
+                );
+            }
+            if case == "controlled-paint-mutation" {
+                assert!(
+                    stdout.contains("controlled-paint-mutation-rejected"),
+                    "Paint mutation was not rejected before readback:\n{stdout}",
                 );
             }
         }
@@ -2653,11 +3081,16 @@ window.pliego?.defer();
                 _bundle = Some(bundle);
                 input
             },
-            "controlled-finite" => {
+            "controlled-finite" | "controlled-paint-mutation" => {
                 let bundle = TempBundle::new(case.as_str());
+                bundle.copy(
+                    &Path::new(env!("CARGO_MANIFEST_DIR"))
+                        .join("../../benchmarks/fixtures/minimal-static"),
+                    "Ahem.ttf",
+                );
                 let input = bundle.write(
                     "input.html",
-                    "<!doctype html><p id='state'>pending</p><script>if(Object.prototype.hasOwnProperty.call(window,'pliego')||Object.prototype.hasOwnProperty.call(window,'__pliegoReadiness')){setInterval(()=>{},1);}console.info(`controlled-start:${Date.now()}:${performance.now()}`);requestAnimationFrame(()=>console.info('controlled-frame'));setTimeout(()=>{document.getElementById('state').textContent='done';console.info(`controlled-end:${Date.now()}:${performance.now()}`);},5);</script>",
+                    "<!doctype html><style>@font-face{font-family:Ahem;src:url('Ahem.ttf')}#state{font:12px/16px Ahem}</style><p id='state'>pending</p><script>if(Object.prototype.hasOwnProperty.call(window,'pliego')||Object.prototype.hasOwnProperty.call(window,'__pliegoReadiness')){setInterval(()=>{},1);}const paintObserver=new PerformanceObserver(list=>{const fcp=list.getEntries().find(entry=>entry.name==='first-contentful-paint');if(!fcp)return;document.getElementById('state').textContent=`PLIEGO_FCP_${fcp.startTime}`;console.info(`controlled-paint-observed:${fcp.name}:${fcp.startTime}:${fcp.duration}:${performance.now()}`);paintObserver.disconnect();});paintObserver.observe({type:'paint'});console.info(`controlled-start:${Date.now()}:${performance.now()}`);requestAnimationFrame(()=>console.info('controlled-frame'));setTimeout(()=>{document.getElementById('state').textContent='PLIEGO_POST5MS_UNIT_7C4E';console.info(`controlled-end:${Date.now()}:${performance.now()}`);},5);</script>",
                 );
                 _bundle = Some(bundle);
                 input
@@ -2918,7 +3351,10 @@ window.pliego?.defer();
             },
             _ => a4(),
         };
-        if matches!(case.as_str(), "controlled-finite" | "controlled-interval") {
+        if matches!(
+            case.as_str(),
+            "controlled-finite" | "controlled-paint-mutation" | "controlled-interval"
+        ) {
             let bundle_files = || {
                 let mut files = fs::read_dir(input.parent().unwrap())
                     .unwrap()
@@ -2995,7 +3431,7 @@ window.pliego?.defer();
                             .trace()
                             .contains(&ControlledSettlementStep::PrepareCapture)
                     );
-                    let console = candidate._session.session.delegate.console.borrow();
+                    let console = candidate.session.session.delegate.console.borrow();
                     let messages = console
                         .entries
                         .iter()
@@ -3026,8 +3462,87 @@ window.pliego?.defer();
                         ]
                     );
                     drop(console);
-                    drop(candidate);
-                    println!("controlled-candidate-dropped");
+                    let outcome = candidate
+                        .capture()
+                        .expect("the retained candidate and Paint presentation should commit");
+                    assert_eq!(
+                        outcome.readiness["payload"]["source"],
+                        "controlled-generation-capture"
+                    );
+                    assert_eq!(outcome.readiness["payload"]["document_time_ns"], "40000000");
+                    assert_eq!(
+                        outcome.readiness["payload"]["script_rendering_epoch"],
+                        outcome.readiness["payload"]["layout_paint_epoch"]
+                    );
+                    assert_eq!(
+                        outcome.readiness["payload"]["script_rendering_epoch"],
+                        outcome.readiness["payload"]["paint_presented_epoch"]
+                    );
+                    assert_eq!(
+                        outcome
+                            .console
+                            .iter()
+                            .filter(|(_, message)| {
+                                message ==
+                                    "controlled-paint-observed:first-contentful-paint:20:0:20"
+                            })
+                            .count(),
+                        1,
+                        "controlled capture did not execute exactly one deterministic paint observer: {:?}",
+                        outcome.console,
+                    );
+                    let layout_marker_count = outcome
+                        .layout_debug
+                        .get("fragments")
+                        .and_then(serde_json::Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .filter(|fragment| {
+                            fragment
+                                .get("text_run")
+                                .and_then(|run| run.get("text"))
+                                .and_then(serde_json::Value::as_str) ==
+                                Some("PLIEGO_FCP_20")
+                        })
+                        .count();
+                    assert_eq!(
+                        layout_marker_count, 1,
+                        "controlled layout did not contain exactly one paint-observer marker: {}",
+                        outcome.layout_debug,
+                    );
+                    let scene_marker_count = outcome
+                        .capture
+                        .scene
+                        .pages
+                        .iter()
+                        .flat_map(|page| &page.operations)
+                        .filter(|operation| {
+                            matches!(
+                                operation,
+                                Operation::Text { text, .. }
+                                    if text == "PLIEGO_FCP_20"
+                            )
+                        })
+                        .count();
+                    assert_eq!(scene_marker_count, 1);
+                    assert!(outcome.stable_image_png.starts_with(b"\x89PNG\r\n\x1a\n"));
+                    assert!(outcome.capture.unsupported_events.is_empty());
+                    assert!(outcome.capture.text_mapping_gaps.is_empty());
+                    println!("controlled-capture-complete");
+                },
+                "controlled-paint-mutation" => {
+                    let candidate = controlled
+                        .prepare_capture_candidate()
+                        .expect("finite controlled work should reach candidate evidence");
+                    let error =
+                        match candidate.capture_with_paint_hook(|webview, _| webview.paint()) {
+                            Ok(_) => panic!("a Paint mutation after reservation exposed pixels"),
+                            Err(error) => error,
+                        };
+                    assert_eq!(error.code, "CONTROLLED_PAINT_FINALIZE_FAILED");
+                    assert!(error.capture_evidence.stable_image_png.is_none());
+                    assert!(error.capture_evidence.layout_debug.is_none());
+                    println!("controlled-paint-mutation-rejected");
                 },
                 "controlled-interval" => {
                     let error = match controlled.prepare_capture_candidate() {
