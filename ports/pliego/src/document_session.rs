@@ -2987,12 +2987,8 @@ window.pliego?.defer();
                             .trace()
                             .contains(&ControlledSettlementStep::PrepareCapture)
                     );
-                    let messages = candidate
-                        ._session
-                        .session
-                        .delegate
-                        .console
-                        .borrow()
+                    let console = candidate._session.session.delegate.console.borrow();
+                    let messages = console
                         .entries
                         .iter()
                         .filter_map(|(_, message)| {

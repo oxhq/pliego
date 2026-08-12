@@ -14,8 +14,9 @@ use embedder_traits::{
     DocumentProducerStability, DocumentSettlementSourceDisposition, DocumentTimeControlAction,
     DocumentTimeControlCommand, DocumentTimeControlError, DocumentTimeControlObservation,
     DocumentTimeControlOutcome, DocumentTimeControlReceiveOutcome,
-    DocumentTimeControlTransportFailure, TimerControlError,
+    DocumentTimeControlTransportFailure,
 };
+use timers::TimerControlError;
 
 /// The next host action required by mechanical settlement.
 #[derive(Debug)]
