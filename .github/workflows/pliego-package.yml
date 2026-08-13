@@ -2,17 +2,31 @@ name: Pliego package matrix
 
 on:
   workflow_dispatch:
-  pull_request:
-    paths:
-      - .github/workflows/pliego-package.yml
-      - Cargo.lock
-      - Cargo.toml
-      - ports/pliego/**
-      - python/check_pliego_release_archive.py
-      - python/check_pliego_version.py
   push:
     branches:
+      - main
       - "release-proof/**"
+    paths: &package-paths
+      - .github/workflows/pliego-package.yml
+      - .cargo/**
+      - .python-version
+      - Cargo.lock
+      - Cargo.toml
+      - LICENSE*
+      - licenses/**
+      - mach
+      - pyproject.toml
+      - rust-toolchain.toml
+      - uv.lock
+      - ports/pliego/**
+      - components/**
+      - docs/pliego/third-party-notices.md
+      - resources/**
+      - support/**
+      - third_party/**
+      - python/**
+  pull_request:
+    paths: *package-paths
 
 permissions:
   contents: read
@@ -111,6 +125,7 @@ jobs:
         run: |
           echo "LIBCLANG_PATH=/usr/lib/llvm-14/lib" >> "$GITHUB_ENV"
           sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends poppler-utils xauth xvfb
           ./mach bootstrap --yes --skip-lints --skip-nextest
 
       - name: Configure macOS build
@@ -278,6 +293,37 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $hash = (Get-FileHash "dist/$archive" -Algorithm SHA256).Hash.ToLowerInvariant()
           "$hash  $archive" | Set-Content "dist/$archive.sha256" -Encoding ascii
+
+      - name: Prove the packaged Linux controlled-capture boundary
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          bundle="pliego-${PLIEGO_VERSION}-${{ matrix.bundle }}"
+          archive="${bundle}.${{ matrix.archive_ext }}"
+          unpacked="$RUNNER_TEMP/pliego-packaged-controlled-capture"
+          proof="$PWD/dist/controlled-capture-proof"
+          test ! -e "$unpacked"
+          test ! -e "$proof"
+          mkdir -p "$unpacked"
+          tar -xzf "dist/$archive" -C "$unpacked"
+          binary="$unpacked/$bundle/pliego"
+          test -x "$binary"
+          python ports/pliego/tests/check_controlled_capture.py --self-test
+          xvfb-run --auto-servernum python ports/pliego/tests/check_controlled_capture.py \
+            "$binary" \
+            "$proof"
+          cp "dist/$archive.sha256" "$proof/archive.sha256"
+          cp "$unpacked/$bundle/VERSION.txt" "$proof/VERSION.txt"
+
+      - name: Upload packaged Linux controlled-capture proof
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: pliego-linux-x86_64-controlled-capture-proof
+          path: dist/controlled-capture-proof
+          if-no-files-found: error
+          retention-days: 7
 
       - name: Upload Pliego bundle
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7

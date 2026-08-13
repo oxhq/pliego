@@ -81,6 +81,85 @@ def read_json(path: Path) -> dict[str, Any]:
     return value
 
 
+def sha256_bytes(value: bytes) -> str:
+    return hashlib.sha256(value).hexdigest()
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while block := stream.read(1024 * 1024):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def write_proof_manifest(
+    output: Path,
+    binary: Path,
+    fixture: Path,
+    font: Path,
+    materialized_inputs: tuple[Path, ...],
+    comparisons: tuple[tuple[bytes, ...], ...],
+    open_ended_failure: dict[str, Any],
+) -> None:
+    names = (
+        "artifacts/render.png",
+        "normalized-layout.json",
+        "artifacts/scene.json",
+        "document.pdf",
+    )
+    require(len(comparisons) == 2, "controlled proof requires two successful fresh processes")
+    require(len(materialized_inputs) == len(comparisons), "controlled proof input/run counts differ")
+    comparison_hashes = []
+    for comparison in comparisons:
+        require(len(comparison) == len(names), "controlled comparison has an unexpected shape")
+        comparison_hashes.append({name: sha256_bytes(value) for name, value in zip(names, comparison, strict=True)})
+    require(
+        comparison_hashes[0] == comparison_hashes[1],
+        "successful controlled runs do not have identical comparison hashes",
+    )
+    for name, value in zip(names, comparisons[0], strict=True):
+        retained = output / name
+        require(retained.is_file(), f"controlled proof did not retain {name}")
+        require(
+            sha256_file(retained) == sha256_bytes(value),
+            f"retained controlled proof changed {name}",
+        )
+    require(open_ended_failure.get("exit_code") not in (None, 0), repr(open_ended_failure))
+    require(open_ended_failure.get("failure_code") == "SETTLEMENT_FAILED", repr(open_ended_failure))
+    require(open_ended_failure.get("readiness_status") == "failed", repr(open_ended_failure))
+    require(open_ended_failure.get("readiness_error_code") == "SETTLEMENT_FAILED", repr(open_ended_failure))
+    failure_hashes = open_ended_failure.get("evidence_sha256")
+    require(isinstance(failure_hashes, dict), repr(open_ended_failure))
+    for name, expected_hash in failure_hashes.items():
+        retained = output / "open-ended-failure" / name
+        require(retained.is_file(), f"controlled proof did not retain open-ended {name}")
+        require(sha256_file(retained) == expected_hash, f"retained open-ended proof changed {name}")
+    manifest = {
+        "schema": "pliego.controlled-capture-proof",
+        "version": 1,
+        "binary_sha256": sha256_file(binary),
+        "fixture_template_sha256": sha256_file(fixture),
+        "font_sha256": sha256_file(font),
+        "successful_runs": [
+            {
+                "process": index,
+                "materialized_input_sha256": sha256_file(materialized_input),
+                "comparison_sha256": hashes,
+            }
+            for index, (materialized_input, hashes) in enumerate(
+                zip(materialized_inputs, comparison_hashes, strict=True),
+                start=1,
+            )
+        ],
+        "open_ended_failure": open_ended_failure,
+    }
+    (output / "proof.json").write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
 def normalized_layout(value: Any) -> Any:
     if isinstance(value, dict):
         return {key: normalized_layout(item) for key, item in value.items() if key not in NONDETERMINISTIC_LAYOUT_KEYS}
@@ -245,12 +324,13 @@ def run_success(binary: Path, fixture: Path, font: Path, root: Path) -> tuple[by
     require(isinstance(readiness, dict), repr(summary))
     require(readiness.get("source") == "controlled-generation-capture", repr(readiness))
     require(readiness.get("document_time_ns") == "40000000", repr(readiness))
-    require(
-        readiness.get("script_rendering_epoch")
-        == readiness.get("layout_paint_epoch")
-        == readiness.get("paint_presented_epoch"),
-        repr(readiness),
+    epochs = (
+        readiness.get("script_rendering_epoch"),
+        readiness.get("layout_paint_epoch"),
+        readiness.get("paint_presented_epoch"),
     )
+    require(all(type(epoch) is int and epoch >= 0 for epoch in epochs), repr(readiness))
+    require(epochs[0] == epochs[1] == epochs[2], repr(readiness))
 
     layout_path = artifact(summary, "layout_debug", root / "artifacts/layout-debug.json")
     layout = read_json(layout_path)
@@ -351,19 +431,24 @@ def run_success(binary: Path, fixture: Path, font: Path, root: Path) -> tuple[by
         f"published PDF did not expose exactly one paint-observer marker: {extracted_pdf!r}",
     )
     console = (root / "artifacts/console.jsonl").read_text(encoding="utf-8")
+    timeout_message = "controlled-production-ready:946684800005:5"
     require(
-        "controlled-production-ready:946684800005:5" in console,
-        "console evidence did not retain the 5 ms controlled-time callback",
+        console.count(timeout_message) == 1,
+        "console evidence did not retain exactly one 5 ms controlled-time callback",
     )
     paint_observer_message = "controlled-paint-observed:first-contentful-paint:20:0:20"
     require(
         console.count(paint_observer_message) == 1,
         "console evidence did not retain exactly one deterministic paint-observer callback",
     )
+    require(
+        console.count("controlled-production-frame") == 1,
+        "console evidence did not retain exactly one requestAnimationFrame callback",
+    )
     return stable_png, layout_projection, scene, pdf
 
 
-def run_open_ended_failure(binary: Path, root: Path) -> None:
+def run_open_ended_failure(binary: Path, root: Path) -> dict[str, Any]:
     (root / "input.html").write_text("<!doctype html><script>setInterval(()=>{},1)</script>", encoding="utf-8")
     result = subprocess.run(
         [
@@ -382,7 +467,7 @@ def run_open_ended_failure(binary: Path, root: Path) -> None:
         check=False,
     )
     require(result.returncode != 0, "open-ended source unexpectedly published")
-    for relative in (
+    success_artifacts = (
         "document.pdf",
         "artifacts/bundle.json",
         "artifacts/document.pdf",
@@ -398,7 +483,8 @@ def run_open_ended_failure(binary: Path, root: Path) -> None:
         "artifacts/publication/outcome.json",
         "artifacts/publication/prepared.json",
         "artifacts/publication/committed.json",
-    ):
+    )
+    for relative in success_artifacts:
         require(
             not (root / relative).exists(),
             f"failed capture exposed success artifact {relative}",
@@ -411,6 +497,18 @@ def run_open_ended_failure(binary: Path, root: Path) -> None:
     readiness = read_json(root / "artifacts/readiness.json")
     require(readiness.get("status") == "failed", repr(readiness))
     require(readiness.get("error", {}).get("code") == "SETTLEMENT_FAILED", repr(readiness))
+    return {
+        "exit_code": result.returncode,
+        "failure_code": failure.get("error", {}).get("code"),
+        "failure_message": failure.get("error", {}).get("message"),
+        "readiness_status": readiness.get("status"),
+        "readiness_error_code": readiness.get("error", {}).get("code"),
+        "success_artifacts_absent": list(success_artifacts),
+        "evidence_sha256": {
+            "failure.json": sha256_file(failure_path),
+            "readiness.json": sha256_file(root / "artifacts/readiness.json"),
+        },
+    }
 
 
 def self_test(fixture: Path, font: Path) -> None:
@@ -461,6 +559,73 @@ def self_test(fixture: Path, font: Path) -> None:
             projection["fragments"][0]["text_run"]["text"] == MARKER,
             "layout projection removed semantic marker evidence",
         )
+        proof_root = Path(temporary)
+        (proof_root / "artifacts").mkdir()
+        (proof_root / "artifacts/render.png").write_bytes(b"png")
+        (proof_root / "normalized-layout.json").write_bytes(b"layout")
+        (proof_root / "artifacts/scene.json").write_bytes(b"scene")
+        (proof_root / "document.pdf").write_bytes(b"pdf")
+        failure_root = proof_root / "open-ended-failure"
+        failure_root.mkdir()
+        (failure_root / "failure.json").write_bytes(b"failure")
+        (failure_root / "readiness.json").write_bytes(b"readiness")
+        write_proof_manifest(
+            proof_root,
+            materialized,
+            fixture,
+            font,
+            (materialized, materialized),
+            (
+                (b"png", b"layout", b"scene", b"pdf"),
+                (b"png", b"layout", b"scene", b"pdf"),
+            ),
+            {
+                "exit_code": 1,
+                "failure_code": "SETTLEMENT_FAILED",
+                "failure_message": "capture preparation failed: [OpenEndedSource]",
+                "readiness_status": "failed",
+                "readiness_error_code": "SETTLEMENT_FAILED",
+                "success_artifacts_absent": ["document.pdf"],
+                "evidence_sha256": {
+                    "failure.json": sha256_bytes(b"failure"),
+                    "readiness.json": sha256_bytes(b"readiness"),
+                },
+            },
+        )
+        proof = read_json(proof_root / "proof.json")
+        require(proof.get("schema") == "pliego.controlled-capture-proof", repr(proof))
+        require(proof.get("version") == 1, repr(proof))
+        runs = proof.get("successful_runs")
+        require(isinstance(runs, list) and len(runs) == 2, repr(proof))
+        require(runs[0] == {**runs[1], "process": 1}, repr(proof))
+        require(runs[1].get("process") == 2, repr(proof))
+        hashes = runs[0].get("comparison_sha256")
+        require(
+            isinstance(hashes, dict)
+            and set(hashes)
+            == {
+                "artifacts/render.png",
+                "artifacts/scene.json",
+                "document.pdf",
+                "normalized-layout.json",
+            },
+            repr(proof),
+        )
+        require(
+            hashes
+            == {
+                "artifacts/render.png": "8f8cbb7dcf46e0bc7d53265749a6c17d116093a6ba95e442764060c76fd4a86c",
+                "normalized-layout.json": "1dc5ae5b68174891b6aa9850aa05ee0d9ae8a20468d9517259951a2dd9e9c0f0",
+                "artifacts/scene.json": "4f48f7207cebf92638debb5694e4a8677350cf88a9e98e73c6c466b6b1d43890",
+                "document.pdf": "c35b21d6ca39aa7cc3b79a705d989f1a6e88b99ab43988d74048799e3db926a3",
+            },
+            repr(proof),
+        )
+        require(
+            proof.get("open_ended_failure", {}).get("failure_message")
+            == "capture preparation failed: [OpenEndedSource]",
+            repr(proof),
+        )
 
 
 def main() -> int:
@@ -497,9 +662,23 @@ def main() -> int:
             first == second,
             "identical controlled captures changed pixels, semantic layout, scene, or PDF",
         )
-        run_open_ended_failure(binary, failure_root)
+        open_ended_failure = run_open_ended_failure(binary, failure_root)
         shutil.copytree(first_root / "artifacts", output / "artifacts")
         shutil.copy2(first_root / "document.pdf", output / "document.pdf")
+        (output / "normalized-layout.json").write_bytes(first[1])
+        failure_output = output / "open-ended-failure"
+        failure_output.mkdir()
+        shutil.copy2(failure_root / "artifacts/failure.json", failure_output / "failure.json")
+        shutil.copy2(failure_root / "artifacts/readiness.json", failure_output / "readiness.json")
+        write_proof_manifest(
+            output,
+            binary,
+            fixture,
+            font,
+            (first_root / "input.html", second_root / "input.html"),
+            (first, second),
+            open_ended_failure,
+        )
     print(f"controlled capture check: ok (artifacts: {output})")
     return 0
 

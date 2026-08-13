@@ -14,6 +14,62 @@ Published bundles target Linux x86_64, Windows x86_64, macOS x86_64, and macOS
 arm64. The same engine API is checked after unpacking on each target; document-level
 regression coverage is deepest on Linux x86_64.
 
+## Controlled-capture release candidate
+
+The repository contains an unreleased `render-controlled` route. It is not part of
+the stable v0.1.1/API 1 contract, and the PHP and Laravel packages continue to use
+the compatibility `render` route. `render-controlled` creates the document clock
+before navigation, settles the sources it owns, and consumes one ScriptThread capture
+candidate together with one Paint presentation ticket bound to the same generation.
+It has no realtime or shell fallback: stale capture state, a lost or indeterminate
+consume outcome, and open-ended or unsupported sources all fail without publishing
+the requested PDF or any success-only artifact.
+
+The release-candidate package gate unpacks the Linux x86_64 checked-release archive
+and runs its binary in two fresh processes against one pinned offline font-and-script
+fixture. The gate requires byte-identical pixels, normalized semantic layout, scene,
+and PDF; exact timeout, `requestAnimationFrame`, paint-observer, and document-time
+evidence; matching Script, layout, and presented Paint epochs; PDF text extraction;
+and a separate interval-based open-ended-source rejection. The proof manifest records
+SHA-256 hashes of the binary, fixture template, materialized input, font, and retained
+comparison artifacts. Other packaged targets currently have engine API, native
+publication primitives, help, version, dependency-boundary, and archive smoke coverage,
+not this document-level controlled-capture proof.
+
+The implemented candidate boundary is deliberately narrow:
+
+- it captures one fully active painted pipeline; multi-pipeline and cross-event-loop
+  frame trees are unsupported;
+- the packaged fixture is offline and uses a pinned inline font; it does not establish
+  a controlled network-resource or arbitrary-page contract;
+- intervals, infinite animations, WebSocket, EventSource, BroadcastChannel,
+  MessagePort, storage-event listeners, visible embedder controls, and retained media
+  action handlers are open ended and prevent capture;
+- Canvas contexts, media elements and streams, dedicated workers, worklets, IndexedDB,
+  pending CookieStore requests, ServiceWorker backend work or messaging, WebXR,
+  StorageManager, Bluetooth, WebRTC, Web Audio, notifications, WebGPU, and
+  OffscreenCanvas are rejected rather than settled;
+- invalid CSS timing, worker-owned timers, and unclassified non-DOM timer callbacks
+  are rejected; a future Servo event source has no controlled support until it gains
+  an explicit typed disposition and whatever owned lifecycle or producer-fence
+  evidence its execution model requires;
+- host- or cross-process-supplied performance timestamps, cross-event-loop navigation,
+  and auxiliary WebViews fail closed; the controlled ledger does not interrupt one
+  already-running JavaScript turn, so deployments still need an outer process
+  deadline; and
+- this candidate is not API 2, a hostile-input sandbox, a cross-platform determinism
+  claim, or a replacement for the stable compatibility route.
+
+The exact transaction and source inventory are documented in
+[generation capture preconditions](generation-capture-precondition.md) and the
+[controlled execution ledger](controlled-execution-ledger.md). Supporting an excluded
+source requires a typed inventory entry plus owned lifecycle evidence and, for external
+producers, producer-fence coverage; merely rendering one page that uses it does not
+expand this profile.
+
+Unless a section explicitly names `render-controlled`, the remaining capability and
+operational boundaries on this page describe the stable compatibility `render` route.
+
 ## Resource modes
 
 - **Offline:** network denied, assets supplied by the application, and exact bytes
