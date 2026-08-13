@@ -15,10 +15,12 @@ Pliego-owned document process without promising servoshell, a daemon, a browser 
 session reuse. It must bind exact input bytes to exact output bytes, separate deterministic delivery
 from diagnostics, and make every failure incapable of looking like partial success.
 
-This ADR defines a proposed contract scaffold before runtime implementation. The schemas, byte fixtures,
-goldens, and dependency-free self-test in [`contracts/api2`](../../../contracts/api2) are review
-artifacts only. They do not change the CLI, PHP SDK, package version, renderer, publication flow, or
-release behavior, and they are not evidence that API 2 is implemented or available.
+This ADR defines a proposed render contract whose executable foundation is now under development. In
+addition to the schemas, byte fixtures, goldens, and dependency-free self-test in
+[`contracts/api2`](../../../contracts/api2), the repository contains an unreleased probe, strict
+request decoder, and PHP tuple validator. The probe advertises `contracts: []`: those components do
+not make an API 2 render transaction, profile, package version, or release available, and they do not
+change the API 1 renderer or publication flow.
 
 These schemas are explicitly **pre-R3.5 scaffolding**, not the contract freeze requested by OXH-326.
 R3.5 defines the semantic document model, profile decision, validation result, and deterministic
@@ -53,15 +55,23 @@ identity that will appear in results. API 2 schema version 1 is usable only when
 is advertised. Advertising request version 1 and result version 2 in separate tuples does not imply
 that request 1/result 2 is supported.
 
-Each exact tuple also advertises an ordered array of supported versioned profile references. The
+The `contracts` array may be empty. An empty array truthfully reports an executable foundation whose
+probe and decoder exist but which does not yet accept a complete API 2 render transaction. A facade
+must treat it as no supported API 2 tuple; it must not infer capability from the engine API field,
+schema files, or command availability.
+
+Each exact tuple also advertises an ordered array of supported versioned profile references, sorted
+ascending by schema identifier and then version. Complete tuples themselves are unique and
+canonically ordered by their compact JSON bytes. The
 pre-R3.5 fixture advertises an empty array. A profile is usable only when its exact `{schema, version}`
 reference appears inside the selected API tuple; profile names are not inferred from PDF metadata or
 formed as a cross-product with protocol versions. One protocol tuple may appear only once, so two
 different profile arrays cannot make capability negotiation ambiguous.
 
-The proposed probe invocation is `pliego --contract-probe`: on success it writes exactly one probe
-JSON object to stdout and exits zero. This command and the render transport still require runtime and
-SDK implementation before they become available.
+The executable-foundation probe invocation is `pliego --contract-probe`: on success it writes exactly
+one compact, typed-field-order JSON object followed by one line feed to stdout, leaves stderr empty,
+and exits zero. A PHP facade validates the exact framing and tuple rather than inferring support. A
+complete render tuple and successful API 2 render transport remain unavailable.
 
 ### One-shot invocation and invocation errors
 
@@ -70,9 +80,18 @@ one isolated `DocumentSession`, accepts at most one request, emits at most one t
 exits. Servoshell is not a production fallback. Daemon, browser-pool, and hidden process/session reuse
 semantics are not part of API 2.
 
+The dedicated executable selector is `pliego render-api2` with no render options on the command
+line; the normalized request is supplied only on stdin. During the executable-foundation phase the
+probe advertises no contract tuple, so this selector decodes and validates framing but rejects every
+request as unavailable with the invocation-error contract. Input, delivery, and diagnostic root
+arguments must be specified here before any complete tuple is advertised and accepted.
+
 The runtime probe fixes the render transport rather than leaving SDKs to infer it:
 
 - one normalized request is a single JSON value on stdin;
+- stdin is bounded to at most `1,048,576` bytes, inclusive; the probe reports that exact
+  `request_max_bytes` value, and the runtime rejects an over-limit frame before allocating or reading
+  an unbounded request;
 - every accepted request writes exactly one `RenderResult` JSON value to stdout;
 - `success` exits `0`, while an accepted request whose result is `failed` exits `1`; and
 - an argument, framing, decoding, normalization, manifest-pairing, or unsupported-contract error
@@ -318,12 +337,14 @@ tuple negotiation, operation-order identity, the absence of premature operation 
 profile advertisement, semantic-layer/profile binding, result/profile echoing, and the ban on
 evidence-free conformance.
 
-This evidence proves only local schema and fixture consistency. It does not prove runtime
-decode/encode, the probe or invocation transport, facade prefetch/rewrite, CLI or PHP integration,
-deterministic time, settlement, renderer output, atomic publication, cross-platform byte identity,
-CI, packaging, consumer installation, or release availability. API 2 and Pliego 1.0 remain blocked on
-those independent implementation and hosted proof gates. The schema is also not frozen: OXH-346 and
-its R3.5 prerequisites must complete before OXH-326 can freeze the contract.
+The executable-foundation tests separately exercise strict runtime request decoding, canonical probe
+framing, exact PHP tuple negotiation, invocation-error framing, and packaged binary/source/target
+identity. They deliberately require an empty advertised contract array and terminal rejection for
+every API 2 render request. They do not prove facade prefetch/rewrite, a successful API 2 render,
+deterministic renderer output, atomic API 2 publication, cross-platform byte identity, consumer
+installation, or release availability. API 2 rendering and Pliego 1.0 remain blocked on those
+independent implementation and hosted proof gates. The schema is also not frozen: OXH-346 and its
+R3.5 prerequisites must complete before OXH-326 can freeze the contract.
 
 ## Consequences
 

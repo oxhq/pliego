@@ -11,9 +11,11 @@ trusted, application-owned HTML for invoices, statements, and operational report
 Its exact support and deployment boundary is documented in the
 [support profile](docs/pliego/support-profile.md).
 
-The repository also contains work toward controlled capture and a proposed API 2.
-Neither is a released v0.1.1 capability. Comparative benchmark results have not yet
-been published from the repository's benchmark protocol.
+The repository also contains work toward controlled capture and an unreleased API 2
+executable foundation. Its probe, strict request decoder, and SDK tuple validator
+advertise no render contract and cannot render through API 2. None of this is a
+released v0.1.1 capability. Comparative benchmark results have not yet been
+published from the repository's benchmark protocol.
 
 ## Versioning policy and intended release train
 
@@ -40,7 +42,7 @@ the upstream engine.
 | Intended version | Public purpose | Release gate |
 | --- | --- | --- |
 | **0.2.0 — Pliego-owned controlled document runtime** | Make the default `render` command and supported SDK path use the Pliego-owned `DocumentSession` controlled transaction. The normal Pliego package graph has no `servoshell` dependency, fallback, or runtime entry. | Existing v0.1 supported inputs are either truthfully settled by the controlled runtime or covered by an explicit migration boundary; controlled time, generation-bound capture, and fail-closed publication pass from packaged binaries; API 1 compatibility tests remain green. The current explicit `render-controlled` candidate and its Linux packaged proof are prerequisites, not the completed cutover or a cross-platform byte-determinism claim. |
-| **0.3.0 — API 2 and a precisely named accessible-PDF profile** | Turn the proposed API 2 schemas into a discoverable, strictly decoded runtime contract, migrate PHP/Laravel to exact-tuple negotiation, and expose the first supported accessible-PDF profile through that versioned contract. This is not a blanket claim of “PDF/UA support.” | `--contract-probe`, canonical request/result transport, accepted and rejected goldens, package smoke tests, cross-platform conformance, and API 1 migration behavior pass against packaged binaries; OXH-339 selects PDF/UA-1, PDF/UA-2, or another exact target; OXH-346 freezes the corresponding semantic and evidence contract; OXH-326 freezes the complete API 2 contract; semantic structure, language, alternate text, validator versions, failure policy, fixtures, and retained evidence are independently reproducible. |
+| **0.3.0 — API 2 and a precisely named accessible-PDF profile** | Graduate the empty-contract executable foundation into one complete advertised and frozen tuple, migrate the PHP/Laravel render path to exact-tuple negotiation, and expose the first supported accessible-PDF profile through that versioned contract. This is not a blanket claim of “PDF/UA support.” | `--contract-probe`, canonical request/result transport, accepted and rejected goldens, package smoke tests, cross-platform conformance, and API 1 migration behavior pass against packaged binaries; OXH-339 selects PDF/UA-1, PDF/UA-2, or another exact target; OXH-346 freezes the corresponding semantic and evidence contract; OXH-326 freezes the complete API 2 contract; semantic structure, language, alternate text, validator versions, failure policy, fixtures, and retained evidence are independently reproducible. |
 | **0.3.1 — Pliego package-surface reduction** | Remove features, dependencies, adapters, and Pliego-owned paths proven unreachable from the supported product. This does not mean deleting or renaming upstream-tracked Servo modules merely to make the fork look smaller. | Public inputs, artifacts, protocol tuples, and contract-visible rendering behavior remain compatible; expected version/source-identity changes are recorded; package graphs, archives, and native inventories measurably shrink; the Servo directory topology and an upstream-sync rehearsal remain intact. Any other public behavior change promotes this work to a minor release instead. |
 | **0.3.2 — code hygiene and bloat reduction** | Remove unused imports, dead Pliego paths, redundant dependencies, and unjustified warning suppressions while retaining the existing deny-warnings gates. Necessary interop, generated-code, and safety allowances remain documented rather than being deleted mechanically. | Clippy, Tidy, checked-release `-D warnings`, dependency audits, and supported package targets stay green; dependency, archive, and binary-size deltas are recorded; contract-visible outputs and conformance outcomes remain stable except for explicitly versioned engine/source identity fields. Behavior changes are excluded from this patch line. |
 | **0.4.0 — hardened operational support boundary** | Promote the 0.3 contract into documented security, deployment, upstream-maintenance, consumer-support, and comparative-evidence commitments for a pre-1.0 release candidate. | The reviewed threat model, upstream-sync report, dependency/native notice audit, deployment limits, packaged Laravel consumer, conformance matrix, and correctness-gated internal/dompdf/Browsershot reports are public and reproducible against exact tagged binaries. |
@@ -106,7 +108,9 @@ Done means:
 - the PDF, semantic input, validator output, profile identity, and tool versions are
   retained together for the declared fixture corpus.
 
-API 2 and the accessible-PDF profile remain proposed until all of these criteria pass.
+The API 2 executable foundation remains unavailable for rendering, and the complete
+API 2 contract and accessible-PDF profile remain proposed until all of these criteria
+pass.
 
 ### 3. Pliego 0.3.1-0.3.2 internal cleanup (March-April 2027)
 

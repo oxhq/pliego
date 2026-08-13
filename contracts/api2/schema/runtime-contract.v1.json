@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://pliego.dev/schema/runtime-contract.v1.json",
   "title": "Pliego runtime contract probe",
-  "description": "The exact protocol tuple and one-shot transport supported by one Pliego executable.",
+  "description": "The exact protocol tuples, if any, and one-shot transport reported by one Pliego executable.",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema", "version", "engine", "contracts", "invocation"],
@@ -12,7 +12,7 @@
     "engine": { "$ref": "render-result.v1.json#/definitions/engine" },
     "contracts": {
       "type": "array",
-      "minItems": 1,
+      "minItems": 0,
       "maxItems": 32,
       "items": { "$ref": "#/definitions/api2_contract" }
     },
@@ -91,6 +91,7 @@
       "additionalProperties": false,
       "required": [
         "request_transport",
+        "request_max_bytes",
         "result_transport",
         "invocation_error_transport",
         "success_exit_code",
@@ -99,6 +100,7 @@
       ],
       "properties": {
         "request_transport": { "const": "stdin-single-json" },
+        "request_max_bytes": { "const": 1048576 },
         "result_transport": { "const": "stdout-single-json" },
         "invocation_error_transport": { "const": "stderr-utf8-line" },
         "success_exit_code": { "const": 0 },

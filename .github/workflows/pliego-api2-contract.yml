@@ -1,0 +1,67 @@
+name: Pliego API 2 contract foundation
+
+on:
+  push:
+    branches: ["main"]
+    paths: &api2-paths
+      - ".github/workflows/pliego-api2-contract.yml"
+      - ".github/actions/setup-python/**"
+      - ".python-version"
+      - "contracts/api2/**"
+      - "docs/pliego/adr/0018-api-2-contract-and-public-artifacts.md"
+      - "ports/pliego/build.rs"
+      - "ports/pliego/src/api2.rs"
+      - "ports/pliego/src/main.rs"
+      - "ports/pliego/tests/check_api2_contract.py"
+      - "pyproject.toml"
+      - "sdk/php/composer.json"
+      - "sdk/php/composer.lock"
+      - "sdk/php/src/RuntimeContract.php"
+      - "sdk/php/src/Exception/InvocationException.php"
+      - "sdk/php/tests/api2_contract_test.php"
+      - "sdk/php/tests/fake_pliego.php"
+      - "uv.lock"
+  pull_request:
+    paths: *api2-paths
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pliego-api2-contract-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contract:
+    name: Schema, checker self-test, and SDK negotiation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out exact source
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+
+      - name: Set up Python and uv
+        uses: ./.github/actions/setup-python
+
+      - name: Validate API 2 schemas and executable checker
+        run: |
+          python contracts/api2/test_contract.py
+          python ports/pliego/tests/check_api2_contract.py --self-test
+          python -m py_compile \
+            contracts/api2/test_contract.py \
+            ports/pliego/tests/check_api2_contract.py
+          uv run --frozen ruff check \
+            contracts/api2/test_contract.py \
+            ports/pliego/tests/check_api2_contract.py
+          uv run --frozen ruff format --check \
+            contracts/api2/test_contract.py \
+            ports/pliego/tests/check_api2_contract.py
+
+      - name: Validate PHP tuple negotiation and invocation framing
+        run: |
+          composer --no-interaction --no-plugins --no-scripts --working-dir=sdk/php install --no-progress
+          php sdk/php/tests/api2_contract_test.php

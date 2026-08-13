@@ -9,6 +9,8 @@ on:
       - ".github/actions/setup-python/**"
       - "Cargo.lock"
       - "Cargo.toml"
+      - "contracts/api2/**"
+      - "docs/pliego/adr/0018-api-2-contract-and-public-artifacts.md"
       - "rust-toolchain.toml"
       - "ports/pliego/**"
       - "components/canvas/**"
@@ -53,6 +55,7 @@ jobs:
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           persist-credentials: false
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
 
       - name: Set up Python and uv
         uses: ./.github/actions/setup-python
@@ -148,6 +151,23 @@ jobs:
 
       - name: Test the CLI error boundary
         run: cargo test -p pliego --bin pliego session_failures_preserve_the_engine_error_classes --locked
+
+      - name: Test the unreleased API 2 executable foundation
+        run: |
+          python contracts/api2/test_contract.py
+          python ports/pliego/tests/check_api2_contract.py --self-test
+          cargo test -p pliego --bin pliego api2::tests --locked
+          cargo build -p pliego --bin pliego --locked
+          pliego_version="$(python -c 'import json, subprocess; data=json.loads(subprocess.check_output(["cargo", "metadata", "--no-deps", "--format-version", "1"])); print(next(package["version"] for package in data["packages"] if package["name"] == "pliego"))')"
+          python ports/pliego/tests/check_api2_contract.py \
+            --binary "$PWD/target/debug/pliego" \
+            --expected-version "$pliego_version" \
+            --expected-source-commit "$(git rev-parse HEAD)" \
+            --expected-target x86_64-unknown-linux-gnu \
+            --expected-servo-base 313b6d5ecc113b08010ce434140db3ca5abcc71c \
+            --valid-request contracts/api2/goldens/accepted/render-request.a4.json \
+            --proof-output "$RUNNER_TEMP/pliego-api2-executable-proof.json"
+          php sdk/php/tests/api2_contract_test.php "$PWD/target/debug/pliego"
 
       - name: Check runtime feature matrices
         run: |

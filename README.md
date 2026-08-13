@@ -145,7 +145,9 @@ For the project's scope, evidence, release train, and next gates, see:
 - [2026 funding plan](docs/funding/2026.md)
 
 Controlled capture and API 2 work described in those planning documents is not part
-of the v0.1.1 release.
+of the v0.1.1 release. The development tree includes an unreleased API 2 probe,
+strict request decoder, and PHP tuple validator, but the probe advertises no render
+contract and `render-api2` cannot render a document.
 
 Every native archive includes the project and specification licenses, an exact tagged
 source pointer, the generated Cargo dependency report, and pinned notices for copied

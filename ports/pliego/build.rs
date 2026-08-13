@@ -46,6 +46,17 @@ fn emit_servo_build_identity(workspace_root: &Path) -> Result<(), Box<dyn Error>
         },
         Ok(_) | Err(_) => println!("cargo:rustc-env=PLIEGO_GIT_SHA=nogit"),
     }
+    match git_output(workspace_root, &["rev-parse", "--verify", "HEAD"]) {
+        Ok(revision)
+            if revision.len() == 40 && revision.bytes().all(|byte| byte.is_ascii_hexdigit()) =>
+        {
+            println!(
+                "cargo:rustc-env=PLIEGO_SOURCE_COMMIT={}",
+                revision.to_ascii_lowercase()
+            );
+        },
+        Ok(_) | Err(_) => println!("cargo:rustc-env=PLIEGO_SOURCE_COMMIT=unknown"),
+    }
 
     if let Ok(head_path) = git_output(workspace_root, &["rev-parse", "--git-path", "HEAD"]) {
         let head_path = normalize_git_path(workspace_root, &head_path);
@@ -84,6 +95,10 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let target_os = std::env::var("CARGO_CFG_TARGET_OS")?;
     let target_env = std::env::var("CARGO_CFG_TARGET_ENV")?;
+    println!(
+        "cargo:rustc-env=PLIEGO_BUILD_TARGET={}",
+        std::env::var("TARGET")?
+    );
     emit_windows_gpu_exports(
         &target_os,
         &target_env,
