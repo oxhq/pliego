@@ -53,7 +53,7 @@ impl RenderOutcome {
 pub struct RenderError {
     pub code: String,
     pub message: String,
-    pub exit_code: i32,
+    pub exit_code: u8,
     pub artifacts: Option<PathBuf>,
     pub document_pdf: Option<PathBuf>,
     pub render_id: Option<String>,
@@ -65,7 +65,7 @@ impl RenderError {
         Self::without_publication(code, message, 2)
     }
 
-    pub fn without_publication(code: &str, message: impl Into<String>, exit_code: i32) -> Self {
+    pub fn without_publication(code: &str, message: impl Into<String>, exit_code: u8) -> Self {
         Self {
             code: code.to_owned(),
             message: message.into(),

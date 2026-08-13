@@ -435,8 +435,9 @@ enum DocumentSessionRuntime {
 
 pub(crate) struct DocumentSession {
     webview: WebView,
-    servo: Servo,
+    // Drop the delegate-owned HTTP client before the final Servo handle shuts down its runtime.
     delegate: Rc<DocumentDelegate>,
+    servo: Servo,
     environment: RenderEnvironment,
     allow_host_fonts: bool,
     host_deadline: SessionHostDeadline,

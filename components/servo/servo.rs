@@ -6,6 +6,7 @@ use std::cell::{Cell, Ref, RefCell, RefMut};
 use std::cmp::max;
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
+use std::thread::JoinHandle;
 use std::time::Duration;
 
 use crossbeam_channel::{Receiver, Sender, unbounded};
@@ -224,6 +225,8 @@ struct ServoInner {
     delegate: RefCell<Rc<dyn ServoDelegate>>,
     paint: Rc<RefCell<Paint>>,
     constellation_proxy: ConstellationProxy,
+    /// Joined after `ShutdownComplete` so destruction cannot race the final constellation cleanup.
+    constellation_join_handle: Option<JoinHandle<()>>,
     embedder_receiver: Receiver<EmbedderMsg>,
     net_embedder_receiver: Receiver<NetToEmbedderMsg>,
     constellation_embedder_receiver: Receiver<ConstellationToEmbedderMsg>,
@@ -860,6 +863,11 @@ impl Drop for ServoInner {
         while self.spin_event_loop() {
             std::thread::sleep(Duration::from_micros(500));
         }
+        if let Some(handle) = self.constellation_join_handle.take() {
+            if handle.join().is_err() {
+                warn!("Failed to join the constellation thread");
+            }
+        }
     }
 }
 
@@ -983,7 +991,7 @@ impl Servo {
             opts.temporary_storage,
         );
 
-        create_constellation(
+        let constellation_join_handle = create_constellation(
             embedder_to_constellation_receiver,
             &paint.borrow(),
             embedder_proxy,
@@ -1023,6 +1031,7 @@ impl Servo {
                 constellation_proxy.clone(),
             ))),
             constellation_proxy,
+            constellation_join_handle: Some(constellation_join_handle),
             embedder_receiver,
             net_embedder_receiver,
             constellation_embedder_receiver,
@@ -1199,7 +1208,7 @@ fn create_constellation(
     async_runtime: Box<dyn net_traits::AsyncRuntime>,
     public_storage_threads: StorageThreads,
     private_storage_threads: StorageThreads,
-) {
+) -> JoinHandle<()> {
     // Global configuration options, parsed from the command line.
     let opts = opts::get();
 
@@ -1246,14 +1255,14 @@ fn create_constellation(
 
     let layout_factory = Arc::new(LayoutFactoryImpl());
 
-    Constellation::<script::ScriptThread, script::ServiceWorkerManager>::start(
+    Constellation::<script::ScriptThread, script::ServiceWorkerManager>::start_with_join_handle(
         embedder_to_constellation_receiver,
         initial_state,
         layout_factory,
         opts.random_pipeline_closure_probability,
         opts.random_pipeline_closure_seed,
         opts.hard_fail,
-    );
+    )
 }
 
 // A logger that logs to two downstream loggers.

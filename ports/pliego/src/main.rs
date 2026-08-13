@@ -718,18 +718,25 @@ fn parse_timezone(value: &OsString) -> Result<&'static str, String> {
     }
 }
 
-fn main() {
+fn main() -> std::process::ExitCode {
     let command = parse_args(std::env::args_os().skip(1).collect())
         .unwrap_or_else(|error| invalid_request(&error));
 
     match command {
-        Command::Help => print_help(),
-        Command::Version => print_version(),
+        Command::Help => {
+            print_help();
+            std::process::ExitCode::SUCCESS
+        },
+        Command::Version => {
+            print_version();
+            std::process::ExitCode::SUCCESS
+        },
         Command::ContractProbe => {
             let mut stdout = std::io::stdout().lock();
             if let Err(error) = api2::write_contract_probe(&mut stdout, SERVO_BASE_SHA) {
                 api2_invocation_error(&error);
             }
+            std::process::ExitCode::SUCCESS
         },
         Command::RenderApi2 => {
             let result: Result<(), api2::InvocationError> = {
@@ -740,6 +747,7 @@ fn main() {
             if let Err(error) = result {
                 api2_invocation_error(&error);
             }
+            std::process::ExitCode::SUCCESS
         },
         Command::Api2InvocationError(message) => {
             api2_invocation_error(&api2::InvocationError::new(message));
@@ -749,6 +757,7 @@ fn main() {
                 let mut stdout = std::io::stdout().lock();
                 write_render_outcome(&mut stdout, &outcome)
                     .expect("failed to write the render outcome to stdout");
+                std::process::ExitCode::SUCCESS
             },
             Err(error) => print_render_error(&error),
         },
@@ -757,6 +766,7 @@ fn main() {
                 let mut stdout = std::io::stdout().lock();
                 write_render_outcome(&mut stdout, &outcome)
                     .expect("failed to write the render outcome to stdout");
+                std::process::ExitCode::SUCCESS
             },
             Err(error) => print_render_error(&error),
         },
@@ -896,7 +906,7 @@ fn cli_render_error(error: &RenderError) -> CliRenderError {
     }
 }
 
-fn print_render_error(error: &RenderError) -> ! {
+fn print_render_error(error: &RenderError) -> std::process::ExitCode {
     for warning in &error.warnings {
         eprintln!("pliego: warning: {warning}");
     }
@@ -905,7 +915,7 @@ fn print_render_error(error: &RenderError) -> ! {
         println!("{stdout}");
     }
     eprintln!("{}", output.stderr);
-    std::process::exit(error.exit_code)
+    std::process::ExitCode::from(error.exit_code)
 }
 
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
@@ -4462,9 +4472,10 @@ mod tests {
         ResourceCapture, ResourcePolicy, ResourcePolicyConfig, ResourcePolicyFailure,
         ResourceRequest, WebResourceLoadRole, classify_controlled_http_status, cli_render_error,
         controlled_capture_render_id, create_session_artifacts, default_page, page_artifact,
-        parse_args, persist_scene_capture, publication_request_fingerprint_with_runtime_policy,
-        resolve_scene_resource, runtime_policy, set_document_pdf_environment, sha256_hex,
-        stable_render_id, stable_render_id_with_runtime_policy,
+        parse_args, persist_scene_capture, print_render_error,
+        publication_request_fingerprint_with_runtime_policy, resolve_scene_resource,
+        runtime_policy, set_document_pdf_environment, sha256_hex, stable_render_id,
+        stable_render_id_with_runtime_policy,
     };
     #[cfg(feature = "shell-oracle")]
     use super::{
@@ -5422,6 +5433,17 @@ mod tests {
             "pliego: document is unavailable: C:\\workspace\\missing.html"
         );
         assert_eq!(error.exit_code, 2);
+    }
+
+    #[test]
+    fn render_failure_emitter_returns_the_requested_exit_code() {
+        let error = RenderError::without_publication(
+            "RESOURCE_DENIED",
+            "controlled resource was denied",
+            1,
+        );
+
+        assert_eq!(print_render_error(&error), std::process::ExitCode::from(1));
     }
 
     #[test]

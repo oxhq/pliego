@@ -1647,7 +1647,6 @@ where
     SWF: ServiceWorkerManagerFactory,
 {
     /// Create a new constellation thread.
-    #[servo_tracing::instrument(skip(state, layout_factory))]
     pub fn start(
         embedder_to_constellation_receiver: Receiver<EmbedderToConstellationMessage>,
         state: InitialConstellationState,
@@ -1656,6 +1655,26 @@ where
         random_pipeline_closure_seed: Option<usize>,
         hard_fail: bool,
     ) {
+        drop(Self::start_with_join_handle(
+            embedder_to_constellation_receiver,
+            state,
+            layout_factory,
+            random_pipeline_closure_probability,
+            random_pipeline_closure_seed,
+            hard_fail,
+        ));
+    }
+
+    /// Create a new constellation thread and return the handle needed to join it at shutdown.
+    #[servo_tracing::instrument(name = "Constellation::start", skip(state, layout_factory))]
+    pub fn start_with_join_handle(
+        embedder_to_constellation_receiver: Receiver<EmbedderToConstellationMessage>,
+        state: InitialConstellationState,
+        layout_factory: Arc<dyn LayoutFactory>,
+        random_pipeline_closure_probability: Option<f32>,
+        random_pipeline_closure_seed: Option<usize>,
+        hard_fail: bool,
+    ) -> JoinHandle<()> {
         thread::Builder::new()
             .name("Constellation".to_owned())
             .spawn(move || {
@@ -1788,7 +1807,7 @@ where
 
                 constellation.run();
             })
-            .expect("Thread spawning failed");
+            .expect("Thread spawning failed")
     }
 
     fn event_loops(&self) -> Vec<Rc<EventLoop>> {
