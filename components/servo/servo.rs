@@ -863,10 +863,8 @@ impl Drop for ServoInner {
         while self.spin_event_loop() {
             std::thread::sleep(Duration::from_micros(500));
         }
-        if let Some(handle) = self.constellation_join_handle.take() {
-            if handle.join().is_err() {
-                warn!("Failed to join the constellation thread");
-            }
+        if let Some(handle) = self.constellation_join_handle.take() && handle.join().is_err() {
+            warn!("Failed to join the constellation thread");
         }
     }
 }
