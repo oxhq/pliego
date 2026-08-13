@@ -206,12 +206,13 @@ where
         }
     }
 
-    /// Produce a callback and local receiver which notifies an external event loop after every
-    /// delivered value or transport error.
+    /// Produce a one-shot callback and local receiver which notify an external event loop after
+    /// the callback's single value or transport error is delivered, or when the callback is
+    /// dropped without a result.
     ///
-    /// The notification runs only after the result has entered the returned receiver, allowing a
-    /// host to wake and poll without racing ahead of delivery. Cross-process replies are routed
-    /// through the local callback before notification.
+    /// The notification runs only after the result has entered the returned receiver or that
+    /// receiver has disconnected, allowing a host to wake and poll without racing ahead of either
+    /// state change. Cross-process replies are routed through the local callback first.
     pub fn new_blocking_notifying<F>(
         notify: F,
     ) -> Result<(Self, GenericReceiver<T>), ipc_channel::IpcError>

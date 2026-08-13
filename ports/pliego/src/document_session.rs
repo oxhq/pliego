@@ -841,6 +841,7 @@ impl DocumentSession {
         allow_host_fonts: bool,
         runtime_policy: DeterministicRuntimePolicy,
     ) -> Result<ControlledDocumentSession, SessionError> {
+        validate_resource_timeout(resource_policy.timeout_ms)?;
         let runtime_policy = runtime_policy
             .validate()
             .map_err(|error| SessionError::new("INVALID_REQUEST", error.to_string()))?;
@@ -1751,6 +1752,11 @@ fn validate_session_timeouts(
     resource_timeout_ms: u64,
 ) -> Result<Duration, SessionError> {
     let session_host_timeout = session_host_timeout(readiness)?;
+    validate_resource_timeout(resource_timeout_ms)?;
+    Ok(session_host_timeout)
+}
+
+fn validate_resource_timeout(resource_timeout_ms: u64) -> Result<(), SessionError> {
     if !(1..=MAX_RESOURCE_TIMEOUT_MS).contains(&resource_timeout_ms) {
         return Err(SessionError::new(
             "INVALID_REQUEST",
@@ -1759,7 +1765,7 @@ fn validate_session_timeouts(
             ),
         ));
     }
-    Ok(session_host_timeout)
+    Ok(())
 }
 
 fn validate_resolved_resource_policy(
@@ -2119,8 +2125,9 @@ mod tests {
     use sha2::{Digest, Sha256};
 
     use super::super::resource_policy::{
-        ResourceAccounting, ResourceEvidence, ResourcePolicy, ResourcePolicyFailure,
-        ResourceRequest, ResourceSource, ResponseHeaderEvidence, VirtualResourceSpec,
+        MAX_RESOURCE_TIMEOUT_MS, ResourceAccounting, ResourceEvidence, ResourcePolicy,
+        ResourcePolicyFailure, ResourceRequest, ResourceSource, ResponseHeaderEvidence,
+        VirtualResourceSpec,
     };
     use super::super::runtime_policy::DeterministicRuntimePolicy;
     use super::super::session::LocalDocument;
@@ -2790,6 +2797,33 @@ window.pliego?.defer();
             error.message,
             "resource timeout must be between 1 and 60000 milliseconds"
         );
+    }
+
+    #[test]
+    fn invalid_controlled_resource_timeout_is_rejected_before_servo_starts() {
+        let bundle = TempBundle::new("invalid-controlled-resource-timeout");
+        let input = bundle.write("input.html", "<!doctype html><p>timeout</p>");
+
+        for timeout_ms in [0, MAX_RESOURCE_TIMEOUT_MS + 1] {
+            let error = DocumentSession::new_controlled(
+                &input,
+                RenderEnvironment::default(),
+                a4(),
+                ResourcePolicyConfig {
+                    timeout_ms,
+                    ..ResourcePolicyConfig::default()
+                },
+                false,
+                DeterministicRuntimePolicy::default(),
+            )
+            .err()
+            .expect("invalid controlled resource timeout must fail before Servo starts");
+            assert_eq!(error.code, "INVALID_REQUEST");
+            assert_eq!(
+                error.message,
+                "resource timeout must be between 1 and 60000 milliseconds"
+            );
+        }
     }
 
     #[test]

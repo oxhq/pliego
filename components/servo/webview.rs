@@ -877,7 +877,7 @@ impl WebView {
     }
 
     /// Submit one controlled command and notify the embedding driver only after its result has
-    /// entered the returned receiver.
+    /// entered the returned receiver or that receiver has disconnected.
     #[doc(hidden)]
     pub fn request_controlled_document_time_notifying<F>(
         &self,
