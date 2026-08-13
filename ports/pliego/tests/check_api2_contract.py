@@ -20,6 +20,8 @@ from typing import Any
 
 
 REQUEST_MAX_BYTES = 1_048_576
+PROBE_TIMEOUT_SECONDS = 180
+INVOCATION_TIMEOUT_SECONDS = 30
 SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 TARGET_COMPONENT = r"[a-z0-9]+(?:_[a-z0-9]+)*"
@@ -152,7 +154,10 @@ def run_probe(binary: Path) -> tuple[dict[str, Any], bytes]:
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         check=False,
-        timeout=30,
+        # Debug Servo executables are hundreds of MiB. The probe hashes its own
+        # bytes before emitting identity, so give that bounded operation a
+        # separate budget from ordinary request framing.
+        timeout=PROBE_TIMEOUT_SECONDS,
     )
     if completed.returncode != 0 or completed.stderr != b"":
         raise AssertionError(f"contract probe failed: exit={completed.returncode}, stderr={completed.stderr!r}")
@@ -182,7 +187,7 @@ def assert_invocation_error(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         check=False,
-        timeout=30,
+        timeout=INVOCATION_TIMEOUT_SECONDS,
     )
     if completed.returncode != 64:
         raise AssertionError(f"{name}: expected exit 64, got {completed.returncode}")
@@ -349,6 +354,8 @@ def self_test() -> None:
             raise AssertionError("self-test lost an executable framing proof case")
         if len(cases[7][1]) != REQUEST_MAX_BYTES or len(cases[8][1]) != REQUEST_MAX_BYTES + 1:
             raise AssertionError("self-test lost the inclusive request-size boundary")
+        if PROBE_TIMEOUT_SECONDS <= INVOCATION_TIMEOUT_SECONDS:
+            raise AssertionError("self-test lost the separate debug-binary probe budget")
     print("API 2 executable contract checker self-test: ok")
 
 
