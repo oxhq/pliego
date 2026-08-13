@@ -159,6 +159,11 @@ mod asset_cache;
     feature = "document-session",
     not(any(target_os = "android", target_env = "ohos"))
 ))]
+mod controlled_settlement;
+#[cfg(all(
+    feature = "document-session",
+    not(any(target_os = "android", target_env = "ohos"))
+))]
 #[allow(dead_code)]
 mod document_session;
 mod engine;
@@ -170,6 +175,7 @@ mod owned_resource_store;
 mod readiness;
 mod render_environment;
 mod resource_policy;
+mod runtime_policy;
 mod session;
 
 #[cfg(all(
@@ -219,6 +225,7 @@ use resource_policy::{
 use resource_policy::{
     RESOURCE_POLICY_ID, ResourcePolicy, ResourcePolicyFailure, ResourcePolicySetupFailure,
 };
+use runtime_policy::DeterministicRuntimePolicy;
 
 const SERVO_BASE_SHA: &str = "313b6d5ecc113b08010ce434140db3ca5abcc71c";
 const PLIEGO_API_VERSION: u32 = 1;
@@ -233,10 +240,10 @@ const DEFAULT_PAGE_WIDTH_CSS_PX: f32 = 793.7008;
 const DEFAULT_PAGE_HEIGHT_CSS_PX: f32 = 1122.5197;
 const DEFAULT_PAGE_MARGIN_VERTICAL_CSS_PX: f32 = 45.3543;
 const DEFAULT_PAGE_MARGIN_HORIZONTAL_CSS_PX: f32 = 60.4724;
-const RENDER_ID_SCHEMA_MARKER: &[u8] = b"pliego.render-id.v1";
+const RENDER_ID_SCHEMA_MARKER: &[u8] = b"pliego.render-id.v2";
 // Runtime identity is part of recovery identity. This version deliberately invalidates prepared
 // transactions from the pre-cutover fingerprint instead of resuming them under another runtime.
-const PUBLICATION_REQUEST_SCHEMA_MARKER: &[u8] = b"pliego.publication-request.v3";
+const PUBLICATION_REQUEST_SCHEMA_MARKER: &[u8] = b"pliego.publication-request.v4";
 
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -522,6 +529,7 @@ fn parse_args(mut args: Vec<OsString>) -> Result<Command, String> {
             asset_manifest,
             timeout_ms: resource_timeout_ms.unwrap_or(DEFAULT_RESOURCE_TIMEOUT_MS),
         },
+        runtime_policy: DeterministicRuntimePolicy::default(),
         allow_host_fonts,
         allow_partial_scene,
         explicit_paths,
@@ -872,13 +880,14 @@ fn begin_publication_for_runtime(
     resolved_input: &Path,
     runtime: PublicationRuntimeIdentity,
 ) -> Result<PublicationStart, RenderError> {
-    let request_fingerprint = publication_request_fingerprint(
+    let request_fingerprint = publication_request_fingerprint_with_runtime_policy(
         runtime,
         render_id,
         request.allow_partial_scene,
         &request.input,
         resolved_input,
         resource_policy.summary_asset_manifest_path(),
+        request.runtime_policy,
     );
     let (artifacts, resuming) = if let Some(paths) = &request.explicit_paths {
         match SessionArtifacts::create_with_render_id(&paths.artifacts, render_id) {
@@ -1128,6 +1137,10 @@ fn begin_publication_for_runtime(
     not(any(target_os = "android", target_env = "ohos"))
 ))]
 fn render_with_shell_oracle(request: RenderRequest) -> Result<RenderOutcome, RenderError> {
+    request
+        .runtime_policy
+        .validate()
+        .map_err(|error| RenderError::request("INVALID_REQUEST", error.to_string()))?;
     layout::pages::configure_for_process(request.page).map_err(|_| {
         RenderError::request(
             "LAYOUT_CONFIGURATION_FAILED",
@@ -1146,12 +1159,13 @@ fn render_with_shell_oracle(request: RenderRequest) -> Result<RenderOutcome, Ren
         )
     })?;
     let resource_policy = Rc::new(ResourcePolicy::resolve(&request.resources, document.root()));
-    let render_id = stable_render_id(
+    let render_id = stable_render_id_with_runtime_policy(
         &input_bytes,
         request.environment,
         request.page,
         &resource_policy,
         request.allow_host_fonts,
+        request.runtime_policy,
     );
     let input_url = url::Url::from_file_path(document.path()).map_err(|_| {
         RenderError::request(
@@ -1940,6 +1954,10 @@ fn render(request: RenderRequest) -> Result<RenderOutcome, RenderError> {
 fn prepare_document_session_render(
     request: RenderRequest,
 ) -> Result<PreparedDocumentSessionStart, RenderError> {
+    request
+        .runtime_policy
+        .validate()
+        .map_err(|error| RenderError::request("INVALID_REQUEST", error.to_string()))?;
     let document = LocalDocument::resolve(".", &request.input)
         .map_err(|error| RenderError::request("INVALID_REQUEST", error.to_string()))?;
     let input_bytes = std::fs::read(document.path()).map_err(|error| {
@@ -1952,12 +1970,13 @@ fn prepare_document_session_render(
         )
     })?;
     let resource_policy = ResourcePolicy::resolve(&request.resources, document.root());
-    let render_id = stable_render_id(
+    let render_id = stable_render_id_with_runtime_policy(
         &input_bytes,
         request.environment,
         request.page,
         &resource_policy,
         request.allow_host_fonts,
+        request.runtime_policy,
     );
     let input_url = url::Url::from_file_path(document.path()).map_err(|_| {
         RenderError::request(
@@ -2726,6 +2745,25 @@ fn stable_render_id(
     resource_policy: &ResourcePolicy,
     allow_host_fonts: bool,
 ) -> String {
+    stable_render_id_with_runtime_policy(
+        input_bytes,
+        environment,
+        page,
+        resource_policy,
+        allow_host_fonts,
+        DeterministicRuntimePolicy::default(),
+    )
+}
+
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+fn stable_render_id_with_runtime_policy(
+    input_bytes: &[u8],
+    environment: RenderEnvironment,
+    page: PageDefinition,
+    resource_policy: &ResourcePolicy,
+    allow_host_fonts: bool,
+    runtime_policy: DeterministicRuntimePolicy,
+) -> String {
     let margins = page.margins();
     let mut hasher = Sha256::new();
     update_hash_field(&mut hasher, RENDER_ID_SCHEMA_MARKER);
@@ -2745,6 +2783,7 @@ fn stable_render_id(
     if allow_host_fonts {
         update_hash_field(&mut hasher, b"pliego.host-fonts.v1");
     }
+    hash_runtime_policy(&mut hasher, runtime_policy);
     if !resource_policy.allowed_http_roots.is_empty() ||
         !resource_policy.virtual_resources.is_empty() ||
         resource_policy.asset_manifest.is_some() ||
@@ -2780,11 +2819,12 @@ fn stable_render_id(
 ///
 /// `runtime` prevents a transaction from crossing between the production document session and
 /// the explicit shell oracle. `render_id` binds the input bytes, environment, page, semantic
-/// resource content, and `allow_host_fonts`. The requested and canonical input paths are bound
-/// separately so a recovered summary cannot report a different request spelling. The captured
-/// manifest path is
-/// also bound because the sealed resource-policy artifact names it even when two manifests have
-/// identical asset content. `allow_partial_scene` is the remaining render-policy field.
+/// resource content, `allow_host_fonts`, and deterministic runtime policy. The runtime policy is
+/// also bound directly here so recovery remains fail-closed if render-ID composition changes.
+/// The requested and canonical input paths are bound separately so a recovered summary cannot
+/// report a different request spelling. The captured manifest path is also bound because the
+/// sealed resource-policy artifact names it even when two manifests have identical asset content.
+/// `allow_partial_scene` is the remaining render-policy field.
 /// `explicit_paths` is bound by the publication plan's artifact root, requested output, canonical
 /// output, and directory identities. When `RenderRequest` gains a field, its render semantics and
 /// sealed-summary representation must be covered here, by `render_id`, or by the immutable
@@ -2797,12 +2837,34 @@ fn publication_request_fingerprint(
     resolved_input: &Path,
     summary_asset_manifest: Option<&Path>,
 ) -> String {
+    publication_request_fingerprint_with_runtime_policy(
+        runtime,
+        render_id,
+        allow_partial_scene,
+        requested_input,
+        resolved_input,
+        summary_asset_manifest,
+        DeterministicRuntimePolicy::default(),
+    )
+}
+
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+fn publication_request_fingerprint_with_runtime_policy(
+    runtime: PublicationRuntimeIdentity,
+    render_id: &str,
+    allow_partial_scene: bool,
+    requested_input: &Path,
+    resolved_input: &Path,
+    summary_asset_manifest: Option<&Path>,
+    runtime_policy: DeterministicRuntimePolicy,
+) -> String {
     let mut hasher = Sha256::new();
     update_hash_field(&mut hasher, PUBLICATION_REQUEST_SCHEMA_MARKER);
     update_hash_field(&mut hasher, b"runtime");
     update_hash_field(&mut hasher, runtime.fingerprint_field());
     update_hash_field(&mut hasher, b"render-id");
     update_hash_field(&mut hasher, render_id.as_bytes());
+    hash_runtime_policy(&mut hasher, runtime_policy);
     update_hash_field(&mut hasher, b"requested-input");
     update_hash_path(&mut hasher, requested_input);
     update_hash_field(&mut hasher, b"resolved-input");
@@ -2825,6 +2887,57 @@ fn publication_request_fingerprint(
         },
     );
     format!("sha256:{}", lowercase_hex(&hasher.finalize()))
+}
+
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+fn hash_runtime_policy(hasher: &mut Sha256, runtime_policy: DeterministicRuntimePolicy) {
+    let runtime_policy::DeterministicRuntimePolicy {
+        time:
+            runtime_policy::DocumentTimePolicy {
+                epoch_unix_ms,
+                initial_offset_ns,
+            },
+        settlement:
+            runtime_policy::DocumentSettlementPolicy {
+                infinite_source_policy,
+                empty_checkpoints,
+                limits:
+                    runtime_policy::DocumentSettlementLimits {
+                        virtual_span_ms,
+                        ordinary_tasks,
+                        microtasks,
+                        rendering_opportunities,
+                        mutations,
+                        post_readiness_resources,
+                        process_cpu_ms,
+                        host_wall_ms,
+                    },
+            },
+    } = runtime_policy;
+    update_hash_field(hasher, b"pliego.runtime-policy.v1");
+    update_hash_field(hasher, &[runtime_policy::API2_TIME_POLICY_VERSION]);
+    update_hash_field(hasher, &epoch_unix_ms.to_be_bytes());
+    update_hash_field(hasher, &initial_offset_ns.to_be_bytes());
+    update_hash_field(hasher, &[runtime_policy::API2_SETTLEMENT_POLICY_VERSION]);
+    update_hash_field(
+        hasher,
+        match infinite_source_policy {
+            runtime_policy::InfiniteSourcePolicy::Fail => b"fail",
+        },
+    );
+    update_hash_field(hasher, &[empty_checkpoints]);
+    for value in [
+        virtual_span_ms,
+        ordinary_tasks,
+        microtasks,
+        rendering_opportunities,
+        mutations,
+        post_readiness_resources,
+        process_cpu_ms,
+        host_wall_ms,
+    ] {
+        update_hash_field(hasher, &value.to_be_bytes());
+    }
 }
 
 #[cfg(all(unix, not(any(target_os = "android", target_env = "ohos"))))]
@@ -4139,7 +4252,7 @@ mod tests {
     use std::collections::{BTreeMap, HashMap};
     use std::ffi::OsString;
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use base64::Engine as _;
@@ -4165,12 +4278,13 @@ mod tests {
         publish_captured_document,
     };
     use super::{
-        Command, DEFAULT_LOCALE, DEFAULT_TIMEZONE, ExplicitRenderPaths, PageDefinition,
-        PageMargins, RenderEnvironment, RenderError, RenderRequest, ResourceCapture,
-        ResourcePolicy, ResourcePolicyConfig, ResourcePolicyFailure, ResourceRequest,
-        WebResourceLoadRole, classify_controlled_http_status, cli_render_error,
+        Command, DEFAULT_LOCALE, DEFAULT_TIMEZONE, DeterministicRuntimePolicy, ExplicitRenderPaths,
+        PageDefinition, PageMargins, RenderEnvironment, RenderError, RenderRequest,
+        ResourceCapture, ResourcePolicy, ResourcePolicyConfig, ResourcePolicyFailure,
+        ResourceRequest, WebResourceLoadRole, classify_controlled_http_status, cli_render_error,
         create_session_artifacts, default_page, page_artifact, parse_args, persist_scene_capture,
-        resolve_scene_resource, set_document_pdf_environment, sha256_hex, stable_render_id,
+        resolve_scene_resource, runtime_policy, set_document_pdf_environment, sha256_hex,
+        stable_render_id,
     };
     #[cfg(feature = "shell-oracle")]
     use super::{
@@ -4184,8 +4298,9 @@ mod tests {
     ))]
     use super::{
         PublicationRuntimeIdentity, PublicationStart, PublicationTransaction, begin_publication,
-        publication_recovery_required_message, publication_request_fingerprint, render,
-        write_render_outcome,
+        publication_recovery_required_message, publication_request_fingerprint,
+        publication_request_fingerprint_with_runtime_policy, render,
+        stable_render_id_with_runtime_policy, write_render_outcome,
     };
     #[cfg(feature = "document-session")]
     use crate::document_session::{DocumentCaptureOutcome, SessionError};
@@ -4238,6 +4353,7 @@ mod tests {
             environment: RenderEnvironment::default(),
             page: default_page(),
             resources: ResourcePolicyConfig::default(),
+            runtime_policy: DeterministicRuntimePolicy::default(),
             allow_host_fonts: false,
             allow_partial_scene: false,
             explicit_paths: Some(ExplicitRenderPaths {
@@ -5020,6 +5136,7 @@ mod tests {
                 },
                 page: default_page(),
                 resources: ResourcePolicyConfig::default(),
+                runtime_policy: DeterministicRuntimePolicy::default(),
                 allow_host_fonts: false,
                 allow_partial_scene: false,
                 explicit_paths: None,
@@ -5102,6 +5219,7 @@ mod tests {
                 environment: RenderEnvironment::default(),
                 page: default_page(),
                 resources: ResourcePolicyConfig::default(),
+                runtime_policy: DeterministicRuntimePolicy::default(),
                 allow_host_fonts: false,
                 allow_partial_scene: false,
                 explicit_paths: Some(ExplicitRenderPaths {
@@ -5233,12 +5351,91 @@ mod tests {
                 &policy,
                 false,
             ),
-            "sha256:9ca553323bf5eb8118c51a46c00b174e1ef1febc7e6bbdb3d763ac2dcf5291a3"
+            "sha256:a89b2616c570d9ff69c7b12dd97721a6289a1a4f872873e50121565eb5606f04"
         );
         assert_ne!(
             render_id,
             stable_render_id(input, first.environment, first.page, &policy, true)
         );
+    }
+
+    #[cfg(all(
+        feature = "document-session",
+        not(any(target_os = "android", target_env = "ohos"))
+    ))]
+    #[test]
+    fn every_runtime_policy_override_changes_render_and_recovery_identity() {
+        let input = b"<!doctype html><title>Controlled</title>";
+        let resources = ResourcePolicy::default();
+        let environment = RenderEnvironment::default();
+        let page = default_page();
+        let baseline_policy = DeterministicRuntimePolicy::default();
+        let baseline_render_id = stable_render_id_with_runtime_policy(
+            input,
+            environment,
+            page,
+            &resources,
+            false,
+            baseline_policy,
+        );
+        let baseline_recovery_id = publication_request_fingerprint_with_runtime_policy(
+            PublicationRuntimeIdentity::DocumentSession,
+            &baseline_render_id,
+            false,
+            Path::new("invoice.html"),
+            Path::new("/canonical/invoice.html"),
+            None,
+            baseline_policy,
+        );
+
+        let mut variants = Vec::new();
+        let mut policy = baseline_policy;
+        policy.time.epoch_unix_ms += 1;
+        variants.push(policy);
+        let mutate_limits: [fn(&mut runtime_policy::DocumentSettlementLimits); 8] = [
+            |limits: &mut runtime_policy::DocumentSettlementLimits| limits.virtual_span_ms += 1,
+            |limits: &mut runtime_policy::DocumentSettlementLimits| limits.ordinary_tasks += 1,
+            |limits: &mut runtime_policy::DocumentSettlementLimits| limits.microtasks += 1,
+            |limits: &mut runtime_policy::DocumentSettlementLimits| {
+                limits.rendering_opportunities += 1
+            },
+            |limits: &mut runtime_policy::DocumentSettlementLimits| limits.mutations += 1,
+            |limits: &mut runtime_policy::DocumentSettlementLimits| {
+                limits.post_readiness_resources += 1
+            },
+            |limits: &mut runtime_policy::DocumentSettlementLimits| limits.process_cpu_ms += 1,
+            |limits: &mut runtime_policy::DocumentSettlementLimits| limits.host_wall_ms += 1,
+        ];
+        for mutate in mutate_limits {
+            let mut policy = baseline_policy;
+            mutate(&mut policy.settlement.limits);
+            variants.push(policy);
+        }
+
+        for policy in variants {
+            policy.validate().unwrap();
+            let render_id = stable_render_id_with_runtime_policy(
+                input,
+                environment,
+                page,
+                &resources,
+                false,
+                policy,
+            );
+            assert_ne!(render_id, baseline_render_id);
+            assert_ne!(
+                publication_request_fingerprint_with_runtime_policy(
+                    PublicationRuntimeIdentity::DocumentSession,
+                    &baseline_render_id,
+                    false,
+                    Path::new("invoice.html"),
+                    Path::new("/canonical/invoice.html"),
+                    None,
+                    policy,
+                ),
+                baseline_recovery_id
+            );
+        }
     }
 
     #[cfg(all(feature = "document-session", unix))]
@@ -5336,6 +5533,7 @@ mod tests {
                 },
                 page: default_page(),
                 resources: ResourcePolicyConfig::default(),
+                runtime_policy: DeterministicRuntimePolicy::default(),
                 allow_host_fonts: false,
                 allow_partial_scene: false,
                 explicit_paths: None,
@@ -7524,6 +7722,7 @@ mod tests {
             environment: RenderEnvironment::default(),
             page: default_page(),
             resources: ResourcePolicyConfig::default(),
+            runtime_policy: DeterministicRuntimePolicy::default(),
             allow_host_fonts: false,
             allow_partial_scene: false,
             explicit_paths: Some(ExplicitRenderPaths {
@@ -7587,6 +7786,7 @@ mod tests {
             environment: RenderEnvironment::default(),
             page: default_page(),
             resources: ResourcePolicyConfig::default(),
+            runtime_policy: DeterministicRuntimePolicy::default(),
             allow_host_fonts: false,
             allow_partial_scene: false,
             explicit_paths: None,
@@ -7718,6 +7918,7 @@ mod tests {
             environment: RenderEnvironment::default(),
             page: default_page(),
             resources: ResourcePolicyConfig::default(),
+            runtime_policy: DeterministicRuntimePolicy::default(),
             allow_host_fonts: false,
             allow_partial_scene: false,
             explicit_paths: Some(ExplicitRenderPaths {

@@ -6,6 +6,7 @@ use std::path::PathBuf;
 
 pub use super::render_environment::RenderEnvironment;
 use super::resource_policy::ResourcePolicyConfig;
+pub use super::runtime_policy::DeterministicRuntimePolicy;
 use crate::PageDefinition;
 
 #[derive(Debug, PartialEq)]
@@ -20,6 +21,8 @@ pub struct RenderRequest {
     pub environment: RenderEnvironment,
     pub page: PageDefinition,
     pub resources: ResourcePolicyConfig,
+    /// Full normalized deterministic-time and settlement identity.
+    pub runtime_policy: DeterministicRuntimePolicy,
     pub allow_host_fonts: bool,
     pub allow_partial_scene: bool,
     pub explicit_paths: Option<ExplicitRenderPaths>,
@@ -169,6 +172,7 @@ mod tests {
             environment: RenderEnvironment::default(),
             page: crate::default_page(),
             resources: ResourcePolicyConfig::default(),
+            runtime_policy: DeterministicRuntimePolicy::default(),
             allow_host_fonts: false,
             allow_partial_scene: false,
             explicit_paths: None,
@@ -201,6 +205,7 @@ mod tests {
             environment: RenderEnvironment::default(),
             page: crate::default_page(),
             resources: ResourcePolicyConfig::default(),
+            runtime_policy: DeterministicRuntimePolicy::default(),
             allow_host_fonts: false,
             allow_partial_scene: false,
             explicit_paths: None,

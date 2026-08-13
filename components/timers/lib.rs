@@ -1329,6 +1329,8 @@ pub struct DocumentProducerFence {
     inner: Arc<Mutex<DocumentProducerFenceState>>,
     #[ignore_malloc_size_of = "The optional execution ledger is shared with the document clock"]
     execution_ledger: Option<DocumentExecutionLedger>,
+    #[ignore_malloc_size_of = "The optional host notifier is shared embedding state"]
+    state_change_notifier: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 impl Default for DocumentProducerFence {
@@ -1340,6 +1342,15 @@ impl Default for DocumentProducerFence {
 impl DocumentProducerFence {
     /// Construct a producer fence optionally bound to one controlled execution ledger.
     pub fn with_execution_ledger(execution_ledger: Option<DocumentExecutionLedger>) -> Self {
+        Self::with_execution_ledger_and_notifier(execution_ledger, None)
+    }
+
+    /// Construct a producer fence which wakes its controlled host after every committed state
+    /// change. Notification occurs after releasing the fence lock.
+    pub fn with_execution_ledger_and_notifier(
+        execution_ledger: Option<DocumentExecutionLedger>,
+        state_change_notifier: Option<Arc<dyn Fn() + Send + Sync>>,
+    ) -> Self {
         let fence_id = DocumentProducerFenceId(
             NEXT_DOCUMENT_PRODUCER_FENCE_ID
                 .fetch_update(
@@ -1353,6 +1364,7 @@ impl DocumentProducerFence {
             fence_id,
             inner: Arc::new(Mutex::new(DocumentProducerFenceState::default())),
             execution_ledger,
+            state_change_notifier,
         }
     }
 
@@ -1410,6 +1422,7 @@ impl DocumentProducerFence {
         {
             ledger.record_owned_resource_event();
         }
+        self.notify_state_change();
 
         Ok(DocumentProducerGuard {
             fence: self.clone(),
@@ -1488,7 +1501,15 @@ impl DocumentProducerFence {
             .pending
             .checked_sub(1)
             .expect("document producer kind ticket completed twice");
+        drop(state);
+        self.notify_state_change();
         Ok(())
+    }
+
+    fn notify_state_change(&self) {
+        if let Some(notify) = &self.state_change_notifier {
+            notify();
+        }
     }
 }
 
@@ -1906,6 +1927,7 @@ impl TimerScheduler {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex, mpsc};
     use std::thread;
 
@@ -2133,6 +2155,26 @@ mod tests {
 
         assert_eq!(ledger.observation().counters.owned_resource_events, 1);
         drop((resource, task));
+    }
+
+    #[test]
+    fn producer_notifier_runs_after_each_committed_fence_change() {
+        let notifications = Arc::new(AtomicUsize::new(0));
+        let observed_notifications = notifications.clone();
+        let fence = DocumentProducerFence::with_execution_ledger_and_notifier(
+            None,
+            Some(Arc::new(move || {
+                observed_notifications.fetch_add(1, Ordering::SeqCst);
+            })),
+        );
+
+        let guard = fence.begin(DocumentProducerKind::Task).unwrap();
+        assert_eq!(notifications.load(Ordering::SeqCst), 1);
+        assert_eq!(fence.snapshot().pending(), 1);
+
+        drop(guard);
+        assert_eq!(notifications.load(Ordering::SeqCst), 2);
+        assert!(fence.snapshot().is_empty());
     }
 
     #[test]
@@ -2390,6 +2432,7 @@ mod tests {
             fence_id: DocumentProducerFenceId(1),
             inner: Arc::new(Mutex::new(state)),
             execution_ledger: None,
+            state_change_notifier: None,
         };
         let before = fence.snapshot();
 

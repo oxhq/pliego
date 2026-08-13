@@ -815,8 +815,22 @@ impl WebView {
         &self,
         command: DocumentTimeControlCommand,
     ) -> Result<DocumentTimeControlReceiver, DocumentTimeControlError> {
-        let (response, receiver) =
-            GenericCallback::new_blocking().map_err(|_| DocumentTimeControlError::ChannelClosed)?;
+        self.request_controlled_document_time_notifying(command, || {})
+    }
+
+    /// Submit one controlled command and notify the embedding driver only after its result has
+    /// entered the returned receiver or that receiver has disconnected.
+    #[doc(hidden)]
+    pub fn request_controlled_document_time_notifying<F>(
+        &self,
+        command: DocumentTimeControlCommand,
+        notify: F,
+    ) -> Result<DocumentTimeControlReceiver, DocumentTimeControlError>
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        let (response, receiver) = GenericCallback::new_blocking_notifying(notify)
+            .map_err(|_| DocumentTimeControlError::ChannelClosed)?;
         let (webview_id, cancellation_id, constellation_proxy) = {
             let mut inner = self.inner_mut();
             let Some(next_id) = inner
