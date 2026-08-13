@@ -1021,7 +1021,7 @@ def main() -> None:
         raise AssertionError("both result branches must retain the exact normalized request")
     if runtime["engine"] != success["engine"] or runtime["engine"] != failure["engine"]:
         raise AssertionError("probe and both result branches must retain the exact engine identity")
-    if API2_REQUEST_MAX_BYTES != 1_048_576:
+    if runtime["invocation"]["request_max_bytes"] != API2_REQUEST_MAX_BYTES:
         raise AssertionError("API 2 request framing limit drifted")
 
     assert_rejected(

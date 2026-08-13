@@ -68,6 +68,31 @@ api2Expect(
         && $probeParameters[1]->getDefaultValue() === 180,
     'the public probe default retains the bounded debug-binary identity budget',
 );
+$validateCommand = new ReflectionMethod(RuntimeContract::class, 'validateCommand');
+$batchTargets = [
+    'C:\\tools\\pliego.cmd',
+    'C:\\tools\\PLIEGO.BAT',
+    'C:\\tools\\pliego.cmd ',
+    'C:\\tools\\pliego.bat.',
+];
+foreach ($batchTargets as $batchTarget) {
+    if (PHP_OS_FAMILY !== 'Windows') {
+        $validateCommand->invoke(null, [$batchTarget], 1);
+
+        continue;
+    }
+
+    try {
+        RuntimeContract::probe([$batchTarget], 1);
+        throw new RuntimeException("expected Windows batch target rejection: {$batchTarget}");
+    } catch (InvalidArgumentException $error) {
+        api2Expect(
+            $error->getMessage()
+                === 'command must use a native executable on Windows; .bat and .cmd targets are not supported',
+            'Windows batch target rejection is explicit and stable',
+        );
+    }
+}
 
 putenv('PLIEGO_API2_FAKE_MODE=empty');
 $foundation = RuntimeContract::probe($command);
@@ -135,6 +160,37 @@ api2Expect(
 foreach (['out-of-order', 'unknown-member', 'stderr', 'second-frame', 'exit-64'] as $mode) {
     putenv("PLIEGO_API2_FAKE_MODE={$mode}");
     api2Rejected(fn () => RuntimeContract::probe($command), "invalid probe mode {$mode}");
+}
+putenv('PLIEGO_API2_FAKE_MODE=exit-64');
+api2RejectedWith(
+    fn () => RuntimeContract::probe($command),
+    'received exit 64; stderr="invalid probe invocation\\n" (25 bytes)',
+    'nonzero probe diagnostics are safely exposed',
+);
+putenv('PLIEGO_API2_FAKE_MODE=stderr');
+api2RejectedWith(
+    fn () => RuntimeContract::probe($command),
+    'leave stderr empty; stderr="unexpected diagnostic\\n" (22 bytes)',
+    'dirty successful-probe stderr is safely exposed',
+);
+putenv('PLIEGO_API2_FAKE_MODE=adversarial-stderr');
+try {
+    RuntimeContract::probe($command);
+    throw new RuntimeException('expected adversarial probe stderr rejection');
+} catch (UnexpectedValueException $error) {
+    $message = $error->getMessage();
+    api2Expect(str_contains($message, 'received exit 65'), 'adversarial stderr retains the exit code');
+    api2Expect(
+        str_contains($message, 'stderr="first\\r\\nsecond\\xFF'),
+        'multiline and invalid UTF-8 stderr bytes are escaped',
+    );
+    api2Expect(
+        str_contains($message, '314 bytes total; preview truncated to 256 bytes'),
+        'oversized stderr reports its bounded preview and total byte count',
+    );
+    api2Expect(!str_contains($message, "\r") && !str_contains($message, "\n"), 'stderr cannot inject lines');
+    api2Expect(preg_match('//u', $message) === 1, 'escaped stderr leaves a valid UTF-8 exception message');
+    api2Expect(strlen($message) < 1_100, 'escaped stderr exception text remains bounded');
 }
 
 $valid = $profileRuntime->toArray();

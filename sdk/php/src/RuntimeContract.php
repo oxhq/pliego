@@ -23,6 +23,9 @@ final readonly class RuntimeContract
      */
     private const DEFAULT_PROBE_TIMEOUT_SECONDS = 180;
 
+    /** Keep child diagnostics useful without reflecting raw or unbounded bytes. */
+    private const STDERR_DIAGNOSTIC_MAX_BYTES = 256;
+
     private const TOP_LEVEL_KEYS = ['schema', 'version', 'engine', 'contracts', 'invocation'];
     private const ENGINE_KEYS = ['name', 'version', 'api', 'source_commit', 'runtime'];
     private const RUNTIME_KEYS = ['mode', 'target', 'binary_sha256', 'servo_base'];
@@ -78,11 +81,15 @@ final readonly class RuntimeContract
     {
         if ($exitCode !== 0) {
             throw new UnexpectedValueException(
-                "Pliego contract probe must exit 0; received exit {$exitCode}",
+                "Pliego contract probe must exit 0; received exit {$exitCode}; "
+                    .self::formatStderrDiagnostic($stderr),
             );
         }
         if ($stderr !== '') {
-            throw new UnexpectedValueException('Pliego contract probe must leave stderr empty');
+            throw new UnexpectedValueException(
+                'Pliego contract probe must leave stderr empty; '
+                    .self::formatStderrDiagnostic($stderr),
+            );
         }
         if (
             $stdout === ''
@@ -471,6 +478,36 @@ final readonly class RuntimeContract
         }
     }
 
+    private static function formatStderrDiagnostic(string $stderr): string
+    {
+        $totalBytes = strlen($stderr);
+        if ($totalBytes === 0) {
+            return 'stderr=<empty>';
+        }
+
+        $preview = substr($stderr, 0, self::STDERR_DIAGNOSTIC_MAX_BYTES);
+        $escaped = '';
+        for ($index = 0, $length = strlen($preview); $index < $length; $index++) {
+            $byte = ord($preview[$index]);
+            $escaped .= match ($byte) {
+                0x09 => '\\t',
+                0x0a => '\\n',
+                0x0d => '\\r',
+                0x22 => '\\"',
+                0x5c => '\\\\',
+                default => $byte >= 0x20 && $byte <= 0x7e
+                    ? $preview[$index]
+                    : sprintf('\\x%02X', $byte),
+            };
+        }
+
+        $extent = $totalBytes > self::STDERR_DIAGNOSTIC_MAX_BYTES
+            ? "{$totalBytes} bytes total; preview truncated to ".self::STDERR_DIAGNOSTIC_MAX_BYTES.' bytes'
+            : "{$totalBytes} bytes";
+
+        return "stderr=\"{$escaped}\" ({$extent})";
+    }
+
     /**
      * @param list<string> $command
      */
@@ -483,6 +520,15 @@ final readonly class RuntimeContract
             if (!is_string($part) || $part === '' || str_contains($part, "\0")) {
                 throw new InvalidArgumentException('command must contain non-empty strings');
             }
+        }
+        // Windows dispatches batch targets through cmd.exe even for array-form process commands.
+        if (
+            PHP_OS_FAMILY === 'Windows'
+            && preg_match('/\.(?:bat|cmd)\z/i', rtrim($command[0], " .\t")) === 1
+        ) {
+            throw new InvalidArgumentException(
+                'command must use a native executable on Windows; .bat and .cmd targets are not supported',
+            );
         }
         if ($timeoutSeconds < 1) {
             throw new InvalidArgumentException('timeoutSeconds must be at least 1');

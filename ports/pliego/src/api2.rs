@@ -151,11 +151,12 @@ pub(crate) fn write_contract_probe(
             invocation_error_exit_code: INVOCATION_ERROR_EXIT_CODE,
         },
     };
-    serde_json::to_writer(&mut *writer, &probe).map_err(|error| {
+    let mut frame = serde_json::to_vec(&probe).map_err(|error| {
         InvocationError::framing(format!("cannot serialize contract probe: {error}"))
     })?;
+    frame.push(b'\n');
     writer
-        .write_all(b"\n")
+        .write_all(&frame)
         .map_err(|error| InvocationError::framing(format!("cannot write contract probe: {error}")))
 }
 
@@ -873,6 +874,39 @@ mod tests {
                 .as_str()
                 .is_some_and(|value| value.starts_with("sha256:") && value.len() == 71)
         );
+    }
+
+    #[test]
+    fn contract_probe_buffers_the_complete_frame_before_touching_the_writer() {
+        #[derive(Default)]
+        struct RecordingWriter {
+            calls: usize,
+            bytes: Vec<u8>,
+        }
+
+        impl Write for RecordingWriter {
+            fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+                self.calls += 1;
+                self.bytes.extend_from_slice(buffer);
+                Ok(buffer.len())
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let mut writer = RecordingWriter::default();
+        write_contract_probe(&mut writer, super::super::SERVO_BASE_SHA).unwrap();
+
+        assert_eq!(writer.calls, 1);
+        assert_eq!(writer.bytes.last(), Some(&b'\n'));
+        assert_eq!(
+            writer.bytes.iter().filter(|byte| **byte == b'\n').count(),
+            1
+        );
+        let probe: Value = serde_json::from_slice(&writer.bytes).unwrap();
+        assert_eq!(probe["contracts"], serde_json::json!([]));
     }
 
     #[test]

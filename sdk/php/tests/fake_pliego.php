@@ -71,6 +71,9 @@ if (($argv[1] ?? null) === '--contract-probe') {
     if ($api2Mode === 'exit-64') {
         fwrite(STDERR, "invalid probe invocation\n");
         exit(64);
+    } elseif ($api2Mode === 'adversarial-stderr') {
+        fwrite(STDERR, "first\r\nsecond\xFF".str_repeat('x', 300));
+        exit(65);
     }
     fwrite(STDOUT, json_encode($contract, JSON_UNESCAPED_SLASHES)."\n");
     if ($api2Mode === 'stderr') {

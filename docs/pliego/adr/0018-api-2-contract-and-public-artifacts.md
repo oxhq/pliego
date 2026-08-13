@@ -84,7 +84,8 @@ The dedicated executable selector is `pliego render-api2` with no render options
 line; the normalized request is supplied only on stdin. During the executable-foundation phase the
 probe advertises no contract tuple, so this selector decodes and validates framing but rejects every
 request as unavailable with the invocation-error contract. Input, delivery, and diagnostic root
-arguments must be specified here before any complete tuple is advertised and accepted.
+transport must be defined and implemented by a later change before any complete tuple is advertised
+and accepted; the executable-foundation selector accepts no host-root transport today.
 
 The runtime probe fixes the render transport rather than leaving SDKs to infer it:
 
