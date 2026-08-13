@@ -133,8 +133,10 @@ Composer distributions pass their focused contracts. The support profile remains
 the boundary; Pliego does not claim browser-wide compatibility or safe rendering of
 untrusted HTML.
 
-The current stable release is v0.1.1 and exposes engine API 1. For the project's
-scope, evidence, and next gates, see:
+The current stable release is v0.1.1 and exposes engine API 1. The next intended
+feature release is v0.2.0, but it remains unreleased until the default command and
+supported SDK path complete the packaged Pliego-owned controlled-runtime cutover.
+For the project's scope, evidence, release train, and next gates, see:
 
 - [Project overview](docs/project-overview.md)
 - [Roadmap](ROADMAP.md)
@@ -142,7 +144,7 @@ scope, evidence, and next gates, see:
 - [Security threat model](docs/security/threat-model.md)
 - [2026 funding plan](docs/funding/2026.md)
 
-Controlled capture and API2 work described in those planning documents is not part
+Controlled capture and API 2 work described in those planning documents is not part
 of the v0.1.1 release.
 
 Every native archive includes the project and specification licenses, an exact tagged
