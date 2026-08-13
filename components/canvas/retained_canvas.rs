@@ -143,16 +143,6 @@ pub enum RetainedCanvasUnsupportedReason {
     UnsupportedCommand,
 }
 
-impl RetainedCanvasUnsupportedReason {
-    fn survives_full_readback(self) -> bool {
-        // A readback seals prior pixels, but it does not reset the current clipping region.
-        // Draw-local transform, paint, shadow, and compositing state is checked again when a
-        // later retained command uses it. Clip state is not carried by FillRect and must remain
-        // fail-closed until a future retained protocol can model the clip stack exactly.
-        self == Self::Clip
-    }
-}
-
 /// Enables the in-process command snapshot used by Pliego document capture.
 ///
 /// Normal Servo sessions pay only one relaxed atomic load per Canvas command. The retained state
@@ -370,6 +360,7 @@ pub(crate) fn observe_canvas_for_capture(
 
 struct Registry {
     canvases: HashMap<CanvasId, Arc<RetainedCanvasSnapshot>>,
+    active_clip_depths: HashMap<CanvasId, usize>,
     image_keys: HashMap<ImageKey, CanvasId>,
     completed: HashMap<ImageKey, Arc<RetainedCanvasSnapshot>>,
     retained_command_count: u64,
@@ -386,6 +377,7 @@ impl Default for Registry {
     fn default() -> Self {
         Self {
             canvases: HashMap::new(),
+            active_clip_depths: HashMap::new(),
             image_keys: HashMap::new(),
             completed: HashMap::new(),
             retained_command_count: 0,
@@ -403,6 +395,7 @@ impl Default for Registry {
 impl Registry {
     fn clear(&mut self) {
         self.canvases.clear();
+        self.active_clip_depths.clear();
         self.image_keys.clear();
         self.completed.clear();
         self.retained_command_count = 0;
@@ -523,6 +516,7 @@ pub(crate) fn register_canvas(canvas_id: CanvasId, size: Size2D<u64>) {
             unsupported: None,
         }),
     );
+    registry.active_clip_depths.insert(canvas_id, 0);
 }
 
 pub(crate) fn recreate_canvas(canvas_id: CanvasId, size: Option<Size2D<u64>>) {
@@ -531,10 +525,11 @@ pub(crate) fn recreate_canvas(canvas_id: CanvasId, size: Option<Size2D<u64>>) {
     }
     let mut registry = registry();
     registry.advance_generation();
-    let Some(canvas) = registry.canvases.get_mut(&canvas_id) else {
+    if !registry.canvases.contains_key(&canvas_id) {
         return;
-    };
-    let canvas = Arc::make_mut(canvas);
+    }
+    registry.active_clip_depths.insert(canvas_id, 0);
+    let canvas = Arc::make_mut(registry.canvases.get_mut(&canvas_id).unwrap());
     if let Some(size) = size {
         let (Ok(width), Ok(height)) = (u32::try_from(size.width), u32::try_from(size.height))
         else {
@@ -574,6 +569,7 @@ pub(crate) fn finish_canvas(canvas_id: CanvasId) {
     let Some(snapshot) = registry.canvases.remove(&canvas_id) else {
         return;
     };
+    registry.active_clip_depths.remove(&canvas_id);
     let image_keys = registry
         .image_keys
         .iter()
@@ -652,6 +648,16 @@ pub(crate) fn retain_fill_rect(
     else {
         return;
     };
+    let has_active_clip = registry.active_clip_depths[&canvas_id] != 0;
+    if has_active_clip {
+        Arc::make_mut(registry.canvases.get_mut(&canvas_id).unwrap())
+            .unsupported
+            .get_or_insert(RetainedCanvasUnsupported {
+                command: "fill_rect",
+                reason: RetainedCanvasUnsupportedReason::Clip,
+            });
+        return;
+    }
     if !registry.reserve_command(canvas_id, 0, false) {
         return;
     }
@@ -667,6 +673,45 @@ pub(crate) fn retain_fill_rect(
         blue: f64::from(srgb.components.2),
         alpha: f64::from(srgb.alpha),
     });
+}
+
+/// Record persistent clip state without treating the clip operation itself as painted output.
+///
+/// A later retained draw while this depth is non-zero fails closed. A full-canvas readback may
+/// still seal every pixel produced so far without discarding this state.
+pub(crate) fn retain_clip_push(canvas_id: CanvasId) {
+    if !ENABLED.load(Ordering::Acquire) {
+        return;
+    }
+    let mut registry = registry();
+    registry.advance_generation();
+    let Some(depth) = registry.active_clip_depths.get(&canvas_id).copied() else {
+        return;
+    };
+    let Some(next_depth) = depth.checked_add(1) else {
+        if let Some(canvas) = registry.canvases.get_mut(&canvas_id) {
+            Arc::make_mut(canvas)
+                .unsupported
+                .get_or_insert(RetainedCanvasUnsupported {
+                    command: "clip_path",
+                    reason: RetainedCanvasUnsupportedReason::Clip,
+                });
+        }
+        return;
+    };
+    registry.active_clip_depths.insert(canvas_id, next_depth);
+}
+
+/// Apply the painter's exact clip-pop count to the retained persistent state.
+pub(crate) fn retain_clip_pop(canvas_id: CanvasId, clips: usize) {
+    if clips == 0 || !ENABLED.load(Ordering::Acquire) {
+        return;
+    }
+    let mut registry = registry();
+    registry.advance_generation();
+    if let Some(depth) = registry.active_clip_depths.get_mut(&canvas_id) {
+        *depth = depth.saturating_sub(clips);
+    }
 }
 
 pub(crate) fn retain_pixel_readback(
@@ -700,11 +745,7 @@ pub(crate) fn retain_pixel_readback(
             origin.x == 0 &&
                 origin.y == 0 &&
                 size.width == canvas.width &&
-                size.height == canvas.height &&
-                !canvas
-                    .unsupported
-                    .as_ref()
-                    .is_some_and(|unsupported| unsupported.reason.survives_full_readback())
+                size.height == canvas.height
         });
         if !registry.reserve_command(canvas_id, bytes, can_replace_unsupported) {
             return;
@@ -752,16 +793,9 @@ pub(crate) fn mark_unsupported(
     registry.advance_generation();
     if let Some(canvas) = registry.canvases.get_mut(&canvas_id) {
         let canvas = Arc::make_mut(canvas);
-        match &mut canvas.unsupported {
-            Some(unsupported)
-                if reason.survives_full_readback() &&
-                    !unsupported.reason.survives_full_readback() =>
-            {
-                *unsupported = RetainedCanvasUnsupported { command, reason };
-            },
-            None => canvas.unsupported = Some(RetainedCanvasUnsupported { command, reason }),
-            Some(_) => {},
-        }
+        canvas
+            .unsupported
+            .get_or_insert(RetainedCanvasUnsupported { command, reason });
     }
 }
 
@@ -785,12 +819,42 @@ mod tests {
         RetainedCanvasSnapshot, RetainedCanvasUnsupportedReason, associate_image_key,
         finish_canvas, freeze_canvas_snapshots, freeze_canvas_snapshots_at_generation,
         freeze_canvas_snapshots_with_observer, mark_unsupported, observe_canvas_for_capture,
-        recreate_canvas, register_canvas, registry, retain_fill_rect, retain_pixel_readback,
-        start_retaining_canvas_commands,
+        recreate_canvas, register_canvas, registry, retain_clip_pop, retain_clip_push,
+        retain_fill_rect, retain_pixel_readback, start_retaining_canvas_commands,
         start_retaining_canvas_commands_with_limits,
     };
 
     static RETENTION_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    fn opaque_2x2_snapshot() -> Snapshot {
+        Snapshot::from_vec(
+            Size2D::new(2, 2),
+            SnapshotPixelFormat::RGBA,
+            SnapshotAlphaMode::Transparent {
+                premultiplied: true,
+            },
+            vec![255; 16],
+        )
+    }
+
+    fn retain_supported_fill(canvas_id: CanvasId) {
+        retain_fill_rect(
+            canvas_id,
+            &Rect::new(Point2D::zero(), Size2D::new(2.0, 2.0)),
+            &FillOrStrokeStyle::Color(AbsoluteColor::BLACK),
+            &ShadowOptions {
+                offset_x: 0.0,
+                offset_y: 0.0,
+                blur: 0.0,
+                color: AbsoluteColor::TRANSPARENT_BLACK,
+            },
+            CompositionOptions {
+                alpha: 1.0,
+                composition_operation: Default::default(),
+            },
+            Transform2D::identity(),
+        );
+    }
 
     #[test]
     fn retains_only_while_the_capture_guard_is_live() {
@@ -1138,65 +1202,99 @@ mod tests {
     }
 
     #[test]
-    fn full_readback_does_not_seal_persistent_clip_state_before_later_draws() {
+    fn full_readback_seals_pixels_while_retaining_active_clip_state() {
         let _serial = RETENTION_TEST_LOCK.lock().unwrap();
         let key = ImageKey(IdNamespace(7), 15);
         let canvas_id = CanvasId(6);
         let _guard = start_retaining_canvas_commands();
         register_canvas(canvas_id, Size2D::new(2, 2));
         associate_image_key(canvas_id, key);
+        retain_clip_push(canvas_id);
         mark_unsupported(
             canvas_id,
             "fill_path",
             RetainedCanvasUnsupportedReason::UnsupportedCommand,
         );
-        mark_unsupported(
-            canvas_id,
-            "clip_path",
-            RetainedCanvasUnsupportedReason::Clip,
-        );
-        assert_eq!(
-            registry().canvases[&canvas_id]
-                .unsupported
-                .as_ref()
-                .map(|unsupported| unsupported.reason),
-            Some(RetainedCanvasUnsupportedReason::Clip),
-            "persistent clip state must dominate an earlier pixel-sealable failure"
-        );
-        let pixels = Snapshot::from_vec(
-            Size2D::new(2, 2),
-            SnapshotPixelFormat::RGBA,
-            SnapshotAlphaMode::Transparent {
-                premultiplied: true,
-            },
-            vec![255; 16],
-        );
         retain_pixel_readback(
             canvas_id,
             Some(Rect::new(Point2D::zero(), Size2D::new(2, 2))),
-            &pixels,
+            &opaque_2x2_snapshot(),
         );
-        retain_fill_rect(
+
+        let observation = observe_canvas_for_capture(canvas_id, Some(key), Size2D::new(2, 2));
+        assert_eq!(observation.status, CanvasCaptureObservationStatus::Ready);
+        assert_eq!(registry().active_clip_depths[&canvas_id], 1);
+    }
+
+    #[test]
+    fn retained_draw_after_full_readback_under_active_clip_fails_closed() {
+        let _serial = RETENTION_TEST_LOCK.lock().unwrap();
+        let key = ImageKey(IdNamespace(7), 16);
+        let canvas_id = CanvasId(7);
+        let _guard = start_retaining_canvas_commands();
+        register_canvas(canvas_id, Size2D::new(2, 2));
+        associate_image_key(canvas_id, key);
+        retain_clip_push(canvas_id);
+        retain_pixel_readback(
             canvas_id,
-            &Rect::new(Point2D::zero(), Size2D::new(2.0, 2.0)),
-            &FillOrStrokeStyle::Color(AbsoluteColor::BLACK),
-            &ShadowOptions {
-                offset_x: 0.0,
-                offset_y: 0.0,
-                blur: 0.0,
-                color: AbsoluteColor::TRANSPARENT_BLACK,
-            },
-            CompositionOptions {
-                alpha: 1.0,
-                composition_operation: Default::default(),
-            },
-            Transform2D::identity(),
+            Some(Rect::new(Point2D::zero(), Size2D::new(2, 2))),
+            &opaque_2x2_snapshot(),
         );
+        assert_eq!(
+            observe_canvas_for_capture(canvas_id, Some(key), Size2D::new(2, 2)).status,
+            CanvasCaptureObservationStatus::Ready
+        );
+
+        retain_supported_fill(canvas_id);
 
         let observation = observe_canvas_for_capture(canvas_id, Some(key), Size2D::new(2, 2));
         assert_eq!(
             observation.status,
             CanvasCaptureObservationStatus::UnsupportedTranscript
         );
+        assert_eq!(
+            registry().canvases[&canvas_id]
+                .unsupported
+                .as_ref()
+                .map(|unsupported| unsupported.reason),
+            Some(RetainedCanvasUnsupportedReason::Clip)
+        );
+    }
+
+    #[test]
+    fn exact_clip_pops_restore_retained_draw_support_only_after_the_last_clip() {
+        let _serial = RETENTION_TEST_LOCK.lock().unwrap();
+        let key = ImageKey(IdNamespace(7), 17);
+        let canvas_id = CanvasId(8);
+        let _guard = start_retaining_canvas_commands();
+        register_canvas(canvas_id, Size2D::new(2, 2));
+        associate_image_key(canvas_id, key);
+        retain_clip_push(canvas_id);
+        retain_clip_push(canvas_id);
+        retain_pixel_readback(
+            canvas_id,
+            Some(Rect::new(Point2D::zero(), Size2D::new(2, 2))),
+            &opaque_2x2_snapshot(),
+        );
+
+        retain_clip_pop(canvas_id, 1);
+        retain_supported_fill(canvas_id);
+        assert_eq!(
+            observe_canvas_for_capture(canvas_id, Some(key), Size2D::new(2, 2)).status,
+            CanvasCaptureObservationStatus::UnsupportedTranscript
+        );
+
+        retain_pixel_readback(
+            canvas_id,
+            Some(Rect::new(Point2D::zero(), Size2D::new(2, 2))),
+            &opaque_2x2_snapshot(),
+        );
+        retain_clip_pop(canvas_id, 1);
+        retain_supported_fill(canvas_id);
+        assert_eq!(
+            observe_canvas_for_capture(canvas_id, Some(key), Size2D::new(2, 2)).status,
+            CanvasCaptureObservationStatus::Ready
+        );
+        assert_eq!(registry().active_clip_depths[&canvas_id], 0);
     }
 }

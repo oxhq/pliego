@@ -20,8 +20,8 @@ use webrender_api::ImageKey;
 use crate::canvas_data::*;
 use crate::retained_canvas::{
     RetainedCanvasUnsupportedReason, associate_image_key, finish_canvas, mark_unsupported,
-    observe_canvas_for_capture, recreate_canvas, register_canvas, retain_fill_rect,
-    retain_pixel_readback,
+    observe_canvas_for_capture, recreate_canvas, register_canvas, retain_clip_pop,
+    retain_clip_push, retain_fill_rect, retain_pixel_readback,
 };
 
 pub struct CanvasPaintThread {
@@ -269,11 +269,7 @@ impl CanvasPaintThread {
             CanvasCommand::ClipPath(path, fill_rule, transform) => {
                 self.canvas(canvas_id)
                     .clip_path(&path, fill_rule, transform);
-                mark_unsupported(
-                    canvas_id,
-                    "clip_path",
-                    RetainedCanvasUnsupportedReason::Clip,
-                );
+                retain_clip_push(canvas_id);
             },
             CanvasCommand::DrawImage(
                 snapshot,
@@ -382,7 +378,10 @@ impl CanvasPaintThread {
             CanvasCommand::UpdateImage(canvas_epoch) => {
                 self.canvas(canvas_id).update_image_rendering(canvas_epoch);
             },
-            CanvasCommand::PopClips(clips) => self.canvas(canvas_id).pop_clips(clips),
+            CanvasCommand::PopClips(clips) => {
+                self.canvas(canvas_id).pop_clips(clips);
+                retain_clip_pop(canvas_id, clips);
+            },
             CanvasCommand::ProcessBatchMessages(messages) => {
                 for message in messages {
                     self.process_command(message, canvas_id);

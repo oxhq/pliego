@@ -49,9 +49,12 @@ The implemented candidate boundary is deliberately narrow:
 - Canvas 2D contexts are accepted only when their paint-thread observation, image key,
   retained transcript, and registry generation can be bound atomically to the consumed
   candidate; bitmap renderer, WebGL/WebGL2, WebGPU, OffscreenCanvas, unsealed unsupported
-  commands, attempts to seal unsupported state with a partial readback, and persistent clip state
-  are rejected. A zero-area Canvas does not establish a retained paint-image binding and therefore
-  also fails closed. Media elements and streams,
+  commands, attempts to seal unsupported state with a partial readback, and retained draws made
+  under an active clip without a later full-surface readback are rejected. A full-surface readback
+  seals exact prior pixels but keeps the clip depth active. Any later retained draw fails closed
+  while that clip remains active; popping it afterward does not repair the rejected draw without
+  another full-surface readback. A zero-area Canvas does not establish a retained paint-image
+  binding and therefore also fails closed. Media elements and streams,
   dedicated workers, worklets, IndexedDB, pending CookieStore requests, ServiceWorker backend
   work or messaging, WebXR, StorageManager, Bluetooth, WebRTC, Web Audio, and notifications are
   rejected rather than settled;

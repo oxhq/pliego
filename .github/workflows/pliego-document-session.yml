@@ -144,6 +144,25 @@ jobs:
             "$PWD/target/debug/pliego" \
             "$RUNNER_TEMP/pliego-controlled-capture"
 
+      - name: Prove unmodified Chart.js through the controlled CLI twice
+        run: |
+          export PATH="$PWD/.venv/bin:$PATH"
+          python ports/pliego/tests/check_chartjs_report.py --self-test
+          xvfb-run python ports/pliego/tests/check_chartjs_report.py \
+            --controlled \
+            "$PWD/target/debug/pliego" \
+            "$RUNNER_TEMP/pliego-controlled-chartjs"
+
+      - name: Upload direct controlled-capture proof
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: pliego-direct-controlled-capture-proof
+          path: |
+            ${{ runner.temp }}/pliego-controlled-capture
+            ${{ runner.temp }}/pliego-controlled-chartjs
+          if-no-files-found: error
+          retention-days: 7
+
       - name: Test the PHP bridge against the production binary
         run: |
           composer --no-interaction --no-plugins --no-scripts --working-dir=sdk/php install --no-progress
