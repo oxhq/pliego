@@ -10,13 +10,14 @@ Chromium, Node.js, or Java with an application.
 | Item | Current public boundary |
 | --- | --- |
 | Stable release | v0.1.1 |
+| Next intended release | v0.2.0 controlled-runtime cutover; unreleased and evidence-gated |
 | Engine protocol | API 1 |
 | Supported input trust | Application-owned HTML and assets |
 | Runtime network | Denied by default; explicit URL roots are opt-in |
 | Native bundles | Linux x86_64, Windows x86_64, macOS x86_64, macOS arm64 |
 | Primary integration | PHP and Laravel packages |
 | Hostile HTML | Unsupported; Pliego is not a security sandbox |
-| API2 | Proposed design work, not a released API |
+| API 2 | Proposed design work, not a released API |
 
 The [support profile](pliego/support-profile.md) is authoritative for current CSS,
 paint, resource, platform, and operational limits.
