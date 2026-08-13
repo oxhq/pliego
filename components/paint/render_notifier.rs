@@ -34,12 +34,13 @@ impl webrender_api::RenderNotifier for RenderNotifier {
     fn new_frame_ready(
         &self,
         document_id: DocumentId,
-        _: FramePublishId,
+        publish_id: FramePublishId,
         frame_ready_params: &FrameReadyParams,
     ) {
         self.paint_proxy.send(PaintMessage::NewWebRenderFrameReady(
             self.painter_id,
             document_id,
+            publish_id.0,
             frame_ready_params.render,
         ));
     }

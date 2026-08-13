@@ -145,12 +145,21 @@ pub enum UserContentManagerAction {
     RemoveUserStyleSheet(UserStyleSheetId),
 }
 
+/// The clock domain which produced a paint-metric timestamp.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum PaintMetricTime {
+    /// An ordinary realtime rendering timestamp.
+    Host(CrossProcessInstant),
+    /// Exact nanoseconds in the controlled document's clock domain.
+    Document(u128),
+}
+
 /// A description of a paint metric that is sent from the Servo renderer to the
 /// constellation.
 pub enum PaintMetricEvent {
-    FirstPaint(CrossProcessInstant, bool /* first_reflow */),
-    FirstContentfulPaint(CrossProcessInstant, bool /* first_reflow */),
-    LargestContentfulPaint(CrossProcessInstant, usize /* area */, Option<ServoUrl>),
+    FirstPaint(PaintMetricTime, bool /* first_reflow */),
+    FirstContentfulPaint(PaintMetricTime, bool /* first_reflow */),
+    LargestContentfulPaint(PaintMetricTime, usize /* area */, Option<ServoUrl>),
 }
 
 impl fmt::Debug for EmbedderToConstellationMessage {

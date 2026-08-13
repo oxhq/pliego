@@ -107,15 +107,16 @@ use devtools_traits::{
 use embedder_traits::resources::{self, Resource};
 use embedder_traits::user_contents::{UserContentManagerId, UserContents};
 use embedder_traits::{
-    AnimationState, DocumentTimeControlAction, DocumentTimeControlCancellationId,
-    DocumentTimeControlCommand, DocumentTimeControlError, DocumentTimeControlObservation,
-    DocumentTimeControlOutcome, DocumentTimeControlRequestId, DocumentTimeControlTarget,
-    EmbedderControlId, EmbedderControlResponse, EmbedderProxy, FocusSequenceNumber,
-    GenericEmbedderProxy, InputEvent, InputEventAndId, InputEventOutcome, JSValue,
-    JavaScriptEvaluationError, JavaScriptEvaluationId, KeyboardEvent, MediaSessionActionType,
-    MediaSessionEvent, MediaSessionPlaybackState, MouseButton, MouseButtonAction, MouseButtonEvent,
-    NewWebViewDetails, PaintHitTestResult, Theme, ViewportDetails, WakeLockDelegate, WakeLockType,
-    WebDriverCommandMsg, WebDriverLoadStatus, WebDriverScriptCommand,
+    AnimationState, DocumentCapturePreconditionId, DocumentPaintPresentationTicketId,
+    DocumentTimeControlAction, DocumentTimeControlCancellationId, DocumentTimeControlCommand,
+    DocumentTimeControlError, DocumentTimeControlObservation, DocumentTimeControlOutcome,
+    DocumentTimeControlRequestId, DocumentTimeControlTarget, EmbedderControlId,
+    EmbedderControlResponse, EmbedderProxy, FocusSequenceNumber, GenericEmbedderProxy, InputEvent,
+    InputEventAndId, InputEventOutcome, JSValue, JavaScriptEvaluationError, JavaScriptEvaluationId,
+    KeyboardEvent, MediaSessionActionType, MediaSessionEvent, MediaSessionPlaybackState,
+    MouseButton, MouseButtonAction, MouseButtonEvent, NewWebViewDetails, PaintHitTestResult, Theme,
+    ViewportDetails, WakeLockDelegate, WakeLockType, WebDriverCommandMsg, WebDriverLoadStatus,
+    WebDriverScriptCommand,
 };
 use euclid::Size2D;
 use euclid::default::Size2D as UntypedSize2D;
@@ -563,17 +564,17 @@ impl PendingDocumentTimeControl {
             self.target.pipelines.first().copied() == Some(source_pipeline_id)
     }
 
-    fn guarded_success_is_definitive(
+    fn committed_success_is_definitive(
         &self,
         result: &Result<DocumentTimeControlObservation, DocumentTimeControlError>,
     ) -> Option<bool> {
-        if !self.completion.is_guarded_advance() {
+        if !self.completion.has_indeterminate_commit() {
             return None;
         }
         result.as_ref().ok().map(|observation| {
             observation.target == self.target &&
                 self.completion
-                    .is_matching_committed_action(observation.action)
+                    .is_matching_committed_observation(observation)
         })
     }
 
@@ -593,8 +594,8 @@ impl PendingDocumentTimeControl {
             let _ = self.response.send(outcome);
         }
         // DriveOneTurn and PrepareCapture have receiver-local semantics for an unobserved
-        // completion. Dropping the sole callback lets the receiver classify the transport fact
-        // without changing the same-build protocol enum.
+        // completion. Guarded advance and capture consume return their exact typed indeterminate
+        // identities above; dropping is reserved for commands without a protocol outcome.
     }
 }
 
@@ -649,14 +650,19 @@ fn take_document_time_controls_for_pipeline(
 
 fn reject_document_time_control_during_shutdown(
     shutting_down: bool,
+    completion: DocumentTimeControlCompletion,
+    target: Option<DocumentTimeControlTarget>,
     response: &GenericCallback<DocumentTimeControlOutcome>,
 ) -> bool {
     if !shutting_down {
         return false;
     }
-    let _ = response.send(DocumentTimeControlOutcome::Rejected(
-        DocumentTimeControlError::ChannelClosed,
-    ));
+    let outcome = target
+        .and_then(|target| completion.unresolved_outcome(target))
+        .unwrap_or(DocumentTimeControlOutcome::Rejected(
+            DocumentTimeControlError::ChannelClosed,
+        ));
+    let _ = response.send(outcome);
     true
 }
 
@@ -668,6 +674,15 @@ enum DocumentTimeControlCompletion {
     GuardedAdvance {
         token_id: embedder_traits::DocumentTimeAdvanceTokenId,
         deadline: TimerDeadlineSnapshot,
+    },
+    CaptureConsume {
+        candidate_id: DocumentCapturePreconditionId,
+        ticket_id: DocumentPaintPresentationTicketId,
+        pipeline_id: PipelineId,
+        script_rendering_epoch: Epoch,
+        surface: embedder_traits::DocumentCaptureSurfaceFingerprint,
+        presentation_generation: u64,
+        publish_generation: u64,
     },
 }
 
@@ -681,24 +696,62 @@ impl DocumentTimeControlCompletion {
             DocumentTimeControlCommand::Observe => Self::Observe,
             DocumentTimeControlCommand::DriveOneTurn => Self::DriveOneTurn,
             DocumentTimeControlCommand::PrepareCapture(_) => Self::PrepareCapture,
+            DocumentTimeControlCommand::ConsumeCapture(request) => Self::CaptureConsume {
+                candidate_id: request.precondition().id(),
+                ticket_id: request.ticket().id(),
+                pipeline_id: request.ticket().pipeline_id(),
+                script_rendering_epoch: request.ticket().script_rendering_epoch(),
+                surface: request.ticket().surface(),
+                presentation_generation: request.ticket().presentation_generation(),
+                publish_generation: request.ticket().publish_generation(),
+            },
         }
     }
 
-    fn is_matching_committed_action(self, action: DocumentTimeControlAction) -> bool {
-        matches!(
-            (self, action),
-            (
-                Self::GuardedAdvance {
-                    deadline: expected,
-                    ..
-                },
-                DocumentTimeControlAction::TimerActivated(observed),
-            ) if expected == observed
-        )
+    fn is_matching_committed_observation(
+        self,
+        observation: &DocumentTimeControlObservation,
+    ) -> bool {
+        match self {
+            Self::GuardedAdvance {
+                deadline: expected, ..
+            } => matches!(
+                observation.action,
+                DocumentTimeControlAction::TimerActivated(observed) if expected == observed
+            ),
+            Self::CaptureConsume {
+                candidate_id,
+                ticket_id,
+                pipeline_id,
+                script_rendering_epoch,
+                surface,
+                presentation_generation,
+                publish_generation,
+            } => {
+                observation.action == DocumentTimeControlAction::CaptureConsumed &&
+                    observation.advance_token.is_none() &&
+                    observation.capture_preparation.is_none() &&
+                    observation.capture_commit.as_ref().is_some_and(|commit| {
+                        commit.candidate_id() == candidate_id &&
+                            commit.ticket_id() == ticket_id &&
+                            commit.target() == &observation.target &&
+                            commit.pipeline_id() == pipeline_id &&
+                            commit.script_rendering_epoch() == script_rendering_epoch &&
+                            commit.surface() == surface &&
+                            commit.presentation_generation() == presentation_generation &&
+                            commit.publish_generation() == publish_generation &&
+                            commit.layout_paint_epoch() == script_rendering_epoch
+                    })
+            },
+            Self::Observe | Self::DriveOneTurn | Self::PrepareCapture => false,
+        }
     }
 
-    fn is_guarded_advance(self) -> bool {
-        matches!(self, Self::GuardedAdvance { .. })
+    fn has_indeterminate_commit(self) -> bool {
+        matches!(
+            self,
+            Self::GuardedAdvance { .. } | Self::CaptureConsume { .. }
+        )
     }
 
     fn unresolved_outcome(
@@ -718,6 +771,17 @@ impl DocumentTimeControlCompletion {
                     deadline,
                 })
             },
+            Self::CaptureConsume {
+                candidate_id,
+                ticket_id,
+                ..
+            } => Some(
+                DocumentTimeControlOutcome::CaptureConsumeOutcomeIndeterminate {
+                    candidate_id,
+                    ticket_id,
+                    target: Box::new(target),
+                },
+            ),
         }
     }
 }
@@ -743,11 +807,13 @@ mod controlled_document_time_tests {
     use std::time::Duration;
 
     use embedder_traits::{
-        DocumentProducerStability, DocumentTimeAdvanceToken, DocumentTimeAdvanceTokenId,
-        DocumentTimeControlCancellationId, DocumentTimeControlCommand, DocumentTimeControlError,
-        DocumentTimeControlObservation, DocumentTimeControlOutcome, DocumentTimeControlRequestId,
-        DocumentTimeControlTarget, DocumentTimeProducerObservation,
+        DocumentCaptureCommit, DocumentCapturePreconditionId, DocumentCaptureSurfaceFingerprint,
+        DocumentPaintPresentationTicketId, DocumentProducerStability, DocumentTimeAdvanceToken,
+        DocumentTimeAdvanceTokenId, DocumentTimeControlCancellationId, DocumentTimeControlCommand,
+        DocumentTimeControlError, DocumentTimeControlObservation, DocumentTimeControlOutcome,
+        DocumentTimeControlRequestId, DocumentTimeControlTarget, DocumentTimeProducerObservation,
     };
+    use euclid::{Box2D, Point2D, Size2D};
     use rustc_hash::FxHashMap;
     use servo_base::Epoch;
     use servo_base::generic_channel::GenericCallback;
@@ -806,6 +872,27 @@ mod controlled_document_time_tests {
         }
     }
 
+    fn capture_completion() -> DocumentTimeControlCompletion {
+        DocumentTimeControlCompletion::CaptureConsume {
+            candidate_id: DocumentCapturePreconditionId::new(17),
+            ticket_id: DocumentPaintPresentationTicketId::new(19),
+            pipeline_id: TEST_PIPELINE_ID,
+            script_rendering_epoch: Epoch(23),
+            surface: capture_surface(),
+            presentation_generation: 29,
+            publish_generation: 31,
+        }
+    }
+
+    fn capture_surface() -> DocumentCaptureSurfaceFingerprint {
+        DocumentCaptureSurfaceFingerprint::new(
+            Size2D::new(800, 600),
+            Box2D::new(Point2D::new(0, 0), Point2D::new(800, 600)),
+            1.0,
+        )
+        .unwrap()
+    }
+
     fn committed_observation(expected: TimerDeadlineSnapshot) -> DocumentTimeControlObservation {
         let fence = DocumentProducerFence::default();
         DocumentTimeControlObservation {
@@ -827,7 +914,26 @@ mod controlled_document_time_tests {
             documents: Vec::new(),
             execution: None,
             capture_preparation: None,
+            capture_commit: None,
         }
+    }
+
+    fn capture_committed_observation() -> DocumentTimeControlObservation {
+        let mut observation = committed_observation(deadline());
+        observation.action = DocumentTimeControlAction::CaptureConsumed;
+        observation.capture_commit = Some(Box::new(DocumentCaptureCommit::new_internal(
+            DocumentCapturePreconditionId::new(17),
+            DocumentPaintPresentationTicketId::new(19),
+            target(),
+            TEST_PIPELINE_ID,
+            Epoch(23),
+            capture_surface(),
+            29,
+            31,
+            Epoch(23),
+            "{\"paint_epoch\":23}".to_owned(),
+        )));
+        observation
     }
 
     #[test]
@@ -839,19 +945,181 @@ mod controlled_document_time_tests {
             deadline: DocumentTime::from_nanos(11),
         };
 
-        assert!(
-            completion
-                .is_matching_committed_action(DocumentTimeControlAction::TimerActivated(expected))
+        assert!(completion.is_matching_committed_observation(&committed_observation(expected)));
+        assert!(!completion.is_matching_committed_observation(&committed_observation(changed)));
+        let mut observed = committed_observation(expected);
+        observed.action = DocumentTimeControlAction::Observed;
+        assert!(!completion.is_matching_committed_observation(&observed));
+        assert!(completion.has_indeterminate_commit());
+        assert!(!DocumentTimeControlCompletion::Observe.has_indeterminate_commit());
+        assert!(!DocumentTimeControlCompletion::DriveOneTurn.has_indeterminate_commit());
+        assert!(!DocumentTimeControlCompletion::PrepareCapture.has_indeterminate_commit());
+    }
+
+    #[test]
+    fn only_exact_capture_candidate_ticket_target_and_action_are_committed() {
+        let completion = capture_completion();
+        assert!(completion.is_matching_committed_observation(&capture_committed_observation()));
+        assert!(completion.has_indeterminate_commit());
+
+        let mut mutations = Vec::new();
+        let mut missing_commit = capture_committed_observation();
+        missing_commit.capture_commit = None;
+        mutations.push(missing_commit);
+        let mut wrong_action = capture_committed_observation();
+        wrong_action.action = DocumentTimeControlAction::Observed;
+        mutations.push(wrong_action);
+        let mut wrong_target = capture_committed_observation();
+        wrong_target.target.fully_active_pipelines.clear();
+        mutations.push(wrong_target);
+        let mut wrong_candidate = capture_committed_observation();
+        let old = wrong_candidate.capture_commit.take().unwrap();
+        wrong_candidate.capture_commit = Some(Box::new(DocumentCaptureCommit::new_internal(
+            DocumentCapturePreconditionId::new(old.candidate_id().get() + 1),
+            old.ticket_id(),
+            old.target().clone(),
+            old.pipeline_id(),
+            old.script_rendering_epoch(),
+            old.surface(),
+            old.presentation_generation(),
+            old.publish_generation(),
+            old.layout_paint_epoch(),
+            old.serialized_layout_snapshot().to_owned(),
+        )));
+        mutations.push(wrong_candidate);
+        let mut wrong_ticket = capture_committed_observation();
+        let old = wrong_ticket.capture_commit.take().unwrap();
+        wrong_ticket.capture_commit = Some(Box::new(DocumentCaptureCommit::new_internal(
+            old.candidate_id(),
+            DocumentPaintPresentationTicketId::new(old.ticket_id().get() + 1),
+            old.target().clone(),
+            old.pipeline_id(),
+            old.script_rendering_epoch(),
+            old.surface(),
+            old.presentation_generation(),
+            old.publish_generation(),
+            old.layout_paint_epoch(),
+            old.serialized_layout_snapshot().to_owned(),
+        )));
+        mutations.push(wrong_ticket);
+
+        for observation in mutations {
+            assert!(!completion.is_matching_committed_observation(&observation));
+        }
+    }
+
+    #[test]
+    fn every_capture_commit_correlation_dimension_is_required() {
+        #[derive(Clone, Copy, Debug)]
+        enum Mutation {
+            Candidate,
+            Ticket,
+            Target,
+            Pipeline,
+            ScriptEpoch,
+            Surface,
+            PresentationGeneration,
+            PublishGeneration,
+            LayoutEpoch,
+        }
+
+        let other_pipeline = PipelineId {
+            namespace_id: TEST_PIPELINE_ID.namespace_id,
+            index: Index::new(404).unwrap(),
+        };
+        for mutation in [
+            Mutation::Candidate,
+            Mutation::Ticket,
+            Mutation::Target,
+            Mutation::Pipeline,
+            Mutation::ScriptEpoch,
+            Mutation::Surface,
+            Mutation::PresentationGeneration,
+            Mutation::PublishGeneration,
+            Mutation::LayoutEpoch,
+        ] {
+            let mut observation = capture_committed_observation();
+            let old = observation.capture_commit.take().unwrap();
+            let mut candidate_id = old.candidate_id();
+            let mut ticket_id = old.ticket_id();
+            let mut commit_target = old.target().clone();
+            let mut pipeline_id = old.pipeline_id();
+            let mut script_epoch = old.script_rendering_epoch();
+            let mut surface = old.surface();
+            let mut presentation_generation = old.presentation_generation();
+            let mut publish_generation = old.publish_generation();
+            let mut layout_epoch = old.layout_paint_epoch();
+            match mutation {
+                Mutation::Candidate => {
+                    candidate_id = DocumentCapturePreconditionId::new(candidate_id.get() + 1)
+                },
+                Mutation::Ticket => {
+                    ticket_id = DocumentPaintPresentationTicketId::new(ticket_id.get() + 1)
+                },
+                Mutation::Target => commit_target.fully_active_pipelines.clear(),
+                Mutation::Pipeline => pipeline_id = other_pipeline,
+                Mutation::ScriptEpoch => script_epoch = Epoch(script_epoch.0 + 1),
+                Mutation::Surface => {
+                    surface = DocumentCaptureSurfaceFingerprint::new(
+                        Size2D::new(801, 600),
+                        Box2D::new(Point2D::new(0, 0), Point2D::new(801, 600)),
+                        1.0,
+                    )
+                    .unwrap()
+                },
+                Mutation::PresentationGeneration => presentation_generation += 1,
+                Mutation::PublishGeneration => publish_generation += 1,
+                Mutation::LayoutEpoch => layout_epoch = Epoch(layout_epoch.0 + 1),
+            }
+            observation.capture_commit = Some(Box::new(DocumentCaptureCommit::new_internal(
+                candidate_id,
+                ticket_id,
+                commit_target,
+                pipeline_id,
+                script_epoch,
+                surface,
+                presentation_generation,
+                publish_generation,
+                layout_epoch,
+                old.serialized_layout_snapshot().to_owned(),
+            )));
+            assert!(
+                !capture_completion().is_matching_committed_observation(&observation),
+                "commit mutation {mutation:?} must be outcome-indeterminate"
+            );
+        }
+    }
+
+    #[test]
+    fn nonauthoritative_capture_success_is_indeterminate_and_not_forwarded_as_completed() {
+        let (response, receiver) = GenericCallback::<DocumentTimeControlOutcome>::new_blocking()
+            .expect("test control callback channel should be created");
+        let pending = PendingDocumentTimeControl {
+            target: target(),
+            cancellation_id: cancellation_id(5),
+            completion: capture_completion(),
+            response,
+        };
+        let mut malformed_success = capture_committed_observation();
+        malformed_success.capture_commit = None;
+        assert_eq!(
+            pending.committed_success_is_definitive(&Ok(malformed_success)),
+            Some(false)
         );
-        assert!(
-            !completion
-                .is_matching_committed_action(DocumentTimeControlAction::TimerActivated(changed))
-        );
-        assert!(!completion.is_matching_committed_action(DocumentTimeControlAction::Observed));
-        assert!(completion.is_guarded_advance());
-        assert!(!DocumentTimeControlCompletion::Observe.is_guarded_advance());
-        assert!(!DocumentTimeControlCompletion::DriveOneTurn.is_guarded_advance());
-        assert!(!DocumentTimeControlCompletion::PrepareCapture.is_guarded_advance());
+
+        pending.send_unresolved_outcome();
+        assert!(matches!(
+            receiver
+                .recv()
+                .expect("nonauthoritative consume should resolve callback"),
+            DocumentTimeControlOutcome::CaptureConsumeOutcomeIndeterminate {
+                candidate_id,
+                ticket_id,
+                target: observed_target,
+            } if candidate_id == DocumentCapturePreconditionId::new(17) &&
+                ticket_id == DocumentPaintPresentationTicketId::new(19) &&
+                *observed_target == target()
+        ));
     }
 
     #[test]
@@ -873,6 +1141,18 @@ mod controlled_document_time_tests {
         assert!(matches!(
             guarded_completion(deadline()).unresolved_outcome(target()),
             Some(DocumentTimeControlOutcome::AdvanceOutcomeIndeterminate { .. })
+        ));
+        assert!(matches!(
+            capture_completion().unresolved_outcome(target()),
+            Some(
+                DocumentTimeControlOutcome::CaptureConsumeOutcomeIndeterminate {
+                    candidate_id,
+                    ticket_id,
+                    target: observed_target,
+                }
+            ) if candidate_id == DocumentCapturePreconditionId::new(17) &&
+                ticket_id == DocumentPaintPresentationTicketId::new(19) &&
+                *observed_target == target()
         ));
     }
 
@@ -923,7 +1203,7 @@ mod controlled_document_time_tests {
             .remove(&request_id)
             .expect("test guarded request should still be pending");
         let result = Ok(committed_observation(expected));
-        assert_eq!(pending.guarded_success_is_definitive(&result), Some(true));
+        assert_eq!(pending.committed_success_is_definitive(&result), Some(true));
         pending.send_definitive(result);
         for (_, pending) in std::mem::take(&mut pending_controls) {
             pending.send_unresolved_outcome();
@@ -991,7 +1271,7 @@ mod controlled_document_time_tests {
         )
         .expect("the exact response source should retain authority");
         let result = Ok(committed_observation(expected));
-        assert_eq!(pending.guarded_success_is_definitive(&result), Some(true));
+        assert_eq!(pending.committed_success_is_definitive(&result), Some(true));
         pending.send_definitive(result);
         assert!(matches!(
             receiver.recv().expect("exact response should resolve callback"),
@@ -1030,7 +1310,7 @@ mod controlled_document_time_tests {
             };
             assert!(pending.accepts_response_source(TEST_WEBVIEW_ID, TEST_PIPELINE_ID));
             assert_eq!(
-                pending.guarded_success_is_definitive(&Ok(observation)),
+                pending.committed_success_is_definitive(&Ok(observation)),
                 Some(false)
             );
             pending.send_unresolved_outcome();
@@ -1203,7 +1483,10 @@ mod controlled_document_time_tests {
             .expect("test control callback channel should be created");
 
         assert!(reject_document_time_control_during_shutdown(
-            true, &response
+            true,
+            DocumentTimeControlCompletion::Observe,
+            None,
+            &response,
         ));
         assert_eq!(
             receiver
@@ -1211,6 +1494,31 @@ mod controlled_document_time_tests {
                 .expect("unrouted shutdown rejection should resolve callback"),
             DocumentTimeControlOutcome::Rejected(DocumentTimeControlError::ChannelClosed)
         );
+    }
+
+    #[test]
+    fn shutdown_preserves_consume_as_identity_bound_indeterminate_when_target_is_known() {
+        let (response, receiver) = GenericCallback::<DocumentTimeControlOutcome>::new_blocking()
+            .expect("test control callback channel should be created");
+
+        assert!(reject_document_time_control_during_shutdown(
+            true,
+            capture_completion(),
+            Some(target()),
+            &response,
+        ));
+        assert!(matches!(
+            receiver
+                .recv()
+                .expect("shutdown consume should resolve callback"),
+            DocumentTimeControlOutcome::CaptureConsumeOutcomeIndeterminate {
+                candidate_id,
+                ticket_id,
+                target: observed_target,
+            } if candidate_id == DocumentCapturePreconditionId::new(17) &&
+                ticket_id == DocumentPaintPresentationTicketId::new(19) &&
+                *observed_target == target()
+        ));
     }
 
     #[test]
@@ -2612,7 +2920,13 @@ where
         command: DocumentTimeControlCommand,
         response: GenericCallback<DocumentTimeControlOutcome>,
     ) {
-        if reject_document_time_control_during_shutdown(self.shutting_down, &response) {
+        let completion = DocumentTimeControlCompletion::for_command(&command);
+        if reject_document_time_control_during_shutdown(
+            self.shutting_down,
+            completion,
+            self.controlled_document_time_target(webview_id).ok(),
+            &response,
+        ) {
             return;
         }
         if self
@@ -2637,7 +2951,6 @@ where
             let _ = response.send(DocumentTimeControlOutcome::Rejected(error));
             return;
         }
-        let completion = DocumentTimeControlCompletion::for_command(&command);
         let Some(next_request_id) = self.next_document_time_control_request_id.checked_add(1)
         else {
             let _ = response.send(DocumentTimeControlOutcome::Rejected(
@@ -4451,15 +4764,16 @@ where
             return;
         };
 
-        if let Some(definitive) = pending.guarded_success_is_definitive(&result) {
+        if let Some(definitive) = pending.committed_success_is_definitive(&result) {
             if definitive {
-                // ScriptThread crossed the clock linearization point before replying, so a later
-                // navigation must not retroactively turn this committed success into an error.
+                // ScriptThread crossed the command's single-use linearization point before
+                // replying, so a later navigation cannot retroactively turn this commit into an
+                // error.
                 pending.send_definitive(result);
             } else {
-                // A successful guarded envelope that does not carry the exact target and action
-                // cannot prove whether the clock mutation happened.
-                warn!("Guarded document-time response {request_id:?} was not authoritative");
+                // A successful envelope without the exact target/action and guarded token or
+                // candidate/ticket correlation cannot prove whether the mutation happened.
+                warn!("Single-use document-time response {request_id:?} was not authoritative");
                 pending.send_unresolved_outcome();
             }
             return;

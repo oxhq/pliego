@@ -41,17 +41,17 @@ use devtools_traits::{
 };
 use embedder_traits::user_contents::{UserContentManagerId, UserContents, UserScript};
 use embedder_traits::{
-    DocumentCaptureDocumentEpoch, DocumentCapturePrecondition, DocumentCapturePreconditionId,
-    DocumentCapturePreparation, DocumentCaptureQuietFence, DocumentCaptureSurfaceFingerprint,
-    DocumentProducerStability, DocumentSettlementSource, DocumentSettlementSourceDisposition,
-    DocumentSettlementSourceEpoch, DocumentSettlementSourceSnapshot, DocumentTimeAdvanceToken,
-    DocumentTimeAdvanceTokenId, DocumentTimeControlAction, DocumentTimeControlCommand,
-    DocumentTimeControlError, DocumentTimeControlObservation, DocumentTimeControlRequestId,
-    DocumentTimeControlTarget, DocumentTimeDocumentObservation, DocumentTimeProducerObservation,
-    DocumentTimeReadinessBlocker, DocumentTrackedSourceKind, EmbedderControlId,
-    EmbedderControlResponse, EmbedderMsg, FocusSequenceNumber, InputEventOutcome,
-    JavaScriptEvaluationError, JavaScriptEvaluationId, MediaSessionActionType,
-    ScriptToEmbedderChan, Theme, ViewportDetails, WebDriverScriptCommand,
+    DocumentCaptureCommit, DocumentCaptureConsumeRequest, DocumentCaptureDocumentEpoch,
+    DocumentCapturePrecondition, DocumentCapturePreconditionId, DocumentCapturePreparation,
+    DocumentCaptureQuietFence, DocumentCaptureSurfaceFingerprint, DocumentProducerStability,
+    DocumentSettlementSource, DocumentSettlementSourceDisposition, DocumentSettlementSourceEpoch,
+    DocumentSettlementSourceSnapshot, DocumentTimeAdvanceToken, DocumentTimeAdvanceTokenId,
+    DocumentTimeControlAction, DocumentTimeControlCommand, DocumentTimeControlError,
+    DocumentTimeControlObservation, DocumentTimeControlRequestId, DocumentTimeControlTarget,
+    DocumentTimeDocumentObservation, DocumentTimeProducerObservation, DocumentTimeReadinessBlocker,
+    DocumentTrackedSourceKind, EmbedderControlId, EmbedderControlResponse, EmbedderMsg,
+    FocusSequenceNumber, InputEventOutcome, JavaScriptEvaluationError, JavaScriptEvaluationId,
+    MediaSessionActionType, ScriptToEmbedderChan, Theme, ViewportDetails, WebDriverScriptCommand,
     capture_blockers_internal, capture_producers_internal,
 };
 use encoding_rs::Encoding;
@@ -103,7 +103,7 @@ use servo_canvas_traits::webgl::WebGLPipeline;
 use servo_config::opts::{self, DiagnosticsLoggingOption};
 use servo_config::{pref, prefs};
 use servo_constellation_traits::{
-    LoadData, LoadOrigin, NavigationHistoryBehavior, RemoteFocusOperation,
+    LoadData, LoadOrigin, NavigationHistoryBehavior, PaintMetricTime, RemoteFocusOperation,
     ScreenshotReadinessResponse, ScriptToConstellationChan, ScriptToConstellationMessage,
     ScrollStateUpdate, StructuredSerializedData, TargetSnapshotParams, TraversalDirection,
     WindowSizeType,
@@ -308,6 +308,23 @@ impl ControlledCaptureQuietState {
         // again; `source_epoch_overflowed` remains sticky for this ScriptThread.
         self.quiet_fence.invalidate_revision();
     }
+
+    fn retained_source_epoch(
+        &self,
+    ) -> Result<DocumentSettlementSourceEpoch, DocumentTimeControlError> {
+        if self.source_epoch_overflowed {
+            return Err(DocumentTimeControlError::CaptureSourceEpochOverflow);
+        }
+        if !self.source_epoch_initialized {
+            return Err(DocumentTimeControlError::CaptureStateChanged);
+        }
+        Ok(DocumentSettlementSourceEpoch::new(self.source_epoch))
+    }
+
+    fn exact_revision_remains_qualified(&self, revision: &ControlledCaptureRevision) -> bool {
+        self.last_sources.as_ref() == Some(&revision.sources) &&
+            self.quiet_fence.is_qualified(revision)
+    }
 }
 
 fn capture_revision_is_mechanically_qualified(revision: &ControlledCaptureRevision) -> bool {
@@ -437,11 +454,33 @@ impl ControlledDocumentTimeState {
         Ok(precondition)
     }
 
-    #[cfg(test)]
-    fn consume_capture_precondition(&mut self, observed: &DocumentCapturePrecondition) -> bool {
-        self.issued_capture_precondition
-            .take()
-            .is_some_and(|expected| expected == *observed)
+    fn validate_capture_precondition(
+        &mut self,
+        observed: &DocumentCapturePrecondition,
+    ) -> Result<(), DocumentTimeControlError> {
+        let Some(expected) = self.issued_capture_precondition.as_ref() else {
+            return Err(DocumentTimeControlError::CapturePreconditionUnavailable {
+                observed: observed.id(),
+            });
+        };
+        if expected != observed {
+            let expected_id = expected.id();
+            self.invalidate_capture_precondition();
+            return Err(DocumentTimeControlError::StaleCapturePrecondition {
+                expected: expected_id,
+                observed: observed.id(),
+            });
+        }
+        Ok(())
+    }
+
+    fn consume_capture_precondition(
+        &mut self,
+        observed: &DocumentCapturePrecondition,
+    ) -> Result<(), DocumentTimeControlError> {
+        self.validate_capture_precondition(observed)?;
+        self.issued_capture_precondition.take();
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -629,16 +668,53 @@ fn begin_controlled_document_time_command(
     state: &mut ControlledDocumentTimeState,
     command: &DocumentTimeControlCommand,
 ) {
-    // Commands always supersede issued capture authority. Conditional advance consumes its
-    // already-issued advance token. PrepareCapture may re-emit that token only after exact current
-    // state validation; Observe and DriveOneTurn supersede it immediately.
-    state.invalidate_capture_precondition();
+    // Every command except the single-use consumer supersedes issued capture authority.
+    // ConsumeCapture must retain the candidate until its own final producer-fence linearization
+    // point; every failure in that path invalidates it explicitly.
+    if !matches!(command, DocumentTimeControlCommand::ConsumeCapture(_)) {
+        state.invalidate_capture_precondition();
+    }
     if !matches!(
         command,
         DocumentTimeControlCommand::AdvanceTo(_) | DocumentTimeControlCommand::PrepareCapture(_)
     ) {
         state.clear_advance_token();
     }
+}
+
+fn validate_capture_consume_request(
+    request: &DocumentCaptureConsumeRequest,
+    target: &DocumentTimeControlTarget,
+) -> Result<(PipelineId, Epoch), DocumentTimeControlError> {
+    let precondition = request.precondition();
+    let ticket = request.ticket();
+    let [document] = precondition.documents() else {
+        return Err(DocumentTimeControlError::CapturePresentationMismatch);
+    };
+    if precondition.target() != target ||
+        ticket.target() != target ||
+        ticket.candidate_id() != precondition.id() ||
+        ticket.pipeline_id() != document.pipeline_id ||
+        ticket.script_rendering_epoch() != document.script_rendering_epoch ||
+        ticket.surface() != precondition.surface() ||
+        target.fully_active_pipelines.as_slice() != [document.pipeline_id] ||
+        !target.pipelines.contains(&document.pipeline_id) ||
+        precondition.surface().validate().is_err()
+    {
+        return Err(DocumentTimeControlError::CapturePresentationMismatch);
+    }
+    Ok((document.pipeline_id, document.script_rendering_epoch))
+}
+
+fn validate_capture_layout_epoch(
+    expected: Epoch,
+    observed: u32,
+) -> Result<Epoch, DocumentTimeControlError> {
+    let observed = Epoch(observed);
+    if observed != expected {
+        return Err(DocumentTimeControlError::CaptureLayoutEpochMismatch { expected, observed });
+    }
+    Ok(observed)
 }
 
 fn controlled_advance_execution_guard(
@@ -2520,6 +2596,7 @@ impl ScriptThread {
             documents,
             execution,
             capture_preparation,
+            capture_commit: None,
         })
     }
 
@@ -2591,6 +2668,233 @@ impl ScriptThread {
         }
 
         Ok(documents)
+    }
+
+    /// Reobserve every ScriptThread-owned candidate dimension without advancing any control fence.
+    fn capture_consume_observation(
+        &self,
+        cx: &mut js::context::JSContext,
+        target: &DocumentTimeControlTarget,
+        candidate: &DocumentCapturePrecondition,
+        input_batch_saturated: bool,
+    ) -> Result<DocumentCapturePrecondition, DocumentTimeControlError> {
+        self.validate_controlled_document_time_target(target)?;
+        let execution = self
+            .document_execution_ledger
+            .as_ref()
+            .map(DocumentExecutionLedger::observation);
+        let checkpoint = self.document_producer_checkpoint();
+        let producer_snapshot = self.document_producer_fence.snapshot();
+        let pending_events = u64::try_from(self.controlled_pending_events.borrow().len())
+            .map_err(|_| DocumentTimeControlError::QueueLengthOverflow)?;
+        let documents = self.controlled_document_observations(cx, target)?;
+        if let Some(surface) = self.document_clock.unsupported_surface() {
+            return Err(DocumentTimeControlError::UnsupportedSurface(surface));
+        }
+        let now = controlled_document_time_now(&self.document_clock)?;
+        let next_deadline = self
+            .finite_timer_deadline()
+            .map_err(DocumentTimeControlError::Timer)?;
+        let mut settlement_sources = self.controlled_document_settlement_sources(target, now)?;
+        settlement_sources.sort_unstable();
+        let input_revision = self
+            .controlled_document_time_state
+            .borrow()
+            .input_revision()?;
+        let revision = ControlledCaptureRevision {
+            target: target.clone(),
+            clock_id: self.document_clock.id(),
+            now,
+            input_revision,
+            pending_events,
+            input_batch_saturated,
+            producer_fence_id: self.document_producer_fence.id(),
+            producer_snapshot,
+            documents: documents.clone(),
+            execution,
+            next_deadline,
+            sources: settlement_sources.clone(),
+        };
+        let (source_epoch, quiet_checkpoints_qualified) = {
+            let state = self.controlled_document_time_state.borrow();
+            (
+                state.capture_quiet_state.retained_source_epoch()?,
+                state
+                    .capture_quiet_state
+                    .exact_revision_remains_qualified(&revision),
+            )
+        };
+        let producers = DocumentTimeProducerObservation {
+            fence_id: self.document_producer_fence.id(),
+            checkpoint,
+            snapshot: producer_snapshot,
+            stability: if quiet_checkpoints_qualified {
+                DocumentProducerStability::StableEmpty
+            } else {
+                DocumentProducerStability::UnchangedCheckpoint
+            },
+        };
+        let document_epochs = documents
+            .into_iter()
+            .map(|document| {
+                Ok(DocumentCaptureDocumentEpoch {
+                    pipeline_id: document.pipeline_id,
+                    script_rendering_epoch: document
+                        .script_rendering_epoch
+                        .ok_or(DocumentTimeControlError::CaptureStateChanged)?,
+                    readiness_blockers: document.readiness_blockers,
+                })
+            })
+            .collect::<Result<Vec<_>, DocumentTimeControlError>>()?;
+        let execution = execution.ok_or(DocumentTimeControlError::CaptureStateChanged)?;
+        Ok(DocumentCapturePrecondition::new_internal(
+            candidate.id(),
+            target.clone(),
+            self.document_clock.id(),
+            now,
+            input_revision,
+            pending_events,
+            input_batch_saturated,
+            producers,
+            execution,
+            next_deadline,
+            DocumentSettlementSourceSnapshot::new_internal(source_epoch, settlement_sources),
+            document_epochs,
+            candidate.surface(),
+        ))
+    }
+
+    /// Complete one of the two consume passes at a small producer/input/target linearization check.
+    ///
+    /// The bounded channel drain happens before acquiring the producer-fence mutex. Layout, DOM
+    /// readiness, source collection, and channel callbacks therefore never run under that mutex.
+    fn validate_capture_consume_pass(
+        &self,
+        cx: &mut js::context::JSContext,
+        target: &DocumentTimeControlTarget,
+        candidate: &DocumentCapturePrecondition,
+        prior_input_batch_saturated: bool,
+        consume_candidate: bool,
+    ) -> Result<(), DocumentTimeControlError> {
+        let observed =
+            self.capture_consume_observation(cx, target, candidate, prior_input_batch_saturated)?;
+        if observed != *candidate {
+            return Err(DocumentTimeControlError::CaptureStateChanged);
+        }
+
+        // This is the pass's final bounded ready-input drain. It may invoke the wake callback, so
+        // it must precede the producer-fence lock below.
+        let input_batch_saturated =
+            prior_input_batch_saturated | self.drain_ready_controlled_inputs();
+        let expected_producers = observed.producers();
+        let producer_fence = self.document_producer_fence.clone();
+        let guarded = producer_fence.with_matching_snapshot(
+            expected_producers.snapshot,
+            || -> Result<(), DocumentTimeControlError> {
+                self.validate_controlled_document_time_target(target)?;
+                let pending_events = u64::try_from(self.controlled_pending_events.borrow().len())
+                    .map_err(|_| DocumentTimeControlError::QueueLengthOverflow)?;
+                let mut state = self.controlled_document_time_state.borrow_mut();
+                let input_revision = state.input_revision()?;
+                if producer_fence.id() != expected_producers.fence_id ||
+                    self.document_producer_checkpoint() != expected_producers.checkpoint ||
+                    input_revision != observed.input_revision() ||
+                    pending_events != observed.pending_events() ||
+                    input_batch_saturated != observed.input_batch_saturated()
+                {
+                    return Err(DocumentTimeControlError::CaptureStateChanged);
+                }
+                if consume_candidate {
+                    state.consume_capture_precondition(candidate)
+                } else {
+                    state.validate_capture_precondition(candidate)
+                }
+            },
+        );
+        match guarded {
+            Ok(result) => result,
+            Err(_) => Err(DocumentTimeControlError::CaptureStateChanged),
+        }
+    }
+
+    fn execute_capture_consume(
+        &self,
+        cx: &mut js::context::JSContext,
+        target: &DocumentTimeControlTarget,
+        request: &DocumentCaptureConsumeRequest,
+        prior_input_batch_saturated: bool,
+    ) -> Result<DocumentTimeControlObservation, DocumentTimeControlError> {
+        let result = (|| {
+            self.controlled_document_time_state
+                .borrow_mut()
+                .validate_capture_precondition(request.precondition())?;
+            let (pipeline_id, script_rendering_epoch) =
+                validate_capture_consume_request(request, target)?;
+
+            // Pass one proves the complete candidate immediately before reading Layout's cache.
+            self.validate_capture_consume_pass(
+                cx,
+                target,
+                request.precondition(),
+                prior_input_batch_saturated,
+                false,
+            )?;
+            let (serialized_layout_snapshot, layout_paint_epoch) = self
+                .build_cached_layout_debug_snapshot(pipeline_id)
+                .ok_or(DocumentTimeControlError::CaptureLayoutUnavailable)?;
+            let layout_paint_epoch =
+                validate_capture_layout_epoch(script_rendering_epoch, layout_paint_epoch)?;
+
+            // Pass two repeats every fact after snapshot construction and takes the candidate only
+            // inside the final producer-fence match. That take is the consume linearization point.
+            self.validate_capture_consume_pass(cx, target, request.precondition(), false, true)?;
+
+            let candidate = request.precondition();
+            let ticket = request.ticket();
+            let documents = candidate
+                .documents()
+                .iter()
+                .map(|document| DocumentTimeDocumentObservation {
+                    pipeline_id: document.pipeline_id,
+                    script_rendering_epoch: Some(document.script_rendering_epoch),
+                    readiness_blockers: document.readiness_blockers.clone(),
+                })
+                .collect();
+            let commit = DocumentCaptureCommit::new_internal(
+                candidate.id(),
+                ticket.id(),
+                target.clone(),
+                pipeline_id,
+                script_rendering_epoch,
+                candidate.surface(),
+                ticket.presentation_generation(),
+                ticket.publish_generation(),
+                layout_paint_epoch,
+                serialized_layout_snapshot,
+            );
+            Ok(DocumentTimeControlObservation {
+                target: target.clone(),
+                now: candidate.now(),
+                next_deadline: candidate.next_deadline(),
+                advance_token: None,
+                pending_events: candidate.pending_events(),
+                input_batch_saturated: candidate.input_batch_saturated(),
+                action: DocumentTimeControlAction::CaptureConsumed,
+                producers: candidate.producers(),
+                documents,
+                execution: Some(candidate.execution()),
+                capture_preparation: None,
+                capture_commit: Some(Box::new(commit)),
+            })
+        })();
+        if result.is_err() {
+            // Every failed match is terminal for this retained candidate. In particular, a caller
+            // cannot repair a stale ticket or state mismatch and replay the same evidence.
+            self.controlled_document_time_state
+                .borrow_mut()
+                .invalidate_capture_precondition();
+        }
+        result
     }
 
     /// Conditionally advance one exact timer and return a committed observation.
@@ -2728,6 +3032,7 @@ impl ScriptThread {
                 .as_ref()
                 .map(DocumentExecutionLedger::observation),
             capture_preparation: None,
+            capture_commit: None,
         })
     }
 
@@ -2771,9 +3076,9 @@ impl ScriptThread {
         request: ControlledDocumentTimeRequest,
         prior_input_batch_saturated: bool,
     ) -> bool {
-        // Every control command invalidates any previously issued single-use capture authority.
-        // This intentionally does not erase quiet-checkpoint history: two successive no-op drives
-        // must be able to qualify the same normalized revision.
+        // ConsumeCapture retains its exact candidate through two-pass validation; every other
+        // control command supersedes it. Quiet-checkpoint history remains independent so two
+        // successive no-op drives can qualify the same normalized revision.
         let retained_advance_token = {
             let mut state = self.controlled_document_time_state.borrow_mut();
             begin_controlled_document_time_command(&mut state, &request.command);
@@ -2796,7 +3101,8 @@ impl ScriptThread {
             },
             DocumentTimeControlCommand::Observe |
             DocumentTimeControlCommand::DriveOneTurn |
-            DocumentTimeControlCommand::PrepareCapture(_) => {},
+            DocumentTimeControlCommand::PrepareCapture(_) |
+            DocumentTimeControlCommand::ConsumeCapture(_) => {},
         }
 
         self.task_queue.start_event_loop_iteration();
@@ -2808,11 +3114,26 @@ impl ScriptThread {
             self.validate_controlled_document_time_authority(&request.target)
         };
         if let Err(error) = prevalidation {
+            if matches!(
+                &request.command,
+                DocumentTimeControlCommand::ConsumeCapture(_)
+            ) {
+                // ConsumeCapture bypassed the blanket invalidation above. A route/target mismatch
+                // is nevertheless terminal for its single-use retained candidate.
+                self.controlled_document_time_state
+                    .borrow_mut()
+                    .invalidate_capture_precondition();
+            }
             return self.send_controlled_document_time_response(&request, Err(error));
         }
         if let DocumentTimeControlCommand::AdvanceTo(token) = &request.command {
             let result =
                 self.execute_conditional_advance(cx, &request.target, token, input_batch_saturated);
+            return self.send_controlled_document_time_response(&request, result);
+        }
+        if let DocumentTimeControlCommand::ConsumeCapture(consume) = &request.command {
+            let result =
+                self.execute_capture_consume(cx, &request.target, consume, input_batch_saturated);
             return self.send_controlled_document_time_response(&request, result);
         }
 
@@ -2824,6 +3145,9 @@ impl ScriptThread {
             },
             DocumentTimeControlCommand::AdvanceTo(_) => {
                 unreachable!("guarded advance returned through its committed response path")
+            },
+            DocumentTimeControlCommand::ConsumeCapture(_) => {
+                unreachable!("capture consume returned through its committed response path")
             },
             DocumentTimeControlCommand::DriveOneTurn => {
                 if self.document_execution_is_terminal() {
@@ -4343,11 +4667,19 @@ impl ScriptThread {
         result_sender: GenericCallback<Option<String>>,
     ) {
         let snapshot = self
-            .documents
+            .build_cached_layout_debug_snapshot(id)
+            .map(|(serialized, _)| serialized);
+        let _ = result_sender.send(snapshot);
+    }
+
+    /// Serialize Layout's already-cached snapshot without triggering reflow or Paint work.
+    fn build_cached_layout_debug_snapshot(&self, id: PipelineId) -> Option<(String, u32)> {
+        self.documents
             .borrow()
             .find_document(id)
             .and_then(|document| {
                 let snapshot = document.window().layout().debug_snapshot()?;
+                let paint_epoch = snapshot.paint_epoch;
                 let fragment_tag_ids: FxHashSet<u64> = snapshot
                     .fragments
                     .iter()
@@ -4378,8 +4710,8 @@ impl ScriptThread {
                         warn!("Could not serialize layout debug snapshot: {error}")
                     })
                     .ok()
-            });
-        let _ = result_sender.send(snapshot);
+                    .map(|serialized| (serialized, paint_epoch))
+            })
     }
 
     // exit_fullscreen creates a new JS promise object, so we need to have entered a realm
@@ -5919,7 +6251,7 @@ impl ScriptThread {
         cx: &mut js::context::JSContext,
         pipeline_id: PipelineId,
         metric_type: ProgressiveWebMetricType,
-        metric_value: CrossProcessInstant,
+        metric_value: PaintMetricTime,
         first_reflow: bool,
     ) {
         match self.documents.borrow().find_document(pipeline_id) {
@@ -6130,20 +6462,22 @@ mod tests {
     use std::time::Duration;
 
     use embedder_traits::{
-        DocumentCaptureBlocker, DocumentCaptureDocumentEpoch, DocumentCapturePrecondition,
-        DocumentCaptureQuietFence, DocumentCaptureSurfaceFingerprint, DocumentProducerStability,
-        DocumentSettlementSource, DocumentSettlementSourceDisposition,
-        DocumentSettlementSourceEpoch, DocumentSettlementSourceIdentity,
-        DocumentSettlementSourceSnapshot, DocumentTimeAdvanceToken, DocumentTimeControlCommand,
-        DocumentTimeControlError, DocumentTimeControlRequestId, DocumentTimeControlTarget,
-        DocumentTimeDocumentObservation, DocumentTimeProducerObservation,
-        DocumentTrackedSourceKind, DocumentUnsupportedSourceReason, EventLoopWaker,
-        ScriptToEmbedderChan, capture_blockers_internal, capture_producers_internal,
+        DocumentCaptureBlocker, DocumentCaptureConsumeRequest, DocumentCaptureDocumentEpoch,
+        DocumentCapturePrecondition, DocumentCapturePreconditionId, DocumentCaptureQuietFence,
+        DocumentCaptureSurfaceFingerprint, DocumentPaintPresentationTicket,
+        DocumentPaintPresentationTicketId, DocumentProducerStability, DocumentSettlementSource,
+        DocumentSettlementSourceDisposition, DocumentSettlementSourceEpoch,
+        DocumentSettlementSourceIdentity, DocumentSettlementSourceSnapshot,
+        DocumentTimeAdvanceToken, DocumentTimeControlCommand, DocumentTimeControlError,
+        DocumentTimeControlRequestId, DocumentTimeControlTarget, DocumentTimeDocumentObservation,
+        DocumentTimeProducerObservation, DocumentTrackedSourceKind,
+        DocumentUnsupportedSourceReason, EventLoopWaker, ScriptToEmbedderChan,
+        capture_blockers_internal, capture_producers_internal,
     };
     use euclid::{Box2D, Point2D, Size2D};
     use script_traits::{DiscardBrowsingContext, ScriptThreadMessage};
     use servo_base::Epoch;
-    use servo_base::id::{TEST_PIPELINE_ID, TEST_SCRIPT_EVENT_LOOP_ID, TEST_WEBVIEW_ID};
+    use servo_base::id::{Index, TEST_PIPELINE_ID, TEST_SCRIPT_EVENT_LOOP_ID, TEST_WEBVIEW_ID};
     use servo_geometry::DeviceIndependentPixel;
     use timers::{
         DocumentClock, DocumentClockConfiguration, DocumentClockError, DocumentExecutionLedger,
@@ -6164,7 +6498,8 @@ mod tests {
         dirty_document_before_unblocking_web_fonts, drain_controlled_input_batch,
         enqueue_controlled_input, is_controlled_lifecycle_event,
         remaining_rendering_opportunity_delay, renderer_may_drive_rendering,
-        take_controlled_lifecycle_event, take_controlled_turn, validate_conditional_advance_state,
+        take_controlled_lifecycle_event, take_controlled_turn, validate_capture_consume_request,
+        validate_capture_layout_epoch, validate_conditional_advance_state,
         wake_controlled_owner_after_ordinary_input,
     };
     use crate::dom::document::controlled_unsupported_dom_sources;
@@ -6309,6 +6644,25 @@ mod tests {
                 capture_surface(),
             )
             .unwrap()
+    }
+
+    fn test_presentation_ticket(
+        precondition: &DocumentCapturePrecondition,
+    ) -> DocumentPaintPresentationTicket {
+        let document = precondition
+            .documents()
+            .first()
+            .expect("test capture precondition has one document");
+        DocumentPaintPresentationTicket::new_internal(
+            DocumentPaintPresentationTicketId::new(23),
+            precondition.id(),
+            precondition.target().clone(),
+            document.pipeline_id,
+            document.script_rendering_epoch,
+            precondition.surface(),
+            29,
+            31,
+        )
     }
 
     struct GuardedAdvanceFixture {
@@ -7043,7 +7397,7 @@ mod tests {
         let mut state = ControlledDocumentTimeState::default();
         let precondition =
             issue_test_capture_precondition(&mut state, &clock, &fence, prepare_sources);
-        assert!(state.consume_capture_precondition(&precondition));
+        assert_eq!(state.consume_capture_precondition(&precondition), Ok(()));
     }
 
     #[test]
@@ -7330,7 +7684,10 @@ mod tests {
             let issued =
                 issue_test_capture_precondition(&mut state, &clock, &fence, source_snapshot());
             begin_controlled_document_time_command(&mut state, &command);
-            assert!(!state.consume_capture_precondition(&issued));
+            assert!(matches!(
+                state.consume_capture_precondition(&issued),
+                Err(DocumentTimeControlError::CapturePreconditionUnavailable { .. })
+            ));
         }
 
         let advance_fixture = GuardedAdvanceFixture::new();
@@ -7339,7 +7696,10 @@ mod tests {
             &mut state,
             &DocumentTimeControlCommand::AdvanceTo(Box::new(advance_fixture.token)),
         );
-        assert!(!state.consume_capture_precondition(&issued));
+        assert!(matches!(
+            state.consume_capture_precondition(&issued),
+            Err(DocumentTimeControlError::CapturePreconditionUnavailable { .. })
+        ));
 
         let checkpoint_1 = DocumentProducerCheckpoint::ZERO.checked_next().unwrap();
         let checkpoint_2 = checkpoint_1.checked_next().unwrap();
@@ -7373,7 +7733,10 @@ mod tests {
         let issued = issue_test_capture_precondition(&mut state, &clock, &fence, source_snapshot());
         state.record_ordinary_inputs(1);
         state.invalidate_capture_authority();
-        assert!(!state.consume_capture_precondition(&issued));
+        assert!(matches!(
+            state.consume_capture_precondition(&issued),
+            Err(DocumentTimeControlError::CapturePreconditionUnavailable { .. })
+        ));
         let after_input = capture_revision(&clock, &fence, 1, settled_collector_sources());
         let checkpoint_3 = checkpoint_2.checked_next().unwrap();
         assert!(
@@ -7388,7 +7751,10 @@ mod tests {
         let issued = issue_test_capture_precondition(&mut state, &clock, &fence, source_snapshot());
         state.invalidate_capture_authority();
         assert!(
-            !state.consume_capture_precondition(&issued),
+            matches!(
+                state.consume_capture_precondition(&issued),
+                Err(DocumentTimeControlError::CapturePreconditionUnavailable { .. })
+            ),
             "navigation/authority loss invalidates the issued precondition"
         );
     }
@@ -7425,12 +7791,332 @@ mod tests {
 
         let first = issue(&mut state);
         let second = issue(&mut state);
-        assert!(!state.consume_capture_precondition(&first));
-        assert!(!state.consume_capture_precondition(&second));
+        assert!(matches!(
+            state.consume_capture_precondition(&first),
+            Err(DocumentTimeControlError::StaleCapturePrecondition {
+                expected,
+                observed,
+            }) if expected == second.id() && observed == first.id()
+        ));
+        assert!(matches!(
+            state.consume_capture_precondition(&second),
+            Err(DocumentTimeControlError::CapturePreconditionUnavailable { .. })
+        ));
 
         let successful = issue(&mut state);
-        assert!(state.consume_capture_precondition(&successful));
-        assert!(!state.consume_capture_precondition(&successful));
+        assert_eq!(state.consume_capture_precondition(&successful), Ok(()));
+        assert!(matches!(
+            state.consume_capture_precondition(&successful),
+            Err(DocumentTimeControlError::CapturePreconditionUnavailable { .. })
+        ));
+    }
+
+    #[test]
+    fn consume_command_preserves_then_takes_the_exact_candidate_without_page_work_classification() {
+        let clock = controlled_capture_clock();
+        let fence = DocumentProducerFence::with_execution_ledger(clock.execution_ledger());
+        let mut state = ControlledDocumentTimeState::default();
+        let candidate = issue_test_capture_precondition(
+            &mut state,
+            &clock,
+            &fence,
+            DocumentSettlementSourceSnapshot::new_internal(
+                DocumentSettlementSourceEpoch::new(0),
+                settled_collector_sources(),
+            ),
+        );
+        let command = DocumentTimeControlCommand::ConsumeCapture(Box::new(
+            DocumentCaptureConsumeRequest::new_internal(
+                Box::new(candidate.clone()),
+                test_presentation_ticket(&candidate),
+            ),
+        ));
+
+        begin_controlled_document_time_command(&mut state, &command);
+        assert_eq!(
+            state.validate_capture_precondition(&candidate),
+            Ok(()),
+            "ConsumeCapture bypasses blanket candidate invalidation"
+        );
+        assert!(command_requires_exact_target_before_action(&command));
+        assert!(!matches!(command, DocumentTimeControlCommand::DriveOneTurn));
+        assert_eq!(state.consume_capture_precondition(&candidate), Ok(()));
+        assert!(matches!(
+            state.consume_capture_precondition(&candidate),
+            Err(DocumentTimeControlError::CapturePreconditionUnavailable { .. })
+        ));
+    }
+
+    #[test]
+    fn consume_handler_returns_before_page_turn_or_checkpoint_code() {
+        let source = include_str!("script_thread.rs");
+        let dispatcher = source
+            .split("fn execute_controlled_document_time_request(")
+            .nth(1)
+            .unwrap()
+            .split("fn handle_controlled_document_time(")
+            .next()
+            .unwrap();
+        let consume_return = dispatcher
+            .find("DocumentTimeControlCommand::ConsumeCapture(consume)")
+            .unwrap();
+        let checkpoint_tail = dispatcher.find("let before_checkpoint").unwrap();
+        assert!(consume_return < checkpoint_tail);
+
+        let handler = source
+            .split("fn execute_capture_consume(")
+            .nth(1)
+            .unwrap()
+            .split("/// Conditionally advance one exact timer")
+            .next()
+            .unwrap();
+        for forbidden in [
+            "process_one_controlled_event(",
+            "finish_event_loop_turn(",
+            "perform_a_microtask_checkpoint(",
+            "validate_and_advance_from(",
+            "activate_due_timer(",
+            "queue_controlled_page_event(",
+        ] {
+            assert!(
+                !handler.contains(forbidden),
+                "capture consume must not invoke {forbidden}"
+            );
+        }
+
+        let first_pass = handler.find("self.validate_capture_consume_pass(").unwrap();
+        let snapshot = handler
+            .find(".build_cached_layout_debug_snapshot(")
+            .unwrap();
+        let second_pass = handler[first_pass + 1..]
+            .find("self.validate_capture_consume_pass(")
+            .map(|offset| first_pass + 1 + offset)
+            .unwrap();
+        assert!(first_pass < snapshot && snapshot < second_pass);
+
+        let pass = source
+            .split("fn validate_capture_consume_pass(")
+            .nth(1)
+            .unwrap()
+            .split("fn execute_capture_consume(")
+            .next()
+            .unwrap();
+        let full_observation = pass.find("self.capture_consume_observation(").unwrap();
+        let final_input_drain = pass.find("self.drain_ready_controlled_inputs()").unwrap();
+        let producer_match = pass.find("producer_fence.with_matching_snapshot(").unwrap();
+        assert!(full_observation < final_input_drain && final_input_drain < producer_match);
+    }
+
+    #[test]
+    fn caller_candidate_mutations_fail_closed_and_consume_retained_authority() {
+        #[derive(Clone, Copy, Debug)]
+        enum Mutation {
+            Id,
+            Target,
+            ClockId,
+            Now,
+            InputRevision,
+            PendingEvents,
+            InputSaturation,
+            Producers,
+            Execution,
+            Deadline,
+            Sources,
+            Documents,
+            Surface,
+        }
+
+        let mutations = [
+            Mutation::Id,
+            Mutation::Target,
+            Mutation::ClockId,
+            Mutation::Now,
+            Mutation::InputRevision,
+            Mutation::PendingEvents,
+            Mutation::InputSaturation,
+            Mutation::Producers,
+            Mutation::Execution,
+            Mutation::Deadline,
+            Mutation::Sources,
+            Mutation::Documents,
+            Mutation::Surface,
+        ];
+        for mutation in mutations {
+            let clock = controlled_capture_clock();
+            let fence = DocumentProducerFence::with_execution_ledger(clock.execution_ledger());
+            let mut state = ControlledDocumentTimeState::default();
+            let candidate = issue_test_capture_precondition(
+                &mut state,
+                &clock,
+                &fence,
+                DocumentSettlementSourceSnapshot::new_internal(
+                    DocumentSettlementSourceEpoch::new(0),
+                    settled_collector_sources(),
+                ),
+            );
+            let mut id = candidate.id();
+            let mut target = candidate.target().clone();
+            let mut clock_id = candidate.clock_id();
+            let mut now = candidate.now();
+            let mut input_revision = candidate.input_revision();
+            let mut pending_events = candidate.pending_events();
+            let mut input_batch_saturated = candidate.input_batch_saturated();
+            let mut producers = candidate.producers();
+            let mut execution = candidate.execution();
+            let mut next_deadline = candidate.next_deadline();
+            let mut sources = candidate.sources().clone();
+            let mut documents = candidate.documents().to_vec();
+            let mut surface = candidate.surface();
+
+            match mutation {
+                Mutation::Id => id = DocumentCapturePreconditionId::new(id.get() + 1),
+                Mutation::Target => target.fully_active_pipelines.clear(),
+                Mutation::ClockId => clock_id = controlled_capture_clock().id(),
+                Mutation::Now => now = DocumentTime::from_nanos(now.as_nanos() + 1),
+                Mutation::InputRevision => input_revision += 1,
+                Mutation::PendingEvents => pending_events = 1,
+                Mutation::InputSaturation => input_batch_saturated = true,
+                Mutation::Producers => {
+                    producers.checkpoint = producers.checkpoint.checked_next().unwrap()
+                },
+                Mutation::Execution => execution.counters.ordinary_tasks += 1,
+                Mutation::Deadline => {
+                    next_deadline = Some(GuardedAdvanceFixture::new().token.deadline())
+                },
+                Mutation::Sources => {
+                    sources = DocumentSettlementSourceSnapshot::new_internal(
+                        DocumentSettlementSourceEpoch::new(sources.source_epoch().get() + 1),
+                        sources.sources().to_vec(),
+                    )
+                },
+                Mutation::Documents => documents[0].script_rendering_epoch = Epoch(1),
+                Mutation::Surface => {
+                    surface = DocumentCaptureSurfaceFingerprint::new(
+                        Size2D::<i32, DeviceIndependentPixel>::new(801, 600),
+                        Box2D::new(Point2D::new(0, 0), Point2D::new(801, 600)),
+                        1.0,
+                    )
+                    .unwrap()
+                },
+            }
+            let observed = DocumentCapturePrecondition::new_internal(
+                id,
+                target,
+                clock_id,
+                now,
+                input_revision,
+                pending_events,
+                input_batch_saturated,
+                producers,
+                execution,
+                next_deadline,
+                sources,
+                documents,
+                surface,
+            );
+            assert!(
+                matches!(
+                    state.validate_capture_precondition(&observed),
+                    Err(DocumentTimeControlError::StaleCapturePrecondition { .. })
+                ),
+                "candidate mutation {mutation:?} must fail closed"
+            );
+            assert!(matches!(
+                state.validate_capture_precondition(&candidate),
+                Err(DocumentTimeControlError::CapturePreconditionUnavailable { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn paint_ticket_mutations_and_layout_epoch_mismatch_fail_closed() {
+        #[derive(Clone, Copy, Debug)]
+        enum Mutation {
+            Candidate,
+            Target,
+            Pipeline,
+            Epoch,
+            Surface,
+        }
+
+        let clock = controlled_capture_clock();
+        let fence = DocumentProducerFence::with_execution_ledger(clock.execution_ledger());
+        let mut state = ControlledDocumentTimeState::default();
+        let candidate = issue_test_capture_precondition(
+            &mut state,
+            &clock,
+            &fence,
+            DocumentSettlementSourceSnapshot::new_internal(
+                DocumentSettlementSourceEpoch::new(0),
+                settled_collector_sources(),
+            ),
+        );
+        let exact = test_presentation_ticket(&candidate);
+        let exact_request =
+            DocumentCaptureConsumeRequest::new_internal(Box::new(candidate.clone()), exact.clone());
+        assert_eq!(
+            validate_capture_consume_request(&exact_request, &control_target()),
+            Ok((TEST_PIPELINE_ID, Epoch::default()))
+        );
+        assert_eq!(validate_capture_layout_epoch(Epoch(9), 9), Ok(Epoch(9)));
+        assert_eq!(
+            validate_capture_layout_epoch(Epoch(9), 10),
+            Err(DocumentTimeControlError::CaptureLayoutEpochMismatch {
+                expected: Epoch(9),
+                observed: Epoch(10),
+            })
+        );
+
+        let other_pipeline = servo_base::id::PipelineId {
+            namespace_id: TEST_PIPELINE_ID.namespace_id,
+            index: Index::new(404).unwrap(),
+        };
+        for mutation in [
+            Mutation::Candidate,
+            Mutation::Target,
+            Mutation::Pipeline,
+            Mutation::Epoch,
+            Mutation::Surface,
+        ] {
+            let mut candidate_id = candidate.id();
+            let mut target = control_target();
+            let mut pipeline_id = TEST_PIPELINE_ID;
+            let mut epoch = Epoch::default();
+            let mut surface = capture_surface();
+            match mutation {
+                Mutation::Candidate => {
+                    candidate_id = DocumentCapturePreconditionId::new(candidate.id().get() + 1)
+                },
+                Mutation::Target => target.fully_active_pipelines.clear(),
+                Mutation::Pipeline => pipeline_id = other_pipeline,
+                Mutation::Epoch => epoch = Epoch(1),
+                Mutation::Surface => {
+                    surface = DocumentCaptureSurfaceFingerprint::new(
+                        Size2D::<i32, DeviceIndependentPixel>::new(801, 600),
+                        Box2D::new(Point2D::new(0, 0), Point2D::new(801, 600)),
+                        1.0,
+                    )
+                    .unwrap()
+                },
+            }
+            let ticket = DocumentPaintPresentationTicket::new_internal(
+                exact.id(),
+                candidate_id,
+                target,
+                pipeline_id,
+                epoch,
+                surface,
+                exact.presentation_generation(),
+                exact.publish_generation(),
+            );
+            let request =
+                DocumentCaptureConsumeRequest::new_internal(Box::new(candidate.clone()), ticket);
+            assert_eq!(
+                validate_capture_consume_request(&request, &control_target()),
+                Err(DocumentTimeControlError::CapturePresentationMismatch),
+                "ticket mutation {mutation:?} must fail closed"
+            );
+        }
     }
 
     #[test]

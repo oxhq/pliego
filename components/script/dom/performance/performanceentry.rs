@@ -155,7 +155,12 @@ impl PerformanceEntry {
 
     /// Return the start time in the same domain exposed to this entry's global.
     pub(crate) fn start_time_for_sorting(&self) -> Option<PerformanceEntryTime> {
-        observable_start_time(self.start_time, self.accepts_host_timestamp())
+        match self.start_time {
+            Some(PerformanceEntryTime::Host(_)) => {
+                observable_start_time(self.start_time, self.accepts_host_timestamp())
+            },
+            start_time => start_time,
+        }
     }
 
     fn accepts_host_timestamp(&self) -> bool {
@@ -212,7 +217,12 @@ impl PerformanceEntryMethods<crate::DomTypeHolder> for PerformanceEntry {
 
     /// <https://w3c.github.io/performance-timeline/#dom-performanceentry-duration>
     fn Duration(&self) -> DOMHighResTimeStamp {
-        observable_duration(self.duration, self.accepts_host_timestamp())
+        match self.duration {
+            PerformanceEntryDuration::Host(_) => {
+                observable_duration(self.duration, self.accepts_host_timestamp())
+            },
+            PerformanceEntryDuration::Document(duration) => duration.to_dom_high_res_time_stamp(),
+        }
     }
 }
 

@@ -77,6 +77,9 @@ impl ControlledSettlementCoordinator {
             outcome @ DocumentTimeControlOutcome::AdvanceOutcomeIndeterminate { .. } => Err(
                 ControlledSettlementError::AdvanceOutcomeIndeterminate(outcome),
             ),
+            outcome @ DocumentTimeControlOutcome::CaptureConsumeOutcomeIndeterminate { .. } => {
+                Err(ControlledSettlementError::CaptureConsumeOutcomeIndeterminate(outcome))
+            },
         }
     }
 
@@ -252,6 +255,7 @@ pub(crate) enum ControlledSettlementError {
     DriveOutcomeIndeterminate(DocumentTimeControlTransportFailure),
     CaptureTransport(DocumentTimeControlTransportFailure),
     AdvanceOutcomeIndeterminate(DocumentTimeControlOutcome),
+    CaptureConsumeOutcomeIndeterminate(DocumentTimeControlOutcome),
     ExecutionPolicyUnavailable,
     ExecutionTerminated,
     CaptureSurfaceChanged,
@@ -283,6 +287,10 @@ impl fmt::Display for ControlledSettlementError {
                     "controlled advance outcome is indeterminate: {outcome:?}"
                 )
             },
+            Self::CaptureConsumeOutcomeIndeterminate(outcome) => write!(
+                formatter,
+                "controlled capture consume outcome is indeterminate: {outcome:?}"
+            ),
             Self::ExecutionPolicyUnavailable => {
                 formatter.write_str("controlled execution policy is unavailable")
             },
@@ -385,6 +393,7 @@ mod tests {
             }],
             execution: Some(clock.execution_ledger().unwrap().observation()),
             capture_preparation: None,
+            capture_commit: None,
         };
         (clock, observation)
     }

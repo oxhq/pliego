@@ -12,7 +12,8 @@ use accesskit::{
 };
 use dpi::PhysicalSize;
 use embedder_traits::{
-    ContextMenuAction, ContextMenuItem, Cursor, DocumentClockConfiguration,
+    ContextMenuAction, ContextMenuItem, Cursor, DocumentCaptureCommit, DocumentCapturePrecondition,
+    DocumentClockConfiguration, DocumentPaintPresentationTicket, DocumentPaintPresentationTicketId,
     DocumentTimeControlCancellationId, DocumentTimeControlCommand, DocumentTimeControlError,
     DocumentTimeControlReceiver, EmbedderControlId, EmbedderControlRequest, Image, InputEvent,
     InputEventAndId, InputEventId, JSValue, JavaScriptEvaluationError, LoadStatus,
@@ -22,6 +23,7 @@ use embedder_traits::{
 use euclid::{Scale, Size2D};
 use image::RgbaImage;
 use log::debug;
+use paint::{ControlledDocumentCaptureReservation, ControlledDocumentCaptureResult};
 use paint_api::WebViewTrait;
 use paint_api::rendering_context::RenderingContext;
 use servo_base::Epoch;
@@ -770,6 +772,60 @@ impl WebView {
         self.inner().servo.paint().render(self.id());
     }
 
+    /// Reserve the exact currently presented Paint generation for a qualified Script candidate.
+    ///
+    /// This owner-thread deterministic-rendering seam synchronously renders but deliberately does
+    /// not read pixels. The returned ticket is retained by Paint and is single-use.
+    #[doc(hidden)]
+    pub fn reserve_controlled_document_capture(
+        &self,
+        precondition: &DocumentCapturePrecondition,
+    ) -> ControlledDocumentCaptureResult<ControlledDocumentCaptureReservation> {
+        self.inner()
+            .servo
+            .paint()
+            .reserve_controlled_document_capture(self.id(), precondition)
+    }
+
+    /// Consume an exact retained Paint ticket after Script atomically commits the same candidate.
+    /// Pixel readback occurs only after every ticket, commit, Paint, and WebRender dimension still
+    /// matches exactly. Every finalization attempt consumes the retained ticket.
+    #[doc(hidden)]
+    pub fn finalize_controlled_document_capture(
+        &self,
+        ticket: &DocumentPaintPresentationTicket,
+        commit: &DocumentCaptureCommit,
+    ) -> ControlledDocumentCaptureResult<RgbaImage> {
+        self.inner()
+            .servo
+            .paint()
+            .finalize_controlled_document_capture(self.id(), ticket, commit)
+    }
+
+    /// Idempotently discard a retained Paint ticket. Returns whether this call removed it.
+    #[doc(hidden)]
+    pub fn abort_controlled_document_capture(
+        &self,
+        ticket_id: DocumentPaintPresentationTicketId,
+    ) -> bool {
+        self.inner()
+            .servo
+            .paint()
+            .abort_controlled_document_capture(self.id(), ticket_id)
+    }
+
+    /// Idempotently discard the retained Paint ticket owned by this WebView, if any.
+    ///
+    /// This scoped recovery seam remains usable when a low-level caller lost the opaque ticket
+    /// value. It cannot discard a reservation owned by a sibling WebView sharing the framebuffer.
+    #[doc(hidden)]
+    pub fn abort_current_controlled_document_capture(&self) -> bool {
+        self.inner()
+            .servo
+            .paint()
+            .abort_current_controlled_document_capture(self.id())
+    }
+
     /// Get the [`UserContentManager`] associated with this [`WebView`].
     pub fn user_content_manager(&self) -> Option<Rc<UserContentManager>> {
         self.inner().user_content_manager.clone()
@@ -809,7 +865,9 @@ impl WebView {
     /// occupied. A missing `Observe` response cannot hide page work or clock advance,
     /// though internal control bookkeeping may have changed. A missing `DriveOneTurn` response may
     /// have completed late and must not be retried as a no-op. A guarded failure remains
-    /// exact-token indeterminate. This API neither decides visual settlement nor captures output.
+    /// exact-token indeterminate. A missing `ConsumeCapture` response is candidate-and-ticket
+    /// indeterminate and must abort the whole capture transaction without retry. This API neither
+    /// decides visual settlement nor captures output by itself.
     #[doc(hidden)]
     pub fn request_controlled_document_time(
         &self,

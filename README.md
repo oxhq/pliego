@@ -133,6 +133,18 @@ Composer distributions pass their focused contracts. The support profile remains
 the boundary; Pliego does not claim browser-wide compatibility or safe rendering of
 untrusted HTML.
 
+The current stable release is v0.1.1 and exposes engine API 1. For the project's
+scope, evidence, and next gates, see:
+
+- [Project overview](docs/project-overview.md)
+- [Roadmap](ROADMAP.md)
+- [Benchmark methodology](docs/benchmarks/README.md)
+- [Security threat model](docs/security/threat-model.md)
+- [2026 funding plan](docs/funding/2026.md)
+
+Controlled capture and API2 work described in those planning documents is not part
+of the v0.1.1 release.
+
 Every native archive includes the project and specification licenses, an exact tagged
 source pointer, the generated Cargo dependency report, and pinned notices for copied
 or linked native code. Windows archives additionally inventory their ANGLE DLLs and

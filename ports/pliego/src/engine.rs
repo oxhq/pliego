@@ -135,6 +135,15 @@ impl DocumentEngine {
         }
     }
 
+    /// Render through the generation-bound controlled capture transaction.
+    ///
+    /// This route is deliberately explicit while the accepted surface is narrower than the
+    /// realtime compatibility route. It never falls back to realtime capture.
+    #[cfg(feature = "document-session")]
+    pub fn render_controlled(request: RenderRequest) -> Result<RenderOutcome, RenderError> {
+        crate::render_controlled(request)
+    }
+
     /// Exercise the pre-cutover servoshell path as an explicit, nonproduction
     /// parity oracle. This entrypoint does not participate in default builds.
     #[cfg(feature = "shell-oracle")]

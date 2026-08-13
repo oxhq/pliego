@@ -1,0 +1,91 @@
+# Pliego project overview
+
+Pliego is an open-source native HTML-to-PDF engine built on Servo for trusted,
+application-owned documents such as invoices, statements, and operational reports.
+It is intended for teams that want a native packaged runtime instead of shipping
+Chromium, Node.js, or Java with an application.
+
+## Current status
+
+| Item | Current public boundary |
+| --- | --- |
+| Stable release | v0.1.1 |
+| Engine protocol | API 1 |
+| Supported input trust | Application-owned HTML and assets |
+| Runtime network | Denied by default; explicit URL roots are opt-in |
+| Native bundles | Linux x86_64, Windows x86_64, macOS x86_64, macOS arm64 |
+| Primary integration | PHP and Laravel packages |
+| Hostile HTML | Unsupported; Pliego is not a security sandbox |
+| API2 | Proposed design work, not a released API |
+
+The [support profile](pliego/support-profile.md) is authoritative for current CSS,
+paint, resource, platform, and operational limits.
+
+## The problem Pliego addresses
+
+Business documents need pagination, selectable text, links, embedded fonts, stable
+assets, and failures an application can handle. General-purpose browser automation
+can provide broad web compatibility, but it also brings a browser process tree and
+an execution model that is larger than many document workflows need. Pliego is
+developing a narrower, explicit document path on Servo.
+
+That narrower scope is deliberate. Unsupported paint features fail before a requested
+PDF is published by default. Remote resources and host-font fallback are disabled
+unless the caller opts into them. The application receives typed status and retained
+artifacts instead of a success-shaped response when the supported path cannot finish.
+
+## How it fits together
+
+1. An application or SDK provides HTML, document settings, and explicitly authorized
+   assets.
+2. The native Pliego process loads and lays out the document through Servo.
+3. Pliego records the supported document scene and rejects unsupported paint by
+   default.
+4. The PDF backend writes searchable text, links, images, paths, and embedded font
+   data from that scene.
+5. The caller receives either a completed PDF and artifact metadata or a typed
+   failure.
+
+The stable CLI and SDK contract is engine API 1. The internal `DocumentScene` format
+is versioned for repository use but is not currently a stable public interchange
+format. [ADR 0014](pliego/adr/0014-document-scene-v1-and-canonical-ordering.md)
+records that boundary.
+
+## What the repository currently proves
+
+- The v0.1.1 release surface and native package targets are versioned in the source
+  tree.
+- The package workflow defines native builds, checksum and notice artifacts, and
+  engine-API smoke checks for the four published targets.
+- Focused fixtures cover supported pagination, fonts, images, links, Chart.js usage,
+  and unsupported-paint failure behavior.
+- The Laravel package exposes installation, environment diagnosis, rendering, typed
+  failures, and retained artifacts for the supported path.
+
+These are implementation and release-mechanism claims. They are not evidence of
+market adoption, arbitrary-page compatibility, hostile-input isolation, or
+performance leadership. The repository currently contains no publishable comparative
+benchmark results; see the [benchmark methodology](benchmarks/README.md).
+
+## Governance and upstream relationship
+
+Pliego retains Servo's source layout so reviewed upstream synchronization remains
+possible. The accepted
+[hard-fork governance ADR](pliego/adr/0013-hard-fork-governance.md) defines the
+intended mirror-and-sync process: generic fixes should be contributed upstream when
+they fit Servo, while document-specific behavior remains downstream. The repository
+does not currently publish a fixed synchronization cadence or service level.
+
+The engine is MPL-2.0. The PHP and Laravel SDKs are MIT-licensed. Contributions use
+the repository's [contribution guide](../CONTRIBUTING.md), and vulnerabilities should
+be reported through the private process in [SECURITY.md](../SECURITY.md).
+
+## Plans and ways to evaluate the project
+
+- Review the evidence-gated [roadmap](../ROADMAP.md).
+- Reproduce the existing engine benchmark harness using the
+  [benchmark guide](benchmarks/README.md).
+- Evaluate deployment risks against the [threat model](security/threat-model.md).
+- Review the public assumptions in the [2026 funding plan](funding/2026.md).
+- Try the v0.1.1 Laravel or native CLI path from the root [README](../README.md), then
+  report the exact fixture, platform, command, and retained artifacts for any failure.
