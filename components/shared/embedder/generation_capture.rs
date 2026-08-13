@@ -378,6 +378,43 @@ pub enum DocumentUnsupportedSourceReason {
     WebGpuApi,
 }
 
+/// Result of synchronizing one DOM-owned Canvas 2D context with retained capture state.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+pub enum DocumentCanvasCaptureStatus {
+    Ready,
+    RetentionDisabled,
+    MissingCanvas,
+    MissingImageKey,
+    ImageKeyMismatch,
+    SizeMismatch,
+    RetentionBudgetExceeded,
+    UnsupportedTranscript,
+    ObservationUnavailable,
+    MixedGeneration,
+}
+
+/// Portable image-key identity used by the generation-bound Canvas capture binding.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+pub struct DocumentCanvasImageKey {
+    namespace: u32,
+    key: u32,
+}
+
+impl DocumentCanvasImageKey {
+    #[doc(hidden)]
+    pub const fn new_internal(namespace: u32, key: u32) -> Self {
+        Self { namespace, key }
+    }
+
+    pub const fn namespace(self) -> u32 {
+        self.namespace
+    }
+
+    pub const fn key(self) -> u32 {
+        self.key
+    }
+}
+
 /// Mechanical disposition of one exact source entry at the preparation observation.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 pub enum DocumentSettlementSourceDisposition {
@@ -429,6 +466,12 @@ pub enum DocumentSettlementSourceIdentity {
         pipeline_id: PipelineId,
         kind: DocumentTrackedSourceKind,
     },
+    /// One DOM-owned Canvas 2D context and its Canvas-paint-thread identity.
+    Canvas2d {
+        pipeline_id: PipelineId,
+        node_id: usize,
+        canvas_id: u64,
+    },
     /// One DOM node whose source class is intentionally unsupported.
     UnsupportedDomNode {
         pipeline_id: PipelineId,
@@ -466,6 +509,14 @@ pub enum DocumentSettlementSourceState {
     AnimationFrame { active: bool },
     /// Exact blocking presence/count retained by one owner-tracker class.
     TrackedPresence { blocking_count: u64 },
+    /// Exact retained registry state observed after the Canvas command barrier.
+    Canvas2d {
+        image_key: Option<DocumentCanvasImageKey>,
+        width: u32,
+        height: u32,
+        registry_generation: Option<u64>,
+        status: DocumentCanvasCaptureStatus,
+    },
     /// Unsupported DOM node class; identity still prevents a count-only snapshot.
     UnsupportedDomNode,
 }
@@ -777,6 +828,45 @@ impl DocumentSettlementSource {
             identity: DocumentSettlementSourceIdentity::TrackedPresence { pipeline_id, kind },
             state: DocumentSettlementSourceState::TrackedPresence { blocking_count },
             disposition,
+        }
+    }
+
+    /// Construct one Canvas 2D source from a Canvas-paint-thread barrier observation.
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn canvas_2d_internal(
+        pipeline_id: PipelineId,
+        node_id: usize,
+        canvas_id: u64,
+        image_key: Option<DocumentCanvasImageKey>,
+        width: u32,
+        height: u32,
+        registry_generation: Option<u64>,
+        status: DocumentCanvasCaptureStatus,
+    ) -> Self {
+        let mechanically_ready = status == DocumentCanvasCaptureStatus::Ready &&
+            image_key.is_some() &&
+            registry_generation.is_some();
+        Self {
+            identity: DocumentSettlementSourceIdentity::Canvas2d {
+                pipeline_id,
+                node_id,
+                canvas_id,
+            },
+            state: DocumentSettlementSourceState::Canvas2d {
+                image_key,
+                width,
+                height,
+                registry_generation,
+                status,
+            },
+            disposition: if mechanically_ready {
+                DocumentSettlementSourceDisposition::Inert
+            } else {
+                DocumentSettlementSourceDisposition::Unsupported(
+                    DocumentUnsupportedSourceReason::Canvas2d,
+                )
+            },
         }
     }
 
@@ -1123,6 +1213,34 @@ pub struct DocumentSettlementSourceSnapshot {
     sources: Vec<DocumentSettlementSource>,
 }
 
+/// Canonical Canvas registry generation and image-key set consumed by a capture candidate.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DocumentCanvasCaptureBinding {
+    registry_generation: u64,
+    image_keys: Vec<DocumentCanvasImageKey>,
+}
+
+impl DocumentCanvasCaptureBinding {
+    pub const fn registry_generation(&self) -> u64 {
+        self.registry_generation
+    }
+
+    pub fn image_keys(&self) -> &[DocumentCanvasImageKey] {
+        &self.image_keys
+    }
+}
+
+/// A Canvas source vector was not a single mechanically ready registry generation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DocumentCanvasCaptureBindingError {
+    MalformedSource,
+    SourceNotReady,
+    MissingImageKey,
+    MissingGeneration,
+    MixedGeneration,
+    DuplicateImageKey,
+}
+
 impl DocumentSettlementSourceSnapshot {
     /// Construct and canonically order one internally observed source inventory.
     #[doc(hidden)]
@@ -1145,6 +1263,59 @@ impl DocumentSettlementSourceSnapshot {
     /// Return every source entry retained in this snapshot, in canonical order.
     pub fn sources(&self) -> &[DocumentSettlementSource] {
         &self.sources
+    }
+
+    /// Derive the exact Canvas token retained by this canonical source snapshot.
+    pub fn canvas_capture_binding(
+        &self,
+    ) -> Result<Option<DocumentCanvasCaptureBinding>, DocumentCanvasCaptureBindingError> {
+        let mut registry_generation = None;
+        let mut image_keys = Vec::new();
+        for source in &self.sources {
+            if !matches!(
+                &source.identity,
+                DocumentSettlementSourceIdentity::Canvas2d { .. }
+            ) {
+                continue;
+            }
+            let DocumentSettlementSourceState::Canvas2d {
+                image_key,
+                registry_generation: observed_generation,
+                status,
+                ..
+            } = &source.state
+            else {
+                return Err(DocumentCanvasCaptureBindingError::MalformedSource);
+            };
+            if *status != DocumentCanvasCaptureStatus::Ready ||
+                source.disposition != DocumentSettlementSourceDisposition::Inert
+            {
+                return Err(DocumentCanvasCaptureBindingError::SourceNotReady);
+            }
+            let image_key = (*image_key)
+                .ok_or(DocumentCanvasCaptureBindingError::MissingImageKey)?;
+            let observed_generation = (*observed_generation)
+                .ok_or(DocumentCanvasCaptureBindingError::MissingGeneration)?;
+            match registry_generation {
+                Some(expected) if expected != observed_generation => {
+                    return Err(DocumentCanvasCaptureBindingError::MixedGeneration);
+                },
+                None => registry_generation = Some(observed_generation),
+                Some(_) => {},
+            }
+            image_keys.push(image_key);
+        }
+        let Some(registry_generation) = registry_generation else {
+            return Ok(None);
+        };
+        image_keys.sort_unstable();
+        if image_keys.windows(2).any(|keys| keys[0] == keys[1]) {
+            return Err(DocumentCanvasCaptureBindingError::DuplicateImageKey);
+        }
+        Ok(Some(DocumentCanvasCaptureBinding {
+            registry_generation,
+            image_keys,
+        }))
     }
 
     /// Return whether no inventoried source needs another deadline or rendering opportunity.
@@ -2202,6 +2373,94 @@ mod tests {
                 DocumentSettlementSourceDisposition::Unsupported(reason)
             );
         }
+    }
+
+    #[test]
+    fn ready_canvas_sources_produce_one_canonical_capture_binding() {
+        let first = DocumentSettlementSource::canvas_2d_internal(
+            TEST_PIPELINE_ID,
+            8,
+            3,
+            Some(DocumentCanvasImageKey::new_internal(4, 9)),
+            320,
+            200,
+            Some(17),
+            DocumentCanvasCaptureStatus::Ready,
+        );
+        let second = DocumentSettlementSource::canvas_2d_internal(
+            TEST_PIPELINE_ID,
+            9,
+            4,
+            Some(DocumentCanvasImageKey::new_internal(4, 2)),
+            100,
+            50,
+            Some(17),
+            DocumentCanvasCaptureStatus::Ready,
+        );
+        let snapshot = DocumentSettlementSourceSnapshot::new_internal(
+            DocumentSettlementSourceEpoch::new(2),
+            vec![first, second],
+        );
+
+        assert!(snapshot.is_settled());
+        let binding = snapshot.canvas_capture_binding().unwrap().unwrap();
+        assert_eq!(binding.registry_generation(), 17);
+        assert_eq!(
+            binding.image_keys(),
+            &[
+                DocumentCanvasImageKey::new_internal(4, 2),
+                DocumentCanvasImageKey::new_internal(4, 9),
+            ]
+        );
+    }
+
+    #[test]
+    fn unsupported_and_mixed_canvas_sources_fail_closed() {
+        let unsupported = DocumentSettlementSource::canvas_2d_internal(
+            TEST_PIPELINE_ID,
+            8,
+            3,
+            Some(DocumentCanvasImageKey::new_internal(4, 9)),
+            320,
+            200,
+            Some(17),
+            DocumentCanvasCaptureStatus::UnsupportedTranscript,
+        );
+        assert_eq!(
+            unsupported.disposition(),
+            DocumentSettlementSourceDisposition::Unsupported(
+                DocumentUnsupportedSourceReason::Canvas2d
+            )
+        );
+
+        let first = DocumentSettlementSource::canvas_2d_internal(
+            TEST_PIPELINE_ID,
+            8,
+            3,
+            Some(DocumentCanvasImageKey::new_internal(4, 9)),
+            320,
+            200,
+            Some(17),
+            DocumentCanvasCaptureStatus::Ready,
+        );
+        let second = DocumentSettlementSource::canvas_2d_internal(
+            TEST_PIPELINE_ID,
+            9,
+            4,
+            Some(DocumentCanvasImageKey::new_internal(4, 10)),
+            320,
+            200,
+            Some(18),
+            DocumentCanvasCaptureStatus::Ready,
+        );
+        let snapshot = DocumentSettlementSourceSnapshot::new_internal(
+            DocumentSettlementSourceEpoch::new(2),
+            vec![first, second],
+        );
+        assert_eq!(
+            snapshot.canvas_capture_binding(),
+            Err(DocumentCanvasCaptureBindingError::MixedGeneration)
+        );
     }
 
     #[test]

@@ -37,13 +37,16 @@ ServiceWorker's exact pending-algorithm count, and its retained unsolicited-mess
 WebXR, StorageManager, Web Bluetooth, WebRTC, MediaDevices/media-stream creation, Web Audio,
 Notification construction, and WebGPU access conservatively latch as unsupported when invoked or
 first exposed because Servo does not retain a complete pending-callback lifecycle for them.
-Standalone and transferred OffscreenCanvas creation also latches unsupported. Finite CSS timings
+Canvas 2D contexts in the retained subset contribute an exact Canvas identity, image key, size,
+capture status, and shared registry generation after a paint-thread tail barrier. Unsupported 2D
+transcripts, missing or mixed generations, bitmap renderer, WebGL/WebGL2, WebGPU, and standalone or
+transferred OffscreenCanvas remain unsupported. Finite CSS timings
 use Stylo's seconds-based `started_at`/`start_time`, which already include CSS delay; delay remains
 part of the fingerprint but is not added twice, and fractional nanosecond deadlines round upward.
 Running or pending infinite animations and intervals are open ended; paused animations are inert
-at their exact retained state. Non-DOM timer callbacks, detached or connected media elements, and
-every detached or connected canvas rendering context (2D, bitmap renderer, WebGL/WebGL2, WebGPU,
-and transferred/offscreen placeholders) are unsupported and prevent issuance.
+at their exact retained state. Non-DOM timer callbacks and detached or connected media elements are
+unsupported and prevent issuance. Canvas ownership includes detached live nodes; only the
+generation-bound Canvas 2D subset above may become inert.
 
 Animated-image frame opportunities are not claimed as exhaustive typed entries in that source
 vector. Servo's current `ImageAnimationManager` schedules the next frame through ScriptThread's
@@ -67,9 +70,10 @@ remain covered by the live media-element owner tracker.
   closed without publication whenever an interleaving invalidates either retained value.
 - It supports only one fully-active painted pipeline. Multi-pipeline frame-tree capture remains
   unsupported.
-- It does not add settlement ownership for media clocks, canvas/graphics generations, workers,
-  worklets, IndexedDB, or cross-event-loop frames. This inventory rejects their tracked
-  presence instead; media/canvas ownership tracking includes detached live nodes and adoption.
+- It does not add settlement ownership for media clocks, graphics APIs outside the retained Canvas
+  2D subset, workers, worklets, IndexedDB, or cross-event-loop frames. This inventory rejects their
+  tracked presence instead; media/Canvas ownership tracking includes detached live nodes and
+  adoption.
 - It does not settle WebXR, StorageManager, Web Bluetooth, WebRTC, media streams, Web Audio,
   Notification image-decoding tails, or WebGPU adapter/device operations. The conservative sticky
   invocation/access latches described above instead prevent preparation from issuing after those
@@ -79,5 +83,4 @@ remain covered by the live media-element owner tracker.
   a feature must add a typed unsupported or owned source entry before generation capture can claim
   it.
 - Default realtime embedding behavior is unchanged. Pliego's explicit `render-controlled` route
-  exercises this transaction; the compatibility `render` route remains realtime until its
-  unsupported source classes, including Canvas, have equivalent owned settlement coverage.
+  exercises this transaction; the compatibility `render` route remains realtime.

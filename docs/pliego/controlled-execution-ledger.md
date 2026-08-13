@@ -56,7 +56,8 @@ This slice does not claim:
 - CPU or host-wall hard interruption of JavaScript already running inside one task or microtask;
 - a post-readiness resource budget, until readiness is a typed phase transition;
 - a universal post-DOM-write generation (CharacterData deliberately queues its record before the
-  write), or complete style, Canvas, image, font, or worker mutation generations;
+  write), or complete style, graphics beyond the retained Canvas 2D subset, image, font, or worker
+  mutation generations;
 - classification of infinite timers, RAF loops, declarative animations, workers, or resources; or
 - universal visual settlement for the unsupported source classes below, or stable API 2 terminal
   artifact integration.
@@ -68,8 +69,9 @@ opaque candidate, reserves the exact Paint presentation without readback, consum
 after two ScriptThread revalidations around layout serialization, and revalidates Paint again before
 pixel readback. A ledger or capture terminal is routed through the existing fail-closed publication
 transaction, so it cannot expose a PDF, scene bundle, or requested output. The compatibility
-`render` route remains realtime until unsupported source classes such as Canvas gain truthful owned
-settlement; there is no realtime fallback from `render-controlled`.
+`render` route remains realtime; there is no realtime fallback from `render-controlled`. The
+controlled route accepts only Canvas 2D transcripts whose retained image keys and registry
+generation survive Script consume, Paint finalization, layout serialization, and atomic freeze.
 
 This still does not enforce CPU or host-wall interruption inside one already-running JavaScript
 turn, or the post-readiness resource budget described above. The widened serde/IPC shapes are

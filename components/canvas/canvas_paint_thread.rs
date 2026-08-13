@@ -20,7 +20,8 @@ use webrender_api::ImageKey;
 use crate::canvas_data::*;
 use crate::retained_canvas::{
     RetainedCanvasUnsupportedReason, associate_image_key, finish_canvas, mark_unsupported,
-    recreate_canvas, register_canvas, retain_fill_rect, retain_pixel_readback,
+    observe_canvas_for_capture, recreate_canvas, register_canvas, retain_fill_rect,
+    retain_pixel_readback,
 };
 
 pub struct CanvasPaintThread {
@@ -353,6 +354,20 @@ impl CanvasPaintThread {
                 retain_pixel_readback(canvas_id, dest_rect, &snapshot);
                 if let Err(error) = sender.send(snapshot.to_shared()) {
                     warn!("GetImageData response failed ({error})");
+                }
+            },
+            CanvasCommand::ObserveCapture {
+                expected_image_key,
+                expected_size,
+                response,
+            } => {
+                let observation = observe_canvas_for_capture(
+                    canvas_id,
+                    expected_image_key,
+                    expected_size,
+                );
+                if let Err(error) = response.send(observation) {
+                    warn!("Canvas capture observation response failed ({error})");
                 }
             },
             CanvasCommand::PutImageData(rect, snapshot) => {

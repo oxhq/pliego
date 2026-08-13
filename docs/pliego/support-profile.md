@@ -25,9 +25,10 @@ It has no realtime or shell fallback: stale capture state, a lost or indetermina
 consume outcome, and open-ended or unsupported sources all fail without publishing
 the requested PDF or any success-only artifact.
 
-The release-candidate package gate unpacks the Linux x86_64 checked-release archive
-and runs its binary in two fresh processes against one pinned offline font-and-script
-fixture. The gate requires byte-identical pixels, normalized semantic layout, scene,
+The release-candidate package gate is configured to unpack the Linux x86_64 checked-release
+archive and run its binary in two fresh processes against one pinned offline font, script, and
+visible retained-subset Canvas 2D fixture. The gate requires byte-identical pixels, normalized
+semantic layout, scene,
 and PDF; exact timeout, `requestAnimationFrame`, paint-observer, and document-time
 evidence; matching Script, layout, and presented Paint epochs; PDF text extraction;
 and a separate interval-based open-ended-source rejection. The proof manifest records
@@ -45,10 +46,15 @@ The implemented candidate boundary is deliberately narrow:
 - intervals, infinite animations, WebSocket, EventSource, BroadcastChannel,
   MessagePort, storage-event listeners, visible embedder controls, and retained media
   action handlers are open ended and prevent capture;
-- Canvas contexts, media elements and streams, dedicated workers, worklets, IndexedDB,
-  pending CookieStore requests, ServiceWorker backend work or messaging, WebXR,
-  StorageManager, Bluetooth, WebRTC, Web Audio, notifications, WebGPU, and
-  OffscreenCanvas are rejected rather than settled;
+- Canvas 2D contexts are accepted only when their paint-thread observation, image key,
+  retained transcript, and registry generation can be bound atomically to the consumed
+  candidate; bitmap renderer, WebGL/WebGL2, WebGPU, OffscreenCanvas, unsealed unsupported
+  commands, attempts to seal unsupported state with a partial readback, and persistent clip state
+  are rejected. A zero-area Canvas does not establish a retained paint-image binding and therefore
+  also fails closed. Media elements and streams,
+  dedicated workers, worklets, IndexedDB, pending CookieStore requests, ServiceWorker backend
+  work or messaging, WebXR, StorageManager, Bluetooth, WebRTC, Web Audio, and notifications are
+  rejected rather than settled;
 - invalid CSS timing, worker-owned timers, and unclassified non-DOM timer callbacks
   are rejected; a future Servo event source has no controlled support until it gains
   an explicit typed disposition and whatever owned lifecycle or producer-fence

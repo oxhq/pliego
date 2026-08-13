@@ -20,6 +20,10 @@ from typing import Any
 MARKER = "PLIEGO_FCP_20"
 POST5_MARKER = "PLIEGO_POST5MS_7C4E"
 MARKER_RGBA = (197, 48, 80, 255)
+CONTROLLED_CANVAS_ID = "controlled-capture-canvas"
+CONTROLLED_CANVAS_SIZE = (48, 24)
+CONTROLLED_CANVAS_BACKGROUND_RGBA = (12, 180, 96, 255)
+CONTROLLED_CANVAS_INSET_RGBA = (244, 196, 48, 255)
 STABLE_FRAME_SIZE = (200, 160)
 FONT_PLACEHOLDER = "__PLIEGO_CONTROLLED_CAPTURE_FONT_BASE64__"
 PINNED_FONT_SHA256 = "7da195a74c55bef988d0d48f9508bd5d849425c1770dba5d7bfc6ce9ed848954"
@@ -350,6 +354,15 @@ def run_success(binary: Path, fixture: Path, font: Path, root: Path) -> tuple[by
         layout_marker_runs.count(MARKER) == 1,
         f"layout did not retain exactly one paint-observer marker text run: {layout_marker_runs!r}",
     )
+    layout_canvas_keys = [
+        fragment.get("canvas_image_key")
+        for fragment in fragments
+        if isinstance(fragment, dict) and isinstance(fragment.get("canvas_image_key"), dict)
+    ]
+    require(
+        len(layout_canvas_keys) == 1,
+        f"layout did not retain exactly one generation-bound Canvas key: {layout_canvas_keys!r}",
+    )
 
     stable_png = artifact(summary, "rendered_image", root / "artifacts/render.png").read_bytes()
     require(
@@ -378,6 +391,20 @@ def run_success(binary: Path, fixture: Path, font: Path, root: Path) -> tuple[by
         scene_marker_runs.count(MARKER) == 1,
         f"scene did not retain exactly one paint-observer marker text operation: {scene_marker_runs!r}",
     )
+    scene_images = [
+        operation for operation in operations if isinstance(operation, dict) and operation.get("type") == "image"
+    ]
+    require(
+        len(scene_images) >= 1,
+        f"scene did not retain a Canvas image operation: {operations!r}",
+    )
+    require(
+        all(
+            isinstance(operation.get("resource"), str) and operation["resource"].startswith("sha256:")
+            for operation in scene_images
+        ),
+        f"scene Canvas image operation has no content-addressed resource: {scene_images!r}",
+    )
 
     report = read_json(artifact(summary, "scene_report", root / "artifacts/scene-report.json"))
     capture = report.get("capture")
@@ -388,6 +415,42 @@ def run_success(binary: Path, fixture: Path, font: Path, root: Path) -> tuple[by
         and capture.get("unsupported_events") == []
         and capture.get("text_mapping_gaps") == [],
         repr(capture),
+    )
+    captured_canvases = capture.get("canvases")
+    require(
+        isinstance(captured_canvases, list) and len(captured_canvases) == 1,
+        f"scene report did not retain exactly one controlled Canvas: {captured_canvases!r}",
+    )
+    canvas_diagnostics = captured_canvases[0].get("diagnostics")
+    require(isinstance(canvas_diagnostics, dict), repr(captured_canvases[0]))
+    require(
+        canvas_diagnostics.get("rasterized_area_px") == CONTROLLED_CANVAS_SIZE[0] * CONTROLLED_CANVAS_SIZE[1],
+        repr(canvas_diagnostics),
+    )
+    canvas_fallbacks = canvas_diagnostics.get("fallbacks")
+    require(
+        isinstance(canvas_fallbacks, list) and len(canvas_fallbacks) == 1,
+        repr(canvas_diagnostics),
+    )
+    canvas_resource = canvas_fallbacks[0].get("resource")
+    require(
+        isinstance(canvas_resource, str) and canvas_resource in {operation["resource"] for operation in scene_images},
+        f"Canvas diagnostics fallback is not bound to a scene image: {canvas_fallbacks!r}",
+    )
+    canvas_png_path = root / "artifacts/resources" / canvas_resource.removeprefix("sha256:")
+    require(canvas_png_path.is_file(), f"missing controlled Canvas resource: {canvas_png_path}")
+    canvas_png = canvas_png_path.read_bytes()
+    require(
+        png_dimensions(canvas_png) == CONTROLLED_CANVAS_SIZE,
+        f"controlled Canvas resource dimensions differ from {CONTROLLED_CANVAS_SIZE!r}",
+    )
+    require(
+        rgba_pixel(canvas_png, 0, 0) == CONTROLLED_CANVAS_BACKGROUND_RGBA,
+        "controlled Canvas resource lost its background pixels",
+    )
+    require(
+        rgba_pixel(canvas_png, 10, 8) == CONTROLLED_CANVAS_INSET_RGBA,
+        "controlled Canvas resource lost its inset pixels",
     )
     preview = report.get("preview")
     require(isinstance(preview, dict) and preview.get("status") == "rendered", repr(preview))
@@ -538,6 +601,15 @@ def self_test(fixture: Path, font: Path) -> None:
             "materialized fixture has no paint-observer marker",
         )
         require("PLIEGO_FONT_PREWARM" in source, "materialized fixture does not prewarm its font")
+        require(
+            f'id="{CONTROLLED_CANVAS_ID}"' in source,
+            "materialized fixture has no visible controlled Canvas",
+        )
+        require(
+            'getContext("2d")' in source
+            and "getImageData(0, 0, controlledCanvas.width, controlledCanvas.height)" in source,
+            "materialized fixture has no retained-supported full-surface Canvas 2D transcript",
+        )
         projection = normalized_layout(
             {
                 "tag_id": 1,

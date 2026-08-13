@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use embedder_traits::DocumentCanvasCaptureBinding;
 use serde::{Deserialize, Serialize};
 use servo_canvas::retained_canvas::{
     FreezeCanvasSnapshotsError, FrozenCanvasSnapshots, RetainedCanvasSnapshot,
@@ -656,22 +657,8 @@ pub fn capture_document_scene_with_canvas(
         .iter()
         .map(|(_, key)| (key.namespace, key.key))
         .collect::<Vec<_>>();
-    let frozen_canvas = freeze_canvas(&requested_keys).map_err(|error| {
-        let sequence = match &error {
-            FreezeCanvasSnapshotsError::MissingImageKey { namespace, key, .. } => requests
-                .iter()
-                .find_map(|(sequence, requested)| {
-                    (requested.namespace == *namespace && requested.key == *key)
-                        .then_some(*sequence)
-                })
-                .unwrap_or(first_sequence),
-            FreezeCanvasSnapshotsError::RetentionDisabled => first_sequence,
-        };
-        CaptureError::Canvas {
-            sequence,
-            message: error.to_string(),
-        }
-    })?;
+    let frozen_canvas = freeze_canvas(&requested_keys)
+        .map_err(|error| canvas_freeze_error(&requests, first_sequence, error))?;
     if frozen_canvas.retention_budget_exceeded() {
         return Err(CaptureError::CanvasRetentionBudgetExceeded);
     }
@@ -688,6 +675,121 @@ pub fn capture_document_scene_with_canvas(
         },
         DEFAULT_CANVAS_CAPTURE_LIMITS,
     )
+}
+
+/// Convert one consumed controlled candidate using only its generation-bound Canvas sources.
+///
+/// Every Canvas image key used by the retained layout must have been observed in the candidate.
+/// The registry generation is checked atomically with freezing the complete requested key set.
+/// Extra candidate-bound keys are allowed because a live Canvas need not be placed by this layout.
+#[doc(hidden)]
+pub fn capture_controlled_document_scene_with_canvas(
+    snapshot_json: &[u8],
+    resolve_image: impl FnMut(&str) -> Option<String>,
+    canvas_binding: Option<&DocumentCanvasCaptureBinding>,
+    freeze_canvas: impl FnOnce(
+        &[(u32, u32)],
+        u64,
+    ) -> Result<FrozenCanvasSnapshots, FreezeCanvasSnapshotsError>,
+) -> Result<SceneCapture, CaptureError> {
+    let capture: LayoutCapture = serde_json::from_slice(snapshot_json)
+        .map_err(|error| CaptureError::InvalidJson(error.to_string()))?;
+    let requests = canvas_freeze_requests(&capture, DEFAULT_CANVAS_CAPTURE_LIMITS.placements)?;
+    let first_sequence = requests.first().map_or(0, |(sequence, _)| *sequence);
+    let requested_keys = requests
+        .iter()
+        .map(|(_, key)| (key.namespace, key.key))
+        .collect::<Vec<_>>();
+
+    let Some(canvas_binding) = canvas_binding else {
+        if let Some((sequence, key)) = requests.first() {
+            return Err(CaptureError::Canvas {
+                sequence: *sequence,
+                message: format!(
+                    "layout Canvas image key {}:{} was not bound by the consumed controlled candidate",
+                    key.namespace, key.key
+                ),
+            });
+        }
+        return capture_layout_with_canvas_limits(
+            capture,
+            resolve_image,
+            |key| {
+                Err(format!(
+                    "layout requested unbound Canvas image key {}:{}",
+                    key.namespace, key.key
+                ))
+            },
+            DEFAULT_CANVAS_CAPTURE_LIMITS,
+        );
+    };
+
+    for (sequence, requested) in &requests {
+        let requested_key = (requested.namespace, requested.key);
+        if canvas_binding
+            .image_keys()
+            .binary_search_by_key(&requested_key, |bound| (bound.namespace(), bound.key()))
+            .is_err()
+        {
+            return Err(CaptureError::Canvas {
+                sequence: *sequence,
+                message: format!(
+                    "layout Canvas image key {}:{} was not bound by the consumed controlled candidate",
+                    requested.namespace, requested.key
+                ),
+            });
+        }
+    }
+
+    let expected_generation = canvas_binding.registry_generation();
+    let frozen_canvas = freeze_canvas(&requested_keys, expected_generation)
+        .map_err(|error| canvas_freeze_error(&requests, first_sequence, error))?;
+    if frozen_canvas.generation() != expected_generation {
+        return Err(CaptureError::Canvas {
+            sequence: first_sequence,
+            message: format!(
+                "Canvas freezer returned registry generation {} for controlled generation {expected_generation}",
+                frozen_canvas.generation()
+            ),
+        });
+    }
+    if frozen_canvas.retention_budget_exceeded() {
+        return Err(CaptureError::CanvasRetentionBudgetExceeded);
+    }
+    capture_layout_with_canvas_limits(
+        capture,
+        resolve_image,
+        move |key| {
+            frozen_canvas.get(key.namespace, key.key).ok_or_else(|| {
+                format!(
+                    "frozen Canvas snapshot bundle omitted requested image key {}:{}",
+                    key.namespace, key.key
+                )
+            })
+        },
+        DEFAULT_CANVAS_CAPTURE_LIMITS,
+    )
+}
+
+fn canvas_freeze_error(
+    requests: &[(usize, CapturedCanvasImageKey)],
+    first_sequence: usize,
+    error: FreezeCanvasSnapshotsError,
+) -> CaptureError {
+    let sequence = match &error {
+        FreezeCanvasSnapshotsError::MissingImageKey { namespace, key, .. } => requests
+            .iter()
+            .find_map(|(sequence, requested)| {
+                (requested.namespace == *namespace && requested.key == *key).then_some(*sequence)
+            })
+            .unwrap_or(first_sequence),
+        FreezeCanvasSnapshotsError::RetentionDisabled |
+        FreezeCanvasSnapshotsError::GenerationChanged { .. } => first_sequence,
+    };
+    CaptureError::Canvas {
+        sequence,
+        message: error.to_string(),
+    }
 }
 
 fn canvas_freeze_requests(
@@ -2852,7 +2954,42 @@ struct CaptureFontVariation {
 
 #[cfg(test)]
 mod tests {
+    use embedder_traits::{
+        DocumentCanvasCaptureBinding, DocumentCanvasCaptureStatus, DocumentCanvasImageKey,
+        DocumentSettlementSource, DocumentSettlementSourceEpoch, DocumentSettlementSourceSnapshot,
+    };
+    use servo_base::id::TEST_PIPELINE_ID;
+
     use super::*;
+
+    fn controlled_canvas_binding(
+        image_keys: &[(u32, u32)],
+        registry_generation: u64,
+    ) -> DocumentCanvasCaptureBinding {
+        let sources = image_keys
+            .iter()
+            .enumerate()
+            .map(|(index, &(namespace, key))| {
+                DocumentSettlementSource::canvas_2d_internal(
+                    TEST_PIPELINE_ID,
+                    index,
+                    index as u64,
+                    Some(DocumentCanvasImageKey::new_internal(namespace, key)),
+                    1,
+                    1,
+                    Some(registry_generation),
+                    DocumentCanvasCaptureStatus::Ready,
+                )
+            })
+            .collect();
+        DocumentSettlementSourceSnapshot::new_internal(
+            DocumentSettlementSourceEpoch::new(1),
+            sources,
+        )
+        .canvas_capture_binding()
+        .unwrap()
+        .unwrap()
+    }
 
     #[test]
     fn retained_canvas_aliases_share_one_adapted_capture() {
@@ -3107,6 +3244,108 @@ mod tests {
                 message:
                     "no retained command snapshot for image key 7:10 at Canvas registry generation 17"
                         .into(),
+            }
+        );
+    }
+
+    #[test]
+    fn controlled_canvas_freeze_uses_the_bound_generation_and_visible_subset() {
+        let binding = controlled_canvas_binding(&[(7, 9), (8, 3)], 17);
+
+        let error = capture_controlled_document_scene_with_canvas(
+            &canvas_alias_layout(1, 1),
+            |_| None,
+            Some(&binding),
+            |keys, generation| {
+                assert_eq!(keys, &[(7, 9)]);
+                assert_eq!(generation, 17);
+                Err(FreezeCanvasSnapshotsError::GenerationChanged {
+                    expected: 17,
+                    observed: 18,
+                })
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            CaptureError::Canvas {
+                sequence: 0,
+                message:
+                    "Canvas registry generation changed from expected 17 to observed 18".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn controlled_canvas_rejects_a_layout_key_absent_from_the_candidate() {
+        let binding = controlled_canvas_binding(&[(7, 10)], 17);
+
+        let error = capture_controlled_document_scene_with_canvas(
+            &canvas_alias_layout(1, 1),
+            |_| None,
+            Some(&binding),
+            |_, _| panic!("an unbound layout key must be rejected before freezing"),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            CaptureError::Canvas {
+                sequence: 0,
+                message:
+                    "layout Canvas image key 7:9 was not bound by the consumed controlled candidate"
+                        .into(),
+            }
+        );
+    }
+
+    #[test]
+    fn controlled_canvas_requires_a_candidate_binding_for_layout_canvas() {
+        let error = capture_controlled_document_scene_with_canvas(
+            &canvas_alias_layout(1, 1),
+            |_| None,
+            None,
+            |_, _| panic!("a missing candidate binding must be rejected before freezing"),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            CaptureError::Canvas {
+                sequence: 0,
+                message:
+                    "layout Canvas image key 7:9 was not bound by the consumed controlled candidate"
+                        .into(),
+            }
+        );
+    }
+
+    #[test]
+    fn controlled_hidden_canvas_still_checks_the_bound_generation() {
+        let binding = controlled_canvas_binding(&[(7, 9)], 17);
+
+        let error = capture_controlled_document_scene_with_canvas(
+            &canvas_alias_layout(0, 1),
+            |_| None,
+            Some(&binding),
+            |keys, generation| {
+                assert!(keys.is_empty());
+                assert_eq!(generation, 17);
+                Err(FreezeCanvasSnapshotsError::GenerationChanged {
+                    expected: 17,
+                    observed: 19,
+                })
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            CaptureError::Canvas {
+                sequence: 0,
+                message:
+                    "Canvas registry generation changed from expected 17 to observed 19".into(),
             }
         );
     }
