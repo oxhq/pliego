@@ -357,11 +357,8 @@ impl CanvasPaintThread {
                 expected_size,
                 response,
             } => {
-                let observation = observe_canvas_for_capture(
-                    canvas_id,
-                    expected_image_key,
-                    expected_size,
-                );
+                let observation =
+                    observe_canvas_for_capture(canvas_id, expected_image_key, expected_size);
                 if let Err(error) = response.send(observation) {
                     warn!("Canvas capture observation response failed ({error})");
                 }

@@ -3271,8 +3271,8 @@ mod tests {
             error,
             CaptureError::Canvas {
                 sequence: 0,
-                message:
-                    "Canvas registry generation changed from expected 17 to observed 18".into(),
+                message: "Canvas registry generation changed from expected 17 to observed 18"
+                    .into(),
             }
         );
     }
@@ -3344,8 +3344,8 @@ mod tests {
             error,
             CaptureError::Canvas {
                 sequence: 0,
-                message:
-                    "Canvas registry generation changed from expected 17 to observed 19".into(),
+                message: "Canvas registry generation changed from expected 17 to observed 19"
+                    .into(),
             }
         );
     }

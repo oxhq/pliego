@@ -260,7 +260,9 @@ fn freeze_canvas_snapshots_internal(
         return Err(FreezeCanvasSnapshotsError::RetentionDisabled);
     }
     let generation = registry.generation;
-    if let Some(expected) = expected_generation && generation != expected {
+    if let Some(expected) = expected_generation &&
+        generation != expected
+    {
         return Err(FreezeCanvasSnapshotsError::GenerationChanged {
             expected,
             observed: generation,
@@ -332,9 +334,9 @@ pub(crate) fn observe_canvas_for_capture(
         CanvasCaptureObservationStatus::MissingCanvas
     } else if expected_image_key.is_none() {
         CanvasCaptureObservationStatus::MissingImageKey
-    } else if expected_image_key.is_some_and(|image_key| {
-        registry.image_keys.get(&image_key).copied() != Some(canvas_id)
-    }) {
+    } else if expected_image_key
+        .is_some_and(|image_key| registry.image_keys.get(&image_key).copied() != Some(canvas_id))
+    {
         CanvasCaptureObservationStatus::ImageKeyMismatch
     } else {
         let canvas = registry
@@ -1003,8 +1005,7 @@ mod tests {
         associate_image_key(canvas_id, key);
         let generation = registry().generation;
 
-        let observation =
-            observe_canvas_for_capture(canvas_id, Some(key), Size2D::new(12, 8));
+        let observation = observe_canvas_for_capture(canvas_id, Some(key), Size2D::new(12, 8));
 
         assert_eq!(observation.status, CanvasCaptureObservationStatus::Ready);
         assert_eq!(observation.registry_generation, Some(generation));
@@ -1162,8 +1163,7 @@ mod tests {
                 ..
             }]
         ));
-        let observation =
-            observe_canvas_for_capture(CanvasId(4), Some(key), Size2D::new(2, 2));
+        let observation = observe_canvas_for_capture(CanvasId(4), Some(key), Size2D::new(2, 2));
         assert_eq!(observation.status, CanvasCaptureObservationStatus::Ready);
     }
 
@@ -1193,8 +1193,7 @@ mod tests {
             &pixels,
         );
 
-        let observation =
-            observe_canvas_for_capture(CanvasId(5), Some(key), Size2D::new(2, 2));
+        let observation = observe_canvas_for_capture(CanvasId(5), Some(key), Size2D::new(2, 2));
         assert_eq!(
             observation.status,
             CanvasCaptureObservationStatus::UnsupportedTranscript

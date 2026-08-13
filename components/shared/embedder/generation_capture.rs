@@ -1292,8 +1292,8 @@ impl DocumentSettlementSourceSnapshot {
             {
                 return Err(DocumentCanvasCaptureBindingError::SourceNotReady);
             }
-            let image_key = (*image_key)
-                .ok_or(DocumentCanvasCaptureBindingError::MissingImageKey)?;
+            let image_key =
+                (*image_key).ok_or(DocumentCanvasCaptureBindingError::MissingImageKey)?;
             let observed_generation = (*observed_generation)
                 .ok_or(DocumentCanvasCaptureBindingError::MissingGeneration)?;
             match registry_generation {

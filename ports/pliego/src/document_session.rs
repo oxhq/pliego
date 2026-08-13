@@ -29,8 +29,7 @@ use http::header::CONTENT_TYPE;
 use http::{HeaderMap, HeaderValue};
 use layout::pages::{PageDefinition, reserve_for_process};
 use pliego::capture::{
-    SceneCapture, capture_controlled_document_scene_with_canvas,
-    capture_document_scene_with_canvas,
+    SceneCapture, capture_controlled_document_scene_with_canvas, capture_document_scene_with_canvas,
 };
 use pliego::event_loop_waker::{EventLoopWakeWaitOutcome, PliegoEventLoopWaker};
 use pliego::pdf::{PdfFontResource, PdfFontVariation, render_document_pdf};
@@ -643,9 +642,7 @@ impl PreparedDocumentCaptureCandidate {
             .map_err(|error| {
                 SessionError::new(
                     "CONTROLLED_CANVAS_BINDING_INVALID",
-                    format!(
-                        "consumed capture candidate has an invalid Canvas binding: {error:?}"
-                    ),
+                    format!("consumed capture candidate has an invalid Canvas binding: {error:?}"),
                 )
             })?;
 

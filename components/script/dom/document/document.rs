@@ -258,18 +258,14 @@ fn controlled_canvas_capture_status(
         CanvasCaptureObservationStatus::RetentionDisabled => {
             DocumentCanvasCaptureStatus::RetentionDisabled
         },
-        CanvasCaptureObservationStatus::MissingCanvas => {
-            DocumentCanvasCaptureStatus::MissingCanvas
-        },
+        CanvasCaptureObservationStatus::MissingCanvas => DocumentCanvasCaptureStatus::MissingCanvas,
         CanvasCaptureObservationStatus::MissingImageKey => {
             DocumentCanvasCaptureStatus::MissingImageKey
         },
         CanvasCaptureObservationStatus::ImageKeyMismatch => {
             DocumentCanvasCaptureStatus::ImageKeyMismatch
         },
-        CanvasCaptureObservationStatus::SizeMismatch => {
-            DocumentCanvasCaptureStatus::SizeMismatch
-        },
+        CanvasCaptureObservationStatus::SizeMismatch => DocumentCanvasCaptureStatus::SizeMismatch,
         CanvasCaptureObservationStatus::RetentionBudgetExceeded => {
             DocumentCanvasCaptureStatus::RetentionBudgetExceeded
         },
@@ -4853,8 +4849,7 @@ impl Document {
             capture_canvases.push(canvas);
         });
         capture_canvases.sort_unstable_by_key(|canvas| canvas.upcast::<Node>().to_opaque().id());
-        capture_canvases
-            .dedup_by_key(|canvas| canvas.upcast::<Node>().to_opaque().id());
+        capture_canvases.dedup_by_key(|canvas| canvas.upcast::<Node>().to_opaque().id());
 
         let mut canvas_2d_nodes = Vec::new();
         for canvas in capture_canvases {
@@ -4894,9 +4889,7 @@ impl Document {
             })
             .collect::<Vec<_>>();
         let mut pending_requests = Vec::with_capacity(canvas_2d_nodes.len());
-        for ((node_id, canvas), flush_succeeded) in
-            canvas_2d_nodes.iter().zip(flush_succeeded)
-        {
+        for ((node_id, canvas), flush_succeeded) in canvas_2d_nodes.iter().zip(flush_succeeded) {
             let image_key = canvas.capture_image_key();
             let size = canvas.get_size();
             let canvas_id = canvas
@@ -4906,15 +4899,15 @@ impl Document {
                     _ => None,
                 })
                 .unwrap_or(CanvasId(u64::MAX));
-            let receiver = flush_succeeded.then(|| {
-                let context = canvas.context()?;
-                let RenderingContext::Context2d(context) = &*context else {
-                    return None;
-                };
-                context
-                    .enqueue_capture_observation(image_key, size)
-                    .ok()
-            }).flatten();
+            let receiver = flush_succeeded
+                .then(|| {
+                    let context = canvas.context()?;
+                    let RenderingContext::Context2d(context) = &*context else {
+                        return None;
+                    };
+                    context.enqueue_capture_observation(image_key, size).ok()
+                })
+                .flatten();
             pending_requests.push(PendingControlledCanvasObservation {
                 node_id: *node_id,
                 canvas_id,
@@ -4927,35 +4920,37 @@ impl Document {
         let mut observations = Vec::with_capacity(pending_requests.len());
         let observation_deadline = Instant::now() + CONTROLLED_CANVAS_OBSERVATION_TIMEOUT;
         for pending in pending_requests {
-            observations.push(match pending.receiver.and_then(|receiver| {
-                receive_controlled_canvas_observation(receiver, observation_deadline)
-            }) {
-                Some(observation)
-                    if observation.canvas_id == pending.canvas_id &&
-                        observation.image_key == pending.image_key &&
-                        observation.size.width == pending.width &&
-                        observation.size.height == pending.height =>
-                {
-                    ControlledCanvasObservation {
+            observations.push(
+                match pending.receiver.and_then(|receiver| {
+                    receive_controlled_canvas_observation(receiver, observation_deadline)
+                }) {
+                    Some(observation)
+                        if observation.canvas_id == pending.canvas_id &&
+                            observation.image_key == pending.image_key &&
+                            observation.size.width == pending.width &&
+                            observation.size.height == pending.height =>
+                    {
+                        ControlledCanvasObservation {
+                            node_id: pending.node_id,
+                            canvas_id: pending.canvas_id,
+                            image_key: pending.image_key,
+                            width: pending.width,
+                            height: pending.height,
+                            registry_generation: observation.registry_generation,
+                            status: controlled_canvas_capture_status(observation.status),
+                        }
+                    },
+                    _ => ControlledCanvasObservation {
                         node_id: pending.node_id,
                         canvas_id: pending.canvas_id,
                         image_key: pending.image_key,
                         width: pending.width,
                         height: pending.height,
-                        registry_generation: observation.registry_generation,
-                        status: controlled_canvas_capture_status(observation.status),
-                    }
+                        registry_generation: None,
+                        status: DocumentCanvasCaptureStatus::ObservationUnavailable,
+                    },
                 },
-                _ => ControlledCanvasObservation {
-                    node_id: pending.node_id,
-                    canvas_id: pending.canvas_id,
-                    image_key: pending.image_key,
-                    width: pending.width,
-                    height: pending.height,
-                    registry_generation: None,
-                    status: DocumentCanvasCaptureStatus::ObservationUnavailable,
-                },
-            });
+            );
         }
         let ready_generations = observations
             .iter()
@@ -4970,9 +4965,11 @@ impl Document {
             }
         }
         sources.extend(observations.into_iter().map(|observation| {
-            let image_key = observation.image_key.map(|ImageKey(IdNamespace(namespace), key)| {
-                DocumentCanvasImageKey::new_internal(namespace, key)
-            });
+            let image_key = observation
+                .image_key
+                .map(|ImageKey(IdNamespace(namespace), key)| {
+                    DocumentCanvasImageKey::new_internal(namespace, key)
+                });
             DocumentSettlementSource::canvas_2d_internal(
                 pipeline_id,
                 observation.node_id,
@@ -5447,7 +5444,8 @@ mod animation_frame_callback_tests {
             receive_controlled_canvas_observation(first_receiver, expired_batch_deadline).is_none()
         );
         assert!(
-            receive_controlled_canvas_observation(second_receiver, expired_batch_deadline).is_none()
+            receive_controlled_canvas_observation(second_receiver, expired_batch_deadline)
+                .is_none()
         );
     }
 }
