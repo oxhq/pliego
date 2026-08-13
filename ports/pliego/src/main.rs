@@ -4417,6 +4417,14 @@ mod tests {
         Color, DocumentScene, Glyph, Operation, OperationMeta, Page, Rect, Size, Utf8Range,
     };
 
+    #[cfg(all(
+        feature = "document-session",
+        feature = "shell-oracle",
+        not(any(target_os = "android", target_env = "ohos"))
+    ))]
+    use super::begin_publication_for_runtime;
+    #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+    use super::controlled_capture_render_id;
     #[cfg(feature = "document-session")]
     use super::{
         CapturedPublication, ExpectedInputIdentity, RenderOutcome, finish_document_session_render,
@@ -4431,8 +4439,6 @@ mod tests {
         resolve_scene_resource, runtime_policy, set_document_pdf_environment, sha256_hex,
         stable_render_id,
     };
-    #[cfg(not(any(target_os = "android", target_env = "ohos")))]
-    use super::controlled_capture_render_id;
     #[cfg(feature = "shell-oracle")]
     use super::{
         PendingResource, ResourcePolicyDecision, SERVO_BUILD_VERSION, complete_resource,
@@ -4445,18 +4451,11 @@ mod tests {
     ))]
     use super::{
         PublicationRuntimeIdentity, PublicationStart, PublicationTransaction, begin_publication,
-        publication_recovery_required_message,
-        publication_request_fingerprint, publication_request_fingerprint_with_runtime_policy,
-        render,
-        render_controlled_with_post_reservation_paint_invalidation_for_test, write_render_outcome,
-        stable_render_id_with_runtime_policy,
+        publication_recovery_required_message, publication_request_fingerprint,
+        publication_request_fingerprint_with_runtime_policy, render,
+        render_controlled_with_post_reservation_paint_invalidation_for_test,
+        stable_render_id_with_runtime_policy, write_render_outcome,
     };
-    #[cfg(all(
-        feature = "document-session",
-        feature = "shell-oracle",
-        not(any(target_os = "android", target_env = "ohos"))
-    ))]
-    use super::begin_publication_for_runtime;
     #[cfg(feature = "document-session")]
     use crate::document_session::{DocumentCaptureOutcome, SessionError};
     #[cfg(feature = "document-session")]
