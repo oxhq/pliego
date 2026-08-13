@@ -61,6 +61,13 @@ function api2ProbeFrame(array $document): string
 }
 
 $command = [PHP_BINARY, __DIR__.'/fake_pliego.php'];
+$probeParameters = (new ReflectionMethod(RuntimeContract::class, 'probe'))->getParameters();
+api2Expect(
+    count($probeParameters) === 2
+        && $probeParameters[1]->isDefaultValueAvailable()
+        && $probeParameters[1]->getDefaultValue() === 180,
+    'the public probe default retains the bounded debug-binary identity budget',
+);
 
 putenv('PLIEGO_API2_FAKE_MODE=empty');
 $foundation = RuntimeContract::probe($command);
@@ -75,6 +82,22 @@ api2Expect(
     $foundation->invocation()['request_max_bytes'] === 1_048_576,
     'probe fixes the inclusive request frame limit',
 );
+
+putenv('PLIEGO_API2_FAKE_MODE=slow-probe');
+$slowFoundation = RuntimeContract::probe($command);
+api2Expect(
+    !$slowFoundation->api2Available(),
+    'the bounded probe budget permits exact executable identity work',
+);
+try {
+    RuntimeContract::probe($command, timeoutSeconds: 1);
+    throw new RuntimeException('expected the explicit probe deadline');
+} catch (RuntimeException $error) {
+    api2Expect(
+        str_contains($error->getMessage(), 'contract-probe exceeded 1 seconds'),
+        'an explicit probe deadline remains bounded and actionable',
+    );
+}
 
 putenv('PLIEGO_API2_FAKE_MODE=available');
 $available = RuntimeContract::probe($command);

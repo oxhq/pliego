@@ -14,6 +14,9 @@ $mode = getenv('PLIEGO_DOCTOR_FAKE_MODE');
 
 if (($argv[1] ?? null) === '--contract-probe') {
     $api2Mode = getenv('PLIEGO_API2_FAKE_MODE') ?: 'empty';
+    if ($api2Mode === 'slow-probe') {
+        usleep(1_100_000);
+    }
     $profiles = $api2Mode === 'profile'
         ? [['schema' => 'pliego.profile.test', 'version' => 1]]
         : [];

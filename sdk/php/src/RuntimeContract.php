@@ -17,6 +17,12 @@ use UnexpectedValueException;
  */
 final readonly class RuntimeContract
 {
+    /**
+     * The probe hashes the exact executable before responding. Keep this
+     * host-side budget independent from render and doctor process deadlines.
+     */
+    private const DEFAULT_PROBE_TIMEOUT_SECONDS = 180;
+
     private const TOP_LEVEL_KEYS = ['schema', 'version', 'engine', 'contracts', 'invocation'];
     private const ENGINE_KEYS = ['name', 'version', 'api', 'source_commit', 'runtime'];
     private const RUNTIME_KEYS = ['mode', 'target', 'binary_sha256', 'servo_base'];
@@ -54,7 +60,10 @@ final readonly class RuntimeContract
     /**
      * @param non-empty-list<string> $command
      */
-    public static function probe(array $command, int $timeoutSeconds = 10): self
+    public static function probe(
+        array $command,
+        int $timeoutSeconds = self::DEFAULT_PROBE_TIMEOUT_SECONDS,
+    ): self
     {
         self::validateCommand($command, $timeoutSeconds);
         [$exitCode, $stdout, $stderr] = self::execute(
