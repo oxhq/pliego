@@ -586,6 +586,18 @@ fn wake_controlled_owner_after_ordinary_input(sender: &ScriptToEmbedderChan, ord
     }
 }
 
+fn controlled_producer_state_change_notifier(
+    document_clock: &DocumentClock,
+    script_to_embedder_sender: &ScriptToEmbedderChan,
+) -> Option<Arc<dyn Fn() + Send + Sync>> {
+    document_clock.is_controlled().then(|| {
+        let script_to_embedder_sender = script_to_embedder_sender.clone();
+        Arc::new(move || {
+            let _ = script_to_embedder_sender.wake();
+        }) as Arc<dyn Fn() + Send + Sync>
+    })
+}
+
 fn drain_controlled_input_batch(
     pending_events: &mut VecDeque<MixedMessage>,
     pending_requests: &mut VecDeque<ControlledDocumentTimeRequest>,
@@ -1569,12 +1581,10 @@ impl ScriptThread {
         let (self_sender, self_receiver) = unbounded();
         let document_clock = DocumentClock::new(state.document_clock);
         let document_execution_ledger = document_clock.execution_ledger();
-        let producer_state_change_notifier = document_execution_ledger.as_ref().map(|_| {
-            let script_to_embedder_sender = state.script_to_embedder_sender.clone();
-            Arc::new(move || {
-                let _ = script_to_embedder_sender.wake();
-            }) as Arc<dyn Fn() + Send + Sync>
-        });
+        let producer_state_change_notifier = controlled_producer_state_change_notifier(
+            &document_clock,
+            &state.script_to_embedder_sender,
+        );
         let document_producer_fence = DocumentProducerFence::with_execution_ledger_and_notifier(
             document_execution_ledger.clone(),
             producer_state_change_notifier,
@@ -6149,7 +6159,8 @@ mod tests {
         advance_document_producer_checkpoint_after_microtasks,
         begin_controlled_document_time_command, capture_revision_is_mechanically_qualified,
         command_requires_exact_target_before_action, controlled_advance_execution_guard,
-        controlled_document_time_now, controlled_event_consumes_ordinary_task_budget,
+        controlled_advance_is_qualified, controlled_document_time_now,
+        controlled_event_consumes_ordinary_task_budget, controlled_producer_state_change_notifier,
         dirty_document_before_unblocking_web_fonts, drain_controlled_input_batch,
         enqueue_controlled_input, is_controlled_lifecycle_event,
         remaining_rendering_opportunity_delay, renderer_may_drive_rendering,
@@ -6481,14 +6492,42 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert!(requests.is_empty());
         assert!(wake_count.load(Ordering::SeqCst) > producer_wake);
-        assert_eq!(
+        assert!(matches!(
             embedder_receiver.try_recv(),
             Err(crossbeam_channel::TryRecvError::Empty)
-        );
+        ));
 
         let after_ordinary = wake_count.load(Ordering::SeqCst);
         wake_controlled_owner_after_ordinary_input(&sender, 0);
         assert_eq!(wake_count.load(Ordering::SeqCst), after_ordinary);
+    }
+
+    #[test]
+    fn controlled_producer_wakes_do_not_require_an_execution_ledger() {
+        let (embedder_sender, _embedder_receiver) = crossbeam_channel::unbounded();
+        let wake_count = Arc::new(AtomicUsize::new(0));
+        let sender = ScriptToEmbedderChan::new(
+            embedder_sender,
+            Box::new(CountingEventLoopWaker(wake_count.clone())),
+        );
+        let controlled_clock = DocumentClock::new(DocumentClockConfiguration::Controlled {
+            initial_time_ns: 0,
+            unix_time_origin_ns: DocumentUnixTime::default(),
+            execution_limits: None,
+        });
+        assert!(controlled_clock.execution_ledger().is_none());
+        let fence = DocumentProducerFence::with_execution_ledger_and_notifier(
+            None,
+            controlled_producer_state_change_notifier(&controlled_clock, &sender),
+        );
+
+        let producer = fence.begin(DocumentProducerKind::Resource).unwrap();
+        assert_eq!(wake_count.load(Ordering::SeqCst), 1);
+        drop(producer);
+        assert_eq!(wake_count.load(Ordering::SeqCst), 2);
+
+        let realtime_clock = DocumentClock::new(DocumentClockConfiguration::Realtime);
+        assert!(controlled_producer_state_change_notifier(&realtime_clock, &sender).is_none());
     }
 
     #[test]

@@ -292,8 +292,9 @@ impl fmt::Display for ControlledSettlementError {
             Self::CaptureSurfaceChanged => {
                 formatter.write_str("capture preparation returned another surface")
             },
-            Self::InconsistentPreparation => formatter
-                .write_str("capture preparation returned a candidate together with blockers"),
+            Self::InconsistentPreparation => {
+                formatter.write_str("capture preparation response is internally inconsistent")
+            },
             Self::FiniteSourceWithoutAuthority => formatter
                 .write_str("finite settlement source has no exact scheduler advance authority"),
             Self::TerminalCaptureBlockers(blockers) => {
@@ -325,6 +326,14 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn inconsistent_preparation_has_a_generic_message() {
+        assert_eq!(
+            ControlledSettlementError::InconsistentPreparation.to_string(),
+            "capture preparation response is internally inconsistent"
+        );
+    }
 
     fn surface() -> DocumentCaptureSurfaceFingerprint {
         DocumentCaptureSurfaceFingerprint::new(
