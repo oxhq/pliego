@@ -2086,6 +2086,12 @@ impl ScriptThread {
 
             // > Step 22: For each doc of docs, update the rendering or user interface of
             // > doc and its node navigable to reflect the current state.
+            if self.document_clock.is_controlled() {
+                // Controlled capture binds Script's rendering epoch to a real Layout/Paint
+                // display list. Rendering reasons such as a no-op ResizeObserver can otherwise
+                // advance Script alone and leave an exact capture permanently unreservable.
+                document.window().layout().set_needs_new_display_list();
+            }
             if document.update_the_rendering(cx).0.needs_frame() {
                 painters_generating_frames.insert(document.webview_id().into());
             }

@@ -3303,6 +3303,7 @@ impl Document {
         // the sake of taking screenshots. This has the effect of delaying screenshots
         // until layout has taken a shot at updating the rendering.
         if result {
+            self.window().layout().set_needs_new_display_list();
             self.add_rendering_update_reason(RenderingUpdateReason::FontReadyPromiseFulfilled);
         }
 

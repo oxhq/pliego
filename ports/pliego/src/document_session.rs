@@ -3322,6 +3322,8 @@ window.pliego?.defer();
     #[test]
     fn controlled_session_bridges_api1_readiness_before_generation_bound_capture() {
         for case in [
+            "controlled-local-success",
+            "controlled-resize-observer",
             "controlled-finite",
             "controlled-paint-mutation",
             "controlled-readiness-retry",
@@ -3438,6 +3440,41 @@ window.pliego?.defer();
                     format!(
                         "<!doctype html><script>for(let index=0;index<={MAX_CONSOLE_EVENTS};index+=1){{console.info('overflow-'+index);}}window.pliego?.ready({{fixture:'console-overflow'}});</script>"
                     ),
+                );
+                _bundle = Some(bundle);
+                input
+            },
+            "controlled-local-success" => {
+                let bundle = TempBundle::new(case.as_str());
+                let fixture_root = session_fixture("local-success.html")
+                    .parent()
+                    .unwrap()
+                    .to_path_buf();
+                bundle.copy(&fixture_root, "local-success.html");
+                bundle.copy(&fixture_root, "local-success.js");
+                let input = bundle.0.join("local-success.html");
+                _bundle = Some(bundle);
+                input
+            },
+            "controlled-resize-observer" => {
+                let bundle = TempBundle::new(case.as_str());
+                let input = bundle.write(
+                    "input.html",
+                    r#"<!doctype html>
+<div id="target" style="width:96px;height:48px"></div>
+<script>
+window.pliego.defer();
+document.fonts.ready.then(() => {
+    requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+            const observer = new ResizeObserver(() => {});
+            observer.observe(document.getElementById("target"));
+            window.controlledResizeObserver = observer;
+            window.pliego.ready({ fixture: "controlled-resize-observer" });
+        });
+    });
+});
+</script>"#,
                 );
                 _bundle = Some(bundle);
                 input
@@ -3746,7 +3783,9 @@ window.pliego?.defer();
         };
         if matches!(
             case.as_str(),
-            "controlled-finite" |
+            "controlled-local-success" |
+                "controlled-resize-observer" |
+                "controlled-finite" |
                 "controlled-paint-mutation" |
                 "controlled-readiness-retry" |
                 "controlled-readiness-fail" |
@@ -3764,6 +3803,13 @@ window.pliego?.defer();
                 files
             };
             let files_before = bundle_files();
+            let mut runtime_policy = DeterministicRuntimePolicy::default();
+            if matches!(
+                case.as_str(),
+                "controlled-local-success" | "controlled-resize-observer"
+            ) {
+                runtime_policy.settlement.limits.ordinary_tasks = 256;
+            }
             let controlled = DocumentSession::new_controlled(
                 &input,
                 environment,
@@ -3771,10 +3817,64 @@ window.pliego?.defer();
                 resources,
                 allow_host_fonts,
                 readiness,
-                DeterministicRuntimePolicy::default(),
+                runtime_policy,
             )
             .expect("controlled fixture should construct with the API 1 readiness shim");
             match case.as_str() {
+                "controlled-resize-observer" => {
+                    let candidate = controlled.prepare_capture_candidate().expect(
+                        "a late no-op ResizeObserver should reach generation-bound candidate evidence",
+                    );
+                    let authored_readiness = candidate.readiness.clone();
+                    assert_eq!(authored_readiness["status"], "ready");
+                    assert_eq!(authored_readiness["font_status"], "loaded");
+                    assert_eq!(
+                        authored_readiness["payload"]["fixture"],
+                        "controlled-resize-observer"
+                    );
+                    let outcome = candidate
+                        .capture()
+                        .expect("a late no-op ResizeObserver should complete controlled capture");
+                    assert_eq!(outcome.readiness, authored_readiness);
+                    assert!(outcome.capture.unsupported_events.is_empty());
+                    assert!(outcome.capture.text_mapping_gaps.is_empty());
+                },
+                "controlled-local-success" => {
+                    let candidate = controlled.prepare_capture_candidate().expect(
+                        "static local-success should reach generation-bound candidate evidence",
+                    );
+                    let surface = candidate.precondition().surface();
+                    assert_eq!(surface.device_pixel_scale(), 1.0);
+                    assert_eq!(
+                        (surface.viewport().width, surface.viewport().height),
+                        (794, 1123)
+                    );
+                    assert_eq!(surface.capture_rect().min.x, 0);
+                    assert_eq!(surface.capture_rect().min.y, 0);
+                    assert_eq!(surface.capture_rect().max.x, surface.viewport().width);
+                    assert_eq!(surface.capture_rect().max.y, surface.viewport().height);
+
+                    let outcome = candidate
+                        .capture()
+                        .expect("static local-success should complete controlled capture");
+                    assert_eq!(outcome.readiness["status"], "ready");
+                    assert_eq!(outcome.readiness["font_status"], "loaded");
+                    assert_eq!(outcome.readiness["payload"]["local_loaded"], true);
+                    assert_eq!(outcome.resource_accounting.requests, 2);
+                    assert_eq!(outcome.resource_accounting.loaded, 2);
+                    assert_eq!(outcome.resource_accounting.delegated, 0);
+                    assert_eq!(outcome.resource_accounting.failed, 0);
+                    assert_eq!(outcome.resources.len(), 2);
+                    assert_eq!(
+                        png_dimensions(&outcome.stable_image_png),
+                        (
+                            surface.capture_rect().width() as u32,
+                            surface.capture_rect().height() as u32,
+                        )
+                    );
+                    assert!(outcome.capture.unsupported_events.is_empty());
+                    assert!(outcome.capture.text_mapping_gaps.is_empty());
+                },
                 "controlled-finite" => {
                     let handshake_before = controlled_readiness_handshake_counts();
                     let candidate = controlled

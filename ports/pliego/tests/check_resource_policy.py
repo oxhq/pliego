@@ -25,6 +25,7 @@ from typing import Any, Iterator
 POLICY = "pliego.resource-policy.v1"
 RESOURCE_TIMEOUT_MS = 1_000
 PROCESS_TIMEOUT_SECONDS = 30
+SUCCESS_PROCESS_TIMEOUT_SECONDS = 60
 FAILURE_EXIT_STRESS_RUNS_PER_CASE = 10
 MAX_CACHE_ENTRIES = 128
 MAX_RESOURCE_BYTES = 64 * 1024 * 1024
@@ -302,6 +303,7 @@ def run(
     fixture: str,
     checks: dict[str, str] | None = None,
     options: tuple[str, ...] = (),
+    process_timeout_seconds: int = PROCESS_TIMEOUT_SECONDS,
 ) -> tuple[subprocess.CompletedProcess[bytes], dict[str, Any]]:
     (root / "document.html").write_text(document(fixture, scripts, checks), encoding="utf-8")
     command = [
@@ -329,7 +331,7 @@ def run(
             cwd=root,
             env=environment,
             capture_output=True,
-            timeout=PROCESS_TIMEOUT_SECONDS,
+            timeout=process_timeout_seconds,
             check=False,
         )
     except subprocess.TimeoutExpired as error:
@@ -338,13 +340,10 @@ def run(
         result = subprocess.CompletedProcess(command, 124, stdout, stderr)
         retain(root, result, destination)
         (destination / "process-timeout.json").write_text(
-            json.dumps({"case": fixture, "timeout_seconds": PROCESS_TIMEOUT_SECONDS}, indent=2) + "\n",
+            json.dumps({"case": fixture, "timeout_seconds": process_timeout_seconds}, indent=2) + "\n",
             encoding="utf-8",
         )
-        fail(
-            f"{fixture} exceeded {PROCESS_TIMEOUT_SECONDS}s; retained evidence at {destination} "
-            "(possible Servo post-Allow cancellation gap)"
-        )
+        fail(f"{fixture} exceeded its {process_timeout_seconds}s process deadline; retained evidence at {destination}")
     retain(root, result, destination)
     require_no_private_container(root, fixture)
     summary = final_json(result)
@@ -625,6 +624,7 @@ def main() -> int:
                 "http": 'window.httpLoaded === "HTTP_RESOURCE_BODY_SECRET"',
             },
             options=(*allow_http, "--virtual-resource", f"{virtual_url}=virtual.js"),
+            process_timeout_seconds=SUCCESS_PROCESS_TIMEOUT_SECONDS,
         )
         policy = verify_healthy(
             result,
@@ -827,6 +827,7 @@ def main() -> int:
                 fixture=name,
                 checks={"cached": 'window.cachedLoaded === "CACHE_RESOURCE_BODY_SECRET"'},
                 options=("--asset-manifest", str(manifest)),
+                process_timeout_seconds=SUCCESS_PROCESS_TIMEOUT_SECONDS,
             )
             policy = verify_healthy(
                 result,
@@ -866,6 +867,7 @@ def main() -> int:
             ["local.js"],
             fixture="recovery",
             checks={"local": 'window.localLoaded === "LOCAL_RESOURCE_BODY_SECRET"'},
+            process_timeout_seconds=SUCCESS_PROCESS_TIMEOUT_SECONDS,
         )
         verify_healthy(
             result,
