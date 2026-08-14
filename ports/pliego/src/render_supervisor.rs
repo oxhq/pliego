@@ -227,32 +227,79 @@ impl ChildContainment {
         if self.termination_sent {
             return Ok(());
         }
-        // Record the one permitted numeric-PGID signal attempt before making it. Even if the
-        // kernel rejects this call, cleanup must never retry after the leader is reaped and the
-        // number can be reused by an unrelated process group.
+        // Record the bounded numeric-PGID termination operation before making it. Cleanup must
+        // never start a new signal operation after the leader is reaped and the number can be
+        // reused by an unrelated process group.
         self.termination_sent = true;
-        let result = unsafe { libc::kill(-self.process_group, libc::SIGKILL) };
-        if result != 0 {
+        #[cfg(target_os = "macos")]
+        {
+            self.terminate_macos()
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            let result = unsafe { libc::kill(-self.process_group, libc::SIGKILL) };
+            if result == 0 {
+                return Ok(());
+            }
             let error = io::Error::last_os_error();
             if error.raw_os_error() == Some(libc::ESRCH) {
                 return Ok(());
             }
-            // Darwin's POSIX killpg implementation reports EPERM when an existing process group
-            // contains only zombies because those members are excluded from signal delivery.
-            // Accept that status only after a read-only group inspection proves there is no live
-            // member; every genuine permission failure remains fail-closed.
-            #[cfg(target_os = "macos")]
-            if error.raw_os_error() == Some(libc::EPERM) &&
-                matches!(
-                    macos_process_group_has_only_zombies(self.process_group),
-                    Ok(true)
-                )
-            {
+            Err(error)
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn terminate_macos(&self) -> io::Result<()> {
+        let deadline = Instant::now()
+            .checked_add(PROCESS_TREE_DRAIN_GRACE)
+            .unwrap_or_else(Instant::now);
+        loop {
+            let result = unsafe { libc::kill(-self.process_group, libc::SIGKILL) };
+            if result == 0 {
                 return Ok(());
             }
-            return Err(error);
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::ESRCH) {
+                return Ok(());
+            }
+            if error.raw_os_error() != Some(libc::EPERM) {
+                return Err(error);
+            }
+
+            // Darwin's POSIX killpg implementation can report EPERM while a member is
+            // transitioning after the group leader exits, and also reports EPERM for a
+            // zombie-only group because zombies are excluded from signal delivery. The unreaped
+            // leader still reserves this PGID throughout this bounded operation, so a retry cannot
+            // target a reused group. Accept only a proven zombie-only group; an orphan that is
+            // temporarily hidden by MAC process-info policy remains untrusted until it disappears.
+            match macos_process_group_observation(self.process_group).map_err(|inspection_error| {
+                io::Error::new(
+                    inspection_error.kind(),
+                    format!(
+                        "Darwin process-group inspection failed after termination was denied: {inspection_error}"
+                    ),
+                )
+            })? {
+                MacosProcessGroupObservation::ZombieOnly => return Ok(()),
+                MacosProcessGroupObservation::Live if Instant::now() >= deadline => {
+                    return Err(error);
+                },
+                MacosProcessGroupObservation::TemporarilyUnobservable
+                    if Instant::now() >= deadline =>
+                {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "Darwin process group remained unobservable after termination was denied",
+                    ));
+                },
+                MacosProcessGroupObservation::Live |
+                MacosProcessGroupObservation::TemporarilyUnobservable => {
+                    thread::sleep(PROCESS_POLL_INTERVAL);
+                },
+            }
         }
-        Ok(())
     }
 
     fn quiesce(&mut self) -> io::Result<()> {
@@ -269,7 +316,15 @@ impl ChildContainment {
             .unwrap_or_else(Instant::now);
         loop {
             #[cfg(target_os = "macos")]
-            if macos_process_group_has_only_zombies(self.process_group)? {
+            let macos_observation =
+                macos_process_group_observation(self.process_group).map_err(|error| {
+                    io::Error::new(
+                        error.kind(),
+                        format!("Darwin process-group drainage inspection failed: {error}"),
+                    )
+                })?;
+            #[cfg(target_os = "macos")]
+            if macos_observation == MacosProcessGroupObservation::ZombieOnly {
                 self.quiesced = true;
                 return Ok(());
             }
@@ -280,18 +335,38 @@ impl ChildContainment {
                     self.quiesced = true;
                     return Ok(());
                 }
-                // A live member can become a zombie between the read-only group inspection
-                // above and this probe. Darwin then reports EPERM for the now zombie-only group.
-                // Recheck that exact state before failing closed on the permission error.
                 #[cfg(target_os = "macos")]
-                if error.raw_os_error() == Some(libc::EPERM) &&
-                    matches!(
-                        macos_process_group_has_only_zombies(self.process_group),
-                        Ok(true)
-                    )
-                {
-                    self.quiesced = true;
-                    return Ok(());
+                if error.raw_os_error() == Some(libc::EPERM) {
+                    // A member can transition between the read-only inspection and this probe.
+                    // Recheck, but never treat an unobservable group as drained. The held leader
+                    // reserves the PGID throughout this bounded observation loop.
+                    let observation = macos_process_group_observation(self.process_group)
+                        .map_err(|inspection_error| {
+                            io::Error::new(
+                                inspection_error.kind(),
+                                format!(
+                                    "Darwin process-group drainage inspection failed after the group probe was denied: {inspection_error}"
+                                ),
+                            )
+                        })?;
+                    if observation == MacosProcessGroupObservation::ZombieOnly {
+                        self.quiesced = true;
+                        return Ok(());
+                    }
+                    if Instant::now() >= deadline {
+                        return if observation ==
+                            MacosProcessGroupObservation::TemporarilyUnobservable
+                        {
+                            Err(io::Error::new(
+                                io::ErrorKind::PermissionDenied,
+                                "Darwin process group remained unobservable during drainage",
+                            ))
+                        } else {
+                            Err(error)
+                        };
+                    }
+                    thread::sleep(PROCESS_POLL_INTERVAL);
+                    continue;
                 }
                 return Err(error);
             }
@@ -301,6 +376,13 @@ impl ChildContainment {
                 return Ok(());
             }
             if Instant::now() >= deadline {
+                #[cfg(target_os = "macos")]
+                if macos_observation == MacosProcessGroupObservation::TemporarilyUnobservable {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "Darwin process group remained unobservable during drainage",
+                    ));
+                }
                 return Err(io::Error::new(
                     io::ErrorKind::TimedOut,
                     "internal worker process group did not terminate",
@@ -308,6 +390,35 @@ impl ChildContainment {
             }
             thread::sleep(PROCESS_POLL_INTERVAL);
         }
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MacosProcessGroupObservation {
+    ZombieOnly,
+    Live,
+    TemporarilyUnobservable,
+}
+
+#[cfg(target_os = "macos")]
+fn macos_process_group_observation(
+    process_group: libc::pid_t,
+) -> io::Result<MacosProcessGroupObservation> {
+    macos_process_group_observation_from_result(macos_process_group_has_only_zombies(process_group))
+}
+
+#[cfg(target_os = "macos")]
+fn macos_process_group_observation_from_result(
+    result: io::Result<bool>,
+) -> io::Result<MacosProcessGroupObservation> {
+    match result {
+        Ok(true) => Ok(MacosProcessGroupObservation::ZombieOnly),
+        Ok(false) => Ok(MacosProcessGroupObservation::Live),
+        Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+            Ok(MacosProcessGroupObservation::TemporarilyUnobservable)
+        },
+        Err(error) => Err(error),
     }
 }
 
@@ -3450,6 +3561,34 @@ mod tests {
         let mut child = child_result(&captured_frame, 0);
         child.stderr.bytes = b"unexpected log\n".to_vec();
         assert!(trusted_frame(child, NONCE, &paths()).is_err());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_permission_denied_group_observation_is_never_drained() {
+        assert_eq!(
+            macos_process_group_observation_from_result(Ok(true)).unwrap(),
+            MacosProcessGroupObservation::ZombieOnly
+        );
+        assert_eq!(
+            macos_process_group_observation_from_result(Ok(false)).unwrap(),
+            MacosProcessGroupObservation::Live
+        );
+        assert_eq!(
+            macos_process_group_observation_from_result(Err(io::Error::from(
+                io::ErrorKind::PermissionDenied,
+            )))
+            .unwrap(),
+            MacosProcessGroupObservation::TemporarilyUnobservable
+        );
+        assert_eq!(
+            macos_process_group_observation_from_result(Err(io::Error::from(
+                io::ErrorKind::InvalidData,
+            )))
+            .unwrap_err()
+            .kind(),
+            io::ErrorKind::InvalidData
+        );
     }
 
     #[cfg(target_os = "macos")]
