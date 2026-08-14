@@ -25,6 +25,7 @@ from typing import Any, Iterator
 POLICY = "pliego.resource-policy.v1"
 RESOURCE_TIMEOUT_MS = 1_000
 PROCESS_TIMEOUT_SECONDS = 30
+FAILURE_EXIT_STRESS_RUNS_PER_CASE = 10
 MAX_CACHE_ENTRIES = 128
 MAX_RESOURCE_BYTES = 64 * 1024 * 1024
 LOCAL_BODY = 'window.localLoaded = "LOCAL_RESOURCE_BODY_SECRET";\n'
@@ -692,6 +693,52 @@ def main() -> int:
                     and str(MAX_RESOURCE_BYTES) in str(error.get("message"))
                     and "exceeds" in str(error.get("message")),
                     f"size-limit failure omitted its configured bound: {error!r}",
+                )
+
+        # A typed render failure must return through Rust normally. Hosted runs intermittently
+        # observed abnormal teardown after the correct failure frame had already been emitted while
+        # this path used forced process exit. Repeat both a no-network denial and the exact HTTP
+        # status case in fresh processes, distinguishing a stable exit-1 contract from a
+        # post-result abnormal termination without claiming that process exit was the sole cause.
+        stress_cases = (
+            ("traversal", ["../outside.js"], (), "RESOURCE_DENIED", "deny", None),
+            (
+                "http-408",
+                [f"{server.base_url}timeout.js"],
+                allow_http,
+                "RESOURCE_TIMEOUT",
+                "configured-roots",
+                "/timeout.js",
+            ),
+        )
+        for case, scripts, options, expected_code, network, requested_path in stress_cases:
+            for iteration in range(FAILURE_EXIT_STRESS_RUNS_PER_CASE):
+                name = f"{case}-{iteration + 1:02d}"
+                root = temp_root / f"failure-exit-{name}"
+                root.mkdir()
+                before_requested = server.count(requested_path) if requested_path else 0
+                result, summary = run(
+                    binary,
+                    root,
+                    output / "failure-exit-stress" / name,
+                    scripts,
+                    fixture=name,
+                    options=options,
+                )
+                verify_failure(result, summary, root, expected_code, network=network)
+                if requested_path:
+                    require(
+                        server.count(requested_path) > before_requested,
+                        f"{name} did not reach {requested_path}",
+                    )
+                stdout_lines = [line for line in result.stdout.splitlines() if line.strip()]
+                require(len(stdout_lines) == 1, f"{name} emitted {len(stdout_lines)} stdout frames")
+                stderr = result.stderr.lower()
+                require(
+                    "mozalloc_abort" not in stderr
+                    and "redirecting call to abort()" not in stderr
+                    and "segmentation fault" not in stderr,
+                    f"{name} reached native abort during failure teardown: {result.stderr[-2000:]}",
                 )
 
         cache_store = temp_root / "cache-store"

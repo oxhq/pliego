@@ -153,6 +153,7 @@ use session::{PreparedPublicationError, PublicationJournal, PublicationRecoveryS
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
 use sha2::{Digest, Sha256};
 
+mod api2;
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
 mod asset_cache;
 #[cfg(all(
@@ -358,6 +359,9 @@ fn policy_failure_for_pending(url: String, response_status: Option<u16>) -> Reso
 enum Command {
     Help,
     Version,
+    ContractProbe,
+    RenderApi2,
+    Api2InvocationError(String),
     Render(RenderRequest),
     RenderControlled(RenderRequest),
 }
@@ -372,6 +376,28 @@ fn parse_args(mut args: Vec<OsString>) -> Result<Command, String> {
     if matches!(args.as_slice(), [flag] if flag == "-V" || flag == "--version" || flag == "--verbose-version")
     {
         return Ok(Command::Version);
+    }
+    if matches!(args.as_slice(), [flag] if flag == "--contract-probe") {
+        return Ok(Command::ContractProbe);
+    }
+    if matches!(args.as_slice(), [command] if command == "render-api2") {
+        return Ok(Command::RenderApi2);
+    }
+    if args
+        .first()
+        .is_some_and(|argument| argument == "render-api2")
+    {
+        return Ok(Command::Api2InvocationError(
+            "`pliego render-api2` accepts no command-line options or paths".into(),
+        ));
+    }
+    if args
+        .first()
+        .is_some_and(|argument| argument == "--contract-probe")
+    {
+        return Ok(Command::Api2InvocationError(
+            "`pliego --contract-probe` accepts no additional arguments".into(),
+        ));
     }
 
     let controlled_render = args
@@ -692,18 +718,46 @@ fn parse_timezone(value: &OsString) -> Result<&'static str, String> {
     }
 }
 
-fn main() {
+fn main() -> std::process::ExitCode {
     let command = parse_args(std::env::args_os().skip(1).collect())
         .unwrap_or_else(|error| invalid_request(&error));
 
     match command {
-        Command::Help => print_help(),
-        Command::Version => print_version(),
+        Command::Help => {
+            print_help();
+            std::process::ExitCode::SUCCESS
+        },
+        Command::Version => {
+            print_version();
+            std::process::ExitCode::SUCCESS
+        },
+        Command::ContractProbe => {
+            let mut stdout = std::io::stdout().lock();
+            if let Err(error) = api2::write_contract_probe(&mut stdout, SERVO_BASE_SHA) {
+                api2_invocation_error(&error);
+            }
+            std::process::ExitCode::SUCCESS
+        },
+        Command::RenderApi2 => {
+            let result: Result<(), api2::InvocationError> = {
+                let mut stdin = std::io::stdin().lock();
+                api2::decode_render_request(&mut stdin)
+                    .and_then(|_| Err(api2::InvocationError::unsupported()))
+            };
+            if let Err(error) = result {
+                api2_invocation_error(&error);
+            }
+            std::process::ExitCode::SUCCESS
+        },
+        Command::Api2InvocationError(message) => {
+            api2_invocation_error(&api2::InvocationError::new(message));
+        },
         Command::Render(request) => match render_command(request) {
             Ok(outcome) => {
                 let mut stdout = std::io::stdout().lock();
                 write_render_outcome(&mut stdout, &outcome)
                     .expect("failed to write the render outcome to stdout");
+                std::process::ExitCode::SUCCESS
             },
             Err(error) => print_render_error(&error),
         },
@@ -712,6 +766,7 @@ fn main() {
                 let mut stdout = std::io::stdout().lock();
                 write_render_outcome(&mut stdout, &outcome)
                     .expect("failed to write the render outcome to stdout");
+                std::process::ExitCode::SUCCESS
             },
             Err(error) => print_render_error(&error),
         },
@@ -778,7 +833,7 @@ fn print_help() {
         "NONPRODUCTION ORACLE BUILD — servoshell is enabled only for explicit parity diagnostics."
     );
     println!(
-        "Pliego — native document rendering on Servo\nRuntime: {}\n\nUsage:\n  pliego render <document.html> --output <document.pdf> --artifacts <directory> [options]\n  pliego render-controlled <document.html> --output <document.pdf> --artifacts <directory> [options]\n  pliego [options] <document.html>\n  pliego --version\n\nOptions:\n  --locale en-US|es-MX\n  --timezone UTC|PST8PDT\n  --page-size WIDTHxHEIGHT\n  --page-margins TOP,RIGHT,BOTTOM,LEFT\n  --allow-host-fonts          Opt in to observable system-font resolution\n  --allow-partial-scene       Retain diagnostic output (render only; rejected by render-controlled)\n  --allow-http-root URL       Allow GET/HEAD below one explicit http(s) URL root\n  --virtual-resource URL=FILE Serve one exact URL from a host-provided file\n  --asset-manifest FILE       Verify and cache manifest-backed assets locally\n  --resource-timeout-ms MS    Bound controlled network connection time (1..60000)\n\nThe controlled route is fail-closed and currently accepts one root document with no Canvas or other unsupported open-ended source. Host fonts, partial scenes, network, redirects, and asset caching are disabled by default. The shorthand form writes outputs to a temporary artifact directory. Page geometry is expressed in CSS pixels.",
+        "Pliego — native document rendering on Servo\nRuntime: {}\n\nUsage:\n  pliego render <document.html> --output <document.pdf> --artifacts <directory> [options]\n  pliego render-controlled <document.html> --output <document.pdf> --artifacts <directory> [options]\n  pliego [options] <document.html>\n  pliego --version\n  pliego --contract-probe\n  pliego render-api2\n\nOptions:\n  --locale en-US|es-MX\n  --timezone UTC|PST8PDT\n  --page-size WIDTHxHEIGHT\n  --page-margins TOP,RIGHT,BOTTOM,LEFT\n  --allow-host-fonts          Opt in to observable system-font resolution\n  --allow-partial-scene       Retain diagnostic output (render only; rejected by render-controlled)\n  --allow-http-root URL       Allow GET/HEAD below one explicit http(s) URL root\n  --virtual-resource URL=FILE Serve one exact URL from a host-provided file\n  --asset-manifest FILE       Verify and cache manifest-backed assets locally\n  --resource-timeout-ms MS    Bound controlled network connection time (1..60000)\n\nAPI 2 is an unreleased executable foundation: the probe advertises no complete render tuple, so render-api2 strictly decodes stdin and exits unavailable without rendering.\n\nThe controlled route is fail-closed and currently accepts one root document with no Canvas or other unsupported open-ended source. Host fonts, partial scenes, network, redirects, and asset caching are disabled by default. The shorthand form writes outputs to a temporary artifact directory. Page geometry is expressed in CSS pixels.",
         active_runtime_name()
     );
 }
@@ -806,6 +861,12 @@ fn invalid_request(message: &str) -> ! {
     );
     eprintln!("pliego: INVALID_REQUEST: {message}");
     std::process::exit(2)
+}
+
+fn api2_invocation_error(error: &api2::InvocationError) -> ! {
+    let mut stderr = std::io::stderr().lock();
+    let _ = error.write_stderr_line(&mut stderr);
+    std::process::exit(api2::INVOCATION_ERROR_EXIT_CODE)
 }
 
 #[derive(Debug, PartialEq)]
@@ -845,7 +906,7 @@ fn cli_render_error(error: &RenderError) -> CliRenderError {
     }
 }
 
-fn print_render_error(error: &RenderError) -> ! {
+fn print_render_error(error: &RenderError) -> std::process::ExitCode {
     for warning in &error.warnings {
         eprintln!("pliego: warning: {warning}");
     }
@@ -854,7 +915,7 @@ fn print_render_error(error: &RenderError) -> ! {
         println!("{stdout}");
     }
     eprintln!("{}", output.stderr);
-    std::process::exit(error.exit_code)
+    std::process::ExitCode::from(error.exit_code)
 }
 
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
@@ -4436,8 +4497,8 @@ mod tests {
         ResourceCapture, ResourcePolicy, ResourcePolicyConfig, ResourcePolicyFailure,
         ResourceRequest, WebResourceLoadRole, classify_controlled_http_status, cli_render_error,
         create_session_artifacts, default_page, page_artifact, parse_args, persist_scene_capture,
-        resolve_scene_resource, runtime_policy, set_document_pdf_environment, sha256_hex,
-        stable_render_id,
+        print_render_error, resolve_scene_resource, runtime_policy, set_document_pdf_environment,
+        sha256_hex, stable_render_id,
     };
     #[cfg(feature = "shell-oracle")]
     use super::{
@@ -5322,6 +5383,32 @@ mod tests {
     }
 
     #[test]
+    fn api2_selectors_with_extra_arguments_stay_in_api2_invocation_framing() {
+        assert_eq!(
+            parse_args(vec![OsString::from("--contract-probe")]).unwrap(),
+            Command::ContractProbe
+        );
+        assert_eq!(
+            parse_args(vec![OsString::from("render-api2")]).unwrap(),
+            Command::RenderApi2
+        );
+        assert!(matches!(
+            parse_args(vec![
+                OsString::from("--contract-probe"),
+                OsString::from("extra")
+            ]),
+            Ok(Command::Api2InvocationError(_))
+        ));
+        assert!(matches!(
+            parse_args(vec![
+                OsString::from("render-api2"),
+                OsString::from("--anything")
+            ]),
+            Ok(Command::Api2InvocationError(_))
+        ));
+    }
+
+    #[test]
     fn runtime_selection_is_explicit_and_direct_wins_combined_builds() {
         #[cfg(feature = "document-session")]
         assert_eq!(super::active_runtime_name(), "document-session");
@@ -5370,6 +5457,17 @@ mod tests {
             "pliego: document is unavailable: C:\\workspace\\missing.html"
         );
         assert_eq!(error.exit_code, 2);
+    }
+
+    #[test]
+    fn render_failure_emitter_returns_the_requested_exit_code() {
+        let error = RenderError::without_publication(
+            "RESOURCE_DENIED",
+            "controlled resource was denied",
+            1,
+        );
+
+        assert_eq!(print_render_error(&error), std::process::ExitCode::from(1));
     }
 
     #[test]

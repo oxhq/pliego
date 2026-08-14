@@ -17,7 +17,7 @@ Chromium, Node.js, or Java with an application.
 | Native bundles | Linux x86_64, Windows x86_64, macOS x86_64, macOS arm64 |
 | Primary integration | PHP and Laravel packages |
 | Hostile HTML | Unsupported; Pliego is not a security sandbox |
-| API 2 | Proposed design work, not a released API |
+| API 2 | Unreleased probe/decoder foundation; advertises no render contract |
 
 The [support profile](pliego/support-profile.md) is authoritative for current CSS,
 paint, resource, platform, and operational limits.

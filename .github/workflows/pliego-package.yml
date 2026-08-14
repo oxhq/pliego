@@ -12,6 +12,7 @@ on:
       - .python-version
       - Cargo.lock
       - Cargo.toml
+      - contracts/api2/**
       - LICENSE*
       - licenses/**
       - mach
@@ -51,6 +52,7 @@ jobs:
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           persist-credentials: false
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
 
       - name: Set up Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
@@ -74,21 +76,29 @@ jobs:
           - name: Linux x64
             runner: ubuntu-22.04
             bundle: linux-x86_64
+            executable: pliego
+            target: x86_64-unknown-linux-gnu
             target_dir: target
             archive_ext: tar.gz
           - name: Windows x64
             runner: windows-2022
             bundle: windows-x86_64
+            executable: pliego.exe
+            target: x86_64-pc-windows-msvc
             target_dir: C:\a\pliego\target
             archive_ext: zip
           - name: macOS Intel
             runner: macos-15-intel
             bundle: macos-x86_64
+            executable: pliego
+            target: x86_64-apple-darwin
             target_dir: target
             archive_ext: tar.gz
           - name: macOS Apple Silicon
             runner: macos-15
             bundle: macos-aarch64
+            executable: pliego
+            target: aarch64-apple-darwin
             target_dir: target
             archive_ext: tar.gz
     env:
@@ -99,6 +109,7 @@ jobs:
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           persist-credentials: false
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
 
       - name: Set up Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
@@ -293,6 +304,45 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $hash = (Get-FileHash "dist/$archive" -Algorithm SHA256).Hash.ToLowerInvariant()
           "$hash  $archive" | Set-Content "dist/$archive.sha256" -Encoding ascii
+
+      - name: Prove the packaged API 2 executable foundation
+        shell: bash
+        run: |
+          set -euo pipefail
+          bundle="pliego-${PLIEGO_VERSION}-${{ matrix.bundle }}"
+          archive="$PWD/dist/${bundle}.${{ matrix.archive_ext }}"
+          unpacked="$RUNNER_TEMP/pliego-packaged-api2-${{ matrix.bundle }}"
+          proof="$PWD/dist/api2-executable-proof-${{ matrix.bundle }}.json"
+          test ! -e "$unpacked"
+          test ! -e "$proof"
+          python - "$archive" "$unpacked" <<'PY'
+          import shutil
+          import sys
+          shutil.unpack_archive(sys.argv[1], sys.argv[2])
+          PY
+          binary="$unpacked/$bundle/${{ matrix.executable }}"
+          test -f "$binary"
+          source_commit="$(git rev-parse HEAD)"
+          python contracts/api2/test_contract.py
+          python ports/pliego/tests/check_api2_contract.py --self-test
+          python ports/pliego/tests/check_api2_contract.py \
+            --binary "$binary" \
+            --expected-version "$PLIEGO_VERSION" \
+            --expected-source-commit "$source_commit" \
+            --expected-target '${{ matrix.target }}' \
+            --expected-servo-base "$SERVO_BASE_SHA" \
+            --valid-request contracts/api2/goldens/accepted/render-request.a4.json \
+            --archive "$archive" \
+            --bundle-version-file "$unpacked/$bundle/VERSION.txt" \
+            --proof-output "$proof"
+
+      - name: Upload packaged API 2 executable proof
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: pliego-${{ matrix.bundle }}-api2-executable-proof
+          path: dist/api2-executable-proof-${{ matrix.bundle }}.json
+          if-no-files-found: error
+          retention-days: 30
 
       - name: Prove the packaged Linux controlled-capture boundary
         if: runner.os == 'Linux'
