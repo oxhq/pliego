@@ -11,6 +11,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,8 @@ PAGE_MARGINS = "10,10,10,10"
 REFERENCE_SCHEMA = "pliego.paged-typography-reference"
 SUPPORT_SCHEMA = "pliego.typography-support"
 FONT_PLACEHOLDER = "__PLIEGO_FONT_BASE64__"
+UNIX_SOCKET_PATH_BYTES = 108
+WAYLAND_SOCKET_NAME = "wayland-0"
 
 
 @dataclass(frozen=True)
@@ -101,6 +104,10 @@ def canonical_text(value: str) -> str:
     return " ".join(value.replace("\f", " ").split())
 
 
+def unix_socket_path_fits(path: Path) -> bool:
+    return len(os.fsencode(path)) + 1 <= UNIX_SOCKET_PATH_BYTES
+
+
 def materialize_fixture(repo: Path, case: Case, template: Path, output: Path) -> Path:
     asset = repo / case.font
     require(asset.is_file(), f"missing pinned font: {case.font}")
@@ -120,42 +127,48 @@ def render(binary: Path, repo: Path, case: Case, fixture: Path, destination: Pat
     destination.mkdir(parents=True)
     home = destination / "home"
     home.mkdir()
-    runtime = home / "runtime"
-    runtime.mkdir()
-    runtime.chmod(0o700)
     output = destination / "document.pdf"
     artifacts = destination / "artifacts"
-    environment = os.environ.copy()
-    environment.update(
-        {
-            "HOME": str(home),
-            "XDG_CACHE_HOME": str(home / "cache"),
-            "XDG_CONFIG_HOME": str(home / "config"),
-            "XDG_DATA_HOME": str(home / "data"),
-            "XDG_RUNTIME_DIR": str(runtime),
-        }
-    )
-    result = subprocess.run(
-        [
-            str(binary),
-            "render",
-            fixture.name,
-            "--output",
-            str(output),
-            "--artifacts",
-            str(artifacts),
-            "--page-size",
-            PAGE_SIZE,
-            "--page-margins",
-            PAGE_MARGINS,
-        ],
-        cwd=fixture.parent,
-        env=environment,
-        capture_output=True,
-        text=True,
-        timeout=60,
-        check=False,
-    )
+    short_runtime_root = "/tmp" if os.name == "posix" else None
+    with tempfile.TemporaryDirectory(prefix="pliego-runtime-", dir=short_runtime_root) as runtime_name:
+        runtime = Path(runtime_name)
+        runtime.chmod(0o700)
+        if os.name == "posix":
+            require(
+                unix_socket_path_fits(runtime / WAYLAND_SOCKET_NAME),
+                f"XDG runtime socket path exceeds {UNIX_SOCKET_PATH_BYTES} bytes",
+            )
+        environment = os.environ.copy()
+        environment.update(
+            {
+                "HOME": str(home),
+                "XDG_CACHE_HOME": str(home / "cache"),
+                "XDG_CONFIG_HOME": str(home / "config"),
+                "XDG_DATA_HOME": str(home / "data"),
+                "XDG_RUNTIME_DIR": str(runtime),
+            }
+        )
+        result = subprocess.run(
+            [
+                str(binary),
+                "render",
+                fixture.name,
+                "--output",
+                str(output),
+                "--artifacts",
+                str(artifacts),
+                "--page-size",
+                PAGE_SIZE,
+                "--page-margins",
+                PAGE_MARGINS,
+            ],
+            cwd=fixture.parent,
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
     (destination / "process.stdout.log").write_text(result.stdout, encoding="utf-8")
     (destination / "process.stderr.log").write_text(result.stderr, encoding="utf-8")
     require(result.returncode == 0, f"{case.fixture} failed: {result.stderr[-3000:]}")
@@ -454,6 +467,11 @@ def self_test() -> None:
         )
     sample = "क्ष"
     require(len(sample.encode()) == 9 and canonical_text("a\n b\f") == "a b", "Unicode helpers differ")
+    require(
+        unix_socket_path_fits(Path("/tmp/pliego-runtime-12345678") / WAYLAND_SOCKET_NAME)
+        and not unix_socket_path_fits(Path("/") / ("x" * (UNIX_SOCKET_PATH_BYTES - 1))),
+        "Unix socket path boundary differs",
+    )
     require(
         support_state({name: {"font_resource": "sha256:x", "page_count": 2} for name in CASES})["upstream_limits"][0][
             "state"
