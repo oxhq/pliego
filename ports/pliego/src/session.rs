@@ -411,8 +411,8 @@ pub(crate) fn validate_staged_artifacts(
     let staged = BoundDirectory::open_movable(staging.clone())?;
     require_private_promotion_container(&container)?;
     require_immediate_bound_child(&staging, &container, &staging_name)?;
-    if promotion_filesystem_id(container.handle.as_file())?
-        != promotion_filesystem_id(staged.handle.as_file())?
+    if promotion_filesystem_id(container.handle.as_file())? !=
+        promotion_filesystem_id(staged.handle.as_file())?
     {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -624,8 +624,8 @@ fn require_immediate_bound_child(
     parent: &BoundDirectory,
     name: &OsStr,
 ) -> io::Result<()> {
-    if path.parent() != Some(parent.requested_path.as_path())
-        || path != parent.requested_path.join(name)
+    if path.parent() != Some(parent.requested_path.as_path()) ||
+        path != parent.requested_path.join(name)
     {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -896,10 +896,10 @@ fn require_windows_private_directory(file: &File) -> io::Result<()> {
     let expected_flags = (CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE) as u8;
     // SAFETY: GetAce returned a live ACCESS_ALLOWED_ACE-sized record from the ACL.
     let valid = unsafe {
-        (*ace).Header.AceType == 0
-            && (*ace).Header.AceFlags == expected_flags
-            && (*ace).Mask == FILE_ALL_ACCESS
-            && EqualSid(
+        (*ace).Header.AceType == 0 &&
+            (*ace).Header.AceFlags == expected_flags &&
+            (*ace).Mask == FILE_ALL_ACCESS &&
+            EqualSid(
                 std::ptr::addr_of_mut!((*ace).SidStart).cast(),
                 expected_user.as_ptr(),
             ) != 0
@@ -1018,8 +1018,8 @@ fn private_leaf_token(value: &str) -> bool {
     let Some(nonce) = value.strip_prefix(".pliego-runtime-") else {
         return false;
     };
-    matches!(nonce.len(), 32 | 64)
-        && nonce
+    matches!(nonce.len(), 32 | 64) &&
+        nonce
             .bytes()
             .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
 }
@@ -1187,9 +1187,9 @@ fn validate_promotion_directory(
             hash_promotion_file(handle.as_file(), &path, before.len(), forbidden_prefixes)?;
         let after = handle.as_file().metadata()?;
         require_single_link_regular_file(handle.as_file(), &after, &path)?;
-        if bytes != before.len()
-            || after.len() != before.len()
-            || !path_matches_handle(&path, &handle)?
+        if bytes != before.len() ||
+            after.len() != before.len() ||
+            !path_matches_handle(&path, &handle)?
         {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -1489,10 +1489,10 @@ impl<'a> JsonPrivatePathScanner<'a> {
     }
 
     fn finish(self, path: &Path) -> io::Result<()> {
-        if self.in_string
-            || self.escaped
-            || self.unicode_digits != 0
-            || self.pending_high_surrogate.is_some()
+        if self.in_string ||
+            self.escaped ||
+            self.unicode_digits != 0 ||
+            self.pending_high_surrogate.is_some()
         {
             return Err(invalid_json_escape(path));
         }
@@ -1528,9 +1528,9 @@ fn deque_ends_with_private_fragment(
     haystack: &std::collections::VecDeque<u8>,
     needle: &[u8],
 ) -> bool {
-    !needle.is_empty()
-        && needle.len() <= haystack.len()
-        && haystack
+    !needle.is_empty() &&
+        needle.len() <= haystack.len() &&
+        haystack
             .iter()
             .rev()
             .zip(needle.iter().rev())
@@ -2130,9 +2130,9 @@ impl PreparedBundle {
     }
 
     fn matches_output(&self, output: &PublicationArtifact, requested_output: &str) -> bool {
-        self.output.path == requested_output
-            && self.output.sha256 == output.sha256
-            && self.output.bytes == output.bytes
+        self.output.path == requested_output &&
+            self.output.sha256 == output.sha256 &&
+            self.output.bytes == output.bytes
     }
 
     fn publication_artifact(&self) -> io::Result<PublicationArtifact> {
@@ -2356,8 +2356,8 @@ impl PublicationJournal {
         self.artifact_root.require_current()?;
         self.output_parent.require_current()?;
         self.directory.require_current()?;
-        if self.artifact_root.identity()? != self.plan.artifact_root_identity
-            || self.output_parent.identity()? != self.plan.output_parent_identity
+        if self.artifact_root.identity()? != self.plan.artifact_root_identity ||
+            self.output_parent.identity()? != self.plan.output_parent_identity
         {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -2472,9 +2472,9 @@ impl PublicationJournal {
         output.verify_staged()?;
         bundle.verify()?;
         let output_artifact = output.publication_artifact()?;
-        if output_artifact.path != self.plan.output
-            || output.output_parent_identity()? != self.plan.output_parent_identity
-            || !bundle.matches_output(&output_artifact, &self.plan.requested_output)
+        if output_artifact.path != self.plan.output ||
+            output.output_parent_identity()? != self.plan.output_parent_identity ||
+            !bundle.matches_output(&output_artifact, &self.plan.requested_output)
         {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -2573,23 +2573,23 @@ impl PublicationJournal {
         let output = Path::new(&receipt.output.path);
         let staging = Path::new(&receipt.staging.path);
         let staging_is_output = staging == output;
-        let staging_is_owned_temporary = staging.parent() == output.parent()
-            && staging
+        let staging_is_owned_temporary = staging.parent() == output.parent() &&
+            staging
                 .file_name()
                 .and_then(|name| name.to_str())
                 .is_some_and(|name| {
                     name.starts_with('.') && name.contains(".pliego-") && name.ends_with(".tmp")
                 });
-        if receipt.schema != "pliego.publication-prepared"
-            || receipt.version != 1
-            || receipt.transaction_id != self.plan.transaction_id
-            || receipt.plan_sha256 != self.plan_sha256
-            || receipt.output.path != self.plan.output
-            || receipt.bundle.path != expected_bundle
-            || receipt.outcome.path != expected_outcome
-            || (!staging_is_output && !staging_is_owned_temporary)
-            || receipt.staging.sha256 != receipt.output.sha256
-            || receipt.staging.bytes != receipt.output.bytes
+        if receipt.schema != "pliego.publication-prepared" ||
+            receipt.version != 1 ||
+            receipt.transaction_id != self.plan.transaction_id ||
+            receipt.plan_sha256 != self.plan_sha256 ||
+            receipt.output.path != self.plan.output ||
+            receipt.bundle.path != expected_bundle ||
+            receipt.outcome.path != expected_outcome ||
+            (!staging_is_output && !staging_is_owned_temporary) ||
+            receipt.staging.sha256 != receipt.output.sha256 ||
+            receipt.staging.bytes != receipt.output.bytes
         {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -2666,10 +2666,10 @@ impl PublicationJournal {
         receipt: &PublicationCommittedReceipt,
         prepared_sha256: &str,
     ) -> io::Result<()> {
-        if receipt.schema != "pliego.publication-committed"
-            || receipt.version != 1
-            || receipt.transaction_id != self.plan.transaction_id
-            || receipt.prepared_sha256 != prepared_sha256
+        if receipt.schema != "pliego.publication-committed" ||
+            receipt.version != 1 ||
+            receipt.transaction_id != self.plan.transaction_id ||
+            receipt.prepared_sha256 != prepared_sha256
         {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -2958,8 +2958,8 @@ impl SessionArtifacts {
 
     fn artifact_path(&self, name: &str) -> io::Result<PathBuf> {
         let path = Path::new(name);
-        if path.components().count() != 1
-            || !matches!(path.components().next(), Some(Component::Normal(_)))
+        if path.components().count() != 1 ||
+            !matches!(path.components().next(), Some(Component::Normal(_)))
         {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -3386,8 +3386,8 @@ impl SessionArtifacts {
 
     fn write_resource_digest(&self, digest: &str, body: &[u8]) -> io::Result<String> {
         self.require_current()?;
-        if digest.len() != 64
-            || !digest
+        if digest.len() != 64 ||
+            !digest
                 .bytes()
                 .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
         {
@@ -3530,9 +3530,9 @@ fn collect_bundle_entries(
             ));
         }
         if metadata.is_dir() {
-            if path.parent() == Some(root)
-                && path.file_name().and_then(|name| name.to_str())
-                    == Some(PUBLICATION_DIRECTORY_NAME)
+            if path.parent() == Some(root) &&
+                path.file_name().and_then(|name| name.to_str()) ==
+                    Some(PUBLICATION_DIRECTORY_NAME)
             {
                 continue;
             }
@@ -3801,8 +3801,8 @@ fn read_receipt_bytes(directory: &BoundDirectory, name: &str) -> io::Result<Vec<
             format!("publication receipt grew while reading: {}", path.display()),
         ));
     }
-    if !path_matches_handle(&path, &handle)?
-        || bytes.len() as u64 != handle.as_file().metadata()?.len()
+    if !path_matches_handle(&path, &handle)? ||
+        bytes.len() as u64 != handle.as_file().metadata()?.len()
     {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -3853,11 +3853,11 @@ fn read_publication_summary(
         .try_clone()?
         .take(MAX_PUBLICATION_OUTCOME_BYTES + 1)
         .read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > MAX_PUBLICATION_OUTCOME_BYTES
-        || bytes.len() as u64 != handle.as_file().metadata()?.len()
-        || !path_matches_handle(path, &handle)?
-        || receipt_sha256(&bytes) != artifact.sha256
-        || bytes.len() as u64 != artifact.bytes
+    if bytes.len() as u64 > MAX_PUBLICATION_OUTCOME_BYTES ||
+        bytes.len() as u64 != handle.as_file().metadata()?.len() ||
+        !path_matches_handle(path, &handle)? ||
+        receipt_sha256(&bytes) != artifact.sha256 ||
+        bytes.len() as u64 != artifact.bytes
     {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -4059,10 +4059,10 @@ fn verify_bundle_closure(
         }
         bytes.extend_from_slice(&buffer[..read]);
     }
-    if offset != artifact.bytes
-        || handle.as_file().metadata()?.len() != artifact.bytes
-        || receipt_sha256(&bytes) != artifact.sha256
-        || !path_matches_handle(&bundle_path, handle)?
+    if offset != artifact.bytes ||
+        handle.as_file().metadata()?.len() != artifact.bytes ||
+        receipt_sha256(&bytes) != artifact.sha256 ||
+        !path_matches_handle(&bundle_path, handle)?
     {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -4076,11 +4076,11 @@ fn verify_bundle_closure(
             format!("prepared bundle is invalid JSON: {error}"),
         )
     })?;
-    if manifest.schema != "pliego.bundle"
-        || manifest.version != 1
-        || manifest.render_id != render_id
-        || manifest.output != *output
-        || manifest
+    if manifest.schema != "pliego.bundle" ||
+        manifest.version != 1 ||
+        manifest.render_id != render_id ||
+        manifest.output != *output ||
+        manifest
             .entries
             .windows(2)
             .any(|entries| entries[0].path >= entries[1].path)
@@ -4459,9 +4459,9 @@ pub(crate) fn create_private_directory(path: &Path) -> io::Result<()> {
         return Err(io::Error::last_os_error());
     }
     // SAFETY: descriptor, SID, and ACL all remain live until CreateDirectoryW returns.
-    if unsafe { SetSecurityDescriptorOwner((&raw mut descriptor).cast(), user.as_ptr(), 0) } == 0
-        || unsafe { SetSecurityDescriptorDacl((&raw mut descriptor).cast(), 1, acl, 0) } == 0
-        || unsafe {
+    if unsafe { SetSecurityDescriptorOwner((&raw mut descriptor).cast(), user.as_ptr(), 0) } == 0 ||
+        unsafe { SetSecurityDescriptorDacl((&raw mut descriptor).cast(), 1, acl, 0) } == 0 ||
+        unsafe {
             SetSecurityDescriptorControl(
                 (&raw mut descriptor).cast(),
                 SE_DACL_PROTECTED,
@@ -4516,12 +4516,12 @@ fn open_directory_handle(path: &Path) -> io::Result<File> {
 
     OpenOptions::new()
         .access_mode(
-            FILE_ADD_FILE
-                | FILE_ADD_SUBDIRECTORY
-                | FILE_READ_ATTRIBUTES
-                | FILE_TRAVERSE
-                | READ_CONTROL
-                | SYNCHRONIZE,
+            FILE_ADD_FILE |
+                FILE_ADD_SUBDIRECTORY |
+                FILE_READ_ATTRIBUTES |
+                FILE_TRAVERSE |
+                READ_CONTROL |
+                SYNCHRONIZE,
         )
         .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
@@ -4909,8 +4909,8 @@ fn prepare_artifact_file(
     absolute_destination: PathBuf,
     artifact_root: BoundDirectory,
 ) -> io::Result<PreparedDocumentPdf> {
-    if source != absolute_destination
-        || source.parent() != Some(artifact_root.requested_path.as_path())
+    if source != absolute_destination ||
+        source.parent() != Some(artifact_root.requested_path.as_path())
     {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,

@@ -93,8 +93,12 @@ def final_json(result: subprocess.CompletedProcess[bytes]) -> dict[str, Any]:
 
 
 def require_no_private_container(root: Path, fixture: str) -> None:
-    private = sorted(path.name for path in root.glob(".pliego-runtime-*"))
-    require(not private, f"{fixture} retained private runtime containers: {private}")
+    private = sorted(root.glob(".pliego-runtime-*"))
+    closure = {
+        path.name: sorted(child.name for child in path.iterdir()) if path.is_dir() else ["<non-directory>"]
+        for path in private
+    }
+    require(not private, f"{fixture} retained private runtime containers: {closure}")
 
 
 def inline_body_field(value: Any) -> str | None:

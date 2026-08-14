@@ -539,6 +539,8 @@ def success_case(pliego: Path, fixture: Path, root: Path) -> None:
         ],
         cwd=fixture,
     )
+    application_top_level = {path.name for path in case.iterdir()}
+    record_process(case, result)
     require(result.returncode == 0, f"success exited {result.returncode}: {result.stderr!r}")
     require(result.stderr == b"", f"success wrote stderr: {result.stderr!r}")
     summary = decode_single_json_frame(result.stdout, "success")
@@ -550,8 +552,10 @@ def success_case(pliego: Path, fixture: Path, root: Path) -> None:
     require((artifacts / "bundle.json").is_file(), "success did not seal bundle.json")
     require_success_artifact_closure(artifacts, output, summary["render_id"])
     require_no_private_container(case, "success")
-    require_top_level(case, {"artifacts", "document.pdf"}, "success")
-    record_process(case, result)
+    require(
+        application_top_level == {"artifacts", "document.pdf"},
+        f"success top-level closure drifted: {sorted(application_top_level)}",
+    )
 
 
 def shorthand_success_case(pliego: Path, fixture: Path, root: Path) -> None:

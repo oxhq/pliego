@@ -122,8 +122,8 @@ pub(crate) fn validate_captured_artifact_contract(
     }
     tree.require_root_directory("resources")?;
 
-    if deferred.capture_status != "complete"
-        && !(deferred.capture_status == "partial" && expected.allow_partial_scene)
+    if deferred.capture_status != "complete" &&
+        !(deferred.capture_status == "partial" && expected.allow_partial_scene)
     {
         return Err(invalid(
             "captured scene status is not permitted by the original request",
@@ -196,10 +196,10 @@ pub(crate) fn validate_failed_artifact_contract(
         MAX_CONTROL_JSON_BYTES,
         "failure.json",
     )?;
-    if failure.status != "failed"
-        || failure.render_id != expected.render_id
-        || failure.error.code != expected.code
-        || failure.error.message != expected.message
+    if failure.status != "failed" ||
+        failure.render_id != expected.render_id ||
+        failure.error.code != expected.code ||
+        failure.error.message != expected.message
     {
         return Err(invalid(
             "failure.json does not match the accepted worker failure",
@@ -215,13 +215,13 @@ pub(crate) fn validate_failed_artifact_contract(
         ));
     }
     if resource_ledger.input.as_ref().is_some_and(|input| {
-        input.render_id != expected.render_id
-            || input.url != expected.input.url
-            || input.sha256 != expected.input.sha256
-            || input.resource != expected.input.resource
-            || input.bytes != expected.input.bytes
-            || input.source != "document_root"
-            || !input.main_frame
+        input.render_id != expected.render_id ||
+            input.url != expected.input.url ||
+            input.sha256 != expected.input.sha256 ||
+            input.resource != expected.input.resource ||
+            input.bytes != expected.input.bytes ||
+            input.source != "document_root" ||
+            !input.main_frame
     }) {
         return Err(invalid(
             "failure resource ledger main-frame input does not match the parent identity",
@@ -238,8 +238,8 @@ pub(crate) fn validate_failed_artifact_contract(
         if readiness
             .as_object()
             .and_then(|object| object.get("render_id"))
-            .and_then(serde_json::Value::as_str)
-            != Some(expected.render_id)
+            .and_then(serde_json::Value::as_str) !=
+            Some(expected.render_id)
         {
             return Err(invalid(
                 "failure readiness evidence does not match the render ID",
@@ -261,9 +261,9 @@ pub(crate) fn validate_failed_artifact_contract(
             },
         }
     }
-    if session_phase == FailureSessionPhase::BeforeStart
-        && tree.root_files.contains("readiness.json")
-        && !readiness_is_failed
+    if session_phase == FailureSessionPhase::BeforeStart &&
+        tree.root_files.contains("readiness.json") &&
+        !readiness_is_failed
     {
         return Err(invalid(
             "pre-start failure cannot contain preserved Ready or Pending evidence",
@@ -275,25 +275,25 @@ pub(crate) fn validate_failed_artifact_contract(
             MAX_CONTROL_JSON_BYTES,
             "environment.json",
         )?;
-        if environment.locale.requested != expected.locale
-            || environment.locale.resolved != expected.locale
-            || environment.timezone.requested != expected.timezone
-            || environment.timezone.resolved != expected.timezone
-            || environment.page != *expected.page
-            || !resource_policy_matches_expected(
+        if environment.locale.requested != expected.locale ||
+            environment.locale.resolved != expected.locale ||
+            environment.timezone.requested != expected.timezone ||
+            environment.timezone.resolved != expected.timezone ||
+            environment.page != *expected.page ||
+            !resource_policy_matches_expected(
                 &environment.resource_policy,
                 expected.resource_policy,
-            )
-            || environment.fonts.host_fonts != expected_host_font_policy(expected.allow_host_fonts)
+            ) ||
+            environment.fonts.host_fonts != expected_host_font_policy(expected.allow_host_fonts)
         {
             return Err(invalid(
                 "failure environment does not match the original deterministic request",
             ));
         }
-        let pending = environment.document_pdf.status == "pending"
-            && environment.document_pdf.error.0.is_none();
-        let failed = environment.document_pdf.status == "failed"
-            && environment
+        let pending = environment.document_pdf.status == "pending" &&
+            environment.document_pdf.error.0.is_none();
+        let failed = environment.document_pdf.status == "failed" &&
+            environment
                 .document_pdf
                 .error
                 .0
@@ -301,9 +301,9 @@ pub(crate) fn validate_failed_artifact_contract(
                 .is_some_and(|error| {
                     error.code == expected.code && error.message == expected.message
                 });
-        if environment.document_pdf.artifact.as_str()
-            != expected.public_output.to_string_lossy().as_ref()
-            || !(pending || failed)
+        if environment.document_pdf.artifact.as_str() !=
+            expected.public_output.to_string_lossy().as_ref() ||
+            !(pending || failed)
         {
             return Err(invalid(
                 "failure environment does not bind a permitted logical public PDF state",
@@ -311,27 +311,27 @@ pub(crate) fn validate_failed_artifact_contract(
         }
         let environment_phase =
             validate_failure_environment_phases(&environment, &resource_ledger, expected)?;
-        if session_phase == FailureSessionPhase::BeforeStart
-            && (environment_phase != FailureEnvironmentPhase::Base
-                || console_rows != 0
-                || resource_ledger.has_document_rows)
-            || session_phase == FailureSessionPhase::Started
-                && (resource_ledger.has_asset_failure
-                    || environment_phase == FailureEnvironmentPhase::Base
-                        && expected.code != "SESSION_ARTIFACT_WRITE_FAILED")
+        if session_phase == FailureSessionPhase::BeforeStart &&
+            (environment_phase != FailureEnvironmentPhase::Base ||
+                console_rows != 0 ||
+                resource_ledger.has_document_rows) ||
+            session_phase == FailureSessionPhase::Started &&
+                (resource_ledger.has_asset_failure ||
+                    environment_phase == FailureEnvironmentPhase::Base &&
+                        expected.code != "SESSION_ARTIFACT_WRITE_FAILED")
         {
             return Err(invalid(
                 "failure environment phase does not match session-state.jsonl",
             ));
         }
-    } else if session_phase != FailureSessionPhase::BeforeStart
-        || !resource_ledger.resources.is_empty()
-        || resource_ledger.input.is_some()
-        || resource_ledger.has_standalone_failure
-        || resource_ledger.has_document_rows
-        || resource_ledger.has_asset_failure
-        || resource_ledger.accounting != EnvironmentResourceAccounting::default()
-        || console_rows != 0
+    } else if session_phase != FailureSessionPhase::BeforeStart ||
+        !resource_ledger.resources.is_empty() ||
+        resource_ledger.input.is_some() ||
+        resource_ledger.has_standalone_failure ||
+        resource_ledger.has_document_rows ||
+        resource_ledger.has_asset_failure ||
+        resource_ledger.accounting != EnvironmentResourceAccounting::default() ||
+        console_rows != 0
     {
         return Err(invalid(
             "failure evidence without environment.json is not a legal pre-start phase",
@@ -430,30 +430,30 @@ fn allowed_root_file(name: &str, kind: TreeKind) -> bool {
     match kind {
         TreeKind::Captured => matches!(
             name,
-            "console.jsonl"
-                | "document.pdf"
-                | "environment.json"
-                | "fonts.json"
-                | "layout-debug.json"
-                | "pages.json"
-                | "pdf-structure.json"
-                | "readiness.json"
-                | "render.png"
-                | "resources.jsonl"
-                | "scene-preview.png"
-                | "scene-report.json"
-                | "scene.json"
-                | "session-state.jsonl"
+            "console.jsonl" |
+                "document.pdf" |
+                "environment.json" |
+                "fonts.json" |
+                "layout-debug.json" |
+                "pages.json" |
+                "pdf-structure.json" |
+                "readiness.json" |
+                "render.png" |
+                "resources.jsonl" |
+                "scene-preview.png" |
+                "scene-report.json" |
+                "scene.json" |
+                "session-state.jsonl"
         ),
         TreeKind::Failed => matches!(
             name,
-            "console.jsonl"
-                | "environment.json"
-                | "failure.json"
-                | "readiness.json"
-                | "render.png"
-                | "resources.jsonl"
-                | "session-state.jsonl"
+            "console.jsonl" |
+                "environment.json" |
+                "failure.json" |
+                "readiness.json" |
+                "render.png" |
+                "resources.jsonl" |
+                "session-state.jsonl"
         ),
     }
 }
@@ -518,8 +518,8 @@ fn validate_readiness(
     }
     let path = root.join("readiness.json");
     let bytes = read_bounded_bytes(&path, MAX_CONTROL_JSON_BYTES, "readiness.json")?;
-    if bytes.len() as u64 != deferred.readiness_bytes
-        || content_address(&bytes) != deferred.readiness_sha256
+    if bytes.len() as u64 != deferred.readiness_bytes ||
+        content_address(&bytes) != deferred.readiness_sha256
     {
         return Err(invalid(
             "readiness.json does not match its deferred identity",
@@ -530,8 +530,8 @@ fn validate_readiness(
     let Some(object) = readiness.as_object() else {
         return Err(invalid("readiness.json must be a JSON object"));
     };
-    if object.get("render_id").and_then(serde_json::Value::as_str)
-        != Some(deferred.render_id.as_str())
+    if object.get("render_id").and_then(serde_json::Value::as_str) !=
+        Some(deferred.render_id.as_str())
     {
         return Err(invalid(
             "readiness.json does not match the deferred render ID",
@@ -556,21 +556,21 @@ fn validate_environment(
         MAX_CONTROL_JSON_BYTES,
         "environment.json",
     )?;
-    if environment.locale.requested != expected.locale
-        || environment.locale.resolved != expected.locale
-        || environment.timezone.requested != expected.timezone
-        || environment.timezone.resolved != expected.timezone
-        || environment.page != *expected.page
-        || !resource_policy_matches_expected(&environment.resource_policy, expected.resource_policy)
+    if environment.locale.requested != expected.locale ||
+        environment.locale.resolved != expected.locale ||
+        environment.timezone.requested != expected.timezone ||
+        environment.timezone.resolved != expected.timezone ||
+        environment.page != *expected.page ||
+        !resource_policy_matches_expected(&environment.resource_policy, expected.resource_policy)
     {
         return Err(invalid(
             "environment.json does not match the original deterministic request",
         ));
     }
-    if environment.document_pdf.artifact.as_str()
-        != expected.public_output.to_string_lossy().as_ref()
-        || environment.document_pdf.status != "pending"
-        || environment.document_pdf.error.0.is_some()
+    if environment.document_pdf.artifact.as_str() !=
+        expected.public_output.to_string_lossy().as_ref() ||
+        environment.document_pdf.status != "pending" ||
+        environment.document_pdf.error.0.is_some()
     {
         return Err(invalid(
             "environment.json does not bind the pending logical public PDF path",
@@ -586,8 +586,8 @@ fn validate_environment(
             "environment.json does not identify the document-session runtime",
         ));
     }
-    if environment.phase_timings_ms.controlled_runtime != deferred.controlled_runtime_ms
-        || environment.phase_timings_ms.scene_capture != deferred.scene_capture_ms
+    if environment.phase_timings_ms.controlled_runtime != deferred.controlled_runtime_ms ||
+        environment.phase_timings_ms.scene_capture != deferred.scene_capture_ms
     {
         return Err(invalid(
             "environment.json phase timings do not match the deferred receipt",
@@ -603,14 +603,14 @@ fn validate_environment(
             "environment.json resource accounting does not match resources.jsonl",
         ));
     }
-    if environment.input_resource != resource_ledger.input
-        || environment.input_resource.render_id != deferred.render_id
-        || environment.input_resource.url != expected.input.url
-        || environment.input_resource.sha256 != expected.input.sha256
-        || environment.input_resource.resource != expected.input.resource
-        || environment.input_resource.bytes != expected.input.bytes
-        || environment.input_resource.source != "document_root"
-        || !environment.input_resource.main_frame
+    if environment.input_resource != resource_ledger.input ||
+        environment.input_resource.render_id != deferred.render_id ||
+        environment.input_resource.url != expected.input.url ||
+        environment.input_resource.sha256 != expected.input.sha256 ||
+        environment.input_resource.resource != expected.input.resource ||
+        environment.input_resource.bytes != expected.input.bytes ||
+        environment.input_resource.source != "document_root" ||
+        !environment.input_resource.main_frame
     {
         return Err(invalid(
             "environment.json input resource does not match parent and ledger evidence",
@@ -639,11 +639,11 @@ fn validate_failure_environment_phases(
     ) {
         (None, None, None) => false,
         (Some(runtime), Some(accounting), Some(timings)) => {
-            if !resource_ledger.complete
-                || runtime.adapter != "document-session"
-                || accounting != &resource_ledger.accounting
-                || !valid_optional_timing(timings.controlled_runtime.0)
-                || !valid_optional_timing(timings.scene_capture.0)
+            if !resource_ledger.complete ||
+                runtime.adapter != "document-session" ||
+                accounting != &resource_ledger.accounting ||
+                !valid_optional_timing(timings.controlled_runtime.0) ||
+                !valid_optional_timing(timings.scene_capture.0)
             {
                 return Err(invalid(
                     "failure environment runtime evidence does not match resources.jsonl",
@@ -659,15 +659,15 @@ fn validate_failure_environment_phases(
     };
 
     if let Some(input) = environment.input_resource.as_ref() {
-        if !evidence_group
-            || resource_ledger.input.as_ref() != Some(input)
-            || input.render_id != expected.render_id
-            || input.url != expected.input.url
-            || input.sha256 != expected.input.sha256
-            || input.resource != expected.input.resource
-            || input.bytes != expected.input.bytes
-            || input.source != "document_root"
-            || !input.main_frame
+        if !evidence_group ||
+            resource_ledger.input.as_ref() != Some(input) ||
+            input.render_id != expected.render_id ||
+            input.url != expected.input.url ||
+            input.sha256 != expected.input.sha256 ||
+            input.resource != expected.input.resource ||
+            input.bytes != expected.input.bytes ||
+            input.source != "document_root" ||
+            !input.main_frame
         {
             return Err(invalid(
                 "failure environment input resource does not match parent and ledger evidence",
@@ -675,9 +675,9 @@ fn validate_failure_environment_phases(
         }
     }
     if let Some(resolved_input_hash) = environment.resolved_input_hash.as_deref() {
-        if environment.input_resource.is_none()
-            || resolved_input_hash != resource_ledger.resolved_input_hash
-            || !resolved_input_hash
+        if environment.input_resource.is_none() ||
+            resolved_input_hash != resource_ledger.resolved_input_hash ||
+            !resolved_input_hash
                 .strip_prefix("sha256:")
                 .is_some_and(is_lower_sha256_digest)
         {
@@ -707,9 +707,9 @@ fn resource_policy_matches_expected(
 ) -> bool {
     let mut actual = actual.clone();
     let mut expected = expected.clone();
-    normalize_asset_cache_runtime(&mut actual).is_ok()
-        && normalize_asset_cache_runtime(&mut expected).is_ok()
-        && actual == expected
+    normalize_asset_cache_runtime(&mut actual).is_ok() &&
+        normalize_asset_cache_runtime(&mut expected).is_ok() &&
+        actual == expected
 }
 
 fn normalize_asset_cache_runtime(policy: &mut serde_json::Value) -> ArtifactContractResult {
@@ -760,10 +760,10 @@ fn normalize_asset_cache_runtime(policy: &mut serde_json::Value) -> ArtifactCont
         .remove("invalidations")
         .and_then(|value| value.as_u64());
     let evictions = cache.remove("evictions").and_then(|value| value.as_u64());
-    if recorded_hits != Some(hits)
-        || recorded_misses != Some(misses)
-        || recorded_invalidations != Some(invalidations)
-        || evictions.is_none_or(|evictions| evictions > misses.saturating_add(invalidations))
+    if recorded_hits != Some(hits) ||
+        recorded_misses != Some(misses) ||
+        recorded_invalidations != Some(invalidations) ||
+        evictions.is_none_or(|evictions| evictions > misses.saturating_add(invalidations))
     {
         return Err(invalid(
             "asset manifest cache accounting does not match its asset entries",
@@ -807,9 +807,9 @@ fn validate_scene(
     // digit. The deferred receipt already binds the exact scene bytes; validate the
     // parsed schema and every public semantic field below without imposing an
     // invalid deserialize/reserialize byte-idempotence requirement.
-    if scene.schema != deferred.scene_schema
-        || scene.version != deferred.scene_version
-        || scene.pages.len() != deferred.page_count
+    if scene.schema != deferred.scene_schema ||
+        scene.version != deferred.scene_version ||
+        scene.pages.len() != deferred.page_count
     {
         return Err(invalid(
             "scene.json schema, version, or page count does not match the deferred receipt",
@@ -901,8 +901,8 @@ fn validate_previews(
 
     match deferred.preview_count {
         0 => {
-            if tree.root_files.contains("scene-preview.png")
-                || tree.root_directories.contains("pages")
+            if tree.root_files.contains("scene-preview.png") ||
+                tree.root_directories.contains("pages")
             {
                 return Err(invalid(
                     "preview artifacts exist for a deferred zero-preview result",
@@ -957,14 +957,14 @@ fn validate_pdf(
             .map_err(|_| invalid("cannot open pdf-structure.json"))?,
     ))
     .map_err(|_| invalid("pdf-structure.json is not a valid structure artifact"))?;
-    if structure.schema != "pliego.pdf-structure"
-        || structure.version != 1
-        || structure.backend != "krilla"
-        || structure.pdf.artifact != "document.pdf"
-        || structure.pdf.sha256 != pdf_sha256
-        || structure.pdf.bytes != pdf_bytes
-        || structure.page_count != deferred.page_count
-        || structure.pages.0.len() != deferred.page_count
+    if structure.schema != "pliego.pdf-structure" ||
+        structure.version != 1 ||
+        structure.backend != "krilla" ||
+        structure.pdf.artifact != "document.pdf" ||
+        structure.pdf.sha256 != pdf_sha256 ||
+        structure.pdf.bytes != pdf_bytes ||
+        structure.page_count != deferred.page_count ||
+        structure.pages.0.len() != deferred.page_count
     {
         return Err(invalid(
             "pdf-structure.json does not match document.pdf and the deferred receipt",
@@ -977,12 +977,12 @@ fn validate_pdf(
             expected_page.size.width * pliego::pdf::CSS_PX_TO_PDF_PT,
             expected_page.size.height * pliego::pdf::CSS_PX_TO_PDF_PT,
         ];
-        if page.index != index
-            || page.scene_page_size_css_px != expected_page.size
-            || page.media_box_pt != expected_media_box
-            || page.expected_extracted_unicode != expected_page.expected_extracted_unicode
-            || page.embedded_font_ids.0 != expected_page.embedded_font_ids
-            || page.operation_counts != expected_page.operation_counts
+        if page.index != index ||
+            page.scene_page_size_css_px != expected_page.size ||
+            page.media_box_pt != expected_media_box ||
+            page.expected_extracted_unicode != expected_page.expected_extracted_unicode ||
+            page.embedded_font_ids.0 != expected_page.embedded_font_ids ||
+            page.operation_counts != expected_page.operation_counts
         {
             return Err(invalid(
                 "pdf-structure.json page evidence does not match scene.json",
@@ -1001,9 +1001,9 @@ fn validate_pages(
         File::open(root.join("pages.json")).map_err(|_| invalid("cannot open pages.json"))?,
     ))
     .map_err(|_| invalid("pages.json does not match the pages artifact schema"))?;
-    if pages.schema != "pliego.pages"
-        || pages.version != 1
-        || pages.page_count != deferred.page_count
+    if pages.schema != "pliego.pages" ||
+        pages.version != 1 ||
+        pages.page_count != deferred.page_count
     {
         return Err(invalid(
             "pages.json schema or page count does not match the deferred receipt",
@@ -1060,30 +1060,30 @@ fn validate_scene_report(
         .join("pdf-structure.json")
         .to_string_lossy()
         .into_owned();
-    if report.scene.schema != deferred.scene_schema
-        || report.scene.version != deferred.scene_version
-        || report.scene.hash != deferred.scene_hash
-        || report.scene.validation != "valid"
-        || report.capture.status != deferred.capture_status
-        || report.capture.code.0 != deferred.capture_code
-        || report.capture.status != expected_capture.0
-        || report.capture.code.0.as_deref() != expected_capture.1
-        || report.capture.unsupported_events.0.len() != deferred.unsupported_event_count
-        || report.capture.text_mapping_gaps.0.len() != deferred.text_mapping_gap_count
-        || report.preview.page_size != scene.pages[0].size
-        || report.preview.operation_counts != scene.pages[0].operation_counts
-        || report.preview.status != deferred.preview_status
-        || report.preview.status != expected_preview_status
-        || report.preview.artifact.0.as_deref() != expected_preview
-        || report.preview.page_count != deferred.preview_count
-        || report.preview.page_count != expected_preview_count
-        || report.preview.unsupported.0 != expected_unsupported
-        || report.document_pdf.status != deferred.pdf_status
-        || report.document_pdf.artifact != public_pdf
-        || report.document_pdf.error.0.is_some()
-        || report.pdf_structure.status != deferred.pdf_structure_status
-        || report.pdf_structure.artifact != public_structure
-        || report.pdf_structure.error.0.is_some()
+    if report.scene.schema != deferred.scene_schema ||
+        report.scene.version != deferred.scene_version ||
+        report.scene.hash != deferred.scene_hash ||
+        report.scene.validation != "valid" ||
+        report.capture.status != deferred.capture_status ||
+        report.capture.code.0 != deferred.capture_code ||
+        report.capture.status != expected_capture.0 ||
+        report.capture.code.0.as_deref() != expected_capture.1 ||
+        report.capture.unsupported_events.0.len() != deferred.unsupported_event_count ||
+        report.capture.text_mapping_gaps.0.len() != deferred.text_mapping_gap_count ||
+        report.preview.page_size != scene.pages[0].size ||
+        report.preview.operation_counts != scene.pages[0].operation_counts ||
+        report.preview.status != deferred.preview_status ||
+        report.preview.status != expected_preview_status ||
+        report.preview.artifact.0.as_deref() != expected_preview ||
+        report.preview.page_count != deferred.preview_count ||
+        report.preview.page_count != expected_preview_count ||
+        report.preview.unsupported.0 != expected_unsupported ||
+        report.document_pdf.status != deferred.pdf_status ||
+        report.document_pdf.artifact != public_pdf ||
+        report.document_pdf.error.0.is_some() ||
+        report.pdf_structure.status != deferred.pdf_structure_status ||
+        report.pdf_structure.artifact != public_structure ||
+        report.pdf_structure.error.0.is_some()
     {
         return Err(invalid(
             "scene-report.json does not match the deferred receipt and logical public paths",
@@ -1094,8 +1094,8 @@ fn validate_scene_report(
         .unsupported_events
         .0
         .windows(2)
-        .all(|pair| pair[0].sequence < pair[1].sequence)
-        || !report.capture.text_mapping_gaps.0.windows(2).all(|pair| {
+        .all(|pair| pair[0].sequence < pair[1].sequence) ||
+        !report.capture.text_mapping_gaps.0.windows(2).all(|pair| {
             (pair[0].sequence, pair[0].glyph_index) < (pair[1].sequence, pair[1].glyph_index)
         })
     {
@@ -1126,10 +1126,10 @@ fn validate_page_bindings(
         } else {
             Some(format!("pages/page-{:04}.png", index + 1))
         };
-        if page.index != index
-            || page.artifact.0 != expected_artifact
-            || page.page_size != scene.pages[index].size
-            || page.operation_counts != scene.pages[index].operation_counts
+        if page.index != index ||
+            page.artifact.0 != expected_artifact ||
+            page.page_size != scene.pages[index].size ||
+            page.operation_counts != scene.pages[index].operation_counts
         {
             return Err(invalid(format!(
                 "{label} preview bindings do not match the deferred page order"
@@ -1179,9 +1179,9 @@ fn validate_canvas_diagnostics(
     let mut emitted_vectors = 0usize;
     let mut sequences = BTreeSet::new();
     for canvas in canvases {
-        if canvas.sequences.0.is_empty()
-            || canvas.diagnostics.schema != "pliego.hybrid-canvas-diagnostics"
-            || canvas.diagnostics.version != 1
+        if canvas.sequences.0.is_empty() ||
+            canvas.diagnostics.schema != "pliego.hybrid-canvas-diagnostics" ||
+            canvas.diagnostics.version != 1
         {
             return Err(invalid(
                 "scene-report.json contains invalid Canvas diagnostics identity",
@@ -1224,10 +1224,10 @@ fn validate_canvas_diagnostics(
             let area = width
                 .checked_mul(height)
                 .ok_or_else(|| invalid("Canvas fallback area overflow"))?;
-            if !finite_nonnegative_rect(&fallback.bounds)
-                || area == 0
-                || fallback.area_px != area
-                || !scene_resources.contains(&fallback.resource)
+            if !finite_nonnegative_rect(&fallback.bounds) ||
+                area == 0 ||
+                fallback.area_px != area ||
+                !scene_resources.contains(&fallback.resource)
             {
                 return Err(invalid(
                     "scene-report.json contains invalid Canvas fallback evidence",
@@ -1278,9 +1278,9 @@ fn validate_fonts(
         File::open(root.join("fonts.json")).map_err(|_| invalid("cannot open fonts.json"))?,
     ))
     .map_err(|_| invalid("fonts.json does not match the font report schema"))?;
-    if fonts.schema != "pliego.font-report"
-        || fonts.version != 1
-        || fonts.manifest.resolution != "css-order"
+    if fonts.schema != "pliego.font-report" ||
+        fonts.version != 1 ||
+        fonts.manifest.resolution != "css-order"
     {
         return Err(invalid("fonts.json has an unknown schema or resolution"));
     }
@@ -1303,13 +1303,13 @@ fn validate_fonts(
         let decoded = BASE64_STANDARD
             .decode(&resource.bytes_base64)
             .map_err(|_| invalid("fonts.json contains invalid base64 font bytes"))?;
-        if content_address(&decoded) != resource.resource
-            || BASE64_STANDARD.encode(&decoded) != resource.bytes_base64
-            || tree.resources.get(&digest).copied() != Some(decoded.len() as u64)
-            || previous_resource
+        if content_address(&decoded) != resource.resource ||
+            BASE64_STANDARD.encode(&decoded) != resource.bytes_base64 ||
+            tree.resources.get(&digest).copied() != Some(decoded.len() as u64) ||
+            previous_resource
                 .as_ref()
-                .is_some_and(|previous| previous >= &resource.resource)
-            || !persisted.insert(resource.resource)
+                .is_some_and(|previous| previous >= &resource.resource) ||
+            !persisted.insert(resource.resource)
         {
             return Err(invalid(
                 "fonts.json contains a missing, duplicate, or misbound font resource",
@@ -1324,23 +1324,23 @@ fn validate_fonts(
     for instance in fonts.font_instances.0 {
         let varied = !instance.variations.0.is_empty();
         let variations_are_canonical = instance.variations.0.iter().all(|variation| {
-            variation.value.is_finite()
-                && !(variation.value == 0.0 && variation.value.is_sign_negative())
+            variation.value.is_finite() &&
+                !(variation.value == 0.0 && variation.value.is_sign_negative())
         }) && instance.variations.0.windows(2).all(|pair| {
             (pair[0].tag, pair[0].value.to_bits()) <= (pair[1].tag, pair[1].value.to_bits())
         });
-        if !persisted.contains(&instance.resource)
-            || !variations_are_canonical
-            || font_instance_id(
+        if !persisted.contains(&instance.resource) ||
+            !variations_are_canonical ||
+            font_instance_id(
                 &instance.resource,
                 instance.face_index,
                 &instance.variations.0,
                 instance.synthetic_bold,
-            )? != instance.id
-            || previous_instance
+            )? != instance.id ||
+            previous_instance
                 .as_ref()
-                .is_some_and(|previous| previous >= &instance.id)
-            || instances.contains_key(&instance.id)
+                .is_some_and(|previous| previous >= &instance.id) ||
+            instances.contains_key(&instance.id)
         {
             return Err(invalid(
                 "fonts.json contains a missing-resource or duplicate font instance",
@@ -1376,10 +1376,10 @@ fn validate_fonts(
                 "fonts.json contains a host selection forbidden by the original request",
             ));
         }
-        if !persisted.contains(&selection.resource)
-            || !scene.font_instances.contains(&selection.instance)
-            || instances.get(&selection.instance)
-                != Some(&(selection.resource.clone(), selection.face_index))
+        if !persisted.contains(&selection.resource) ||
+            !scene.font_instances.contains(&selection.instance) ||
+            instances.get(&selection.instance) !=
+                Some(&(selection.resource.clone(), selection.face_index))
         {
             return Err(invalid(
                 "fonts.json selection does not match a persisted font instance",
@@ -1391,9 +1391,9 @@ fn validate_fonts(
         .filter(|selection| {
             matches!(
                 selection.source,
-                FontSelectionSource::Bundled
-                    | FontSelectionSource::Data
-                    | FontSelectionSource::Memory
+                FontSelectionSource::Bundled |
+                    FontSelectionSource::Data |
+                    FontSelectionSource::Memory
             )
         })
         .cloned()
@@ -1534,8 +1534,8 @@ fn validate_captured_resource_ledger(
         )?;
     }
 
-    if compute_resolved_input_hash(&deferred.render_id, &url_to_resource)
-        != deferred.resolved_input_hash
+    if compute_resolved_input_hash(&deferred.render_id, &url_to_resource) !=
+        deferred.resolved_input_hash
     {
         return Err(invalid(
             "deferred resolved input hash does not match resources.jsonl",
@@ -1561,23 +1561,23 @@ fn validate_document_session_resource_pair(
     url_to_resource: &mut BTreeMap<String, String>,
 ) -> ArtifactContractResult {
     let expected_request_id = format!("document-session:{index:06}");
-    if requested.render_id != render_id
-        || terminal.render_id != render_id
-        || requested.policy != "pliego.resource-policy.v1"
-        || terminal.policy != "pliego.resource-policy.v1"
-        || requested.request_id != expected_request_id
-        || terminal.request_id != expected_request_id
-        || requested.url != terminal.url
-        || !is_canonical_url(&terminal.url)
-        || terminal
+    if requested.render_id != render_id ||
+        terminal.render_id != render_id ||
+        requested.policy != "pliego.resource-policy.v1" ||
+        terminal.policy != "pliego.resource-policy.v1" ||
+        requested.request_id != expected_request_id ||
+        terminal.request_id != expected_request_id ||
+        requested.url != terminal.url ||
+        !is_canonical_url(&terminal.url) ||
+        terminal
             .referrer_url
             .0
             .as_deref()
-            .is_some_and(|url| !is_canonical_url(url))
-        || http::Method::from_bytes(terminal.method.as_bytes()).is_err()
-        || requested.status != "requested"
-        || requested.bytes.0.is_some()
-        || terminal.urls.0.as_slice() != [terminal.url.as_str()]
+            .is_some_and(|url| !is_canonical_url(url)) ||
+        http::Method::from_bytes(terminal.method.as_bytes()).is_err() ||
+        requested.status != "requested" ||
+        requested.bytes.0.is_some() ||
+        terminal.urls.0.as_slice() != [terminal.url.as_str()]
     {
         return Err(invalid(
             "resources.jsonl request and terminal rows are not producer-bound",
@@ -1615,8 +1615,8 @@ fn validate_document_session_resource_pair(
                     .as_ref()
                     .expect("loaded resource shape was validated");
                 if let Some(previous) =
-                    url_to_resource.insert(terminal.url.clone(), resource.clone())
-                    && previous != *resource
+                    url_to_resource.insert(terminal.url.clone(), resource.clone()) &&
+                    previous != *resource
                 {
                     return Err(invalid(
                         "resources.jsonl maps one URL to conflicting content addresses",
@@ -1639,24 +1639,24 @@ fn validate_document_session_resource_pair(
                     "resources.jsonl cancelled row has no failure evidence",
                 ));
             };
-            if terminal.source.0.is_some()
-                || terminal.fatal
-                || !terminal.cancelled
-                || terminal.load_role != CapturedResourceLoadRole::DocumentMetadata
-                || terminal.is_for_main_frame
-                || terminal.code.0.as_deref() != Some(failure.code.as_str())
-                || failure.code.is_empty()
-                || failure.fatal
-                || failure.reason.is_empty()
-                || terminal.response_status.0.is_some()
-                || terminal.content_type.0.is_some()
-                || terminal.bytes.0.is_some()
-                || terminal.sha256.0.is_some()
-                || terminal.resource.0.is_some()
-                || terminal.content_hash.0.is_some()
-                || terminal.response_headers.0.is_some()
-                || terminal.cache_result.0.is_some()
-                || terminal.artifact.0.is_some()
+            if terminal.source.0.is_some() ||
+                terminal.fatal ||
+                !terminal.cancelled ||
+                terminal.load_role != CapturedResourceLoadRole::DocumentMetadata ||
+                terminal.is_for_main_frame ||
+                terminal.code.0.as_deref() != Some(failure.code.as_str()) ||
+                failure.code.is_empty() ||
+                failure.fatal ||
+                failure.reason.is_empty() ||
+                terminal.response_status.0.is_some() ||
+                terminal.content_type.0.is_some() ||
+                terminal.bytes.0.is_some() ||
+                terminal.sha256.0.is_some() ||
+                terminal.resource.0.is_some() ||
+                terminal.content_hash.0.is_some() ||
+                terminal.response_headers.0.is_some() ||
+                terminal.cache_result.0.is_some() ||
+                terminal.artifact.0.is_some()
             {
                 return Err(invalid(
                     "resources.jsonl cancelled row has an invalid producer shape",
@@ -1666,15 +1666,15 @@ fn validate_document_session_resource_pair(
     }
 
     if terminal.is_for_main_frame {
-        if input.is_some()
-            || terminal.status != CapturedResourceStatus::Loaded
-            || terminal.method != "GET"
-            || terminal.destination != CapturedResourceDestination::Document
-            || terminal.load_role != CapturedResourceLoadRole::DocumentContent
-            || terminal.referrer_url.0.is_some()
-            || terminal.is_redirect
-            || terminal.source.0 != Some(CapturedResourceSource::DocumentRoot)
-            || terminal.response_status.0 != Some(200)
+        if input.is_some() ||
+            terminal.status != CapturedResourceStatus::Loaded ||
+            terminal.method != "GET" ||
+            terminal.destination != CapturedResourceDestination::Document ||
+            terminal.load_role != CapturedResourceLoadRole::DocumentContent ||
+            terminal.referrer_url.0.is_some() ||
+            terminal.is_redirect ||
+            terminal.source.0 != Some(CapturedResourceSource::DocumentRoot) ||
+            terminal.response_status.0 != Some(200)
         {
             return Err(invalid(
                 "resources.jsonl main-frame input row is not the producer input binding",
@@ -1750,46 +1750,45 @@ fn validate_captured_loaded_resource(
             .ok_or_else(|| invalid("response header name byte count overflow"))
     })?;
     let empty_headers_sha256 = lower_hex(&Sha256::digest(b"pliego.response-headers.v1\0"));
-    if row.source.0.is_none()
-        || !matches!(row.method.as_str(), "GET" | "HEAD")
-        || row.is_redirect
-        || row.fatal
-        || row.cancelled
-        || row.code.0.is_some()
-        || row.failure.0.is_some()
-        || row.response_status.0.is_none()
-        || row
-            .response_status
+    if row.source.0.is_none() ||
+        !matches!(row.method.as_str(), "GET" | "HEAD") ||
+        row.is_redirect ||
+        row.fatal ||
+        row.cancelled ||
+        row.code.0.is_some() ||
+        row.failure.0.is_some() ||
+        row.response_status.0.is_none() ||
+        row.response_status
             .0
-            .is_some_and(|status| http::StatusCode::from_u16(status).is_err())
-        || row.bytes.0.is_none()
-        || row.resource.0.as_deref() != Some(content_address.as_str())
-        || row.content_hash.0.as_deref() != Some(content_address.as_str())
-        || row.artifact.0.as_deref() != Some(artifact.as_str())
-        || tree.resources.get(digest).copied() != row.bytes.0
-        || headers.count < u64::try_from(headers.names.0.len()).unwrap_or(u64::MAX)
-        || headers.count > MAX_RESPONSE_HEADER_COUNT as u64
-        || headers.bytes > MAX_RESPONSE_HEADER_BYTES
-        || headers.bytes < header_name_bytes
-        || !is_lower_sha256_digest(&headers.sha256)
-        || (headers.count == 0
-            && (headers.bytes != 0
-                || !headers.names.0.is_empty()
-                || headers.sha256 != empty_headers_sha256))
-        || !headers.names.0.windows(2).all(|pair| pair[0] < pair[1])
-        || headers.names.0.iter().any(|name| {
-            name != &name.to_ascii_lowercase()
-                || http::header::HeaderName::from_bytes(name.as_bytes()).is_err()
-        })
-        || match row.source.0 {
+            .is_some_and(|status| http::StatusCode::from_u16(status).is_err()) ||
+        row.bytes.0.is_none() ||
+        row.resource.0.as_deref() != Some(content_address.as_str()) ||
+        row.content_hash.0.as_deref() != Some(content_address.as_str()) ||
+        row.artifact.0.as_deref() != Some(artifact.as_str()) ||
+        tree.resources.get(digest).copied() != row.bytes.0 ||
+        headers.count < u64::try_from(headers.names.0.len()).unwrap_or(u64::MAX) ||
+        headers.count > MAX_RESPONSE_HEADER_COUNT as u64 ||
+        headers.bytes > MAX_RESPONSE_HEADER_BYTES ||
+        headers.bytes < header_name_bytes ||
+        !is_lower_sha256_digest(&headers.sha256) ||
+        (headers.count == 0 &&
+            (headers.bytes != 0 ||
+                !headers.names.0.is_empty() ||
+                headers.sha256 != empty_headers_sha256)) ||
+        !headers.names.0.windows(2).all(|pair| pair[0] < pair[1]) ||
+        headers.names.0.iter().any(|name| {
+            name != &name.to_ascii_lowercase() ||
+                http::header::HeaderName::from_bytes(name.as_bytes()).is_err()
+        }) ||
+        match row.source.0 {
             Some(CapturedResourceSource::AssetCache) => !matches!(
                 row.cache_result.0.as_deref(),
                 Some("hit" | "miss" | "invalidated")
             ),
             Some(_) => row.cache_result.0.is_some(),
             None => true,
-        }
-        || match row.source.0 {
+        } ||
+        match row.source.0 {
             Some(CapturedResourceSource::DataUrl) => !row.url.starts_with("data:"),
             Some(CapturedResourceSource::DocumentRoot) => !row.url.starts_with("file:"),
             Some(CapturedResourceSource::Http) => {
@@ -1799,8 +1798,8 @@ fn validate_captured_loaded_resource(
                 false
             },
             None => true,
-        }
-        || (row.method == "HEAD" && row.bytes.0 != Some(0))
+        } ||
+        (row.method == "HEAD" && row.bytes.0 != Some(0))
     {
         return Err(invalid(
             "resources.jsonl loaded row does not match its content-addressed producer evidence",
@@ -1821,9 +1820,9 @@ fn validate_failed_resource_ledger(
         true,
         MAX_RESOURCE_LEDGER_ROWS,
     )?;
-    if rows.len() == 1
-        && rows[0].get("policy").and_then(serde_json::Value::as_str)
-            == Some("pliego.asset-cache.v1")
+    if rows.len() == 1 &&
+        rows[0].get("policy").and_then(serde_json::Value::as_str) ==
+            Some("pliego.asset-cache.v1")
     {
         let row: AssetFailureResourceRow = serde_json::from_value(rows[0].clone())
             .map_err(|_| invalid("resources.jsonl has an invalid asset failure row"))?;
@@ -1879,13 +1878,13 @@ fn validate_failed_resource_ledger(
             .map_err(|_| invalid("resources.jsonl has an invalid requested row"))?;
         if cursor + 1 == rows.len() {
             let expected_request_id = format!("document-session:{pair_index:06}");
-            if expected.code != "SESSION_ARTIFACT_WRITE_FAILED"
-                || requested.render_id != expected.render_id
-                || requested.policy != "pliego.resource-policy.v1"
-                || requested.request_id != expected_request_id
-                || !is_canonical_url(&requested.url)
-                || requested.status != "requested"
-                || requested.bytes.0.is_some()
+            if expected.code != "SESSION_ARTIFACT_WRITE_FAILED" ||
+                requested.render_id != expected.render_id ||
+                requested.policy != "pliego.resource-policy.v1" ||
+                requested.request_id != expected_request_id ||
+                !is_canonical_url(&requested.url) ||
+                requested.status != "requested" ||
+                requested.bytes.0.is_some()
             {
                 return Err(invalid(
                     "resources.jsonl has an unpermitted incomplete request row",
@@ -1930,28 +1929,27 @@ fn validate_asset_failure_resource_row(
         .get("error")
         .and_then(serde_json::Value::as_object)
         .ok_or_else(|| invalid("asset failure row has no parent-bound asset error"))?;
-    if row.render_id != expected.render_id
-        || row.policy != "pliego.asset-cache.v1"
-        || row.request_id.0.is_some()
-        || row.status != "failed"
-        || row.code != expected.code
-        || row.reason != expected.message
-        || row.cache_result.0.is_some()
-        || row.bytes.0.is_some()
-        || row
-            .url
+    if row.render_id != expected.render_id ||
+        row.policy != "pliego.asset-cache.v1" ||
+        row.request_id.0.is_some() ||
+        row.status != "failed" ||
+        row.code != expected.code ||
+        row.reason != expected.message ||
+        row.cache_result.0.is_some() ||
+        row.bytes.0.is_some() ||
+        row.url
             .0
             .as_deref()
-            .is_some_and(|url| !is_canonical_url(url))
-        || asset.get("schema").and_then(serde_json::Value::as_str) != Some("pliego.asset-manifest")
-        || asset.get("version").and_then(serde_json::Value::as_u64) != Some(1)
-        || asset.get("status").and_then(serde_json::Value::as_str) != Some("failed")
-        || asset.get("manifest").and_then(serde_json::Value::as_str) != Some(row.manifest.as_str())
-        || error.get("code").and_then(serde_json::Value::as_str) != Some(row.code.as_str())
-        || error.get("message").and_then(serde_json::Value::as_str) != Some(row.reason.as_str())
-        || error.get("url") != Some(&option_string_value(&row.url.0))
-        || error.get("expected") != Some(&option_string_value(&row.expected.0))
-        || error.get("actual") != Some(&option_string_value(&row.actual.0))
+            .is_some_and(|url| !is_canonical_url(url)) ||
+        asset.get("schema").and_then(serde_json::Value::as_str) != Some("pliego.asset-manifest") ||
+        asset.get("version").and_then(serde_json::Value::as_u64) != Some(1) ||
+        asset.get("status").and_then(serde_json::Value::as_str) != Some("failed") ||
+        asset.get("manifest").and_then(serde_json::Value::as_str) != Some(row.manifest.as_str()) ||
+        error.get("code").and_then(serde_json::Value::as_str) != Some(row.code.as_str()) ||
+        error.get("message").and_then(serde_json::Value::as_str) != Some(row.reason.as_str()) ||
+        error.get("url") != Some(&option_string_value(&row.url.0)) ||
+        error.get("expected") != Some(&option_string_value(&row.expected.0)) ||
+        error.get("actual") != Some(&option_string_value(&row.actual.0))
     {
         return Err(invalid(
             "resources.jsonl asset failure does not match parent-bound resource policy evidence",
@@ -1974,21 +1972,20 @@ fn validate_standalone_resource_failure(
     let cancelled =
         row.cancelled && !row.fatal && row.load_role == CapturedResourceLoadRole::DocumentMetadata;
     let fatal = !row.cancelled && row.fatal;
-    if row.render_id != expected.render_id
-        || row.policy != "pliego.resource-policy.v1"
-        || row.request_id.0.is_some()
-        || row.code != expected.code
-        || expected_message != expected.message
-        || !is_canonical_url(&row.url)
-        || row
-            .referrer_url
+    if row.render_id != expected.render_id ||
+        row.policy != "pliego.resource-policy.v1" ||
+        row.request_id.0.is_some() ||
+        row.code != expected.code ||
+        expected_message != expected.message ||
+        !is_canonical_url(&row.url) ||
+        row.referrer_url
             .0
             .as_deref()
-            .is_some_and(|url| !is_canonical_url(url))
-        || http::Method::from_bytes(row.method.as_bytes()).is_err()
-        || row.reason.is_empty()
-        || !(cancelled || fatal)
-        || row.bytes.0.is_some()
+            .is_some_and(|url| !is_canonical_url(url)) ||
+        http::Method::from_bytes(row.method.as_bytes()).is_err() ||
+        row.reason.is_empty() ||
+        !(cancelled || fatal) ||
+        row.bytes.0.is_some()
     {
         return Err(invalid(
             "resources.jsonl standalone failure does not match the accepted worker failure",
@@ -2022,9 +2019,9 @@ fn validate_failed_session_state(
         },
         _ => None,
     };
-    if phase.is_none()
-        || terminal.state != "failed"
-        || terminal.message.0.as_deref() != Some(expected.message)
+    if phase.is_none() ||
+        terminal.state != "failed" ||
+        terminal.message.0.as_deref() != Some(expected.message)
     {
         return Err(invalid(
             "session-state.jsonl is not an exact producer failure sequence",
@@ -2063,10 +2060,10 @@ fn validate_console_ledger(root: &Path) -> ArtifactContractResult<usize> {
 }
 
 fn require_deferred_counts(deferred: &DeferredCapturedPublication) -> ArtifactContractResult {
-    if deferred.page_count == 0
-        || u64::try_from(deferred.page_count).unwrap_or(u64::MAX) > MAX_PROMOTION_TREE_ENTRIES
-        || u64::try_from(deferred.preview_count).unwrap_or(u64::MAX) > MAX_PROMOTION_TREE_ENTRIES
-        || deferred.preview_count > deferred.page_count
+    if deferred.page_count == 0 ||
+        u64::try_from(deferred.page_count).unwrap_or(u64::MAX) > MAX_PROMOTION_TREE_ENTRIES ||
+        u64::try_from(deferred.preview_count).unwrap_or(u64::MAX) > MAX_PROMOTION_TREE_ENTRIES ||
+        deferred.preview_count > deferred.page_count
     {
         return Err(invalid("deferred artifact counts are out of bounds"));
     }
@@ -2125,8 +2122,8 @@ where
             let value: serde_json::Value = serde_json::from_slice(&line)
                 .map_err(|_| invalid(format!("{label} contains invalid JSON framing")))?;
             if serde_json::to_vec(&value)
-                .map_err(|_| invalid(format!("cannot normalize {label}")))?
-                != line
+                .map_err(|_| invalid(format!("cannot normalize {label}")))? !=
+                line
             {
                 return Err(invalid(format!("{label} contains a non-canonical row")));
             }
@@ -2286,8 +2283,8 @@ fn lower_hex(bytes: &[u8]) -> String {
 }
 
 fn is_lower_sha256_digest(value: &str) -> bool {
-    value.len() == 64
-        && value
+    value.len() == 64 &&
+        value
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }

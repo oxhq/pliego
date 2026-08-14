@@ -60,6 +60,8 @@ const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const PIPE_DRAIN_GRACE: Duration = Duration::from_secs(1);
 #[cfg(any(unix, windows))]
 const PROCESS_TREE_DRAIN_GRACE: Duration = Duration::from_secs(1);
+const PRIVATE_CONTAINER_CLEANUP_ATTEMPTS: usize = 16;
+const PRIVATE_CONTAINER_CLEANUP_RETRY_DELAY: Duration = Duration::from_millis(10);
 
 static WORKER_CONTEXT: OnceLock<WorkerContext> = OnceLock::new();
 static WORKER_IDENTITY: OnceLock<SupervisorRenderIdentity> = OnceLock::new();
@@ -148,19 +150,19 @@ impl WireRenderError {
             self.artifacts.is_some() && self.document_pdf.is_some() && self.render_id.is_some();
         let has_no_publication =
             self.artifacts.is_none() && self.document_pdf.is_none() && self.render_id.is_none();
-        if (!has_complete_publication && !has_no_publication)
-            || !matches!(self.exit_code, 1 | 2)
-            || (self.exit_code == 1 && !has_complete_publication)
-            || (self.exit_code == 2 && !has_no_publication)
+        if (!has_complete_publication && !has_no_publication) ||
+            !matches!(self.exit_code, 1 | 2) ||
+            (self.exit_code == 1 && !has_complete_publication) ||
+            (self.exit_code == 2 && !has_no_publication)
         {
             return Err(());
         }
-        if has_complete_publication
-            && (self.artifacts.as_deref()
-                != Some(paths.public_artifacts.to_string_lossy().as_ref())
-                || self.document_pdf.as_deref()
-                    != Some(paths.public_output.to_string_lossy().as_ref())
-                || self.render_id.as_deref() != Some(identity.render_id.as_str()))
+        if has_complete_publication &&
+            (self.artifacts.as_deref() !=
+                Some(paths.public_artifacts.to_string_lossy().as_ref()) ||
+                self.document_pdf.as_deref() !=
+                    Some(paths.public_output.to_string_lossy().as_ref()) ||
+                self.render_id.as_deref() != Some(identity.render_id.as_str()))
         {
             return Err(());
         }
@@ -232,9 +234,23 @@ impl ChildContainment {
         let result = unsafe { libc::kill(-self.process_group, libc::SIGKILL) };
         if result != 0 {
             let error = io::Error::last_os_error();
-            if error.raw_os_error() != Some(libc::ESRCH) {
-                return Err(error);
+            if error.raw_os_error() == Some(libc::ESRCH) {
+                return Ok(());
             }
+            // Darwin's POSIX killpg implementation reports EPERM when an existing process group
+            // contains only zombies because those members are excluded from signal delivery.
+            // Accept that status only after a read-only group inspection proves there is no live
+            // member; every genuine permission failure remains fail-closed.
+            #[cfg(target_os = "macos")]
+            if error.raw_os_error() == Some(libc::EPERM) &&
+                matches!(
+                    macos_process_group_has_only_zombies(self.process_group),
+                    Ok(true)
+                )
+            {
+                return Ok(());
+            }
+            return Err(error);
         }
         Ok(())
     }
@@ -252,6 +268,11 @@ impl ChildContainment {
             .checked_add(PROCESS_TREE_DRAIN_GRACE)
             .unwrap_or_else(Instant::now);
         loop {
+            #[cfg(target_os = "macos")]
+            if macos_process_group_has_only_zombies(self.process_group)? {
+                self.quiesced = true;
+                return Ok(());
+            }
             let probe = unsafe { libc::kill(-self.process_group, 0) };
             if probe != 0 {
                 let error = io::Error::last_os_error();
@@ -296,6 +317,187 @@ fn linux_process_group_has_only_zombies(process_group: libc::pid_t) -> io::Resul
         }
     }
     Ok(true)
+}
+
+#[cfg(target_os = "macos")]
+fn macos_process_group_has_only_zombies(process_group: libc::pid_t) -> io::Result<bool> {
+    for process_id in macos_process_group_members(process_group)? {
+        let Some((state, observed_group)) = macos_process_state_and_group(process_id)? else {
+            continue;
+        };
+        // A PID can disappear and be reused between the group snapshot and its status query.
+        // Ignore only a process that is no longer in the held group; any live member still in the
+        // group keeps the containment active.
+        if observed_group == process_group && state != libc::SZOMB {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+#[cfg(target_os = "macos")]
+fn macos_process_group_members(process_group: libc::pid_t) -> io::Result<Vec<libc::pid_t>> {
+    const LIST_ATTEMPTS: usize = 4;
+    const LIST_HEADROOM: usize = 8;
+    const MAX_PROCESS_GROUP_MEMBERS: usize = 4096;
+
+    for _ in 0..LIST_ATTEMPTS {
+        // SAFETY: __error returns this thread's errno location.
+        unsafe { *libc::__error() = 0 };
+        // SAFETY: a null buffer with zero length asks libproc for a process-list sizing bound.
+        let observed = unsafe { libc::proc_listpgrppids(process_group, std::ptr::null_mut(), 0) };
+        if observed < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if observed == 0 {
+            // SAFETY: __error returns this thread's errno location.
+            let error = unsafe { *libc::__error() };
+            return if matches!(error, 0 | libc::ESRCH) {
+                Ok(Vec::new())
+            } else {
+                Err(io::Error::from_raw_os_error(error))
+            };
+        }
+
+        // Darwin's null-buffer query reports a global process-list bound, not the selected
+        // group's exact size. Cap that sizing hint; the filled-call count below still rejects an
+        // actually full/ambiguous group instead of treating it as drained.
+        let capacity = usize::try_from(observed)
+            .map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "libproc returned an invalid process group size",
+                )
+            })?
+            .saturating_add(LIST_HEADROOM)
+            .min(MAX_PROCESS_GROUP_MEMBERS);
+        let buffer_bytes = capacity
+            .checked_mul(std::mem::size_of::<libc::pid_t>())
+            .and_then(|bytes| libc::c_int::try_from(bytes).ok())
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "internal worker process group buffer is too large",
+                )
+            })?;
+        let mut members = vec![0; capacity];
+
+        // SAFETY: members is writable for buffer_bytes and libproc returns at most that many PIDs.
+        unsafe { *libc::__error() = 0 };
+        let returned = unsafe {
+            libc::proc_listpgrppids(process_group, members.as_mut_ptr().cast(), buffer_bytes)
+        };
+        if returned < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if returned == 0 {
+            // The group may disappear between the sizing and filling calls.
+            // SAFETY: __error returns this thread's errno location.
+            let error = unsafe { *libc::__error() };
+            return if matches!(error, 0 | libc::ESRCH) {
+                Ok(Vec::new())
+            } else {
+                Err(io::Error::from_raw_os_error(error))
+            };
+        }
+        let returned = usize::try_from(returned).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "libproc returned an invalid process group size",
+            )
+        })?;
+        if returned > capacity {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "libproc exceeded the process group buffer",
+            ));
+        }
+        if returned == capacity {
+            // A full buffer is ambiguous: the group could have grown while it was inspected.
+            continue;
+        }
+        members.truncate(returned);
+        if members.iter().any(|process_id| *process_id <= 0) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "libproc returned an invalid process group member",
+            ));
+        }
+        return Ok(members);
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::WouldBlock,
+        "internal worker process group changed during bounded inspection",
+    ))
+}
+
+#[cfg(target_os = "macos")]
+fn macos_process_state_and_group(
+    process_id: libc::pid_t,
+) -> io::Result<Option<(u32, libc::pid_t)>> {
+    let mut information = unsafe { std::mem::zeroed::<libc::proc_bsdinfo>() };
+    let information_bytes = libc::c_int::try_from(std::mem::size_of::<libc::proc_bsdinfo>())
+        .expect("proc_bsdinfo size fits c_int");
+    // SAFETY: __error returns this thread's errno location.
+    unsafe { *libc::__error() = 0 };
+    // SAFETY: information is writable for information_bytes and has the requested layout.
+    let returned = unsafe {
+        libc::proc_pidinfo(
+            process_id,
+            libc::PROC_PIDTBSDINFO,
+            // Darwin searches the zombie process list for PROC_PIDTBSDINFO only when arg is
+            // nonzero. The inspected process-group snapshot can contain unreaped zombies after
+            // the worker group has been terminated.
+            1,
+            (&raw mut information).cast(),
+            information_bytes,
+        )
+    };
+    if returned == 0 {
+        // proc_pidinfo can lose a process between the group snapshot and this query. Tolerate that
+        // race only when a fresh existence probe proves the PID is gone; every other libproc
+        // failure remains fail-closed.
+        let status_error = unsafe { *libc::__error() };
+        let probe = unsafe { libc::kill(process_id, 0) };
+        if probe != 0 {
+            let probe_error = io::Error::last_os_error();
+            if probe_error.raw_os_error() == Some(libc::ESRCH) {
+                return Ok(None);
+            }
+            return Err(probe_error);
+        }
+        return Err(if status_error == 0 {
+            io::Error::other("libproc returned no process status without an error")
+        } else {
+            io::Error::from_raw_os_error(status_error)
+        });
+    }
+    if returned != information_bytes {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "libproc returned a partial process status",
+        ));
+    }
+    let observed_id = libc::pid_t::try_from(information.pbi_pid).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "libproc returned a process ID outside pid_t",
+        )
+    })?;
+    if observed_id != process_id {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "libproc returned status for a different process",
+        ));
+    }
+    let process_group = libc::pid_t::try_from(information.pbi_pgid).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "libproc returned a process group outside pid_t",
+        )
+    })?;
+    Ok(Some((information.pbi_status, process_group)))
 }
 
 #[cfg(target_os = "linux")]
@@ -557,7 +759,20 @@ struct StagingGuard {
 
 impl Drop for StagingGuard {
     fn drop(&mut self) {
-        let _ = remove_empty_private_container(&self.container);
+        cleanup_empty_private_container(&self.container);
+    }
+}
+
+fn cleanup_empty_private_container(container: &Path) {
+    for attempt in 0..PRIVATE_CONTAINER_CLEANUP_ATTEMPTS {
+        match remove_empty_private_container(container) {
+            Ok(true) | Ok(false) => return,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return,
+            Err(_) if attempt + 1 < PRIVATE_CONTAINER_CLEANUP_ATTEMPTS => {
+                thread::sleep(PRIVATE_CONTAINER_CLEANUP_RETRY_DELAY);
+            },
+            Err(_) => return,
+        }
     }
 }
 
@@ -628,11 +843,11 @@ pub(crate) fn run_worker_from_environment() {
 fn run_worker(marker: String, prechecked_parent_pid: u32) -> u8 {
     let manifest = match read_worker_manifest() {
         Ok(manifest)
-            if manifest.schema == WORKER_MANIFEST_SCHEMA
-                && manifest.version == PROTOCOL_VERSION
-                && manifest.nonce == marker
-                && manifest.parent_pid == prechecked_parent_pid
-                && valid_nonce(&manifest.nonce) =>
+            if manifest.schema == WORKER_MANIFEST_SCHEMA &&
+                manifest.version == PROTOCOL_VERSION &&
+                manifest.nonce == marker &&
+                manifest.parent_pid == prechecked_parent_pid &&
+                valid_nonce(&manifest.nonce) =>
         {
             manifest
         },
@@ -642,9 +857,9 @@ fn run_worker(marker: String, prechecked_parent_pid: u32) -> u8 {
         Some(paths) => paths,
         None => return 2,
     };
-    if !worker_paths_match_private_container(&manifest.nonce, &paths)
-        || !worker_parent_is_same_executable(manifest.parent_pid)
-        || manifest.paths_sha256 != worker_paths_sha256(&manifest.nonce, &paths)
+    if !worker_paths_match_private_container(&manifest.nonce, &paths) ||
+        !worker_parent_is_same_executable(manifest.parent_pid) ||
+        manifest.paths_sha256 != worker_paths_sha256(&manifest.nonce, &paths)
     {
         return 2;
     }
@@ -713,8 +928,8 @@ pub(crate) fn finish_captured_worker(deferred: DeferredCapturedPublication) -> !
     let Some(context) = WORKER_CONTEXT.get() else {
         terminate_worker_process(2);
     };
-    if deferred.validate(&context.expected_render_id).is_err()
-        || write_worker_frame(&context.nonce, WorkerResult::Captured { deferred }).is_err()
+    if deferred.validate(&context.expected_render_id).is_err() ||
+        write_worker_frame(&context.nonce, WorkerResult::Captured { deferred }).is_err()
     {
         terminate_worker_process(2);
     }
@@ -846,9 +1061,9 @@ fn read_worker_manifest() -> io::Result<WorkerManifest> {
         .lock()
         .take(MAX_MANIFEST_BYTES + 1)
         .read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > MAX_MANIFEST_BYTES
-        || bytes.last() != Some(&b'\n')
-        || bytes[..bytes.len().saturating_sub(1)].contains(&b'\n')
+    if bytes.len() as u64 > MAX_MANIFEST_BYTES ||
+        bytes.last() != Some(&b'\n') ||
+        bytes[..bytes.len().saturating_sub(1)].contains(&b'\n')
     {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -906,11 +1121,11 @@ fn worker_paths_match_private_container(nonce: &str, paths: &WorkerPublicationPa
     let Some(expected_container) = staging_container_leaf(nonce) else {
         return false;
     };
-    paths.staging_container.file_name() == Some(expected_container.as_os_str())
-        && paths.staging_artifacts.parent() == Some(paths.staging_container.as_path())
-        && paths.staging_artifacts.file_name() == Some(std::ffi::OsStr::new("artifacts"))
-        && !paths.public_artifacts.starts_with(&paths.staging_container)
-        && !paths.public_output.starts_with(&paths.staging_container)
+    paths.staging_container.file_name() == Some(expected_container.as_os_str()) &&
+        paths.staging_artifacts.parent() == Some(paths.staging_container.as_path()) &&
+        paths.staging_artifacts.file_name() == Some(std::ffi::OsStr::new("artifacts")) &&
+        !paths.public_artifacts.starts_with(&paths.staging_container) &&
+        !paths.public_output.starts_with(&paths.staging_container)
 }
 
 fn staging_container_leaf(nonce: &str) -> Option<std::ffi::OsString> {
@@ -1108,7 +1323,7 @@ fn promote_failure_without_plan(
     .map_err(|error| {
         PlanAndPromoteError::AfterVisibility(staged_artifact_error(error, paths, identity))
     })?;
-    let _ = remove_empty_private_container(&paths.staging_container);
+    cleanup_empty_private_container(&paths.staging_container);
     Ok(())
 }
 
@@ -1759,27 +1974,27 @@ fn trusted_frame(
     nonce: &str,
     paths: &WorkerPublicationPaths,
 ) -> Result<WorkerFrame, ()> {
-    if child.timed_out
-        || child.stdout.overflowed
-        || child.stderr.overflowed
-        || !child.stderr.bytes.is_empty()
-        || child.stdout.bytes.last() != Some(&b'\n')
-        || child.stdout.bytes[..child.stdout.bytes.len().saturating_sub(1)].contains(&b'\n')
+    if child.timed_out ||
+        child.stdout.overflowed ||
+        child.stderr.overflowed ||
+        !child.stderr.bytes.is_empty() ||
+        child.stdout.bytes.last() != Some(&b'\n') ||
+        child.stdout.bytes[..child.stdout.bytes.len().saturating_sub(1)].contains(&b'\n')
     {
         return Err(());
     }
     let encoded = &child.stdout.bytes[..child.stdout.bytes.len().saturating_sub(1)];
-    if encoded.first() != Some(&b'{')
-        || encoded.last() != Some(&b'}')
-        || encoded.contains(&b'\r')
-        || !worker_frame_has_exact_top_level_shape(encoded)
+    if encoded.first() != Some(&b'{') ||
+        encoded.last() != Some(&b'}') ||
+        encoded.contains(&b'\r') ||
+        !worker_frame_has_exact_top_level_shape(encoded)
     {
         return Err(());
     }
     let frame: WorkerFrame = serde_json::from_slice(encoded).map_err(|_| ())?;
-    if frame.schema != WORKER_FRAME_SCHEMA
-        || frame.version != PROTOCOL_VERSION
-        || frame.nonce != nonce
+    if frame.schema != WORKER_FRAME_SCHEMA ||
+        frame.version != PROTOCOL_VERSION ||
+        frame.nonce != nonce
     {
         return Err(());
     }
@@ -1882,8 +2097,8 @@ fn private_leaf_token(value: &str) -> bool {
     let Some(nonce) = value.strip_prefix(".pliego-runtime-") else {
         return false;
     };
-    matches!(nonce.len(), STAGING_PATH_NONCE_HEX_LEN | 64)
-        && nonce
+    matches!(nonce.len(), STAGING_PATH_NONCE_HEX_LEN | 64) &&
+        nonce
             .bytes()
             .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
 }
@@ -1941,7 +2156,7 @@ fn plan_and_promote(
     require_promoted_plan(paths, identity).map_err(PlanAndPromoteError::AfterVisibility)?;
     // Publication is already atomically visible and bound at this point. Container cleanup is
     // hygiene only; never rewrite an accepted result into RUNTIME_TERMINATED after visibility.
-    let _ = remove_empty_private_container(&paths.staging_container);
+    cleanup_empty_private_container(&paths.staging_container);
     Ok(())
 }
 
@@ -2081,8 +2296,8 @@ fn generate_nonce() -> io::Result<String> {
 }
 
 fn valid_nonce(nonce: &str) -> bool {
-    nonce.len() == 64
-        && nonce
+    nonce.len() == 64 &&
+        nonce
             .bytes()
             .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
 }
@@ -2562,6 +2777,68 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn staging_guard_retries_transient_private_container_cleanup_errors() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let sandbox = std::env::temp_dir().canonicalize().unwrap().join(format!(
+            "pliego-supervisor-cleanup-retry-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&sandbox).unwrap();
+        let container = sandbox.join(staging_container_leaf(NONCE).unwrap());
+        create_private_directory(&container).unwrap();
+
+        // Model a transient identity-bound cleanup rejection without putting forensic evidence
+        // inside the container. The guard must never recurse; it may retry only after errors.
+        std::fs::set_permissions(&container, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let repaired_container = container.clone();
+        let repair = std::thread::spawn(move || {
+            std::thread::sleep(PRIVATE_CONTAINER_CLEANUP_RETRY_DELAY.saturating_mul(3));
+            std::fs::set_permissions(repaired_container, std::fs::Permissions::from_mode(0o700))
+                .unwrap();
+        });
+
+        drop(StagingGuard {
+            container: container.clone(),
+        });
+        repair.join().unwrap();
+
+        assert!(!container.exists());
+        std::fs::remove_dir(sandbox).unwrap();
+    }
+
+    #[test]
+    fn staging_guard_preserves_nonempty_private_failure_evidence() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let sandbox = std::env::temp_dir().canonicalize().unwrap().join(format!(
+            "pliego-supervisor-cleanup-evidence-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&sandbox).unwrap();
+        let container = sandbox.join(staging_container_leaf(NONCE).unwrap());
+        create_private_directory(&container).unwrap();
+        let evidence = container.join("failure-evidence");
+        std::fs::write(&evidence, b"retain me").unwrap();
+
+        drop(StagingGuard {
+            container: container.clone(),
+        });
+
+        assert_eq!(std::fs::read(&evidence).unwrap(), b"retain me");
+        std::fs::remove_file(evidence).unwrap();
+        assert!(remove_empty_private_container(&container).unwrap());
+        std::fs::remove_dir(sandbox).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn near_path_limit_is_rejected_by_the_documented_headroom_boundary() {
         use std::ffi::CString;
         use std::os::unix::ffi::OsStrExt;
@@ -2610,8 +2887,8 @@ mod tests {
                 .join("0".repeat(64))
                 .as_os_str()
                 .as_bytes()
-                .len()
-                < path_max
+                .len() <
+                path_max
         );
         let Command::Render(request) = parse_args(vec![
             OsString::from("render"),
@@ -2635,8 +2912,8 @@ mod tests {
                 .join("0".repeat(64))
                 .as_os_str()
                 .as_bytes()
-                .len()
-                >= path_max
+                .len() >=
+                path_max
         );
         create_private_directory(&paths.staging_container).unwrap();
         let guard = StagingGuard {
@@ -3103,6 +3380,86 @@ mod tests {
         assert!(trusted_frame(child, NONCE, &paths()).is_err());
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_termination_accepts_an_already_zombie_only_group() {
+        let mut command = ProcessCommand::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg("exit 0")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        ChildContainment::configure(&mut command);
+        let mut child = command.spawn().unwrap();
+        let mut containment = ChildContainment::bind(&child).unwrap();
+        let child_id = libc::pid_t::try_from(child.id()).unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !unix_child_exited_without_reaping(&child).unwrap() {
+            assert!(
+                Instant::now() < deadline,
+                "zombie-only process-group fixture did not become waitable"
+            );
+            thread::sleep(PROCESS_POLL_INTERVAL);
+        }
+        let (state, observed_group) = macos_process_state_and_group(child_id)
+            .unwrap()
+            .expect("waitable process remains observable before it is reaped");
+        assert_eq!(state, libc::SZOMB);
+        assert_eq!(observed_group, containment.process_group);
+
+        containment.terminate().unwrap();
+        assert!(child.wait().unwrap().success());
+        containment.quiesce().unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_process_group_distinguishes_live_members_from_zombies() {
+        let mut command = ProcessCommand::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg("trap '' HUP; sleep 60 & wait")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        ChildContainment::configure(&mut command);
+        let mut child = command.spawn().unwrap();
+        let mut containment = ChildContainment::bind(&child).unwrap();
+        let child_id = libc::pid_t::try_from(child.id()).unwrap();
+
+        assert!(!macos_process_group_has_only_zombies(containment.process_group).unwrap());
+        containment.terminate().unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !unix_child_exited_without_reaping(&child).unwrap() {
+            assert!(
+                Instant::now() < deadline,
+                "process-group fixture did not become waitable"
+            );
+            thread::sleep(PROCESS_POLL_INTERVAL);
+        }
+        let (state, observed_group) = macos_process_state_and_group(child_id)
+            .unwrap()
+            .expect("waitable process remains observable before it is reaped");
+        assert_eq!(state, libc::SZOMB);
+        assert_eq!(observed_group, containment.process_group);
+        loop {
+            if macos_process_group_has_only_zombies(containment.process_group).unwrap() {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "terminated process-group members did not become zombies"
+            );
+            thread::sleep(PROCESS_POLL_INTERVAL);
+        }
+
+        let _ = child.wait().unwrap();
+        containment.quiesce().unwrap();
+    }
+
     #[cfg(unix)]
     #[test]
     fn unix_process_group_quiesces_a_descendant_after_the_worker_exits() {
@@ -3144,7 +3501,15 @@ mod tests {
                 .unwrap()
                 .is_none_or(|(state, _)| matches!(state, 'Z' | 'X'))
         );
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "macos")]
+        assert!(
+            macos_process_state_and_group(descendant)
+                .unwrap()
+                .is_none_or(|(state, group)| {
+                    state == libc::SZOMB && group == containment.process_group
+                })
+        );
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
             assert_eq!(unsafe { libc::kill(descendant, 0) }, -1);
             assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::ESRCH));

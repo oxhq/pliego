@@ -1690,15 +1690,15 @@ fn exact_capture_commit(
         };
     };
     let mut observation = *observation;
-    let documents_match = observation.documents.len() == precondition.documents().len()
-        && observation
+    let documents_match = observation.documents.len() == precondition.documents().len() &&
+        observation
             .documents
             .iter()
             .zip(precondition.documents())
             .all(|(observed, expected)| {
-                observed.pipeline_id == expected.pipeline_id
-                    && observed.script_rendering_epoch == Some(expected.script_rendering_epoch)
-                    && observed.readiness_blockers == expected.readiness_blockers
+                observed.pipeline_id == expected.pipeline_id &&
+                    observed.script_rendering_epoch == Some(expected.script_rendering_epoch) &&
+                    observed.readiness_blockers == expected.readiness_blockers
             });
     let Some(commit) = observation.capture_commit.take() else {
         return Err(SessionError::new(
@@ -1706,26 +1706,26 @@ fn exact_capture_commit(
             "successful capture consume returned no commit",
         ));
     };
-    if observation.action != DocumentTimeControlAction::CaptureConsumed
-        || observation.target != *precondition.target()
-        || observation.now != precondition.now()
-        || observation.next_deadline != precondition.next_deadline()
-        || observation.advance_token.is_some()
-        || observation.pending_events != precondition.pending_events()
-        || observation.input_batch_saturated != precondition.input_batch_saturated()
-        || observation.producers != precondition.producers()
-        || observation.execution != Some(precondition.execution())
-        || observation.capture_preparation.is_some()
-        || !documents_match
-        || commit.candidate_id() != precondition.id()
-        || commit.ticket_id() != ticket.id()
-        || commit.target() != precondition.target()
-        || commit.pipeline_id() != ticket.pipeline_id()
-        || commit.script_rendering_epoch() != ticket.script_rendering_epoch()
-        || commit.surface() != precondition.surface()
-        || commit.presentation_generation() != ticket.presentation_generation()
-        || commit.publish_generation() != ticket.publish_generation()
-        || commit.layout_paint_epoch() != ticket.script_rendering_epoch()
+    if observation.action != DocumentTimeControlAction::CaptureConsumed ||
+        observation.target != *precondition.target() ||
+        observation.now != precondition.now() ||
+        observation.next_deadline != precondition.next_deadline() ||
+        observation.advance_token.is_some() ||
+        observation.pending_events != precondition.pending_events() ||
+        observation.input_batch_saturated != precondition.input_batch_saturated() ||
+        observation.producers != precondition.producers() ||
+        observation.execution != Some(precondition.execution()) ||
+        observation.capture_preparation.is_some() ||
+        !documents_match ||
+        commit.candidate_id() != precondition.id() ||
+        commit.ticket_id() != ticket.id() ||
+        commit.target() != precondition.target() ||
+        commit.pipeline_id() != ticket.pipeline_id() ||
+        commit.script_rendering_epoch() != ticket.script_rendering_epoch() ||
+        commit.surface() != precondition.surface() ||
+        commit.presentation_generation() != ticket.presentation_generation() ||
+        commit.publish_generation() != ticket.publish_generation() ||
+        commit.layout_paint_epoch() != ticket.script_rendering_epoch()
     {
         return Err(SessionError::new(
             "CONTROLLED_CAPTURE_PROTOCOL_MISMATCH",
@@ -2061,8 +2061,8 @@ impl DocumentDelegate {
         let observed_evidence = evidence.clone();
         let result = self.resources.borrow_mut().push(evidence);
         #[cfg(test)]
-        if result.is_ok()
-            && let Some(observer) = self.resource_evidence_observer.borrow().as_ref()
+        if result.is_ok() &&
+            let Some(observer) = self.resource_evidence_observer.borrow().as_ref()
         {
             observer(&observed_evidence);
         }
@@ -2082,8 +2082,8 @@ impl DocumentDelegate {
         request: ResourceRequest,
         failure: ResourcePolicyFailure,
     ) {
-        if request.load_role != WebResourceLoadRole::DocumentMetadata
-            || !failure.is_optional_metadata_failure()
+        if request.load_role != WebResourceLoadRole::DocumentMetadata ||
+            !failure.is_optional_metadata_failure()
         {
             self.cancel_resource(load, failure);
             return;
@@ -2554,8 +2554,8 @@ mod tests {
             .and_then(|line| line.split_whitespace().nth(1))
             .unwrap_or("/");
         let cookie_seen = request.lines().any(|line| {
-            line.to_ascii_lowercase().starts_with("cookie:")
-                && line.contains("pliego_session_seed=1")
+            line.to_ascii_lowercase().starts_with("cookie:") &&
+                line.contains("pliego_session_seed=1")
         });
         let (status, content_type, body) = match path {
             "/allowed.js" => ("200 OK", "text/javascript", ALLOWED_HTTP_BODY.to_vec()),
@@ -2601,12 +2601,12 @@ mod tests {
             .and_then(|()| stream.write_all(&body));
         match result {
             Err(error)
-                if path == "/timeout.js"
-                    && matches!(
+                if path == "/timeout.js" &&
+                    matches!(
                         error.kind(),
-                        io::ErrorKind::BrokenPipe
-                            | io::ErrorKind::ConnectionAborted
-                            | io::ErrorKind::ConnectionReset
+                        io::ErrorKind::BrokenPipe |
+                            io::ErrorKind::ConnectionAborted |
+                            io::ErrorKind::ConnectionReset
                     ) =>
             {
                 Ok(())
@@ -3398,10 +3398,10 @@ window.pliego?.defer();
             return;
         }
         let page = match case.as_str() {
-            "hybrid-canvas"
-            | "unsupported-canvas"
-            | "canvas-retention-budget"
-            | "canvas-missing-snapshot" => {
+            "hybrid-canvas" |
+            "unsupported-canvas" |
+            "canvas-retention-budget" |
+            "canvas-missing-snapshot" => {
                 PageDefinition::new(200.0, 160.0, PageMargins::new(10.0, 10.0, 10.0, 10.0)).unwrap()
             },
             "chartjs-report" => {
@@ -3476,8 +3476,8 @@ window.pliego?.defer();
                             .trace()
                             .iter()
                             .filter(|step| **step == ControlledSettlementStep::DriveOneTurn)
-                            .count()
-                            >= 2
+                            .count() >=
+                            2
                     );
                     assert!(
                         candidate
@@ -3510,8 +3510,8 @@ window.pliego?.defer();
                         messages
                             .into_iter()
                             .filter(|message| {
-                                message.starts_with("controlled-start:")
-                                    || message.starts_with("controlled-end:")
+                                message.starts_with("controlled-start:") ||
+                                    message.starts_with("controlled-end:")
                             })
                             .collect::<Vec<_>>(),
                         vec![
@@ -3541,8 +3541,8 @@ window.pliego?.defer();
                             .console
                             .iter()
                             .filter(|(_, message)| {
-                                message
-                                    == "controlled-paint-observed:first-contentful-paint:20:0:20"
+                                message ==
+                                    "controlled-paint-observed:first-contentful-paint:20:0:20"
                             })
                             .count(),
                         1,
@@ -3559,8 +3559,8 @@ window.pliego?.defer();
                             fragment
                                 .get("text_run")
                                 .and_then(|run| run.get("text"))
-                                .and_then(serde_json::Value::as_str)
-                                == Some("PLIEGO_FCP_20")
+                                .and_then(serde_json::Value::as_str) ==
+                                Some("PLIEGO_FCP_20")
                         })
                         .count();
                     assert_eq!(
@@ -3672,10 +3672,10 @@ window.pliego?.defer();
         ) {
             let observed = Arc::clone(observed);
             session.set_resource_evidence_observer(Rc::new(move |evidence| {
-                if evidence.request.url == target
-                    && evidence.request.load_role == WebResourceLoadRole::DocumentMetadata
-                    && evidence.request.destination == "Image"
-                    && evidence.status == status
+                if evidence.request.url == target &&
+                    evidence.request.load_role == WebResourceLoadRole::DocumentMetadata &&
+                    evidence.request.destination == "Image" &&
+                    evidence.status == status
                 {
                     observed.store(true, Ordering::SeqCst);
                 }
@@ -3757,8 +3757,8 @@ window.pliego?.defer();
                         loaded: 2,
                         delegated: 0,
                         failed: 0,
-                        body_bytes: (std::fs::metadata(&input).unwrap().len()
-                            + std::fs::metadata(&script).unwrap().len()),
+                        body_bytes: (std::fs::metadata(&input).unwrap().len() +
+                            std::fs::metadata(&script).unwrap().len()),
                         unavailable_bodies: 0,
                     }
                 );
@@ -3842,13 +3842,13 @@ window.pliego?.defer();
                 let asset_body = fs::read(input.parent().unwrap().join("first.js")).unwrap();
                 let asset_sha = content_address(&asset_body);
                 assert!(assets.iter().all(|resource| {
-                    resource.request.method == "GET"
-                        && resource.request.destination == "Script"
-                        && !resource.request.is_for_main_frame
-                        && resource.status == "loaded"
-                        && resource.response_status == Some(200)
-                        && resource.bytes == Some(asset_body.len() as u64)
-                        && resource.sha256.as_deref() == Some(&asset_sha[7..])
+                    resource.request.method == "GET" &&
+                        resource.request.destination == "Script" &&
+                        !resource.request.is_for_main_frame &&
+                        resource.status == "loaded" &&
+                        resource.response_status == Some(200) &&
+                        resource.bytes == Some(asset_body.len() as u64) &&
+                        resource.sha256.as_deref() == Some(&asset_sha[7..])
                 }));
                 let first = assets
                     .iter()
@@ -3922,9 +3922,9 @@ window.pliego?.defer();
                     .resources
                     .iter()
                     .find(|resource| {
-                        resource.source == Some(source)
-                            && resource.content_address.as_deref()
-                                == Some(expected_address.as_str())
+                        resource.source == Some(source) &&
+                            resource.content_address.as_deref() ==
+                                Some(expected_address.as_str())
                     })
                     .expect("raster evidence should reference its owned exact bytes");
                 assert_eq!(evidence.status, "loaded");
@@ -3965,9 +3965,9 @@ window.pliego?.defer();
                 assert_eq!(outcome.resource_accounting.failed, 1);
                 assert_eq!(
                     outcome.resource_accounting.requests,
-                    outcome.resource_accounting.loaded
-                        + outcome.resource_accounting.delegated
-                        + outcome.resource_accounting.failed
+                    outcome.resource_accounting.loaded +
+                        outcome.resource_accounting.delegated +
+                        outcome.resource_accounting.failed
                 );
                 assert!(outcome.resource_accounting.loaded >= 3);
             },
@@ -4085,9 +4085,9 @@ window.pliego?.defer();
                 assert_eq!(error.resource_accounting.unavailable_bodies, 1);
                 assert_eq!(
                     error.resource_accounting.requests,
-                    error.resource_accounting.loaded
-                        + error.resource_accounting.delegated
-                        + error.resource_accounting.failed
+                    error.resource_accounting.loaded +
+                        error.resource_accounting.delegated +
+                        error.resource_accounting.failed
                 );
                 assert_eq!(error.resources.len(), 1);
             },
@@ -4475,10 +4475,10 @@ window.pliego?.defer();
             .font_selections
             .iter()
             .filter(|selection| {
-                selection.source == CapturedFontSource::Bundled
-                    && selection.resource == AHEM_CAPTURED_RESOURCE
-                    && selection.selected_family.as_deref() == Some("Ahem")
-                    && selection
+                selection.source == CapturedFontSource::Bundled &&
+                    selection.resource == AHEM_CAPTURED_RESOURCE &&
+                    selection.selected_family.as_deref() == Some("Ahem") &&
+                    selection
                         .requested_families
                         .iter()
                         .any(|family| family == "Ahem")

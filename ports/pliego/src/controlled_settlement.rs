@@ -87,8 +87,8 @@ impl ControlledSettlementCoordinator {
         &self,
         mut observation: DocumentTimeControlObservation,
     ) -> Result<ControlledSettlementProgress, ControlledSettlementError> {
-        if observation.action == DocumentTimeControlAction::ExecutionTerminated
-            || observation
+        if observation.action == DocumentTimeControlAction::ExecutionTerminated ||
+            observation
                 .execution
                 .is_some_and(|execution| execution.terminal.is_some())
         {
@@ -124,8 +124,8 @@ impl ControlledSettlementCoordinator {
             if preparation.sources.sources().iter().any(|source| {
                 matches!(
                     source.disposition(),
-                    DocumentSettlementSourceDisposition::OpenEnded(_)
-                        | DocumentSettlementSourceDisposition::Unsupported(_)
+                    DocumentSettlementSourceDisposition::OpenEnded(_) |
+                        DocumentSettlementSourceDisposition::Unsupported(_)
                 )
             }) {
                 return Err(ControlledSettlementError::InconsistentPreparation);
@@ -155,8 +155,8 @@ impl ControlledSettlementCoordinator {
                 )
             }) || preparation
                 .blockers
-                .contains(&DocumentCaptureBlocker::FiniteTimerDeadline)
-                || observation.next_deadline.is_some();
+                .contains(&DocumentCaptureBlocker::FiniteTimerDeadline) ||
+                observation.next_deadline.is_some();
             if has_finite_deadline {
                 let Some(token) = observation.advance_token.take() else {
                     return Err(ControlledSettlementError::FiniteSourceWithoutAuthority);
@@ -184,8 +184,8 @@ impl ControlledSettlementCoordinator {
             if preparation.blockers.iter().any(|blocker| {
                 matches!(
                     blocker,
-                    DocumentCaptureBlocker::ProducerNotStableEmpty
-                        | DocumentCaptureBlocker::QuietCheckpointsUnqualified
+                    DocumentCaptureBlocker::ProducerNotStableEmpty |
+                        DocumentCaptureBlocker::QuietCheckpointsUnqualified
                 )
             }) {
                 return Ok(ControlledSettlementProgress::Command(
@@ -204,9 +204,9 @@ impl ControlledSettlementCoordinator {
             ));
         }
 
-        let producers_stable = observation.producers.stability
-            == DocumentProducerStability::StableEmpty
-            && observation.producers.snapshot.is_empty();
+        let producers_stable = observation.producers.stability ==
+            DocumentProducerStability::StableEmpty &&
+            observation.producers.snapshot.is_empty();
         if !observation.producers.snapshot.is_empty() {
             return Ok(ControlledSettlementProgress::WaitForWake);
         }
@@ -227,24 +227,24 @@ impl ControlledSettlementCoordinator {
 fn should_reobserve(error: &DocumentTimeControlError) -> bool {
     matches!(
         error,
-        DocumentTimeControlError::EventLoopUnavailable
-            | DocumentTimeControlError::AdvanceInputChanged { .. }
-            | DocumentTimeControlError::AdvanceClockChanged { .. }
-            | DocumentTimeControlError::AdvanceProducerChanged { .. }
-            | DocumentTimeControlError::TargetChanged { .. }
-            | DocumentTimeControlError::Timer(TimerControlError::StaleDeadline { .. })
+        DocumentTimeControlError::EventLoopUnavailable |
+            DocumentTimeControlError::AdvanceInputChanged { .. } |
+            DocumentTimeControlError::AdvanceClockChanged { .. } |
+            DocumentTimeControlError::AdvanceProducerChanged { .. } |
+            DocumentTimeControlError::TargetChanged { .. } |
+            DocumentTimeControlError::Timer(TimerControlError::StaleDeadline { .. })
     )
 }
 
 fn is_terminal_capture_blocker(blocker: &DocumentCaptureBlocker) -> bool {
     matches!(
         blocker,
-        DocumentCaptureBlocker::MultipleFullyActivePipelines
-            | DocumentCaptureBlocker::ExecutionPolicyUnavailable
-            | DocumentCaptureBlocker::ExecutionTerminated
-            | DocumentCaptureBlocker::OpenEndedSource
-            | DocumentCaptureBlocker::UnsupportedSource
-            | DocumentCaptureBlocker::InvalidSurface
+        DocumentCaptureBlocker::MultipleFullyActivePipelines |
+            DocumentCaptureBlocker::ExecutionPolicyUnavailable |
+            DocumentCaptureBlocker::ExecutionTerminated |
+            DocumentCaptureBlocker::OpenEndedSource |
+            DocumentCaptureBlocker::UnsupportedSource |
+            DocumentCaptureBlocker::InvalidSurface
     )
 }
 
