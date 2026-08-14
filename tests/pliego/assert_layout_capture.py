@@ -179,19 +179,9 @@ def main() -> int:
                     repr(rejected_summary),
                 )
                 require(not rejected_output.exists(), "partial scene PDF was published")
-                rejected_environment = json.loads((rejected_artifacts / "environment.json").read_text(encoding="utf-8"))
                 require(
-                    rejected_environment.get("document_pdf", {}).get("status") == "failed"
-                    and rejected_environment.get("document_pdf", {}).get("error", {}).get("code")
-                    == "SCENE_CAPTURE_UNSUPPORTED_PAINT_EVENTS",
-                    repr(rejected_environment.get("document_pdf")),
-                )
-                rejected_report = json.loads((rejected_artifacts / "scene-report.json").read_text(encoding="utf-8"))
-                require(
-                    rejected_report.get("document_pdf", {}).get("status") == "failed"
-                    and rejected_report.get("document_pdf", {}).get("error", {}).get("code")
-                    == "SCENE_CAPTURE_UNSUPPORTED_PAINT_EVENTS",
-                    repr(rejected_report.get("document_pdf")),
+                    not rejected_artifacts.exists(),
+                    "partial scene published unvalidated failure artifacts",
                 )
             command = [str(binary)]
             if mode == "effects":

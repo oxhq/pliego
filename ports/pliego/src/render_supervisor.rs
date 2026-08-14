@@ -1170,20 +1170,17 @@ fn worker_failure_evidence(error: &RenderError) -> FailureEvidenceDisposition {
     let Some(paths) = WORKER_CONTEXT.get().map(|context| &context.paths) else {
         return FailureEvidenceDisposition::None;
     };
-    let required_files = [
-        "console.jsonl",
-        "failure.json",
-        "resources.jsonl",
-        "session-state.jsonl",
-    ];
-    let has_required_files = required_files.iter().all(|name| {
-        std::fs::symlink_metadata(paths.staging_artifacts.join(name))
-            .is_ok_and(|metadata| metadata.is_file())
-    });
-    let has_resource_directory =
-        std::fs::symlink_metadata(paths.staging_artifacts.join("resources"))
-            .is_ok_and(|metadata| metadata.is_dir());
-    if has_required_files && has_resource_directory {
+    let Some(identity) = WORKER_IDENTITY.get() else {
+        return FailureEvidenceDisposition::None;
+    };
+    let expected = failed_artifact_expectation(
+        identity,
+        &identity.render_id,
+        &error.code,
+        &error.message,
+        &paths.public_output,
+    );
+    if validate_failed_artifact_contract(&paths.staging_artifacts, expected).is_ok() {
         FailureEvidenceDisposition::Staged
     } else {
         FailureEvidenceDisposition::None

@@ -350,39 +350,69 @@ def self_test() -> None:
     )
 
     with tempfile.TemporaryDirectory(prefix="pliego-table-header-footer-self-test-") as temp:
-        artifacts = Path(temp) / "artifacts"
-        artifacts.mkdir()
-        layout_path = artifacts / "layout-debug.json"
-        layout_path.write_text(json.dumps(layout), encoding="utf-8")
-        result = subprocess.CompletedProcess(
+        failure_artifacts = Path(temp) / "failure-artifacts"
+        failure = subprocess.CompletedProcess(
             args=[],
             returncode=1,
             stdout=json.dumps(
                 {
-                    "artifacts": str(artifacts),
-                    "document_pdf": str(Path(temp) / "document.pdf"),
+                    "artifacts": str(failure_artifacts),
+                    "document_pdf": str(Path(temp) / "failed.pdf"),
                     "error": {"code": UNSUPPORTED_CAPTURE_CODE},
                     "status": "failed",
                 }
             ),
             stderr="",
         )
-        require(read_unsupported_layout(result) == layout, "unsupported diagnostic layout differs")
+        require_unsupported_failure(failure)
+
+        diagnostic_artifacts = Path(temp) / "diagnostic-artifacts"
+        diagnostic_artifacts.mkdir()
+        layout_path = diagnostic_artifacts / "layout-debug.json"
+        layout_path.write_text(json.dumps(layout), encoding="utf-8")
+        diagnostic = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "artifacts": str(diagnostic_artifacts),
+                    "document_pdf": str(Path(temp) / "document.pdf"),
+                    "scene": {
+                        "capture_code": UNSUPPORTED_CAPTURE_CODE,
+                        "capture_status": "partial",
+                    },
+                    "status": "rendered",
+                }
+            ),
+            stderr="",
+        )
+        require(read_diagnostic_layout(diagnostic) == layout, "unsupported diagnostic layout differs")
 
 
-def invoke(binary: Path, fixture: Path, temp: str) -> subprocess.CompletedProcess[str]:
+def invoke(
+    binary: Path,
+    fixture: Path,
+    temp: str,
+    *,
+    allow_partial_scene: bool = False,
+) -> subprocess.CompletedProcess[str]:
     environment = os.environ.copy()
     environment.update({"TMPDIR": temp, "TMP": temp, "TEMP": temp})
-    return subprocess.run(
+    command = [str(binary)]
+    if allow_partial_scene:
+        command.append("--allow-partial-scene")
+    command.extend(
         [
-            str(binary),
             "--allow-host-fonts",
             "--page-size",
             "240x140",
             "--page-margins",
             "10,10,10,10",
             fixture.name,
-        ],
+        ]
+    )
+    return subprocess.run(
+        command,
         cwd=fixture.parent,
         env=environment,
         capture_output=True,
@@ -392,7 +422,7 @@ def invoke(binary: Path, fixture: Path, temp: str) -> subprocess.CompletedProces
     )
 
 
-def read_unsupported_layout(result: subprocess.CompletedProcess[str]) -> dict[str, Any]:
+def require_unsupported_failure(result: subprocess.CompletedProcess[str]) -> None:
     require(result.returncode != 0, "unsupported fixture did not fail closed")
     summary = final_summary(result)
     require(summary.get("status") == "failed", f"unsupported fixture status differs: {summary!r}")
@@ -402,16 +432,31 @@ def read_unsupported_layout(result: subprocess.CompletedProcess[str]) -> dict[st
         f"unsupported fixture error differs: {error!r}",
     )
     artifacts_value = summary.get("artifacts")
-    require(isinstance(artifacts_value, str), "unsupported fixture has no artifact directory")
-    artifacts = Path(artifacts_value)
-    require(artifacts.is_dir(), "unsupported fixture artifact directory does not exist")
+    require(isinstance(artifacts_value, str), "unsupported fixture has no artifact path")
+    require(not Path(artifacts_value).exists(), "unsupported fixture published failure artifacts")
     document_value = summary.get("document_pdf")
     require(isinstance(document_value, str), "unsupported fixture has no document PDF path")
     require(not Path(document_value).exists(), "unsupported fixture published a PDF")
-    require(not any(artifacts.rglob("*.pdf")), "unsupported fixture retained a PDF artifact")
+
+
+def read_diagnostic_layout(result: subprocess.CompletedProcess[str]) -> dict[str, Any]:
+    require(result.returncode == 0, f"partial diagnostic render failed: {result.stderr[-4000:]}")
+    summary = final_summary(result)
+    require(summary.get("status") == "rendered", f"partial diagnostic status differs: {summary!r}")
+    scene = summary.get("scene")
+    require(
+        isinstance(scene, dict)
+        and scene.get("capture_status") == "partial"
+        and scene.get("capture_code") == UNSUPPORTED_CAPTURE_CODE,
+        f"partial diagnostic scene differs: {scene!r}",
+    )
+    artifacts_value = summary.get("artifacts")
+    require(isinstance(artifacts_value, str), "partial diagnostic has no artifact directory")
+    artifacts = Path(artifacts_value)
+    require(artifacts.is_dir(), "partial diagnostic artifact directory does not exist")
     layout = artifacts / "layout-debug.json"
-    require(layout.is_file(), "unsupported fixture did not retain layout diagnostics")
-    return read_json(str(layout), "unsupported layout debug artifact")
+    require(layout.is_file(), "partial diagnostic did not retain layout diagnostics")
+    return read_json(str(layout), "partial diagnostic layout debug artifact")
 
 
 def run(binary: Path, fixture: Path) -> dict[str, Any]:
@@ -431,7 +476,9 @@ def run(binary: Path, fixture: Path) -> dict[str, Any]:
 
 def run_unsupported(binary: Path, fixture: Path) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="pliego-table-header-footer-unsupported-") as temp:
-        return read_unsupported_layout(invoke(binary, fixture, temp))
+        require_unsupported_failure(invoke(binary, fixture, temp))
+    with tempfile.TemporaryDirectory(prefix="pliego-table-header-footer-diagnostic-") as temp:
+        return read_diagnostic_layout(invoke(binary, fixture, temp, allow_partial_scene=True))
 
 
 def main() -> int:
