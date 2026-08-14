@@ -5451,9 +5451,13 @@ mod tests {
             std::process::id()
         ));
         fs::create_dir(&sandbox).unwrap();
-        let container = sandbox.join(std::ffi::OsString::from_vec(vec![
+        // APFS rejects malformed UTF-8 filenames with EILSEQ, so keep the fixture tree portable and
+        // supply the non-UTF-8 path through the explicit private-path input being tested.
+        let private_path = sandbox.join(std::ffi::OsString::from_vec(vec![
             b'.', b'p', b'l', b'i', b'e', b'g', b'o', b'-', 0x80, b'-', b'1', b'2', b'3', b'4',
         ]));
+        assert!(private_path.to_str().is_none());
+        let container = sandbox.join(format!(".pliego-runtime-{}", "a".repeat(32)));
         create_private_directory(&container).unwrap();
         let stage = container.join("artifacts");
         let public = sandbox.join("public-artifacts");
@@ -5468,13 +5472,13 @@ mod tests {
             .unwrap();
         drop(artifacts);
 
-        validate_staged_artifacts(&stage, &[&container, &stage]).unwrap();
+        validate_staged_artifacts(&stage, &[&private_path]).unwrap();
         fs::write(
             stage.join("raw-private-path.bin"),
-            container.as_os_str().as_bytes(),
+            private_path.as_os_str().as_bytes(),
         )
         .unwrap();
-        let error = validate_staged_artifacts(&stage, &[&container, &stage]).unwrap_err();
+        let error = validate_staged_artifacts(&stage, &[&private_path]).unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
         assert!(error.to_string().contains("private staging path"));
         assert!(!public.exists());
