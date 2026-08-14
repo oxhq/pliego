@@ -2531,11 +2531,12 @@ mod tests {
         std::fs::create_dir(&sandbox).unwrap();
         let input = sandbox.join("input.html");
         std::fs::write(&input, b"<!doctype html><title>leaf cleanup</title>").unwrap();
+        let input_argument = PathBuf::from(sandbox.file_name().unwrap()).join("input.html");
         let artifacts = sandbox.join("a".repeat(256));
         let output = sandbox.join("invoice.pdf");
         let Command::Render(request) = parse_args(vec![
             OsString::from("render"),
-            input.clone().into_os_string(),
+            input_argument.into_os_string(),
             OsString::from("--output"),
             output.clone().into_os_string(),
             OsString::from("--artifacts"),
@@ -2596,7 +2597,10 @@ mod tests {
             std::fs::create_dir(&parent).unwrap();
         }
 
-        let input = sandbox.join("input.html");
+        let input = PathBuf::from(format!(
+            "pliego-supervisor-path-headroom-input-{}-{unique}.html",
+            std::process::id()
+        ));
         std::fs::write(&input, b"<!doctype html><title>path headroom</title>").unwrap();
         let artifacts = parent.join("a");
         let output = sandbox.join("invoice.pdf");
@@ -2611,7 +2615,7 @@ mod tests {
         );
         let Command::Render(request) = parse_args(vec![
             OsString::from("render"),
-            input.into_os_string(),
+            input.clone().into_os_string(),
             OsString::from("--output"),
             output.clone().into_os_string(),
             OsString::from("--artifacts"),
@@ -2655,6 +2659,7 @@ mod tests {
                 .to_string_lossy()
                 .starts_with(".pliego-runtime-")
         }));
+        std::fs::remove_file(input).unwrap();
         std::fs::remove_dir_all(sandbox).unwrap();
     }
 

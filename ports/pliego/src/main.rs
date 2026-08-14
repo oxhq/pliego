@@ -6974,13 +6974,17 @@ mod tests {
     ))]
     #[test]
     fn supervisor_identity_retains_pre_spawn_artifact_contract_inputs() {
-        let root = temporary_artifacts("pliego-supervisor-artifact-contract-identity");
+        let root_name = temporary_artifacts("pliego-supervisor-artifact-contract-identity")
+            .file_name()
+            .unwrap()
+            .to_owned();
+        let root = std::env::current_dir().unwrap().join(&root_name);
         fs::create_dir(&root).unwrap();
         let input = root.join("input.html");
         let original = b"<!doctype html><p>original</p>";
         fs::write(&input, original).unwrap();
         let request = RenderRequest {
-            input: input.clone(),
+            input: PathBuf::from(root_name).join("input.html"),
             environment: RenderEnvironment {
                 locale: "es-MX",
                 timezone: "PST8PDT",
@@ -9305,6 +9309,10 @@ mod tests {
         );
         let artifact_root = publication.artifacts.directory().to_owned();
         fs::write(&publication.proof, stable_png()).unwrap();
+        publication
+            .artifacts
+            .write_readiness(&serde_json::json!({ "status": "ready" }))
+            .unwrap();
 
         let outcome = publish_captured_document(
             &request,
@@ -9440,6 +9448,10 @@ mod tests {
         );
         let artifact_root = publication.artifacts.directory().to_owned();
         fs::write(&publication.proof, stable_png()).unwrap();
+        publication
+            .artifacts
+            .write_readiness(&serde_json::json!({ "status": "ready" }))
+            .unwrap();
 
         let outcome = publish_captured_document(
             &request,
