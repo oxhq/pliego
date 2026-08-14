@@ -264,6 +264,25 @@ def retain(root: Path, result: subprocess.CompletedProcess[bytes], destination: 
     destination.mkdir(parents=True)
     (destination / "process.stdout.log").write_bytes(result.stdout)
     (destination / "process.stderr.log").write_bytes(result.stderr)
+    (destination / "process.json").write_text(
+        json.dumps(
+            {
+                "returncode": result.returncode,
+                "stderr": {
+                    "bytes": len(result.stderr),
+                    "sha256": hashlib.sha256(result.stderr).hexdigest(),
+                },
+                "stdout": {
+                    "bytes": len(result.stdout),
+                    "sha256": hashlib.sha256(result.stdout).hexdigest(),
+                },
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     inputs = destination / "inputs"
     inputs.mkdir()
     for source in sorted((*root.glob("*.html"), *root.glob("*.js"))):
@@ -474,6 +493,16 @@ def self_test() -> None:
         parsed = read_object(manifest)
         require(cached_url == "https://assets.invalid/asset-000.js", cached_url)
         require(len(parsed.get("assets", [])) == MAX_CACHE_ENTRIES + 1, repr(parsed))
+    with tempfile.TemporaryDirectory(prefix="pliego-process-proof-self-test-") as temp:
+        root = Path(temp) / "root"
+        destination = Path(temp) / "proof"
+        root.mkdir()
+        result = subprocess.CompletedProcess([], 1, b'{"status":"failed"}\n', b"typed failure\n")
+        retain(root, result, destination)
+        process = read_object(destination / "process.json")
+        require(process.get("returncode") == 1, repr(process))
+        require(process.get("stdout", {}).get("bytes") == len(result.stdout), repr(process))
+        require(process.get("stderr", {}).get("bytes") == len(result.stderr), repr(process))
     with tempfile.TemporaryDirectory(prefix="pliego-resource-log-self-test-") as temp:
         artifacts = Path(temp)
         render_id = "sha256:" + "1" * 64
