@@ -1762,6 +1762,10 @@ fn run_child(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    #[cfg(target_os = "linux")]
+    // Headless Mesa otherwise probes unavailable DRI/Zink devices and writes native warnings to
+    // the worker's authenticated stderr channel. Software GL keeps that channel pristine.
+    command.env("LIBGL_ALWAYS_SOFTWARE", "1");
     ChildContainment::configure(&mut command);
     let mut child = command.spawn()?;
     let mut containment = match ChildContainment::bind(&child) {
@@ -1830,10 +1834,14 @@ fn run_child(
 
 #[cfg(unix)]
 fn terminate_and_reap(child: &mut Child, containment: &mut ChildContainment) {
-    let _ = containment.terminate();
-    let _ = child.kill();
+    if containment
+        .terminate()
+        .and_then(|()| containment.quiesce())
+        .is_err()
+    {
+        let _ = child.kill();
+    }
     let _ = child.wait();
-    let _ = containment.quiesce();
 }
 
 #[cfg(windows)]
@@ -1857,6 +1865,11 @@ fn wait_for_child(
                     let _ = child.wait();
                     return Err(error);
                 }
+                if let Err(error) = containment.quiesce() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(error);
+                }
                 return child.wait().map(|status| (status, false));
             },
             Ok(false) => {},
@@ -1867,6 +1880,11 @@ fn wait_for_child(
         }
         if Instant::now() >= deadline {
             if let Err(error) = containment.terminate() {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error);
+            }
+            if let Err(error) = containment.quiesce() {
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err(error);
@@ -3409,9 +3427,8 @@ mod tests {
         assert_eq!(state, libc::SZOMB);
         assert_eq!(observed_group, containment.process_group);
 
-        containment.terminate().unwrap();
-        assert!(child.wait().unwrap().success());
         containment.quiesce().unwrap();
+        assert!(child.wait().unwrap().success());
     }
 
     #[cfg(target_os = "macos")]
@@ -3456,8 +3473,8 @@ mod tests {
             thread::sleep(PROCESS_POLL_INTERVAL);
         }
 
-        let _ = child.wait().unwrap();
         containment.quiesce().unwrap();
+        let _ = child.wait().unwrap();
     }
 
     #[cfg(unix)]
@@ -3492,9 +3509,8 @@ mod tests {
         }
         assert_eq!(unsafe { libc::kill(descendant, 0) }, 0);
 
-        containment.terminate().unwrap();
-        assert!(child.wait().unwrap().success());
         containment.quiesce().unwrap();
+        assert!(child.wait().unwrap().success());
         #[cfg(target_os = "linux")]
         assert!(
             linux_process_state_and_group(descendant)
