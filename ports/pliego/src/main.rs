@@ -3103,27 +3103,50 @@ fn publication_request_fingerprint_with_runtime_policy(
 
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
 fn hash_runtime_policy(hasher: &mut Sha256, runtime_policy: DeterministicRuntimePolicy) {
+    let runtime_policy::DeterministicRuntimePolicy {
+        time:
+            runtime_policy::DocumentTimePolicy {
+                epoch_unix_ms,
+                initial_offset_ns,
+            },
+        settlement:
+            runtime_policy::DocumentSettlementPolicy {
+                infinite_source_policy,
+                empty_checkpoints,
+                limits:
+                    runtime_policy::DocumentSettlementLimits {
+                        virtual_span_ms,
+                        ordinary_tasks,
+                        microtasks,
+                        rendering_opportunities,
+                        mutations,
+                        post_readiness_resources,
+                        process_cpu_ms,
+                        host_wall_ms,
+                    },
+            },
+    } = runtime_policy;
     update_hash_field(hasher, b"pliego.runtime-policy.v1");
     update_hash_field(hasher, &[runtime_policy::API2_TIME_POLICY_VERSION]);
-    update_hash_field(hasher, &runtime_policy.time.epoch_unix_ms.to_be_bytes());
-    update_hash_field(hasher, &runtime_policy.time.initial_offset_ns.to_be_bytes());
+    update_hash_field(hasher, &epoch_unix_ms.to_be_bytes());
+    update_hash_field(hasher, &initial_offset_ns.to_be_bytes());
     update_hash_field(hasher, &[runtime_policy::API2_SETTLEMENT_POLICY_VERSION]);
     update_hash_field(
         hasher,
-        match runtime_policy.settlement.infinite_source_policy {
+        match infinite_source_policy {
             runtime_policy::InfiniteSourcePolicy::Fail => b"fail",
         },
     );
-    update_hash_field(hasher, &[runtime_policy.settlement.empty_checkpoints]);
+    update_hash_field(hasher, &[empty_checkpoints]);
     for value in [
-        runtime_policy.settlement.limits.virtual_span_ms,
-        runtime_policy.settlement.limits.ordinary_tasks,
-        runtime_policy.settlement.limits.microtasks,
-        runtime_policy.settlement.limits.rendering_opportunities,
-        runtime_policy.settlement.limits.mutations,
-        runtime_policy.settlement.limits.post_readiness_resources,
-        runtime_policy.settlement.limits.process_cpu_ms,
-        runtime_policy.settlement.limits.host_wall_ms,
+        virtual_span_ms,
+        ordinary_tasks,
+        microtasks,
+        rendering_opportunities,
+        mutations,
+        post_readiness_resources,
+        process_cpu_ms,
+        host_wall_ms,
     ] {
         update_hash_field(hasher, &value.to_be_bytes());
     }
@@ -4460,7 +4483,9 @@ mod tests {
         feature = "shell-oracle",
         not(any(target_os = "android", target_env = "ohos"))
     ))]
-    use super::begin_shell_oracle_publication;
+    use super::begin_publication_for_runtime;
+    #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+    use super::controlled_capture_render_id;
     #[cfg(feature = "document-session")]
     use super::{
         CapturedPublication, ExpectedInputIdentity, RenderOutcome, finish_document_session_render,
@@ -4471,11 +4496,9 @@ mod tests {
         PageDefinition, PageMargins, RenderEnvironment, RenderError, RenderRequest,
         ResourceCapture, ResourcePolicy, ResourcePolicyConfig, ResourcePolicyFailure,
         ResourceRequest, WebResourceLoadRole, classify_controlled_http_status, cli_render_error,
-        controlled_capture_render_id, create_session_artifacts, default_page, page_artifact,
-        parse_args, persist_scene_capture, print_render_error,
-        publication_request_fingerprint_with_runtime_policy, resolve_scene_resource,
-        runtime_policy, set_document_pdf_environment, sha256_hex, stable_render_id,
-        stable_render_id_with_runtime_policy,
+        create_session_artifacts, default_page, page_artifact, parse_args, persist_scene_capture,
+        print_render_error, resolve_scene_resource, runtime_policy, set_document_pdf_environment,
+        sha256_hex, stable_render_id,
     };
     #[cfg(feature = "shell-oracle")]
     use super::{
@@ -4489,9 +4512,10 @@ mod tests {
     ))]
     use super::{
         PublicationRuntimeIdentity, PublicationStart, PublicationTransaction, begin_publication,
-        begin_publication_for_runtime, publication_recovery_required_message,
-        publication_request_fingerprint, render,
-        render_controlled_with_post_reservation_paint_invalidation_for_test, write_render_outcome,
+        publication_recovery_required_message, publication_request_fingerprint,
+        publication_request_fingerprint_with_runtime_policy, render,
+        render_controlled_with_post_reservation_paint_invalidation_for_test,
+        stable_render_id_with_runtime_policy, write_render_outcome,
     };
     #[cfg(feature = "document-session")]
     use crate::document_session::{DocumentCaptureOutcome, SessionError};
@@ -5783,7 +5807,10 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "document-session")]
+    #[cfg(all(
+        feature = "document-session",
+        not(any(target_os = "android", target_env = "ohos"))
+    ))]
     #[test]
     fn every_runtime_policy_override_changes_render_and_recovery_identity() {
         let input = b"<!doctype html><title>Controlled</title>";

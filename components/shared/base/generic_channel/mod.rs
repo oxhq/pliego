@@ -384,7 +384,7 @@ pub fn to_receive_result<T>(receive_result: RoutedReceiverReceiveResult<T>) -> R
     match receive_result {
         Ok(Ok(msg)) => Ok(msg),
         Err(_crossbeam_recv_err) => Err(ReceiveError::Disconnected),
-        Ok(Err(ipc_err)) => Err(ReceiveError::DeserializationFailed(ipc_err.to_string())),
+        Ok(Err(ipc_err)) => Err(ipc_err.into()),
     }
 }
 
@@ -420,11 +420,9 @@ where
         match &self.0 {
             GenericReceiverVariants::Ipc(receiver) => Ok(receiver.recv()?),
             GenericReceiverVariants::Crossbeam(receiver) => {
-                // `recv()` returns an error if the channel is disconnected
-                let msg = receiver.recv()?;
-                // `msg` must be `ok` because the corresponding [`GenericSender::Crossbeam`] will
-                // unconditionally send an `Ok(T)`
-                Ok(msg.expect("Infallible"))
+                // The outer error reports routed-channel disconnection. The inner result
+                // preserves IPC routing and deserialization failures.
+                receiver.recv()?.map_err(ReceiveError::from)
             },
         }
     }
@@ -433,10 +431,9 @@ where
     pub fn try_recv(&self) -> TryReceiveResult<T> {
         match &self.0 {
             GenericReceiverVariants::Ipc(receiver) => Ok(receiver.try_recv()?),
-            GenericReceiverVariants::Crossbeam(receiver) => {
-                let msg = receiver.try_recv()?;
-                Ok(msg.expect("Infallible"))
-            },
+            GenericReceiverVariants::Crossbeam(receiver) => receiver
+                .try_recv()?
+                .map_err(|error| TryReceiveError::ReceiveError(error.into())),
         }
     }
 
@@ -449,7 +446,7 @@ where
             },
             GenericReceiverVariants::Crossbeam(receiver) => match receiver.recv_timeout(timeout) {
                 Ok(Ok(value)) => Ok(value),
-                Ok(Err(_)) => unreachable!("Infallable"),
+                Ok(Err(error)) => Err(TryReceiveError::ReceiveError(error.into())),
                 Err(RecvTimeoutError::Disconnected) => {
                     Err(TryReceiveError::ReceiveError(ReceiveError::Disconnected))
                 },
@@ -621,7 +618,28 @@ mod single_process_channel_tests {
     //! can be sent over each other without problems in single-process mode.
     //! In multiprocess mode we exclusively use `ipc_channel` anyway, which is ensured due
     //! to `channel()` being the only way to construct `GenericSender` and Receiver pairs.
-    use crate::generic_channel::{new_generic_channel_crossbeam, new_generic_channel_ipc};
+    use std::time::Duration;
+
+    use ipc_channel::IpcError;
+
+    use crate::generic_channel::{
+        GenericReceiver, GenericReceiverVariants, ReceiveError, TryReceiveError,
+        new_generic_channel_crossbeam, new_generic_channel_ipc,
+    };
+
+    fn routed_error_receiver<T>() -> (
+        crossbeam_channel::Sender<Result<T, IpcError>>,
+        GenericReceiver<T>,
+    )
+    where
+        T: for<'de> serde::Deserialize<'de> + serde::Serialize,
+    {
+        let (sender, receiver) = crossbeam_channel::bounded(1);
+        (
+            sender,
+            GenericReceiver(GenericReceiverVariants::Crossbeam(receiver)),
+        )
+    }
 
     #[test]
     fn generic_crossbeam_can_send() {
@@ -629,6 +647,39 @@ mod single_process_channel_tests {
         tx.send(5).expect("Send failed");
         let val = rx.recv().expect("Receive failed");
         assert_eq!(val, 5);
+    }
+
+    #[test]
+    fn routed_crossbeam_recv_preserves_transport_error() {
+        let (sender, receiver) = routed_error_receiver::<u8>();
+        sender.send(Err(IpcError::Disconnected)).unwrap();
+
+        assert!(matches!(receiver.recv(), Err(ReceiveError::Disconnected)));
+    }
+
+    #[test]
+    fn routed_crossbeam_try_recv_preserves_transport_error() {
+        let (sender, receiver) = routed_error_receiver::<u8>();
+        sender
+            .send(Err(IpcError::Io(std::io::Error::other("routed io"))))
+            .unwrap();
+
+        let Err(TryReceiveError::ReceiveError(ReceiveError::Io(error))) = receiver.try_recv()
+        else {
+            panic!("routed I/O error must remain a typed receive error");
+        };
+        assert_eq!(error.to_string(), "routed io");
+    }
+
+    #[test]
+    fn routed_crossbeam_timeout_preserves_transport_error() {
+        let (sender, receiver) = routed_error_receiver::<u8>();
+        sender.send(Err(IpcError::Disconnected)).unwrap();
+
+        assert!(matches!(
+            receiver.try_recv_timeout(Duration::from_secs(1)),
+            Err(TryReceiveError::ReceiveError(ReceiveError::Disconnected))
+        ));
     }
 
     #[test]
