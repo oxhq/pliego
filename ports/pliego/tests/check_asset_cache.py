@@ -294,7 +294,9 @@ def verify_success(
         expected_metrics,
         len(body),
     )
-    normalized_rows = verify_loaded_assets(artifacts, render_id, expected_hash, expected_results, body)
+    normalized_rows = verify_loaded_assets(
+        artifacts, render_id, expected_hash, {url: "hit" for url in ASSET_URLS}, body
+    )
     scene_bytes = (artifacts / "scene.json").read_bytes()
     preview = (artifacts / "scene-preview.png").read_bytes()
     pdf = document_pdf.read_bytes()
@@ -322,30 +324,19 @@ def verify_bad_manifest(
     require(summary.get("status") == "failed", repr(summary))
     error = summary.get("error")
     require(isinstance(error, dict) and error.get("code") == "ASSET_HASH_MISMATCH", repr(error))
-    policy = read_object(artifacts / "environment.json").get("resource_policy")
-    require(isinstance(policy, dict), repr(policy))
-    manifest = policy.get("asset_manifest")
-    require(isinstance(manifest, dict) and manifest.get("status") == "failed", repr(manifest))
-    manifest_error = manifest.get("error")
-    require(isinstance(manifest_error, dict), repr(manifest))
-    require(manifest_error.get("code") == "ASSET_HASH_MISMATCH", repr(manifest_error))
-    require(manifest_error.get("expected") == f"sha256:{BAD_DIGEST}", repr(manifest_error))
-    require(manifest_error.get("actual") == f"sha256:{actual_hash}", repr(manifest_error))
-    rows = resource_rows(artifacts)
-    require(len(rows) == 1, f"hash mismatch should fail before Servo resource events: {rows!r}")
-    row = rows[0]
-    require(row.get("policy") == CACHE_SCOPE and row.get("status") == "failed", repr(row))
-    require(row.get("code") == "ASSET_HASH_MISMATCH", repr(row))
-    require(row.get("expected") == f"sha256:{BAD_DIGEST}", repr(row))
-    require(row.get("actual") == f"sha256:{actual_hash}", repr(row))
-    require(row.get("cache_result") is None and row.get("bytes") is None, repr(row))
+    expected_message = f"asset bytes hash to sha256:{actual_hash}, manifest declares sha256:{BAD_DIGEST}"
+    require(error.get("message") == expected_message, repr(error))
+    render_id = summary.get("render_id")
+    require(isinstance(render_id, str) and render_id.startswith("sha256:"), repr(render_id))
+    require(summary.get("artifacts") == str(artifacts), repr(summary.get("artifacts")))
+    require(summary.get("document_pdf") == str(document_pdf), repr(summary.get("document_pdf")))
+    require(result.stderr.strip() == f"pliego: ASSET_HASH_MISMATCH: {expected_message}", repr(result.stderr))
+    require(not artifacts.exists(), "bad manifest published unvalidated failure artifacts")
     require(not document_pdf.exists(), "bad manifest published the requested PDF")
-    require(not (artifacts / "document.pdf").exists(), "bad manifest retained a diagnostic PDF")
-    require(not (artifacts / "scene.json").exists(), "bad manifest reached scene capture")
     return {
-        "code": row["code"],
-        "expected": row["expected"],
-        "actual": row["actual"],
+        "code": error["code"],
+        "expected": f"sha256:{BAD_DIGEST}",
+        "actual": f"sha256:{actual_hash}",
         "failed_before_scene": True,
     }
 
@@ -420,10 +411,11 @@ def main() -> int:
         )
         require(first["render_id"] != changed["render_id"], "changed asset bytes did not change render identity")
 
+        cache_before_bad_manifest = cache_objects(root)
         write_bad_manifest(root)
         bad_run = run(binary, root, output, "bad-manifest")
         bad = verify_bad_manifest(*bad_run, changed_hash)
-        require(BAD_DIGEST not in cache_objects(root), "hash mismatch populated an unverified cache object")
+        require(cache_objects(root) == cache_before_bad_manifest, "hash mismatch changed the verified cache objects")
 
     comparison = {
         "schema": "pliego.asset-cache-check",
