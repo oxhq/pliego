@@ -19,9 +19,25 @@ from typing import Any
 
 MARKER = "PLIEGO_FCP_20"
 POST5_MARKER = "PLIEGO_POST5MS_7C4E"
+SYNTHETIC_READINESS_KEYS = {
+    "source",
+    "document_time_ns",
+    "script_rendering_epoch",
+    "layout_paint_epoch",
+    "paint_presented_epoch",
+}
+OPEN_ENDED_SOURCE = "<!doctype html><script>window.pliego.defer();setInterval(()=>{},1)</script>"
 MARKER_RGBA = (197, 48, 80, 255)
 CONTROLLED_CANVAS_ID = "controlled-capture-canvas"
 CONTROLLED_CANVAS_SIZE = (48, 24)
+CONTROLLED_READINESS_PAYLOAD = {
+    "fixture": "controlled-production-capture",
+    "phase": "post-5ms",
+    "marker": POST5_MARKER,
+    "canvasWidth": CONTROLLED_CANVAS_SIZE[0],
+    "canvasHeight": CONTROLLED_CANVAS_SIZE[1],
+    "readbackBytes": CONTROLLED_CANVAS_SIZE[0] * CONTROLLED_CANVAS_SIZE[1] * 4,
+}
 CONTROLLED_CANVAS_BACKGROUND_RGBA = (12, 180, 96, 255)
 CONTROLLED_CANVAS_INSET_RGBA = (244, 196, 48, 255)
 STABLE_FRAME_SIZE = (200, 160)
@@ -114,19 +130,100 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def exact_ready_snapshot(
+    summary: dict[str, Any],
+    artifacts: Path,
+    expected_payload: dict[str, Any],
+) -> dict[str, Any]:
+    render_id = summary.get("render_id")
+    require(isinstance(render_id, str) and render_id, repr(summary))
+    require(summary.get("readiness") == expected_payload, repr(summary.get("readiness")))
+    require(SYNTHETIC_READINESS_KEYS.isdisjoint(expected_payload), repr(expected_payload))
+    snapshot = read_json(artifacts / "readiness.json")
+    require(
+        snapshot
+        == {
+            "status": "ready",
+            "font_status": "loaded",
+            "payload": expected_payload,
+            "render_id": render_id,
+        },
+        repr(snapshot),
+    )
+    return snapshot
+
+
+def validate_failure_proof(
+    output: Path,
+    directory: str,
+    evidence: dict[str, Any],
+    *,
+    expected_code: str,
+    message_fragment: str,
+    expected_input_sha256: str,
+    readiness_payload: dict[str, Any] | None = None,
+) -> None:
+    require(evidence.get("exit_code") not in (None, 0), repr(evidence))
+    require(evidence.get("failure_code") == expected_code, repr(evidence))
+    require(message_fragment in str(evidence.get("failure_message")), repr(evidence))
+    render_id = evidence.get("render_id")
+    require(isinstance(render_id, str) and render_id, repr(evidence))
+    require(evidence.get("input_sha256") == expected_input_sha256, repr(evidence))
+    readiness = evidence.get("readiness_snapshot")
+    if readiness_payload is None:
+        require(
+            readiness
+            == {
+                "status": "failed",
+                "render_id": render_id,
+                "error": {
+                    "code": expected_code,
+                    "message": evidence.get("failure_message"),
+                },
+            },
+            repr(evidence),
+        )
+    else:
+        require(
+            readiness
+            == {
+                "status": "ready",
+                "font_status": "loaded",
+                "payload": readiness_payload,
+                "render_id": render_id,
+            },
+            repr(evidence),
+        )
+    require(evidence.get("success_artifacts_absent") == list(SUCCESS_ARTIFACTS), repr(evidence))
+    evidence_hashes = evidence.get("evidence_sha256")
+    require(
+        isinstance(evidence_hashes, dict) and set(evidence_hashes) == {"failure.json", "readiness.json"},
+        repr(evidence),
+    )
+    for name, expected_hash in evidence_hashes.items():
+        retained = output / directory / name
+        require(retained.is_file(), f"controlled proof did not retain {directory}/{name}")
+        require(sha256_file(retained) == expected_hash, f"retained controlled proof changed {directory}/{name}")
+
+
 def write_proof_manifest(
     output: Path,
     binary: Path,
     fixture: Path,
     active_clip_fixture: Path,
+    explicit_fail_fixture: Path,
+    defer_timeout_fixture: Path,
     font: Path,
     materialized_inputs: tuple[Path, ...],
     comparisons: tuple[tuple[bytes, ...], ...],
+    explicit_failure: dict[str, Any],
+    deferred_timeout_failure: dict[str, Any],
     open_ended_failure: dict[str, Any],
     active_clip_failure: dict[str, Any],
 ) -> None:
     names = (
         "artifacts/render.png",
+        "artifacts/readiness.json",
         "normalized-layout.json",
         "artifacts/scene.json",
         "document.pdf",
@@ -148,42 +245,46 @@ def write_proof_manifest(
             sha256_file(retained) == sha256_bytes(value),
             f"retained controlled proof changed {name}",
         )
-    require(open_ended_failure.get("exit_code") not in (None, 0), repr(open_ended_failure))
-    require(open_ended_failure.get("failure_code") == "SETTLEMENT_FAILED", repr(open_ended_failure))
-    require("[OpenEndedSource]" in str(open_ended_failure.get("failure_message")), repr(open_ended_failure))
-    require(open_ended_failure.get("readiness_status") == "failed", repr(open_ended_failure))
-    require(open_ended_failure.get("readiness_error_code") == "SETTLEMENT_FAILED", repr(open_ended_failure))
-    require(open_ended_failure.get("success_artifacts_absent") == list(SUCCESS_ARTIFACTS), repr(open_ended_failure))
-    failure_hashes = open_ended_failure.get("evidence_sha256")
-    require(
-        isinstance(failure_hashes, dict) and set(failure_hashes) == {"failure.json", "readiness.json"},
-        repr(open_ended_failure),
+    validate_failure_proof(
+        output,
+        "explicit-failure",
+        explicit_failure,
+        expected_code="FIXTURE_READINESS_FAILED",
+        message_fragment="expected explicit failure",
+        expected_input_sha256=sha256_file(explicit_fail_fixture),
     )
-    for name, expected_hash in failure_hashes.items():
-        retained = output / "open-ended-failure" / name
-        require(retained.is_file(), f"controlled proof did not retain open-ended {name}")
-        require(sha256_file(retained) == expected_hash, f"retained open-ended proof changed {name}")
-    require(active_clip_failure.get("exit_code") not in (None, 0), repr(active_clip_failure))
-    require(active_clip_failure.get("failure_code") == "SETTLEMENT_FAILED", repr(active_clip_failure))
-    require("[UnsupportedSource]" in str(active_clip_failure.get("failure_message")), repr(active_clip_failure))
-    require(active_clip_failure.get("readiness_status") == "failed", repr(active_clip_failure))
-    require(active_clip_failure.get("readiness_error_code") == "SETTLEMENT_FAILED", repr(active_clip_failure))
-    require(active_clip_failure.get("success_artifacts_absent") == list(SUCCESS_ARTIFACTS), repr(active_clip_failure))
-    active_clip_hashes = active_clip_failure.get("evidence_sha256")
-    require(
-        isinstance(active_clip_hashes, dict) and set(active_clip_hashes) == {"failure.json", "readiness.json"},
-        repr(active_clip_failure),
+    validate_failure_proof(
+        output,
+        "deferred-timeout-failure",
+        deferred_timeout_failure,
+        expected_code="READINESS_TIMEOUT",
+        message_fragment="Document readiness timed out after 10000 ms",
+        expected_input_sha256=sha256_file(defer_timeout_fixture),
     )
-    for name, expected_hash in active_clip_hashes.items():
-        retained = output / "active-clip-failure" / name
-        require(retained.is_file(), f"controlled proof did not retain active-clip {name}")
-        require(sha256_file(retained) == expected_hash, f"retained active-clip proof changed {name}")
+    validate_failure_proof(
+        output,
+        "open-ended-failure",
+        open_ended_failure,
+        expected_code="SETTLEMENT_FAILED",
+        message_fragment="[OpenEndedSource]",
+        expected_input_sha256=sha256_bytes(OPEN_ENDED_SOURCE.encode()),
+    )
+    validate_failure_proof(
+        output,
+        "active-clip-failure",
+        active_clip_failure,
+        expected_code="SETTLEMENT_FAILED",
+        message_fragment="[UnsupportedSource]",
+        expected_input_sha256=sha256_file(active_clip_fixture),
+    )
     manifest = {
         "schema": "pliego.controlled-capture-proof",
-        "version": 1,
+        "version": 2,
         "binary_sha256": sha256_file(binary),
         "fixture_template_sha256": sha256_file(fixture),
         "active_clip_fixture_sha256": sha256_file(active_clip_fixture),
+        "explicit_fail_fixture_sha256": sha256_file(explicit_fail_fixture),
+        "defer_timeout_fixture_sha256": sha256_file(defer_timeout_fixture),
         "font_sha256": sha256_file(font),
         "successful_runs": [
             {
@@ -196,6 +297,8 @@ def write_proof_manifest(
                 start=1,
             )
         ],
+        "explicit_failure": explicit_failure,
+        "deferred_timeout_failure": deferred_timeout_failure,
         "open_ended_failure": open_ended_failure,
         "active_clip_failure": active_clip_failure,
     }
@@ -365,17 +468,7 @@ def run_success(binary: Path, fixture: Path, font: Path, root: Path) -> tuple[by
     require(scene_summary.get("capture_status") == "complete", repr(scene_summary))
     require(scene_summary.get("capture_code") is None, repr(scene_summary))
     require(scene_summary.get("preview_status") == "rendered", repr(scene_summary))
-    readiness = summary.get("readiness")
-    require(isinstance(readiness, dict), repr(summary))
-    require(readiness.get("source") == "controlled-generation-capture", repr(readiness))
-    require(readiness.get("document_time_ns") == "40000000", repr(readiness))
-    epochs = (
-        readiness.get("script_rendering_epoch"),
-        readiness.get("layout_paint_epoch"),
-        readiness.get("paint_presented_epoch"),
-    )
-    require(all(type(epoch) is int and epoch >= 0 for epoch in epochs), repr(readiness))
-    require(epochs[0] == epochs[1] == epochs[2], repr(readiness))
+    exact_ready_snapshot(summary, root / "artifacts", CONTROLLED_READINESS_PAYLOAD)
 
     layout_path = artifact(summary, "layout_debug", root / "artifacts/layout-debug.json")
     layout = read_json(layout_path)
@@ -549,11 +642,18 @@ def run_success(binary: Path, fixture: Path, font: Path, root: Path) -> tuple[by
         console.count("controlled-production-frame") == 1,
         "console evidence did not retain exactly one requestAnimationFrame callback",
     )
-    return stable_png, layout_projection, scene, pdf
+    return stable_png, (root / "artifacts/readiness.json").read_bytes(), layout_projection, scene, pdf
 
 
-def run_open_ended_failure(binary: Path, root: Path) -> dict[str, Any]:
-    (root / "input.html").write_text("<!doctype html><script>setInterval(()=>{},1)</script>", encoding="utf-8")
+def run_failure(
+    binary: Path,
+    root: Path,
+    description: str,
+    *,
+    expected_code: str,
+    message_fragment: str,
+    readiness_payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     result = subprocess.run(
         [
             str(binary),
@@ -570,73 +670,50 @@ def run_open_ended_failure(binary: Path, root: Path) -> dict[str, Any]:
         timeout=75,
         check=False,
     )
-    require(result.returncode != 0, "open-ended source unexpectedly published")
+    require(result.returncode != 0, f"{description} unexpectedly published")
     for relative in SUCCESS_ARTIFACTS:
         require(
             not (root / relative).exists(),
-            f"failed capture exposed success artifact {relative}",
+            f"{description} exposed success artifact {relative}",
         )
+    summary = final_json(result)
+    render_id = summary.get("render_id")
+    require(isinstance(render_id, str) and render_id, repr(summary))
+    require(summary.get("status") == "failed", repr(summary))
+    require(summary.get("error", {}).get("code") == expected_code, repr(summary))
+    require(message_fragment in str(summary.get("error", {}).get("message")), repr(summary))
     failure_path = root / "artifacts/failure.json"
-    require(failure_path.is_file(), "failed capture did not retain typed failure evidence")
+    require(failure_path.is_file(), f"{description} did not retain typed failure evidence")
     failure = read_json(failure_path)
-    require(failure.get("error", {}).get("code") == "SETTLEMENT_FAILED", repr(failure))
-    require("OpenEndedSource" in str(failure.get("error", {}).get("message")), repr(failure))
-    readiness = read_json(root / "artifacts/readiness.json")
-    require(readiness.get("status") == "failed", repr(readiness))
-    require(readiness.get("error", {}).get("code") == "SETTLEMENT_FAILED", repr(readiness))
-    return {
-        "exit_code": result.returncode,
-        "failure_code": failure.get("error", {}).get("code"),
-        "failure_message": failure.get("error", {}).get("message"),
-        "readiness_status": readiness.get("status"),
-        "readiness_error_code": readiness.get("error", {}).get("code"),
-        "success_artifacts_absent": list(SUCCESS_ARTIFACTS),
-        "evidence_sha256": {
-            "failure.json": sha256_file(failure_path),
-            "readiness.json": sha256_file(root / "artifacts/readiness.json"),
-        },
-    }
-
-
-def run_active_clip_failure(binary: Path, fixture: Path, root: Path) -> dict[str, Any]:
-    shutil.copy2(fixture, root / "input.html")
-    result = subprocess.run(
-        [
-            str(binary),
-            "render-controlled",
-            "input.html",
-            "--output",
-            str(root / "document.pdf"),
-            "--artifacts",
-            str(root / "artifacts"),
-        ],
-        cwd=root,
-        capture_output=True,
-        text=True,
-        timeout=75,
-        check=False,
+    error = failure.get("error")
+    require(isinstance(error, dict), repr(failure))
+    require(error.get("code") == expected_code, repr(failure))
+    require(message_fragment in str(error.get("message")), repr(failure))
+    require(
+        failure == {"status": "failed", "render_id": render_id, "error": error},
+        repr(failure),
     )
-    require(result.returncode != 0, "active-clip Canvas source unexpectedly published")
-    for relative in SUCCESS_ARTIFACTS:
-        require(
-            not (root / relative).exists(),
-            f"active-clip Canvas failure exposed success artifact {relative}",
-        )
-    failure_path = root / "artifacts/failure.json"
-    require(failure_path.is_file(), "active-clip Canvas failure retained no typed evidence")
-    failure = read_json(failure_path)
-    require(failure.get("error", {}).get("code") == "SETTLEMENT_FAILED", repr(failure))
-    require("UnsupportedSource" in str(failure.get("error", {}).get("message")), repr(failure))
+    require(summary.get("error") == error, repr(summary))
     readiness_path = root / "artifacts/readiness.json"
     readiness = read_json(readiness_path)
-    require(readiness.get("status") == "failed", repr(readiness))
-    require(readiness.get("error", {}).get("code") == "SETTLEMENT_FAILED", repr(readiness))
+    expected_readiness = (
+        {"status": "failed", "render_id": render_id, "error": error}
+        if readiness_payload is None
+        else {
+            "status": "ready",
+            "font_status": "loaded",
+            "payload": readiness_payload,
+            "render_id": render_id,
+        }
+    )
+    require(readiness == expected_readiness, repr(readiness))
     return {
         "exit_code": result.returncode,
-        "failure_code": failure.get("error", {}).get("code"),
-        "failure_message": failure.get("error", {}).get("message"),
-        "readiness_status": readiness.get("status"),
-        "readiness_error_code": readiness.get("error", {}).get("code"),
+        "failure_code": error.get("code"),
+        "failure_message": error.get("message"),
+        "render_id": render_id,
+        "input_sha256": sha256_file(root / "input.html"),
+        "readiness_snapshot": readiness,
         "success_artifacts_absent": list(SUCCESS_ARTIFACTS),
         "evidence_sha256": {
             "failure.json": sha256_file(failure_path),
@@ -645,7 +722,45 @@ def run_active_clip_failure(binary: Path, fixture: Path, root: Path) -> dict[str
     }
 
 
-def self_test(fixture: Path, font: Path) -> None:
+def run_fixture_failure(
+    binary: Path,
+    fixture: Path,
+    root: Path,
+    description: str,
+    *,
+    expected_code: str,
+    message_fragment: str,
+    readiness_payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    shutil.copy2(fixture, root / "input.html")
+    return run_failure(
+        binary,
+        root,
+        description,
+        expected_code=expected_code,
+        message_fragment=message_fragment,
+        readiness_payload=readiness_payload,
+    )
+
+
+def run_open_ended_failure(binary: Path, root: Path) -> dict[str, Any]:
+    (root / "input.html").write_text(OPEN_ENDED_SOURCE, encoding="utf-8")
+    return run_failure(
+        binary,
+        root,
+        "open-ended deferred source",
+        expected_code="SETTLEMENT_FAILED",
+        message_fragment="[OpenEndedSource]",
+    )
+
+
+def self_test(
+    fixture: Path,
+    active_clip_fixture: Path,
+    explicit_fail_fixture: Path,
+    defer_timeout_fixture: Path,
+    font: Path,
+) -> None:
     # 1x1 RGBA8, filter 0, pixel 36/104/172/255.
     raw = b"\x00\x24\x68\xac\xff"
     ihdr = struct.pack(">IIBBBBB", 1, 1, 8, 6, 0, 0, 0)
@@ -668,6 +783,18 @@ def self_test(fixture: Path, font: Path) -> None:
         require(FONT_PLACEHOLDER not in source, "font placeholder survived materialization")
         require(POST5_MARKER in source, "materialized fixture has no post-5ms marker")
         require(
+            source.count("window.pliego.defer();") == 1 and source.count("window.pliego.ready({") == 1,
+            "materialized fixture does not directly author one defer/ready transition",
+        )
+        require(
+            all(f"{key}: " in source for key in CONTROLLED_READINESS_PAYLOAD),
+            "materialized fixture does not author the expected readiness payload",
+        )
+        require(
+            "controlled-generation-capture" not in source and "__pliegoReadiness" not in source,
+            "materialized fixture still depends on synthetic controlled readiness",
+        )
+        require(
             "PLIEGO_FCP_${fcp.startTime}" in source,
             "materialized fixture has no paint-observer marker",
         )
@@ -678,7 +805,9 @@ def self_test(fixture: Path, font: Path) -> None:
         )
         require(
             'getContext("2d")' in source
-            and "getImageData(0, 0, controlledCanvas.width, controlledCanvas.height)" in source,
+            and "const controlledPixels = controlledContext.getImageData(" in source
+            and "controlledCanvas.width" in source
+            and "controlledCanvas.height" in source,
             "materialized fixture has no retained-supported full-surface Canvas 2D transcript",
         )
         projection = normalized_layout(
@@ -702,7 +831,6 @@ def self_test(fixture: Path, font: Path) -> None:
             projection["fragments"][0]["text_run"]["text"] == MARKER,
             "layout projection removed semantic marker evidence",
         )
-        active_clip_fixture = fixture.parents[1] / "controlled-canvas-active-clip/index.html"
         active_clip_source = active_clip_fixture.read_text(encoding="utf-8")
         clip = active_clip_source.index("context.clip()")
         full_readback = active_clip_source.index("context.getImageData(0, 0, canvas.width, canvas.height)")
@@ -711,59 +839,133 @@ def self_test(fixture: Path, font: Path) -> None:
             clip < full_readback < later_fill,
             "active-clip fixture must draw after a full readback without popping its clip",
         )
+        require(
+            'window.pliego.fail({\n  code: "FIXTURE_READINESS_FAILED"'
+            in explicit_fail_fixture.read_text(encoding="utf-8"),
+            "explicit-fail fixture does not directly report its typed readiness error",
+        )
+        require(
+            "window.pliego.defer();" in defer_timeout_fixture.read_text(encoding="utf-8"),
+            "defer-timeout fixture does not directly defer readiness",
+        )
         proof_root = Path(temporary)
+        readiness_artifacts = proof_root / "readiness-self-test"
+        readiness_artifacts.mkdir()
+        readiness_summary = {
+            "render_id": "self-test-render",
+            "readiness": CONTROLLED_READINESS_PAYLOAD,
+        }
+        (readiness_artifacts / "readiness.json").write_text(
+            json.dumps(
+                {
+                    "status": "ready",
+                    "font_status": "loaded",
+                    "payload": CONTROLLED_READINESS_PAYLOAD,
+                    "render_id": "self-test-render",
+                }
+            ),
+            encoding="utf-8",
+        )
+        require(
+            exact_ready_snapshot(readiness_summary, readiness_artifacts, CONTROLLED_READINESS_PAYLOAD)["payload"]
+            == CONTROLLED_READINESS_PAYLOAD,
+            repr(readiness_summary),
+        )
         (proof_root / "artifacts").mkdir()
         (proof_root / "artifacts/render.png").write_bytes(b"png")
+        (proof_root / "artifacts/readiness.json").write_bytes(b"ready")
         (proof_root / "normalized-layout.json").write_bytes(b"layout")
         (proof_root / "artifacts/scene.json").write_bytes(b"scene")
         (proof_root / "document.pdf").write_bytes(b"pdf")
-        failure_root = proof_root / "open-ended-failure"
-        failure_root.mkdir()
-        (failure_root / "failure.json").write_bytes(b"failure")
-        (failure_root / "readiness.json").write_bytes(b"readiness")
-        active_clip_failure_root = proof_root / "active-clip-failure"
-        active_clip_failure_root.mkdir()
-        (active_clip_failure_root / "failure.json").write_bytes(b"active clip failure")
-        (active_clip_failure_root / "readiness.json").write_bytes(b"active clip readiness")
+
+        def retained_failure(
+            directory: str,
+            code: str,
+            message: str,
+            *,
+            input_sha256: str,
+            readiness_payload: dict[str, Any] | None = None,
+        ) -> dict[str, Any]:
+            retained = proof_root / directory
+            retained.mkdir()
+            failure_bytes = f"{directory} failure".encode()
+            readiness_bytes = f"{directory} readiness".encode()
+            (retained / "failure.json").write_bytes(failure_bytes)
+            (retained / "readiness.json").write_bytes(readiness_bytes)
+            render_id = f"render-{directory}"
+            readiness = (
+                {
+                    "status": "failed",
+                    "render_id": render_id,
+                    "error": {"code": code, "message": message},
+                }
+                if readiness_payload is None
+                else {
+                    "status": "ready",
+                    "font_status": "loaded",
+                    "payload": readiness_payload,
+                    "render_id": render_id,
+                }
+            )
+            return {
+                "exit_code": 1,
+                "failure_code": code,
+                "failure_message": message,
+                "render_id": render_id,
+                "input_sha256": input_sha256,
+                "readiness_snapshot": readiness,
+                "success_artifacts_absent": list(SUCCESS_ARTIFACTS),
+                "evidence_sha256": {
+                    "failure.json": sha256_bytes(failure_bytes),
+                    "readiness.json": sha256_bytes(readiness_bytes),
+                },
+            }
+
+        explicit_failure = retained_failure(
+            "explicit-failure",
+            "FIXTURE_READINESS_FAILED",
+            "expected explicit failure",
+            input_sha256=sha256_file(explicit_fail_fixture),
+        )
+        deferred_timeout_failure = retained_failure(
+            "deferred-timeout-failure",
+            "READINESS_TIMEOUT",
+            "Document readiness timed out after 10000 ms",
+            input_sha256=sha256_file(defer_timeout_fixture),
+        )
+        open_ended_failure = retained_failure(
+            "open-ended-failure",
+            "SETTLEMENT_FAILED",
+            "capture preparation failed: [OpenEndedSource]",
+            input_sha256=sha256_bytes(OPEN_ENDED_SOURCE.encode()),
+        )
+        active_clip_failure = retained_failure(
+            "active-clip-failure",
+            "SETTLEMENT_FAILED",
+            "capture preparation failed: [UnsupportedSource]",
+            input_sha256=sha256_file(active_clip_fixture),
+        )
         write_proof_manifest(
             proof_root,
             materialized,
             fixture,
             active_clip_fixture,
+            explicit_fail_fixture,
+            defer_timeout_fixture,
             font,
             (materialized, materialized),
             (
-                (b"png", b"layout", b"scene", b"pdf"),
-                (b"png", b"layout", b"scene", b"pdf"),
+                (b"png", b"ready", b"layout", b"scene", b"pdf"),
+                (b"png", b"ready", b"layout", b"scene", b"pdf"),
             ),
-            {
-                "exit_code": 1,
-                "failure_code": "SETTLEMENT_FAILED",
-                "failure_message": "capture preparation failed: [OpenEndedSource]",
-                "readiness_status": "failed",
-                "readiness_error_code": "SETTLEMENT_FAILED",
-                "success_artifacts_absent": list(SUCCESS_ARTIFACTS),
-                "evidence_sha256": {
-                    "failure.json": sha256_bytes(b"failure"),
-                    "readiness.json": sha256_bytes(b"readiness"),
-                },
-            },
-            {
-                "exit_code": 1,
-                "failure_code": "SETTLEMENT_FAILED",
-                "failure_message": "capture preparation failed: [UnsupportedSource]",
-                "readiness_status": "failed",
-                "readiness_error_code": "SETTLEMENT_FAILED",
-                "success_artifacts_absent": list(SUCCESS_ARTIFACTS),
-                "evidence_sha256": {
-                    "failure.json": sha256_bytes(b"active clip failure"),
-                    "readiness.json": sha256_bytes(b"active clip readiness"),
-                },
-            },
+            explicit_failure,
+            deferred_timeout_failure,
+            open_ended_failure,
+            active_clip_failure,
         )
         proof = read_json(proof_root / "proof.json")
         require(proof.get("schema") == "pliego.controlled-capture-proof", repr(proof))
-        require(proof.get("version") == 1, repr(proof))
+        require(proof.get("version") == 2, repr(proof))
         runs = proof.get("successful_runs")
         require(isinstance(runs, list) and len(runs) == 2, repr(proof))
         require(runs[0] == {**runs[1], "process": 1}, repr(proof))
@@ -774,6 +976,7 @@ def self_test(fixture: Path, font: Path) -> None:
             and set(hashes)
             == {
                 "artifacts/render.png",
+                "artifacts/readiness.json",
                 "artifacts/scene.json",
                 "document.pdf",
                 "normalized-layout.json",
@@ -784,10 +987,21 @@ def self_test(fixture: Path, font: Path) -> None:
             hashes
             == {
                 "artifacts/render.png": "8f8cbb7dcf46e0bc7d53265749a6c17d116093a6ba95e442764060c76fd4a86c",
+                "artifacts/readiness.json": "b24d6d33736ecd5604a4b17bc9c6481039fac362bb7df044ef1c10a2bfd21db6",
                 "normalized-layout.json": "1dc5ae5b68174891b6aa9850aa05ee0d9ae8a20468d9517259951a2dd9e9c0f0",
                 "artifacts/scene.json": "4f48f7207cebf92638debb5694e4a8677350cf88a9e98e73c6c466b6b1d43890",
                 "document.pdf": "c35b21d6ca39aa7cc3b79a705d989f1a6e88b99ab43988d74048799e3db926a3",
             },
+            repr(proof),
+        )
+        require(
+            proof.get("explicit_failure", {}).get("readiness_snapshot", {}).get("error", {}).get("code")
+            == "FIXTURE_READINESS_FAILED",
+            repr(proof),
+        )
+        require(
+            proof.get("deferred_timeout_failure", {}).get("readiness_snapshot", {}).get("error", {}).get("code")
+            == "READINESS_TIMEOUT",
             repr(proof),
         )
         require(
@@ -804,6 +1018,11 @@ def self_test(fixture: Path, font: Path) -> None:
             == "capture preparation failed: [UnsupportedSource]",
             repr(proof),
         )
+        require(
+            proof.get("active_clip_failure", {}).get("readiness_snapshot", {}).get("error", {}).get("code")
+            == "SETTLEMENT_FAILED",
+            repr(proof),
+        )
 
 
 def main() -> int:
@@ -811,12 +1030,16 @@ def main() -> int:
     repository = Path(__file__).resolve().parents[3]
     fixture = test_root / "fixtures/controlled-production-capture/index.html"
     active_clip_fixture = test_root / "fixtures/controlled-canvas-active-clip/index.html"
+    explicit_fail_fixture = test_root / "fixtures/document-session/explicit-fail.html"
+    defer_timeout_fixture = test_root / "fixtures/document-session/defer-timeout.html"
     font = repository / "components/fonts/tests/support/dejavu-fonts-ttf-2.37/ttf/DejaVuSans.ttf"
     if sys.argv[1:] == ["--self-test"]:
         require(fixture.is_file(), f"missing fixture: {fixture}")
         require(active_clip_fixture.is_file(), f"missing fixture: {active_clip_fixture}")
+        require(explicit_fail_fixture.is_file(), f"missing fixture: {explicit_fail_fixture}")
+        require(defer_timeout_fixture.is_file(), f"missing fixture: {defer_timeout_fixture}")
         require(font.is_file(), f"missing controlled-capture font: {font}")
-        self_test(fixture, font)
+        self_test(fixture, active_clip_fixture, explicit_fail_fixture, defer_timeout_fixture, font)
         print("controlled capture checker self-test: ok")
         return 0
     if len(sys.argv) != 3:
@@ -826,6 +1049,8 @@ def main() -> int:
     require(binary.is_file(), f"missing Pliego binary: {binary}")
     require(fixture.is_file(), f"missing fixture: {fixture}")
     require(active_clip_fixture.is_file(), f"missing fixture: {active_clip_fixture}")
+    require(explicit_fail_fixture.is_file(), f"missing fixture: {explicit_fail_fixture}")
+    require(defer_timeout_fixture.is_file(), f"missing fixture: {defer_timeout_fixture}")
     require(font.is_file(), f"missing controlled-capture font: {font}")
     require(not output.exists(), f"output already exists: {output}")
     output.mkdir(parents=True)
@@ -833,49 +1058,75 @@ def main() -> int:
         temporary_root = Path(temporary)
         first_root = temporary_root / "first"
         second_root = temporary_root / "second"
-        failure_root = temporary_root / "failure"
+        explicit_failure_root = temporary_root / "explicit-failure"
+        deferred_timeout_failure_root = temporary_root / "deferred-timeout-failure"
+        open_ended_failure_root = temporary_root / "open-ended-failure"
         active_clip_failure_root = temporary_root / "active-clip-failure"
-        first_root.mkdir()
-        second_root.mkdir()
-        failure_root.mkdir()
-        active_clip_failure_root.mkdir()
+        for root in (
+            first_root,
+            second_root,
+            explicit_failure_root,
+            deferred_timeout_failure_root,
+            open_ended_failure_root,
+            active_clip_failure_root,
+        ):
+            root.mkdir()
         first = run_success(binary, fixture, font, first_root)
         second = run_success(binary, fixture, font, second_root)
         require(
             first == second,
-            "identical controlled captures changed pixels, semantic layout, scene, or PDF",
+            "identical controlled captures changed readiness, pixels, semantic layout, scene, or PDF",
         )
-        open_ended_failure = run_open_ended_failure(binary, failure_root)
-        active_clip_failure = run_active_clip_failure(
+        explicit_failure = run_fixture_failure(
+            binary,
+            explicit_fail_fixture,
+            explicit_failure_root,
+            "explicit readiness failure",
+            expected_code="FIXTURE_READINESS_FAILED",
+            message_fragment="expected explicit failure",
+        )
+        deferred_timeout_failure = run_fixture_failure(
+            binary,
+            defer_timeout_fixture,
+            deferred_timeout_failure_root,
+            "deferred readiness timeout",
+            expected_code="READINESS_TIMEOUT",
+            message_fragment="Document readiness timed out after 10000 ms",
+        )
+        open_ended_failure = run_open_ended_failure(binary, open_ended_failure_root)
+        active_clip_failure = run_fixture_failure(
             binary,
             active_clip_fixture,
             active_clip_failure_root,
+            "active-clip Canvas failure",
+            expected_code="SETTLEMENT_FAILED",
+            message_fragment="[UnsupportedSource]",
         )
         shutil.copytree(first_root / "artifacts", output / "artifacts")
         shutil.copy2(first_root / "document.pdf", output / "document.pdf")
-        (output / "normalized-layout.json").write_bytes(first[1])
-        failure_output = output / "open-ended-failure"
-        failure_output.mkdir()
-        shutil.copy2(failure_root / "artifacts/failure.json", failure_output / "failure.json")
-        shutil.copy2(failure_root / "artifacts/readiness.json", failure_output / "readiness.json")
-        active_clip_failure_output = output / "active-clip-failure"
-        active_clip_failure_output.mkdir()
-        shutil.copy2(
-            active_clip_failure_root / "artifacts/failure.json",
-            active_clip_failure_output / "failure.json",
-        )
-        shutil.copy2(
-            active_clip_failure_root / "artifacts/readiness.json",
-            active_clip_failure_output / "readiness.json",
-        )
+        (output / "normalized-layout.json").write_bytes(first[2])
+        for directory, root in (
+            ("explicit-failure", explicit_failure_root),
+            ("deferred-timeout-failure", deferred_timeout_failure_root),
+            ("open-ended-failure", open_ended_failure_root),
+            ("active-clip-failure", active_clip_failure_root),
+        ):
+            retained = output / directory
+            retained.mkdir()
+            shutil.copy2(root / "artifacts/failure.json", retained / "failure.json")
+            shutil.copy2(root / "artifacts/readiness.json", retained / "readiness.json")
         write_proof_manifest(
             output,
             binary,
             fixture,
             active_clip_fixture,
+            explicit_fail_fixture,
+            defer_timeout_fixture,
             font,
             (first_root / "input.html", second_root / "input.html"),
             (first, second),
+            explicit_failure,
+            deferred_timeout_failure,
             open_ended_failure,
             active_clip_failure,
         )

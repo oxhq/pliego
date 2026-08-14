@@ -14,6 +14,8 @@ use std::collections::BTreeMap;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use std::time::{Duration, Instant};
 
 use base64::Engine as _;
@@ -71,6 +73,24 @@ const TIMEOUT: Duration = Duration::from_secs(30);
 
 #[cfg(test)]
 type ResourceEvidenceObserver = Rc<dyn Fn(&ResourceEvidence)>;
+
+type ReadinessEvaluation = Rc<RefCell<Option<Result<JSValue, String>>>>;
+
+#[cfg(test)]
+static CONTROLLED_READINESS_EVALUATIONS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(test)]
+static CONTROLLED_READINESS_CALLBACKS_DECODED: AtomicUsize = AtomicUsize::new(0);
+#[cfg(test)]
+static CONTROLLED_READINESS_FRESHNESS_SETTLEMENTS: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(test)]
+fn controlled_readiness_handshake_counts() -> (usize, usize, usize) {
+    (
+        CONTROLLED_READINESS_EVALUATIONS.load(AtomicOrdering::Relaxed),
+        CONTROLLED_READINESS_CALLBACKS_DECODED.load(AtomicOrdering::Relaxed),
+        CONTROLLED_READINESS_FRESHNESS_SETTLEMENTS.load(AtomicOrdering::Relaxed),
+    )
+}
 
 #[derive(Debug, Default, PartialEq)]
 pub(crate) struct SessionCaptureEvidence {
@@ -432,6 +452,7 @@ enum DocumentSessionRuntime {
     Controlled {
         clock: DocumentClockConfiguration,
         waker: PliegoEventLoopWaker,
+        readiness: ReadinessPolicy,
     },
 }
 
@@ -458,6 +479,7 @@ pub(crate) struct ControlledDocumentSession {
 pub(crate) struct PreparedDocumentCaptureCandidate {
     session: ControlledDocumentSession,
     precondition: Box<DocumentCapturePrecondition>,
+    readiness: serde_json::Value,
     trace: Vec<ControlledSettlementStep>,
 }
 
@@ -507,12 +529,13 @@ impl PreparedDocumentCaptureCandidate {
 
     /// Consume this candidate through Paint reservation, Script revalidation, and exact readback.
     pub(crate) fn capture(self) -> Result<DocumentCaptureOutcome, SessionError> {
-        self.capture_with_canvas_freezer_and_hook(
+        self.capture_with_canvas_freezer_and_hooks(
             |keys, generation| {
                 servo_canvas::retained_canvas::freeze_canvas_snapshots_at_generation(
                     keys, generation,
                 )
             },
+            |_| {},
             |_, _| {},
         )
     }
@@ -522,17 +545,34 @@ impl PreparedDocumentCaptureCandidate {
         self,
         after_reservation: impl FnOnce(&WebView, &DocumentPaintPresentationTicket),
     ) -> Result<DocumentCaptureOutcome, SessionError> {
-        self.capture_with_canvas_freezer_and_hook(
+        self.capture_with_canvas_freezer_and_hooks(
             |keys, generation| {
                 servo_canvas::retained_canvas::freeze_canvas_snapshots_at_generation(
                     keys, generation,
                 )
             },
+            |_| {},
             after_reservation,
         )
     }
 
-    fn capture_with_canvas_freezer_and_hook(
+    #[cfg(test)]
+    pub(crate) fn capture_with_document_work_queued_hook(
+        self,
+        on_document_work_queued: impl FnOnce(&WebView),
+    ) -> Result<DocumentCaptureOutcome, SessionError> {
+        self.capture_with_canvas_freezer_and_hooks(
+            |keys, generation| {
+                servo_canvas::retained_canvas::freeze_canvas_snapshots_at_generation(
+                    keys, generation,
+                )
+            },
+            on_document_work_queued,
+            |_, _| {},
+        )
+    }
+
+    fn capture_with_canvas_freezer_and_hooks(
         self,
         freeze_canvas: impl FnOnce(
             &[(u32, u32)],
@@ -541,24 +581,18 @@ impl PreparedDocumentCaptureCandidate {
             servo_canvas::retained_canvas::FrozenCanvasSnapshots,
             servo_canvas::retained_canvas::FreezeCanvasSnapshotsError,
         >,
+        on_document_work_queued: impl FnOnce(&WebView),
         after_reservation: impl FnOnce(&WebView, &DocumentPaintPresentationTicket),
     ) -> Result<DocumentCaptureOutcome, SessionError> {
-        let result = self.capture_inner(freeze_canvas, after_reservation);
-        result.map_err(|mut error| {
-            error
-                .capture_evidence
-                .controlled_runtime_ms
-                .get_or_insert(self.session.session.host_deadline.elapsed_ms());
-            let resources =
-                std::mem::take(&mut self.session.session.delegate.resources.borrow_mut().entries);
-            let resource_store = self.session.session.delegate.resource_store.take();
-            let console =
-                std::mem::take(&mut self.session.session.delegate.console.borrow_mut().entries);
-            error.with_evidence(resources, resource_store, console)
-        })
+        let result = self.capture_inner(
+            freeze_canvas,
+            Some(on_document_work_queued),
+            after_reservation,
+        );
+        result.map_err(|error| self.session.enrich_error_evidence(error))
     }
 
-    fn capture_inner(
+    fn capture_inner<F>(
         &self,
         freeze_canvas: impl FnOnce(
             &[(u32, u32)],
@@ -567,15 +601,35 @@ impl PreparedDocumentCaptureCandidate {
             servo_canvas::retained_canvas::FrozenCanvasSnapshots,
             servo_canvas::retained_canvas::FreezeCanvasSnapshotsError,
         >,
+        mut on_document_work_queued: Option<F>,
         after_reservation: impl FnOnce(&WebView, &DocumentPaintPresentationTicket),
-    ) -> Result<DocumentCaptureOutcome, SessionError> {
-        let mut capture_evidence = SessionCaptureEvidence::default();
+    ) -> Result<DocumentCaptureOutcome, SessionError>
+    where
+        F: FnOnce(&WebView),
+    {
+        let mut capture_evidence = SessionCaptureEvidence {
+            readiness: Some(self.readiness.clone()),
+            ..Default::default()
+        };
         let mut precondition = self.precondition.clone();
         let ticket = loop {
-            match self.session.reserve_presentation(&precondition)? {
+            let reservation =
+                self.session
+                    .reserve_presentation(&precondition)
+                    .map_err(|error| {
+                        with_current_readiness_evidence(error, capture_evidence.readiness.as_ref())
+                    })?;
+            match reservation {
                 PresentationReservationProgress::DocumentWorkQueued => {
-                    let (next, _) = self.session.settle_capture_candidate()?;
+                    if let Some(hook) = on_document_work_queued.take() {
+                        hook(&self.session.session.webview);
+                    }
+                    // A replacement handshake may discover a new target. Preserve only evidence
+                    // authored by that handshake on failure; the prior target's readiness is not
+                    // valid fallback evidence for it.
+                    let (next, readiness, _) = self.session.prepare_ready_capture_candidate()?;
                     precondition = next;
+                    capture_evidence.readiness = Some(readiness);
                 },
                 PresentationReservationProgress::Reserved(ticket) => break ticket,
             }
@@ -674,18 +728,6 @@ impl PreparedDocumentCaptureCandidate {
                 .with_capture_evidence(std::mem::take(capture_evidence))
         })?;
         capture_evidence.layout_debug = Some(layout_debug);
-        let readiness = serde_json::json!({
-            "status": "ready",
-            "font_status": "loaded",
-            "payload": {
-                "source": "controlled-generation-capture",
-                "document_time_ns": precondition.now().as_nanos().to_string(),
-                "script_rendering_epoch": ticket.script_rendering_epoch().0,
-                "layout_paint_epoch": commit.layout_paint_epoch().0,
-                "paint_presented_epoch": ticket.script_rendering_epoch().0,
-            }
-        });
-        capture_evidence.readiness = Some(readiness);
         capture_evidence.controlled_runtime_ms =
             Some(self.session.session.host_deadline.elapsed_ms());
 
@@ -798,13 +840,14 @@ impl DocumentSession {
         )
     }
 
-    /// Build an opt-in controlled session without the legacy readiness bootstrap script.
+    /// Build an opt-in controlled session with the API 1 readiness bootstrap script.
     pub(crate) fn new_controlled(
         input: impl AsRef<Path>,
         environment: RenderEnvironment,
         page: PageDefinition,
         resources: ResourcePolicyConfig,
         allow_host_fonts: bool,
+        readiness: ReadinessPolicy,
         runtime_policy: DeterministicRuntimePolicy,
     ) -> Result<ControlledDocumentSession, SessionError> {
         let input = input.as_ref().canonicalize().map_err(|error| {
@@ -831,6 +874,7 @@ impl DocumentSession {
             environment,
             page,
             allow_host_fonts,
+            readiness,
             runtime_policy,
         )
     }
@@ -841,6 +885,7 @@ impl DocumentSession {
         environment: RenderEnvironment,
         page: PageDefinition,
         allow_host_fonts: bool,
+        readiness: ReadinessPolicy,
         runtime_policy: DeterministicRuntimePolicy,
     ) -> Result<ControlledDocumentSession, SessionError> {
         validate_resolved_resource_policy(document, &resource_policy)?;
@@ -851,6 +896,7 @@ impl DocumentSession {
             environment,
             page,
             allow_host_fonts,
+            readiness,
             runtime_policy,
         )
     }
@@ -863,6 +909,7 @@ impl DocumentSession {
         environment: RenderEnvironment,
         page: PageDefinition,
         allow_host_fonts: bool,
+        readiness: ReadinessPolicy,
         runtime_policy: DeterministicRuntimePolicy,
     ) -> Result<ControlledDocumentSession, SessionError> {
         validate_resource_timeout(resource_policy.timeout_ms)?;
@@ -884,6 +931,7 @@ impl DocumentSession {
             DocumentSessionRuntime::Controlled {
                 clock,
                 waker: waker.clone(),
+                readiness,
             },
             host_timeout,
             servo_canvas::retained_canvas::start_retaining_canvas_commands,
@@ -1044,9 +1092,13 @@ impl DocumentSession {
             DocumentSessionRuntime::Realtime(readiness) => {
                 (ServoBuilder::default(), Some(readiness), None)
             },
-            DocumentSessionRuntime::Controlled { clock, waker } => (
+            DocumentSessionRuntime::Controlled {
+                clock,
+                waker,
+                readiness,
+            } => (
                 ServoBuilder::default().event_loop_waker(Box::new(waker)),
-                None,
+                Some(readiness),
                 Some(clock),
             ),
         };
@@ -1304,45 +1356,10 @@ impl DocumentSession {
 
     fn evaluate_readiness(&self) -> Result<serde_json::Value, SessionError> {
         loop {
-            let result = Rc::new(RefCell::new(None));
-            let callback_result = result.clone();
-            self.webview
-                .evaluate_javascript(readiness::HOST_EVALUATION_EXPRESSION, move |value| {
-                    *callback_result.borrow_mut() = Some(value)
-                });
-            self.spin_until_host_deadline("readiness evaluation", || result.borrow().is_some())?;
-            let value = result.borrow_mut().take().ok_or_else(|| {
-                SessionError::new(
-                    "READINESS_EVALUATION_FAILED",
-                    "readiness callback completed without a result",
-                )
-            })?;
-            let value = value.map_err(|error| {
-                SessionError::new("READINESS_EVALUATION_FAILED", format!("{error:?}"))
-            })?;
-            let snapshot = match value {
-                JSValue::String(snapshot) => snapshot,
-                value => {
-                    return Err(SessionError::new(
-                        "READINESS_INVALID_RESULT",
-                        format!("expected readiness JSON string, got {value:?}"),
-                    ));
-                },
-            };
-            let evidence = serde_json::from_str(&snapshot).map_err(|error| {
-                SessionError::new("READINESS_INVALID_RESULT", error.to_string())
-            })?;
-            let readiness = match readiness::parse_snapshot(&snapshot) {
-                Ok(readiness) => readiness,
-                Err(error) => {
-                    return Err(SessionError::new("READINESS_INVALID_RESULT", error)
-                        .with_capture_evidence(SessionCaptureEvidence {
-                            readiness: Some(evidence),
-                            ..Default::default()
-                        }));
-                },
-            };
-            match readiness {
+            let evaluation = self.begin_readiness_evaluation();
+            let value = self.await_readiness_evaluation(evaluation)?;
+            let (evidence, state) = decode_readiness_evaluation(value)?;
+            match state {
                 Readiness::Ready { .. } => return Ok(evidence),
                 Readiness::Failed { error } => {
                     return Err(SessionError::new(error.code, error.message)
@@ -1367,6 +1384,29 @@ impl DocumentSession {
                 },
             }
         }
+    }
+
+    fn begin_readiness_evaluation(&self) -> ReadinessEvaluation {
+        let result = Rc::new(RefCell::new(None));
+        let callback_result = result.clone();
+        self.webview
+            .evaluate_javascript(readiness::HOST_EVALUATION_EXPRESSION, move |value| {
+                *callback_result.borrow_mut() = Some(value.map_err(|error| format!("{error:?}")));
+            });
+        result
+    }
+
+    fn await_readiness_evaluation(
+        &self,
+        result: ReadinessEvaluation,
+    ) -> Result<Result<JSValue, String>, SessionError> {
+        self.spin_until_host_deadline("readiness evaluation", || result.borrow().is_some())?;
+        result.borrow_mut().take().ok_or_else(|| {
+            SessionError::new(
+                "READINESS_EVALUATION_FAILED",
+                "readiness callback completed without a result",
+            )
+        })
     }
 
     fn spin_until_host_deadline(
@@ -1415,6 +1455,18 @@ impl DocumentSession {
 }
 
 impl ControlledDocumentSession {
+    fn enrich_error_evidence(&self, mut error: SessionError) -> SessionError {
+        error
+            .capture_evidence
+            .controlled_runtime_ms
+            .get_or_insert(self.session.host_deadline.elapsed_ms());
+        error.with_evidence(
+            std::mem::take(&mut self.session.delegate.resources.borrow_mut().entries),
+            self.session.delegate.resource_store.take(),
+            std::mem::take(&mut self.session.delegate.console.borrow_mut().entries),
+        )
+    }
+
     fn reserve_presentation(
         &self,
         precondition: &DocumentCapturePrecondition,
@@ -1472,12 +1524,95 @@ impl ControlledDocumentSession {
         self,
     ) -> Result<PreparedDocumentCaptureCandidate, SessionError> {
         self.session.webview.show();
-        let (precondition, trace) = self.settle_capture_candidate()?;
-        Ok(PreparedDocumentCaptureCandidate {
-            session: self,
-            precondition,
-            trace,
-        })
+        match self.prepare_ready_capture_candidate() {
+            Ok((precondition, readiness, trace)) => Ok(PreparedDocumentCaptureCandidate {
+                session: self,
+                precondition,
+                readiness,
+                trace,
+            }),
+            Err(error) => Err(self.enrich_error_evidence(error)),
+        }
+    }
+
+    /// Pair an authored API 1 readiness snapshot with a fresh candidate for the same target.
+    /// Evaluating the snapshot is ordinary Script input and therefore invalidates the probe which
+    /// preceded it. A ready snapshot is followed by another settlement before capture; a target
+    /// mismatch at either boundary discards the snapshot and repeats under the one host budget.
+    fn prepare_ready_capture_candidate(
+        &self,
+    ) -> Result<
+        (
+            Box<DocumentCapturePrecondition>,
+            serde_json::Value,
+            Vec<ControlledSettlementStep>,
+        ),
+        SessionError,
+    > {
+        let (mut probe, mut trace) = self.settle_capture_candidate()?;
+        loop {
+            let target = probe.target().clone();
+            #[cfg(test)]
+            CONTROLLED_READINESS_EVALUATIONS.fetch_add(1, AtomicOrdering::Relaxed);
+            let evaluation = self.session.begin_readiness_evaluation();
+            let (evaluated, evaluated_trace) = self
+                .settle_capture_candidate()
+                .map_err(|error| with_completed_readiness_evidence(error, &evaluation))?;
+            trace.extend(evaluated_trace);
+            let value = self
+                .session
+                .await_readiness_evaluation(evaluation.clone())
+                .map_err(|error| with_completed_readiness_evidence(error, &evaluation))?;
+            if evaluated.target() != &target {
+                probe = evaluated;
+                continue;
+            }
+            let (evidence, readiness) = decode_readiness_evaluation(value)?;
+            #[cfg(test)]
+            CONTROLLED_READINESS_CALLBACKS_DECODED.fetch_add(1, AtomicOrdering::Relaxed);
+            match readiness {
+                Readiness::Ready { .. } => {
+                    #[cfg(test)]
+                    CONTROLLED_READINESS_FRESHNESS_SETTLEMENTS
+                        .fetch_add(1, AtomicOrdering::Relaxed);
+                    let (fresh, fresh_trace) = self
+                        .settle_capture_candidate()
+                        .map_err(|error| with_current_readiness_evidence(error, Some(&evidence)))?;
+                    trace.extend(fresh_trace);
+                    if fresh.target() == &target {
+                        return Ok((fresh, evidence, trace));
+                    }
+                    probe = fresh;
+                },
+                Readiness::Failed { error } => {
+                    return Err(SessionError::new(error.code, error.message)
+                        .with_capture_evidence(SessionCaptureEvidence {
+                            readiness: Some(evidence),
+                            ..Default::default()
+                        }));
+                },
+                Readiness::Pending if self.session.host_deadline.is_elapsed() => {
+                    return Err(SessionError::new(
+                        "READINESS_TIMEOUT",
+                        "document readiness did not settle before the host deadline",
+                    )
+                    .with_capture_evidence(SessionCaptureEvidence {
+                        readiness: Some(evidence),
+                        ..Default::default()
+                    }));
+                },
+                Readiness::Pending => {
+                    #[cfg(test)]
+                    CONTROLLED_READINESS_FRESHNESS_SETTLEMENTS
+                        .fetch_add(1, AtomicOrdering::Relaxed);
+                    let (fresh, fresh_trace) = self
+                        .settle_capture_candidate()
+                        .map_err(|error| with_current_readiness_evidence(error, Some(&evidence)))?;
+                    trace.extend(fresh_trace);
+                    probe = fresh;
+                },
+            }
+        }
     }
 
     fn settle_capture_candidate(
@@ -1645,6 +1780,69 @@ impl ControlledDocumentSession {
             }
         }
     }
+}
+
+fn decode_readiness_evaluation(
+    value: Result<JSValue, String>,
+) -> Result<(serde_json::Value, Readiness), SessionError> {
+    let value = value.map_err(|error| SessionError::new("READINESS_EVALUATION_FAILED", error))?;
+    let snapshot = match value {
+        JSValue::String(snapshot) => snapshot,
+        value => {
+            return Err(SessionError::new(
+                "READINESS_INVALID_RESULT",
+                format!("expected readiness JSON string, got {value:?}"),
+            ));
+        },
+    };
+    let evidence: serde_json::Value = serde_json::from_str(&snapshot)
+        .map_err(|error| SessionError::new("READINESS_INVALID_RESULT", error.to_string()))?;
+    let readiness = readiness::parse_snapshot(&snapshot).map_err(|error| {
+        SessionError::new("READINESS_INVALID_RESULT", error).with_capture_evidence(
+            SessionCaptureEvidence {
+                readiness: Some(evidence.clone()),
+                ..Default::default()
+            },
+        )
+    })?;
+    Ok((evidence, readiness))
+}
+
+fn with_completed_readiness_evidence(
+    error: SessionError,
+    evaluation: &ReadinessEvaluation,
+) -> SessionError {
+    let completed = evaluation.borrow_mut().take();
+    let Some(completed) = completed else {
+        return error;
+    };
+    with_readiness_evaluation_evidence(error, &completed)
+}
+
+fn with_readiness_evaluation_evidence(
+    error: SessionError,
+    evaluation: &Result<JSValue, String>,
+) -> SessionError {
+    let Ok(JSValue::String(snapshot)) = evaluation else {
+        return error;
+    };
+    if readiness::parse_snapshot(snapshot).is_err() {
+        return error;
+    }
+    let Ok(readiness) = serde_json::from_str(snapshot) else {
+        return error;
+    };
+    with_current_readiness_evidence(error, Some(&readiness))
+}
+
+fn with_current_readiness_evidence(
+    error: SessionError,
+    readiness: Option<&serde_json::Value>,
+) -> SessionError {
+    error.with_capture_evidence(SessionCaptureEvidence {
+        readiness: readiness.cloned(),
+        ..Default::default()
+    })
 }
 
 fn controlled_settlement_step(command: &DocumentTimeControlCommand) -> ControlledSettlementStep {
@@ -2156,12 +2354,14 @@ mod tests {
     use super::super::runtime_policy::DeterministicRuntimePolicy;
     use super::super::session::LocalDocument;
     use super::{
-        ConsoleEvidenceLog, ConsoleLogLevel, ControlledSettlementStep, DocumentSession,
+        ConsoleEvidenceLog, ConsoleLogLevel, ControlledSettlementStep, DocumentSession, JSValue,
         MAX_CONSOLE_BYTES, MAX_CONSOLE_EVENTS, PaintTicketAbortGuard,
         RESOURCE_EVIDENCE_ENTRY_OVERHEAD_BYTES, ReadinessPolicy, RenderEnvironment,
-        ResourceEvidenceLog, ResourcePolicyConfig, SessionError, SessionHostDeadline,
-        console_log_level_name, session_host_timeout, validate_host_font_policy,
-        validate_resolved_resource_policy, validate_resource_policy,
+        ResourceEvidenceLog, ResourcePolicyConfig, SessionCaptureEvidence, SessionError,
+        SessionHostDeadline, console_log_level_name, controlled_readiness_handshake_counts,
+        session_host_timeout, validate_host_font_policy, validate_resolved_resource_policy,
+        validate_resource_policy, with_current_readiness_evidence,
+        with_readiness_evaluation_evidence,
     };
 
     const ISOLATED_CASE_ENV: &str = "PLIEGO_DOCUMENT_SESSION_FIXTURE";
@@ -2170,6 +2370,18 @@ mod tests {
     const ISOLATED_TEST: &str = "document_session::tests::isolated_resource_and_readiness_fixture";
     const ALLOWED_HTTP_BODY: &[u8] = b"window.pliego.ready({ http_loaded: true });\n";
     const FIXTURE_PNG_DATA_URL: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+
+    fn readiness_handshake_delta(before: (usize, usize, usize)) -> (usize, usize, usize) {
+        let after = controlled_readiness_handshake_counts();
+        (after.0 - before.0, after.1 - before.1, after.2 - before.2)
+    }
+
+    fn assert_successful_readiness_handshake(before: (usize, usize, usize)) {
+        let (evaluations, callbacks, freshness) = readiness_handshake_delta(before);
+        assert!(evaluations > 0);
+        assert_eq!(callbacks, evaluations);
+        assert_eq!(freshness, evaluations);
+    }
 
     #[test]
     fn paint_ticket_abort_guard_runs_during_unwind() {
@@ -2181,6 +2393,51 @@ mod tests {
 
         assert!(unwind.is_err());
         assert_eq!(aborts.get(), 1);
+    }
+
+    #[test]
+    fn reservation_error_keeps_current_readiness_without_overwriting_richer_evidence() {
+        let latest = serde_json::json!({
+            "status": "ready",
+            "payload": { "revision": 2 },
+            "font_status": "loaded",
+        });
+        let enriched = with_current_readiness_evidence(
+            SessionError::new("RESERVATION_FAILED", "reservation failed"),
+            Some(&latest),
+        );
+        assert_eq!(enriched.capture_evidence.readiness.as_ref(), Some(&latest));
+
+        let terminal = serde_json::json!({
+            "status": "failed",
+            "error": { "code": "PAGE_FAILED", "message": "authored failure" },
+        });
+        let enriched = with_current_readiness_evidence(
+            SessionError::new("PAGE_FAILED", "authored failure").with_capture_evidence(
+                SessionCaptureEvidence {
+                    readiness: Some(terminal.clone()),
+                    ..Default::default()
+                },
+            ),
+            Some(&latest),
+        );
+        assert_eq!(
+            enriched.capture_evidence.readiness.as_ref(),
+            Some(&terminal)
+        );
+    }
+
+    #[test]
+    fn settlement_error_rejects_parseable_but_invalid_readiness_evidence() {
+        let evaluation = Ok(JSValue::String(
+            r#"{"status":"ready","font_status":"loaded"}"#.to_owned(),
+        ));
+        let error = with_readiness_evaluation_evidence(
+            SessionError::new("SETTLEMENT_FAILED", "settlement failed"),
+            &evaluation,
+        );
+
+        assert!(error.capture_evidence.readiness.is_none());
     }
 
     const AHEM_SOURCE_RESOURCE: &str =
@@ -2838,6 +3095,7 @@ window.pliego?.defer();
                     ..ResourcePolicyConfig::default()
                 },
                 false,
+                ReadinessPolicy::default(),
                 DeterministicRuntimePolicy::default(),
             )
             .err()
@@ -3020,10 +3278,13 @@ window.pliego?.defer();
     }
 
     #[test]
-    fn controlled_session_consumes_a_finite_candidate_and_rejects_open_ended_sources() {
+    fn controlled_session_bridges_api1_readiness_before_generation_bound_capture() {
         for case in [
             "controlled-finite",
             "controlled-paint-mutation",
+            "controlled-readiness-retry",
+            "controlled-readiness-fail",
+            "controlled-readiness-timeout",
             "controlled-interval",
         ] {
             let output = run_isolated(case, "http://127.0.0.1:1/");
@@ -3082,7 +3343,7 @@ window.pliego?.defer();
         let http_base = std::env::var(HTTP_BASE_ENV).expect("HTTP fixture base should be set");
         let mut readiness = ReadinessPolicy {
             timeout_ms: match case.as_str() {
-                "defer-timeout" => 25,
+                "defer-timeout" | "controlled-readiness-timeout" => 25,
                 "metadata-denied-non-icon" | "same-url-role-split" | "metadata-allowed-icon" => {
                     10_000
                 },
@@ -3148,7 +3409,39 @@ window.pliego?.defer();
                 );
                 let input = bundle.write(
                     "input.html",
-                    "<!doctype html><style>@font-face{font-family:Ahem;src:url('Ahem.ttf')}#state{font:12px/16px Ahem}</style><p id='state'>pending</p><script>if(Object.prototype.hasOwnProperty.call(window,'pliego')||Object.prototype.hasOwnProperty.call(window,'__pliegoReadiness')){setInterval(()=>{},1);}const paintObserver=new PerformanceObserver(list=>{const fcp=list.getEntries().find(entry=>entry.name==='first-contentful-paint');if(!fcp)return;document.getElementById('state').textContent=`PLIEGO_FCP_${fcp.startTime}`;console.info(`controlled-paint-observed:${fcp.name}:${fcp.startTime}:${fcp.duration}:${performance.now()}`);paintObserver.disconnect();});paintObserver.observe({type:'paint'});console.info(`controlled-start:${Date.now()}:${performance.now()}`);requestAnimationFrame(()=>console.info('controlled-frame'));setTimeout(()=>{document.getElementById('state').textContent='PLIEGO_POST5MS_UNIT_7C4E';console.info(`controlled-end:${Date.now()}:${performance.now()}`);},5);</script>",
+                    "<!doctype html><style>@font-face{font-family:Ahem;src:url('Ahem.ttf')}#state{font:12px/16px Ahem}</style><p id='state'>pending</p><script>window.pliego.defer();const paintObserver=new PerformanceObserver(list=>{const fcp=list.getEntries().find(entry=>entry.name==='first-contentful-paint');if(!fcp)return;document.getElementById('state').textContent=`PLIEGO_FCP_${fcp.startTime}`;console.info(`controlled-paint-observed:${fcp.name}:${fcp.startTime}:${fcp.duration}:${performance.now()}`);paintObserver.disconnect();});paintObserver.observe({type:'paint'});console.info(`controlled-start:${Date.now()}:${performance.now()}`);requestAnimationFrame(()=>console.info('controlled-frame'));setTimeout(()=>{document.getElementById('state').textContent='PLIEGO_POST5MS_UNIT_7C4E';console.info(`controlled-end:${Date.now()}:${performance.now()}`);window.pliego.ready({fixture:'controlled-finite',page:{rows:7,label:'authored'}});},5);</script>",
+                );
+                _bundle = Some(bundle);
+                input
+            },
+            "controlled-readiness-retry" => {
+                let bundle = TempBundle::new(case.as_str());
+                bundle.copy(
+                    &Path::new(env!("CARGO_MANIFEST_DIR"))
+                        .join("../../benchmarks/fixtures/minimal-static"),
+                    "Ahem.ttf",
+                );
+                let input = bundle.write(
+                    "input.html",
+                    "<!doctype html><style>@font-face{font-family:Ahem;src:url('Ahem.ttf')}#state{font:12px/16px Ahem}</style><p id='state'>revision 1</p><script>window.readinessPayload={fixture:'controlled-readiness-retry',revision:1};window.pliego.ready(window.readinessPayload);</script>",
+                );
+                _bundle = Some(bundle);
+                input
+            },
+            "controlled-readiness-fail" => {
+                let bundle = TempBundle::new(case.as_str());
+                let input = bundle.write(
+                    "input.html",
+                    "<!doctype html><script>window.pliego.fail({code:'CONTROLLED_FIXTURE_FAILED',message:'controlled readiness rejected'});</script>",
+                );
+                _bundle = Some(bundle);
+                input
+            },
+            "controlled-readiness-timeout" => {
+                let bundle = TempBundle::new(case.as_str());
+                let input = bundle.write(
+                    "input.html",
+                    "<!doctype html><script>window.pliego.defer();</script>",
                 );
                 _bundle = Some(bundle);
                 input
@@ -3157,7 +3450,7 @@ window.pliego?.defer();
                 let bundle = TempBundle::new(case.as_str());
                 let input = bundle.write(
                     "input.html",
-                    "<!doctype html><script>setInterval(()=>{},100);</script>",
+                    "<!doctype html><script>window.pliego.ready({fixture:'controlled-interval'});setInterval(()=>{},100);</script>",
                 );
                 _bundle = Some(bundle);
                 input
@@ -3411,8 +3704,15 @@ window.pliego?.defer();
         };
         if matches!(
             case.as_str(),
-            "controlled-finite" | "controlled-paint-mutation" | "controlled-interval"
+            "controlled-finite" |
+                "controlled-paint-mutation" |
+                "controlled-readiness-retry" |
+                "controlled-readiness-fail" |
+                "controlled-readiness-timeout" |
+                "controlled-interval"
         ) {
+            // Controlled fixtures exercise the production-default font readiness policy.
+            readiness.wait_for_fonts = true;
             let bundle_files = || {
                 let mut files = fs::read_dir(input.parent().unwrap())
                     .unwrap()
@@ -3428,14 +3728,17 @@ window.pliego?.defer();
                 page,
                 resources,
                 allow_host_fonts,
+                readiness,
                 DeterministicRuntimePolicy::default(),
             )
-            .expect("controlled fixture should construct without the legacy readiness shim");
+            .expect("controlled fixture should construct with the API 1 readiness shim");
             match case.as_str() {
                 "controlled-finite" => {
+                    let handshake_before = controlled_readiness_handshake_counts();
                     let candidate = controlled
                         .prepare_capture_candidate()
                         .expect("finite controlled work should reach opaque candidate evidence");
+                    assert_successful_readiness_handshake(handshake_before);
                     // The 5 ms timeout runs first, then the pending animation frame consumes
                     // ScriptThread's deterministic 20 ms rendering-opportunity deadline.
                     assert_eq!(candidate.precondition().now().as_nanos(), 20_000_000);
@@ -3520,21 +3823,25 @@ window.pliego?.defer();
                         ]
                     );
                     drop(console);
+                    let authored_readiness = candidate.readiness.clone();
+                    assert_eq!(authored_readiness["status"], "ready");
+                    assert_eq!(authored_readiness["font_status"], "loaded");
+                    assert_eq!(
+                        authored_readiness["payload"],
+                        serde_json::json!({
+                            "fixture": "controlled-finite",
+                            "page": { "rows": 7, "label": "authored" },
+                        })
+                    );
                     let outcome = candidate
                         .capture()
                         .expect("the retained candidate and Paint presentation should commit");
-                    assert_eq!(
-                        outcome.readiness["payload"]["source"],
-                        "controlled-generation-capture"
-                    );
-                    assert_eq!(outcome.readiness["payload"]["document_time_ns"], "40000000");
-                    assert_eq!(
-                        outcome.readiness["payload"]["script_rendering_epoch"],
-                        outcome.readiness["payload"]["layout_paint_epoch"]
-                    );
-                    assert_eq!(
-                        outcome.readiness["payload"]["script_rendering_epoch"],
-                        outcome.readiness["payload"]["paint_presented_epoch"]
+                    assert_eq!(outcome.readiness, authored_readiness);
+                    assert!(outcome.readiness["payload"].get("source").is_none());
+                    assert!(
+                        outcome.readiness["payload"]
+                            .get("document_time_ns")
+                            .is_none()
                     );
                     assert_eq!(
                         outcome
@@ -3592,6 +3899,7 @@ window.pliego?.defer();
                     let candidate = controlled
                         .prepare_capture_candidate()
                         .expect("finite controlled work should reach candidate evidence");
+                    let authored_readiness = candidate.readiness.clone();
                     let error =
                         match candidate.capture_with_paint_hook(|webview, _| webview.paint()) {
                             Ok(_) => panic!("a Paint mutation after reservation exposed pixels"),
@@ -3600,15 +3908,147 @@ window.pliego?.defer();
                     assert_eq!(error.code, "CONTROLLED_PAINT_FINALIZE_FAILED");
                     assert!(error.capture_evidence.stable_image_png.is_none());
                     assert!(error.capture_evidence.layout_debug.is_none());
+                    assert_eq!(
+                        error.capture_evidence.readiness.as_ref(),
+                        Some(&authored_readiness)
+                    );
+                    assert!(error.capture_evidence.controlled_runtime_ms.is_some());
+                    assert!(
+                        error
+                            .resources
+                            .iter()
+                            .any(|evidence| evidence.request.is_for_main_frame)
+                    );
                     println!("controlled-paint-mutation-rejected");
                 },
+                "controlled-readiness-retry" => {
+                    let candidate = controlled
+                        .prepare_capture_candidate()
+                        .expect("the first page should reach candidate evidence");
+                    assert_eq!(candidate.readiness["payload"]["revision"], 1);
+                    let retry_handshake_before = controlled_readiness_handshake_counts();
+                    let hook_calls = Rc::new(Cell::new(0));
+                    let callback_hook_calls = hook_calls.clone();
+                    let mutation_evaluated = Rc::new(Cell::new(false));
+                    let callback_evaluated = mutation_evaluated.clone();
+                    let outcome = candidate
+                        .capture_with_document_work_queued_hook(move |webview| {
+                            callback_hook_calls.set(callback_hook_calls.get() + 1);
+                            webview.evaluate_javascript(
+                                "window.readinessPayload.revision=2;document.getElementById('state').textContent='revision 2'",
+                                move |_| {
+                                    callback_evaluated.set(true);
+                                },
+                            );
+                        })
+                        .expect(
+                            "queued authored work should settle and replace the stale readiness snapshot",
+                        );
+                    assert_successful_readiness_handshake(retry_handshake_before);
+                    assert_eq!(hook_calls.get(), 1);
+                    assert!(mutation_evaluated.get());
+                    assert_eq!(outcome.readiness["status"], "ready");
+                    assert_eq!(
+                        outcome.readiness["payload"],
+                        serde_json::json!({
+                            "fixture": "controlled-readiness-retry",
+                            "revision": 2,
+                        })
+                    );
+                    let scene_text = outcome
+                        .capture
+                        .scene
+                        .pages
+                        .iter()
+                        .flat_map(|page| &page.operations)
+                        .filter_map(|operation| match operation {
+                            Operation::Text { text, .. } => Some(text.as_str()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>();
+                    assert_eq!(
+                        scene_text.concat(),
+                        "revision 2",
+                        "replacement scene text operations are stale: {scene_text:?}"
+                    );
+                },
+                "controlled-readiness-fail" => {
+                    let handshake_before = controlled_readiness_handshake_counts();
+                    let error = match controlled.prepare_capture_candidate() {
+                        Ok(_) => panic!("an explicitly failed page issued candidate evidence"),
+                        Err(error) => error,
+                    };
+                    assert_eq!(
+                        readiness_handshake_delta(handshake_before),
+                        (1, 1, 0),
+                        "terminal readiness must decode exactly once without a freshness settlement"
+                    );
+                    assert_eq!(error.code, "CONTROLLED_FIXTURE_FAILED");
+                    assert_eq!(error.message, "controlled readiness rejected");
+                    let readiness = error.capture_evidence.readiness.as_ref().unwrap();
+                    assert_eq!(readiness["status"], "failed");
+                    assert_eq!(readiness["error"]["code"], "CONTROLLED_FIXTURE_FAILED");
+                    assert_eq!(
+                        readiness["error"]["message"],
+                        "controlled readiness rejected"
+                    );
+                    assert!(error.capture_evidence.controlled_runtime_ms.is_some());
+                    assert!(
+                        error
+                            .resources
+                            .iter()
+                            .any(|evidence| evidence.request.is_for_main_frame)
+                    );
+                },
+                "controlled-readiness-timeout" => {
+                    let handshake_before = controlled_readiness_handshake_counts();
+                    let error = match controlled.prepare_capture_candidate() {
+                        Ok(_) => panic!("a deferred page issued candidate evidence"),
+                        Err(error) => error,
+                    };
+                    assert_eq!(
+                        readiness_handshake_delta(handshake_before),
+                        (1, 1, 0),
+                        "terminal readiness timeout must decode exactly once without a freshness settlement"
+                    );
+                    assert_eq!(error.code, "READINESS_TIMEOUT");
+                    assert_eq!(error.message, "Document readiness timed out after 25 ms");
+                    let readiness = error.capture_evidence.readiness.as_ref().unwrap();
+                    assert_eq!(readiness["status"], "failed");
+                    assert_eq!(readiness["error"]["code"], "READINESS_TIMEOUT");
+                    assert_eq!(
+                        readiness["error"]["message"],
+                        "Document readiness timed out after 25 ms"
+                    );
+                    assert!(error.capture_evidence.controlled_runtime_ms.is_some());
+                    assert!(
+                        error
+                            .resources
+                            .iter()
+                            .any(|evidence| evidence.request.is_for_main_frame)
+                    );
+                },
                 "controlled-interval" => {
+                    let handshake_before = controlled_readiness_handshake_counts();
                     let error = match controlled.prepare_capture_candidate() {
                         Ok(_) => panic!("an interval issued candidate evidence"),
                         Err(error) => error,
                     };
+                    assert_eq!(
+                        readiness_handshake_delta(handshake_before),
+                        (0, 0, 0),
+                        "pre-readiness settlement failure must not enqueue readiness JavaScript"
+                    );
                     assert_eq!(error.code, "SETTLEMENT_FAILED");
                     assert!(error.message.contains("OpenEndedSource"));
+                    assert!(error.capture_evidence.readiness.is_none());
+                    assert!(error.capture_evidence.controlled_runtime_ms.is_some());
+                    assert!(
+                        error
+                            .resources
+                            .iter()
+                            .any(|evidence| evidence.request.is_for_main_frame)
+                    );
                 },
                 _ => unreachable!(),
             }

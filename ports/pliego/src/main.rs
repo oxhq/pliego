@@ -2798,6 +2798,7 @@ where
         request.environment,
         request.page,
         request.allow_host_fonts,
+        ReadinessPolicy::default(),
         request.runtime_policy,
     )
     .and_then(ControlledDocumentSession::prepare_capture_candidate)

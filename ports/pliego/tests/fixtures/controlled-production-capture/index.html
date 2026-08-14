@@ -42,12 +42,7 @@
   <canvas id="controlled-capture-canvas" width="48" height="24"></canvas>
 </body>
 <script>
-  if (
-    Object.prototype.hasOwnProperty.call(window, "pliego") ||
-    Object.prototype.hasOwnProperty.call(window, "__pliegoReadiness")
-  ) {
-    setInterval(() => {}, 1);
-  }
+  window.pliego.defer();
 
   const controlledCanvas = document.getElementById("controlled-capture-canvas");
   const controlledContext = controlledCanvas.getContext("2d");
@@ -55,7 +50,12 @@
   controlledContext.fillRect(0, 0, controlledCanvas.width, controlledCanvas.height);
   controlledContext.fillStyle = "rgb(244, 196, 48)";
   controlledContext.fillRect(8, 6, 20, 10);
-  controlledContext.getImageData(0, 0, controlledCanvas.width, controlledCanvas.height);
+  const controlledPixels = controlledContext.getImageData(
+    0,
+    0,
+    controlledCanvas.width,
+    controlledCanvas.height,
+  );
 
   const paintObserver = new PerformanceObserver((list) => {
     const fcp = list
@@ -82,5 +82,13 @@
     document.body.style.background = "rgb(36, 104, 172)";
     document.body.dataset.controlledTime = `${Date.now()}:${performance.now()}`;
     console.info(`controlled-production-ready:${Date.now()}:${performance.now()}`);
+    window.pliego.ready({
+      fixture: "controlled-production-capture",
+      phase: "post-5ms",
+      marker: marker.textContent,
+      canvasWidth: controlledCanvas.width,
+      canvasHeight: controlledCanvas.height,
+      readbackBytes: controlledPixels.data.length,
+    });
   }, 5);
 </script>
