@@ -15,6 +15,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from contextlib import redirect_stderr
 from pathlib import Path
@@ -32,6 +33,8 @@ ROUND_DIGITS = 6
 GEOMETRY_TOLERANCE = 0.51
 PDF_RASTER_DPI = 96
 PDF_PREVIEW_MAX_INK_MISMATCH = 0.03
+UNIX_SOCKET_PATH_BYTES = 108
+WAYLAND_SOCKET_NAME = "wayland-0"
 PHASES = (
     "controlled_runtime",
     "scene_capture",
@@ -929,16 +932,18 @@ def phase_timings(summary: dict[str, Any]) -> dict[str, float]:
     return {phase: round(number(timings[phase], f"{phase} timing"), 3) for phase in PHASES}
 
 
-def clean_environment(destination: Path) -> dict[str, str]:
+def unix_socket_path_fits(path: Path) -> bool:
+    return len(os.fsencode(path)) + 1 <= UNIX_SOCKET_PATH_BYTES
+
+
+def clean_environment(destination: Path, runtime: Path) -> dict[str, str]:
     home = destination / "home"
     cache = home / ".cache"
     config = home / ".config"
     data = home / ".local/share"
-    runtime = home / ".runtime"
     temporary = destination / "tmp"
-    for path in (home, cache, config, data, runtime, temporary):
+    for path in (home, cache, config, data, temporary):
         path.mkdir(parents=True, exist_ok=True)
-    runtime.chmod(0o700)
     return {
         "HOME": str(home),
         "USERPROFILE": str(home),
@@ -977,22 +982,31 @@ def run_document(
         "--page-margins",
         margins,
     ]
-    environment = os.environ.copy()
-    environment.update(clean_environment(destination))
-    started = time.perf_counter()
-    try:
-        result = subprocess.run(
-            command,
-            cwd=fixtures_root,
-            env=environment,
-            capture_output=True,
-            text=True,
-            timeout=PROCESS_TIMEOUT_SECONDS,
-            check=False,
-        )
-    except subprocess.TimeoutExpired:
-        fail(f"{fixture['name']} run {run_number} exceeded {PROCESS_TIMEOUT_SECONDS}s")
-    process_ms = round((time.perf_counter() - started) * 1000, 3)
+    short_runtime_root = "/tmp" if os.name == "posix" else None
+    with tempfile.TemporaryDirectory(prefix="pliego-runtime-", dir=short_runtime_root) as runtime_name:
+        runtime = Path(runtime_name)
+        runtime.chmod(0o700)
+        if os.name == "posix":
+            require(
+                unix_socket_path_fits(runtime / WAYLAND_SOCKET_NAME),
+                f"XDG runtime socket path exceeds {UNIX_SOCKET_PATH_BYTES} bytes",
+            )
+        environment = os.environ.copy()
+        environment.update(clean_environment(destination, runtime))
+        started = time.perf_counter()
+        try:
+            result = subprocess.run(
+                command,
+                cwd=fixtures_root,
+                env=environment,
+                capture_output=True,
+                text=True,
+                timeout=PROCESS_TIMEOUT_SECONDS,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            fail(f"{fixture['name']} run {run_number} exceeded {PROCESS_TIMEOUT_SECONDS}s")
+        process_ms = round((time.perf_counter() - started) * 1000, 3)
     (destination / "stdout.log").write_text(result.stdout, encoding="utf-8")
     (destination / "stderr.log").write_text(result.stderr, encoding="utf-8")
     require(
@@ -1216,6 +1230,21 @@ def synthetic_scene_and_layout(fixture: dict[str, Any]) -> tuple[dict[str, Any],
 
 def self_test(directory: Path) -> None:
     manifest = validate_fixture_pins(directory)
+    require(
+        unix_socket_path_fits(Path("/tmp/pliego-runtime-12345678") / WAYLAND_SOCKET_NAME)
+        and not unix_socket_path_fits(Path("/") / ("x" * (UNIX_SOCKET_PATH_BYTES - 1))),
+        "Unix socket path boundary differs",
+    )
+    with tempfile.TemporaryDirectory(prefix="pliego-document-gate-self-test-") as root_name:
+        root = Path(root_name)
+        runtime = root / "runtime"
+        runtime.mkdir()
+        destination = root / "retained"
+        environment = clean_environment(destination, runtime)
+        require(
+            environment["XDG_RUNTIME_DIR"] == str(runtime) and environment["TMPDIR"] == str(destination / "tmp"),
+            "clean environment runtime wiring differs",
+        )
     for fixture in manifest["fixtures"]:
         scene, layout = synthetic_scene_and_layout(fixture)
         require(
