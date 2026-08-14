@@ -1715,7 +1715,7 @@ fn render_with_shell_oracle(request: RenderRequest) -> Result<RenderOutcome, Ren
         &render_id,
         PublicationTransaction {
             artifacts,
-            journal,
+            journal: Some(journal),
             proof,
             userscripts: Some(userscripts),
             document_pdf_path,
@@ -2686,6 +2686,11 @@ pub(crate) fn finalize_supervised_publication(
         prepared_output,
     )
 }
+
+#[cfg(all(
+    feature = "document-session",
+    not(any(target_os = "android", target_env = "ohos"))
+))]
 fn render(request: RenderRequest) -> Result<RenderOutcome, RenderError> {
     #[cfg(test)]
     {

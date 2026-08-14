@@ -280,6 +280,19 @@ impl ChildContainment {
                     self.quiesced = true;
                     return Ok(());
                 }
+                // A live member can become a zombie between the read-only group inspection
+                // above and this probe. Darwin then reports EPERM for the now zombie-only group.
+                // Recheck that exact state before failing closed on the permission error.
+                #[cfg(target_os = "macos")]
+                if error.raw_os_error() == Some(libc::EPERM) &&
+                    matches!(
+                        macos_process_group_has_only_zombies(self.process_group),
+                        Ok(true)
+                    )
+                {
+                    self.quiesced = true;
+                    return Ok(());
+                }
                 return Err(error);
             }
             #[cfg(target_os = "linux")]
