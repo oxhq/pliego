@@ -44,6 +44,7 @@ hyper = { workspace = true }
 imagesize = "0.14.0"
 image = { workspace = true, default-features = false, features = ["png"], optional = true }
 libc = { workspace = true }
+rand = { workspace = true }
 krilla = { version = "0.8.2", default-features = false, features = ["raster-images"] }
 layout = { workspace = true, optional = true }
 net = { workspace = true }
@@ -56,6 +57,7 @@ servo = { workspace = true, default-features = false, features = ["baked-in-reso
 servoshell = { workspace = true, features = ["baked-in-resources", "bundled_freetype"], optional = true }
 surfman = { workspace = true, optional = true }
 servo-geometry = { workspace = true, optional = true }
+sysinfo = { workspace = true }
 tokio = { workspace = true, features = ["time"] }
 timers = { workspace = true }
 unicode-segmentation = { workspace = true }
@@ -79,7 +81,7 @@ toml_edit = { version = "=0.25.12", default-features = false, features = ["parse
 # servoshell cutover. Match Servo's supported Windows embedding path: WGL does
 # not provide a usable headless context on CI or all production hosts.
 servo = { workspace = true, features = ["no-wgl"], optional = true }
-windows-sys = { workspace = true, features = ["Wdk_Storage_FileSystem", "Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_IO"] }
+windows-sys = { workspace = true, features = ["Wdk_Storage_FileSystem", "Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Diagnostics_ToolHelp", "Win32_System_IO", "Win32_System_JobObjects", "Win32_System_Threading"] }
 
 [[bench]]
 name = "document_scene_pdf"

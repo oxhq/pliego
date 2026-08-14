@@ -52,10 +52,11 @@ for arbitrary documents are outside the current guarantee.
 | CPU, memory, disk, or wall-time exhaustion | One document uses one process; the PHP bridge can enforce a wall timeout and kill that process; resource-body and cache limits exist. | There is no engine-wide hard limit for arbitrary HTML, page count, memory, or CPU. Apply OS or container limits and cap input size, retained artifacts, and concurrent jobs. |
 | Native parser, layout, script, font, image, or graphics exploit | The supported model limits inputs to trusted application-owned content; releases track reviewed Servo and dependency changes. | Native vulnerabilities remain possible. Do not accept hostile markup. Use an additional security boundary if the product requires it and keep the engine and OS patched. |
 | Remote resource drift or nondeterministic output | Offline rendering is the default; authorized resource evidence can be retained with the job. | Allowlisted content, host state, timestamps, and unsupported dynamic behavior can change output. Bundle exact assets and render offline when reproducibility matters. |
-| Partial, stale, or unsupported output treated as success | Unsupported paint fails before the requested PDF is published by default, and SDKs expose typed failures and retained diagnostics. | A crash can leave temporary or diagnostic artifacts, and callers can misuse partial-scene diagnostic options. Publish only the returned success artifact and segregate, access-control, and prune diagnostic storage. |
+| Partial, stale, or unsupported output treated as success | Unsupported paint fails before the requested PDF is published by default, and SDKs expose typed failures. Validated engine failure evidence is promoted separately from success output; deterministic publication preflight creates no public artifact tree. | A host or power failure can leave private temporary state, and callers can misuse partial-scene diagnostic options. Publish only the returned success artifact and segregate, access-control, and prune diagnostic storage. |
+| Abnormal document-process termination leaves private residue | Malformed or abnormal child output is never promoted to the public artifact root, and the staging container is owner-only and excluded from recovery. | A nonempty `.pliego-runtime-*` container can remain for forensic inspection and consume disk. Apply same-user storage quotas and identity-aware retention; do not recursively delete an unverified path. |
 | Unsafe hyperlinks in a valid PDF | Link annotations preserve document links. | A PDF viewer may open a malicious destination. Validate or remove user-derived links before rendering and apply viewer-side policy. |
 | Compromised or substituted distribution | Releases publish SHA-256 checksums beside native archives; archives include source pointers, licenses, dependency reports, and native notices; the installer verifies package-pinned size and SHA-256. | Checksums served from the same compromised channel are not independent signatures. Pin expected hashes through the application release process. macOS bundles are not Developer ID signed or notarized. |
-| Sensitive data retained in evidence | Artifact paths and retention behavior are explicit to the caller and SDK. | Inputs, resources, diagnostics, and PDFs can contain personal or confidential data. Restrict access, encrypt storage where required, set short retention, and avoid uploading evidence to public issues. |
+| Sensitive data retained in evidence | Artifact path fields and retention behavior are explicit to the caller and SDK; a preflight path field is not an existence guarantee. | Inputs, resources, diagnostics, and PDFs can contain personal or confidential data. Check that evidence exists before handling it, restrict access, encrypt storage where required, set short retention, and avoid uploading evidence to public issues. |
 
 ## Deployment checklist
 
@@ -67,12 +68,15 @@ For the supported trusted-input use case:
    a narrowly reviewed exception.
 4. Run the process as an unprivileged identity with an isolated writable directory,
    no ambient secrets, and only the required read-only assets.
+   On Unix, do not install a custom or auto-reaping `SIGCHLD` disposition around Pliego;
+   the supervisor rejects that launch state before it creates a worker process group.
 5. Apply OS or container wall-time, memory, CPU, process-count, file-size, and disk
    quotas. Set application concurrency according to measured capacity.
 6. Treat a timeout, crash, unsupported feature, readiness failure, or partial-scene
    result as a failed job. Never promote a diagnostic PDF to the requested output.
 7. Protect and expire input, resource, scene, PDF, log, and diagnostic artifacts
-   according to the data classification of the document.
+   according to the data classification of the document. Treat a reported artifact
+   path as a locator and check that it exists before reading diagnostics.
 8. Keep Servo, Pliego, SDK, and operating-system updates in the normal security patch
    process.
 

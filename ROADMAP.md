@@ -48,6 +48,26 @@ the upstream engine.
 | **0.4.0 — hardened operational support boundary** | Promote the 0.3 contract into documented security, deployment, upstream-maintenance, consumer-support, and comparative-evidence commitments for a pre-1.0 release candidate. | The reviewed threat model, upstream-sync report, dependency/native notice audit, deployment limits, packaged Laravel consumer, conformance matrix, and correctness-gated internal/dompdf/Browsershot reports are public and reproducible against exact tagged binaries. |
 | **1.0.0 — stable supported contract** | Freeze the documented runtime, protocol, SDK, compatibility, security-reporting, and maintenance commitments. | Every 1.0 gate below passes on immutable source, package, checksum, notice, SDK, and consumer artifacts. An unmet gate keeps Pliego on 0.x. |
 
+The explicit 0.2 API 1 migration boundary is that deterministic publication
+preflight no longer creates a public artifact tree. Failure results still carry the
+requested path strings and stable typed error, but `OUTPUT_ARTIFACTS_OVERLAP`,
+`OUTPUT_ALREADY_EXISTS`, and `PUBLICATION_TRANSACTION_FAILED` leave caller-owned
+paths unchanged and retain no private runtime container. SDK consumers must check
+artifact-path existence before reading diagnostics. Post-start failure evidence is
+public only after its staged contract validates and promotion succeeds.
+
+New-publication paths that depend on unresolved symbolic-link traversal or prospective
+Windows DOS 8.3 aliases are unsupported and rejected fail-closed before success;
+callers must use direct, non-aliased paths with an already-resolvable external output
+parent.
+
+New artifact roots must leave enough destination-filesystem pathname headroom for
+the owner-only private staging tree and its longest bounded resource descendant.
+The v0.2 supervisor proves that boundary before starting the document process and
+returns `ARTIFACTS_CREATE_FAILED` without a public artifact root or PDF when the
+probe fails. The filesystem's path rules, rather than a portable character count,
+define the limit.
+
 Reproducible internal, dompdf, and Browsershot benchmark reports are an evidence track,
 not a reason by themselves to increment the product version. They must name the exact
 tagged Pliego binary they measure. If benchmark work changes runtime behavior or the

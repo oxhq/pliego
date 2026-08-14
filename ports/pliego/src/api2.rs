@@ -279,8 +279,8 @@ fn validate_build_identity() -> Result<(), InvocationError> {
 }
 
 fn is_lower_hex(value: &str, length: usize) -> bool {
-    value.len() == length &&
-        value
+    value.len() == length
+        && value
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
@@ -301,10 +301,11 @@ fn is_target_triple(value: &str) -> bool {
 }
 
 fn is_target_component(value: &str) -> bool {
-    !value.is_empty() &&
-        value.split('_').all(|atom| {
-            !atom.is_empty() &&
-                atom.bytes()
+    !value.is_empty()
+        && value.split('_').all(|atom| {
+            !atom.is_empty()
+                && atom
+                    .bytes()
                     .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
         })
 }
@@ -577,12 +578,12 @@ fn validate_profile(value: &Value, path: &str) -> Result<(), String> {
     let suffix = schema
         .strip_prefix("pliego.profile.")
         .ok_or_else(|| format!("{path}.schema: unsupported profile schema"))?;
-    if suffix.is_empty() ||
-        suffix.len() > 128 ||
-        !suffix.bytes().all(|byte| {
+    if suffix.is_empty()
+        || suffix.len() > 128
+        || !suffix.bytes().all(|byte| {
             byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'-')
-        }) ||
-        !suffix.as_bytes()[0].is_ascii_lowercase() && !suffix.as_bytes()[0].is_ascii_digit()
+        })
+        || !suffix.as_bytes()[0].is_ascii_lowercase() && !suffix.as_bytes()[0].is_ascii_digit()
     {
         return Err(format!("{path}.schema: unsupported profile schema"));
     }
@@ -721,21 +722,21 @@ fn content_address(value: &str, path: &str) -> Result<(), String> {
 }
 
 fn portable_path(value: &str, path: &str) -> Result<(), String> {
-    if value.is_empty() ||
-        value.len() > 240 ||
-        !value.is_ascii() ||
-        !value.as_bytes()[0].is_ascii_alphanumeric() ||
-        value.starts_with('/') ||
-        value.contains('\\')
+    if value.is_empty()
+        || value.len() > 240
+        || !value.is_ascii()
+        || !value.as_bytes()[0].is_ascii_alphanumeric()
+        || value.starts_with('/')
+        || value.contains('\\')
     {
         return Err(format!("{path}: path is not portable"));
     }
     for segment in value.split('/') {
-        if segment.is_empty() ||
-            matches!(segment, "." | "..") ||
-            segment.len() > 100 ||
-            segment.ends_with(['.', ' ']) ||
-            !segment
+        if segment.is_empty()
+            || matches!(segment, "." | "..")
+            || segment.len() > 100
+            || segment.ends_with(['.', ' '])
+            || !segment
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
         {
@@ -746,11 +747,11 @@ fn portable_path(value: &str, path: &str) -> Result<(), String> {
             .next()
             .unwrap_or_default()
             .to_ascii_lowercase();
-        if matches!(stem.as_str(), "aux" | "con" | "nul" | "prn") ||
-            stem.len() == 4 &&
-                (stem.starts_with("com") || stem.starts_with("lpt")) &&
-                stem.as_bytes()[3].is_ascii_digit() &&
-                stem.as_bytes()[3] != b'0'
+        if matches!(stem.as_str(), "aux" | "con" | "nul" | "prn")
+            || stem.len() == 4
+                && (stem.starts_with("com") || stem.starts_with("lpt"))
+                && stem.as_bytes()[3].is_ascii_digit()
+                && stem.as_bytes()[3] != b'0'
         {
             return Err(format!("{path}: path is not portable"));
         }

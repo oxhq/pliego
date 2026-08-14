@@ -238,10 +238,10 @@ impl ResponseHeaderEvidence {
     }
 
     pub(crate) fn retained_metadata_bytes(&self) -> u64 {
-        self.sha256.len() as u64 +
-            self.names.iter().map(|name| name.len() as u64).sum::<u64>() +
-            self.names.len() as u64 * std::mem::size_of::<String>() as u64 +
-            std::mem::size_of::<Self>() as u64
+        self.sha256.len() as u64
+            + self.names.iter().map(|name| name.len() as u64).sum::<u64>()
+            + self.names.len() as u64 * std::mem::size_of::<String>() as u64
+            + std::mem::size_of::<Self>() as u64
     }
 
     fn intercepted_metadata_bytes(&self) -> u64 {
@@ -502,12 +502,12 @@ impl ResourcePolicyFailure {
 
     #[cfg(feature = "document-session")]
     fn metadata_bytes(&self) -> u64 {
-        self.url.len() as u64 +
-            self.method.len() as u64 +
-            self.destination.len() as u64 +
-            self.referrer_url.as_ref().map_or(0, String::len) as u64 +
-            self.reason.len() as u64 +
-            std::mem::size_of::<Self>() as u64
+        self.url.len() as u64
+            + self.method.len() as u64
+            + self.destination.len() as u64
+            + self.referrer_url.as_ref().map_or(0, String::len) as u64
+            + self.reason.len() as u64
+            + std::mem::size_of::<Self>() as u64
     }
 }
 
@@ -785,8 +785,8 @@ impl ResourcePolicy {
                         "file is outside the document root".into(),
                     ),
                     Err(error)
-                        if error.kind() == std::io::ErrorKind::NotFound &&
-                            nearest_existing_ancestor(&path)
+                        if error.kind() == std::io::ErrorKind::NotFound
+                            && nearest_existing_ancestor(&path)
                                 .is_some_and(|ancestor| ancestor.starts_with(document_root)) =>
                     {
                         denial(
@@ -1122,17 +1122,17 @@ pub(crate) fn http_root_allows(root: &url::Url, requested: &url::Url) -> bool {
     let path_allowed = if root_path.ends_with('/') {
         requested_path.starts_with(root_path)
     } else {
-        requested_path == root_path ||
-            requested_path
+        requested_path == root_path
+            || requested_path
                 .strip_prefix(root_path)
                 .is_some_and(|rest| rest.starts_with('/'))
     };
-    requested.username().is_empty() &&
-        requested.password().is_none() &&
-        root.scheme() == requested.scheme() &&
-        root.host_str() == requested.host_str() &&
-        root.port_or_known_default() == requested.port_or_known_default() &&
-        path_allowed
+    requested.username().is_empty()
+        && requested.password().is_none()
+        && root.scheme() == requested.scheme()
+        && root.host_str() == requested.host_str()
+        && root.port_or_known_default() == requested.port_or_known_default()
+        && path_allowed
 }
 
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]

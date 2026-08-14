@@ -5542,6 +5542,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0676bb32a98c1a483ce53e500a81ad9c3d5b3f7c920c28c24e9cb0980d0b5bc8"
 
 [[package]]
+name = "ntapi"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c3b335231dfd352ffb0f8017f3b6027a4917f7df785ea2143d8af2adc66980ae"
+dependencies = [
+ "winapi",
+]
+
+[[package]]
 name = "nu-ansi-term"
 version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6609,6 +6618,7 @@ dependencies = [
  "imagesize",
  "krilla",
  "libc",
+ "rand 0.10.2",
  "same-file",
  "serde",
  "serde_json",
@@ -6623,6 +6633,7 @@ dependencies = [
  "servoshell",
  "sha2 0.11.0",
  "surfman",
+ "sysinfo",
  "tokio",
  "toml_edit",
  "ttf-parser",
@@ -10137,6 +10148,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92ab6a2f8bfe508deb3c6406578252e491d299cbbf3bc0529ecc3313aee4a52f"
 dependencies = [
  "libc",
+ "memchr",
+ "ntapi",
  "objc2-core-foundation",
  "objc2-io-kit",
  "windows 0.62.2",

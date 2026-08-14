@@ -103,6 +103,12 @@ Catch `Pliego\Php\Exception\RenderException` for typed failures. The
 exception preserves the engine code, process exit code, stderr, and retained input
 and artifact paths. Failed renders do not publish a final PDF.
 
+On the v0.2 API 1 runtime, the exception's artifact path is a requested locator, not
+an existence guarantee. Deterministic publication preflight failures create no
+public artifact tree and leave an already-existing output unchanged. Check
+`is_dir($error->artifactsPath)` before reading diagnostics; validated engine failure
+evidence remains available when it can be promoted atomically.
+
 Successful jobs are retained for one day and failed jobs for seven days by default.
 Preview or apply cleanup with:
 

@@ -181,10 +181,10 @@ impl AssetStore {
                     format!("asset URL is invalid: {error}"),
                 )
             })?;
-            if !matches!(url.scheme(), "http" | "https") ||
-                url.host_str().is_none() ||
-                !url.username().is_empty() ||
-                url.password().is_some()
+            if !matches!(url.scheme(), "http" | "https")
+                || url.host_str().is_none()
+                || !url.username().is_empty()
+                || url.password().is_some()
             {
                 return Err(AssetError::new(
                     "ASSET_MANIFEST_INVALID",
@@ -464,8 +464,8 @@ fn read_source(path: &Path, url: &url::Url, expected: &str) -> Result<Vec<u8>, A
 
 fn resolve_source(root: &Path, path: &str) -> Result<PathBuf, String> {
     let path = Path::new(path);
-    if path.as_os_str().is_empty() ||
-        path.components().any(|component| {
+    if path.as_os_str().is_empty()
+        || path.components().any(|component| {
             matches!(
                 component,
                 Component::ParentDir | Component::RootDir | Component::Prefix(_)
@@ -489,8 +489,8 @@ fn resolve_source(root: &Path, path: &str) -> Result<PathBuf, String> {
 }
 
 fn validate_digest(digest: &str) -> Result<(), String> {
-    if digest.len() == 64 &&
-        digest
+    if digest.len() == 64
+        && digest
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
     {

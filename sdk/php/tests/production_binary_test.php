@@ -85,6 +85,41 @@ try {
         'PHP bridge and CLI disagree on the artifact root',
     );
 
+    $preflightPath = "{$root}/preflight-output-and-artifacts";
+    try {
+        $renderer->render(
+            '<!doctype html><div>preflight overlap</div>',
+            "{$root}/preflight-input",
+            $preflightPath,
+            $preflightPath,
+        );
+        throw new RuntimeException('expected the overlapping output and artifact path to fail');
+    } catch (EngineRenderException $error) {
+        expectProductionBridge(
+            $error->errorCode === 'OUTPUT_ARTIFACTS_OVERLAP',
+            'PHP bridge changed the typed preflight code',
+        );
+        expectProductionBridge($error->exitCode === 1, 'PHP bridge changed the typed preflight exit code');
+        expectProductionBridge(
+            $error->stderr
+                === "pliego: OUTPUT_ARTIFACTS_OVERLAP: requested output must be outside the artifact directory\n",
+            'PHP bridge changed the typed preflight diagnostic',
+        );
+        expectProductionBridge($error->artifactsPath === $preflightPath, 'PHP bridge changed the requested artifact path');
+        expectProductionBridge(
+            $error->inputBundlePath === "{$root}/preflight-input" && is_dir($error->inputBundlePath),
+            'PHP bridge did not retain the preflight input bundle',
+        );
+        expectProductionBridge(
+            !file_exists($preflightPath) && !is_link($preflightPath),
+            'typed preflight failure created a public artifact tree or output',
+        );
+        expectProductionBridge(
+            (glob("{$root}/.pliego-runtime-*") ?: []) === [],
+            'typed preflight failure retained a private runtime container',
+        );
+    }
+
     file_put_contents("{$root}/blocked.js", 'document.body.dataset.blocked = "1";');
     try {
         $renderer->render(

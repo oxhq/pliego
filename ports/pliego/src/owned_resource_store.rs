@@ -254,12 +254,12 @@ impl OwnedResourceStore {
         let content_address = format!("sha256:{}", sha256_hex(&body));
 
         if let Some(existing) = self.requests.get_mut(&identity) {
-            if existing.resource.status != status ||
-                existing.resource.content_type.as_deref() != content_type.as_deref() ||
-                existing.resource.content_address != content_address ||
-                existing.resource.response_headers != response_headers ||
-                existing.resource.source != source ||
-                existing.resource.body() != body
+            if existing.resource.status != status
+                || existing.resource.content_type.as_deref() != content_type.as_deref()
+                || existing.resource.content_address != content_address
+                || existing.resource.response_headers != response_headers
+                || existing.resource.source != source
+                || existing.resource.body() != body
             {
                 return Err(changed_resource_failure(request));
             }
@@ -281,8 +281,9 @@ impl OwnedResourceStore {
             response_headers: response_headers.clone(),
             source,
         };
-        if request.method != "HEAD" &&
-            self.url_to_resource
+        if request.method != "HEAD"
+            && self
+                .url_to_resource
                 .get(&fetch_url)
                 .is_some_and(|existing| existing != &response_identity)
         {
@@ -602,17 +603,17 @@ fn image_cost(
         .and_then(|value| value.split(';').next())
         .map(str::trim);
     let declares_image = media_type.is_some_and(|value| value.starts_with("image/"));
-    if (!declares_image && request.destination != "Image") ||
-        media_type.is_some_and(|value| value.eq_ignore_ascii_case("image/svg+xml"))
+    if (!declares_image && request.destination != "Image")
+        || media_type.is_some_and(|value| value.eq_ignore_ascii_case("image/svg+xml"))
     {
         return Ok(None);
     }
 
     let decompressed_bytes_per_pixel = if body.starts_with(b"\x89PNG\r\n\x1a\n") {
         if body.get(24) == Some(&16) { 8 } else { 4 }
-    } else if body.starts_with(b"GIF87a") ||
-        body.starts_with(b"GIF89a") ||
-        (body.len() >= 12 && &body[..4] == b"RIFF" && &body[8..12] == b"WEBP")
+    } else if body.starts_with(b"GIF87a")
+        || body.starts_with(b"GIF89a")
+        || (body.len() >= 12 && &body[..4] == b"RIFF" && &body[8..12] == b"WEBP")
     {
         4
     } else if body.starts_with(b"\xff\xd8\xff") {
@@ -862,8 +863,9 @@ fn gif_info(body: &[u8]) -> Result<GifInfo, &'static str> {
                 max_frame_pixels = max_frame_pixels.max(pixels);
                 rectangles_within_screen &= left
                     .checked_add(width)
-                    .is_some_and(|right| right <= logical_width) &&
-                    top.checked_add(height)
+                    .is_some_and(|right| right <= logical_width)
+                    && top
+                        .checked_add(height)
                         .is_some_and(|bottom| bottom <= logical_height);
                 let packed = body[offset + 8];
                 offset = descriptor_end;
@@ -1170,11 +1172,11 @@ mod tests {
         exact.is_for_main_frame = true;
         exact.is_redirect = true;
         let identity = RequestIdentity::new(&exact);
-        let expected_identity_bytes = exact.method.len() as u64 +
-            exact.url.as_str().len() as u64 +
-            exact.destination.len() as u64 +
-            exact.referrer_url.as_ref().unwrap().as_str().len() as u64 +
-            2;
+        let expected_identity_bytes = exact.method.len() as u64
+            + exact.url.as_str().len() as u64
+            + exact.destination.len() as u64
+            + exact.referrer_url.as_ref().unwrap().as_str().len() as u64
+            + 2;
         assert_eq!(identity.url, exact.url.to_string());
         assert_eq!(identity.metadata_bytes(), Some(expected_identity_bytes));
 
