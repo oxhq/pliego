@@ -1826,8 +1826,16 @@ fn with_readiness_evaluation_evidence(
     let Ok(JSValue::String(snapshot)) = evaluation else {
         return error;
     };
-    if readiness::parse_snapshot(snapshot).is_err() {
+    let Ok(state) = readiness::parse_snapshot(snapshot) else {
         return error;
+    };
+    if let Readiness::Failed {
+        error: readiness_error,
+    } = state
+    {
+        if readiness_error.code != error.code || readiness_error.message != error.message {
+            return error;
+        }
     }
     let Ok(readiness) = serde_json::from_str(snapshot) else {
         return error;
@@ -2438,6 +2446,40 @@ mod tests {
         );
 
         assert!(error.capture_evidence.readiness.is_none());
+    }
+
+    #[test]
+    fn settlement_error_rejects_failed_readiness_evidence_from_a_different_failure() {
+        for snapshot in [
+            r#"{"status":"failed","error":{"code":"OTHER_FAILURE","message":"settlement failed"}}"#,
+            r#"{"status":"failed","error":{"code":"SETTLEMENT_FAILED","message":"different failure"}}"#,
+        ] {
+            let evaluation = Ok(JSValue::String(snapshot.to_owned()));
+            let error = with_readiness_evaluation_evidence(
+                SessionError::new("SETTLEMENT_FAILED", "settlement failed"),
+                &evaluation,
+            );
+
+            assert!(error.capture_evidence.readiness.is_none());
+        }
+    }
+
+    #[test]
+    fn settlement_error_keeps_exactly_matching_failed_readiness_evidence() {
+        let snapshot = serde_json::json!({
+            "status": "failed",
+            "error": {
+                "code": "SETTLEMENT_FAILED",
+                "message": "settlement failed",
+            },
+        });
+        let evaluation = Ok(JSValue::String(snapshot.to_string()));
+        let error = with_readiness_evaluation_evidence(
+            SessionError::new("SETTLEMENT_FAILED", "settlement failed"),
+            &evaluation,
+        );
+
+        assert_eq!(error.capture_evidence.readiness.as_ref(), Some(&snapshot));
     }
 
     const AHEM_SOURCE_RESOURCE: &str =

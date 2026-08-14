@@ -261,7 +261,7 @@ const RENDER_ID_SCHEMA_MARKER: &[u8] = b"pliego.render-id.v2";
 // Runtime identity is part of recovery identity. This version deliberately invalidates prepared
 // transactions from the pre-cutover fingerprint instead of resuming them under another runtime.
 const PUBLICATION_REQUEST_SCHEMA_MARKER: &[u8] = b"pliego.publication-request.v4";
-const CONTROLLED_CAPTURE_RENDER_ID_SCHEMA_MARKER: &[u8] = b"pliego.render-id.controlled-capture.v1";
+const CONTROLLED_CAPTURE_RENDER_ID_SCHEMA_MARKER: &[u8] = b"pliego.render-id.controlled-capture.v2";
 
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -5468,6 +5468,7 @@ mod tests {
     use pliego::{
         Color, DocumentScene, Glyph, Operation, OperationMeta, Page, Rect, Size, Utf8Range,
     };
+    use sha2::{Digest as _, Sha256};
 
     #[cfg(all(
         feature = "document-session",
@@ -5487,9 +5488,10 @@ mod tests {
         PageDefinition, PageMargins, RenderEnvironment, RenderError, RenderRequest,
         ResourceCapture, ResourcePolicy, ResourcePolicyConfig, ResourcePolicyFailure,
         ResourceRequest, WebResourceLoadRole, classify_controlled_http_status, cli_render_error,
-        cli_render_stderr, create_session_artifacts, default_page, page_artifact, parse_args,
-        persist_scene_capture, print_render_error, resolve_scene_resource, runtime_policy,
-        set_document_pdf_environment, sha256_hex, stable_render_id,
+        cli_render_stderr, create_session_artifacts, default_page, lowercase_hex, page_artifact,
+        parse_args, persist_scene_capture, print_render_error, resolve_scene_resource,
+        runtime_policy, set_document_pdf_environment, sha256_hex, stable_render_id,
+        update_hash_field,
     };
     #[cfg(feature = "shell-oracle")]
     use super::{
@@ -6807,6 +6809,19 @@ mod tests {
     fn controlled_capture_has_a_distinct_stable_render_identity() {
         let base = "sha256:7e771884747878e76c9e45b6fdb4ad5bf59b15ff33cfe0d9ef0db140fad2f52f";
         let controlled = controlled_capture_render_id(base);
+        let mut v1_hasher = Sha256::new();
+        update_hash_field(&mut v1_hasher, b"pliego.render-id.controlled-capture.v1");
+        update_hash_field(&mut v1_hasher, base.as_bytes());
+        let v1 = format!("sha256:{}", lowercase_hex(&v1_hasher.finalize()));
+
+        assert_eq!(
+            v1,
+            "sha256:fe262370f31b605420bfc97bfdc76c344d5ff3d3b9e44bec0ad1c4bd5e026dfe"
+        );
+        assert_eq!(
+            controlled,
+            "sha256:fd4813cfdea8db625b9e3650361128f24b7aaf711e0b5ff7ec76d349a274fe02"
+        );
         assert_eq!(controlled, controlled_capture_render_id(base));
         assert_ne!(controlled, base);
         assert!(controlled.starts_with("sha256:"));

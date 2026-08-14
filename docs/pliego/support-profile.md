@@ -18,9 +18,13 @@ regression coverage is deepest on Linux x86_64.
 
 The repository contains an unreleased `render-controlled` route. It is not part of
 the stable v0.1.1/API 1 contract, and the PHP and Laravel packages continue to use
-the compatibility `render` route. `render-controlled` creates the document clock
-before navigation, settles the sources it owns, and consumes one ScriptThread capture
-candidate together with one Paint presentation ticket bound to the same generation.
+the compatibility `render` route. `render-controlled` installs the same API 1
+readiness bootstrap as that route: static pages become ready after load and the font
+wait, while pages with asynchronous work use `window.pliego.defer()`, `ready()`, and
+`fail()`. After a ready snapshot, it settles again and accepts the snapshot only with
+a fresh capture candidate for the same target. It creates the document clock before
+navigation, settles the sources it owns, and consumes one ScriptThread capture candidate
+together with one Paint presentation ticket bound to the same generation.
 It has no realtime or shell fallback: stale capture state, a lost or indeterminate
 consume outcome, and open-ended or unsupported sources all fail without publishing
 the requested PDF or any success-only artifact.
@@ -51,15 +55,18 @@ publishes no artifact root or PDF, and may take precedence over an already-known
 resource-setup failure. No portable character-count limit is part of the profile;
 the destination filesystem's path rules decide.
 
-The release-candidate package gate is configured to unpack the Linux x86_64 checked-release
-archive and run its binary in two fresh processes against one pinned offline font, script, and
-visible retained-subset Canvas 2D fixture. The gate requires byte-identical pixels, normalized
-semantic layout, scene,
-and PDF; exact timeout, `requestAnimationFrame`, paint-observer, and document-time
-evidence; matching Script, layout, and presented Paint epochs; PDF text extraction;
-and a separate interval-based open-ended-source rejection. The proof manifest records
-SHA-256 hashes of the binary, fixture template, materialized input, font, and retained
-comparison artifacts. Other packaged targets currently have engine API, native
+The release-candidate package gate unpacks the Linux x86_64 checked-release archive
+and runs its binary in two fresh processes against one pinned offline font, script,
+and visible retained-subset Canvas 2D fixture. That fixture directly authors one API 1
+defer/ready transition. The gate requires byte-identical readiness evidence, pixels,
+normalized semantic layout, scene, and PDF; exact readiness payload, timeout,
+`requestAnimationFrame`, paint-observer, and document-time evidence; and PDF text
+extraction. Separate cases verify an authored readiness failure, a deferred-readiness
+timeout, interval-based open-ended-source rejection, and active-clip Canvas rejection;
+each must retain matching typed failure/readiness evidence without a success artifact.
+The proof manifest records SHA-256 hashes of the binary, success and failure fixtures,
+materialized inputs, font, retained comparison artifacts, and retained failure evidence.
+Other packaged targets currently have engine API, native
 publication primitives, help, version, dependency-boundary, and archive smoke coverage,
 not this document-level controlled-capture proof.
 
@@ -152,10 +159,11 @@ for engine development; it is not a delivery mode.
 
 ## Readiness and final canvas state
 
-A static HTML or Blade document does not call the readiness API. Once the page load
-event has fired, Pliego waits for the document font set and proceeds automatically.
-This is the default path, including documents with declared local or allowlisted
-fonts.
+The compatibility `render` route and the unreleased `render-controlled` route both
+install the API 1 readiness bootstrap. A static HTML or Blade document does not call
+the readiness API itself: once the page load event has fired, Pliego waits for the
+document font set and proceeds automatically. This is the default path, including
+documents with declared local or allowlisted fonts.
 
 Use `window.pliego.defer()` only when work that affects the PDF continues after
 load, such as fetching application data or drawing a chart. Call it before starting
