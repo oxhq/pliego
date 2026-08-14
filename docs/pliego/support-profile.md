@@ -25,6 +25,32 @@ It has no realtime or shell fallback: stale capture state, a lost or indetermina
 consume outcome, and open-ended or unsupported sources all fail without publishing
 the requested PDF or any success-only artifact.
 
+The candidate checks path identity, output occupancy, and transaction preconditions
+before starting the document process. After a normal child exit, it prepares and holds
+the external PDF before making the artifact tree visible. An API 1 failure result still
+reports the requested `artifacts` and `document_pdf` strings after a render identity is
+formed, but those strings are locators rather than an existence guarantee.
+`OUTPUT_ARTIFACTS_OVERLAP`, `OUTPUT_ALREADY_EXISTS`, and
+`PUBLICATION_TRANSACTION_FAILED` create no public artifact tree; an already-existing
+output is left unchanged. Only validated staged failure evidence that can be promoted
+atomically becomes a public failure tree, and ordinary preflight completion leaves no
+`.pliego-runtime-*` container.
+
+New artifact roots require direct, non-aliased paths with an already-resolvable
+external output parent. Unresolved symbolic-link traversal and prospective Windows
+DOS 8.3 alias paths are unsupported and rejected fail-closed before success.
+DOS-short-shaped final output names beside a future artifact root are rejected
+conservatively. An alias proven to enter the future scaffold returns
+`OUTPUT_ARTIFACTS_OVERLAP`.
+
+New artifact roots must leave enough pathname headroom on the destination filesystem
+for the owner-only private staging tree and its longest bounded resource descendant.
+The candidate proves that headroom with a private, identity-checked probe before it
+starts the document process. A rejected probe returns `ARTIFACTS_CREATE_FAILED`,
+publishes no artifact root or PDF, and may take precedence over an already-known
+resource-setup failure. No portable character-count limit is part of the profile;
+the destination filesystem's path rules decide.
+
 The release-candidate package gate is configured to unpack the Linux x86_64 checked-release
 archive and run its binary in two fresh processes against one pinned offline font, script, and
 visible retained-subset Canvas 2D fixture. The gate requires byte-identical pixels, normalized
@@ -66,6 +92,9 @@ The implemented candidate boundary is deliberately narrow:
   and auxiliary WebViews fail closed; the controlled ledger does not interrupt one
   already-running JavaScript turn, so deployments still need an outer process
   deadline; and
+- Unix launchers must preserve the default waitable `SIGCHLD` disposition: custom handlers,
+  `SIG_IGN`, and `SA_NOCLDWAIT` are rejected before a document worker is spawned so the
+  supervisor can reserve the worker process-group identity until teardown completes; and
 - this candidate is not API 2, a hostile-input sandbox, a cross-platform determinism
   claim, or a replacement for the stable compatibility route.
 
@@ -151,6 +180,8 @@ sequence ends at that readback; later drawing is outside this Chart.js proof.
 
 Invalid requests, denied resources, timeouts, and engine failures are typed. A failed
 render must not publish a final PDF or silently substitute a declared resource.
+Callers must check that a reported artifact path is a directory before reading
+diagnostics; the path field alone is not retained-evidence proof.
 
 ## Verification boundary
 

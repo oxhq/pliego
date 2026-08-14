@@ -115,6 +115,32 @@ its adjacent SHA-256 file, and run:
 pliego render document.html --output document.pdf --artifacts artifacts
 ```
 
+API 1 failure results preserve the requested `artifacts` and `document_pdf` path
+strings after a render identity is formed; those fields are locators, not proof that
+either path exists. The v0.2 runtime checks path identity, output occupancy, and
+transaction preconditions before starting the document process. After a normal child
+exit, it prepares and holds the external PDF before making the artifact tree visible.
+Deterministic failures in either phase, including `OUTPUT_ARTIFACTS_OVERLAP`,
+`OUTPUT_ALREADY_EXISTS`, and `PUBLICATION_TRANSACTION_FAILED`, do not create a public
+artifact tree or modify the requested output. Validated failure evidence is retained
+only when it can be promoted atomically from the private document process.
+
+For a new artifact root, use direct, non-aliased output and artifact paths whose
+external output parent already resolves. The v0.2 preflight rejects unresolved
+symbolic-link traversal and prospective Windows DOS 8.3 alias paths before success.
+DOS-short-shaped final output names beside a future artifact root are rejected
+conservatively because their destination-assigned identity cannot be proven before
+publication. An alias proven to enter the future artifact scaffold is reported as
+`OUTPUT_ARTIFACTS_OVERLAP`.
+
+New artifact roots must also leave enough pathname headroom on the destination
+filesystem for Pliego's owner-only private staging tree and its longest bounded
+resource descendant. Pliego proves that headroom with a private, identity-checked
+probe before starting the document process. If the destination filesystem rejects
+the probe, v0.2 returns `ARTIFACTS_CREATE_FAILED` without publishing the artifact
+root or PDF. No portable character-count limit is promised; the destination
+filesystem's own path rules decide.
+
 Host-font fallback, network access, redirects, and asset caching are disabled by
 default. Partial scene capture also fails before the requested output is published.
 The [support profile](docs/pliego/support-profile.md) defines the current

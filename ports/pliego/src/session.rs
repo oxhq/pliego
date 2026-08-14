@@ -3,7 +3,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 use std::error::Error;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -24,6 +24,49 @@ const PUBLICATION_PREPARED_FILE_NAME: &str = "prepared.json";
 const PUBLICATION_COMMITTED_FILE_NAME: &str = "committed.json";
 const MAX_PUBLICATION_BUNDLE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_PUBLICATION_OUTCOME_BYTES: u64 = 1024 * 1024;
+const MAX_CONTROL_JSON_BYTES: u64 = 1024 * 1024;
+/// Supervisor acceptance limits are part of the controlled-runtime boundary, not PDF limits.
+/// Callers can distinguish a bounded-closure rejection by downcasting the `io::Error` source.
+pub(crate) const MAX_PROMOTION_TREE_DEPTH: usize = 32;
+pub(crate) const MAX_PROMOTION_TREE_ENTRIES: u64 = 16 * 1024;
+pub(crate) const MAX_PROMOTION_TREE_BYTES: u64 = 512 * 1024 * 1024;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum StagedArtifactLimit {
+    Depth,
+    Entries,
+    AggregateBytes,
+}
+
+#[derive(Debug)]
+pub(crate) struct StagedArtifactLimitExceeded {
+    pub(crate) limit: StagedArtifactLimit,
+    pub(crate) maximum: u64,
+}
+
+impl fmt::Display for StagedArtifactLimitExceeded {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let label = match self.limit {
+            StagedArtifactLimit::Depth => "depth",
+            StagedArtifactLimit::Entries => "entry count",
+            StagedArtifactLimit::AggregateBytes => "aggregate byte count",
+        };
+        write!(
+            formatter,
+            "staged artifact tree exceeds the {label} limit of {}",
+            self.maximum
+        )
+    }
+}
+
+impl Error for StagedArtifactLimitExceeded {}
+
+fn staged_artifact_limit_error(limit: StagedArtifactLimit, maximum: u64) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        StagedArtifactLimitExceeded { limit, maximum },
+    )
+}
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -97,6 +140,28 @@ pub(crate) struct PublicationJournal {
     lease: Handle,
     plan: PublicationPlanReceipt,
     plan_sha256: String,
+}
+
+pub(crate) fn validate_publication_outcome_bytes(outcome_bytes: &[u8]) -> io::Result<()> {
+    if outcome_bytes.len() as u64 > MAX_PUBLICATION_OUTCOME_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("publication outcome exceeds the {MAX_PUBLICATION_OUTCOME_BYTES}-byte limit"),
+        ));
+    }
+    if !outcome_bytes.ends_with(b"\n") {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "publication outcome must end with a newline",
+        ));
+    }
+    serde_json::from_slice::<serde_json::Value>(outcome_bytes).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("publication outcome is invalid JSON: {error}"),
+        )
+    })?;
+    Ok(())
 }
 
 impl Drop for PublicationJournal {
@@ -176,6 +241,7 @@ struct BoundDirectory {
     requested_path: PathBuf,
     path: PathBuf,
     handle: Handle,
+    movable: bool,
 }
 
 #[derive(Debug)]
@@ -187,15 +253,24 @@ struct OwnedFile {
 
 impl BoundDirectory {
     fn open(path: PathBuf) -> io::Result<Self> {
+        Self::open_with_move_access(path, false)
+    }
+
+    fn open_movable(path: PathBuf) -> io::Result<Self> {
+        Self::open_with_move_access(path, true)
+    }
+
+    fn open_with_move_access(path: PathBuf, movable: bool) -> io::Result<Self> {
         let requested_path = std::path::absolute(path)?;
         require_path_without_aliases(&requested_path)?;
         let path = requested_path.canonicalize()?;
         require_directory_without_symlink(&path)?;
-        let handle = Handle::from_file(open_directory_handle(&path)?)?;
+        let handle = Handle::from_file(open_bound_directory_handle(&path, movable)?)?;
         let directory = Self {
             requested_path,
             path,
             handle,
+            movable,
         };
         directory.require_current()?;
         Ok(directory)
@@ -213,7 +288,7 @@ impl BoundDirectory {
                     ),
                 ));
             }
-            let current = Handle::from_file(open_directory_handle(path)?)?;
+            let current = Handle::from_file(open_bound_directory_handle(path, self.movable)?)?;
             if !handles_match(&current, &self.handle)? {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -233,6 +308,7 @@ impl BoundDirectory {
             requested_path: self.requested_path.clone(),
             path: self.path.clone(),
             handle: Handle::from_file(self.handle.as_file().try_clone()?)?,
+            movable: self.movable,
         })
     }
 
@@ -240,6 +316,1552 @@ impl BoundDirectory {
         self.require_current()?;
         open_file_identity(self.handle.as_file(), &self.path)
     }
+}
+
+/// Validate the parent of a requested publication target while retaining API1's absolute requested
+/// spelling. Existing final components are deliberately left to create/recovery classification.
+pub(crate) fn validated_publication_target(path: &Path) -> io::Result<PathBuf> {
+    let absolute = std::path::absolute(path)?;
+    let parent = absolute.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "session artifact path has no parent directory",
+        )
+    })?;
+    require_path_without_aliases(parent)?;
+    Ok(absolute)
+}
+
+/// Validate the path-only publication preconditions that do not require a staged artifact root.
+///
+/// The supervisor runs this before starting Servo so deterministic request/path failures keep the
+/// same API1 classification instead of being rewritten as a worker termination after rendering.
+/// The real journal still rebinds and revalidates every identity before promotion.
+pub(crate) fn preflight_publication_request(
+    logical_artifact_root: &Path,
+    output: &Path,
+) -> io::Result<()> {
+    let requested_output = output.to_str().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("output path is not valid UTF-8: {}", output.display()),
+        )
+    })?;
+    let output = std::path::absolute(output)?;
+    let output_parent_path = output
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "output has no parent"))?
+        .to_owned();
+    output.file_name().and_then(OsStr::to_str).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("output path is not valid UTF-8: {}", output.display()),
+        )
+    })?;
+    let logical_artifact_root = std::path::absolute(logical_artifact_root)?;
+    if output_parent_path != logical_artifact_root {
+        let output_parent = BoundDirectory::open(output_parent_path)?;
+        output_parent.identity()?;
+    }
+    receipt_path(&logical_artifact_root)?;
+    receipt_path(&output)?;
+    // Preserve the same requested-spelling UTF-8 precondition used in the transaction ID.
+    let _ = requested_output;
+    Ok(())
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct PromotionTreeClosure {
+    entries: u64,
+    bytes: u64,
+    artifacts: Vec<PromotionTreeEntry>,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct PromotionTreeEntry {
+    path: String,
+    kind: PromotionTreeEntryKind,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum PromotionTreeEntryKind {
+    Directory,
+    File { sha256: String, bytes: u64 },
+}
+
+/// Validates a bounded private artifact closure without exposing it.
+///
+/// The stage and its private container spellings are always forbidden inside artifact bytes;
+/// callers may add other private path spellings that must not cross the publication boundary.
+/// This is deliberately a structural closure check, not an artifact allowlist or schema check.
+/// The supervisor must validate the exact success or typed-failure artifact contract first.
+pub(crate) fn validate_staged_artifacts(
+    staging: &Path,
+    forbidden_utf8_prefixes: &[&Path],
+) -> io::Result<()> {
+    let staging = std::path::absolute(staging)?;
+    let staging_name = immediate_child_name(&staging, "staging artifact root")?.to_owned();
+    let container_path = staging.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "staging artifact root has no parent",
+        )
+    })?;
+    let container = BoundDirectory::open(container_path.to_owned())?;
+    let staged = BoundDirectory::open_movable(staging.clone())?;
+    require_private_promotion_container(&container)?;
+    require_immediate_bound_child(&staging, &container, &staging_name)?;
+    if promotion_filesystem_id(container.handle.as_file())? !=
+        promotion_filesystem_id(staged.handle.as_file())?
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "private artifact tree and its container must be on the same filesystem",
+        ));
+    }
+    let mut private_paths = vec![
+        staging.as_path(),
+        staged.path.as_path(),
+        container.requested_path.as_path(),
+        container.path.as_path(),
+    ];
+    private_paths.extend_from_slice(forbidden_utf8_prefixes);
+    let forbidden_prefixes = promotion_private_prefixes(&private_paths)?;
+    validate_promotion_tree(&staged, &forbidden_prefixes).map(|_| ())
+}
+
+/// Removes a private source container only when the held identity is still its path target and
+/// the directory is empty. A non-empty container is retained for private failure evidence.
+pub(crate) fn remove_empty_private_container(container: &Path) -> io::Result<bool> {
+    let container = std::path::absolute(container)?;
+    let name = immediate_child_name(&container, "private staging container")?.to_owned();
+    let parent_path = container.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "private staging container has no parent",
+        )
+    })?;
+    let parent = BoundDirectory::open(parent_path.to_owned())?;
+    let container = BoundDirectory::open_movable(container)?;
+    require_immediate_bound_child(&container.requested_path, &parent, &name)?;
+    require_private_promotion_container(&container)?;
+    let identity = container.identity()?;
+    match remove_empty_bound_directory(&container, &parent, &name) {
+        Ok(()) => {},
+        Err(error) if error.kind() == io::ErrorKind::DirectoryNotEmpty => return Ok(false),
+        Err(error) => return Err(error),
+    }
+    if open_file_identity(container.handle.as_file(), &container.requested_path)? != identity {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "private staging container identity changed during empty removal",
+        ));
+    }
+    drop(container);
+    require_child_absent(&parent, &name, "private staging container")?;
+    let _ = parent.handle.as_file().sync_all();
+    Ok(true)
+}
+
+/// Atomically exposes a closed private artifact tree without replacing an existing root.
+///
+/// `staging` must be an immediate child of a caller-created private container. On Unix that
+/// container must be owned by the effective user and have mode 0700. The private container and
+/// `public` parent must be on the same filesystem. The residual race boundary is therefore the
+/// current OS principal: another process running as that same principal can mutate its 0700 tree.
+/// Every in-tree lease must be dropped before this function is called.
+pub(crate) fn promote_staged_artifacts(
+    source_container: &Path,
+    staging: &Path,
+    public: &Path,
+) -> io::Result<()> {
+    let source_container = std::path::absolute(source_container)?;
+    let staging = std::path::absolute(staging)?;
+    let public = std::path::absolute(public)?;
+    let staging_name = immediate_child_name(&staging, "staging artifact root")?.to_owned();
+    let public_name = immediate_child_name(&public, "public artifact root")?.to_owned();
+    let staging_parent = staging.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "staging artifact root has no parent",
+        )
+    })?;
+    if staging_parent != source_container {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "staging artifact root must be an immediate child of the supplied private container",
+        ));
+    }
+    let destination_parent_path = public.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "public artifact root has no parent",
+        )
+    })?;
+
+    let source_container = BoundDirectory::open(source_container)?;
+    let destination_parent = BoundDirectory::open(destination_parent_path.to_owned())?;
+    let staged = BoundDirectory::open_movable(staging.clone())?;
+    require_private_promotion_container(&source_container)?;
+    require_immediate_bound_child(&staging, &source_container, &staging_name)?;
+    require_immediate_bound_child(&public, &destination_parent, &public_name)?;
+    if handles_match(&source_container.handle, &destination_parent.handle)? {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "staging artifact root must be inside a separate private container",
+        ));
+    }
+    require_same_promotion_filesystem(&source_container, &staged, &destination_parent)?;
+
+    let source_container_identity = source_container.identity()?;
+    let destination_parent_identity = destination_parent.identity()?;
+    let staged_identity = staged.identity()?;
+    require_child_absent(&destination_parent, &public_name, "public artifact root")?;
+    let forbidden_prefixes = promotion_private_prefixes(&[
+        &staging,
+        &staged.path,
+        &source_container.requested_path,
+        &source_container.path,
+    ])?;
+    let before = validate_promotion_tree(&staged, &forbidden_prefixes)?;
+
+    require_bound_identity(&source_container, &source_container_identity)?;
+    require_bound_identity(&destination_parent, &destination_parent_identity)?;
+    staged.require_current()?;
+    rename_bound_directory_no_replace(
+        &staged,
+        &source_container,
+        &staging_name,
+        &destination_parent,
+        &public_name,
+    )?;
+
+    let after = (|| {
+        require_bound_identity(&source_container, &source_container_identity)?;
+        require_bound_identity(&destination_parent, &destination_parent_identity)?;
+        require_child_absent(&source_container, &staging_name, "staging artifact root")?;
+        let held_identity = open_file_identity(staged.handle.as_file(), &public)?;
+        if held_identity != staged_identity {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "held staged artifact root identity changed during promotion",
+            ));
+        }
+        let promoted = BoundDirectory::open_movable(public.clone())?;
+        if promoted.identity()? != staged_identity {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "promoted artifact root does not match the held private root",
+            ));
+        }
+        let closure = validate_promotion_tree(&promoted, &forbidden_prefixes)?;
+        if closure != before {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "promoted artifact tree changed across atomic exposure",
+            ));
+        }
+        Ok(())
+    })();
+
+    if let Err(validation_error) = after {
+        let rollback = rename_bound_directory_no_replace(
+            &staged,
+            &destination_parent,
+            &public_name,
+            &source_container,
+            &staging_name,
+        )
+        .and_then(|()| {
+            require_child_absent(&destination_parent, &public_name, "public artifact root")?;
+            staged.require_current()?;
+            if staged.identity()? != staged_identity {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "rolled-back artifact root does not match the held private root",
+                ));
+            }
+            Ok(())
+        });
+        return match rollback {
+            Ok(()) => Err(validation_error),
+            Err(rollback_error) => Err(io::Error::new(
+                io::ErrorKind::Other,
+                format!(
+                    "promoted artifact validation failed ({validation_error}); atomic rollback failed ({rollback_error})"
+                ),
+            )),
+        };
+    }
+
+    let _ = source_container.handle.as_file().sync_all();
+    let _ = destination_parent.handle.as_file().sync_all();
+    Ok(())
+}
+
+fn immediate_child_name<'a>(path: &'a Path, label: &str) -> io::Result<&'a OsStr> {
+    let name = path.file_name().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{label} has no final component"),
+        )
+    })?;
+    if !matches!(
+        Path::new(name).components().next(),
+        Some(Component::Normal(_))
+    ) || Path::new(name).components().count() != 1
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{label} is not one normal path component"),
+        ));
+    }
+    Ok(name)
+}
+
+fn require_immediate_bound_child(
+    path: &Path,
+    parent: &BoundDirectory,
+    name: &OsStr,
+) -> io::Result<()> {
+    if path.parent() != Some(parent.requested_path.as_path()) ||
+        path != parent.requested_path.join(name)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "promotion path is not an immediate child of its bound parent: {}",
+                path.display()
+            ),
+        ));
+    }
+    parent.require_current()
+}
+
+fn require_bound_identity(directory: &BoundDirectory, expected: &str) -> io::Result<()> {
+    if directory.identity()? == expected {
+        return Ok(());
+    }
+    Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!(
+            "bound promotion directory identity changed: {}",
+            directory.requested_path.display()
+        ),
+    ))
+}
+
+#[cfg(unix)]
+fn require_private_promotion_container(container: &BoundDirectory) -> io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    container.require_current()?;
+    let metadata = container.handle.as_file().metadata()?;
+    if metadata.mode() & 0o7777 != 0o700 || metadata.uid() != unsafe { libc::geteuid() } {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "staging container must be owned by the effective user with mode 0700",
+        ));
+    }
+    #[cfg(target_os = "macos")]
+    require_no_macos_extended_acl(container.handle.as_file())?;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn require_no_macos_extended_acl(file: &File) -> io::Result<()> {
+    use std::ffi::c_void;
+    use std::os::fd::AsRawFd;
+
+    const ACL_TYPE_EXTENDED: libc::c_int = 0x0000_0100;
+
+    unsafe extern "C" {
+        fn acl_get_fd_np(fd: libc::c_int, acl_type: libc::c_int) -> *mut c_void;
+        fn acl_free(object: *mut c_void) -> libc::c_int;
+    }
+
+    struct OwnedAcl(*mut c_void);
+    impl Drop for OwnedAcl {
+        fn drop(&mut self) {
+            // SAFETY: acl_get_fd_np returned this releasable ACL allocation.
+            let _ = unsafe { acl_free(self.0) };
+        }
+    }
+
+    // Darwin reports a missing FILESEC_ACL property as a null ACL with ENOENT.
+    unsafe { *libc::__error() = 0 };
+    // SAFETY: the file descriptor remains live and ACL_TYPE_EXTENDED is the Darwin ACL type.
+    let acl = unsafe { acl_get_fd_np(file.as_raw_fd(), ACL_TYPE_EXTENDED) };
+    if acl.is_null() {
+        // SAFETY: __error returns this thread's errno location.
+        let error = unsafe { *libc::__error() };
+        return if matches!(error, 0 | libc::ENOENT) {
+            Ok(())
+        } else {
+            Err(io::Error::from_raw_os_error(error))
+        };
+    }
+    let _acl = OwnedAcl(acl);
+    Err(io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        "private staging directory may not inherit an extended ACL",
+    ))
+}
+
+#[cfg(windows)]
+fn require_private_promotion_container(container: &BoundDirectory) -> io::Result<()> {
+    container.require_current()?;
+    require_windows_private_directory(container.handle.as_file())
+}
+
+#[cfg(windows)]
+struct WindowsUserSid {
+    storage: Vec<usize>,
+}
+
+#[cfg(windows)]
+impl WindowsUserSid {
+    fn as_ptr(&self) -> windows_sys::Win32::Security::PSID {
+        self.storage.as_ptr().cast_mut().cast()
+    }
+}
+
+#[cfg(windows)]
+fn current_process_user_sid() -> io::Result<WindowsUserSid> {
+    use std::mem::size_of;
+
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::Security::{
+        GetLengthSid, GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser,
+    };
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    struct OwnedHandle(HANDLE);
+    impl Drop for OwnedHandle {
+        fn drop(&mut self) {
+            // SAFETY: the handle was returned by OpenProcessToken and is closed exactly once.
+            let _ = unsafe { CloseHandle(self.0) };
+        }
+    }
+
+    let mut token = std::ptr::null_mut();
+    // SAFETY: GetCurrentProcess returns a process pseudo-handle and token points to writable storage.
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let token = OwnedHandle(token);
+    let mut required = 0_u32;
+    // SAFETY: the zero-length query intentionally supplies a null output to obtain the size.
+    let first =
+        unsafe { GetTokenInformation(token.0, TokenUser, std::ptr::null_mut(), 0, &mut required) };
+    if first != 0 || required < size_of::<TOKEN_USER>() as u32 {
+        return Err(if first == 0 {
+            io::Error::last_os_error()
+        } else {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "process token returned an invalid user-information size",
+            )
+        });
+    }
+    let word_count = (required as usize).div_ceil(size_of::<usize>());
+    let mut token_storage = vec![0_usize; word_count];
+    // SAFETY: the aligned buffer has at least `required` bytes and the token remains live.
+    if unsafe {
+        GetTokenInformation(
+            token.0,
+            TokenUser,
+            token_storage.as_mut_ptr().cast(),
+            required,
+            &mut required,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: a successful TokenUser query initializes a TOKEN_USER at the start of the buffer.
+    let source = unsafe { (*(token_storage.as_ptr().cast::<TOKEN_USER>())).User.Sid };
+    // SAFETY: TokenUser supplies a valid SID for the lifetime of token_storage.
+    let sid_bytes = unsafe { GetLengthSid(source) };
+    if sid_bytes == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let sid_words = (sid_bytes as usize).div_ceil(size_of::<usize>());
+    let mut storage = vec![0_usize; sid_words];
+    // SAFETY: both buffers are valid for sid_bytes and do not overlap.
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            source.cast::<u8>(),
+            storage.as_mut_ptr().cast::<u8>(),
+            sid_bytes as usize,
+        );
+    }
+    Ok(WindowsUserSid { storage })
+}
+
+#[cfg(windows)]
+fn require_windows_private_directory(file: &File) -> io::Result<()> {
+    use std::mem::size_of;
+    use std::os::windows::io::AsRawHandle;
+
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SE_FILE_OBJECT};
+    use windows_sys::Win32::Security::{
+        ACCESS_ALLOWED_ACE, ACL, ACL_SIZE_INFORMATION, AclSizeInformation, CONTAINER_INHERIT_ACE,
+        DACL_SECURITY_INFORMATION, EqualSid, GetAce, GetAclInformation,
+        GetSecurityDescriptorControl, OBJECT_INHERIT_ACE, OWNER_SECURITY_INFORMATION,
+        PSECURITY_DESCRIPTOR, PSID, SE_DACL_PROTECTED,
+    };
+    use windows_sys::Win32::Storage::FileSystem::FILE_ALL_ACCESS;
+
+    struct OwnedSecurityDescriptor(PSECURITY_DESCRIPTOR);
+    impl Drop for OwnedSecurityDescriptor {
+        fn drop(&mut self) {
+            // SAFETY: GetSecurityInfo allocated the descriptor with LocalAlloc.
+            let _ = unsafe { LocalFree(self.0) };
+        }
+    }
+
+    let expected_user = current_process_user_sid()?;
+    let mut owner: PSID = std::ptr::null_mut();
+    let mut dacl: *mut ACL = std::ptr::null_mut();
+    let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    // SAFETY: the directory handle includes READ_CONTROL and all output pointers are writable.
+    let status = unsafe {
+        GetSecurityInfo(
+            file.as_raw_handle() as _,
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+            &mut owner,
+            std::ptr::null_mut(),
+            &mut dacl,
+            std::ptr::null_mut(),
+            &mut descriptor,
+        )
+    };
+    if status != 0 {
+        return Err(io::Error::from_raw_os_error(status as i32));
+    }
+    let descriptor = OwnedSecurityDescriptor(descriptor);
+    if owner.is_null() || dacl.is_null() || descriptor.0.is_null() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "staging container has no protected owner-only DACL",
+        ));
+    }
+    // SAFETY: both SIDs are valid while their owning buffers remain live.
+    if unsafe { EqualSid(owner, expected_user.as_ptr()) } == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "staging container is not owned by the current user",
+        ));
+    }
+    let mut control = 0_u16;
+    let mut revision = 0_u32;
+    // SAFETY: descriptor is live and both scalar outputs are writable.
+    if unsafe { GetSecurityDescriptorControl(descriptor.0, &mut control, &mut revision) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if control & SE_DACL_PROTECTED == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "staging container DACL is not protected",
+        ));
+    }
+    let mut acl_information = ACL_SIZE_INFORMATION::default();
+    // SAFETY: dacl is part of the live descriptor and output has the advertised size.
+    if unsafe {
+        GetAclInformation(
+            dacl,
+            (&raw mut acl_information).cast(),
+            size_of::<ACL_SIZE_INFORMATION>() as u32,
+            AclSizeInformation,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    if acl_information.AceCount != 1 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "staging container DACL must grant exactly one principal",
+        ));
+    }
+    let mut ace = std::ptr::null_mut();
+    // SAFETY: the ACL reports one ACE and ace points to writable pointer storage.
+    if unsafe { GetAce(dacl, 0, &mut ace) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let ace = ace.cast::<ACCESS_ALLOWED_ACE>();
+    let expected_flags = (CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE) as u8;
+    // SAFETY: GetAce returned a live ACCESS_ALLOWED_ACE-sized record from the ACL.
+    let valid = unsafe {
+        (*ace).Header.AceType == 0 &&
+            (*ace).Header.AceFlags == expected_flags &&
+            (*ace).Mask == FILE_ALL_ACCESS &&
+            EqualSid(
+                std::ptr::addr_of_mut!((*ace).SidStart).cast(),
+                expected_user.as_ptr(),
+            ) != 0
+    };
+    if !valid {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "staging container DACL is not an owner-only full-access grant",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn require_private_promotion_container(_container: &BoundDirectory) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "private staged artifact containers are unsupported on this platform",
+    ))
+}
+
+#[cfg(unix)]
+fn promotion_filesystem_id(file: &File) -> io::Result<u64> {
+    use std::os::unix::fs::MetadataExt;
+
+    Ok(file.metadata()?.dev())
+}
+
+#[cfg(windows)]
+fn promotion_filesystem_id(file: &File) -> io::Result<u64> {
+    Ok(windows_file_identity(file)?.0)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn promotion_filesystem_id(_file: &File) -> io::Result<u64> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "staged artifact filesystem identity is unsupported on this platform",
+    ))
+}
+
+fn require_same_promotion_filesystem(
+    source_container: &BoundDirectory,
+    staged: &BoundDirectory,
+    destination_parent: &BoundDirectory,
+) -> io::Result<()> {
+    let expected = promotion_filesystem_id(destination_parent.handle.as_file())?;
+    for directory in [source_container, staged] {
+        if promotion_filesystem_id(directory.handle.as_file())? != expected {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "private artifact tree and public parent must be on the same filesystem",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn promotion_private_prefixes(paths: &[&Path]) -> io::Result<Vec<Vec<u8>>> {
+    let mut prefixes = Vec::new();
+    for path in paths {
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+
+            let raw = path.as_os_str().as_bytes();
+            prefixes.push(raw.to_vec());
+            prefixes.push(
+                raw.iter()
+                    .map(|byte| if *byte == b'\\' { b'/' } else { *byte })
+                    .collect(),
+            );
+            prefixes.push(
+                raw.iter()
+                    .map(|byte| if *byte == b'/' { b'\\' } else { *byte })
+                    .collect(),
+            );
+        }
+
+        // Public JSON and diagnostics use a UTF-8 spelling. Keep scanning that representation on
+        // every platform, including the replacement-character spelling of an otherwise non-UTF-8
+        // OS path, while Unix additionally scans the lossless raw bytes above.
+        let value = path.to_string_lossy();
+        let mut candidates = Vec::new();
+        append_private_utf8_spellings(&mut candidates, &value);
+        if let Some(leaf) = path.file_name() {
+            let leaf = leaf.to_string_lossy();
+            if private_leaf_token(&leaf) {
+                candidates.push(leaf.into_owned());
+            }
+        }
+        #[cfg(windows)]
+        for alias in windows_short_path_aliases(path)? {
+            append_private_utf8_spellings(&mut candidates, &alias.to_string_lossy());
+        }
+        for candidate in candidates {
+            if !candidate.is_empty() {
+                prefixes.push(candidate.as_bytes().to_vec());
+                let json = serde_json::to_string(&candidate).map_err(io::Error::other)?;
+                prefixes.push(json[1..json.len() - 1].as_bytes().to_vec());
+            }
+        }
+    }
+    prefixes.sort();
+    prefixes.dedup();
+    Ok(prefixes)
+}
+
+fn append_private_utf8_spellings(candidates: &mut Vec<String>, value: &str) {
+    candidates.push(value.to_owned());
+    candidates.push(value.replace('\\', "/"));
+    candidates.push(value.replace('/', "\\"));
+}
+
+fn private_leaf_token(value: &str) -> bool {
+    let Some(nonce) = value.strip_prefix(".pliego-runtime-") else {
+        return false;
+    };
+    matches!(nonce.len(), 32 | 64) &&
+        nonce
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+fn validate_promotion_tree(
+    root: &BoundDirectory,
+    forbidden_prefixes: &[Vec<u8>],
+) -> io::Result<PromotionTreeClosure> {
+    root.require_current()?;
+    let filesystem = promotion_filesystem_id(root.handle.as_file())?;
+    let mut closure = PromotionTreeClosure {
+        entries: 0,
+        bytes: 0,
+        artifacts: Vec::new(),
+    };
+    validate_promotion_directory(root, "", 0, filesystem, forbidden_prefixes, &mut closure)?;
+    root.require_current()?;
+    Ok(closure)
+}
+
+fn validate_promotion_directory(
+    directory: &BoundDirectory,
+    relative_parent: &str,
+    depth: usize,
+    filesystem: u64,
+    forbidden_prefixes: &[Vec<u8>],
+    closure: &mut PromotionTreeClosure,
+) -> io::Result<()> {
+    if depth > MAX_PROMOTION_TREE_DEPTH {
+        return Err(staged_artifact_limit_error(
+            StagedArtifactLimit::Depth,
+            MAX_PROMOTION_TREE_DEPTH as u64,
+        ));
+    }
+    directory.require_current()?;
+    if promotion_filesystem_id(directory.handle.as_file())? != filesystem {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "staged artifact tree crosses a filesystem boundary: {}",
+                directory.requested_path.display()
+            ),
+        ));
+    }
+
+    let mut entries = Vec::new();
+    for entry in std::fs::read_dir(&directory.requested_path)? {
+        entries.push(entry?);
+        if entries.len() as u64 > MAX_PROMOTION_TREE_ENTRIES {
+            return Err(staged_artifact_limit_error(
+                StagedArtifactLimit::Entries,
+                MAX_PROMOTION_TREE_ENTRIES,
+            ));
+        }
+    }
+    entries.sort_by_key(|entry| entry.file_name());
+
+    for entry in entries {
+        closure.entries = closure.entries.checked_add(1).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "staged artifact entry count overflow",
+            )
+        })?;
+        if closure.entries > MAX_PROMOTION_TREE_ENTRIES {
+            return Err(staged_artifact_limit_error(
+                StagedArtifactLimit::Entries,
+                MAX_PROMOTION_TREE_ENTRIES,
+            ));
+        }
+        let name = entry.file_name();
+        let name = name.to_str().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "staged artifact names must be valid UTF-8",
+            )
+        })?;
+        let relative = if relative_parent.is_empty() {
+            name.to_owned()
+        } else {
+            format!("{relative_parent}/{name}")
+        };
+        let path = entry.path();
+        let metadata = std::fs::symlink_metadata(&path)?;
+        if path_metadata_is_alias(&metadata) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "staged artifact tree may not contain symlinks or reparse points: {}",
+                    path.display()
+                ),
+            ));
+        }
+        if metadata.is_dir() {
+            let child = BoundDirectory::open(path)?;
+            if promotion_filesystem_id(child.handle.as_file())? != filesystem {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "staged artifact tree crosses a filesystem boundary: {}",
+                        child.requested_path.display()
+                    ),
+                ));
+            }
+            closure.artifacts.push(PromotionTreeEntry {
+                path: relative.clone(),
+                kind: PromotionTreeEntryKind::Directory,
+            });
+            validate_promotion_directory(
+                &child,
+                &relative,
+                depth + 1,
+                filesystem,
+                forbidden_prefixes,
+                closure,
+            )?;
+            child.require_current()?;
+            continue;
+        }
+        if !metadata.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "staged artifact tree may only contain regular files and directories: {}",
+                    path.display()
+                ),
+            ));
+        }
+
+        let file = File::open(&path)?;
+        let handle = Handle::from_file(file)?;
+        if !path_matches_handle(&path, &handle)? {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "staged artifact path changed while opening: {}",
+                    path.display()
+                ),
+            ));
+        }
+        let before = handle.as_file().metadata()?;
+        require_single_link_regular_file(handle.as_file(), &before, &path)?;
+        if promotion_filesystem_id(handle.as_file())? != filesystem {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "staged artifact file is on another filesystem: {}",
+                    path.display()
+                ),
+            ));
+        }
+        let next_bytes = closure.bytes.checked_add(before.len()).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "staged artifact byte count overflow",
+            )
+        })?;
+        if next_bytes > MAX_PROMOTION_TREE_BYTES {
+            return Err(staged_artifact_limit_error(
+                StagedArtifactLimit::AggregateBytes,
+                MAX_PROMOTION_TREE_BYTES,
+            ));
+        }
+        let (sha256, bytes) =
+            hash_promotion_file(handle.as_file(), &path, before.len(), forbidden_prefixes)?;
+        let after = handle.as_file().metadata()?;
+        require_single_link_regular_file(handle.as_file(), &after, &path)?;
+        if bytes != before.len() ||
+            after.len() != before.len() ||
+            !path_matches_handle(&path, &handle)?
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "staged artifact changed during validation: {}",
+                    path.display()
+                ),
+            ));
+        }
+        closure.bytes = next_bytes;
+        closure.artifacts.push(PromotionTreeEntry {
+            path: relative,
+            kind: PromotionTreeEntryKind::File { sha256, bytes },
+        });
+    }
+    directory.require_current()
+}
+
+#[cfg(unix)]
+fn require_single_link_regular_file(
+    _file: &File,
+    metadata: &std::fs::Metadata,
+    path: &Path,
+) -> io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    if metadata.is_file() && metadata.nlink() == 1 {
+        return Ok(());
+    }
+    Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!(
+            "staged artifact must be a single-link regular file: {}",
+            path.display()
+        ),
+    ))
+}
+
+#[cfg(windows)]
+fn require_single_link_regular_file(
+    file: &File,
+    metadata: &std::fs::Metadata,
+    path: &Path,
+) -> io::Result<()> {
+    use std::mem::size_of;
+    use std::os::windows::io::AsRawHandle;
+
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_STANDARD_INFO, FileStandardInfo, GetFileInformationByHandleEx,
+    };
+
+    let mut information = FILE_STANDARD_INFO::default();
+    // SAFETY: the file handle remains live and the output buffer has the exact advertised size.
+    let succeeded = unsafe {
+        GetFileInformationByHandleEx(
+            file.as_raw_handle() as _,
+            FileStandardInfo,
+            (&raw mut information).cast(),
+            size_of::<FILE_STANDARD_INFO>() as u32,
+        )
+    };
+    if succeeded == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if metadata.is_file() && information.NumberOfLinks == 1 {
+        return Ok(());
+    }
+    Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!(
+            "staged artifact must be a single-link regular file: {}",
+            path.display()
+        ),
+    ))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn require_single_link_regular_file(
+    _file: &File,
+    _metadata: &std::fs::Metadata,
+    _path: &Path,
+) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "regular-file link-count validation is unsupported on this platform",
+    ))
+}
+
+fn hash_promotion_file(
+    file: &File,
+    path: &Path,
+    expected_bytes: u64,
+    forbidden_prefixes: &[Vec<u8>],
+) -> io::Result<(String, u64)> {
+    let mut hasher = Sha256::new();
+    let mut bytes = 0_u64;
+    let mut tail = Vec::new();
+    let longest_prefix = forbidden_prefixes.iter().map(Vec::len).max().unwrap_or(0);
+    let scans_decoded_json = matches!(
+        path.extension().and_then(OsStr::to_str),
+        Some("json" | "jsonl")
+    );
+    let mut json_scanner =
+        scans_decoded_json.then(|| JsonPrivatePathScanner::new(forbidden_prefixes));
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let remaining = expected_bytes.saturating_sub(bytes);
+        let bounded_read = remaining.saturating_add(1).min(buffer.len() as u64) as usize;
+        let read = read_open_file_at(file, &mut buffer[..bounded_read], bytes)?;
+        if read == 0 {
+            break;
+        }
+        if bytes.saturating_add(read as u64) > expected_bytes {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("staged artifact grew during validation: {}", path.display()),
+            ));
+        }
+        let chunk = &buffer[..read];
+        hasher.update(chunk);
+        let mut searchable = Vec::with_capacity(tail.len() + chunk.len());
+        searchable.extend_from_slice(&tail);
+        searchable.extend_from_slice(chunk);
+        if forbidden_prefixes
+            .iter()
+            .any(|prefix| contains_private_fragment_bytes(&searchable, prefix))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "staged artifact contains a private staging path: {}",
+                    path.display()
+                ),
+            ));
+        }
+        if let Some(scanner) = &mut json_scanner {
+            scanner.feed(chunk, path)?;
+        }
+        let retain = longest_prefix.saturating_sub(1).min(searchable.len());
+        tail.clear();
+        tail.extend_from_slice(&searchable[searchable.len() - retain..]);
+        bytes = bytes.checked_add(read as u64).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "staged artifact byte count overflow",
+            )
+        })?;
+    }
+    if let Some(scanner) = json_scanner {
+        scanner.finish(path)?;
+    }
+    Ok((
+        format!("sha256:{}", lowercase_hex(&hasher.finalize())),
+        bytes,
+    ))
+}
+
+struct JsonPrivatePathScanner<'a> {
+    forbidden_prefixes: &'a [Vec<u8>],
+    longest_prefix: usize,
+    tail: std::collections::VecDeque<u8>,
+    in_string: bool,
+    escaped: bool,
+    unicode_digits: u8,
+    unicode_value: u16,
+    pending_high_surrogate: Option<u16>,
+}
+
+impl<'a> JsonPrivatePathScanner<'a> {
+    fn new(forbidden_prefixes: &'a [Vec<u8>]) -> Self {
+        Self {
+            forbidden_prefixes,
+            longest_prefix: forbidden_prefixes.iter().map(Vec::len).max().unwrap_or(0),
+            tail: std::collections::VecDeque::new(),
+            in_string: false,
+            escaped: false,
+            unicode_digits: 0,
+            unicode_value: 0,
+            pending_high_surrogate: None,
+        }
+    }
+
+    fn feed(&mut self, bytes: &[u8], path: &Path) -> io::Result<()> {
+        for byte in bytes {
+            if self.unicode_digits != 0 {
+                let digit = match byte {
+                    b'0'..=b'9' => u16::from(*byte - b'0'),
+                    b'a'..=b'f' => u16::from(*byte - b'a' + 10),
+                    b'A'..=b'F' => u16::from(*byte - b'A' + 10),
+                    _ => return Err(invalid_json_escape(path)),
+                };
+                self.unicode_value = (self.unicode_value << 4) | digit;
+                self.unicode_digits -= 1;
+                if self.unicode_digits == 0 {
+                    self.append_unicode_escape(path)?;
+                    self.escaped = false;
+                }
+                continue;
+            }
+            if !self.in_string {
+                if *byte == b'"' {
+                    self.in_string = true;
+                    self.tail.clear();
+                    self.pending_high_surrogate = None;
+                }
+                continue;
+            }
+            if self.escaped {
+                match byte {
+                    b'"' | b'\\' | b'/' => self.append_decoded(&[*byte], path)?,
+                    b'b' => self.append_decoded(&[0x08], path)?,
+                    b'f' => self.append_decoded(&[0x0c], path)?,
+                    b'n' => self.append_decoded(b"\n", path)?,
+                    b'r' => self.append_decoded(b"\r", path)?,
+                    b't' => self.append_decoded(b"\t", path)?,
+                    b'u' => {
+                        self.unicode_digits = 4;
+                        self.unicode_value = 0;
+                        continue;
+                    },
+                    _ => return Err(invalid_json_escape(path)),
+                }
+                self.escaped = false;
+                continue;
+            }
+            match byte {
+                b'\\' => self.escaped = true,
+                b'"' => {
+                    if self.pending_high_surrogate.is_some() {
+                        return Err(invalid_json_escape(path));
+                    }
+                    self.in_string = false;
+                    self.tail.clear();
+                },
+                0x00..=0x1f => return Err(invalid_json_escape(path)),
+                _ => self.append_decoded(&[*byte], path)?,
+            }
+        }
+        Ok(())
+    }
+
+    fn append_unicode_escape(&mut self, path: &Path) -> io::Result<()> {
+        let code = self.unicode_value;
+        self.unicode_value = 0;
+        match code {
+            0xd800..=0xdbff => {
+                if self.pending_high_surrogate.replace(code).is_some() {
+                    return Err(invalid_json_escape(path));
+                }
+                Ok(())
+            },
+            0xdc00..=0xdfff => {
+                let high = self
+                    .pending_high_surrogate
+                    .take()
+                    .ok_or_else(|| invalid_json_escape(path))?;
+                let scalar =
+                    0x10000 + ((u32::from(high) - 0xd800) << 10) + (u32::from(code) - 0xdc00);
+                self.append_scalar(scalar, path)
+            },
+            _ => {
+                if self.pending_high_surrogate.is_some() {
+                    return Err(invalid_json_escape(path));
+                }
+                self.append_scalar(u32::from(code), path)
+            },
+        }
+    }
+
+    fn append_scalar(&mut self, scalar: u32, path: &Path) -> io::Result<()> {
+        let value = char::from_u32(scalar).ok_or_else(|| invalid_json_escape(path))?;
+        let mut encoded = [0_u8; 4];
+        self.append_decoded(value.encode_utf8(&mut encoded).as_bytes(), path)
+    }
+
+    fn append_decoded(&mut self, bytes: &[u8], path: &Path) -> io::Result<()> {
+        for byte in bytes {
+            self.tail.push_back(*byte);
+            if self.tail.len() > self.longest_prefix {
+                self.tail.pop_front();
+            }
+            if self
+                .forbidden_prefixes
+                .iter()
+                .any(|prefix| deque_ends_with_private_fragment(&self.tail, prefix))
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "staged JSON artifact contains a decoded private staging path: {}",
+                        path.display()
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn finish(self, path: &Path) -> io::Result<()> {
+        if self.in_string ||
+            self.escaped ||
+            self.unicode_digits != 0 ||
+            self.pending_high_surrogate.is_some()
+        {
+            return Err(invalid_json_escape(path));
+        }
+        Ok(())
+    }
+}
+
+fn contains_private_fragment_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() || needle.len() > haystack.len() {
+        return false;
+    }
+    let first = needle[0];
+    let mut offset = 0;
+    while offset + needle.len() <= haystack.len() {
+        let last_start = haystack.len() - needle.len();
+        let Some(relative) = haystack[offset..=last_start]
+            .iter()
+            .position(|byte| *byte == first || cfg!(windows) && byte.eq_ignore_ascii_case(&first))
+        else {
+            return false;
+        };
+        offset += relative;
+        let candidate = &haystack[offset..offset + needle.len()];
+        if candidate == needle || cfg!(windows) && candidate.eq_ignore_ascii_case(needle) {
+            return true;
+        }
+        offset += 1;
+    }
+    false
+}
+
+fn deque_ends_with_private_fragment(
+    haystack: &std::collections::VecDeque<u8>,
+    needle: &[u8],
+) -> bool {
+    !needle.is_empty() &&
+        needle.len() <= haystack.len() &&
+        haystack
+            .iter()
+            .rev()
+            .zip(needle.iter().rev())
+            .all(|(candidate, expected)| {
+                candidate == expected || cfg!(windows) && candidate.eq_ignore_ascii_case(expected)
+            })
+}
+
+fn invalid_json_escape(path: &Path) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!(
+            "staged JSON artifact has invalid string escaping: {}",
+            path.display()
+        ),
+    )
+}
+
+#[cfg(unix)]
+fn require_child_absent(parent: &BoundDirectory, name: &OsStr, label: &str) -> io::Result<()> {
+    use std::ffi::CString;
+    use std::mem::MaybeUninit;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::OsStrExt;
+
+    parent.require_current()?;
+    let name = CString::new(name.as_bytes()).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{label} contains a NUL byte"),
+        )
+    })?;
+    let mut metadata = MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: the parent descriptor and C string remain live; metadata points to writable storage.
+    let result = unsafe {
+        libc::fstatat(
+            parent.handle.as_file().as_raw_fd(),
+            name.as_ptr(),
+            metadata.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if result == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("{label} already exists"),
+        ));
+    }
+    let error = io::Error::last_os_error();
+    if error.kind() == io::ErrorKind::NotFound {
+        Ok(())
+    } else {
+        Err(error)
+    }
+}
+
+#[cfg(windows)]
+fn require_child_absent(parent: &BoundDirectory, name: &OsStr, label: &str) -> io::Result<()> {
+    parent.require_current()?;
+    match std::fs::symlink_metadata(parent.requested_path.join(name)) {
+        Ok(_) => Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("{label} already exists"),
+        )),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn require_child_absent(_parent: &BoundDirectory, _name: &OsStr, _label: &str) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "relative child validation is unsupported on this platform",
+    ))
+}
+
+#[cfg(unix)]
+fn remove_empty_bound_directory(
+    directory: &BoundDirectory,
+    parent: &BoundDirectory,
+    name: &OsStr,
+) -> io::Result<()> {
+    use std::ffi::CString;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::OsStrExt;
+
+    directory.require_current()?;
+    parent.require_current()?;
+    let name = CString::new(name.as_bytes()).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "private container name contains a NUL byte",
+        )
+    })?;
+    // SAFETY: the held parent descriptor and normal basename remain live for the unlinkat call.
+    let result = unsafe {
+        libc::unlinkat(
+            parent.handle.as_file().as_raw_fd(),
+            name.as_ptr(),
+            libc::AT_REMOVEDIR,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(windows)]
+fn remove_empty_bound_directory(
+    directory: &BoundDirectory,
+    parent: &BoundDirectory,
+    _name: &OsStr,
+) -> io::Result<()> {
+    use std::mem::size_of;
+    use std::os::windows::io::AsRawHandle;
+
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_DISPOSITION_INFO, FileDispositionInfo, SetFileInformationByHandle,
+    };
+
+    if !directory.movable {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "private container was not opened with Windows delete access",
+        ));
+    }
+    directory.require_current()?;
+    parent.require_current()?;
+    let disposition = FILE_DISPOSITION_INFO { DeleteFile: true };
+    // SAFETY: the identity-bound directory handle remains live and the disposition buffer has
+    // the exact advertised size. Windows rejects this operation while the directory is non-empty.
+    let succeeded = unsafe {
+        SetFileInformationByHandle(
+            directory.handle.as_file().as_raw_handle() as _,
+            FileDispositionInfo,
+            (&raw const disposition).cast(),
+            size_of::<FILE_DISPOSITION_INFO>() as u32,
+        )
+    };
+    if succeeded == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn remove_empty_bound_directory(
+    _directory: &BoundDirectory,
+    _parent: &BoundDirectory,
+    _name: &OsStr,
+) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "identity-bound private container removal is unsupported on this platform",
+    ))
+}
+
+#[cfg(target_os = "linux")]
+fn rename_bound_directory_no_replace(
+    _source: &BoundDirectory,
+    source_parent: &BoundDirectory,
+    source_name: &OsStr,
+    destination_parent: &BoundDirectory,
+    destination_name: &OsStr,
+) -> io::Result<()> {
+    use std::ffi::CString;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::OsStrExt;
+
+    let source_name = CString::new(source_name.as_bytes()).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "staging name contains a NUL byte",
+        )
+    })?;
+    let destination_name = CString::new(destination_name.as_bytes()).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "public name contains a NUL byte",
+        )
+    })?;
+    // SAFETY: both names and held parent descriptors remain live for the syscall. RENAME_NOREPLACE
+    // makes destination creation exclusive; ENOSYS or unsupported-filesystem errors fail closed.
+    let result = unsafe {
+        libc::renameat2(
+            source_parent.handle.as_file().as_raw_fd(),
+            source_name.as_ptr(),
+            destination_parent.handle.as_file().as_raw_fd(),
+            destination_name.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn rename_bound_directory_no_replace(
+    _source: &BoundDirectory,
+    source_parent: &BoundDirectory,
+    source_name: &OsStr,
+    destination_parent: &BoundDirectory,
+    destination_name: &OsStr,
+) -> io::Result<()> {
+    use std::ffi::CString;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::OsStrExt;
+
+    let source_name = CString::new(source_name.as_bytes()).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "staging name contains a NUL byte",
+        )
+    })?;
+    let destination_name = CString::new(destination_name.as_bytes()).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "public name contains a NUL byte",
+        )
+    })?;
+    // SAFETY: both names and held parent descriptors remain live for the call. RENAME_EXCL
+    // forbids replacement and there is intentionally no path-based fallback.
+    let result = unsafe {
+        libc::renameatx_np(
+            source_parent.handle.as_file().as_raw_fd(),
+            source_name.as_ptr(),
+            destination_parent.handle.as_file().as_raw_fd(),
+            destination_name.as_ptr(),
+            libc::RENAME_EXCL,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(windows)]
+fn rename_bound_directory_no_replace(
+    source: &BoundDirectory,
+    _source_parent: &BoundDirectory,
+    _source_name: &OsStr,
+    destination_parent: &BoundDirectory,
+    destination_name: &OsStr,
+) -> io::Result<()> {
+    use std::mem::{offset_of, size_of};
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::io::AsRawHandle;
+
+    use windows_sys::Wdk::Storage::FileSystem::{
+        FILE_RENAME_INFORMATION, FileRenameInformation, NtSetInformationFile,
+    };
+    use windows_sys::Win32::Foundation::RtlNtStatusToDosError;
+    use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
+
+    if !source.movable {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "staged directory was not opened with Windows move access",
+        ));
+    }
+    let destination_name: Vec<u16> = destination_name.encode_wide().collect();
+    if destination_name.contains(&0) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "public name contains an embedded NUL",
+        ));
+    }
+    let name_bytes = destination_name
+        .len()
+        .checked_mul(size_of::<u16>())
+        .and_then(|bytes| u32::try_from(bytes).ok())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "public name is too long"))?;
+    let information_bytes = offset_of!(FILE_RENAME_INFORMATION, FileName)
+        .checked_add(name_bytes as usize)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "public name is too long"))?
+        .max(size_of::<FILE_RENAME_INFORMATION>());
+    let information_length = u32::try_from(information_bytes)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "public name is too long"))?;
+    let word_count = information_bytes.div_ceil(size_of::<usize>());
+    let mut storage = vec![0_usize; word_count];
+    let information = storage.as_mut_ptr().cast::<FILE_RENAME_INFORMATION>();
+
+    // SAFETY: storage is aligned and sized for the fixed header plus UTF-16 tail. The movable
+    // source handle and destination-parent root handle remain owned for the whole call.
+    let status = unsafe {
+        (*information).Anonymous.ReplaceIfExists = false;
+        (*information).RootDirectory = destination_parent.handle.as_file().as_raw_handle() as _;
+        (*information).FileNameLength = name_bytes;
+        std::ptr::copy_nonoverlapping(
+            destination_name.as_ptr(),
+            std::ptr::addr_of_mut!((*information).FileName).cast::<u16>(),
+            destination_name.len(),
+        );
+        let mut io_status = IO_STATUS_BLOCK::default();
+        NtSetInformationFile(
+            source.handle.as_file().as_raw_handle() as _,
+            &mut io_status,
+            information.cast(),
+            information_length,
+            FileRenameInformation,
+        )
+    };
+    if status < 0 {
+        // SAFETY: this is a pure status-code conversion.
+        let windows_error = unsafe { RtlNtStatusToDosError(status) };
+        return Err(io::Error::from_raw_os_error(windows_error as i32));
+    }
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+fn rename_bound_directory_no_replace(
+    _source: &BoundDirectory,
+    _source_parent: &BoundDirectory,
+    _source_name: &OsStr,
+    _destination_parent: &BoundDirectory,
+    _destination_name: &OsStr,
+) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "atomic no-replace artifact promotion is unsupported on this platform",
+    ))
 }
 
 impl OwnedFile {
@@ -473,6 +2095,7 @@ impl PreparedDocumentPdf {
 }
 
 impl PreparedBundle {
+    #[cfg(test)]
     pub(crate) fn path(&self) -> &Path {
         &self.file.as_ref().expect("prepared bundle is present").path
     }
@@ -545,12 +2168,18 @@ impl Drop for PreparedBundle {
 impl PublicationJournal {
     fn begin(
         artifact_root: &BoundDirectory,
+        logical_artifact_root: &Path,
         render_id: &str,
         request_fingerprint: &str,
         output: &Path,
     ) -> io::Result<Self> {
-        let (plan, output_parent) =
-            Self::expected_plan(artifact_root, render_id, request_fingerprint, output)?;
+        let (plan, output_parent) = Self::expected_plan(
+            artifact_root,
+            logical_artifact_root,
+            render_id,
+            request_fingerprint,
+            output,
+        )?;
         let publication_directory = artifact_root
             .requested_path
             .join(PUBLICATION_DIRECTORY_NAME);
@@ -562,12 +2191,18 @@ impl PublicationJournal {
 
     fn resume(
         artifact_root: &BoundDirectory,
+        logical_artifact_root: &Path,
         render_id: &str,
         request_fingerprint: &str,
         output: &Path,
     ) -> io::Result<Self> {
-        let (plan, output_parent) =
-            Self::expected_plan(artifact_root, render_id, request_fingerprint, output)?;
+        let (plan, output_parent) = Self::expected_plan(
+            artifact_root,
+            logical_artifact_root,
+            render_id,
+            request_fingerprint,
+            output,
+        )?;
         let directory = BoundDirectory::open(
             artifact_root
                 .requested_path
@@ -579,6 +2214,7 @@ impl PublicationJournal {
 
     fn expected_plan(
         artifact_root: &BoundDirectory,
+        logical_artifact_root: &Path,
         render_id: &str,
         request_fingerprint: &str,
         output: &Path,
@@ -607,7 +2243,12 @@ impl PublicationJournal {
                 format!("output path is not valid UTF-8: {}", output.display()),
             )
         })?;
-        let output_parent = BoundDirectory::open(output_parent_path)?;
+        let logical_artifact_root = std::path::absolute(logical_artifact_root)?;
+        let output_parent = if output_parent_path == logical_artifact_root {
+            artifact_root.try_clone()?
+        } else {
+            BoundDirectory::open(output_parent_path)?
+        };
         let artifact_root_identity = artifact_root.identity()?;
         let output_parent_identity = output_parent.identity()?;
         let transaction_id = publication_transaction_id(
@@ -625,7 +2266,7 @@ impl PublicationJournal {
                 transaction_id,
                 render_id: render_id.to_owned(),
                 request_fingerprint: request_fingerprint.to_owned(),
-                artifact_root: receipt_path(&artifact_root.requested_path)?,
+                artifact_root: receipt_path(&logical_artifact_root)?,
                 artifact_root_identity,
                 requested_output: requested_output.to_owned(),
                 output: receipt_path(&output)?,
@@ -840,26 +2481,7 @@ impl PublicationJournal {
                 "prepared output does not match the publication plan",
             ));
         }
-        if outcome_bytes.len() as u64 > MAX_PUBLICATION_OUTCOME_BYTES {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "publication outcome exceeds the {MAX_PUBLICATION_OUTCOME_BYTES}-byte limit"
-                ),
-            ));
-        }
-        if !outcome_bytes.ends_with(b"\n") {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "publication outcome must end with a newline",
-            ));
-        }
-        serde_json::from_slice::<serde_json::Value>(outcome_bytes).map_err(|error| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("publication outcome is invalid JSON: {error}"),
-            )
-        })?;
+        validate_publication_outcome_bytes(outcome_bytes)?;
         let outcome_sha256 = write_immutable_bytes(
             &self.directory,
             PUBLICATION_OUTCOME_FILE_NAME,
@@ -1128,6 +2750,7 @@ impl LocalDocument {
 #[derive(Debug)]
 pub struct SessionArtifacts {
     directory: PathBuf,
+    public_directory: PathBuf,
     directory_binding: BoundDirectory,
     render_id: String,
 }
@@ -1153,6 +2776,15 @@ impl SessionArtifacts {
         directory: impl AsRef<Path>,
         render_id: impl Into<String>,
     ) -> io::Result<Self> {
+        let directory = directory.as_ref();
+        Self::create_staged_with_render_id(directory, directory, render_id)
+    }
+
+    pub(crate) fn create_staged_with_render_id(
+        directory: impl AsRef<Path>,
+        public_directory: impl AsRef<Path>,
+        render_id: impl Into<String>,
+    ) -> io::Result<Self> {
         let requested_directory = std::path::absolute(directory.as_ref())?;
         let requested_parent = requested_directory.parent().ok_or_else(|| {
             io::Error::new(
@@ -1171,6 +2803,7 @@ impl SessionArtifacts {
         create_private_directory(&requested_directory)?;
         let directory_binding = BoundDirectory::open(requested_directory)?;
         let directory = directory_binding.requested_path.clone();
+        let public_directory = std::path::absolute(public_directory.as_ref())?;
         create_private_directory(&directory.join("resources"))?;
         for name in ["console.jsonl", "resources.jsonl", "session-state.jsonl"] {
             private_file_options()
@@ -1180,6 +2813,7 @@ impl SessionArtifacts {
         }
         Ok(Self {
             directory,
+            public_directory,
             directory_binding,
             render_id,
         })
@@ -1187,6 +2821,15 @@ impl SessionArtifacts {
 
     pub(crate) fn open_for_publication_recovery(
         directory: impl AsRef<Path>,
+        render_id: impl Into<String>,
+    ) -> io::Result<Self> {
+        let directory = directory.as_ref();
+        Self::open_staged_for_publication(directory, directory, render_id)
+    }
+
+    pub(crate) fn open_staged_for_publication(
+        directory: impl AsRef<Path>,
+        public_directory: impl AsRef<Path>,
         render_id: impl Into<String>,
     ) -> io::Result<Self> {
         let requested_directory = std::path::absolute(directory.as_ref())?;
@@ -1206,7 +2849,9 @@ impl SessionArtifacts {
         }
         let directory_binding = BoundDirectory::open(requested_directory)?;
         let directory = directory_binding.requested_path.clone();
+        let public_directory = std::path::absolute(public_directory.as_ref())?;
         Ok(Self {
+            public_directory,
             directory,
             directory_binding,
             render_id,
@@ -1215,6 +2860,113 @@ impl SessionArtifacts {
 
     pub fn directory(&self) -> &Path {
         &self.directory
+    }
+
+    pub(crate) fn public_directory(&self) -> &Path {
+        &self.public_directory
+    }
+
+    pub(crate) fn artifact_identity(&self, name: &str) -> io::Result<(String, u64)> {
+        self.require_current()?;
+        let path = self.artifact_path(name)?;
+        let metadata = std::fs::symlink_metadata(&path)?;
+        if path_metadata_is_alias(&metadata) || !metadata.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("session artifact is not a regular file: {}", path.display()),
+            ));
+        }
+        let file = File::open(&path)?;
+        let handle = Handle::from_file(file)?;
+        if !path_matches_handle(&path, &handle)? {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "session artifact path changed while opening: {}",
+                    path.display()
+                ),
+            ));
+        }
+        let identity = hash_open_file(handle.as_file(), &path)?;
+        if !path_matches_handle(&path, &handle)? {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "session artifact path changed while hashing: {}",
+                    path.display()
+                ),
+            ));
+        }
+        self.require_current()?;
+        Ok(identity)
+    }
+
+    pub(crate) fn read_json_artifact(
+        &self,
+        name: &str,
+        expected_sha256: &str,
+        expected_bytes: u64,
+    ) -> io::Result<serde_json::Value> {
+        let path = self.artifact_path(name)?;
+        if expected_bytes > MAX_CONTROL_JSON_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "session control JSON exceeds the {MAX_CONTROL_JSON_BYTES}-byte limit: {}",
+                    path.display()
+                ),
+            ));
+        }
+        let (sha256, bytes) = self.artifact_identity(name)?;
+        if sha256 != expected_sha256 || bytes != expected_bytes {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("session artifact identity changed: {}", path.display()),
+            ));
+        }
+        let bytes = std::fs::read(&path)?;
+        if bytes.len() as u64 != expected_bytes || receipt_sha256(&bytes) != expected_sha256 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("session artifact changed while reading: {}", path.display()),
+            ));
+        }
+        self.require_current()?;
+        serde_json::from_slice(&bytes).map_err(io::Error::other)
+    }
+
+    pub(crate) fn require_session_state_append_access(&self) -> io::Result<()> {
+        self.require_current()?;
+        let path = self.artifact_path("session-state.jsonl")?;
+        let metadata = std::fs::symlink_metadata(&path)?;
+        if path_metadata_is_alias(&metadata) || !metadata.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("session state is not a regular file: {}", path.display()),
+            ));
+        }
+        let file = OpenOptions::new().append(true).open(&path)?;
+        let handle = Handle::from_file(file)?;
+        if !path_matches_handle(&path, &handle)? {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("session state changed while opening: {}", path.display()),
+            ));
+        }
+        self.require_current()
+    }
+
+    fn artifact_path(&self, name: &str) -> io::Result<PathBuf> {
+        let path = Path::new(name);
+        if path.components().count() != 1 ||
+            !matches!(path.components().next(), Some(Component::Normal(_)))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "session artifact name must be one normal path component",
+            ));
+        }
+        Ok(self.directory.join(path))
     }
 
     pub fn render_id(&self) -> String {
@@ -1233,6 +2985,7 @@ impl SessionArtifacts {
         self.require_current()?;
         PublicationJournal::begin(
             &self.directory_binding,
+            &self.public_directory,
             &self.render_id,
             request_fingerprint,
             output.as_ref(),
@@ -1247,6 +3000,7 @@ impl SessionArtifacts {
         self.require_current()?;
         PublicationJournal::resume(
             &self.directory_binding,
+            &self.public_directory,
             &self.render_id,
             request_fingerprint,
             output.as_ref(),
@@ -1745,12 +3499,12 @@ fn require_path_without_aliases(path: &Path) -> io::Result<()> {
 }
 
 #[cfg(not(windows))]
-fn path_metadata_is_alias(metadata: &std::fs::Metadata) -> bool {
+pub(crate) fn path_metadata_is_alias(metadata: &std::fs::Metadata) -> bool {
     metadata.file_type().is_symlink()
 }
 
 #[cfg(windows)]
-fn path_metadata_is_alias(metadata: &std::fs::Metadata) -> bool {
+pub(crate) fn path_metadata_is_alias(metadata: &std::fs::Metadata) -> bool {
     use std::os::windows::fs::MetadataExt;
 
     use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
@@ -2583,16 +4337,161 @@ fn lowercase_hex(bytes: &[u8]) -> String {
 }
 
 #[cfg(unix)]
-fn create_private_directory(path: &Path) -> io::Result<()> {
+pub(crate) fn create_private_directory(path: &Path) -> io::Result<()> {
     use std::os::unix::fs::DirBuilderExt;
 
     let mut builder = std::fs::DirBuilder::new();
     builder.mode(0o700);
-    builder.create(path)
+    builder.create(path)?;
+    #[cfg(target_os = "macos")]
+    {
+        let validation = File::open(path).and_then(|file| require_no_macos_extended_acl(&file));
+        if let Err(error) = validation {
+            let _ = std::fs::remove_dir(path);
+            return Err(error);
+        }
+    }
+    Ok(())
 }
 
-#[cfg(not(unix))]
-fn create_private_directory(path: &Path) -> io::Result<()> {
+#[cfg(windows)]
+fn windows_long_path(path: &Path) -> io::Result<Vec<u16>> {
+    use std::os::windows::ffi::OsStrExt;
+
+    const LEGACY_CREATE_DIRECTORY_LIMIT: usize = 248;
+    const SEP: u16 = b'\\' as u16;
+    const QUESTION: u16 = b'?' as u16;
+    const DOT: u16 = b'.' as u16;
+    const U: u16 = b'U' as u16;
+    const N: u16 = b'N' as u16;
+    const C: u16 = b'C' as u16;
+    const VERBATIM_PREFIX: &[u16] = &[SEP, SEP, QUESTION, SEP];
+    const NT_PREFIX: &[u16] = &[SEP, QUESTION, QUESTION, SEP];
+    const DEVICE_PREFIX: &[u16] = &[SEP, SEP, DOT, SEP];
+    const UNC_PREFIX: &[u16] = &[SEP, SEP, QUESTION, SEP, U, N, C, SEP];
+
+    let absolute = std::path::absolute(path)?;
+    let mut path: Vec<u16> = absolute.as_os_str().encode_wide().collect();
+    if path.contains(&0) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "private directory path contains an embedded NUL",
+        ));
+    }
+    if path.starts_with(VERBATIM_PREFIX) || path.starts_with(NT_PREFIX) {
+        path.push(0);
+        return Ok(path);
+    }
+    if path.len() + 1 < LEGACY_CREATE_DIRECTORY_LIMIT {
+        path.push(0);
+        return Ok(path);
+    }
+
+    let mut verbatim = Vec::with_capacity(path.len() + UNC_PREFIX.len() + 1);
+    if path.starts_with(DEVICE_PREFIX) {
+        verbatim.extend_from_slice(VERBATIM_PREFIX);
+        verbatim.extend_from_slice(&path[DEVICE_PREFIX.len()..]);
+    } else if path.starts_with(&[SEP, SEP]) {
+        verbatim.extend_from_slice(UNC_PREFIX);
+        verbatim.extend_from_slice(&path[2..]);
+    } else if path.get(1) == Some(&(b':' as u16)) && path.get(2) == Some(&SEP) {
+        verbatim.extend_from_slice(VERBATIM_PREFIX);
+        verbatim.extend_from_slice(&path);
+    } else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "private directory path could not be normalized for Win32 creation",
+        ));
+    }
+    verbatim.push(0);
+    Ok(verbatim)
+}
+
+#[cfg(windows)]
+pub(crate) fn create_private_directory(path: &Path) -> io::Result<()> {
+    use std::mem::size_of;
+
+    use windows_sys::Win32::Security::{
+        ACL, ACL_REVISION, AddAccessAllowedAceEx, CONTAINER_INHERIT_ACE, InitializeAcl,
+        InitializeSecurityDescriptor, OBJECT_INHERIT_ACE, SE_DACL_PROTECTED, SECURITY_ATTRIBUTES,
+        SECURITY_DESCRIPTOR, SetSecurityDescriptorControl, SetSecurityDescriptorDacl,
+        SetSecurityDescriptorOwner,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{CreateDirectoryW, FILE_ALL_ACCESS};
+
+    let user = current_process_user_sid()?;
+    // SAFETY: current_process_user_sid always returns a validated copied SID.
+    let sid_bytes = unsafe { windows_sys::Win32::Security::GetLengthSid(user.as_ptr()) };
+    if sid_bytes == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let acl_bytes = size_of::<ACL>()
+        .checked_add(size_of::<windows_sys::Win32::Security::ACCESS_ALLOWED_ACE>())
+        .and_then(|bytes| bytes.checked_sub(size_of::<u32>()))
+        .and_then(|bytes| bytes.checked_add(sid_bytes as usize))
+        .and_then(|bytes| u32::try_from(bytes).ok())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "private DACL is too large"))?;
+    let acl_words = (acl_bytes as usize).div_ceil(size_of::<usize>());
+    let mut acl_storage = vec![0_usize; acl_words];
+    let acl = acl_storage.as_mut_ptr().cast::<ACL>();
+    // SAFETY: ACL storage is aligned, writable, and has acl_bytes capacity.
+    if unsafe { InitializeAcl(acl, acl_bytes, ACL_REVISION) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let inheritance = CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE;
+    // SAFETY: the initialized ACL and copied current-user SID remain live through directory create.
+    if unsafe {
+        AddAccessAllowedAceEx(
+            acl,
+            ACL_REVISION,
+            inheritance,
+            FILE_ALL_ACCESS,
+            user.as_ptr(),
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+
+    let mut descriptor = SECURITY_DESCRIPTOR::default();
+    // SAFETY: descriptor points to writable SECURITY_DESCRIPTOR storage.
+    if unsafe { InitializeSecurityDescriptor((&raw mut descriptor).cast(), 1) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: descriptor, SID, and ACL all remain live until CreateDirectoryW returns.
+    if unsafe { SetSecurityDescriptorOwner((&raw mut descriptor).cast(), user.as_ptr(), 0) } == 0 ||
+        unsafe { SetSecurityDescriptorDacl((&raw mut descriptor).cast(), 1, acl, 0) } == 0 ||
+        unsafe {
+            SetSecurityDescriptorControl(
+                (&raw mut descriptor).cast(),
+                SE_DACL_PROTECTED,
+                SE_DACL_PROTECTED,
+            )
+        } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    let mut attributes = SECURITY_ATTRIBUTES {
+        nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: (&raw mut descriptor).cast(),
+        bInheritHandle: 0,
+    };
+    let path_wide = windows_long_path(path)?;
+    // SAFETY: the UTF-16 path is terminated and all security descriptor storage remains live.
+    if unsafe { CreateDirectoryW(path_wide.as_ptr(), &raw mut attributes) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let validation =
+        open_directory_handle(path).and_then(|file| require_windows_private_directory(&file));
+    if let Err(error) = validation {
+        let _ = std::fs::remove_dir(path);
+        return Err(error);
+    }
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
+pub(crate) fn create_private_directory(path: &Path) -> io::Result<()> {
     std::fs::create_dir(path)
 }
 
@@ -2601,19 +4500,116 @@ fn open_directory_handle(path: &Path) -> io::Result<File> {
     File::open(path)
 }
 
+#[cfg(unix)]
+fn open_bound_directory_handle(path: &Path, _movable: bool) -> io::Result<File> {
+    open_directory_handle(path)
+}
+
 #[cfg(windows)]
 fn open_directory_handle(path: &Path) -> io::Result<File> {
     use std::os::windows::fs::OpenOptionsExt;
 
     use windows_sys::Win32::Storage::FileSystem::{
-        FILE_ADD_FILE, FILE_FLAG_BACKUP_SEMANTICS, FILE_READ_ATTRIBUTES, FILE_SHARE_READ,
-        FILE_SHARE_WRITE, FILE_TRAVERSE, SYNCHRONIZE,
+        FILE_ADD_FILE, FILE_ADD_SUBDIRECTORY, FILE_FLAG_BACKUP_SEMANTICS, FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE, READ_CONTROL, SYNCHRONIZE,
     };
 
     OpenOptions::new()
-        .access_mode(FILE_ADD_FILE | FILE_READ_ATTRIBUTES | FILE_TRAVERSE | SYNCHRONIZE)
+        .access_mode(
+            FILE_ADD_FILE |
+                FILE_ADD_SUBDIRECTORY |
+                FILE_READ_ATTRIBUTES |
+                FILE_TRAVERSE |
+                READ_CONTROL |
+                SYNCHRONIZE,
+        )
         .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)
+}
+
+/// Return every distinct 8.3 spelling that can address an existing Windows path.
+///
+/// The full short path covers aliases in any parent component; the leaf token covers decoded
+/// relative diagnostics. An unavailable alias is represented by an empty vector, while query,
+/// sizing, encoding, or identity ambiguity fails closed.
+#[cfg(windows)]
+pub(crate) fn windows_short_path_aliases(path: &Path) -> io::Result<Vec<OsString>> {
+    use std::os::windows::ffi::OsStringExt;
+
+    use windows_sys::Win32::Storage::FileSystem::GetShortPathNameW;
+
+    let wide = windows_long_path(path)?;
+
+    // SAFETY: wide is a live NUL-terminated input and the documented zero-sized query accepts a
+    // null output pointer.
+    let required = unsafe { GetShortPathNameW(wide.as_ptr(), std::ptr::null_mut(), 0) };
+    if required == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut short = vec![0_u16; required as usize];
+    // SAFETY: both buffers remain live, the input is NUL-terminated, and the output has exactly
+    // the capacity returned by the first query.
+    let copied = unsafe { GetShortPathNameW(wide.as_ptr(), short.as_mut_ptr(), required) };
+    if copied == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if copied >= required || short[copied as usize] != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "short-path query returned an ambiguous buffer length",
+        ));
+    }
+    short.truncate(copied as usize);
+    if short.contains(&0) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "short-path query returned an embedded NUL",
+        ));
+    }
+
+    let short_path = PathBuf::from(OsString::from_wide(&short));
+    let original = Handle::from_path(path)?;
+    let shortened = Handle::from_path(&short_path)?;
+    if !handles_match(&original, &shortened)? {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "short-path query returned a different filesystem object",
+        ));
+    }
+
+    let mut aliases = Vec::new();
+    if short_path != path {
+        aliases.push(short_path.as_os_str().to_owned());
+    }
+    if let (Some(short_leaf), Some(long_leaf)) = (short_path.file_name(), path.file_name()) {
+        if short_leaf != long_leaf {
+            aliases.push(short_leaf.to_owned());
+        }
+    }
+    aliases.sort();
+    aliases.dedup();
+    Ok(aliases)
+}
+
+#[cfg(windows)]
+fn open_bound_directory_handle(path: &Path, movable: bool) -> io::Result<File> {
+    if !movable {
+        return open_directory_handle(path);
+    }
+
+    use std::os::windows::fs::OpenOptionsExt;
+
+    use windows_sys::Win32::Storage::FileSystem::{
+        DELETE, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
+        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE, READ_CONTROL,
+        SYNCHRONIZE,
+    };
+
+    OpenOptions::new()
+        .access_mode(DELETE | FILE_READ_ATTRIBUTES | FILE_TRAVERSE | READ_CONTROL | SYNCHRONIZE)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
         .open(path)
 }
 
@@ -2622,8 +4618,13 @@ fn open_directory_handle(path: &Path) -> io::Result<File> {
     File::open(path)
 }
 
+#[cfg(not(any(unix, windows)))]
+fn open_bound_directory_handle(path: &Path, _movable: bool) -> io::Result<File> {
+    open_directory_handle(path)
+}
+
 #[cfg(unix)]
-fn private_file_options() -> OpenOptions {
+pub(crate) fn private_file_options() -> OpenOptions {
     use std::os::unix::fs::OpenOptionsExt;
 
     let mut options = OpenOptions::new();
@@ -2632,7 +4633,7 @@ fn private_file_options() -> OpenOptions {
 }
 
 #[cfg(not(unix))]
-fn private_file_options() -> OpenOptions {
+pub(crate) fn private_file_options() -> OpenOptions {
     OpenOptions::new()
 }
 
@@ -2957,11 +4958,15 @@ fn prepare_new_file(source: &Path, destination: &Path) -> io::Result<PreparedDoc
     let destination_parent = BoundDirectory::open(requested_parent)?;
     let parent = destination_parent.requested_path.clone();
     let publication_destination = parent.join(&file_name);
-    if publication_destination.try_exists()? {
-        return Err(io::Error::new(
-            io::ErrorKind::AlreadyExists,
-            format!("output already exists: {}", destination.display()),
-        ));
+    match std::fs::symlink_metadata(&publication_destination) {
+        Ok(_) => {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!("output already exists: {}", destination.display()),
+            ));
+        },
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {},
+        Err(error) => return Err(error),
     }
     let source_path_metadata = std::fs::symlink_metadata(&source)?;
     if path_metadata_is_alias(&source_path_metadata) || !source_path_metadata.is_file() {
@@ -3119,11 +5124,13 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
-        BUNDLE_FILE_NAME, LocalDocument, MAX_PUBLICATION_OUTCOME_BYTES, OwnedFile,
-        PUBLICATION_COMMITTED_FILE_NAME, PUBLICATION_DIRECTORY_NAME, PUBLICATION_LEASE_FILE_NAME,
-        PUBLICATION_OUTCOME_FILE_NAME, PUBLICATION_PLAN_FILE_NAME, PUBLICATION_PREPARED_FILE_NAME,
-        PublicationRecoveryState, SessionArtifacts, SessionFailure, WebResourceLoadRole,
-        contextualize_clonefileat_error, path_metadata_is_alias, serialize_publication_outcome,
+        BUNDLE_FILE_NAME, LocalDocument, MAX_CONTROL_JSON_BYTES, MAX_PUBLICATION_OUTCOME_BYTES,
+        OwnedFile, PUBLICATION_COMMITTED_FILE_NAME, PUBLICATION_DIRECTORY_NAME,
+        PUBLICATION_LEASE_FILE_NAME, PUBLICATION_OUTCOME_FILE_NAME, PUBLICATION_PLAN_FILE_NAME,
+        PUBLICATION_PREPARED_FILE_NAME, PublicationRecoveryState, SessionArtifacts, SessionFailure,
+        WebResourceLoadRole, contextualize_clonefileat_error, create_private_directory,
+        path_metadata_is_alias, promote_staged_artifacts, remove_empty_private_container,
+        serialize_publication_outcome, validate_staged_artifacts,
     };
 
     #[test]
@@ -3168,6 +5175,345 @@ mod tests {
 
     fn test_temp_dir() -> PathBuf {
         std::env::temp_dir().canonicalize().unwrap()
+    }
+
+    fn assert_planned_stage_promotes_and_resumes(shorthand_output: bool) {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let sandbox = test_temp_dir().join(format!(
+            "pliego-staged-plan-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir(&sandbox).unwrap();
+        let container = sandbox.join(format!(".pliego-runtime-{}", "a".repeat(32)));
+        create_private_directory(&container).unwrap();
+        let stage = container.join(format!("stage-{unique}"));
+        let public = sandbox.join("artifacts");
+        let output = if shorthand_output {
+            public.join("document.pdf")
+        } else {
+            sandbox.join("invoice.pdf")
+        };
+        let render_id = format!("sha256:staged-plan-{unique}");
+        let request_fingerprint = format!("sha256:staged-request-{unique}");
+        let artifacts =
+            SessionArtifacts::create_staged_with_render_id(&stage, &public, &render_id).unwrap();
+        artifacts.write_document_pdf(b"%PDF-staged-plan").unwrap();
+        artifacts.record_state("rendered", None).unwrap();
+        let journal = artifacts
+            .begin_publication(&output, &request_fingerprint)
+            .unwrap();
+        assert!(matches!(
+            journal.recover().unwrap(),
+            PublicationRecoveryState::Planned
+        ));
+        let staged_plan = fs::read(
+            stage
+                .join(PUBLICATION_DIRECTORY_NAME)
+                .join(PUBLICATION_PLAN_FILE_NAME),
+        )
+        .unwrap();
+        let staged_plan_json: serde_json::Value = serde_json::from_slice(&staged_plan).unwrap();
+        assert_eq!(
+            staged_plan_json["artifact_root"],
+            std::path::absolute(&public)
+                .unwrap()
+                .to_string_lossy()
+                .as_ref()
+        );
+        assert!(
+            !staged_plan
+                .windows(stage.to_string_lossy().len())
+                .any(|window| window == stage.to_string_lossy().as_bytes())
+        );
+        drop(journal);
+        drop(artifacts);
+        validate_staged_artifacts(&stage, &[&container]).unwrap();
+
+        promote_staged_artifacts(&container, &stage, &public).unwrap();
+        assert!(!stage.exists());
+        assert_eq!(
+            fs::read(
+                public
+                    .join(PUBLICATION_DIRECTORY_NAME)
+                    .join(PUBLICATION_PLAN_FILE_NAME)
+            )
+            .unwrap(),
+            staged_plan
+        );
+        for (_, bytes) in snapshot_tree(&public) {
+            for private in [&stage, &container] {
+                let private = private.to_string_lossy();
+                assert!(
+                    !bytes
+                        .windows(private.len())
+                        .any(|window| window == private.as_bytes()),
+                    "promoted artifact leaked private path {private}"
+                );
+            }
+        }
+
+        let artifacts =
+            SessionArtifacts::open_for_publication_recovery(&public, &render_id).unwrap();
+        let journal = artifacts
+            .resume_publication(&output, &request_fingerprint)
+            .unwrap();
+        assert!(matches!(
+            journal.recover().unwrap(),
+            PublicationRecoveryState::Planned
+        ));
+        drop(journal);
+        drop(artifacts);
+        // The shorthand output is the artifact-owned PDF itself, so atomic tree promotion makes
+        // it visible in the recoverable Planned state. An external output remains withheld until
+        // the parent commits the publication.
+        if shorthand_output {
+            assert_eq!(fs::read(&output).unwrap(), b"%PDF-staged-plan");
+        } else {
+            assert!(!output.exists());
+        }
+
+        fs::remove_dir_all(&public).unwrap();
+        assert!(remove_empty_private_container(&container).unwrap());
+        assert!(!container.exists());
+        fs::remove_dir(&sandbox).unwrap();
+    }
+
+    #[test]
+    fn staged_external_plan_survives_atomic_promotion_and_resumes_planned() {
+        assert_planned_stage_promotes_and_resumes(false);
+    }
+
+    #[test]
+    fn staged_shorthand_plan_survives_atomic_promotion_and_resumes_planned() {
+        assert_planned_stage_promotes_and_resumes(true);
+    }
+
+    #[test]
+    fn staged_promotion_is_exclusive_and_preserves_both_roots_on_collision() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let sandbox = test_temp_dir().join(format!(
+            "pliego-staged-collision-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir(&sandbox).unwrap();
+        let container = sandbox.join(format!(".pliego-private-{unique}"));
+        create_private_directory(&container).unwrap();
+        let stage = container.join(format!("stage-{unique}"));
+        let public = sandbox.join("artifacts");
+        let artifacts =
+            SessionArtifacts::create_staged_with_render_id(&stage, &public, "sha256:collision")
+                .unwrap();
+        artifacts.write_document_pdf(b"%PDF-private").unwrap();
+        drop(artifacts);
+        fs::create_dir(&public).unwrap();
+        fs::write(public.join("sentinel"), b"caller-owned").unwrap();
+
+        let error = promote_staged_artifacts(&container, &stage, &public).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(public.join("sentinel")).unwrap(), b"caller-owned");
+        assert_eq!(
+            fs::read(stage.join("document.pdf")).unwrap(),
+            b"%PDF-private"
+        );
+        assert!(!remove_empty_private_container(&container).unwrap());
+        assert!(stage.exists());
+
+        fs::remove_dir_all(&public).unwrap();
+        fs::remove_dir_all(&stage).unwrap();
+        fs::remove_dir(&container).unwrap();
+        fs::remove_dir(&sandbox).unwrap();
+    }
+
+    #[test]
+    fn staged_validation_rejects_hard_linked_regular_files() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let sandbox = test_temp_dir().join(format!(
+            "pliego-staged-hardlink-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir(&sandbox).unwrap();
+        let container = sandbox.join(format!(".pliego-private-{unique}"));
+        create_private_directory(&container).unwrap();
+        let stage = container.join(format!("stage-{unique}"));
+        let public = sandbox.join("artifacts");
+        let artifacts =
+            SessionArtifacts::create_staged_with_render_id(&stage, &public, "sha256:hardlink")
+                .unwrap();
+        artifacts.write_document_pdf(b"%PDF-linked").unwrap();
+        fs::hard_link(stage.join("document.pdf"), stage.join("linked.pdf")).unwrap();
+        drop(artifacts);
+
+        let error = validate_staged_artifacts(&stage, &[]).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("single-link regular file"));
+        assert!(!public.exists());
+
+        fs::remove_dir_all(&stage).unwrap();
+        fs::remove_dir(&container).unwrap();
+        fs::remove_dir(&sandbox).unwrap();
+    }
+
+    #[test]
+    fn staged_validation_rejects_private_random_leaf_tokens_in_artifact_bytes() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let sandbox = test_temp_dir().join(format!(
+            "pliego-staged-token-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir(&sandbox).unwrap();
+        let container = sandbox.join(format!(".pliego-runtime-{}", "a".repeat(32)));
+        create_private_directory(&container).unwrap();
+        let stage = container.join(format!("stage-{unique}"));
+        let public = sandbox.join("artifacts");
+        let artifacts =
+            SessionArtifacts::create_staged_with_render_id(&stage, &public, "sha256:token")
+                .unwrap();
+        let private_leaf = container.file_name().unwrap().to_string_lossy();
+        #[cfg(windows)]
+        let private_leaf = private_leaf.to_ascii_uppercase();
+        fs::write(stage.join("leak.txt"), private_leaf.as_bytes()).unwrap();
+        drop(artifacts);
+
+        let error = validate_staged_artifacts(&stage, &[]).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("private staging path"));
+        assert!(!public.exists());
+
+        fs::remove_dir_all(&stage).unwrap();
+        fs::remove_dir(&container).unwrap();
+        fs::remove_dir(&sandbox).unwrap();
+    }
+
+    #[test]
+    fn staged_validation_decodes_json_string_escapes_before_private_path_scan() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let sandbox = test_temp_dir().join(format!(
+            "pliego-staged-json-token-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir(&sandbox).unwrap();
+        let container = sandbox.join(format!(".pliego-runtime-{}", "a".repeat(32)));
+        create_private_directory(&container).unwrap();
+        let stage = container.join("artifacts");
+        let public = sandbox.join("public-artifacts");
+        let artifacts = SessionArtifacts::create_staged_with_render_id(
+            &stage,
+            &public,
+            "sha256:json-escaped-private-token",
+        )
+        .unwrap();
+        let private_leaf = container.file_name().unwrap().to_string_lossy();
+        let escaped = format!(
+            r#"{{"path":"\u002e{}"}}"#,
+            private_leaf
+                .strip_prefix('.')
+                .expect("private fixture leaf starts with a dot")
+        );
+        fs::write(stage.join("layout-debug.json"), escaped).unwrap();
+        drop(artifacts);
+
+        let error = validate_staged_artifacts(&stage, &[]).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("decoded private staging path"));
+        assert!(!public.exists());
+
+        fs::remove_dir_all(&stage).unwrap();
+        fs::remove_dir(&container).unwrap();
+        fs::remove_dir(&sandbox).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staged_validation_supports_non_utf8_private_paths_and_scans_their_raw_bytes() {
+        use std::os::unix::ffi::{OsStrExt, OsStringExt};
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let sandbox = test_temp_dir().join(format!(
+            "pliego-staged-non-utf8-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir(&sandbox).unwrap();
+        // APFS rejects malformed UTF-8 filenames with EILSEQ, so keep the fixture tree portable and
+        // supply the non-UTF-8 path through the explicit private-path input being tested.
+        let private_path = sandbox.join(std::ffi::OsString::from_vec(vec![
+            b'.', b'p', b'l', b'i', b'e', b'g', b'o', b'-', 0x80, b'-', b'1', b'2', b'3', b'4',
+        ]));
+        assert!(private_path.to_str().is_none());
+        let container = sandbox.join(format!(".pliego-runtime-{}", "a".repeat(32)));
+        create_private_directory(&container).unwrap();
+        let stage = container.join("artifacts");
+        let public = sandbox.join("public-artifacts");
+        let artifacts = SessionArtifacts::create_staged_with_render_id(
+            &stage,
+            &public,
+            "sha256:non-utf8-private-path",
+        )
+        .unwrap();
+        artifacts
+            .write_document_pdf(b"%PDF-non-utf8-private-path")
+            .unwrap();
+        drop(artifacts);
+
+        validate_staged_artifacts(&stage, &[&private_path]).unwrap();
+        fs::write(
+            stage.join("raw-private-path.bin"),
+            private_path.as_os_str().as_bytes(),
+        )
+        .unwrap();
+        let error = validate_staged_artifacts(&stage, &[&private_path]).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("private staging path"));
+        assert!(!public.exists());
+
+        fs::remove_dir_all(&stage).unwrap();
+        fs::remove_dir(&container).unwrap();
+        fs::remove_dir(&sandbox).unwrap();
+    }
+
+    #[test]
+    fn control_json_rejects_oversized_expected_length_before_reading() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let sandbox = test_temp_dir().join(format!(
+            "pliego-control-json-limit-{}-{unique}",
+            std::process::id()
+        ));
+        let artifacts = SessionArtifacts::create(&sandbox).unwrap();
+        fs::write(sandbox.join("environment.json"), b"{}").unwrap();
+
+        let error = artifacts
+            .read_json_artifact(
+                "environment.json",
+                "sha256:not-consulted",
+                MAX_CONTROL_JSON_BYTES + 1,
+            )
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("control JSON"));
+        assert!(error.to_string().contains("byte limit"));
+
+        drop(artifacts);
+        fs::remove_dir_all(sandbox).unwrap();
     }
 
     fn snapshot_tree(root: &std::path::Path) -> Vec<(String, Vec<u8>)> {
@@ -5071,6 +7417,41 @@ mod tests {
         fs::remove_dir_all(sandbox).unwrap();
     }
 
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn finalization_preflight_rejects_read_only_session_state() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = test_temp_dir().join(format!(
+            "pliego-read-only-state-{}-{unique}",
+            std::process::id()
+        ));
+        let artifacts = SessionArtifacts::create(&directory).unwrap();
+        let state = directory.join("session-state.jsonl");
+        let mut permissions = fs::metadata(&state).unwrap().permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&state, permissions).unwrap();
+
+        assert!(artifacts.require_session_state_append_access().is_err());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            fs::set_permissions(&state, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        #[cfg(windows)]
+        {
+            let mut permissions = fs::metadata(&state).unwrap().permissions();
+            permissions.set_readonly(false);
+            fs::set_permissions(&state, permissions).unwrap();
+        }
+        drop(artifacts);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
     #[cfg(unix)]
     #[test]
     fn creates_private_session_directories_and_files() {
@@ -5118,5 +7499,142 @@ mod tests {
 
         drop(artifacts);
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_private_directory_accepts_no_extended_acl() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let sandbox = test_temp_dir().join(format!(
+            "pliego-no-extended-acl-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir(&sandbox).unwrap();
+        let private = sandbox.join(format!(".pliego-runtime-{}", "a".repeat(32)));
+        create_private_directory(&private).unwrap();
+        fs::remove_dir(private).unwrap();
+        fs::remove_dir(sandbox).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_private_directory_rejects_an_inherited_extended_acl() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let sandbox = test_temp_dir().join(format!(
+            "pliego-inherited-acl-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir(&sandbox).unwrap();
+        let status = std::process::Command::new("chmod")
+            .arg("+a")
+            .arg("everyone allow list,search,file_inherit,directory_inherit")
+            .arg(&sandbox)
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        let private = sandbox.join(format!(".pliego-runtime-{}", "a".repeat(32)));
+        let error = create_private_directory(&private).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(!error.to_string().contains(".pliego-runtime-"));
+        assert!(
+            !error
+                .to_string()
+                .contains(&private.to_string_lossy().into_owned())
+        );
+        assert!(!private.exists());
+
+        let status = std::process::Command::new("chmod")
+            .arg("-N")
+            .arg(&sandbox)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        fs::remove_dir(sandbox).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_private_directory_creation_supports_extended_length_paths() {
+        use std::os::windows::ffi::OsStrExt;
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let sandbox = test_temp_dir().join(format!(
+            "pliego-long-private-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir(&sandbox).unwrap();
+        let parent = sandbox.join("p".repeat(180));
+        fs::create_dir(&parent).unwrap();
+        let private = parent.join(format!(".pliego-runtime-{}", "a".repeat(32)));
+        assert!(private.as_os_str().encode_wide().count() >= 260);
+
+        create_private_directory(&private).unwrap();
+        assert!(private.is_dir());
+        super::windows_short_path_aliases(&private).unwrap();
+
+        fs::remove_dir(&private).unwrap();
+        fs::remove_dir(&parent).unwrap();
+        fs::remove_dir(&sandbox).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_private_short_path_alias_is_scanned_when_available() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let sandbox = test_temp_dir().join(format!(
+            "pliego-short-alias-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir(&sandbox).unwrap();
+        let container = sandbox.join(format!(
+            ".pliego-runtime-{unique:032x}{:032x}",
+            std::process::id()
+        ));
+        create_private_directory(&container).unwrap();
+        let stage = container.join("artifacts");
+        fs::create_dir(&stage).unwrap();
+
+        let aliases = super::windows_short_path_aliases(&container).unwrap();
+        let Some(full_alias) = aliases
+            .iter()
+            .find(|alias| PathBuf::from(alias).is_absolute())
+        else {
+            eprintln!(
+                "SKIP: volume assigned no distinct 8.3 alias; GetShortPathNameW query succeeded"
+            );
+            fs::remove_dir_all(sandbox).unwrap();
+            return;
+        };
+        let prefixes = super::promotion_private_prefixes(&[&container]).unwrap();
+        for alias in &aliases {
+            let alias = alias.to_string_lossy();
+            assert!(
+                prefixes.iter().any(|prefix| prefix == alias.as_bytes()),
+                "short alias was not routed through private prefix generation: {alias}"
+            );
+        }
+        fs::write(
+            stage.join("short-alias-leak.bin"),
+            full_alias.to_string_lossy().as_bytes(),
+        )
+        .unwrap();
+
+        let error = validate_staged_artifacts(&stage, &[]).unwrap_err();
+        assert!(error.to_string().contains("private staging path"));
+
+        fs::remove_dir_all(sandbox).unwrap();
     }
 }

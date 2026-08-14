@@ -47,6 +47,13 @@ artifacts instead of a success-shaped response when the supported path cannot fi
 5. The caller receives either a completed PDF and artifact metadata or a typed
    failure.
 
+For the v0.2 API 1 compatibility boundary, failure path fields identify the caller's
+requested locations but do not guarantee that those locations exist. Deterministic
+publication preflight failures create no public artifact tree, leave an existing
+output unchanged, and retain no private runtime container. A public failure tree
+exists only when staged engine evidence passes the supervisor contract and can be
+promoted atomically.
+
 The stable CLI and SDK contract is engine API 1. The internal `DocumentScene` format
 is versioned for repository use but is not currently a stable public interchange
 format. [ADR 0014](pliego/adr/0014-document-scene-v1-and-canonical-ordering.md)
