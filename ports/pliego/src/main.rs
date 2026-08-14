@@ -6640,7 +6640,7 @@ mod tests {
         fs::create_dir(&root).unwrap();
         fs::write(
             root.join("input.html"),
-            "<!doctype html><p id='state'>pending</p><script>if(Object.prototype.hasOwnProperty.call(window,'pliego')||Object.prototype.hasOwnProperty.call(window,'__pliegoReadiness')){setInterval(()=>{},1);}requestAnimationFrame(()=>{});setTimeout(()=>{document.getElementById('state').textContent='done';},5);</script>",
+            "<!doctype html><p id='state'>pending</p><script>window.pliego.defer();requestAnimationFrame(()=>{});setTimeout(()=>{document.getElementById('state').textContent='done';window.pliego.ready({fixture:'controlled-paint-publication'});},5);</script>",
         )
         .unwrap();
         let output = root.join("requested.pdf");
@@ -6708,10 +6708,10 @@ mod tests {
         assert_eq!(failure["render_id"], error.render_id.unwrap());
         let readiness: serde_json::Value =
             serde_json::from_slice(&fs::read(artifacts.join("readiness.json")).unwrap()).unwrap();
-        assert_eq!(readiness["status"], "failed");
+        assert_eq!(readiness["status"], "ready");
         assert_eq!(
-            readiness["error"]["code"],
-            "CONTROLLED_PAINT_FINALIZE_FAILED"
+            readiness["payload"],
+            serde_json::json!({"fixture": "controlled-paint-publication"})
         );
         println!("controlled-publication-paint-invalidation-rejected");
 
