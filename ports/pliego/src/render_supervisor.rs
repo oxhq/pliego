@@ -522,7 +522,7 @@ fn linux_process_state_and_group(
         .join("stat");
     let stat = match std::fs::read_to_string(path) {
         Ok(stat) => stat,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) if linux_process_stat_error_is_disappearance(&error) => return Ok(None),
         Err(error) => return Err(error),
     };
     let close = stat.rfind(')').ok_or_else(|| {
@@ -558,6 +558,11 @@ fn linux_process_state_and_group(
         .parse::<libc::pid_t>()
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
     Ok(Some((state, process_group)))
+}
+
+#[cfg(target_os = "linux")]
+fn linux_process_stat_error_is_disappearance(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::NotFound || error.raw_os_error() == Some(libc::ESRCH)
 }
 
 #[cfg(unix)]
@@ -3543,6 +3548,35 @@ mod tests {
             assert_eq!(unsafe { libc::kill(descendant, 0) }, -1);
             assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::ESRCH));
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_proc_stat_read_esrch_is_process_disappearance() {
+        let mut child = ProcessCommand::new("/bin/sleep")
+            .arg("60")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let process_id = libc::pid_t::try_from(child.id()).unwrap();
+        let mut stat = match std::fs::File::open(format!("/proc/{process_id}/stat")) {
+            Ok(stat) => stat,
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("cannot open live Linux process stat: {error}");
+            },
+        };
+
+        child.kill().unwrap();
+        child.wait().unwrap();
+
+        let mut contents = String::new();
+        let error = stat.read_to_string(&mut contents).unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(libc::ESRCH));
+        assert!(linux_process_stat_error_is_disappearance(&error));
     }
 
     #[cfg(unix)]
