@@ -5,6 +5,7 @@ on:
   pull_request:
     paths:
       - .github/workflows/pliego-composer-dry-run.yml
+      - Cargo.toml
       - Cargo.lock
       - LICENSE
       - LICENSE_WHATWG_SPECS
@@ -16,6 +17,8 @@ on:
       - resources/resource_protocol/license.html
       - sdk/php/**
       - sdk/laravel/**
+      - tests/pliego/laravel-invoice/composer.json
+      - tests/pliego/laravel-invoice/composer.lock
 
 permissions:
   contents: read
@@ -49,23 +52,51 @@ jobs:
           import tomllib
 
           cargo = tomllib.loads(pathlib.Path("ports/pliego/Cargo.toml").read_text(encoding="utf-8"))
+          workspace = tomllib.loads(pathlib.Path("Cargo.toml").read_text(encoding="utf-8"))
           lock = tomllib.loads(pathlib.Path("Cargo.lock").read_text(encoding="utf-8"))
           laravel = json.loads(pathlib.Path("sdk/laravel/composer.json").read_text(encoding="utf-8"))
+          runtimes = json.loads(pathlib.Path("sdk/laravel/resources/runtimes.json").read_text(encoding="utf-8"))
+          fixture = json.loads(pathlib.Path("tests/pliego/laravel-invoice/composer.json").read_text(encoding="utf-8"))
+          fixture_lock = json.loads(pathlib.Path("tests/pliego/laravel-invoice/composer.lock").read_text(encoding="utf-8"))
           engine_version = cargo["package"]["version"]
           php_version = pathlib.Path("sdk/php/VERSION").read_text(encoding="ascii").strip()
           laravel_version = pathlib.Path("sdk/laravel/VERSION").read_text(encoding="ascii").strip()
-          engine_versions = {
-              "cargo": engine_version,
-              "lock": next(package["version"] for package in lock["package"] if package["name"] == "pliego"),
+          fixture_versions = {
+              package["name"]: package["version"].removeprefix("v")
+              for package in fixture_lock["packages"]
+              if package["name"] in {"oxhq/pliego-php", "oxhq/pliego-laravel"}
           }
-          assert len(set(engine_versions.values())) == 1, engine_versions
-          assert php_version == laravel["require"]["oxhq/pliego-php"]
+          aliases = {
+              name: version
+              for repository in fixture["repositories"]
+              for name, version in repository["options"]["versions"].items()
+          }
+          release_versions = {
+              "cargo-manifest": engine_version,
+              "cargo-workspace-dependency": workspace["workspace"]["dependencies"]["pliego"]["version"].removeprefix("="),
+              "cargo-lock": next(package["version"] for package in lock["package"] if package["name"] == "pliego"),
+              "php-version": php_version,
+              "laravel-version": laravel_version,
+              "laravel-php-requirement": laravel["require"]["oxhq/pliego-php"],
+              "runtime-manifest": runtimes["version"],
+              "fixture-php-alias": aliases["oxhq/pliego-php"],
+              "fixture-laravel-alias": aliases["oxhq/pliego-laravel"],
+              "fixture-laravel-requirement": fixture["require"]["oxhq/pliego-laravel"],
+              "fixture-lock-php": fixture_versions["oxhq/pliego-php"],
+              "fixture-lock-laravel": fixture_versions["oxhq/pliego-laravel"],
+          }
+          assert len(set(release_versions.values())) == 1, release_versions
           with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as environment:
               environment.write(f"PLIEGO_ENGINE_VERSION={engine_version}\n")
               environment.write(f"PLIEGO_PHP_VERSION={php_version}\n")
               environment.write(f"PLIEGO_LARAVEL_VERSION={laravel_version}\n")
           print(f"engine/PHP: {engine_version}; Laravel: {laravel_version}")
           PY
+
+      - name: Validate source Composer manifests strictly
+        run: |
+          composer --no-interaction --no-plugins --no-scripts validate --strict sdk/php/composer.json
+          composer --no-interaction --no-plugins --no-scripts validate --strict sdk/laravel/composer.json
 
       - name: Show Composer toolchain
         run: |

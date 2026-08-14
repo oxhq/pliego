@@ -29,7 +29,7 @@ an authored page break, a dense 20-row ledger, and calculated totals.
 ## Laravel quick start
 
 ```sh
-composer require oxhq/pliego-laravel:^0.1.0
+composer require oxhq/pliego-laravel:^0.2.0
 php artisan pliego:install
 php artisan pliego:doctor
 ```
@@ -159,9 +159,10 @@ Composer distributions pass their focused contracts. The support profile remains
 the boundary; Pliego does not claim browser-wide compatibility or safe rendering of
 untrusted HTML.
 
-The current stable release is v0.1.1 and exposes engine API 1. The next intended
-feature release is v0.2.0, but it remains unreleased until the default command and
-supported SDK path complete the packaged Pliego-owned controlled-runtime cutover.
+The current stable release is v0.1.1 and exposes engine API 1. The v0.2.0 source
+candidate now routes the default command and supported SDK path through the
+Pliego-owned controlled transaction, but v0.2.0 remains unreleased until the exact
+packaged release gates pass.
 For the project's scope, evidence, release train, and next gates, see:
 
 - [Project overview](docs/project-overview.md)

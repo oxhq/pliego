@@ -4,10 +4,10 @@
 
 //! Pliego's minimal one-document Servo owner.
 //!
-//! The default compatibility route remains realtime and uses Servo's temporary screenshot/layout
-//! hooks. The explicit controlled route instead settles a bounded document, reserves an exact
-//! Paint presentation, consumes ScriptThread's retained generation once, and reads pixels only
-//! after both sides still match. It never falls back to realtime capture.
+//! The default CLI route and its explicit alias settle a bounded document, reserve an exact Paint
+//! presentation, consume ScriptThread's retained generation once, and read pixels only after both
+//! sides still match. They never fall back to realtime capture. The direct realtime adapter remains
+//! available only to internal diagnostics and the nonproduction parity boundary.
 
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::BTreeMap;

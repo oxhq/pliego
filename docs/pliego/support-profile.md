@@ -14,17 +14,21 @@ Published bundles target Linux x86_64, Windows x86_64, macOS x86_64, and macOS
 arm64. The same engine API is checked after unpacking on each target; document-level
 regression coverage is deepest on Linux x86_64.
 
-## Controlled-capture release candidate
+## Controlled-capture 0.2 release candidate
 
-The repository contains an unreleased `render-controlled` route. It is not part of
-the stable v0.1.1/API 1 contract, and the PHP and Laravel packages continue to use
-the compatibility `render` route. `render-controlled` installs the same API 1
-readiness bootstrap as that route: static pages become ready after load and the font
-wait, while pages with asynchronous work use `window.pliego.defer()`, `ready()`, and
-`fail()`. After a ready snapshot, it settles again and accepts the snapshot only with
-a fresh capture candidate for the same target. It creates the document clock before
-navigation, settles the sources it owns, and consumes one ScriptThread capture candidate
-together with one Paint presentation ticket bound to the same generation.
+The 0.2 source candidate makes the stable-syntax `render` route—and therefore the
+PHP and Laravel packages that invoke it—use the controlled transaction.
+`render-controlled` remains an explicit alias for that transaction with narrower
+syntax: the alias rejects `--allow-partial-scene`, while `render` retains that
+diagnostic option. This cutover is not part of the published v0.1.1/API 1 package.
+
+Both routes install the API 1 readiness bootstrap: static pages become ready after
+load and the font wait, while pages with asynchronous work use
+`window.pliego.defer()`, `ready()`, and `fail()`. After a ready snapshot, the
+transaction settles again and accepts the snapshot only with a fresh capture
+candidate for the same target. It creates the document clock before navigation,
+settles the sources it owns, and consumes one ScriptThread capture candidate together
+with one Paint presentation ticket bound to the same generation.
 It has no realtime or shell fallback: stale capture state, a lost or indeterminate
 consume outcome, and open-ended or unsupported sources all fail without publishing
 the requested PDF or any success-only artifact.
@@ -102,8 +106,8 @@ The implemented candidate boundary is deliberately narrow:
 - Unix launchers must preserve the default waitable `SIGCHLD` disposition: custom handlers,
   `SIG_IGN`, and `SA_NOCLDWAIT` are rejected before a document worker is spawned so the
   supervisor can reserve the worker process-group identity until teardown completes; and
-- this candidate is not API 2, a hostile-input sandbox, a cross-platform determinism
-  claim, or a replacement for the stable compatibility route.
+- this candidate is not API 2, a hostile-input sandbox, or a cross-platform byte-determinism
+  claim.
 
 The exact transaction and source inventory are documented in
 [generation capture preconditions](generation-capture-precondition.md) and the
@@ -112,8 +116,8 @@ source requires a typed inventory entry plus owned lifecycle evidence and, for e
 producers, producer-fence coverage; merely rendering one page that uses it does not
 expand this profile.
 
-Unless a section explicitly names `render-controlled`, the remaining capability and
-operational boundaries on this page describe the stable compatibility `render` route.
+Unless a section explicitly names alias-only syntax, the remaining capability and
+operational boundaries on this page describe both `render` and `render-controlled`.
 
 ## Resource modes
 
@@ -159,8 +163,8 @@ for engine development; it is not a delivery mode.
 
 ## Readiness and final canvas state
 
-The compatibility `render` route and the unreleased `render-controlled` route both
-install the API 1 readiness bootstrap. A static HTML or Blade document does not call
+The default `render` route and its `render-controlled` alias both install the API 1
+readiness bootstrap. A static HTML or Blade document does not call
 the readiness API itself: once the page load event has fired, Pliego waits for the
 document font set and proceeds automatically. This is the default path, including
 documents with declared local or allowlisted fonts.

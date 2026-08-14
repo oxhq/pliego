@@ -82,5 +82,5 @@ remain covered by the live media-element owner tracker.
 - It does not claim source coverage for future Servo features such as scroll/view timelines. Such
   a feature must add a typed unsupported or owned source entry before generation capture can claim
   it.
-- Default realtime embedding behavior is unchanged. Pliego's explicit `render-controlled` route
-  exercises this transaction; the compatibility `render` route remains realtime.
+- Default Servo embedding behavior outside Pliego is unchanged. Pliego's default `render` route
+  and its explicit `render-controlled` alias exercise this transaction without a realtime fallback.

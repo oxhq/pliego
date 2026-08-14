@@ -63,16 +63,131 @@ expectProductionBridge(mkdir($root, 0700), 'cannot create the production bridge 
 $renderer = new CliRenderer([$binary], timeoutSeconds: 120);
 
 try {
+    $expectedReadiness = [
+        'fixture' => 'php-production-bridge',
+        'phase' => 'post-5ms',
+        'marker' => 'PLIEGO_POST5MS_7C4E',
+        'canvasWidth' => 48,
+        'canvasHeight' => 24,
+        'readbackBytes' => 4608,
+        'epochUnixMs' => 946684800005,
+        'performanceNowMs' => 5,
+    ];
+    $fontBytes = file_get_contents(
+        dirname(__DIR__, 3).'/components/fonts/tests/support/dejavu-fonts-ttf-2.37/ttf/DejaVuSans.ttf',
+    );
+    expectProductionBridge(is_string($fontBytes), 'cannot read the pinned controlled-capture font');
+    $fontBase64 = base64_encode($fontBytes);
+    $successHtml = str_replace(
+        '__PLIEGO_PRODUCTION_BRIDGE_FONT__',
+        $fontBase64,
+        <<<'HTML'
+<!doctype html>
+<style>
+@font-face {
+  font-family: "Pliego Production Bridge";
+  src: url("data:font/ttf;base64,__PLIEGO_PRODUCTION_BRIDGE_FONT__") format("truetype");
+}
+html,
+body {
+  margin: 0;
+  width: 100%;
+  min-height: 100%;
+}
+body {
+  background: rgb(17, 34, 51);
+}
+#marker {
+  display: block;
+  box-sizing: border-box;
+  width: 176px;
+  height: 28px;
+  margin: 12px;
+  background: rgb(197, 48, 80);
+  color: rgb(255, 255, 255);
+  font: 12px/28px "Pliego Production Bridge";
+  text-align: center;
+}
+#canvas {
+  display: block;
+  width: 48px;
+  height: 24px;
+  margin: 0 12px 12px;
+}
+</style>
+<div id="marker">PLIEGO_FONT_PREWARM</div>
+<canvas id="canvas" width="48" height="24"></canvas>
+<script>
+window.pliego.defer();
+const canvas = document.getElementById("canvas");
+const context = canvas.getContext("2d");
+context.fillStyle = "rgb(12, 180, 96)";
+context.fillRect(0, 0, canvas.width, canvas.height);
+context.fillStyle = "rgb(244, 196, 48)";
+context.fillRect(8, 6, 20, 10);
+const pixels = context.getImageData(0, 0, canvas.width, canvas.height);
+const paintObserver = new PerformanceObserver((list) => {
+  const fcp = list.getEntries().find((entry) => entry.name === "first-contentful-paint");
+  if (!fcp) {
+    return;
+  }
+  const marker = document.getElementById("marker");
+  marker.textContent = `PLIEGO_FCP_${fcp.startTime}`;
+  console.info(
+    `php-production-paint-observed:${fcp.name}:${fcp.startTime}:${fcp.duration}:${performance.now()}`,
+  );
+  paintObserver.disconnect();
+});
+paintObserver.observe({ type: "paint" });
+requestAnimationFrame(() => {
+  console.info("php-production-frame");
+});
+setTimeout(() => {
+  const marker = document.getElementById("marker");
+  marker.textContent = "PLIEGO_POST5MS_7C4E";
+  document.body.style.background = "rgb(36, 104, 172)";
+  document.body.dataset.controlledTime = `${Date.now()}:${performance.now()}`;
+  console.info(`php-production-ready:${Date.now()}:${performance.now()}`);
+  window.pliego.ready({
+    fixture: "php-production-bridge",
+    phase: "post-5ms",
+    marker: marker.textContent,
+    canvasWidth: canvas.width,
+    canvasHeight: canvas.height,
+    readbackBytes: pixels.data.length,
+    epochUnixMs: Date.now(),
+    performanceNowMs: performance.now(),
+  });
+}, 5);
+</script>
+HTML,
+    );
     $success = $renderer->render(
-        '<!doctype html><style>div{width:96px;height:48px;background:#1463ff}</style><div></div>',
+        $successHtml,
         "{$root}/success-input",
         "{$root}/success.pdf",
         "{$root}/success-artifacts",
+        new \Pliego\Php\RenderOptions(pageSize: '200x160', pageMargins: '0,0,0,0'),
     );
     expectProductionBridge(str_starts_with($success->bytes(), '%PDF-'), 'production PDF is not readable');
     expectProductionBridge(
         ($success->metadata['environment']['runtime']['adapter'] ?? null) === 'document-session',
         'PHP bridge did not execute the production document-session runtime',
+    );
+    expectProductionBridge(
+        ($success->metadata['readiness'] ?? null) === $expectedReadiness,
+        'PHP bridge did not preserve the authored ready payload at the controlled epoch',
+    );
+    $readinessBytes = file_get_contents("{$root}/success-artifacts/readiness.json");
+    expectProductionBridge(is_string($readinessBytes), 'production readiness evidence is missing');
+    $readiness = json_decode($readinessBytes, true, flags: JSON_THROW_ON_ERROR);
+    expectProductionBridge(
+        is_array($readiness)
+            && ($readiness['status'] ?? null) === 'ready'
+            && ($readiness['font_status'] ?? null) === 'loaded'
+            && ($readiness['payload'] ?? null) === $expectedReadiness
+            && ($readiness['render_id'] ?? null) === ($success->metadata['render_id'] ?? null),
+        'retained readiness evidence does not bind the authored payload to the rendered result',
     );
     expectProductionBridge(
         productionBridgePathIdentity($success->metadata['document_pdf'] ?? null)

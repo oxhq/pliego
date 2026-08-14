@@ -124,6 +124,7 @@ impl DocumentEngine {
     /// Render with the selected runtime. DocumentSession wins whenever it is
     /// enabled; an oracle-only build preserves the pre-cutover explicit API.
     #[cfg(any(feature = "document-session", feature = "shell-oracle"))]
+    #[allow(dead_code)]
     pub fn render(request: RenderRequest) -> Result<RenderOutcome, RenderError> {
         #[cfg(feature = "document-session")]
         {
@@ -135,10 +136,8 @@ impl DocumentEngine {
         }
     }
 
-    /// Render through the generation-bound controlled capture transaction.
-    ///
-    /// This route is deliberately explicit while the accepted surface is narrower than the
-    /// realtime compatibility route. It never falls back to realtime capture.
+    /// Render through the generation-bound controlled capture transaction used by the default CLI
+    /// and supported SDK path. It never falls back to realtime capture.
     #[cfg(feature = "document-session")]
     pub fn render_controlled(request: RenderRequest) -> Result<RenderOutcome, RenderError> {
         crate::render_controlled(request)

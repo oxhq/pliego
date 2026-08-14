@@ -795,7 +795,7 @@ fn main() -> std::process::ExitCode {
 fn render_command(request: RenderRequest) -> Result<RenderOutcome, RenderError> {
     #[cfg(feature = "document-session")]
     {
-        DocumentEngine::render(request)
+        DocumentEngine::render_controlled(request)
     }
     #[cfg(all(not(feature = "document-session"), feature = "shell-oracle"))]
     {
@@ -852,7 +852,7 @@ fn print_help() {
         "NONPRODUCTION ORACLE BUILD — servoshell is enabled only for explicit parity diagnostics."
     );
     println!(
-        "Pliego — native document rendering on Servo\nRuntime: {}\n\nUsage:\n  pliego render <document.html> --output <document.pdf> --artifacts <directory> [options]\n  pliego render-controlled <document.html> --output <document.pdf> --artifacts <directory> [options]\n  pliego [options] <document.html>\n  pliego --version\n  pliego --contract-probe\n  pliego render-api2\n\nOptions:\n  --locale en-US|es-MX\n  --timezone UTC|PST8PDT\n  --page-size WIDTHxHEIGHT\n  --page-margins TOP,RIGHT,BOTTOM,LEFT\n  --allow-host-fonts          Opt in to observable system-font resolution\n  --allow-partial-scene       Retain diagnostic output (render only; rejected by render-controlled)\n  --allow-http-root URL       Allow GET/HEAD below one explicit http(s) URL root\n  --virtual-resource URL=FILE Serve one exact URL from a host-provided file\n  --asset-manifest FILE       Verify and cache manifest-backed assets locally\n  --resource-timeout-ms MS    Bound controlled network connection time (1..60000)\n\nAPI 2 is an unreleased executable foundation: the probe advertises no complete render tuple, so render-api2 strictly decodes stdin and exits unavailable without rendering.\n\nThe controlled route is fail-closed and currently accepts one root document plus generation-bound Canvas 2D transcripts in the retained subset; unsupported Canvas modes or final transcripts, and open-ended sources, are rejected. Host fonts, partial scenes, network, redirects, and asset caching are disabled by default. The shorthand form writes outputs to a temporary artifact directory. Page geometry is expressed in CSS pixels.",
+        "Pliego — native document rendering on Servo\nRuntime: {}\n\nUsage:\n  pliego render <document.html> --output <document.pdf> --artifacts <directory> [options]\n  pliego render-controlled <document.html> --output <document.pdf> --artifacts <directory> [options]\n  pliego [options] <document.html>\n  pliego --version\n  pliego --contract-probe\n  pliego render-api2\n\nOptions:\n  --locale en-US|es-MX\n  --timezone UTC|PST8PDT\n  --page-size WIDTHxHEIGHT\n  --page-margins TOP,RIGHT,BOTTOM,LEFT\n  --allow-host-fonts          Opt in to observable system-font resolution\n  --allow-partial-scene       Retain diagnostic output (render only; rejected by render-controlled)\n  --allow-http-root URL       Allow GET/HEAD below one explicit http(s) URL root\n  --virtual-resource URL=FILE Serve one exact URL from a host-provided file\n  --asset-manifest FILE       Verify and cache manifest-backed assets locally\n  --resource-timeout-ms MS    Bound controlled network connection time (1..60000)\n\nAPI 2 is an unreleased executable foundation: the probe advertises no complete render tuple, so render-api2 strictly decodes stdin and exits unavailable without rendering.\n\nThe default render route uses the fail-closed controlled transaction. render-controlled remains an explicit alias with narrower syntax: it rejects --allow-partial-scene. The controlled transaction currently accepts one root document plus generation-bound Canvas 2D transcripts in the retained subset; unsupported Canvas modes or final transcripts, and open-ended sources, are rejected. Host fonts, partial scenes, network, redirects, and asset caching are disabled by default. The shorthand form writes outputs to a temporary artifact directory. Page geometry is expressed in CSS pixels.",
         active_runtime_name()
     );
 }
@@ -2686,11 +2686,12 @@ pub(crate) fn finalize_supervised_publication(
         prepared_output,
     )
 }
-
 #[cfg(all(
     feature = "document-session",
     not(any(target_os = "android", target_env = "ohos"))
 ))]
+#[allow(dead_code)]
+// Retained for the explicit realtime diagnostic pairing; the public CLI selects controlled capture.
 fn render(request: RenderRequest) -> Result<RenderOutcome, RenderError> {
     #[cfg(test)]
     {

@@ -429,7 +429,7 @@ def run_success(binary: Path, fixture: Path, font: Path, root: Path) -> tuple[by
     result = subprocess.run(
         [
             str(binary),
-            "render-controlled",
+            "render",
             "input.html",
             "--output",
             str(root / "document.pdf"),
@@ -657,7 +657,7 @@ def run_failure(
     result = subprocess.run(
         [
             str(binary),
-            "render-controlled",
+            "render",
             "input.html",
             "--output",
             str(root / "document.pdf"),

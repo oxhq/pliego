@@ -64,14 +64,14 @@ This slice does not claim:
 
 Those are separate fail-closed gates. An opt-in internal Pliego session now maps the normalized API
 2 epoch, virtual span, task, microtask, rendering, and mutation limits into a controlled clock before
-navigation. The explicit production `render-controlled` route drives that coordinator, obtains an
-opaque candidate, reserves the exact Paint presentation without readback, consumes the candidate
-after two ScriptThread revalidations around layout serialization, and revalidates Paint again before
-pixel readback. A ledger or capture terminal is routed through the existing fail-closed publication
-transaction, so it cannot expose a PDF, scene bundle, or requested output. The compatibility
-`render` route remains realtime; there is no realtime fallback from `render-controlled`. The
-controlled route accepts only Canvas 2D transcripts whose retained image keys and registry
-generation survive Script consume, Paint finalization, layout serialization, and atomic freeze.
+navigation. The default production `render` route and its explicit `render-controlled` alias drive
+that coordinator, obtain an opaque candidate, reserve the exact Paint presentation without
+readback, consume the candidate after two ScriptThread revalidations around layout serialization,
+and revalidate Paint again before pixel readback. A ledger or capture terminal is routed through
+the existing fail-closed publication transaction, so it cannot expose a PDF, scene bundle, or
+requested output. Neither route has a realtime fallback. The controlled transaction accepts only
+Canvas 2D transcripts whose retained image keys and registry generation survive Script consume,
+Paint finalization, layout serialization, and atomic freeze.
 
 This still does not enforce CPU or host-wall interruption inside one already-running JavaScript
 turn, or the post-readiness resource budget described above. The widened serde/IPC shapes are

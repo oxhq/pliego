@@ -3,7 +3,7 @@
 Laravel 13 integration for application-owned Blade documents.
 
 ```sh
-composer require oxhq/pliego-laravel:^0.1.0
+composer require oxhq/pliego-laravel:^0.2.0
 php artisan pliego:install
 php artisan pliego:doctor
 ```

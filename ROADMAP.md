@@ -1,6 +1,6 @@
 # Pliego roadmap
 
-This roadmap describes a September 2026-August 2027 planning horizon. It is a set
+This roadmap describes an August 2026-August 2027 planning horizon. It is a set
 of evidence gates, not a promise of dates or features. The sequence and scope may
 change with technical findings and available funding.
 
@@ -41,7 +41,7 @@ the upstream engine.
 
 | Intended version | Public purpose | Release gate |
 | --- | --- | --- |
-| **0.2.0 — Pliego-owned controlled document runtime** | Make the default `render` command and supported SDK path use the Pliego-owned `DocumentSession` controlled transaction. The normal Pliego package graph has no `servoshell` dependency, fallback, or runtime entry. | Existing v0.1 supported inputs are either truthfully settled by the controlled runtime or covered by an explicit migration boundary; controlled time, generation-bound capture, and fail-closed publication pass from packaged binaries; API 1 compatibility tests remain green. The current explicit `render-controlled` candidate and its Linux packaged proof are prerequisites, not the completed cutover or a cross-platform byte-determinism claim. |
+| **0.2.0 — Pliego-owned controlled document runtime** | Make the default `render` command and supported SDK path use the Pliego-owned `DocumentSession` controlled transaction. The normal Pliego package graph has no `servoshell` dependency, fallback, or runtime entry. | Existing v0.1 supported inputs are either truthfully settled by the controlled runtime or covered by an explicit migration boundary; controlled time, generation-bound capture, and fail-closed publication pass from packaged binaries; API 1 compatibility tests remain green. The source cutover is not release proof: the exact packaged and hosted gates must still pass, and they do not establish cross-platform byte determinism. |
 | **0.3.0 — API 2 and a precisely named accessible-PDF profile** | Graduate the empty-contract executable foundation into one complete advertised and frozen tuple, migrate the PHP/Laravel render path to exact-tuple negotiation, and expose the first supported accessible-PDF profile through that versioned contract. This is not a blanket claim of “PDF/UA support.” | `--contract-probe`, canonical request/result transport, accepted and rejected goldens, package smoke tests, cross-platform conformance, and API 1 migration behavior pass against packaged binaries; OXH-339 selects PDF/UA-1, PDF/UA-2, or another exact target; OXH-346 freezes the corresponding semantic and evidence contract; OXH-326 freezes the complete API 2 contract; semantic structure, language, alternate text, validator versions, failure policy, fixtures, and retained evidence are independently reproducible. |
 | **0.3.1 — Pliego package-surface reduction** | Remove features, dependencies, adapters, and Pliego-owned paths proven unreachable from the supported product. This does not mean deleting or renaming upstream-tracked Servo modules merely to make the fork look smaller. | Public inputs, artifacts, protocol tuples, and contract-visible rendering behavior remain compatible; expected version/source-identity changes are recorded; package graphs, archives, and native inventories measurably shrink; the Servo directory topology and an upstream-sync rehearsal remain intact. Any other public behavior change promotes this work to a minor release instead. |
 | **0.3.2 — code hygiene and bloat reduction** | Remove unused imports, dead Pliego paths, redundant dependencies, and unjustified warning suppressions while retaining the existing deny-warnings gates. Necessary interop, generated-code, and safety allowances remain documented rather than being deleted mechanically. | Clippy, Tidy, checked-release `-D warnings`, dependency audits, and supported package targets stay green; dependency, archive, and binary-size deltas are recorded; contract-visible outputs and conformance outcomes remain stable except for explicitly versioned engine/source identity fields. Behavior changes are excluded from this patch line. |
@@ -75,10 +75,13 @@ public contract, that change follows the minor/patch rules above.
 
 ## Milestones
 
-### 1. Pliego 0.2.0 controlled-runtime candidate (September-October 2026)
+### 1. Pliego 0.2.0 controlled-runtime release push (August 2026; two full workdays)
 
 Goal: make the final captured document generation explicit and fail closed when
 the engine cannot prove that it captured that generation.
+
+The current push allocates two full workdays to finish the release. That is the
+active August 2026 schedule, not permission to publish before the gates below pass.
 
 Done means all of the following are public and reproducible:
 

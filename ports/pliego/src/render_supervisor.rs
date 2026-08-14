@@ -895,9 +895,9 @@ fn run_worker(marker: String, prechecked_parent_pid: u32) -> u8 {
         Ok(command) => command,
         Err(_) => return 2,
     };
-    let request = match (manifest.controlled, command) {
-        (false, Command::Render(request)) | (true, Command::RenderControlled(request)) => request,
-        _ => return 2,
+    let request = match worker_request_for_manifest(manifest.controlled, command) {
+        Some(request) => request,
+        None => return 2,
     };
     let identity = match supervisor_render_identity(&request, manifest.controlled) {
         Ok(identity) if identity.render_id == manifest.render_id => identity,
@@ -940,6 +940,14 @@ fn run_worker(marker: String, prechecked_parent_pid: u32) -> u8 {
         return 2;
     }
     exit_code
+}
+
+fn worker_request_for_manifest(controlled: bool, command: Command) -> Option<RenderRequest> {
+    match (controlled, command) {
+        (false, Command::Render(request)) |
+        (true, Command::Render(request) | Command::RenderControlled(request)) => Some(request),
+        _ => None,
+    }
 }
 
 pub(crate) fn finish_captured_worker(deferred: DeferredCapturedPublication) -> ! {
@@ -3789,5 +3797,25 @@ mod tests {
                 parent_pid: 42,
             }
         );
+    }
+
+    #[test]
+    fn authenticated_worker_command_pairings_preserve_stable_and_alias_routes() {
+        let command = |name: &str| {
+            parse_args(vec![
+                OsString::from(name),
+                OsString::from("input.html"),
+                OsString::from("--output"),
+                OsString::from("document.pdf"),
+                OsString::from("--artifacts"),
+                OsString::from("artifacts"),
+            ])
+            .unwrap()
+        };
+
+        assert!(worker_request_for_manifest(false, command("render")).is_some());
+        assert!(worker_request_for_manifest(true, command("render")).is_some());
+        assert!(worker_request_for_manifest(true, command("render-controlled")).is_some());
+        assert!(worker_request_for_manifest(false, command("render-controlled")).is_none());
     }
 }
