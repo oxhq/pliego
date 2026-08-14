@@ -19,6 +19,7 @@
         }
     },
     "scripts": {
+        "release:check-runtime": "@php tests/release_runtime_manifest_test.php",
         "test:runtime": "@php tests/managed_runtime_test.php",
         "test:timings": "@php tests/bridge_timings_test.php",
         "test": ["@test:runtime", "@test:timings"]

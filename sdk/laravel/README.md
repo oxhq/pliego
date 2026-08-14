@@ -2,6 +2,9 @@
 
 Laravel 13 integration for application-owned Blade documents.
 
+The v0.2 commands below become installable only after the split Laravel package tag
+is published. Until then, Packagist's latest stable line remains `^0.1.1`.
+
 ```sh
 composer require oxhq/pliego-laravel:^0.2.0
 php artisan pliego:install
@@ -21,6 +24,11 @@ The Laravel package installs the PHP bridge as its dependency. `pliego:install`
 selects the pinned runtime for Linux x64, Windows x64, or macOS Intel/Apple
 Silicon, verifies its size and SHA-256, and installs it under
 `storage/app/pliego-runtime`.
+
+Managed installation accepts only finalized package metadata and verifies the
+package-pinned archive size, SHA-256, and file inventory. An unfinalized package
+fails before download. `PLIEGO_BINARY` remains an explicit override for a reviewed
+system or air-gapped installation.
 
 Set `PLIEGO_RUNTIME_DIR` to move the managed directory. `PLIEGO_BINARY` is an
 explicit override for system packages and air-gapped deployments; unset it when

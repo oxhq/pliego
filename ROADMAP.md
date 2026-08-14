@@ -6,16 +6,17 @@ change with technical findings and available funding.
 
 ## Starting point
 
-Pliego v0.1.1 is the current stable release. It exposes engine API 1 and targets
-trusted, application-owned HTML for invoices, statements, and operational reports.
-Its exact support and deployment boundary is documented in the
+This roadmap started from Pliego v0.1.1. The v0.2 source line retains engine API 1
+and targets trusted, application-owned HTML for invoices, statements, and
+operational reports. GitHub Releases is authoritative for current publication
+status. The exact support and deployment boundary is documented in the
 [support profile](docs/pliego/support-profile.md).
 
-The repository also contains work toward controlled capture and an unreleased API 2
-executable foundation. Its probe, strict request decoder, and SDK tuple validator
-advertise no render contract and cannot render through API 2. None of this is a
-released v0.1.1 capability. Comparative benchmark results have not yet been
-published from the repository's benchmark protocol.
+The v0.2 source line adds controlled capture. The repository also contains an
+unreleased API 2 executable foundation whose probe, strict request decoder, and SDK
+tuple validator advertise no render contract and cannot render through API 2.
+Comparative benchmark results have not yet been published from the repository's
+benchmark protocol.
 
 ## Versioning policy and intended release train
 
@@ -75,13 +76,10 @@ public contract, that change follows the minor/patch rules above.
 
 ## Milestones
 
-### 1. Pliego 0.2.0 controlled-runtime release push (August 2026; two full workdays)
+### 1. Pliego 0.2.0 controlled-runtime release push (August 2026)
 
 Goal: make the final captured document generation explicit and fail closed when
 the engine cannot prove that it captured that generation.
-
-The current push allocates two full workdays to finish the release. That is the
-active August 2026 schedule, not permission to publish before the gates below pass.
 
 Done means all of the following are public and reproducible:
 

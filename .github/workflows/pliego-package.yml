@@ -22,6 +22,7 @@ on:
       - ports/pliego/**
       - components/**
       - docs/pliego/third-party-notices.md
+      - docs/releases/**
       - resources/**
       - support/**
       - third_party/**

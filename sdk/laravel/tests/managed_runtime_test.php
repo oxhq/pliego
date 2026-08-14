@@ -74,6 +74,7 @@ $manifest = [
     'schema' => 1,
     'version' => $version,
     'api' => 1,
+    'release_ready' => true,
     'assets' => [
         'linux-x86_64' => [
             'bytes' => filesize($archivePath),
@@ -119,9 +120,25 @@ runtimeExpect($runtime->binary('linux-x86_64') === $binary, 'managed binary was 
 runtimeExpect($runtime->install('linux-x86_64') === $binary, 'managed install is not idempotent');
 runtimeExpect($http->recorded()->count() === 1, 'idempotent install downloaded the archive again');
 
+$pendingManifest = $manifest;
+$pendingManifest['release_ready'] = false;
+$pendingManifestPath = $fixture.DIRECTORY_SEPARATOR.'pending-runtimes.json';
+file_put_contents($pendingManifestPath, json_encode($pendingManifest, JSON_THROW_ON_ERROR));
+try {
+    (new ManagedRuntime(
+        $fixture.DIRECTORY_SEPARATOR.'pending-install',
+        $pendingManifestPath,
+        new HttpFactory(),
+        versionProbe: $probe,
+    ))->install('linux-x86_64');
+    throw new RuntimeException('unfinalized managed runtime metadata was installed');
+} catch (RuntimeException $error) {
+    runtimeExpect(str_contains($error->getMessage(), 'not finalized'), 'pending runtime error is not actionable');
+}
+
 $override = new ManagedRuntime(
     $fixture.DIRECTORY_SEPARATOR.'override-root',
-    $manifestPath,
+    $pendingManifestPath,
     new HttpFactory(),
     'custom-pliego',
     $probe,

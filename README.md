@@ -28,6 +28,9 @@ an authored page break, a dense 20-row ledger, and calculated totals.
 
 ## Laravel quick start
 
+The v0.2 commands below become installable only after the split Composer package
+tags are published. Until then, Packagist's latest stable line remains `^0.1.1`.
+
 ```sh
 composer require oxhq/pliego-laravel:^0.2.0
 php artisan pliego:install
@@ -159,10 +162,12 @@ Composer distributions pass their focused contracts. The support profile remains
 the boundary; Pliego does not claim browser-wide compatibility or safe rendering of
 untrusted HTML.
 
-The current stable release is v0.1.1 and exposes engine API 1. The v0.2.0 source
-candidate now routes the default command and supported SDK path through the
-Pliego-owned controlled transaction, but v0.2.0 remains unreleased until the exact
-packaged release gates pass.
+This source tree targets v0.2.0 and engine API 1. The
+[Releases page](https://github.com/oxhq/pliego/releases) is the publication
+authority: unless an exact v0.2.0 tag and its native assets are present there,
+v0.1.1 remains the latest stable release. The v0.2 source routes the default command
+and supported SDK path through the Pliego-owned controlled transaction, but source
+code alone is not release proof.
 For the project's scope, evidence, release train, and next gates, see:
 
 - [Project overview](docs/project-overview.md)

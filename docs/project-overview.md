@@ -9,8 +9,8 @@ Chromium, Node.js, or Java with an application.
 
 | Item | Current public boundary |
 | --- | --- |
-| Stable release | v0.1.1 |
-| Next intended release | v0.2.0 controlled-runtime cutover; unreleased and evidence-gated |
+| Source release line | v0.2.0 controlled-runtime cutover |
+| Publication status | The exact tag and assets on GitHub Releases are authoritative; a source branch is not a release |
 | Engine protocol | API 1 |
 | Supported input trust | Application-owned HTML and assets |
 | Runtime network | Denied by default; explicit URL roots are opt-in |
@@ -61,8 +61,8 @@ records that boundary.
 
 ## What the repository currently proves
 
-- The v0.1.1 release surface and native package targets are versioned in the source
-  tree.
+- The v0.2 source surface and native package targets are versioned in the source
+  tree; GitHub Releases remains authoritative for publication status.
 - The package workflow defines native builds, checksum and notice artifacts, and
   engine-API smoke checks for the four published targets.
 - Focused fixtures cover supported pagination, fonts, images, links, Chart.js usage,
@@ -95,5 +95,6 @@ be reported through the private process in [SECURITY.md](../SECURITY.md).
   [benchmark guide](benchmarks/README.md).
 - Evaluate deployment risks against the [threat model](security/threat-model.md).
 - Review the public assumptions in the [2026 funding plan](funding/2026.md).
-- Try the v0.1.1 Laravel or native CLI path from the root [README](../README.md), then
+- Try the published Laravel or native CLI path named by the root
+  [README](../README.md) and Releases page, then
   report the exact fixture, platform, command, and retained artifacts for any failure.

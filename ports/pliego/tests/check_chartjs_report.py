@@ -656,10 +656,10 @@ def main() -> int:
         if controlled:
             first = output / "first"
             second = output / "second"
-            realtime = output / "realtime"
+            stable = output / "stable"
             first.mkdir()
             second.mkdir()
-            realtime.mkdir()
+            stable.mkdir()
             visible, chromatic, first_hashes, first_readiness = run(binary, installed, first, controlled=True)
             second_visible, second_chromatic, second_hashes, second_readiness = run(
                 binary,
@@ -671,27 +671,27 @@ def main() -> int:
                 (visible, chromatic) == (second_visible, second_chromatic), "controlled Chart.js pixel evidence changed"
             )
             require(first_hashes == second_hashes, "controlled Chart.js outputs changed between fresh processes")
-            realtime_visible, realtime_chromatic, realtime_hashes, realtime_readiness = run(binary, installed, realtime)
+            stable_visible, stable_chromatic, stable_hashes, stable_readiness = run(binary, installed, stable)
             require(
-                (visible, chromatic) == (realtime_visible, realtime_chromatic),
-                "controlled and realtime Chart.js pixel evidence changed",
+                (visible, chromatic) == (stable_visible, stable_chromatic),
+                "controlled alias and stable render Chart.js pixel evidence changed",
             )
-            require(first_readiness == second_readiness == realtime_readiness, repr(realtime_readiness))
+            require(first_readiness == second_readiness == stable_readiness, repr(stable_readiness))
             (output / "proof.json").write_text(
                 json.dumps(
                     {
                         "schema": "pliego.controlled-chartjs-proof",
-                        "version": 2,
+                        "version": 3,
                         "binary_sha256": sha256_file(binary),
                         "fixture_sha256": sha256_file(installed),
                         "chartjs_umd_sha256": CHART_JS_UMD_SHA256,
                         "comparison_sha256": first_hashes,
-                        "realtime_reference_comparison_sha256": realtime_hashes,
-                        "successful_fresh_processes": 2,
+                        "stable_route_comparison_sha256": stable_hashes,
+                        "successful_fresh_processes": 3,
                         "readiness_payload_parity": {
                             "status": "exact",
-                            "controlled_fresh_processes": 2,
-                            "realtime_fresh_processes": 1,
+                            "controlled_alias_fresh_processes": 2,
+                            "stable_route_fresh_processes": 1,
                             "payload": first_readiness,
                             "payload_sha256": canonical_json_sha256(first_readiness),
                         },

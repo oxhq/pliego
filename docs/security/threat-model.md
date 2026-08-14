@@ -1,9 +1,9 @@
 # Security threat model
 
-This document describes the intended security boundary of Pliego v0.1.1 and the
-engine API 1 integration. It complements the exact capability limits in the
-[support profile](../pliego/support-profile.md). It is not a claim that the engine
-is safe for hostile HTML.
+This document describes the intended security boundary of the Pliego v0.2
+controlled runtime and its engine API 1 integration. It complements the exact
+capability limits in the [support profile](../pliego/support-profile.md). It is not
+a claim that the engine is safe for hostile HTML.
 
 ## Scope and trust boundary
 
@@ -88,4 +88,4 @@ Servo vulnerabilities may require coordinated upstream disclosure; the project w
 coordinate that handoff rather than asking reporters to disclose twice.
 
 Future work toward stronger isolation must define and test a new trust boundary. It
-must not silently broaden the v0.1.1 supported-input claim.
+must not silently broaden the v0.2 supported-input claim.

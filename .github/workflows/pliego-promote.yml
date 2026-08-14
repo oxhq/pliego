@@ -186,7 +186,7 @@ jobs:
                   "files": files,
               }
 
-          generated = {"schema": 1, "version": version, "api": 1, "assets": assets}
+          generated = {"schema": 1, "version": version, "api": 1, "release_ready": True, "assets": assets}
           manifest_path = root / "runtimes.json"
           manifest_path.write_text(json.dumps(generated, indent=4) + "\n", encoding="utf-8")
           manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -195,6 +195,7 @@ jobs:
               manifest.get("schema") != 1
               or manifest.get("version") != version
               or manifest.get("api") != 1
+              or manifest.get("release_ready") is not True
               or list(manifest.get("assets", {})) != expected_platforms
           ):
               raise SystemExit("runtime manifest contract does not match the selected release")
@@ -268,6 +269,27 @@ jobs:
 
           printf 'CREATE_TAG=%s\n' "$create_tag" >> "$GITHUB_ENV"
 
+      - name: Load exact release notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          notes_path="docs/releases/v${PLIEGO_VERSION}.md"
+          gh api \
+            -H "Accept: application/vnd.github.raw+json" \
+            "repos/$GITHUB_REPOSITORY/contents/$notes_path?ref=$HEAD_SHA" \
+            > release-notes.md
+          if [[ "$(head -n 1 release-notes.md)" != "# Pliego $TAG" ]]; then
+            echo "release notes do not match $TAG at $HEAD_SHA" >&2
+            exit 1
+          fi
+          cat >> release-notes.md <<EOF
+
+          ## Release provenance
+
+          - [Package workflow run](https://github.com/$GITHUB_REPOSITORY/actions/runs/$RUN_ID)
+          - [Exact source commit](https://github.com/$GITHUB_REPOSITORY/commit/$HEAD_SHA)
+          EOF
+
       # github.token is intentional: its tag event cannot start the legacy v* package trigger at HEAD_SHA.
       - name: Create exact-SHA tag without rebuilding
         if: env.CREATE_TAG == 'true'
@@ -293,4 +315,4 @@ jobs:
             --draft \
             --verify-tag \
             --title "Pliego $TAG" \
-            --notes "Draft native bundles and checksums from package run $RUN_ID at $HEAD_SHA. Publishing remains a separate manual gate."
+            --notes-file release-notes.md

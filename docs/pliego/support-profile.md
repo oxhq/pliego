@@ -1,7 +1,9 @@
-# Pliego 0.1 support profile
+# Pliego v0.2 support profile
 
-This page defines the current public behavior of Pliego 0.1. Behavior outside this
-profile is not implied by Servo or by successful rendering of a different document.
+This page defines the supported behavior of the Pliego v0.2 source line. Publication
+status comes from the exact tags and assets on GitHub Releases, not from a branch.
+Behavior outside this profile is not implied by Servo or by successful rendering of
+a different document.
 
 ## Intended documents
 
@@ -14,13 +16,13 @@ Published bundles target Linux x86_64, Windows x86_64, macOS x86_64, and macOS
 arm64. The same engine API is checked after unpacking on each target; document-level
 regression coverage is deepest on Linux x86_64.
 
-## Controlled-capture 0.2 release candidate
+## Controlled-capture runtime
 
-The 0.2 source candidate makes the stable-syntax `render` route—and therefore the
+The stable-syntax `render` route—and therefore the
 PHP and Laravel packages that invoke it—use the controlled transaction.
 `render-controlled` remains an explicit alias for that transaction with narrower
 syntax: the alias rejects `--allow-partial-scene`, while `render` retains that
-diagnostic option. This cutover is not part of the published v0.1.1/API 1 package.
+diagnostic option. Both routes retain engine API 1.
 
 Both routes install the API 1 readiness bootstrap: static pages become ready after
 load and the font wait, while pages with asynchronous work use
@@ -33,7 +35,7 @@ It has no realtime or shell fallback: stale capture state, a lost or indetermina
 consume outcome, and open-ended or unsupported sources all fail without publishing
 the requested PDF or any success-only artifact.
 
-The candidate checks path identity, output occupancy, and transaction preconditions
+The runtime checks path identity, output occupancy, and transaction preconditions
 before starting the document process. After a normal child exit, it prepares and holds
 the external PDF before making the artifact tree visible. An API 1 failure result still
 reports the requested `artifacts` and `document_pdf` strings after a render identity is
@@ -53,13 +55,13 @@ conservatively. An alias proven to enter the future scaffold returns
 
 New artifact roots must leave enough pathname headroom on the destination filesystem
 for the owner-only private staging tree and its longest bounded resource descendant.
-The candidate proves that headroom with a private, identity-checked probe before it
+The runtime proves that headroom with a private, identity-checked probe before it
 starts the document process. A rejected probe returns `ARTIFACTS_CREATE_FAILED`,
 publishes no artifact root or PDF, and may take precedence over an already-known
 resource-setup failure. No portable character-count limit is part of the profile;
 the destination filesystem's path rules decide.
 
-The release-candidate package gate unpacks the Linux x86_64 checked-release archive
+The package gate unpacks the Linux x86_64 checked-release archive
 and runs its binary in two fresh processes against one pinned offline font, script,
 and visible retained-subset Canvas 2D fixture. That fixture directly authors one API 1
 defer/ready transition. The gate requires byte-identical readiness evidence, pixels,
@@ -74,7 +76,7 @@ Other packaged targets currently have engine API, native
 publication primitives, help, version, dependency-boundary, and archive smoke coverage,
 not this document-level controlled-capture proof.
 
-The implemented candidate boundary is deliberately narrow:
+The implemented v0.2 boundary is deliberately narrow:
 
 - it captures one fully active painted pipeline; multi-pipeline and cross-event-loop
   frame trees are unsupported;
@@ -106,7 +108,7 @@ The implemented candidate boundary is deliberately narrow:
 - Unix launchers must preserve the default waitable `SIGCHLD` disposition: custom handlers,
   `SIG_IGN`, and `SA_NOCLDWAIT` are rejected before a document worker is spawned so the
   supervisor can reserve the worker process-group identity until teardown completes; and
-- this candidate is not API 2, a hostile-input sandbox, or a cross-platform byte-determinism
+- this profile is not API 2, a hostile-input sandbox, or a cross-platform byte-determinism
   claim.
 
 The exact transaction and source inventory are documented in
