@@ -29,9 +29,17 @@
     font: 12px/28px "Controlled Capture Marker";
     text-align: center;
   }
+
+  #controlled-capture-canvas {
+    display: block;
+    width: 48px;
+    height: 24px;
+    margin: 0 12px 12px;
+  }
 </style>
 <body>
   <div id="controlled-capture-marker">PLIEGO_FONT_PREWARM</div>
+  <canvas id="controlled-capture-canvas" width="48" height="24"></canvas>
 </body>
 <script>
   if (
@@ -40,6 +48,14 @@
   ) {
     setInterval(() => {}, 1);
   }
+
+  const controlledCanvas = document.getElementById("controlled-capture-canvas");
+  const controlledContext = controlledCanvas.getContext("2d");
+  controlledContext.fillStyle = "rgb(12, 180, 96)";
+  controlledContext.fillRect(0, 0, controlledCanvas.width, controlledCanvas.height);
+  controlledContext.fillStyle = "rgb(244, 196, 48)";
+  controlledContext.fillRect(8, 6, 20, 10);
+  controlledContext.getImageData(0, 0, controlledCanvas.width, controlledCanvas.height);
 
   const paintObserver = new PerformanceObserver((list) => {
     const fcp = list

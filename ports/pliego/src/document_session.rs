@@ -28,7 +28,9 @@ use embedder_traits::{
 use http::header::CONTENT_TYPE;
 use http::{HeaderMap, HeaderValue};
 use layout::pages::{PageDefinition, reserve_for_process};
-use pliego::capture::{SceneCapture, capture_document_scene_with_canvas};
+use pliego::capture::{
+    SceneCapture, capture_controlled_document_scene_with_canvas, capture_document_scene_with_canvas,
+};
 use pliego::event_loop_waker::{EventLoopWakeWaitOutcome, PliegoEventLoopWaker};
 use pliego::pdf::{PdfFontResource, PdfFontVariation, render_document_pdf};
 use servo::{
@@ -506,7 +508,11 @@ impl PreparedDocumentCaptureCandidate {
     /// Consume this candidate through Paint reservation, Script revalidation, and exact readback.
     pub(crate) fn capture(self) -> Result<DocumentCaptureOutcome, SessionError> {
         self.capture_with_canvas_freezer_and_hook(
-            |keys| servo_canvas::retained_canvas::freeze_canvas_snapshots(keys),
+            |keys, generation| {
+                servo_canvas::retained_canvas::freeze_canvas_snapshots_at_generation(
+                    keys, generation,
+                )
+            },
             |_, _| {},
         )
     }
@@ -517,7 +523,11 @@ impl PreparedDocumentCaptureCandidate {
         after_reservation: impl FnOnce(&WebView, &DocumentPaintPresentationTicket),
     ) -> Result<DocumentCaptureOutcome, SessionError> {
         self.capture_with_canvas_freezer_and_hook(
-            |keys| servo_canvas::retained_canvas::freeze_canvas_snapshots(keys),
+            |keys, generation| {
+                servo_canvas::retained_canvas::freeze_canvas_snapshots_at_generation(
+                    keys, generation,
+                )
+            },
             after_reservation,
         )
     }
@@ -526,6 +536,7 @@ impl PreparedDocumentCaptureCandidate {
         self,
         freeze_canvas: impl FnOnce(
             &[(u32, u32)],
+            u64,
         ) -> Result<
             servo_canvas::retained_canvas::FrozenCanvasSnapshots,
             servo_canvas::retained_canvas::FreezeCanvasSnapshotsError,
@@ -551,6 +562,7 @@ impl PreparedDocumentCaptureCandidate {
         &self,
         freeze_canvas: impl FnOnce(
             &[(u32, u32)],
+            u64,
         ) -> Result<
             servo_canvas::retained_canvas::FrozenCanvasSnapshots,
             servo_canvas::retained_canvas::FreezeCanvasSnapshotsError,
@@ -585,6 +597,7 @@ impl PreparedDocumentCaptureCandidate {
         ticket: &DocumentPaintPresentationTicket,
         freeze_canvas: impl FnOnce(
             &[(u32, u32)],
+            u64,
         ) -> Result<
             servo_canvas::retained_canvas::FrozenCanvasSnapshots,
             servo_canvas::retained_canvas::FreezeCanvasSnapshotsError,
@@ -623,6 +636,15 @@ impl PreparedDocumentCaptureCandidate {
             })?;
         let (outcome, _) = self.session.await_control_outcome(receiver)?;
         let commit = exact_capture_commit(outcome, precondition, ticket)?;
+        let canvas_binding = precondition
+            .sources()
+            .canvas_capture_binding()
+            .map_err(|error| {
+                SessionError::new(
+                    "CONTROLLED_CANVAS_BINDING_INVALID",
+                    format!("consumed capture candidate has an invalid Canvas binding: {error:?}"),
+                )
+            })?;
 
         let screenshot = self
             .session
@@ -670,9 +692,10 @@ impl PreparedDocumentCaptureCandidate {
         let scene_capture_started = Instant::now();
         let capture = {
             let resources = self.session.session.delegate.resource_store.borrow();
-            capture_document_scene_with_canvas(
+            capture_controlled_document_scene_with_canvas(
                 snapshot.as_bytes(),
                 |url| resources.resolve_url(url),
+                canvas_binding.as_ref(),
                 freeze_canvas,
             )
         }

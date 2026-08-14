@@ -23,12 +23,13 @@ use net_traits::request::CorsSettings;
 use pixels::{Snapshot, SnapshotAlphaMode, SnapshotPixelFormat};
 use script_bindings::cell::DomRefCell;
 use servo_arc::Arc as ServoArc;
-use servo_base::generic_channel::GenericBufferedSender;
+use servo_base::generic_channel::{GenericBufferedSender, GenericReceiver};
 use servo_base::{Epoch, generic_channel};
 use servo_canvas_traits::canvas::{
-    CanvasCommand, CanvasFont, CanvasId, CanvasMsg, CompositionOptions, CompositionOrBlending,
-    FillOrStrokeStyle, FillRule, GlyphAndPosition, LineCapStyle, LineJoinStyle, LineOptions,
-    LinearGradientStyle, Path, RadialGradientStyle, RepetitionStyle, ShadowOptions, TextRun,
+    CanvasCaptureObservation, CanvasCommand, CanvasFont, CanvasId, CanvasMsg, CompositionOptions,
+    CompositionOrBlending, FillOrStrokeStyle, FillRule, GlyphAndPosition, LineCapStyle,
+    LineJoinStyle, LineOptions, LinearGradientStyle, Path, RadialGradientStyle, RepetitionStyle,
+    ShadowOptions, TextRun,
 };
 use servo_constellation_traits::ScriptToConstellationMessage;
 use servo_url::{ImmutableOrigin, ServoUrl};
@@ -303,6 +304,31 @@ impl CanvasState {
         } else {
             self.buffered_sender.send_immediate(msg).unwrap();
         }
+    }
+
+    /// Flush every command authored before a controlled-capture Canvas observation.
+    pub(super) fn flush_capture_commands(&self) -> Result<(), ()> {
+        self.buffered_sender.flush().map_err(|_| ())
+    }
+
+    /// Enqueue an observation barrier even when the Canvas has a zero-sized backing bitmap.
+    ///
+    /// The ordinary immediate-command helper intentionally suppresses commands for nonpaintable
+    /// canvases. Capture observation is control traffic and must always receive a reply.
+    pub(super) fn enqueue_capture_observation(
+        &self,
+        expected_image_key: Option<ImageKey>,
+        expected_size: Size2D<u32>,
+    ) -> Result<GenericReceiver<CanvasCaptureObservation>, ()> {
+        let (response, receiver) = generic_channel::channel().ok_or(())?;
+        self.buffered_sender
+            .send_immediate(CanvasCommand::ObserveCapture {
+                expected_image_key,
+                expected_size,
+                response,
+            })
+            .map_err(|_| ())?;
+        Ok(receiver)
     }
 
     /// Updates WR image and blocks on completion

@@ -11,7 +11,7 @@ use std::ops::Deref;
 use std::rc::Rc;
 use std::str::FromStr;
 use std::sync::{Arc as StdArc, LazyLock, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bitflags::bitflags;
 use chrono::Local;
@@ -22,8 +22,9 @@ use data_url::mime::Mime;
 use devtools_traits::ScriptToDevtoolsControlMsg;
 use dom_struct::dom_struct;
 use embedder_traits::{
-    AllowOrDeny, AnimationState, CustomHandlersAutomationMode, DocumentSettlementSource,
-    DocumentTrackedSourceKind, DocumentUnsupportedSourceReason, EmbedderMsg, Image, LoadStatus,
+    AllowOrDeny, AnimationState, CustomHandlersAutomationMode, DocumentCanvasCaptureStatus,
+    DocumentCanvasImageKey, DocumentSettlementSource, DocumentTrackedSourceKind,
+    DocumentUnsupportedSourceReason, EmbedderMsg, Image, LoadStatus,
 };
 use encoding_rs::{Encoding, UTF_8};
 use html5ever::{LocalName, Namespace, QualName, local_name, ns};
@@ -58,9 +59,12 @@ use script_bindings::trace::CustomTraceable;
 use script_traits::{DocumentActivity, ProgressiveWebMetricType};
 use servo_arc::Arc;
 use servo_base::cross_process_instant::CrossProcessInstant;
-use servo_base::generic_channel::GenericSend;
+use servo_base::generic_channel::{GenericReceiver, GenericSend};
 use servo_base::id::{PipelineId, WebViewId};
 use servo_base::{Epoch, generic_channel};
+use servo_canvas_traits::canvas::{
+    CanvasCaptureObservation, CanvasCaptureObservationStatus, CanvasId,
+};
 use servo_config::pref;
 use servo_constellation_traits::{
     NavigationHistoryBehavior, PaintMetricTime, ScriptToConstellationMessage,
@@ -81,9 +85,10 @@ use stylo_atoms::Atom;
 use time::Duration as TimeDuration;
 use timers::{DocumentClockError, DocumentRenderingTime, DocumentTime, DocumentTimeSurface};
 use url::{Host, Position};
+use webrender_api::{IdNamespace, ImageKey};
 
 use crate::animations::Animations;
-use crate::canvas_context::RenderingContext;
+use crate::canvas_context::{CanvasContext, RenderingContext};
 use crate::document_loader::{DocumentLoader, LoadType};
 use crate::dom::FlatTreeParent;
 use crate::dom::animationtimeline::AnimationTimeline;
@@ -224,6 +229,12 @@ use crate::task_source::TaskSourceName;
 use crate::timers::{OneshotTimerCallback, OneshotTimers};
 use crate::xpath::parse_expression;
 
+/// Hard transport bound for one batch of trusted Canvas paint-thread tail-barrier responses.
+///
+/// This is not a settlement retry or delay. A missing response fails the source observation
+/// closed. The caller's independent host deadline may expire first; publication still fails closed.
+const CONTROLLED_CANVAS_OBSERVATION_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Canonicalize tracker-derived unsupported DOM source identities.
 pub(crate) fn controlled_unsupported_dom_sources(
     pipeline_id: PipelineId,
@@ -237,6 +248,61 @@ pub(crate) fn controlled_unsupported_dom_sources(
             DocumentSettlementSource::unsupported_dom_node_internal(pipeline_id, node_id, reason)
         })
         .collect()
+}
+
+fn controlled_canvas_capture_status(
+    status: CanvasCaptureObservationStatus,
+) -> DocumentCanvasCaptureStatus {
+    match status {
+        CanvasCaptureObservationStatus::Ready => DocumentCanvasCaptureStatus::Ready,
+        CanvasCaptureObservationStatus::RetentionDisabled => {
+            DocumentCanvasCaptureStatus::RetentionDisabled
+        },
+        CanvasCaptureObservationStatus::MissingCanvas => DocumentCanvasCaptureStatus::MissingCanvas,
+        CanvasCaptureObservationStatus::MissingImageKey => {
+            DocumentCanvasCaptureStatus::MissingImageKey
+        },
+        CanvasCaptureObservationStatus::ImageKeyMismatch => {
+            DocumentCanvasCaptureStatus::ImageKeyMismatch
+        },
+        CanvasCaptureObservationStatus::SizeMismatch => DocumentCanvasCaptureStatus::SizeMismatch,
+        CanvasCaptureObservationStatus::RetentionBudgetExceeded => {
+            DocumentCanvasCaptureStatus::RetentionBudgetExceeded
+        },
+        CanvasCaptureObservationStatus::UnsupportedTranscript => {
+            DocumentCanvasCaptureStatus::UnsupportedTranscript
+        },
+    }
+}
+
+fn receive_controlled_canvas_observation(
+    receiver: GenericReceiver<CanvasCaptureObservation>,
+    deadline: Instant,
+) -> Option<CanvasCaptureObservation> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return None;
+    }
+    receiver.try_recv_timeout(remaining).ok()
+}
+
+struct ControlledCanvasObservation {
+    node_id: usize,
+    canvas_id: CanvasId,
+    image_key: Option<ImageKey>,
+    width: u32,
+    height: u32,
+    registry_generation: Option<u64>,
+    status: DocumentCanvasCaptureStatus,
+}
+
+struct PendingControlledCanvasObservation {
+    node_id: usize,
+    canvas_id: CanvasId,
+    image_key: Option<ImageKey>,
+    width: u32,
+    height: u32,
+    receiver: Option<GenericReceiver<CanvasCaptureObservation>>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -4775,12 +4841,27 @@ impl Document {
                 ));
             }
         });
+        let mut capture_canvases = Vec::new();
         self.capture_canvases.for_each(|canvas| {
             if &*canvas.owner_document() != self {
                 return;
             }
-            let Some(reason) = canvas.context().map(|context| match &*context {
-                RenderingContext::Context2d(_) => DocumentUnsupportedSourceReason::Canvas2d,
+            capture_canvases.push(canvas);
+        });
+        capture_canvases.sort_unstable_by_key(|canvas| canvas.upcast::<Node>().to_opaque().id());
+        capture_canvases.dedup_by_key(|canvas| canvas.upcast::<Node>().to_opaque().id());
+
+        let mut canvas_2d_nodes = Vec::new();
+        for canvas in capture_canvases {
+            let node_id = canvas.upcast::<Node>().to_opaque().id();
+            let Some(context) = canvas.context() else {
+                continue;
+            };
+            let reason = match &*context {
+                RenderingContext::Context2d(_) => {
+                    canvas_2d_nodes.push((node_id, canvas.clone()));
+                    continue;
+                },
                 RenderingContext::BitmapRenderer(_) => {
                     DocumentUnsupportedSourceReason::BitmapRendererCanvas
                 },
@@ -4792,11 +4873,114 @@ impl Document {
                 RenderingContext::Placeholder(_) => {
                     DocumentUnsupportedSourceReason::OffscreenCanvas
                 },
-            }) else {
-                return;
             };
-            unsupported_nodes.push((canvas.upcast::<Node>().to_opaque().id(), reason));
-        });
+            unsupported_nodes.push((node_id, reason));
+        }
+
+        // Root every live 2D Canvas across all three phases. Flushing every context before
+        // enqueueing any observation makes the observations a common tail barrier on Servo's one
+        // Canvas paint-thread queue.
+        let flush_succeeded = canvas_2d_nodes
+            .iter()
+            .map(|(_, canvas)| {
+                canvas.context().is_some_and(|context| {
+                    matches!(&*context, RenderingContext::Context2d(context) if context.flush_capture_commands().is_ok())
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut pending_requests = Vec::with_capacity(canvas_2d_nodes.len());
+        for ((node_id, canvas), flush_succeeded) in canvas_2d_nodes.iter().zip(flush_succeeded) {
+            let image_key = canvas.capture_image_key();
+            let size = canvas.get_size();
+            let canvas_id = canvas
+                .context()
+                .and_then(|context| match &*context {
+                    RenderingContext::Context2d(context) => Some(context.context_id()),
+                    _ => None,
+                })
+                .unwrap_or(CanvasId(u64::MAX));
+            let receiver = flush_succeeded
+                .then(|| {
+                    let context = canvas.context()?;
+                    let RenderingContext::Context2d(context) = &*context else {
+                        return None;
+                    };
+                    context.enqueue_capture_observation(image_key, size).ok()
+                })
+                .flatten();
+            pending_requests.push(PendingControlledCanvasObservation {
+                node_id: *node_id,
+                canvas_id,
+                image_key,
+                width: size.width,
+                height: size.height,
+                receiver,
+            });
+        }
+        let mut observations = Vec::with_capacity(pending_requests.len());
+        let observation_deadline = Instant::now() + CONTROLLED_CANVAS_OBSERVATION_TIMEOUT;
+        for pending in pending_requests {
+            observations.push(
+                match pending.receiver.and_then(|receiver| {
+                    receive_controlled_canvas_observation(receiver, observation_deadline)
+                }) {
+                    Some(observation)
+                        if observation.canvas_id == pending.canvas_id &&
+                            observation.image_key == pending.image_key &&
+                            observation.size.width == pending.width &&
+                            observation.size.height == pending.height =>
+                    {
+                        ControlledCanvasObservation {
+                            node_id: pending.node_id,
+                            canvas_id: pending.canvas_id,
+                            image_key: pending.image_key,
+                            width: pending.width,
+                            height: pending.height,
+                            registry_generation: observation.registry_generation,
+                            status: controlled_canvas_capture_status(observation.status),
+                        }
+                    },
+                    _ => ControlledCanvasObservation {
+                        node_id: pending.node_id,
+                        canvas_id: pending.canvas_id,
+                        image_key: pending.image_key,
+                        width: pending.width,
+                        height: pending.height,
+                        registry_generation: None,
+                        status: DocumentCanvasCaptureStatus::ObservationUnavailable,
+                    },
+                },
+            );
+        }
+        let ready_generations = observations
+            .iter()
+            .filter(|observation| observation.status == DocumentCanvasCaptureStatus::Ready)
+            .filter_map(|observation| observation.registry_generation)
+            .collect::<BTreeSet<_>>();
+        if ready_generations.len() > 1 {
+            for observation in &mut observations {
+                if observation.status == DocumentCanvasCaptureStatus::Ready {
+                    observation.status = DocumentCanvasCaptureStatus::MixedGeneration;
+                }
+            }
+        }
+        sources.extend(observations.into_iter().map(|observation| {
+            let image_key = observation
+                .image_key
+                .map(|ImageKey(IdNamespace(namespace), key)| {
+                    DocumentCanvasImageKey::new_internal(namespace, key)
+                });
+            DocumentSettlementSource::canvas_2d_internal(
+                pipeline_id,
+                observation.node_id,
+                observation.canvas_id.0,
+                image_key,
+                observation.width,
+                observation.height,
+                observation.registry_generation,
+                observation.status,
+            )
+        }));
         sources.extend(controlled_unsupported_dom_sources(
             pipeline_id,
             unsupported_nodes,
@@ -5246,6 +5430,23 @@ mod animation_frame_callback_tests {
 
         assert_eq!(*observed.borrow(), vec![(1, 50)]);
         assert!(callbacks.borrow().is_empty());
+    }
+
+    #[test]
+    fn missing_canvas_capture_observations_share_one_expired_batch_deadline() {
+        let (_first_sender, first_receiver) =
+            generic_channel::channel::<CanvasCaptureObservation>().unwrap();
+        let (_second_sender, second_receiver) =
+            generic_channel::channel::<CanvasCaptureObservation>().unwrap();
+        let expired_batch_deadline = Instant::now();
+
+        assert!(
+            receive_controlled_canvas_observation(first_receiver, expired_batch_deadline).is_none()
+        );
+        assert!(
+            receive_controlled_canvas_observation(second_receiver, expired_batch_deadline)
+                .is_none()
+        );
     }
 }
 
