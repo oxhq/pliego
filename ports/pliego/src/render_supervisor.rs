@@ -349,6 +349,31 @@ fn macos_process_group_has_only_zombies(process_group: libc::pid_t) -> io::Resul
 }
 
 #[cfg(target_os = "macos")]
+#[repr(C)]
+struct MacosProcBsdShortInfo {
+    pbsi_pid: u32,
+    _pbsi_ppid: u32,
+    pbsi_pgid: u32,
+    pbsi_status: u32,
+    _pbsi_comm: [libc::c_char; libc::MAXCOMLEN],
+    _pbsi_flags: u32,
+    _pbsi_uid: libc::uid_t,
+    _pbsi_gid: libc::gid_t,
+    _pbsi_ruid: libc::uid_t,
+    _pbsi_rgid: libc::gid_t,
+    _pbsi_svuid: libc::uid_t,
+    _pbsi_svgid: libc::gid_t,
+    _pbsi_rfu: u32,
+}
+
+#[cfg(target_os = "macos")]
+const _: () = assert!(std::mem::size_of::<MacosProcBsdShortInfo>() == 64);
+
+#[cfg(target_os = "macos")]
+// `PROC_PIDT_SHORTBSDINFO` from Apple's public proc_info.h. libc 0.2.186 does not yet expose it.
+const MACOS_PROC_PIDT_SHORTBSDINFO: libc::c_int = 13;
+
+#[cfg(target_os = "macos")]
 fn macos_process_group_members(process_group: libc::pid_t) -> io::Result<Vec<libc::pid_t>> {
     const LIST_ATTEMPTS: usize = 4;
     const LIST_HEADROOM: usize = 8;
@@ -449,17 +474,20 @@ fn macos_process_group_members(process_group: libc::pid_t) -> io::Result<Vec<lib
 fn macos_process_state_and_group(
     process_id: libc::pid_t,
 ) -> io::Result<Option<(u32, libc::pid_t)>> {
-    let mut information = unsafe { std::mem::zeroed::<libc::proc_bsdinfo>() };
-    let information_bytes = libc::c_int::try_from(std::mem::size_of::<libc::proc_bsdinfo>())
-        .expect("proc_bsdinfo size fits c_int");
+    let mut information = unsafe { std::mem::zeroed::<MacosProcBsdShortInfo>() };
+    let information_bytes = libc::c_int::try_from(std::mem::size_of::<MacosProcBsdShortInfo>())
+        .expect("proc_bsdshortinfo size fits c_int");
     // SAFETY: __error returns this thread's errno location.
     unsafe { *libc::__error() = 0 };
     // SAFETY: information is writable for information_bytes and has the requested layout.
     let returned = unsafe {
         libc::proc_pidinfo(
             process_id,
-            libc::PROC_PIDTBSDINFO,
-            // Darwin searches the zombie process list for PROC_PIDTBSDINFO only when arg is
+            // The short BSD flavor exposes exactly the PID, process-group, and state needed for
+            // containment without PROC_PIDTBSDINFO's same-user policy. That fuller policy can
+            // return EPERM while an already-killed group member is transitioning into a zombie.
+            MACOS_PROC_PIDT_SHORTBSDINFO,
+            // Darwin searches the zombie process list for BSD-info flavors only when arg is
             // nonzero. The inspected process-group snapshot can contain unreaped zombies after
             // the worker group has been terminated.
             1,
@@ -492,7 +520,7 @@ fn macos_process_state_and_group(
             "libproc returned a partial process status",
         ));
     }
-    let observed_id = libc::pid_t::try_from(information.pbi_pid).map_err(|_| {
+    let observed_id = libc::pid_t::try_from(information.pbsi_pid).map_err(|_| {
         io::Error::new(
             io::ErrorKind::InvalidData,
             "libproc returned a process ID outside pid_t",
@@ -504,13 +532,13 @@ fn macos_process_state_and_group(
             "libproc returned status for a different process",
         ));
     }
-    let process_group = libc::pid_t::try_from(information.pbi_pgid).map_err(|_| {
+    let process_group = libc::pid_t::try_from(information.pbsi_pgid).map_err(|_| {
         io::Error::new(
             io::ErrorKind::InvalidData,
             "libproc returned a process group outside pid_t",
         )
     })?;
-    Ok(Some((information.pbi_status, process_group)))
+    Ok(Some((information.pbsi_status, process_group)))
 }
 
 #[cfg(target_os = "linux")]
