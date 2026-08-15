@@ -1094,7 +1094,7 @@ fn validate_scene_report(
         .unsupported_events
         .0
         .windows(2)
-        .all(|pair| pair[0].sequence < pair[1].sequence) ||
+        .all(|pair| pair[0].sequence <= pair[1].sequence) ||
         !report.capture.text_mapping_gaps.0.windows(2).all(|pair| {
             (pair[0].sequence, pair[0].glyph_index) < (pair[1].sequence, pair[1].glyph_index)
         })
@@ -3410,6 +3410,39 @@ mod tests {
             fixture.contract(&public_artifacts, &public_output),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn accepts_multiple_capture_diagnostics_for_one_paint_event() {
+        let tree = TemporaryTree::new("same-event-diagnostics");
+        let public_artifacts = tree.0.with_extension("public");
+        let public_output = tree.0.with_extension("requested.pdf");
+        let (mut deferred, fixture) =
+            write_captured_fixture(&tree.0, 1, &public_artifacts, &public_output);
+        let report_path = tree.0.join("scene-report.json");
+        let mut report: serde_json::Value =
+            serde_json::from_slice(&fs::read(&report_path).unwrap()).unwrap();
+        report["capture"]["status"] = "partial".into();
+        report["capture"]["code"] = "SCENE_CAPTURE_UNSUPPORTED_PAINT_EVENTS".into();
+        report["capture"]["unsupported_events"] = serde_json::json!([
+            { "sequence": 2, "kind": "svg-animation" },
+            { "sequence": 2, "kind": "svg-compositing" },
+        ]);
+        fs::write(&report_path, serde_json::to_vec(&report).unwrap()).unwrap();
+        deferred.capture_status = "partial".into();
+        deferred.capture_code = Some("SCENE_CAPTURE_UNSUPPORTED_PAINT_EVENTS".into());
+        deferred.unsupported_event_count = 2;
+        let mut expected = fixture.contract(&public_artifacts, &public_output);
+        expected.allow_partial_scene = true;
+
+        validate_captured_artifact_contract(&tree.0, &deferred, expected).unwrap();
+
+        report["capture"]["unsupported_events"] = serde_json::json!([
+            { "sequence": 2, "kind": "svg-animation" },
+            { "sequence": 1, "kind": "svg-compositing" },
+        ]);
+        fs::write(report_path, serde_json::to_vec(&report).unwrap()).unwrap();
+        assert!(validate_captured_artifact_contract(&tree.0, &deferred, expected).is_err());
     }
 
     #[test]

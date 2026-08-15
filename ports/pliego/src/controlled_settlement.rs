@@ -14,8 +14,8 @@ use embedder_traits::{
     DocumentCaptureBlocker, DocumentCapturePrecondition, DocumentCaptureSurfaceFingerprint,
     DocumentProducerStability, DocumentSettlementSourceDisposition, DocumentTimeControlAction,
     DocumentTimeControlCommand, DocumentTimeControlError, DocumentTimeControlObservation,
-    DocumentTimeControlOutcome, DocumentTimeControlReceiveOutcome, DocumentTimeReadinessBlocker,
-    DocumentTimeControlTransportFailure,
+    DocumentTimeControlOutcome, DocumentTimeControlReceiveOutcome,
+    DocumentTimeControlTransportFailure, DocumentTimeReadinessBlocker,
 };
 use timers::{TimerControlError, TimerDeadlineSnapshot};
 
