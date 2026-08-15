@@ -573,6 +573,11 @@ impl ElementStylesheetLoader<'_> {
             },
             ElementStylesheetLoader::Asynchronous(asynchronous_loader) => {
                 let css_error_reporter = window.css_error_reporter().clone();
+                // Keep parallel parsing visible after this networking task returns and until its
+                // completion task owns a producer ticket.
+                let parse_producer = asynchronous_loader
+                    .main_thread_sender
+                    .begin_external_callback();
 
                 let parse_stylesheet = move || {
                     let pipeline_id = asynchronous_loader.pipeline_id;
@@ -590,6 +595,7 @@ impl ElementStylesheetLoader<'_> {
                         Some(pipeline_id),
                         TaskSourceName::Networking,
                     ));
+                    drop(parse_producer);
                 };
 
                 let thread_pool = STYLE_THREAD_POOL.pool();
