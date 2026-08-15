@@ -1659,6 +1659,7 @@ impl ControlledDocumentSession {
                         .consume_receive_outcome(outcome)
                         .map_err(settlement_transition_error)?;
                     if completion_generation.event_loop_changed_since(command_generation) {
+                        coordinator.discard_progress();
                         wait_generation = None;
                         ControlledSettlementProgress::Command(DocumentTimeControlCommand::Observe)
                     } else {
@@ -1699,6 +1700,7 @@ impl ControlledDocumentSession {
                     )?;
                     match wait {
                         EventLoopWakeWaitOutcome::Woken(_) => {
+                            coordinator.discard_progress();
                             ControlledSettlementProgress::Command(
                                 DocumentTimeControlCommand::Observe,
                             )

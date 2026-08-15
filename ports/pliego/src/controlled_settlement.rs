@@ -7,16 +7,17 @@
 //! The coordinator stops at an opaque generation-bound capture candidate. It neither contacts
 //! Paint nor authorizes publication; those are separate atomic-consume requirements.
 
+use std::cell::RefCell;
 use std::fmt;
 
 use embedder_traits::{
     DocumentCaptureBlocker, DocumentCapturePrecondition, DocumentCaptureSurfaceFingerprint,
     DocumentProducerStability, DocumentSettlementSourceDisposition, DocumentTimeControlAction,
     DocumentTimeControlCommand, DocumentTimeControlError, DocumentTimeControlObservation,
-    DocumentTimeControlOutcome, DocumentTimeControlReceiveOutcome,
+    DocumentTimeControlOutcome, DocumentTimeControlReceiveOutcome, DocumentTimeReadinessBlocker,
     DocumentTimeControlTransportFailure,
 };
-use timers::TimerControlError;
+use timers::{TimerControlError, TimerDeadlineSnapshot};
 
 /// The next host action required by mechanical settlement.
 #[derive(Debug)]
@@ -26,18 +27,36 @@ pub(crate) enum ControlledSettlementProgress {
     Candidate(Box<DocumentCapturePrecondition>),
 }
 
-/// Stateless transition policy bound to one exact capture surface.
+/// Transition policy bound to one exact capture surface.
 pub(crate) struct ControlledSettlementCoordinator {
     surface: DocumentCaptureSurfaceFingerprint,
+    readiness_turn_history: RefCell<ReadinessTurnHistory>,
+}
+
+struct ReadinessTurnHistory {
+    deadline: Option<TimerDeadlineSnapshot>,
+    signatures: Vec<Vec<DocumentTimeReadinessBlocker>>,
 }
 
 impl ControlledSettlementCoordinator {
     pub(crate) const fn new(surface: DocumentCaptureSurfaceFingerprint) -> Self {
-        Self { surface }
+        Self {
+            surface,
+            readiness_turn_history: RefCell::new(ReadinessTurnHistory {
+                deadline: None,
+                signatures: Vec::new(),
+            }),
+        }
     }
 
     pub(crate) const fn start(&self) -> ControlledSettlementProgress {
         ControlledSettlementProgress::Command(DocumentTimeControlCommand::Observe)
+    }
+
+    pub(crate) fn discard_progress(&self) {
+        let mut history = self.readiness_turn_history.borrow_mut();
+        history.deadline = None;
+        history.signatures.clear();
     }
 
     pub(crate) fn consume_receive_outcome(
@@ -68,9 +87,12 @@ impl ControlledSettlementCoordinator {
             DocumentTimeControlOutcome::Completed(observation) => {
                 self.consume_observation(*observation)
             },
-            DocumentTimeControlOutcome::Rejected(error) if should_reobserve(&error) => Ok(
-                ControlledSettlementProgress::Command(DocumentTimeControlCommand::Observe),
-            ),
+            DocumentTimeControlOutcome::Rejected(error) if should_reobserve(&error) => {
+                self.discard_progress();
+                Ok(ControlledSettlementProgress::Command(
+                    DocumentTimeControlCommand::Observe,
+                ))
+            },
             DocumentTimeControlOutcome::Rejected(error) => {
                 Err(ControlledSettlementError::Rejected(error))
             },
@@ -158,12 +180,22 @@ impl ControlledSettlementCoordinator {
                 .contains(&DocumentCaptureBlocker::FiniteTimerDeadline) ||
                 observation.next_deadline.is_some();
             if has_finite_deadline {
-                let Some(token) = observation.advance_token.take() else {
+                let Some(token) = observation.advance_token.as_ref() else {
                     return Err(ControlledSettlementError::FiniteSourceWithoutAuthority);
                 };
                 if Some(token.deadline()) != observation.next_deadline {
                     return Err(ControlledSettlementError::InconsistentPreparation);
                 }
+
+                let deadline = token.deadline();
+                if self.should_drive_readiness_turn(deadline, &observation) {
+                    return Ok(ControlledSettlementProgress::Command(
+                        DocumentTimeControlCommand::DriveOneTurn,
+                    ));
+                }
+                let Some(token) = observation.advance_token.take() else {
+                    return Err(ControlledSettlementError::FiniteSourceWithoutAuthority);
+                };
                 return Ok(ControlledSettlementProgress::Command(
                     DocumentTimeControlCommand::AdvanceTo(Box::new(token)),
                 ));
@@ -221,6 +253,46 @@ impl ControlledSettlementCoordinator {
         Ok(ControlledSettlementProgress::Command(
             DocumentTimeControlCommand::PrepareCapture(self.surface),
         ))
+    }
+
+    fn should_drive_readiness_turn(
+        &self,
+        deadline: TimerDeadlineSnapshot,
+        observation: &DocumentTimeControlObservation,
+    ) -> bool {
+        let mut signature = observation
+            .documents
+            .iter()
+            .flat_map(|document| document.readiness_blockers.iter().copied())
+            .filter(|blocker| {
+                matches!(
+                    blocker,
+                    DocumentTimeReadinessBlocker::Loading |
+                        DocumentTimeReadinessBlocker::RenderBlocked |
+                        DocumentTimeReadinessBlocker::FontsLoading |
+                        DocumentTimeReadinessBlocker::FontReadyPromise |
+                        DocumentTimeReadinessBlocker::LayoutImages |
+                        DocumentTimeReadinessBlocker::RasterImages |
+                        DocumentTimeReadinessBlocker::RenderingUpdate |
+                        DocumentTimeReadinessBlocker::CanvasImageUpdates
+                )
+            })
+            .collect::<Vec<_>>();
+        signature.sort_unstable();
+        signature.dedup();
+
+        // Each new progressable state gets one ScriptThread turn at this deadline. Remembering all
+        // seen states prevents a persistent or cycling blocker from starving the finite timer.
+        let mut history = self.readiness_turn_history.borrow_mut();
+        if history.deadline != Some(deadline) {
+            history.deadline = Some(deadline);
+            history.signatures.clear();
+        }
+        if signature.is_empty() || history.signatures.contains(&signature) {
+            return false;
+        }
+        history.signatures.push(signature);
+        true
     }
 }
 
@@ -408,10 +480,18 @@ mod tests {
         clock: &DocumentClock,
         producers: DocumentTimeProducerObservation,
     ) -> DocumentTimeAdvanceToken {
+        advance_token_after(clock, producers, 10)
+    }
+
+    fn advance_token_after(
+        clock: &DocumentClock,
+        producers: DocumentTimeProducerObservation,
+        duration_ns: u64,
+    ) -> DocumentTimeAdvanceToken {
         let mut scheduler = TimerScheduler::with_clock(clock.clone());
         scheduler.schedule_timer(TimerEventRequest {
             callback: Box::new(|| {}),
-            duration: Duration::from_nanos(10),
+            duration: Duration::from_nanos(duration_ns),
         });
         DocumentTimeAdvanceToken::new_internal(
             DocumentTimeAdvanceTokenId::new(1),
@@ -427,6 +507,39 @@ mod tests {
             false,
             producers,
         )
+    }
+
+    fn finite_preparation_observation(
+        clock: &DocumentClock,
+        mut observation: DocumentTimeControlObservation,
+        duration_ns: u64,
+        readiness_blockers: Vec<DocumentTimeReadinessBlocker>,
+    ) -> DocumentTimeControlObservation {
+        let token = advance_token_after(clock, observation.producers, duration_ns);
+        observation.next_deadline = Some(token.deadline());
+        observation.advance_token = Some(token);
+        observation.documents[0].readiness_blockers = readiness_blockers;
+        observation.action = DocumentTimeControlAction::CapturePrepared;
+        observation.capture_preparation = Some(DocumentCapturePreparation {
+            surface: surface(),
+            sources: DocumentSettlementSourceSnapshot::new_internal(
+                DocumentSettlementSourceEpoch::new(1),
+                vec![DocumentSettlementSource::timer_internal(
+                    TEST_PIPELINE_ID,
+                    1,
+                    1,
+                    1,
+                    DocumentTime::from_nanos(duration_ns.into()),
+                    false,
+                )],
+            ),
+            blockers: vec![
+                DocumentCaptureBlocker::DocumentNotReady,
+                DocumentCaptureBlocker::FiniteTimerDeadline,
+            ],
+            precondition: None,
+        });
+        observation
     }
 
     #[test]
@@ -538,13 +651,15 @@ mod tests {
     }
 
     #[test]
-    fn finite_preparation_uses_only_its_same_observation_authority() {
+    fn wait_marker_only_uses_same_observation_finite_authority() {
         let coordinator = ControlledSettlementCoordinator::new(surface());
         let (clock, mut observation) = observation();
         let token = advance_token(&clock, observation.producers);
         let expected_id = token.id();
         observation.next_deadline = Some(token.deadline());
         observation.advance_token = Some(token);
+        observation.documents[0].readiness_blockers =
+            vec![DocumentTimeReadinessBlocker::WaitMarker];
         observation.action = DocumentTimeControlAction::CapturePrepared;
         observation.capture_preparation = Some(DocumentCapturePreparation {
             surface: surface(),
@@ -568,6 +683,97 @@ mod tests {
             Ok(ControlledSettlementProgress::Command(
                 DocumentTimeControlCommand::AdvanceTo(token)
             )) if token.id() == expected_id
+        ));
+    }
+
+    #[test]
+    fn new_progressable_readiness_signatures_get_one_turn_per_deadline() {
+        let coordinator = ControlledSettlementCoordinator::new(surface());
+        let (clock, base) = observation();
+        let loading = finite_preparation_observation(
+            &clock,
+            base.clone(),
+            10,
+            vec![
+                DocumentTimeReadinessBlocker::Loading,
+                DocumentTimeReadinessBlocker::FontsLoading,
+                DocumentTimeReadinessBlocker::FontReadyPromise,
+            ],
+        );
+        let discarded = loading.clone();
+        let repeated = loading.clone();
+        let font_ready = finite_preparation_observation(
+            &clock,
+            base.clone(),
+            10,
+            vec![
+                DocumentTimeReadinessBlocker::WaitMarker,
+                DocumentTimeReadinessBlocker::FontReadyPromise,
+                DocumentTimeReadinessBlocker::RenderingUpdate,
+            ],
+        );
+        let revisited = loading.clone();
+        let later_deadline = finite_preparation_observation(
+            &clock,
+            base,
+            20,
+            loading.documents[0].readiness_blockers.clone(),
+        );
+        let retry_after_rejection = later_deadline.clone();
+
+        assert!(matches!(
+            coordinator.consume_receive_outcome(completed(loading)),
+            Ok(ControlledSettlementProgress::Command(
+                DocumentTimeControlCommand::DriveOneTurn
+            ))
+        ));
+        coordinator.discard_progress();
+        assert!(matches!(
+            coordinator.consume_receive_outcome(completed(discarded)),
+            Ok(ControlledSettlementProgress::Command(
+                DocumentTimeControlCommand::DriveOneTurn
+            ))
+        ));
+        assert!(matches!(
+            coordinator.consume_receive_outcome(completed(repeated)),
+            Ok(ControlledSettlementProgress::Command(
+                DocumentTimeControlCommand::AdvanceTo(_)
+            ))
+        ));
+        assert!(matches!(
+            coordinator.consume_receive_outcome(completed(font_ready)),
+            Ok(ControlledSettlementProgress::Command(
+                DocumentTimeControlCommand::DriveOneTurn
+            ))
+        ));
+        assert!(matches!(
+            coordinator.consume_receive_outcome(completed(revisited)),
+            Ok(ControlledSettlementProgress::Command(
+                DocumentTimeControlCommand::AdvanceTo(_)
+            ))
+        ));
+        assert!(matches!(
+            coordinator.consume_receive_outcome(completed(later_deadline)),
+            Ok(ControlledSettlementProgress::Command(
+                DocumentTimeControlCommand::DriveOneTurn
+            ))
+        ));
+        assert!(matches!(
+            coordinator.consume_receive_outcome(DocumentTimeControlReceiveOutcome::CommandOutcome(
+                DocumentTimeControlOutcome::Rejected(DocumentTimeControlError::TargetChanged {
+                    expected: Box::new(target()),
+                    observed: None,
+                })
+            )),
+            Ok(ControlledSettlementProgress::Command(
+                DocumentTimeControlCommand::Observe
+            ))
+        ));
+        assert!(matches!(
+            coordinator.consume_receive_outcome(completed(retry_after_rejection)),
+            Ok(ControlledSettlementProgress::Command(
+                DocumentTimeControlCommand::DriveOneTurn
+            ))
         ));
     }
 
