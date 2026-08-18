@@ -463,7 +463,7 @@ jobs:
       wpt-args: ${{ inputs.wpt-args }}
       profile: ${{ inputs.profile }}
       wpt-sync-from-upstream: ${{ inputs.wpt-sync-from-upstream }}
-      number-of-wpt-chunks: ${{ inputs. number-of-wpt-chunks }}
+      number-of-wpt-chunks: ${{ inputs.number-of-wpt-chunks }}
       binary-path: servo/servoshell
     secrets: inherit
 
