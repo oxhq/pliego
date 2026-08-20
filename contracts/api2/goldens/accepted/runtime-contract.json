@@ -30,7 +30,7 @@
       },
       "document_scene": {
         "schema": "pliego.document-scene",
-        "version": 1
+        "version": 2
       },
       "bundle_manifest": {
         "schema": "pliego.bundle-manifest",

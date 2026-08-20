@@ -149,7 +149,7 @@ def load_schemas() -> None:
 
     expected = {
         "bundle-manifest.v1.json",
-        "document-scene.v1.json",
+        "document-scene.v2.json",
         "input-manifest.v1.json",
         "render-request.v1.json",
         "render-result.v1.json",
@@ -909,7 +909,7 @@ def request_runtime_semantics(
         ("pliego.input-manifest", 1),
         (request["schema"], request["version"]),
         ("pliego.render-result", 1),
-        ("pliego.document-scene", 1),
+        ("pliego.document-scene", 2),
         ("pliego.bundle-manifest", 1),
     )
     matches = [contract for contract in runtime["contracts"] if protocol_key(contract) == expected_key]
@@ -928,7 +928,7 @@ def schema_errors(kind: str, value: Any) -> list[Violation]:
         "request": "render-request.v1.json",
         "result": "render-result.v1.json",
         "runtime": "runtime-contract.v1.json",
-        "scene": "document-scene.v1.json",
+        "scene": "document-scene.v2.json",
     }[kind]
     return validate(value, SCHEMAS[schema_name], schema_name)
 
@@ -1064,7 +1064,7 @@ def main() -> None:
 
     assert_canonical_fixture(INPUT_MANIFEST_PATH, input_manifest, "input-manifest.v1.json")
     assert_canonical_fixture(BUNDLE_MANIFEST_PATH, bundle_manifest, "bundle-manifest.v1.json")
-    assert_canonical_fixture(SCENE_PATH, delivery_scene, "document-scene.v1.json")
+    assert_canonical_fixture(SCENE_PATH, delivery_scene, "document-scene.v2.json")
     if scene != delivery_scene:
         raise AssertionError("accepted scene golden and canonical scene bytes differ")
     assert_minimal_pdf_fixture(DELIVERY_ROOT / "document.pdf")
@@ -1352,6 +1352,15 @@ def main() -> None:
         ("runtime unknown member", "runtime", "rejected/runtime-contract.unknown-member.json"),
     ):
         assert_rejected(name, kind, golden(relative), "unexpected property")
+
+    legacy_scene_identity = copy.deepcopy(scene)
+    legacy_scene_identity["version"] = 1
+    assert_rejected(
+        "shipped internal scene identity reused by public scene",
+        "scene",
+        legacy_scene_identity,
+        "expected const 2",
+    )
 
     glyph_overflow = golden("rejected/document-scene.glyph-u32-overflow.json")
     assert_rejected("glyph u32 overflow", "scene", glyph_overflow, "maximum 4294967295")

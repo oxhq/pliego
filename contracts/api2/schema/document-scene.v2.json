@@ -1,6 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "https://pliego.dev/schema/document-scene.v1.json",
+  "$id": "https://pliego.dev/schema/document-scene.v2.json",
   "title": "Pliego public DocumentScene",
   "description": "The ordered, fixed-point, path-independent public scene artifact for API 2.",
   "type": "object",
@@ -15,7 +15,7 @@
   ],
   "properties": {
     "schema": { "const": "pliego.document-scene" },
-    "version": { "const": 1 },
+    "version": { "const": 2 },
     "app_units_per_css_px": { "const": 60 },
     "request_page": { "$ref": "render-request.v1.json#/definitions/page" },
     "semantic_layer": {

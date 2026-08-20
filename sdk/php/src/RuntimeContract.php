@@ -308,6 +308,7 @@ final readonly class RuntimeContract
             $contract['document_scene'],
             'pliego.document-scene',
             "{$path}.document_scene",
+            2,
         );
         self::validateExactSchemaReference(
             $contract['bundle_manifest'],
@@ -380,11 +381,16 @@ final readonly class RuntimeContract
         }
     }
 
-    private static function validateExactSchemaReference(mixed $reference, string $schema, string $path): void
+    private static function validateExactSchemaReference(
+        mixed $reference,
+        string $schema,
+        string $path,
+        int $version = 1,
+    ): void
     {
         self::validateSchemaReference($reference, $schema, $path);
         /** @var array<string, mixed> $reference */
-        self::assertLiteral($reference['version'], 1, "{$path}.version");
+        self::assertLiteral($reference['version'], $version, "{$path}.version");
     }
 
     private static function validateSchemaReference(mixed $reference, string $schema, string $path): void

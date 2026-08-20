@@ -49,7 +49,7 @@ function api2Protocol(int $requestVersion = 1, int $resultVersion = 1): array
         'input_manifest' => ['schema' => 'pliego.input-manifest', 'version' => 1],
         'request' => ['schema' => 'pliego.render-request', 'version' => $requestVersion],
         'result' => ['schema' => 'pliego.render-result', 'version' => $resultVersion],
-        'document_scene' => ['schema' => 'pliego.document-scene', 'version' => 1],
+        'document_scene' => ['schema' => 'pliego.document-scene', 'version' => 2],
         'bundle_manifest' => ['schema' => 'pliego.bundle-manifest', 'version' => 1],
     ];
 }
@@ -211,6 +211,12 @@ $wrongType['version'] = '1';
 api2Rejected(
     fn () => RuntimeContract::fromProbeResult(0, api2ProbeFrame($wrongType), ''),
     'schema version with the wrong JSON type',
+);
+$legacySceneIdentity = $valid;
+$legacySceneIdentity['contracts'][0]['document_scene']['version'] = 1;
+api2Rejected(
+    fn () => RuntimeContract::fromProbeResult(0, api2ProbeFrame($legacySceneIdentity), ''),
+    'the shipped internal scene identity cannot be negotiated as the public API 2 scene',
 );
 $duplicateTuple = $valid;
 $duplicateTuple['contracts'][] = $duplicateTuple['contracts'][0];

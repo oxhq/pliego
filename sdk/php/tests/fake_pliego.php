@@ -25,7 +25,7 @@ if (($argv[1] ?? null) === '--contract-probe') {
         'input_manifest' => ['schema' => 'pliego.input-manifest', 'version' => 1],
         'request' => ['schema' => 'pliego.render-request', 'version' => 1],
         'result' => ['schema' => 'pliego.render-result', 'version' => 1],
-        'document_scene' => ['schema' => 'pliego.document-scene', 'version' => 1],
+        'document_scene' => ['schema' => 'pliego.document-scene', 'version' => 2],
         'bundle_manifest' => ['schema' => 'pliego.bundle-manifest', 'version' => 1],
         'profiles' => $profiles,
     ];

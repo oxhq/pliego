@@ -66,7 +66,7 @@
           "required": ["schema", "version"],
           "properties": {
             "schema": { "const": "pliego.document-scene" },
-            "version": { "const": 1 }
+            "version": { "const": 2 }
           }
         },
         "bundle_manifest": {

@@ -7,8 +7,10 @@
 
 Pliego's API 1 surface grew around command-line options, path-bearing summary JSON, PHP value
 objects, and a private artifact directory. ADR 0014 deliberately kept `DocumentScene` version 1
-internal. It used floating-point geometry, accepted unknown object members, and did not define a
-stable public resource closure. Those choices are not a safe Pliego 1.0 compatibility boundary.
+internal, and Pliego 0.2 shipped that identity with floating-point geometry, permissive object
+members, and no stable public resource closure. The incompatible fixed-point public scene therefore
+starts at version 2 rather than reusing the shipped version-1 identity. The internal format remains
+unchanged.
 
 The production renderer is also changing implementation route. A stable API must describe one
 Pliego-owned document process without promising servoshell, a daemon, a browser pool, or hidden
@@ -35,14 +37,15 @@ profile without breaking the profile-null tuple.
 ### Versions and exact runtime pairing
 
 The next production protocol is Pliego API integer `2`. Each public JSON document has an independent
-schema identifier and version `1`:
+schema identifier and version; the fixed-point scene starts at version `2` because version `1` is the
+incompatible shipped internal format:
 
 | Document | `schema` | `version` |
 | --- | --- | ---: |
 | Input manifest | `pliego.input-manifest` | 1 |
 | Render request | `pliego.render-request` | 1 |
 | Render result | `pliego.render-result` | 1 |
-| Document scene | `pliego.document-scene` | 1 |
+| Document scene | `pliego.document-scene` | 2 |
 | Bundle manifest | `pliego.bundle-manifest` | 1 |
 | Runtime contract probe | `pliego.runtime-contract` | 1 |
 
@@ -53,9 +56,9 @@ ignore a field, or form a cross-product from independently advertised versions.
 Before a facade renders, it invokes the executable's contract-probe mode and validates one
 `pliego.runtime-contract` object. The probe reports the exact tuple of input-manifest, request,
 result, scene, and bundle-manifest schema versions supported by that executable, plus the exact engine
-identity that will appear in results. API 2 schema version 1 is usable only when that complete tuple
-is advertised. Advertising request version 1 and result version 2 in separate tuples does not imply
-that request 1/result 2 is supported.
+identity that will appear in results. An API 2 schema tuple is usable only when that complete tuple is
+advertised. Advertising request version 1 and result version 2 in separate tuples does not imply that
+request 1/result 2 is supported.
 
 The `contracts` array may be empty. An empty array truthfully reports an executable foundation whose
 probe and decoder exist but which does not yet accept a complete API 2 render transaction. A facade
@@ -254,25 +257,26 @@ those margins are `2880` app units. Native A4 resolves once to the nearest app-u
 `47622 x 67351`. A request may instead contain explicit positive `width_app_units` and
 `height_app_units`; named and explicit forms are mutually exclusive.
 
-The request page is authoritative in contract version 1. Its required `geometry_authority` is the
+The request page is authoritative in render-request version 1. Its required `geometry_authority` is the
 single stable value `request-only-v1`. `DocumentScene.request_page` is an exact copy of that accepted
 request policy. Every emitted page records its contiguous one-based number, the resolved request
 size and margins, and the only permitted `style_source`, `request-defaults`.
 
 Servo/Pliego does not currently parse and apply standard CSS `@page` size or margin declarations to
 the paged layout. API 2 therefore cannot represent `css-page` provenance or let equivalent fixture
-geometry imply it. Supporting document-owned page geometry requires a later contract version or
-explicitly negotiated policy plus renderer-backed evidence; it cannot silently change version 1.
+geometry imply it. Supporting document-owned page geometry requires a later render-request version
+or explicitly negotiated policy plus renderer-backed evidence; it cannot silently change request
+version 1.
 
 ### Deterministic document time and settlement policy
 
-Schema version 1 includes clock and settlement policy now so later runtime work cannot add hidden
+Render-request version 1 includes clock and settlement policy now so later runtime work cannot add hidden
 defaults to a closed request. `time` records policy version `1`, an explicit integer Unix epoch in
 milliseconds, and initial virtual offset `0`. The native default epoch is
 `2000-01-01T00:00:00Z` (`946684800000`). The page never observes host wall time implicitly.
 
 `settlement` records policy version `1`, the fail-closed infinite-source policy, exactly two fenced
-empty checkpoints, and every version-1 convergence limit:
+empty checkpoints, and every render-request-version-1 convergence limit:
 
 | Limit | Native default |
 | --- | ---: |
@@ -387,7 +391,7 @@ Every image carries its SHA-256 plus one of `image/png`, `image/jpeg`, `image/gi
 The declared media type must match the retained bytes and a decoder supported by the PDF adapter.
 Original SVG input is either retained as canonical path/text operations or deterministically
 rasterized before it can appear as an image operation; `image/svg+xml` is not an image-operation
-resource in version 1.
+resource in public scene version 2.
 
 The bundle manifest contains exactly matching raw font, image, and optional semantic-layer bytes
 under `resources/<digest>` for the set referenced by the scene. Font-instance metadata is inline and
@@ -437,7 +441,7 @@ profile-null activation gates.
 - API 2 has one strict, path-independent request/result boundary and an exact binary contract probe.
 - The core renderer cannot silently depend on live network or a host font database.
 - Page geometry and public scene bytes no longer contain floating-point ambiguity.
-- API 2 version 1 page size and margins are request-authoritative; CSS `@page` authority is unsupported.
+- Render-request version 1 page size and margins are request-authoritative; CSS `@page` authority is unsupported.
 - Input and delivery identities are reproducible from actual bytes and portable paths.
 - Stable public error kinds can survive internal error-code refactors.
 - R3.5 can add a versioned semantic layer and deterministic profile evidence without an opaque map or

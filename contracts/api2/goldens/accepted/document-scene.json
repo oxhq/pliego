@@ -1,6 +1,6 @@
 {
   "schema": "pliego.document-scene",
-  "version": 1,
+  "version": 2,
   "app_units_per_css_px": 60,
   "request_page": {
     "size": {
