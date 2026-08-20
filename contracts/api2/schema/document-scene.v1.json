@@ -36,6 +36,43 @@
       "type": "string",
       "pattern": "^sha256:[0-9a-f]{64}$"
     },
+    "unsigned_32": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    "finite_f32_bits": {
+      "description": "Canonical IEEE-754 binary32 bits: finite values and positive zero only.",
+      "oneOf": [
+        { "type": "integer", "minimum": 0, "maximum": 2139095039 },
+        { "type": "integer", "minimum": 2147483649, "maximum": 4286578687 }
+      ]
+    },
+    "font_variation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tag", "value_f32_bits"],
+      "properties": {
+        "tag": { "$ref": "#/definitions/unsigned_32" },
+        "value_f32_bits": { "$ref": "#/definitions/finite_f32_bits" }
+      }
+    },
+    "font_instance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["resource", "face_index", "variations", "synthetic_bold"],
+      "properties": {
+        "resource": { "$ref": "#/definitions/content_address" },
+        "face_index": { "$ref": "#/definitions/unsigned_32" },
+        "variations": {
+          "type": "array",
+          "maxItems": 4294967295,
+          "uniqueItems": true,
+          "items": { "$ref": "#/definitions/font_variation" }
+        },
+        "synthetic_bold": { "type": "boolean" }
+      }
+    },
     "semantic_layer_ref": {
       "type": "object",
       "additionalProperties": false,
@@ -136,7 +173,7 @@
       "additionalProperties": false,
       "required": ["id", "x", "y", "advance", "text_range"],
       "properties": {
-        "id": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "id": { "$ref": "#/definitions/unsigned_32" },
         "x": { "$ref": "#/definitions/signed_app_unit" },
         "y": { "$ref": "#/definitions/signed_app_unit" },
         "advance": { "$ref": "#/definitions/signed_app_unit" },
@@ -158,7 +195,7 @@
       "properties": {
         "type": { "const": "text" },
         "text": { "type": "string", "minLength": 1, "maxLength": 4294967295 },
-        "font": { "$ref": "#/definitions/content_address" },
+        "font": { "$ref": "#/definitions/font_instance" },
         "font_size_app_units": { "$ref": "#/definitions/positive_app_unit" },
         "color": { "$ref": "#/definitions/color_rgba8" },
         "glyphs": {
@@ -196,11 +233,15 @@
     "image_operation": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["type", "bounds", "resource"],
+      "required": ["type", "bounds", "resource", "media_type"],
       "properties": {
         "type": { "const": "image" },
         "bounds": { "$ref": "#/definitions/rect" },
-        "resource": { "$ref": "#/definitions/content_address" }
+        "resource": { "$ref": "#/definitions/content_address" },
+        "media_type": {
+          "type": "string",
+          "enum": ["image/gif", "image/jpeg", "image/png", "image/webp"]
+        }
       }
     },
     "link_operation": {

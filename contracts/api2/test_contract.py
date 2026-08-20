@@ -12,6 +12,7 @@ import copy
 import hashlib
 import json
 import re
+import struct
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -591,6 +592,16 @@ def scene_semantics(scene: dict[str, Any], request: dict[str, Any] | None = None
     request_width, request_height = page_dimensions(scene["request_page"])
     request_margins = scene["request_page"]["margins_app_units"]
 
+    resource_media_types: dict[str, str] = {}
+
+    def bind_resource(resource: str, media_type: str, resource_path: str) -> None:
+        existing = resource_media_types.setdefault(resource, media_type)
+        if existing != media_type:
+            violations.append(Violation(resource_path, f"resource media type conflicts with {existing!r}"))
+
+    if semantic_layer is not None:
+        bind_resource(semantic_layer["resource"], semantic_layer["media_type"], f"{path}.semantic_layer.resource")
+
     for page_index, page in enumerate(scene["pages"]):
         page_path = f"{path}.pages[{page_index}]"
         if page["number"] != page_index + 1:
@@ -615,23 +626,29 @@ def scene_semantics(scene: dict[str, Any], request: dict[str, Any] | None = None
             elif operation["type"] == "link" and not canonical_link_target(operation["target"]):
                 violations.append(Violation(f"{operation_path}.target", "target is not a canonical absolute URL"))
             elif operation["type"] == "text":
+                font = operation["font"]
+                bind_resource(font["resource"], "application/octet-stream", f"{operation_path}.font.resource")
+                tags = [variation["tag"] for variation in font["variations"]]
+                if any(left >= right for left, right in zip(tags, tags[1:])):
+                    violations.append(
+                        Violation(
+                            f"{operation_path}.font.variations",
+                            "variation tags must be strictly ascending",
+                        )
+                    )
                 if len(operation["text"].encode("utf-8")) > U32_MAX:
                     violations.append(
                         Violation(f"{operation_path}.text", "UTF-8 text length exceeds unsigned 32-bit range")
                     )
                 boundaries = utf8_boundaries(operation["text"])
-                last_start = 0
-                last_end = 0
                 for glyph_index, glyph in enumerate(operation["glyphs"]):
                     glyph_path = f"{operation_path}.glyphs[{glyph_index}].text_range"
                     start = glyph["text_range"]["start"]
                     end = glyph["text_range"]["end"]
                     if start >= end or start not in boundaries or end not in boundaries:
                         violations.append(Violation(glyph_path, "range must be nonempty and on UTF-8 boundaries"))
-                    if start < last_start or end < last_end:
-                        violations.append(Violation(glyph_path, "range starts and ends must be nondecreasing"))
-                    last_start = start
-                    last_end = end
+            elif operation["type"] == "image":
+                bind_resource(operation["resource"], operation["media_type"], f"{operation_path}.resource")
     return violations
 
 
@@ -642,10 +659,35 @@ def scene_resources(scene: dict[str, Any]) -> set[str]:
     for page in scene["pages"]:
         for operation in page["operations"]:
             if operation["type"] == "text":
-                resources.add(operation["font"])
+                resources.add(operation["font"]["resource"])
             elif operation["type"] == "image":
                 resources.add(operation["resource"])
     return resources
+
+
+def scene_resource_media_types(scene: dict[str, Any]) -> dict[str, str]:
+    resources: dict[str, str] = {}
+    if scene["semantic_layer"] is not None:
+        resources[scene["semantic_layer"]["resource"]] = scene["semantic_layer"]["media_type"]
+    for page in scene["pages"]:
+        for operation in page["operations"]:
+            if operation["type"] == "text":
+                resources[operation["font"]["resource"]] = "application/octet-stream"
+            elif operation["type"] == "image":
+                resources[operation["resource"]] = operation["media_type"]
+    return resources
+
+
+def bytes_match_resource_media_type(media_type: str, data: bytes) -> bool:
+    if media_type == "image/png":
+        return data.startswith(b"\x89PNG\r\n\x1a\n")
+    if media_type == "image/jpeg":
+        return data.startswith(b"\xff\xd8\xff")
+    if media_type == "image/gif":
+        return data.startswith((b"GIF87a", b"GIF89a"))
+    if media_type == "image/webp":
+        return len(data) >= 12 and data.startswith(b"RIFF") and data[8:12] == b"WEBP"
+    return True
 
 
 def bundle_manifest_semantics(
@@ -673,6 +715,16 @@ def bundle_manifest_semantics(
             violations.append(
                 Violation(f"{path}.entries", f"scene resource closure differs: {expected!r} != {actual!r}")
             )
+        expected_media_types = scene_resource_media_types(scene)
+        for resource, media_type in expected_media_types.items():
+            resource_entry = next((entry for entry in entries if entry["sha256"] == resource), None)
+            if resource_entry is not None and resource_entry["media_type"] != media_type:
+                violations.append(
+                    Violation(
+                        f"{path}.entries",
+                        f"scene resource {resource} requires media type {media_type!r}",
+                    )
+                )
         semantic_layer = scene["semantic_layer"]
         if semantic_layer is not None:
             semantic_entry = next(
@@ -696,6 +748,12 @@ def bundle_manifest_semantics(
             file_path = root / PurePosixPath(entry["path"])
             if file_path.is_file() and not descriptor_matches_bytes(entry, file_path.read_bytes()):
                 violations.append(Violation(f"{path}.entries[{index}]", "hash or byte length does not match fixture"))
+            elif (
+                file_path.is_file()
+                and entry["path"].startswith("resources/")
+                and not bytes_match_resource_media_type(entry["media_type"], file_path.read_bytes())
+            ):
+                violations.append(Violation(f"{path}.entries[{index}]", "resource bytes do not match media type"))
     return violations
 
 
@@ -1295,20 +1353,84 @@ def main() -> None:
     range_overflow = copy.deepcopy(scene)
     range_overflow["pages"][0]["operations"][0]["glyphs"][0]["text_range"]["end"] = U32_MAX + 1
     assert_rejected("glyph range u32 overflow", "scene", range_overflow, "maximum 4294967295")
-    decreasing_range_end = copy.deepcopy(scene)
-    second_glyph = copy.deepcopy(decreasing_range_end["pages"][0]["operations"][0]["glyphs"][0])
+    descending_rtl_ranges = copy.deepcopy(scene)
+    first_glyph = descending_rtl_ranges["pages"][0]["operations"][0]["glyphs"][0]
+    first_glyph["text_range"] = {"start": 1, "end": 2}
+    second_glyph = copy.deepcopy(first_glyph)
     second_glyph["id"] = 43
-    second_glyph["text_range"] = {"start": 1, "end": 2}
-    decreasing_range_end["pages"][0]["operations"][0]["glyphs"].append(second_glyph)
-    assert_rejected(
-        "decreasing glyph range end",
+    second_glyph["text_range"] = {"start": 0, "end": 1}
+    descending_rtl_ranges["pages"][0]["operations"][0]["glyphs"].append(second_glyph)
+    assert_valid(
+        "descending visual-order RTL glyph ranges",
         "scene",
-        decreasing_range_end,
-        "range starts and ends must be nondecreasing",
-        scene_semantics(decreasing_range_end, request_a4),
+        descending_rtl_ranges,
+        scene_semantics(descending_rtl_ranges, request_a4),
     )
+
+    for name, bits in (
+        ("positive zero font variation", 0),
+        ("minimum positive subnormal font variation", 1),
+        ("maximum positive finite font variation", 2_139_095_039),
+        ("minimum negative subnormal font variation", 2_147_483_649),
+        ("maximum negative finite font variation", 4_286_578_687),
+    ):
+        boundary = copy.deepcopy(scene)
+        boundary["pages"][0]["operations"][0]["font"]["variations"][0]["value_f32_bits"] = bits
+        assert_valid(name, "scene", boundary, scene_semantics(boundary, request_a4))
+        decoded = struct.unpack(">f", bits.to_bytes(4, "big"))[0]
+        if int.from_bytes(struct.pack(">f", decoded), "big") != bits:
+            raise AssertionError(f"{name} did not round-trip through exact IEEE-754 binary32 bits")
+
+    for name, bits in (
+        ("negative font variation bits", -1),
+        ("negative zero font variation", 2_147_483_648),
+        ("positive infinity font variation", 2_139_095_040),
+        ("positive NaN font variation", 2_143_289_344),
+        ("negative infinity font variation", 4_286_578_688),
+        ("negative NaN font variation", 4_290_772_992),
+        ("font variation bits above u32", U32_MAX + 1),
+    ):
+        invalid_variation = copy.deepcopy(scene)
+        invalid_variation["pages"][0]["operations"][0]["font"]["variations"][0]["value_f32_bits"] = bits
+        assert_rejected(name, "scene", invalid_variation, "oneOf")
+
+    reordered_variations = copy.deepcopy(scene)
+    reordered_variations["pages"][0]["operations"][0]["font"]["variations"] = [
+        {"tag": 2, "value_f32_bits": 0},
+        {"tag": 1, "value_f32_bits": 0},
+    ]
+    assert_rejected(
+        "reordered font variation tags",
+        "scene",
+        reordered_variations,
+        "variation tags must be strictly ascending",
+        scene_semantics(reordered_variations, request_a4),
+    )
+    duplicate_variation_tags = copy.deepcopy(scene)
+    duplicate_variation_tags["pages"][0]["operations"][0]["font"]["variations"] = [
+        {"tag": 1, "value_f32_bits": 0},
+        {"tag": 1, "value_f32_bits": 1},
+    ]
+    assert_rejected(
+        "duplicate font variation tags",
+        "scene",
+        duplicate_variation_tags,
+        "variation tags must be strictly ascending",
+        scene_semantics(duplicate_variation_tags, request_a4),
+    )
+    legacy_scalar_font = copy.deepcopy(scene)
+    legacy_scalar_font["pages"][0]["operations"][0]["font"] = scene["pages"][0]["operations"][0]["font"]["resource"]
+    assert_rejected("legacy scalar font identity", "scene", legacy_scalar_font, "expected type ['object']")
     invalid_path = golden("rejected/document-scene.invalid-path-data.json")
     assert_rejected("noncanonical path grammar", "scene", invalid_path, "does not match pattern")
+    unsupported_image_media = copy.deepcopy(scene)
+    unsupported_image_media["pages"][0]["operations"][2]["media_type"] = "image/svg+xml"
+    assert_rejected(
+        "unsupported public scene image media type",
+        "scene",
+        unsupported_image_media,
+        "expected one of",
+    )
     invalid_link = golden("rejected/document-scene.noncanonical-link.json")
     assert_rejected(
         "noncanonical link",
@@ -1398,6 +1520,19 @@ def main() -> None:
         missing,
         "scene resource closure differs",
         bundle_manifest_semantics(missing, scene),
+    )
+    mismatched_image_media = copy.deepcopy(bundle_manifest)
+    next(
+        entry
+        for entry in mismatched_image_media["entries"]
+        if entry["sha256"] == scene["pages"][0]["operations"][2]["resource"]
+    )["media_type"] = "image/jpeg"
+    assert_rejected(
+        "bundle image media type differs from scene",
+        "bundle_manifest",
+        mismatched_image_media,
+        "requires media type 'image/png'",
+        bundle_manifest_semantics(mismatched_image_media, scene),
     )
 
     assert_rejected(
@@ -1592,6 +1727,49 @@ def main() -> None:
     reordered_scene["pages"][0]["operations"].reverse()
     if content_address(canonical_json_bytes(reordered_scene)) == content_address(SCENE_PATH.read_bytes()):
         raise AssertionError("operation reordering must change scene identity")
+
+    base_scene_identity = content_address(canonical_json_bytes(scene))
+    for name, mutate in (
+        ("font face index", lambda font: font.__setitem__("face_index", font["face_index"] + 1)),
+        (
+            "font variation bits",
+            lambda font: font["variations"][0].__setitem__(
+                "value_f32_bits", font["variations"][0]["value_f32_bits"] + 1
+            ),
+        ),
+        ("synthetic bold", lambda font: font.__setitem__("synthetic_bold", not font["synthetic_bold"])),
+    ):
+        changed_font_scene = copy.deepcopy(scene)
+        mutate(changed_font_scene["pages"][0]["operations"][0]["font"])
+        assert_valid(name, "scene", changed_font_scene, scene_semantics(changed_font_scene, request_a4))
+        if content_address(canonical_json_bytes(changed_font_scene)) == base_scene_identity:
+            raise AssertionError(f"{name} must change scene identity")
+        if scene_resources(changed_font_scene) != scene_resources(scene):
+            raise AssertionError(f"{name} must not create a second raw font resource")
+
+    shared_resource_instances = copy.deepcopy(scene)
+    second_text = copy.deepcopy(shared_resource_instances["pages"][0]["operations"][0])
+    second_text["font"]["face_index"] += 1
+    shared_resource_instances["pages"][0]["operations"].insert(1, second_text)
+    assert_valid(
+        "two font instances sharing one raw resource",
+        "scene",
+        shared_resource_instances,
+        scene_semantics(shared_resource_instances, request_a4),
+    )
+    if scene_resources(shared_resource_instances) != scene_resources(scene):
+        raise AssertionError("two font instances sharing bytes must require only one bundled font resource")
+    if content_address(canonical_json_bytes(shared_resource_instances)) == base_scene_identity:
+        raise AssertionError("adding a distinct font instance must change scene identity")
+
+    font_with_internal_id = copy.deepcopy(scene)
+    font_with_internal_id["pages"][0]["operations"][0]["font"]["id"] = "sha256:" + "0" * 64
+    assert_rejected(
+        "internal font instance id",
+        "scene",
+        font_with_internal_id,
+        "unexpected property 'id'",
+    )
 
     rejected_count = len(list((GOLDEN_DIR / "rejected").glob("*.json")))
     print(

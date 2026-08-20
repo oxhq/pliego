@@ -22,11 +22,13 @@ request decoder, and PHP tuple validator. The probe advertises `contracts: []`: 
 not make an API 2 render transaction, profile, package version, or release available, and they do not
 change the API 1 renderer or publication flow.
 
-These schemas are explicitly **pre-R3.5 scaffolding**, not the contract freeze requested by OXH-326.
-R3.5 defines the semantic document model, profile decision, validation result, and deterministic
-evidence needed for PDF/UA. OXH-346 blocks the contract freeze. OXH-339, not this ADR, decides whether
-the first supported target is PDF/UA-1, PDF/UA-2, or another precisely named profile. This ADR only
-reserves strict versioned extension points so that R3.5 does not require a breaking retrofit.
+These schemas are explicitly **pre-freeze scaffolding**, not the contract freeze requested by
+OXH-326. OXH-326 may freeze the profile-null API 2 tuple independently once its implementation and
+evidence gates pass. R3.5 separately defines the semantic document model, profile decision,
+validation result, and deterministic evidence needed for an accessible-PDF release. OXH-339, not
+this ADR, decides whether that later target is PDF/UA-1, PDF/UA-2, or another precisely named
+profile. This ADR reserves strict versioned extension points so that OXH-346 can add the semantic
+profile without breaking the profile-null tuple.
 
 ## Decision
 
@@ -63,10 +65,10 @@ schema files, or command availability.
 Each exact tuple also advertises an ordered array of supported versioned profile references, sorted
 ascending by schema identifier and then version. Complete tuples themselves are unique and
 canonically ordered by their compact JSON bytes. The
-pre-R3.5 fixture advertises an empty array. A profile is usable only when its exact `{schema, version}`
-reference appears inside the selected API tuple; profile names are not inferred from PDF metadata or
-formed as a cross-product with protocol versions. One protocol tuple may appear only once, so two
-different profile arrays cannot make capability negotiation ambiguous.
+profile-null fixture advertises an empty array. A profile is usable only when its exact
+`{schema, version}` reference appears inside the selected API tuple; profile names are not inferred
+from PDF metadata or formed as a cross-product with protocol versions. One protocol tuple may appear
+only once, so two different profile arrays cannot make capability negotiation ambiguous.
 
 The executable-foundation probe invocation is `pliego --contract-probe`: on success it writes exactly
 one compact, typed-field-order JSON object followed by one line feed to stdout, leaves stderr empty,
@@ -150,8 +152,19 @@ those exact bytes, not reparsed or pretty-printed equivalents.
 
 Public numeric geometry is integer fixed point. One CSS pixel is exactly `60` signed app units. This
 removes NaN, infinity, rounding-mode drift, and positive/negative-zero ambiguity from public bytes.
-Producer conversions from CSS values occur before serialization under the engine's declared app-unit
-rounding rule; a consumer never repeats floating-point layout math to recover scene geometry.
+Geometry already owned by layout as app units is copied exactly without a floating-point round trip.
+When a captured CSS-pixel value has no exact app-unit authority, the producer multiplies its finite
+binary64 value by `60` and rounds to the nearest integer, with an exact half rounded away from zero.
+Negative zero becomes zero. A nonfinite input, a result outside signed i32 before or after rounding,
+or a value that violates the target field's positive/nonnegative constraint fails capture; values
+are never clamped. A present stroke whose width quantizes to zero therefore fails capture rather than
+silently becoming a PDF hairline or disappearing. A consumer never repeats floating-point layout
+math to recover scene geometry.
+
+RGBA conversion is likewise single-source. Each finite channel must be inside `[0, 1]`; the producer
+multiplies it by `255` and rounds to nearest with exact halves away from zero. The resulting RGBA8
+values drive both public scene bytes and PDF opacity/color. PDF is rendered from the canonical public
+scene representation, not independently from the pre-quantized internal scene.
 
 ### Canonical input manifest and deterministic resource authority
 
@@ -350,7 +363,8 @@ The public operations are `text`, `path`, `image`, and `link`. All geometry is s
 app units; widths, heights, and font/stroke sizes use the corresponding nonnegative or positive
 subsets. RGBA channels are integers from 0 through 255. Glyph identifiers and both UTF-8 byte-range
 bounds are bounded by unsigned 32-bit integers. Every range is nonempty and aligned to UTF-8
-boundaries, and both its start and end are nondecreasing in glyph order.
+boundaries. Glyph order is shaping/paint order; ranges may repeat for shared clusters or descend for
+visual-order RTL text and are not reordered to manufacture monotonically increasing offsets.
 
 Path data is a canonical flattened SVG subset. It begins with uppercase absolute `M` and then uses
 only uppercase absolute `M`, `L`, `Q`, `C`, and `Z`. Coordinates are signed base-10 i32 app units.
@@ -364,10 +378,24 @@ no dot segments, canonical uppercase percent escapes, and a nonempty absolute pa
 a nonempty address and lowercase domain. Relative URLs, host-dependent bases, and unsafe schemes are
 not public scene data.
 
-Every text font and image is a SHA-256 content address. The bundle manifest contains exactly matching
-bytes under `resources/<digest>` for the set referenced by the scene, including an optional semantic
-layer. Missing, substituted, or extra resource bytes fail the render before delivery. Runtime handles,
-source paths, line/column provenance, debug join IDs, host timings, and timestamps remain diagnostics.
+Every text operation carries one exact font-instance tuple: the raw font-resource SHA-256, unsigned
+collection face index, strictly tag-ascending variation coordinates, and synthetic-bold state.
+Variation tags are their exact big-endian OpenType u32 values. Each coordinate is the exact finite
+IEEE-754 binary32 bit pattern passed to the font backend, encoded as an unsigned integer; negative
+zero, infinities, NaNs, duplicate tags, and reordered tags are rejected. The internal derived font
+instance ID is not public and is not mistaken for a resource body.
+
+Every image carries its SHA-256 plus one of `image/png`, `image/jpeg`, `image/gif`, or `image/webp`.
+The declared media type must match the retained bytes and a decoder supported by the PDF adapter.
+Original SVG input is either retained as canonical path/text operations or deterministically
+rasterized before it can appear as an image operation; `image/svg+xml` is not an image-operation
+resource in version 1.
+
+The bundle manifest contains exactly matching raw font, image, and optional semantic-layer bytes
+under `resources/<digest>` for the set referenced by the scene. Font-instance metadata is inline and
+does not create a second resource body. Missing, substituted, media-mismatched, or extra resource
+bytes fail the render before delivery. Runtime handles, source paths, line/column provenance, debug
+join IDs, host timings, and timestamps remain diagnostics.
 
 ## Contract evidence and proof boundary
 
@@ -375,7 +403,9 @@ The checked-in contract fixtures contain real bytes for the input tree, input ma
 resources, bundle manifest, and diagnostics. The self-test recomputes their byte lengths and SHA-256
 values, verifies exact file closure, and checks that canonical JSON bytes match their parsed values.
 The small font payload exists to exercise manifest/resource byte identity; it is not a font-decoder or
-renderer fixture.
+renderer fixture. The checked-in PDF and scene remain schema/closure fixtures rather than proof that
+the PDF was rendered from that scene. Contract activation requires a separate renderer-backed
+fixture with a real font and a PDF generated from the same canonical fixed-point scene.
 
 Accepted goldens cover both page forms, both result branches, the exact runtime tuple, ordered scene,
 and both manifests. Rejected goldens cover unsupported API/schema pairing, unknown members, live
@@ -393,8 +423,10 @@ identity. They deliberately require an empty advertised contract array and termi
 every API 2 render request. They do not prove facade prefetch/rewrite, a successful API 2 render,
 deterministic renderer output, atomic API 2 publication, cross-platform byte identity, consumer
 installation, or release availability. API 2 rendering and Pliego 1.0 remain blocked on those
-independent implementation and hosted proof gates. The schema is also not frozen: OXH-346 and its
-R3.5 prerequisites must complete before OXH-326 can freeze the contract.
+independent implementation and hosted proof gates. The schema is also not frozen: OXH-326 still
+requires the profile-null encoder, canonical PDF adapter, page/CSS authority, settlement enforcement,
+publication, package, SDK, and hosted proof gates. OXH-346 remains a later prerequisite for the first
+semantic/accessibility profile, not for freezing profile-null API 2.
 
 ## Consequences
 

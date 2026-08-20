@@ -83,14 +83,14 @@
     "scene": {
       "path": "scene.json",
       "media_type": "application/vnd.pliego.document-scene+json",
-      "sha256": "sha256:a61a60177fe7f72eea028c3a4f8453a90eee4e801cb131b63bffcb4f0dff9e9e",
-      "bytes": 1184
+      "sha256": "sha256:e713e9c17892d4140fae2c928693901cdb696cfd64a823bc31c326a4729c4680",
+      "bytes": 1321
     },
     "bundle": {
       "path": "bundle.json",
       "media_type": "application/vnd.pliego.bundle-manifest+json",
-      "sha256": "sha256:26a30d1e6ca7b19dec015a7debd5fd43d25b648367633d5b89961df57eb3c92c",
-      "bytes": 816
+      "sha256": "sha256:8623013f2caa0d9f4513ed25649d22654f9ae25f01faf3307d3f2cc53adbc09c",
+      "bytes": 811
     }
   },
   "conformance": {
