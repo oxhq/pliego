@@ -36,6 +36,8 @@ U32_MAX = 2**32 - 1
 API2_EPOCH_LIMIT_MS = 8_640_000_000_000_000
 API2_VIRTUAL_SPAN_MAX_MS = 2**53 - 1
 API2_REQUEST_MAX_BYTES = 1_048_576
+API2_INPUT_MANIFEST_MAX_BYTES = 16 * 1024 * 1024
+API2_INPUT_MANIFEST_MAX_ENTRIES = 16 * 1024
 NANOSECONDS_PER_MILLISECOND = 1_000_000
 A4_APP_UNITS = (47622, 67351)
 PROTOCOL_FIELDS = (
@@ -1025,6 +1027,52 @@ def main() -> None:
         raise AssertionError("API 2 request framing limit drifted")
     if runtime["invocation"]["job_root_transport"] != "cwd-v1":
         raise AssertionError("API 2 job-root transport drifted")
+    if runtime["invocation"]["input_manifest_max_bytes"] != API2_INPUT_MANIFEST_MAX_BYTES:
+        raise AssertionError("API 2 input-manifest byte limit drifted")
+
+    exact_manifest_limit = copy.deepcopy(request_a4)
+    exact_manifest_limit["input"]["manifest"]["bytes"] = API2_INPUT_MANIFEST_MAX_BYTES
+    assert_valid("inclusive input-manifest byte limit", "request", exact_manifest_limit)
+    over_manifest_limit = copy.deepcopy(exact_manifest_limit)
+    over_manifest_limit["input"]["manifest"]["bytes"] += 1
+    assert_rejected(
+        "input-manifest byte limit overflow",
+        "request",
+        over_manifest_limit,
+        f"maximum {API2_INPUT_MANIFEST_MAX_BYTES}",
+    )
+
+    maximum_path = f"{'a' * 100}/{'b' * 100}/{'c' * 38}"
+    maximum_entry = {
+        "path": maximum_path,
+        "media_type": f"a/{'b' * 253}",
+        "sha256": f"sha256:{'0' * 64}",
+        "bytes": 2**53 - 1,
+    }
+    empty_manifest = {
+        "schema": "pliego.input-manifest",
+        "version": 1,
+        "url_root": "pliego-input:///",
+        "entries": [],
+    }
+    maximum_entry_bytes = len(canonical_json_bytes(maximum_entry)) - 1
+    maximum_manifest_bytes = (
+        len(canonical_json_bytes(empty_manifest))
+        + API2_INPUT_MANIFEST_MAX_ENTRIES * maximum_entry_bytes
+        + API2_INPUT_MANIFEST_MAX_ENTRIES
+        - 1
+    )
+    if maximum_manifest_bytes != 10_338_393 or maximum_manifest_bytes > API2_INPUT_MANIFEST_MAX_BYTES:
+        raise AssertionError("input-manifest byte and entry limits no longer cover the full schema envelope")
+
+    over_entry_limit = copy.deepcopy(input_manifest)
+    over_entry_limit["entries"] = [input_manifest["entries"][0]] * (API2_INPUT_MANIFEST_MAX_ENTRIES + 1)
+    assert_rejected(
+        "input-manifest entry limit overflow",
+        "input_manifest",
+        over_entry_limit,
+        f"at most {API2_INPUT_MANIFEST_MAX_ENTRIES} items",
+    )
 
     assert_rejected(
         "request API mismatch",

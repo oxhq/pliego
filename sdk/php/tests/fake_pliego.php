@@ -49,6 +49,7 @@ if (($argv[1] ?? null) === '--contract-probe') {
             'request_transport' => 'stdin-single-json',
             'request_max_bytes' => 1_048_576,
             'job_root_transport' => 'cwd-v1',
+            'input_manifest_max_bytes' => 16_777_216,
             'result_transport' => 'stdout-single-json',
             'invocation_error_transport' => 'stderr-utf8-line',
             'success_exit_code' => 0,

@@ -20,6 +20,7 @@ use sha2::{Digest, Sha256};
 
 pub(crate) const API_VERSION: u32 = 2;
 pub(crate) const REQUEST_MAX_BYTES: usize = 1_048_576;
+pub(crate) const INPUT_MANIFEST_MAX_BYTES: usize = 16 * 1024 * 1024;
 pub(crate) const INVOCATION_ERROR_EXIT_CODE: i32 = 64;
 
 const SOURCE_COMMIT: &str = env!("PLIEGO_SOURCE_COMMIT");
@@ -67,7 +68,7 @@ const LIMIT_FIELDS: &[&str] = &[
 const DIAGNOSTIC_FIELDS: &[&str] = &["retention"];
 const INPUT_MANIFEST_FIELDS: &[&str] = &["schema", "version", "url_root", "entries"];
 const INPUT_MANIFEST_ENTRY_FIELDS: &[&str] = &["path", "media_type", "sha256", "bytes"];
-const INPUT_MANIFEST_MAX_ENTRIES: usize = 1_000_000;
+const INPUT_MANIFEST_MAX_ENTRIES: usize = 16 * 1024;
 
 #[derive(Debug)]
 pub(crate) struct InvocationError(String);
@@ -148,6 +149,7 @@ pub(crate) fn write_contract_probe(
             request_transport: "stdin-single-json",
             request_max_bytes: REQUEST_MAX_BYTES,
             job_root_transport: "cwd-v1",
+            input_manifest_max_bytes: INPUT_MANIFEST_MAX_BYTES,
             result_transport: "stdout-single-json",
             invocation_error_transport: "stderr-utf8-line",
             success_exit_code: 0,
@@ -195,6 +197,7 @@ struct InvocationContract {
     request_transport: &'static str,
     request_max_bytes: usize,
     job_root_transport: &'static str,
+    input_manifest_max_bytes: usize,
     result_transport: &'static str,
     invocation_error_transport: &'static str,
     success_exit_code: i32,
@@ -265,7 +268,7 @@ pub(crate) fn decode_input_manifest(
         "$.input.manifest",
         "bytes",
         1,
-        9_007_199_254_740_991,
+        INPUT_MANIFEST_MAX_BYTES as u64,
     )
     .map_err(InvocationError::framing)?;
     if u64::try_from(frame.len()).ok() != Some(declared_bytes) {
@@ -600,7 +603,7 @@ fn validate_request(request: &Value) -> Result<(), String> {
         required(manifest, "$.input.manifest", "bytes")?,
         "$.input.manifest.bytes",
         1,
-        9_007_199_254_740_991,
+        INPUT_MANIFEST_MAX_BYTES as i64,
     )?;
 
     let environment = closed_object(
@@ -1012,6 +1015,60 @@ mod tests {
     }
 
     #[test]
+    fn manifest_descriptor_byte_limit_is_inclusive() {
+        let mut request: Value = serde_json::from_slice(REQUEST).unwrap();
+        request["input"]["manifest"]["bytes"] = Value::from(INPUT_MANIFEST_MAX_BYTES as u64);
+        let encoded = serde_json::to_vec(&request).unwrap();
+        decode_render_request(&mut encoded.as_slice()).unwrap();
+
+        request["input"]["manifest"]["bytes"] = Value::from(INPUT_MANIFEST_MAX_BYTES as u64 + 1);
+        let encoded = serde_json::to_vec(&request).unwrap();
+        assert!(
+            decode_render_request(&mut encoded.as_slice())
+                .unwrap_err()
+                .to_string()
+                .contains("$.input.manifest.bytes")
+        );
+    }
+
+    #[test]
+    fn manifest_entry_limit_is_inclusive() {
+        let entries = (0..INPUT_MANIFEST_MAX_ENTRIES)
+            .map(|index| {
+                serde_json::json!({
+                    "path": format!("entry-{index:05}.bin"),
+                    "media_type": "application/octet-stream",
+                    "sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                    "bytes": 0,
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut manifest = serde_json::json!({
+            "schema": "pliego.input-manifest",
+            "version": 1,
+            "url_root": "pliego-input:///",
+            "entries": entries,
+        });
+        validate_input_manifest(&manifest, "entry-00000.bin").unwrap();
+
+        manifest["entries"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "path": "entry-16384.bin",
+                "media_type": "application/octet-stream",
+                "sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                "bytes": 0,
+            }));
+        assert!(
+            validate_input_manifest(&manifest, "entry-00000.bin")
+                .err()
+                .unwrap()
+                .contains("expected 1..=16384 entries")
+        );
+    }
+
+    #[test]
     fn rejects_noncanonical_or_semantically_invalid_bound_manifests() {
         let mut duplicate = br#"{"schema":"pliego.input-manifest","#.to_vec();
         duplicate.extend_from_slice(&INPUT_MANIFEST[1..]);
@@ -1185,7 +1242,7 @@ mod tests {
             "unexpected probe order: {serialized}"
         );
         assert!(serialized.contains(&format!(
-            r#""contracts":[],"invocation":{{"request_transport":"stdin-single-json","request_max_bytes":{REQUEST_MAX_BYTES},"job_root_transport":"cwd-v1","result_transport":"stdout-single-json","invocation_error_transport":"stderr-utf8-line","success_exit_code":0,"failed_exit_code":1,"invocation_error_exit_code":64}}"#
+            r#""contracts":[],"invocation":{{"request_transport":"stdin-single-json","request_max_bytes":{REQUEST_MAX_BYTES},"job_root_transport":"cwd-v1","input_manifest_max_bytes":{INPUT_MANIFEST_MAX_BYTES},"result_transport":"stdout-single-json","invocation_error_transport":"stderr-utf8-line","success_exit_code":0,"failed_exit_code":1,"invocation_error_exit_code":64}}"#
         )));
         let probe: Value = serde_json::from_slice(&output).unwrap();
         assert_eq!(probe["contracts"], serde_json::json!([]));
@@ -1194,6 +1251,10 @@ mod tests {
         assert_eq!(probe["engine"]["runtime"]["target"], BUILD_TARGET);
         assert_eq!(probe["invocation"]["request_max_bytes"], REQUEST_MAX_BYTES);
         assert_eq!(probe["invocation"]["job_root_transport"], "cwd-v1");
+        assert_eq!(
+            probe["invocation"]["input_manifest_max_bytes"],
+            INPUT_MANIFEST_MAX_BYTES
+        );
         assert_eq!(probe["invocation"]["invocation_error_exit_code"], 64);
         assert!(
             probe["engine"]["runtime"]["binary_sha256"]
