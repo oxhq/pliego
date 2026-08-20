@@ -94,10 +94,22 @@ diagnostics/   # absent before invocation; retained only by request policy
 
 `input-manifest.json` is the descriptor-bound canonical manifest, and `input/` contains exactly its
 listed entries. `delivery/` and `diagnostics/` must not exist when the process starts. The runtime
-does not accept an absolute job path in arguments or normalized JSON, does not derive identity from
-the host current-working-directory string, and does not follow a symlink or reparse-point escape
-from the fixed job layout. During the executable-foundation phase the probe still advertises no
-contract tuple, so `render-api2` rejects every request as unavailable before inspecting this layout.
+also rejects any other top-level entry, including a retention marker such as `.pliego-status`.
+Retention state belongs outside this exclusive job root. The root is held as an owner-private
+directory while the manifest and every listed input are loaded through identity-bound handles.
+Regular files must have one link, every directory and file name must match the manifest exactly,
+and the accepted bytes are frozen into a host-path-free in-memory store before rendering.
+The filesystem is not consulted again for accepted input bytes.
+
+The inactive loader foundation currently proves that authority on Linux and macOS. Windows fails
+closed until its implementation can enumerate and open children relative to a held directory
+handle; a path-reopened approximation is not accepted as equivalent evidence.
+
+The runtime does not accept an absolute job path in arguments or normalized JSON, does not derive
+identity from the host current-working-directory string, and does not follow a symlink or
+reparse-point escape from the fixed job layout. During the executable-foundation phase the probe
+still advertises no contract tuple, so `render-api2` rejects every request as unavailable before
+inspecting this layout.
 The layout becomes active only when a complete tuple is advertised and accepted.
 
 The runtime probe fixes the render transport rather than leaving SDKs to infer it:
@@ -160,6 +172,11 @@ are deliberately paired: even 16,384 entries with maximum-length version-1 paths
 hashes, and byte counts serialize to `10,207,321` bytes, so the entry ceiling cannot be reduced
 accidentally by the byte ceiling. The controlled runtime's existing 64 MiB resource allowance is
 therefore not reused as the API 2 metadata transport limit.
+
+An entry path has at most `32` segments. Across all entries, the total of manifest files plus every
+distinct implied directory beneath `input/` is at most `16,384` nodes. The node count excludes the
+fixed `input/` root itself. These semantic limits prevent a legal file count from expanding into an
+unbounded deep directory walk and use the same depth/node envelope as controlled publication.
 
 The declared byte lengths of all entries may total at most `67,108,864` bytes. The sum is
 overflow-checked and counts every entry, including separate paths with the same content address.

@@ -39,6 +39,8 @@ API2_REQUEST_MAX_BYTES = 1_048_576
 API2_INPUT_MANIFEST_MAX_BYTES = 16 * 1024 * 1024
 API2_INPUT_MANIFEST_MAX_ENTRIES = 16 * 1024
 API2_INPUT_CONTENT_MAX_BYTES = 64 * 1024 * 1024
+API2_INPUT_TREE_MAX_DEPTH = 32
+API2_INPUT_TREE_MAX_NODES = 16 * 1024
 NANOSECONDS_PER_MILLISECOND = 1_000_000
 A4_APP_UNITS = (47622, 67351)
 PROTOCOL_FIELDS = (
@@ -391,6 +393,15 @@ def path_set_semantics(paths: list[str], path: str) -> list[Violation]:
         for count in range(1, len(parts)):
             if "/".join(parts[:count]) in folded_set:
                 violations.append(Violation(path, "file and directory paths collide"))
+    folded_directories: dict[str, str] = {}
+    for value in paths:
+        parts = value.split("/")
+        for count in range(1, len(parts)):
+            directory = "/".join(parts[:count])
+            folded_directory = directory.lower()
+            previous = folded_directories.setdefault(folded_directory, directory)
+            if previous != directory:
+                violations.append(Violation(path, "directory paths have an ASCII case collision"))
     return violations
 
 
@@ -409,6 +420,24 @@ def input_manifest_semantics(manifest: dict[str, Any], root: Path | None = None,
     entries = manifest["entries"]
     paths = [entry["path"] for entry in entries]
     violations = path_set_semantics(paths, f"{path}.entries")
+    directories = {
+        "/".join(parts[:count]) for value in paths for parts in [value.split("/")] for count in range(1, len(parts))
+    }
+    for index, value in enumerate(paths):
+        if len(value.split("/")) > API2_INPUT_TREE_MAX_DEPTH:
+            violations.append(
+                Violation(
+                    f"{path}.entries[{index}].path",
+                    f"input tree depth exceeds {API2_INPUT_TREE_MAX_DEPTH}",
+                )
+            )
+    if len(paths) + len(directories) > API2_INPUT_TREE_MAX_NODES:
+        violations.append(
+            Violation(
+                f"{path}.entries",
+                f"input tree exceeds {API2_INPUT_TREE_MAX_NODES} total files and directories",
+            )
+        )
     if sum(entry["bytes"] for entry in entries) > API2_INPUT_CONTENT_MAX_BYTES:
         violations.append(
             Violation(
@@ -1082,6 +1111,88 @@ def main() -> None:
         "input_manifest",
         over_entry_limit,
         f"at most {API2_INPUT_MANIFEST_MAX_ENTRIES} items",
+    )
+
+    path_at_depth = "/".join(f"d{index}" for index in range(API2_INPUT_TREE_MAX_DEPTH))
+    exact_depth = copy.deepcopy(input_manifest)
+    exact_depth["entries"] = [
+        {
+            "path": path_at_depth,
+            "media_type": "application/octet-stream",
+            "sha256": f"sha256:{'0' * 64}",
+            "bytes": 0,
+        }
+    ]
+    assert_valid(
+        "inclusive input-tree depth limit",
+        "input_manifest",
+        exact_depth,
+        input_manifest_semantics(exact_depth),
+    )
+    over_depth = copy.deepcopy(exact_depth)
+    over_depth["entries"][0]["path"] += "/overflow"
+    assert_rejected(
+        "input-tree depth overflow",
+        "input_manifest",
+        over_depth,
+        f"input tree depth exceeds {API2_INPUT_TREE_MAX_DEPTH}",
+        input_manifest_semantics(over_depth),
+    )
+
+    exact_node_limit = copy.deepcopy(input_manifest)
+    exact_node_limit["entries"] = [
+        {
+            "path": f"d{index:05}/file.bin",
+            "media_type": "application/octet-stream",
+            "sha256": f"sha256:{'0' * 64}",
+            "bytes": 0,
+        }
+        for index in range(API2_INPUT_TREE_MAX_NODES // 2)
+    ]
+    assert_valid(
+        "inclusive input-tree node limit",
+        "input_manifest",
+        exact_node_limit,
+        input_manifest_semantics(exact_node_limit),
+    )
+    over_node_limit = copy.deepcopy(exact_node_limit)
+    over_node_limit["entries"].append(
+        {
+            "path": "d08192/file.bin",
+            "media_type": "application/octet-stream",
+            "sha256": f"sha256:{'0' * 64}",
+            "bytes": 0,
+        }
+    )
+    assert_rejected(
+        "input-tree node overflow",
+        "input_manifest",
+        over_node_limit,
+        f"input tree exceeds {API2_INPUT_TREE_MAX_NODES} total files and directories",
+        input_manifest_semantics(over_node_limit),
+    )
+
+    directory_case_collision = copy.deepcopy(input_manifest)
+    directory_case_collision["entries"] = [
+        {
+            "path": "A/x.bin",
+            "media_type": "application/octet-stream",
+            "sha256": f"sha256:{'0' * 64}",
+            "bytes": 0,
+        },
+        {
+            "path": "a/y.bin",
+            "media_type": "application/octet-stream",
+            "sha256": f"sha256:{'1' * 64}",
+            "bytes": 0,
+        },
+    ]
+    assert_rejected(
+        "input-tree implied-directory case collision",
+        "input_manifest",
+        directory_case_collision,
+        "directory paths have an ASCII case collision",
+        input_manifest_semantics(directory_case_collision),
     )
 
     exact_content_limit = copy.deepcopy(input_manifest)

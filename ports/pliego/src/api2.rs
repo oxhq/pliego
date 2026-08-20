@@ -8,7 +8,9 @@
 //! after strict request decoding so it cannot accidentally route an API 2 request through API 1 or
 //! the nonproduction servoshell oracle.
 
-use std::collections::BTreeSet;
+mod input_job;
+
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs::File;
 use std::io::{self, Read, Write};
@@ -70,6 +72,8 @@ const DIAGNOSTIC_FIELDS: &[&str] = &["retention"];
 const INPUT_MANIFEST_FIELDS: &[&str] = &["schema", "version", "url_root", "entries"];
 const INPUT_MANIFEST_ENTRY_FIELDS: &[&str] = &["path", "media_type", "sha256", "bytes"];
 const INPUT_MANIFEST_MAX_ENTRIES: usize = 16 * 1024;
+const INPUT_TREE_MAX_DEPTH: usize = 32;
+const INPUT_TREE_MAX_NODES: usize = 16 * 1024;
 
 #[derive(Debug)]
 pub(crate) struct InvocationError(String);
@@ -521,6 +525,8 @@ fn validate_input_manifest<'a>(
     let mut canonical_entries = Vec::with_capacity(entries.len());
     let mut paths = BTreeSet::new();
     let mut folded_paths = BTreeSet::new();
+    let mut folded_directories = BTreeMap::new();
+    let mut directories = BTreeSet::new();
     let mut previous_path = None;
     let mut content_bytes = 0u64;
     for (index, entry) in entries.iter().enumerate() {
@@ -528,6 +534,23 @@ fn validate_input_manifest<'a>(
         let entry = closed_object(entry, &path, INPUT_MANIFEST_ENTRY_FIELDS)?;
         let entry_path = required_string(entry, &path, "path")?;
         portable_path(entry_path, &format!("{path}.path"))?;
+        let segments = entry_path.split('/').collect::<Vec<_>>();
+        if segments.len() > INPUT_TREE_MAX_DEPTH {
+            return Err(format!(
+                "{path}.path: input tree depth exceeds {INPUT_TREE_MAX_DEPTH}"
+            ));
+        }
+        for end in 1..segments.len() {
+            let directory = segments[..end].join("/");
+            let folded = directory.to_ascii_lowercase();
+            if folded_directories
+                .insert(folded, directory.clone())
+                .is_some_and(|previous| previous != directory)
+            {
+                return Err("$.entries: directory paths have an ASCII case collision".into());
+            }
+            directories.insert(directory);
+        }
         if previous_path.is_some_and(|previous| previous >= entry_path) {
             return Err("$.entries: paths must be in ascending ASCII byte order".into());
         }
@@ -559,6 +582,12 @@ fn validate_input_manifest<'a>(
             sha256,
             bytes,
         });
+    }
+
+    if entries.len().saturating_add(directories.len()) > INPUT_TREE_MAX_NODES {
+        return Err(format!(
+            "$.entries: input tree exceeds {INPUT_TREE_MAX_NODES} total files and directories"
+        ));
     }
 
     for folded_path in &folded_paths {
@@ -1077,6 +1106,98 @@ mod tests {
                 .err()
                 .unwrap()
                 .contains("expected 1..=16384 entries")
+        );
+    }
+
+    #[test]
+    fn manifest_tree_depth_and_total_node_limits_are_inclusive() {
+        let path_at_depth = (0..INPUT_TREE_MAX_DEPTH)
+            .map(|index| format!("d{index}"))
+            .collect::<Vec<_>>()
+            .join("/");
+        let mut manifest = serde_json::json!({
+            "schema": "pliego.input-manifest",
+            "version": 1,
+            "url_root": "pliego-input:///",
+            "entries": [{
+                "path": path_at_depth,
+                "media_type": "application/octet-stream",
+                "sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                "bytes": 0,
+            }],
+        });
+        validate_input_manifest(&manifest, path_at_depth.as_str()).unwrap();
+
+        let path_over_depth = format!("{path_at_depth}/overflow");
+        manifest["entries"][0]["path"] = Value::from(path_over_depth.as_str());
+        assert!(
+            validate_input_manifest(&manifest, path_over_depth.as_str())
+                .err()
+                .unwrap()
+                .contains("input tree depth exceeds 32")
+        );
+
+        let entries_at_node_limit = (0..(INPUT_TREE_MAX_NODES / 2))
+            .map(|index| {
+                serde_json::json!({
+                    "path": format!("d{index:05}/file.bin"),
+                    "media_type": "application/octet-stream",
+                    "sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                    "bytes": 0,
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut manifest = serde_json::json!({
+            "schema": "pliego.input-manifest",
+            "version": 1,
+            "url_root": "pliego-input:///",
+            "entries": entries_at_node_limit,
+        });
+        validate_input_manifest(&manifest, "d00000/file.bin").unwrap();
+
+        manifest["entries"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "path": "d08192/file.bin",
+                "media_type": "application/octet-stream",
+                "sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                "bytes": 0,
+            }));
+        assert!(
+            validate_input_manifest(&manifest, "d00000/file.bin")
+                .err()
+                .unwrap()
+                .contains("input tree exceeds 16384 total files and directories")
+        );
+    }
+
+    #[test]
+    fn manifest_rejects_case_colliding_implied_directories() {
+        let manifest = serde_json::json!({
+            "schema": "pliego.input-manifest",
+            "version": 1,
+            "url_root": "pliego-input:///",
+            "entries": [
+                {
+                    "path": "A/x.bin",
+                    "media_type": "application/octet-stream",
+                    "sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                    "bytes": 0,
+                },
+                {
+                    "path": "a/y.bin",
+                    "media_type": "application/octet-stream",
+                    "sha256": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+                    "bytes": 0,
+                },
+            ],
+        });
+        assert!(
+            validate_input_manifest(&manifest, "A/x.bin")
+                .err()
+                .unwrap()
+                .contains("directory paths have an ASCII case collision")
         );
     }
 
