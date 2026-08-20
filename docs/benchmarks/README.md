@@ -127,8 +127,16 @@ point JSON-escaped, for
 target_id]`; entries sort by digest bytes and then target-ID UTF-8 bytes. It can
 execute preflight, warmup, and indexed timed rounds without batching a target's
 samples. The public CLI does not yet construct attested multi-target contexts
-or retain that schedule, so these commands remain implementation proof, not a
-publishable cross-engine report.
+or persist a real run, so these commands remain implementation proof, not a
+publishable cross-engine report. The executor does produce a
+`pliego.benchmark-interleaved-run` version 1 envelope marked
+`prerequisite-only`: its global timed order embeds the unmodified raw samples,
+with content-bound sample IDs and a digest content-addressing the entire
+envelope. The
+stdlib validator regenerates the schedule, applies the existing benchmark
+sample schema, and verifies every binding and hash. This makes later report
+references unambiguous; it does not itself supply target attestation or Linux
+measurement evidence.
 
 ## Implemented slice and remaining comparative protocol
 
@@ -160,13 +168,13 @@ Before a cross-engine comparison is published, every target must follow these ru
 - Publish raw samples, hashes, commands, logs, environment metadata, validation
   output, and the report-generation code with the summary.
 
-The remaining dedicated-Linux gates are wiring the seeded cross-target
-execution primitive into a retained multi-target artifact and automatic
-traceability from every report cell to retained raw samples. Single-target
-serial throughput now uses the retained outer one-shot wall interval from runner
-process open through sampler exit, which includes descendant drain and
-accounting settlement; it is still not a publishable cross-engine comparison
-until interleaving and report traceability pass.
+The remaining dedicated-Linux gates are wiring the seeded cross-target executor
+to fully attested target contexts, retaining a genuine run artifact, and making
+every generated report cell cite the artifact digest plus its exact raw-sample
+IDs. Single-target serial throughput now uses the retained outer one-shot wall
+interval from runner process open through sampler exit, which includes
+descendant drain and accounting settlement; it is still not a publishable
+cross-engine comparison until those coordination and report gates pass.
 
 ## Publication gate
 

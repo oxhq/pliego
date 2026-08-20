@@ -51,10 +51,15 @@ RUNNER = ROOT / "benchmarks" / "runners" / "pliego.php"
 PDF_ORACLE = ROOT / "benchmarks" / "tools" / "pdf_oracle.py"
 SAMPLER = ROOT / "benchmarks" / "tools" / "process_tree_sampler.py"
 DEFAULT_SCHEMA = ROOT / "benchmarks" / "schema" / "benchmark-result.v1.json"
+DEFAULT_INTERLEAVED_SCHEMA = ROOT / "benchmarks" / "schema" / "benchmark-interleaved-run.v1.json"
 POPPLER_TOOLS = ("pdfinfo", "pdftotext", "pdffonts", "pdftoppm")
 ORACLE_IDENTITY_REASON = "manifest does not pin canonical Poppler tool identities"
 ADAPTER_ATTESTATION_REASON = "out-of-process OCI image attestation is unavailable"
 CROSS_TARGET_SCHEDULE = "pliego.cross-target-schedule.v1"
+INTERLEAVED_RUN_SCHEMA = "pliego.benchmark-interleaved-run"
+INTERLEAVED_RUN_VERSION = 1
+RAW_SAMPLE_ID_CONTRACT = "pliego.benchmark-raw-sample-id.v1"
+BENCHMARK_SAMPLE_CONTRACT = "pliego.benchmark-result.v1#/definitions/sample"
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import validate_result  # noqa: E402
@@ -87,6 +92,12 @@ def cross_target_phase_schedule(
         raise ValueError("cross-target scheduling requires unique nonempty target ids")
     if not isinstance(fixture_id, str) or not fixture_id:
         raise ValueError("cross-target scheduling requires a fixture id")
+    try:
+        fixture_id.encode("utf-8")
+        for target_id in target_ids:
+            target_id.encode("utf-8")
+    except UnicodeEncodeError as error:
+        raise ValueError("cross-target scheduling requires valid Unicode ids") from error
     if not isinstance(iterations, int) or isinstance(iterations, bool) or iterations < 1:
         raise ValueError("cross-target scheduling requires at least one iteration")
     if not isinstance(seed, int) or isinstance(seed, bool):
@@ -116,6 +127,173 @@ def cross_target_phase_schedule(
     return schedule
 
 
+def canonical_json_bytes(value: Any) -> bytes:
+    """Serialize one identity payload using the v1 benchmark hash encoding."""
+
+    return json.dumps(
+        value,
+        ensure_ascii=True,
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("ascii")
+
+
+def canonical_json_sha256(value: Any) -> str:
+    return hashlib.sha256(canonical_json_bytes(value)).hexdigest()
+
+
+def raw_sample_record(
+    fixture_id: str,
+    schedule_entry: dict[str, Any],
+    sample: dict[str, Any],
+) -> dict[str, Any]:
+    sample_sha256 = canonical_json_sha256(sample)
+    identity = [
+        RAW_SAMPLE_ID_CONTRACT,
+        fixture_id,
+        schedule_entry["target_id"],
+        schedule_entry["iteration"],
+        schedule_entry["position"],
+        sample_sha256,
+    ]
+    return {
+        "sample_id": canonical_json_sha256(identity),
+        "sample_sha256": sample_sha256,
+        "schedule_position": schedule_entry["position"],
+        "iteration": schedule_entry["iteration"],
+        "target_id": schedule_entry["target_id"],
+        "sample": sample,
+    }
+
+
+def interleaved_artifact_sha256(artifact: dict[str, Any]) -> str:
+    """Hash the canonical artifact payload with its digest field omitted."""
+
+    return canonical_json_sha256({key: value for key, value in artifact.items() if key != "artifact_sha256"})
+
+
+def validate_interleaved_artifact(
+    data: Any,
+    artifact_schema: dict[str, Any] | None = None,
+    result_schema: dict[str, Any] | None = None,
+) -> list[validate_result.Violation]:
+    """Validate the envelope, schedule, sample bindings, and identity hashes."""
+
+    artifact_schema = artifact_schema or json.loads(DEFAULT_INTERLEAVED_SCHEMA.read_text(encoding="utf-8"))
+    result_schema = result_schema or json.loads(DEFAULT_SCHEMA.read_text(encoding="utf-8"))
+    violations: list[validate_result.Violation] = []
+    validate_result.validate(data, artifact_schema, "$", violations)
+    if violations:
+        return violations
+
+    assert isinstance(data, dict)
+    schedule = data["schedule"]
+    target_ids = schedule["targets"]
+    try:
+        canonical_targets = sorted(target_ids, key=lambda target_id: target_id.encode("utf-8"))
+    except UnicodeEncodeError as error:
+        violations.append(validate_result.Violation("$.schedule.targets", f"must be valid Unicode: {error}"))
+        return violations
+    if target_ids != canonical_targets or len(set(target_ids)) != len(target_ids):
+        violations.append(
+            validate_result.Violation("$.schedule.targets", "must contain unique target ids in UTF-8 byte order")
+        )
+
+    expected_phases: dict[str, list[dict[str, Any]]] = {}
+    try:
+        for phase, iterations in (
+            ("preflight", 1),
+            ("warmup", schedule["warmup_iterations"]),
+            ("timed", schedule["sample_count"]),
+        ):
+            expected_phases[phase] = (
+                cross_target_phase_schedule(
+                    target_ids,
+                    schedule["fixture_id"],
+                    iterations,
+                    schedule["seed"],
+                    phase,
+                )
+                if iterations > 0
+                else []
+            )
+            if schedule[phase] != expected_phases[phase]:
+                violations.append(
+                    validate_result.Violation(
+                        f"$.schedule.{phase}",
+                        f"must equal the canonical {CROSS_TARGET_SCHEDULE} order",
+                    )
+                )
+    except (TypeError, ValueError, UnicodeError) as error:
+        violations.append(validate_result.Violation("$.schedule", f"cannot reproduce canonical schedule: {error}"))
+        return violations
+
+    timed = expected_phases["timed"]
+    raw_samples = data["raw_samples"]
+    if len(raw_samples) != len(timed):
+        violations.append(
+            validate_result.Violation(
+                "$.raw_samples",
+                f"must retain exactly one sample for each of the {len(timed)} timed schedule entries",
+            )
+        )
+
+    sample_ids: list[str] = []
+    sample_definition = result_schema["definitions"]["sample"]
+    for index, record in enumerate(raw_samples):
+        path = f"$.raw_samples[{index}]"
+        validate_result.validate(record["sample"], sample_definition, f"{path}.sample", violations, result_schema)
+        if index >= len(timed):
+            continue
+        entry = timed[index]
+        for field, expected in (
+            ("schedule_position", entry["position"]),
+            ("iteration", entry["iteration"]),
+            ("target_id", entry["target_id"]),
+        ):
+            validate_result.require_equal(f"{path}.{field}", record[field], expected, violations)
+        validate_result.require_equal(
+            f"{path}.sample.index",
+            record["sample"].get("index"),
+            entry["iteration"],
+            violations,
+        )
+        try:
+            expected_record = raw_sample_record(schedule["fixture_id"], entry, record["sample"])
+        except (TypeError, ValueError) as error:
+            violations.append(validate_result.Violation(f"{path}.sample", f"cannot hash canonical sample: {error}"))
+            continue
+        validate_result.require_equal(
+            f"{path}.sample_sha256",
+            record["sample_sha256"],
+            expected_record["sample_sha256"],
+            violations,
+        )
+        validate_result.require_equal(
+            f"{path}.sample_id",
+            record["sample_id"],
+            expected_record["sample_id"],
+            violations,
+        )
+        sample_ids.append(record["sample_id"])
+
+    if len(sample_ids) != len(set(sample_ids)):
+        violations.append(validate_result.Violation("$.raw_samples", "sample ids must be unique"))
+    try:
+        expected_artifact_sha256 = interleaved_artifact_sha256(data)
+    except (TypeError, ValueError) as error:
+        violations.append(validate_result.Violation("$", f"cannot hash canonical artifact: {error}"))
+    else:
+        validate_result.require_equal(
+            "$.artifact_sha256",
+            data["artifact_sha256"],
+            expected_artifact_sha256,
+            violations,
+        )
+    return violations
+
+
 def execute_interleaved_run(
     target_ids: list[str],
     fixture_id: str,
@@ -125,12 +303,12 @@ def execute_interleaved_run(
     run_preflight: Callable[[str], None],
     run_warmup: Callable[[str, int], None],
     run_timed: Callable[[str, int], dict[str, Any]],
-) -> tuple[dict[str, Any], dict[str, list[dict[str, Any]]]]:
+) -> dict[str, Any]:
     """Execute callbacks in the canonical cross-target phase schedules.
 
     This is deliberately not wired into the public single-target CLI yet. A
     future comparison coordinator must first construct fully attested target
-    contexts, then use this primitive and retain the returned transcript.
+    contexts, then use this primitive and persist its validated artifact.
     """
 
     if not isinstance(warmup_iterations, int) or isinstance(warmup_iterations, bool) or warmup_iterations < 0:
@@ -145,7 +323,7 @@ def execute_interleaved_run(
         else []
     )
     timed = cross_target_phase_schedule(target_ids, fixture_id, sample_count, seed, "timed")
-    samples_by_target = {target_id: [] for target_id in sorted(target_ids, key=lambda value: value.encode("utf-8"))}
+    raw_samples: list[dict[str, Any]] = []
 
     for entry in preflight:
         run_preflight(entry["target_id"])
@@ -159,23 +337,37 @@ def execute_interleaved_run(
                 "interleaved runner returned a sample whose index does not match "
                 f"the schedule for {entry['target_id']!r}"
             )
-        samples_by_target[entry["target_id"]].append(sample)
+        try:
+            raw_samples.append(raw_sample_record(fixture_id, entry, sample))
+        except (TypeError, ValueError) as error:
+            fail(f"interleaved runner returned a sample that cannot be retained canonically: {error}")
 
-    expected_indices = list(range(sample_count))
-    for target_id, samples in samples_by_target.items():
-        if [sample["index"] for sample in samples] != expected_indices:
-            fail(f"interleaved runner did not retain one ordered sample per round for {target_id!r}")
-
-    transcript = {
+    schedule = {
         "contract": CROSS_TARGET_SCHEDULE,
         "seed": seed,
         "fixture_id": fixture_id,
         "targets": sorted(target_ids, key=lambda value: value.encode("utf-8")),
+        "warmup_iterations": warmup_iterations,
+        "sample_count": sample_count,
         "preflight": preflight,
         "warmup": warmup,
         "timed": timed,
     }
-    return transcript, samples_by_target
+    artifact = {
+        "schema": INTERLEAVED_RUN_SCHEMA,
+        "version": INTERLEAVED_RUN_VERSION,
+        "publication_status": "prerequisite-only",
+        "artifact_sha256": "",
+        "sample_contract": BENCHMARK_SAMPLE_CONTRACT,
+        "sample_id_contract": RAW_SAMPLE_ID_CONTRACT,
+        "schedule": schedule,
+        "raw_samples": raw_samples,
+    }
+    artifact["artifact_sha256"] = interleaved_artifact_sha256(artifact)
+    violations = validate_interleaved_artifact(artifact)
+    if violations:
+        fail(f"interleaved artifact failed validation: {violations[0]}")
+    return artifact
 
 
 def windows_ram_bytes() -> int:

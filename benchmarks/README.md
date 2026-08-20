@@ -27,6 +27,7 @@ benchmarks/
 │   ├── dompdf/                dompdf 3.1.6 / Composer lock
 │   └── browsershot/           Browsershot 5.4.0 / Composer + Puppeteer locks
 ├── schema/
+│   ├── benchmark-interleaved-run.v1.json
 │   └── benchmark-result.v1.json
 ├── fixtures/                  Seven frozen fixtures
 │   ├── minimal-static/        Pure startup
@@ -44,6 +45,7 @@ benchmarks/
 │   ├── pdf_oracle.py           Shared untimed PDF correctness checks
 │   ├── run_benchmark.py       Orchestrator: manifest → runner → aggregates → result file
 │   ├── test_process_tree_sampler.py Fixture, live cgroup, bridge, and overhead proof
+│   ├── validate_interleaved_run.py Cross-target schedule/raw-sample validator
 │   └── validate_result.py     Stdlib-only JSON Schema check for result files
 ├── baselines/                 Released-runtime baselines
 └── reports/                   Comparison reports land here
@@ -200,10 +202,30 @@ round. The rank input is the ASCII encoding of compact JSON (no spaces, with
 every non-ASCII code point JSON-escaped) for `["pliego.cross-target-schedule.v1", seed, fixture,
 phase, iteration, target_id]`; entries sort by raw SHA-256 digest bytes and then
 target-ID UTF-8 bytes. Its executor interleaves preflights, warmups, and timed
-samples and fails if a returned timed index differs from the schedule. These
-are prerequisites for the future comparison coordinator, not a standalone
-publication command: the public CLI remains single-target and retains all
-identity, oracle, dedicated-host, and N/A gates.
+samples and fails if a returned timed index differs from the schedule. It emits
+a `pliego.benchmark-interleaved-run` version 1 envelope marked
+`publication_status = "prerequisite-only"`. Timed samples remain unmodified and
+in global schedule order. Each is bound to its schedule position by a SHA-256
+of the sample and a content-bound `sample_id`; an `artifact_sha256` seals the
+complete envelope by content (it is not a signature or provenance proof).
+
+Those hashes use ASCII JSON from Python's `json.dumps` with sorted keys,
+`ensure_ascii=True`, `allow_nan=False`, and compact separators. The artifact
+hash omits only its own `artifact_sha256` field. The sample ID hashes compact
+JSON for `["pliego.benchmark-raw-sample-id.v1", fixture_id, target_id,
+iteration, schedule_position, sample_sha256]`. This identity encoding is part
+of the v1 contract. The standalone `validate_interleaved_run.py` rechecks the
+envelope schema, every raw sample against the existing
+`benchmark-result.v1#/definitions/sample` contract, the regenerated schedule,
+every schedule/sample binding, and all hashes:
+
+```sh
+python3 benchmarks/tools/validate_interleaved_run.py path/to/interleaved-run.json
+```
+
+This is a retention and report-traceability primitive for the future comparison
+coordinator, not a standalone publication command. The public CLI remains
+single-target and retains all identity, oracle, dedicated-host, and N/A gates.
 
 Each sample gets a fresh root-owned, non-delegated child cgroup. A root launcher
 first stops in a staging cgroup, drops supplementary groups, all real/effective/
@@ -252,8 +274,9 @@ protocol's `nearest-rank-v1` percentiles and requires p95 wall overhead below
 * Every sample is a cold, one-shot process. The committed seed randomizes
   fixture traversal within a target, preserving the existing `sample_order =
   "random"` protocol. The deterministic cross-target schedule and phase-aware
-  execution primitive are implemented, but no public multi-target coordinator
-  retains that transcript yet; current result files remain single-target.
+  execution primitive now produces a versioned, self-digesting schedule and
+  raw-sample envelope. No public multi-target coordinator persists real target
+  executions yet; current result files remain single-target.
 * Same host, same binary, same fonts/assets. Network disabled.
 * Results record host info, the exact clean harness commit, the oracle script,
   and all Poppler executable identities; validation requires the matching
@@ -293,14 +316,16 @@ and were revalidated unchanged against the published Linux v0.2.0 renderer.
 * dompdf and Browsershot have direct Ubuntu render + real Poppler smoke for
   `minimal-static`, but publishable measurements remain N/A until immutable
   image digests are pinned; all other fixtures are explicit exclusions.
-* The cross-target scheduling/execution prerequisite is implemented, but it is
-  not yet wired to attested target contexts or a retained multi-target result;
-  a report generator is also absent. This slice publishes no comparative numbers.
-* Dedicated-Linux acceptance still needs the public multi-target coordinator,
-  retained schedule evidence, and report-cell to raw-sample traceability. The
-  implemented single-target throughput includes sampler startup, descendant
-  drain, accounting settlement, and sampler exit, but remains a serial
-  per-target diagnostic rather than a publishable cross-engine throughput claim.
+* The cross-target executor now emits a validated retention contract with stable
+  raw-sample IDs, but it is not wired to attested target contexts and no genuine
+  multi-target run artifact has been retained. A report generator is also absent.
+  This slice publishes no comparative numbers.
+* Dedicated-Linux acceptance still needs the public multi-target coordinator, a
+  genuine retained run under all existing gates, and a report generator whose
+  cells cite that artifact hash and exact raw-sample IDs. The implemented
+  single-target throughput includes sampler startup, descendant drain,
+  accounting settlement, and sampler exit, but remains a serial per-target
+  diagnostic rather than a publishable cross-engine throughput claim.
 * The Ubuntu adapter/Poppler smoke is configured in CI; it is not hosted proof
   until that workflow passes at the exact commit containing this change.
 * Core (Criterion) and Laravel e2e levels live outside this directory.

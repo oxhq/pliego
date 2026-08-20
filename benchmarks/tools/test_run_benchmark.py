@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 import importlib.util
 import json
 import os
@@ -22,6 +23,43 @@ SPEC = importlib.util.spec_from_file_location("run_benchmark", SCRIPT)
 assert SPEC is not None and SPEC.loader is not None
 benchmark = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(benchmark)
+
+
+def retained_sample(index: int) -> dict[str, object]:
+    """Return the smallest structurally valid benchmark-result.v1 sample."""
+
+    return {
+        "index": index,
+        "ok": False,
+        "exit_code": 1,
+        "wall_ms": float(index + 1),
+        "one_shot_wall_ms": float(index + 2),
+        "user_ms": None,
+        "sys_ms": None,
+        "memory_current_bytes": None,
+        "memory_peak_bytes": None,
+        "sampled_peak_rss_kib_lower_bound": None,
+        "sampled_peak_pss_kib_lower_bound": None,
+        "read_bytes": None,
+        "write_bytes": None,
+        "read_operations": None,
+        "write_operations": None,
+        "measurement_method": "unavailable",
+        "signal": None,
+        "resource_usage": None,
+        "output": {
+            "pdf_bytes": None,
+            "pdf_sha256": None,
+            "page_count": None,
+            "artifact_bytes": 0,
+            "published_pdf": False,
+            "normalized_text_sha256": None,
+            "font_families": [],
+            "normalized_raster_sha256": None,
+        },
+        "correctness": {"pass": False, "checks": [{"name": "synthetic", "status": "fail"}]},
+        "failure": {"code": "synthetic_failure", "message": "test sample", "published_pdf": False},
+    }
 
 
 def main() -> None:
@@ -79,9 +117,9 @@ def main() -> None:
 
     def record_timed(target_id: str, iteration: int) -> dict[str, object]:
         calls.append(("timed", target_id, iteration))
-        return {"index": iteration}
+        return retained_sample(iteration)
 
-    transcript, interleaved_samples = benchmark.execute_interleaved_run(
+    artifact = benchmark.execute_interleaved_run(
         target_ids,
         "minimal-static",
         2,
@@ -91,13 +129,62 @@ def main() -> None:
         record_warmup,
         record_timed,
     )
+    transcript = artifact["schedule"]
+    assert artifact["schema"] == benchmark.INTERLEAVED_RUN_SCHEMA
+    assert artifact["version"] == benchmark.INTERLEAVED_RUN_VERSION
+    assert artifact["publication_status"] == "prerequisite-only"
+    assert artifact["sample_contract"] == benchmark.BENCHMARK_SAMPLE_CONTRACT
     assert transcript["contract"] == benchmark.CROSS_TARGET_SCHEDULE
     assert calls == [
         *[("preflight", entry["target_id"], None) for entry in transcript["preflight"]],
         *[("warmup", entry["target_id"], entry["iteration"]) for entry in transcript["warmup"]],
         *[("timed", entry["target_id"], entry["iteration"]) for entry in transcript["timed"]],
     ]
-    assert all([sample["index"] for sample in samples] == [0, 1, 2] for samples in interleaved_samples.values())
+    assert [record["schedule_position"] for record in artifact["raw_samples"]] == list(range(9))
+    assert [record["target_id"] for record in artifact["raw_samples"]] == [
+        entry["target_id"] for entry in transcript["timed"]
+    ]
+    assert len({record["sample_id"] for record in artifact["raw_samples"]}) == 9
+    assert artifact["artifact_sha256"] == "35cbb1e012072e54e9cef490c4bd21c74d4538e1f603db9994acbd70d3d645eb"
+    assert artifact["raw_samples"][0]["sample_sha256"] == (
+        "c8f3ae5f1cdbfa83db37a5d97283a3e8f7ad9a95d4b09b1fa31dbab978a698fd"
+    )
+    assert artifact["raw_samples"][0]["sample_id"] == (
+        "ff69974c11d51cfad63707c51fbd5eb85360734e0c0f0f9335ce7aded35081bf"
+    )
+    assert not benchmark.validate_interleaved_artifact(artifact)
+
+    changed_sample = deepcopy(artifact)
+    changed_sample["raw_samples"][0]["sample"]["wall_ms"] = 999
+    changed_errors = "\n".join(map(str, benchmark.validate_interleaved_artifact(changed_sample)))
+    assert "sample_sha256" in changed_errors and "artifact_sha256" in changed_errors
+
+    changed_schedule = deepcopy(artifact)
+    changed_schedule["schedule"]["timed"][0]["target_id"] = "pliego-0.2.0"
+    schedule_errors = "\n".join(map(str, benchmark.validate_interleaved_artifact(changed_schedule)))
+    assert "must equal the canonical pliego.cross-target-schedule.v1 order" in schedule_errors
+
+    missing_sample = deepcopy(artifact)
+    missing_sample["raw_samples"].pop()
+    missing_errors = "\n".join(map(str, benchmark.validate_interleaved_artifact(missing_sample)))
+    assert "must retain exactly one sample" in missing_errors
+
+    unknown_sample_field = deepcopy(artifact)
+    unknown_sample_field["raw_samples"][0]["sample"]["uncontracted"] = True
+    unknown_errors = "\n".join(map(str, benchmark.validate_interleaved_artifact(unknown_sample_field)))
+    assert "unexpected property 'uncontracted'" in unknown_errors
+
+    with tempfile.TemporaryDirectory() as directory:
+        artifact_path = Path(directory) / "interleaved.json"
+        artifact_path.write_text(json.dumps(artifact, indent=2) + "\n", encoding="utf-8")
+        validation = subprocess.run(
+            [sys.executable, str(SCRIPT.with_name("validate_interleaved_run.py")), str(artifact_path)],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert validation.returncode == 0, validation.stderr
+        assert "artifact validated" in validation.stdout
     try:
         benchmark.execute_interleaved_run(
             ["one", "two"],
@@ -113,6 +200,21 @@ def main() -> None:
         assert error.code == 1
     else:
         raise AssertionError("interleaved sample/index mismatch was accepted")
+    try:
+        benchmark.execute_interleaved_run(
+            ["one", "two"],
+            "minimal-static",
+            0,
+            1,
+            1,
+            lambda _target: None,
+            lambda _target, _iteration: None,
+            lambda _target, iteration: {**retained_sample(iteration), "wall_ms": float("nan")},
+        )
+    except SystemExit as error:
+        assert error.code == 1
+    else:
+        raise AssertionError("non-finite raw sample was accepted by the identity contract")
 
     mounts = "\n".join(
         [
