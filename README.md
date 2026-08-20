@@ -28,8 +28,9 @@ an authored page break, a dense 20-row ledger, and calculated totals.
 
 ## Laravel quick start
 
-The v0.2 commands below become installable only after the split Composer package
-tags are published. Until then, Packagist's latest stable line remains `^0.1.1`.
+The v0.2.0 Laravel package is published on Packagist. These commands install its
+exact PHP bridge dependency, then download and verify its package-pinned native
+runtime:
 
 ```sh
 composer require oxhq/pliego-laravel:^0.2.0
@@ -162,12 +163,11 @@ Composer distributions pass their focused contracts. The support profile remains
 the boundary; Pliego does not claim browser-wide compatibility or safe rendering of
 untrusted HTML.
 
-This source tree targets v0.2.0 and engine API 1. The
-[Releases page](https://github.com/oxhq/pliego/releases) is the publication
-authority: unless an exact v0.2.0 tag and its native assets are present there,
-v0.1.1 remains the latest stable release. The v0.2 source routes the default command
-and supported SDK path through the Pliego-owned controlled transaction, but source
-code alone is not release proof.
+This source tree and the latest stable native release are v0.2.0 with engine API 1.
+The exact tag and native assets on the
+[Releases page](https://github.com/oxhq/pliego/releases/tag/v0.2.0) are the
+publication authority. The v0.2 release routes the default command and supported SDK
+path through the Pliego-owned controlled transaction.
 For the project's scope, evidence, release train, and next gates, see:
 
 - [Project overview](docs/project-overview.md)
@@ -176,10 +176,10 @@ For the project's scope, evidence, release train, and next gates, see:
 - [Security threat model](docs/security/threat-model.md)
 - [2026 funding plan](docs/funding/2026.md)
 
-Controlled capture and API 2 work described in those planning documents is not part
-of the v0.1.1 release. The development tree includes an unreleased API 2 probe,
-strict request decoder, and PHP tuple validator, but the probe advertises no render
-contract and `render-api2` cannot render a document.
+Published v0.2.0 uses engine API 1 through the Pliego-owned controlled transaction.
+API 2 remains unreleased: the source tree includes a probe, strict request decoder,
+and PHP tuple validator, but the probe advertises no render contract and
+`render-api2` cannot render a document.
 
 Every native archive includes the project and specification licenses, an exact tagged
 source pointer, the generated Cargo dependency report, and pinned notices for copied

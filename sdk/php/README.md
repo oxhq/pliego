@@ -2,8 +2,7 @@
 
 PHP 8.3+ client for rendering one document per native Pliego process.
 
-The v0.2 command below becomes installable only after the split PHP package tag is
-published. Until then, Packagist's latest stable line remains `^0.1.1`.
+The v0.2.0 PHP package is published on Packagist:
 
 ```sh
 composer require oxhq/pliego-php:^0.2.0
