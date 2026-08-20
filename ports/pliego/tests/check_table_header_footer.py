@@ -25,6 +25,10 @@ UNSUPPORTED_REASONS = {
     "unsupported-layout",
 }
 UNSUPPORTED_CAPTURE_CODE = "SCENE_CAPTURE_UNSUPPORTED_PAINT_EVENTS"
+UNSUPPORTED_CAPTURE_MESSAGE = (
+    "document scene capture is incomplete (unsupported paint kinds: collapsed-table-borders); "
+    "rerun with --allow-partial-scene to inspect scene diagnostics"
+)
 
 
 def fail(message: str, code: int = 1) -> None:
@@ -351,6 +355,25 @@ def self_test() -> None:
 
     with tempfile.TemporaryDirectory(prefix="pliego-table-header-footer-self-test-") as temp:
         failure_artifacts = Path(temp) / "failure-artifacts"
+        failure_artifacts.mkdir()
+        (failure_artifacts / "resources").mkdir()
+        for name in ("console.jsonl", "resources.jsonl", "session-state.jsonl"):
+            (failure_artifacts / name).write_bytes(b"")
+        failure_error = {
+            "code": UNSUPPORTED_CAPTURE_CODE,
+            "message": UNSUPPORTED_CAPTURE_MESSAGE,
+        }
+        failure_render_id = "sha256:" + "a" * 64
+        (failure_artifacts / "failure.json").write_text(
+            json.dumps(
+                {
+                    "status": "failed",
+                    "render_id": failure_render_id,
+                    "error": failure_error,
+                }
+            ),
+            encoding="utf-8",
+        )
         failure = subprocess.CompletedProcess(
             args=[],
             returncode=1,
@@ -358,7 +381,8 @@ def self_test() -> None:
                 {
                     "artifacts": str(failure_artifacts),
                     "document_pdf": str(Path(temp) / "failed.pdf"),
-                    "error": {"code": UNSUPPORTED_CAPTURE_CODE},
+                    "error": failure_error,
+                    "render_id": failure_render_id,
                     "status": "failed",
                 }
             ),
@@ -428,15 +452,39 @@ def require_unsupported_failure(result: subprocess.CompletedProcess[str]) -> Non
     require(summary.get("status") == "failed", f"unsupported fixture status differs: {summary!r}")
     error = summary.get("error")
     require(
-        isinstance(error, dict) and error.get("code") == UNSUPPORTED_CAPTURE_CODE,
+        error == {"code": UNSUPPORTED_CAPTURE_CODE, "message": UNSUPPORTED_CAPTURE_MESSAGE},
         f"unsupported fixture error differs: {error!r}",
     )
     artifacts_value = summary.get("artifacts")
     require(isinstance(artifacts_value, str), "unsupported fixture has no artifact path")
-    require(not Path(artifacts_value).exists(), "unsupported fixture published failure artifacts")
+    artifacts = Path(artifacts_value)
+    require(artifacts.is_dir(), "unsupported fixture did not publish validated failure evidence")
+    files = {path.name for path in artifacts.iterdir() if path.is_file()}
+    directories = {path.name for path in artifacts.iterdir() if path.is_dir()}
+    allowed_files = {
+        "console.jsonl",
+        "environment.json",
+        "failure.json",
+        "readiness.json",
+        "render.png",
+        "resources.jsonl",
+        "session-state.jsonl",
+    }
+    required_files = {"console.jsonl", "failure.json", "resources.jsonl", "session-state.jsonl"}
+    require(files <= allowed_files, f"unsupported failure files drifted: {sorted(files)}")
+    require(required_files <= files, f"unsupported failure files are incomplete: {sorted(files)}")
+    require(directories == {"resources"}, f"unsupported failure directories drifted: {sorted(directories)}")
+    render_id = summary.get("render_id")
+    require(isinstance(render_id, str) and render_id, "unsupported fixture has no render ID")
+    failure = read_json(str(artifacts / "failure.json"), "failure evidence")
+    require(
+        failure == {"status": "failed", "render_id": render_id, "error": error},
+        f"unsupported fixture failure evidence differs: {failure!r}",
+    )
     document_value = summary.get("document_pdf")
     require(isinstance(document_value, str), "unsupported fixture has no document PDF path")
     require(not Path(document_value).exists(), "unsupported fixture published a PDF")
+    require(not list(artifacts.parent.glob(".pliego-runtime-*")), "unsupported fixture retained private evidence")
 
 
 def read_diagnostic_layout(result: subprocess.CompletedProcess[str]) -> dict[str, Any]:
