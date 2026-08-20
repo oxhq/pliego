@@ -1456,12 +1456,7 @@ pub(crate) fn render(
                 validate_staging_closure(&paths, &identity)?;
                 validate_failed_artifact_contract(&paths.staging_artifacts, expected)
                     .map_err(|_| runtime_terminated(&paths, &identity))?;
-                let promotion = if resource_setup_failed {
-                    promote_failure_without_plan(&paths, &identity)
-                } else {
-                    plan_and_promote(&paths, &identity)
-                };
-                match promotion {
+                match promote_failure_without_plan(&paths, &identity) {
                     Ok(()) => {},
                     Err(PlanAndPromoteError::BeforeVisibility(_)) => return Err(error),
                     Err(PlanAndPromoteError::AfterVisibility(error)) => return Err(error),
