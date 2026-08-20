@@ -21,6 +21,7 @@ from typing import Any
 
 REQUEST_MAX_BYTES = 1_048_576
 INPUT_MANIFEST_MAX_BYTES = 16 * 1024 * 1024
+INPUT_CONTENT_MAX_BYTES = 64 * 1024 * 1024
 PROBE_TIMEOUT_SECONDS = 180
 INVOCATION_TIMEOUT_SECONDS = 30
 SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -122,6 +123,7 @@ def validate_probe(
             "request_max_bytes",
             "job_root_transport",
             "input_manifest_max_bytes",
+            "input_content_max_bytes",
             "result_transport",
             "invocation_error_transport",
             "success_exit_code",
@@ -135,6 +137,7 @@ def validate_probe(
         "request_max_bytes": REQUEST_MAX_BYTES,
         "job_root_transport": "cwd-v1",
         "input_manifest_max_bytes": INPUT_MANIFEST_MAX_BYTES,
+        "input_content_max_bytes": INPUT_CONTENT_MAX_BYTES,
         "result_transport": "stdout-single-json",
         "invocation_error_transport": "stderr-utf8-line",
         "success_exit_code": 0,
@@ -146,6 +149,7 @@ def validate_probe(
     for key in [
         "request_max_bytes",
         "input_manifest_max_bytes",
+        "input_content_max_bytes",
         "success_exit_code",
         "failed_exit_code",
         "invocation_error_exit_code",
@@ -298,6 +302,7 @@ def self_test() -> None:
                 "request_max_bytes": REQUEST_MAX_BYTES,
                 "job_root_transport": "cwd-v1",
                 "input_manifest_max_bytes": INPUT_MANIFEST_MAX_BYTES,
+                "input_content_max_bytes": INPUT_CONTENT_MAX_BYTES,
                 "result_transport": "stdout-single-json",
                 "invocation_error_transport": "stderr-utf8-line",
                 "success_exit_code": 0,
@@ -361,6 +366,22 @@ def self_test() -> None:
                 raise
         else:
             raise AssertionError("self-test accepted a different input-manifest byte limit")
+        wrong_content_limit = json.loads(json.dumps(probe))
+        wrong_content_limit["invocation"]["input_content_max_bytes"] -= 1
+        try:
+            validate_probe(
+                wrong_content_limit,
+                binary_sha256=binary_sha256,
+                expected_version="0.1.1",
+                expected_source_commit="1" * 40,
+                expected_target="x86_64-unknown-linux-gnu",
+                expected_servo_base="2" * 40,
+            )
+        except AssertionError as error:
+            if "invocation contract differs" not in str(error):
+                raise
+        else:
+            raise AssertionError("self-test accepted a different aggregate input-content byte limit")
         boolean_version = json.loads(json.dumps(probe))
         boolean_version["version"] = True
         try:

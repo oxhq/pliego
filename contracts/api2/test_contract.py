@@ -38,6 +38,7 @@ API2_VIRTUAL_SPAN_MAX_MS = 2**53 - 1
 API2_REQUEST_MAX_BYTES = 1_048_576
 API2_INPUT_MANIFEST_MAX_BYTES = 16 * 1024 * 1024
 API2_INPUT_MANIFEST_MAX_ENTRIES = 16 * 1024
+API2_INPUT_CONTENT_MAX_BYTES = 64 * 1024 * 1024
 NANOSECONDS_PER_MILLISECOND = 1_000_000
 A4_APP_UNITS = (47622, 67351)
 PROTOCOL_FIELDS = (
@@ -408,6 +409,13 @@ def input_manifest_semantics(manifest: dict[str, Any], root: Path | None = None,
     entries = manifest["entries"]
     paths = [entry["path"] for entry in entries]
     violations = path_set_semantics(paths, f"{path}.entries")
+    if sum(entry["bytes"] for entry in entries) > API2_INPUT_CONTENT_MAX_BYTES:
+        violations.append(
+            Violation(
+                f"{path}.entries",
+                f"declared content exceeds the {API2_INPUT_CONTENT_MAX_BYTES}-byte aggregate limit",
+            )
+        )
     if root is None:
         return violations
 
@@ -1029,6 +1037,8 @@ def main() -> None:
         raise AssertionError("API 2 job-root transport drifted")
     if runtime["invocation"]["input_manifest_max_bytes"] != API2_INPUT_MANIFEST_MAX_BYTES:
         raise AssertionError("API 2 input-manifest byte limit drifted")
+    if runtime["invocation"]["input_content_max_bytes"] != API2_INPUT_CONTENT_MAX_BYTES:
+        raise AssertionError("API 2 input-content byte limit drifted")
 
     exact_manifest_limit = copy.deepcopy(request_a4)
     exact_manifest_limit["input"]["manifest"]["bytes"] = API2_INPUT_MANIFEST_MAX_BYTES
@@ -1047,7 +1057,7 @@ def main() -> None:
         "path": maximum_path,
         "media_type": f"a/{'b' * 253}",
         "sha256": f"sha256:{'0' * 64}",
-        "bytes": 2**53 - 1,
+        "bytes": API2_INPUT_CONTENT_MAX_BYTES,
     }
     empty_manifest = {
         "schema": "pliego.input-manifest",
@@ -1062,7 +1072,7 @@ def main() -> None:
         + API2_INPUT_MANIFEST_MAX_ENTRIES
         - 1
     )
-    if maximum_manifest_bytes != 10_338_393 or maximum_manifest_bytes > API2_INPUT_MANIFEST_MAX_BYTES:
+    if maximum_manifest_bytes != 10_207_321 or maximum_manifest_bytes > API2_INPUT_MANIFEST_MAX_BYTES:
         raise AssertionError("input-manifest byte and entry limits no longer cover the full schema envelope")
 
     over_entry_limit = copy.deepcopy(input_manifest)
@@ -1072,6 +1082,51 @@ def main() -> None:
         "input_manifest",
         over_entry_limit,
         f"at most {API2_INPUT_MANIFEST_MAX_ENTRIES} items",
+    )
+
+    exact_content_limit = copy.deepcopy(input_manifest)
+    exact_content_limit["entries"] = [
+        {
+            "path": "assets/a.bin",
+            "media_type": "application/octet-stream",
+            "sha256": f"sha256:{'0' * 64}",
+            "bytes": API2_INPUT_CONTENT_MAX_BYTES // 4,
+        },
+        {
+            "path": "assets/b.bin",
+            "media_type": "application/octet-stream",
+            "sha256": f"sha256:{'0' * 64}",
+            "bytes": API2_INPUT_CONTENT_MAX_BYTES // 4,
+        },
+        {
+            "path": "document.html",
+            "media_type": "text/html;charset=utf-8",
+            "sha256": f"sha256:{'1' * 64}",
+            "bytes": API2_INPUT_CONTENT_MAX_BYTES // 2,
+        },
+    ]
+    assert_valid(
+        "inclusive aggregate input-content limit",
+        "input_manifest",
+        exact_content_limit,
+        input_manifest_semantics(exact_content_limit),
+    )
+    over_content_limit = copy.deepcopy(exact_content_limit)
+    over_content_limit["entries"][2]["bytes"] += 1
+    assert_rejected(
+        "aggregate input-content limit overflow",
+        "input_manifest",
+        over_content_limit,
+        f"declared content exceeds the {API2_INPUT_CONTENT_MAX_BYTES}-byte aggregate limit",
+        input_manifest_semantics(over_content_limit),
+    )
+    one_oversized_entry = copy.deepcopy(input_manifest)
+    one_oversized_entry["entries"][0]["bytes"] = API2_INPUT_CONTENT_MAX_BYTES + 1
+    assert_rejected(
+        "individual input entry exceeds aggregate limit",
+        "input_manifest",
+        one_oversized_entry,
+        f"maximum {API2_INPUT_CONTENT_MAX_BYTES}",
     )
 
     assert_rejected(

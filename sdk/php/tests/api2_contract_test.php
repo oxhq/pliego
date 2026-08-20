@@ -115,6 +115,10 @@ api2Expect(
     $foundation->invocation()['input_manifest_max_bytes'] === 16_777_216,
     'probe fixes the inclusive input-manifest byte limit',
 );
+api2Expect(
+    $foundation->invocation()['input_content_max_bytes'] === 67_108_864,
+    'probe fixes the inclusive aggregate input-content byte limit',
+);
 
 putenv('PLIEGO_API2_FAKE_MODE=slow-probe');
 $slowFoundation = RuntimeContract::probe($command);
@@ -289,6 +293,9 @@ $mutations['job-root transport'] = $badJobRootTransport;
 $badManifestLimit = $valid;
 $badManifestLimit['invocation']['input_manifest_max_bytes'] = 16_777_215;
 $mutations['input-manifest byte limit'] = $badManifestLimit;
+$badContentLimit = $valid;
+$badContentLimit['invocation']['input_content_max_bytes'] = 67_108_863;
+$mutations['input-content byte limit'] = $badContentLimit;
 foreach ($mutations as $message => $mutation) {
     api2Rejected(
         fn () => RuntimeContract::fromProbeResult(0, api2ProbeFrame($mutation), ''),
@@ -370,6 +377,7 @@ if ($binary !== null) {
             'request_max_bytes' => 1_048_576,
             'job_root_transport' => 'cwd-v1',
             'input_manifest_max_bytes' => 16_777_216,
+            'input_content_max_bytes' => 67_108_864,
             'result_transport' => 'stdout-single-json',
             'invocation_error_transport' => 'stderr-utf8-line',
             'success_exit_code' => 0,

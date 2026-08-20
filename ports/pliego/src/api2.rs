@@ -21,6 +21,7 @@ use sha2::{Digest, Sha256};
 pub(crate) const API_VERSION: u32 = 2;
 pub(crate) const REQUEST_MAX_BYTES: usize = 1_048_576;
 pub(crate) const INPUT_MANIFEST_MAX_BYTES: usize = 16 * 1024 * 1024;
+pub(crate) const INPUT_CONTENT_MAX_BYTES: u64 = 64 * 1024 * 1024;
 pub(crate) const INVOCATION_ERROR_EXIT_CODE: i32 = 64;
 
 const SOURCE_COMMIT: &str = env!("PLIEGO_SOURCE_COMMIT");
@@ -150,6 +151,7 @@ pub(crate) fn write_contract_probe(
             request_max_bytes: REQUEST_MAX_BYTES,
             job_root_transport: "cwd-v1",
             input_manifest_max_bytes: INPUT_MANIFEST_MAX_BYTES,
+            input_content_max_bytes: INPUT_CONTENT_MAX_BYTES,
             result_transport: "stdout-single-json",
             invocation_error_transport: "stderr-utf8-line",
             success_exit_code: 0,
@@ -198,6 +200,7 @@ struct InvocationContract {
     request_max_bytes: usize,
     job_root_transport: &'static str,
     input_manifest_max_bytes: usize,
+    input_content_max_bytes: u64,
     result_transport: &'static str,
     invocation_error_transport: &'static str,
     success_exit_code: i32,
@@ -519,6 +522,7 @@ fn validate_input_manifest<'a>(
     let mut paths = BTreeSet::new();
     let mut folded_paths = BTreeSet::new();
     let mut previous_path = None;
+    let mut content_bytes = 0u64;
     for (index, entry) in entries.iter().enumerate() {
         let path = format!("$.entries[{index}]");
         let entry = closed_object(entry, &path, INPUT_MANIFEST_ENTRY_FIELDS)?;
@@ -540,7 +544,15 @@ fn validate_input_manifest<'a>(
         canonical_media_type(media_type, &format!("{path}.media_type"))?;
         let sha256 = required_string(entry, &path, "sha256")?;
         content_address(sha256, &format!("{path}.sha256"))?;
-        let bytes = required_u64(entry, &path, "bytes", 0, 9_007_199_254_740_991)?;
+        let bytes = required_u64(entry, &path, "bytes", 0, INPUT_CONTENT_MAX_BYTES)?;
+        content_bytes = content_bytes
+            .checked_add(bytes)
+            .filter(|total| *total <= INPUT_CONTENT_MAX_BYTES)
+            .ok_or_else(|| {
+                format!(
+                    "$.entries: declared content exceeds the {INPUT_CONTENT_MAX_BYTES}-byte aggregate limit"
+                )
+            })?;
         canonical_entries.push(CanonicalInputEntry {
             path: entry_path,
             media_type,
@@ -1069,6 +1081,44 @@ mod tests {
     }
 
     #[test]
+    fn manifest_content_limit_is_inclusive_and_counts_every_entry() {
+        let mut manifest = serde_json::json!({
+            "schema": "pliego.input-manifest",
+            "version": 1,
+            "url_root": "pliego-input:///",
+            "entries": [
+                {
+                    "path": "assets/a.bin",
+                    "media_type": "application/octet-stream",
+                    "sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                    "bytes": INPUT_CONTENT_MAX_BYTES / 4,
+                },
+                {
+                    "path": "assets/b.bin",
+                    "media_type": "application/octet-stream",
+                    "sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                    "bytes": INPUT_CONTENT_MAX_BYTES / 4,
+                },
+                {
+                    "path": "document.html",
+                    "media_type": "text/html;charset=utf-8",
+                    "sha256": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+                    "bytes": INPUT_CONTENT_MAX_BYTES / 2,
+                },
+            ],
+        });
+        validate_input_manifest(&manifest, "document.html").unwrap();
+
+        manifest["entries"][2]["bytes"] = Value::from(INPUT_CONTENT_MAX_BYTES / 2 + 1);
+        assert!(
+            validate_input_manifest(&manifest, "document.html")
+                .err()
+                .unwrap()
+                .contains("declared content exceeds the 67108864-byte aggregate limit")
+        );
+    }
+
+    #[test]
     fn rejects_noncanonical_or_semantically_invalid_bound_manifests() {
         let mut duplicate = br#"{"schema":"pliego.input-manifest","#.to_vec();
         duplicate.extend_from_slice(&INPUT_MANIFEST[1..]);
@@ -1242,7 +1292,7 @@ mod tests {
             "unexpected probe order: {serialized}"
         );
         assert!(serialized.contains(&format!(
-            r#""contracts":[],"invocation":{{"request_transport":"stdin-single-json","request_max_bytes":{REQUEST_MAX_BYTES},"job_root_transport":"cwd-v1","input_manifest_max_bytes":{INPUT_MANIFEST_MAX_BYTES},"result_transport":"stdout-single-json","invocation_error_transport":"stderr-utf8-line","success_exit_code":0,"failed_exit_code":1,"invocation_error_exit_code":64}}"#
+            r#""contracts":[],"invocation":{{"request_transport":"stdin-single-json","request_max_bytes":{REQUEST_MAX_BYTES},"job_root_transport":"cwd-v1","input_manifest_max_bytes":{INPUT_MANIFEST_MAX_BYTES},"input_content_max_bytes":{INPUT_CONTENT_MAX_BYTES},"result_transport":"stdout-single-json","invocation_error_transport":"stderr-utf8-line","success_exit_code":0,"failed_exit_code":1,"invocation_error_exit_code":64}}"#
         )));
         let probe: Value = serde_json::from_slice(&output).unwrap();
         assert_eq!(probe["contracts"], serde_json::json!([]));
@@ -1254,6 +1304,10 @@ mod tests {
         assert_eq!(
             probe["invocation"]["input_manifest_max_bytes"],
             INPUT_MANIFEST_MAX_BYTES
+        );
+        assert_eq!(
+            probe["invocation"]["input_content_max_bytes"],
+            INPUT_CONTENT_MAX_BYTES
         );
         assert_eq!(probe["invocation"]["invocation_error_exit_code"], 64);
         assert!(

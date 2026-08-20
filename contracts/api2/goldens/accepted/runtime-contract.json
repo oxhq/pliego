@@ -44,6 +44,7 @@
     "request_max_bytes": 1048576,
     "job_root_transport": "cwd-v1",
     "input_manifest_max_bytes": 16777216,
+    "input_content_max_bytes": 67108864,
     "result_transport": "stdout-single-json",
     "invocation_error_transport": "stderr-utf8-line",
     "success_exit_code": 0,

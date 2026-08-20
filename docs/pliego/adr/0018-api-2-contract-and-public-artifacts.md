@@ -110,6 +110,8 @@ The runtime probe fixes the render transport rather than leaving SDKs to infer i
   place host paths in normalized request or result bytes;
 - `input-manifest.json` is bounded to `16,777,216` bytes, inclusive, and the probe reports that
   exact `input_manifest_max_bytes` value;
+- the sum of every manifest entry's declared byte length is bounded to `67,108,864` bytes,
+  inclusive, and the probe reports that exact `input_content_max_bytes` value;
 - every accepted request writes exactly one `RenderResult` JSON value to stdout;
 - `success` exits `0`, while an accepted request whose result is `failed` exits `1`; and
 - an argument, framing, decoding, normalization, manifest-pairing, or unsupported-contract error
@@ -155,9 +157,14 @@ addressable on case-sensitive and case-insensitive supported hosts.
 Version 1 accepts at most `16,384` entries and at most `16,777,216` canonical manifest bytes. The
 limits match the controlled runtime's existing publication-manifest and bounded-tree envelope. They
 are deliberately paired: even 16,384 entries with maximum-length version-1 paths, media types,
-hashes, and byte counts serialize to `10,338,393` bytes, so the entry ceiling cannot be reduced
-accidentally by the byte ceiling. The older 64 MiB asset-cache allowance is a content/cache budget,
-not the API 2 metadata transport limit.
+hashes, and byte counts serialize to `10,207,321` bytes, so the entry ceiling cannot be reduced
+accidentally by the byte ceiling. The controlled runtime's existing 64 MiB resource allowance is
+therefore not reused as the API 2 metadata transport limit.
+
+The declared byte lengths of all entries may total at most `67,108,864` bytes. The sum is
+overflow-checked and counts every entry, including separate paths with the same content address.
+This matches the existing 64 MiB per-resource, resident-resource, manifest-asset, and delivered-body
+boundary. The separate 512 MiB staged-artifact allowance bounds generated output, not input content.
 
 The only document URL root is the literal `pliego-input:///`. Relative document URLs resolve under
 that root to manifest paths. The entrypoint must be one of the manifest entries. `file:`, a host path,
