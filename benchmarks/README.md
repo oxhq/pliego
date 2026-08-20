@@ -28,6 +28,7 @@ benchmarks/
 │   └── browsershot/           Browsershot 5.4.0 / Composer + Puppeteer locks
 ├── schema/
 │   ├── benchmark-interleaved-run.v1.json
+│   ├── benchmark-report-data.v1.json
 │   └── benchmark-result.v1.json
 ├── fixtures/                  Seven frozen fixtures
 │   ├── minimal-static/        Pure startup
@@ -43,6 +44,7 @@ benchmarks/
 │   ├── generate_fixtures.py   Deterministic generation of long/image fixtures
 │   ├── process_tree_sampler.py Linux cgroup-v2 containment and accounting
 │   ├── pdf_oracle.py           Shared untimed PDF correctness checks
+│   ├── report_data.py         Canonical latency cells + raw-sample provenance
 │   ├── run_benchmark.py       Orchestrator: manifest → runner → aggregates → result file
 │   ├── test_process_tree_sampler.py Fixture, live cgroup, bridge, and overhead proof
 │   ├── validate_interleaved_run.py Cross-target schedule/raw-sample validator
@@ -227,6 +229,32 @@ This is a retention and report-traceability primitive for the future comparison
 coordinator, not a standalone publication command. The public CLI remains
 single-target and retains all identity, oracle, dedicated-host, and N/A gates.
 
+`report_data.py` implements the next deliberately narrow layer. It accepts one
+validated interleaved artifact and emits `pliego.benchmark-report-data` version
+1, also marked `prerequisite-only`. The only cells frozen in v1 are `wall_ms`
+min/p50/p95/p99/max/mean for every scheduled target. Generation fails unless
+every timed sample passes both the runner and correctness gates. Every cell
+repeats the source artifact digest and lists all contributing sample IDs in
+timed schedule order; its content-stable cell ID also binds artifact, fixture,
+target, metric, and statistic. The source record binds the exact schedule by
+digest. Both hashes use the v1 canonical JSON encoding above. A cell ID hashes
+`["pliego.benchmark-report-cell-id.v1", artifact_sha256, fixture_id,
+target_id, "wall_ms", statistic]`. Generation and validation use only synthetic
+data in the contract self-test:
+
+```sh
+python3 benchmarks/tools/report_data.py generate \
+  path/to/interleaved-run.json --out path/to/report-data.json
+python3 benchmarks/tools/report_data.py validate \
+  path/to/report-data.json --artifact path/to/interleaved-run.json
+```
+
+The validator rejects an invalid source artifact, source schedule/target/fixture
+drift, stale artifact digests, non-canonical cell order, changed aggregates, and
+missing, extra, reordered, or duplicate sample IDs. This contract is machine
+report data, not a chart/table renderer, public report, or authority to run an
+unattested target.
+
 Each sample gets a fresh root-owned, non-delegated child cgroup. A root launcher
 first stops in a staging cgroup, drops supplementary groups, all real/effective/
 saved IDs, every capability set, and its bounding capabilities, then sets
@@ -317,15 +345,16 @@ and were revalidated unchanged against the published Linux v0.2.0 renderer.
   `minimal-static`, but publishable measurements remain N/A until immutable
   image digests are pinned; all other fixtures are explicit exclusions.
 * The cross-target executor now emits a validated retention contract with stable
-  raw-sample IDs, but it is not wired to attested target contexts and no genuine
-  multi-target run artifact has been retained. A report generator is also absent.
-  This slice publishes no comparative numbers.
+  raw-sample IDs, and a narrow latency-cell generator preserves exact provenance.
+  Neither is wired to attested target contexts, no genuine multi-target run
+  artifact has been retained, and no chart/table presentation exists. This slice
+  publishes no comparative numbers.
 * Dedicated-Linux acceptance still needs the public multi-target coordinator, a
-  genuine retained run under all existing gates, and a report generator whose
-  cells cite that artifact hash and exact raw-sample IDs. The implemented
-  single-target throughput includes sampler startup, descendant drain,
-  accounting settlement, and sampler exit, but remains a serial per-target
-  diagnostic rather than a publishable cross-engine throughput claim.
+  genuine retained run under all existing gates, and a report presentation that
+  consumes only the validated provenance-bearing cells. The implemented
+  single-target throughput includes sampler startup, descendant drain, accounting
+  settlement, and sampler exit, but remains a serial per-target diagnostic rather
+  than a publishable cross-engine throughput claim.
 * The Ubuntu adapter/Poppler smoke is configured in CI; it is not hosted proof
   until that workflow passes at the exact commit containing this change.
 * Core (Criterion) and Laravel e2e levels live outside this directory.

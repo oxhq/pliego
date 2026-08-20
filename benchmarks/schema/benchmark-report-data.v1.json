@@ -1,0 +1,106 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://pliego.dev/schema/benchmark-report-data.v1.json",
+  "title": "Pliego benchmark report data",
+  "description": "Non-publishable latency cells with exact interleaved-run and raw-sample provenance.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "version",
+    "publication_status",
+    "cell_id_contract",
+    "source",
+    "aggregation",
+    "cells"
+  ],
+  "properties": {
+    "schema": { "const": "pliego.benchmark-report-data" },
+    "version": { "const": 1 },
+    "publication_status": { "const": "prerequisite-only" },
+    "cell_id_contract": { "const": "pliego.benchmark-report-cell-id.v1" },
+    "source": { "$ref": "#/definitions/source" },
+    "aggregation": { "$ref": "#/definitions/aggregation" },
+    "cells": {
+      "type": "array",
+      "minItems": 12,
+      "items": { "$ref": "#/definitions/cell" }
+    }
+  },
+  "definitions": {
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "artifact_schema",
+        "artifact_version",
+        "artifact_sha256",
+        "schedule_contract",
+        "schedule_sha256",
+        "fixture_id",
+        "targets"
+      ],
+      "properties": {
+        "artifact_schema": { "const": "pliego.benchmark-interleaved-run" },
+        "artifact_version": { "const": 1 },
+        "artifact_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "schedule_contract": { "const": "pliego.cross-target-schedule.v1" },
+        "schedule_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "fixture_id": { "type": "string", "minLength": 1 },
+        "targets": {
+          "type": "array",
+          "minItems": 2,
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "aggregation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract", "metric", "unit", "sample_policy", "percentile_method", "statistics"],
+      "properties": {
+        "contract": { "const": "pliego.benchmark-latency-cells.v1" },
+        "metric": { "const": "wall_ms" },
+        "unit": { "const": "ms" },
+        "sample_policy": { "const": "all-timed-samples-must-pass" },
+        "percentile_method": { "const": "nearest-rank-v1" },
+        "statistics": {
+          "type": "array",
+          "minItems": 6,
+          "maxItems": 6,
+          "items": { "type": "string", "enum": ["min", "p50", "p95", "p99", "max", "mean"] }
+        }
+      }
+    },
+    "cell": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "cell_id",
+        "artifact_sha256",
+        "fixture_id",
+        "target_id",
+        "metric",
+        "statistic",
+        "unit",
+        "value",
+        "sample_ids"
+      ],
+      "properties": {
+        "cell_id": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "artifact_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "fixture_id": { "type": "string", "minLength": 1 },
+        "target_id": { "type": "string", "minLength": 1 },
+        "metric": { "const": "wall_ms" },
+        "statistic": { "type": "string", "enum": ["min", "p50", "p95", "p99", "max", "mean"] },
+        "unit": { "const": "ms" },
+        "value": { "type": "number", "minimum": 0 },
+        "sample_ids": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+        }
+      }
+    }
+  }
+}

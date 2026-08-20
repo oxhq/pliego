@@ -138,6 +138,15 @@ sample schema, and verifies every binding and hash. This makes later report
 references unambiguous; it does not itself supply target attestation or Linux
 measurement evidence.
 
+The companion `report_data.py` is intentionally smaller than a report format.
+It generates only `wall_ms` min/p50/p95/p99/max/mean cells, and only when every
+timed sample in the validated artifact passed correctness. Each cell contains
+the artifact digest and the exact contributing sample IDs in schedule order;
+the report source also binds fixture, targets, and the complete schedule digest.
+Validation recomputes every value and rejects provenance drift. The contract is
+marked `prerequisite-only`, uses synthetic self-test inputs, and does not render
+tables/charts or authorize comparative claims.
+
 ## Implemented slice and remaining comparative protocol
 
 | Target | Runner status | Eligible public claim today |
@@ -170,11 +179,11 @@ Before a cross-engine comparison is published, every target must follow these ru
 
 The remaining dedicated-Linux gates are wiring the seeded cross-target executor
 to fully attested target contexts, retaining a genuine run artifact, and making
-every generated report cell cite the artifact digest plus its exact raw-sample
-IDs. Single-target serial throughput now uses the retained outer one-shot wall
-interval from runner process open through sampler exit, which includes
-descendant drain and accounting settlement; it is still not a publishable
-cross-engine comparison until those coordination and report gates pass.
+the eventual report presentation consume only the validated provenance-bearing
+cells. Single-target serial throughput now uses the retained outer one-shot wall
+interval from runner process open through sampler exit, which includes descendant
+drain and accounting settlement; it is still not a publishable cross-engine
+comparison until those coordination and presentation gates pass.
 
 ## Publication gate
 

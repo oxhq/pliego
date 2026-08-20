@@ -23,6 +23,11 @@ SPEC = importlib.util.spec_from_file_location("run_benchmark", SCRIPT)
 assert SPEC is not None and SPEC.loader is not None
 benchmark = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(benchmark)
+REPORT_SCRIPT = SCRIPT.with_name("report_data.py")
+REPORT_SPEC = importlib.util.spec_from_file_location("report_data", REPORT_SCRIPT)
+assert REPORT_SPEC is not None and REPORT_SPEC.loader is not None
+report_data = importlib.util.module_from_spec(REPORT_SPEC)
+REPORT_SPEC.loader.exec_module(report_data)
 
 
 def retained_sample(index: int) -> dict[str, object]:
@@ -60,6 +65,31 @@ def retained_sample(index: int) -> dict[str, object]:
         "correctness": {"pass": False, "checks": [{"name": "synthetic", "status": "fail"}]},
         "failure": {"code": "synthetic_failure", "message": "test sample", "published_pdf": False},
     }
+
+
+def passing_sample(index: int, wall_ms: float) -> dict[str, object]:
+    sample = retained_sample(index)
+    sample.update(
+        {
+            "ok": True,
+            "exit_code": 0,
+            "wall_ms": wall_ms,
+            "one_shot_wall_ms": wall_ms + 1,
+            "output": {
+                "pdf_bytes": 1,
+                "pdf_sha256": "0" * 64,
+                "page_count": 1,
+                "artifact_bytes": 0,
+                "published_pdf": True,
+                "normalized_text_sha256": "1" * 64,
+                "font_families": ["Synthetic"],
+                "normalized_raster_sha256": "2" * 64,
+            },
+            "correctness": {"pass": True, "checks": [{"name": "synthetic", "status": "pass"}]},
+            "failure": {"code": None, "message": None, "published_pdf": True},
+        }
+    )
+    return sample
 
 
 def main() -> None:
@@ -185,6 +215,141 @@ def main() -> None:
         )
         assert validation.returncode == 0, validation.stderr
         assert "artifact validated" in validation.stdout
+
+    synthetic_targets = ["synthetic-alpha", "synthetic-beta"]
+    synthetic_walls = {
+        "synthetic-alpha": [10.0, 20.0, 30.0],
+        "synthetic-beta": [15.0, 25.0, 35.0],
+    }
+    synthetic_artifact = benchmark.execute_interleaved_run(
+        synthetic_targets,
+        "synthetic-fixture",
+        1,
+        3,
+        7,
+        lambda _target: None,
+        lambda _target, _iteration: None,
+        lambda target, iteration: passing_sample(iteration, synthetic_walls[target][iteration]),
+    )
+    report = report_data.build_report_data(synthetic_artifact)
+    assert synthetic_artifact["artifact_sha256"] == ("f65bc80e2b9fd98ed988d0ad217837b7fff7ead1f34c073f55d0994297cc02ae")
+    assert report["schema"] == report_data.REPORT_SCHEMA
+    assert report["publication_status"] == "prerequisite-only"
+    assert report["source"]["artifact_sha256"] == synthetic_artifact["artifact_sha256"]
+    assert report["source"]["fixture_id"] == "synthetic-fixture"
+    assert report["source"]["targets"] == synthetic_targets
+    assert report["source"]["schedule_sha256"] == ("149b14c99c6c30477e3bde01da8f0d837c6de672168abf93e3ed332741d1b81f")
+    assert len(report["cells"]) == 12
+    alpha_cells = [cell for cell in report["cells"] if cell["target_id"] == "synthetic-alpha"]
+    assert [cell["statistic"] for cell in alpha_cells] == list(report_data.STATISTICS)
+    assert [cell["value"] for cell in alpha_cells] == [10.0, 20.0, 30.0, 30.0, 30.0, 20.0]
+    assert all(cell["artifact_sha256"] == synthetic_artifact["artifact_sha256"] for cell in report["cells"])
+    assert all(len(cell["sample_ids"]) == 3 for cell in report["cells"])
+    assert alpha_cells[0]["cell_id"] == "0f617e80fc7355b2d5956f184f33c17a63d5b6ab4a90ec5e18b1efbc1638d50b"
+    assert not report_data.validate_report_data(report, synthetic_artifact)
+
+    for operation, expected_error in (
+        (lambda value: value["cells"][0]["sample_ids"].pop(), "is missing contributing sample ids"),
+        (lambda value: value["cells"][0]["sample_ids"].append("f" * 64), "contains extra sample ids"),
+        (lambda value: value["cells"][0]["sample_ids"].reverse(), "must preserve contributing sample ids"),
+        (
+            lambda value: value["cells"][0]["sample_ids"].__setitem__(1, value["cells"][0]["sample_ids"][0]),
+            "must not contain duplicate sample ids",
+        ),
+        (lambda value: value["cells"][0].__setitem__("value", 999.0), "must equal the recomputed min"),
+        (lambda value: value["source"].__setitem__("schedule_sha256", "f" * 64), "source.schedule_sha256"),
+        (lambda value: value["source"].__setitem__("artifact_sha256", "f" * 64), "source.artifact_sha256"),
+        (lambda value: value["source"].__setitem__("fixture_id", "other-fixture"), "source.fixture_id"),
+        (lambda value: value["cells"][0].__setitem__("target_id", "synthetic-beta"), "cells[0].target_id"),
+        (lambda value: value["cells"][0].__setitem__("fixture_id", "other-fixture"), "cells[0].fixture_id"),
+        (lambda value: value["cells"][0].__setitem__("artifact_sha256", "f" * 64), "cells[0].artifact_sha256"),
+    ):
+        broken_report = deepcopy(report)
+        operation(broken_report)
+        report_errors = "\n".join(map(str, report_data.validate_report_data(broken_report, synthetic_artifact)))
+        assert expected_error in report_errors, report_errors
+
+    missing_cell = deepcopy(report)
+    missing_cell["cells"].pop()
+    assert "expected >= 12 items" in "\n".join(
+        map(str, report_data.validate_report_data(missing_cell, synthetic_artifact))
+    )
+    reordered_cells = deepcopy(report)
+    reordered_cells["cells"][0], reordered_cells["cells"][1] = (
+        reordered_cells["cells"][1],
+        reordered_cells["cells"][0],
+    )
+    reordered_errors = "\n".join(map(str, report_data.validate_report_data(reordered_cells, synthetic_artifact)))
+    assert "cells[0].cell_id" in reordered_errors and "cells[1].cell_id" in reordered_errors
+
+    broken_artifact = deepcopy(synthetic_artifact)
+    broken_artifact["artifact_sha256"] = "f" * 64
+    assert "$artifact.artifact_sha256" in "\n".join(map(str, report_data.validate_report_data(report, broken_artifact)))
+    alternate_schedule_artifact = benchmark.execute_interleaved_run(
+        synthetic_targets,
+        "synthetic-fixture",
+        1,
+        3,
+        8,
+        lambda _target: None,
+        lambda _target, _iteration: None,
+        lambda target, iteration: passing_sample(iteration, synthetic_walls[target][iteration]),
+    )
+    alternate_errors = "\n".join(map(str, report_data.validate_report_data(report, alternate_schedule_artifact)))
+    assert "source.artifact_sha256" in alternate_errors
+    assert "source.schedule_sha256" in alternate_errors
+    assert "sample_ids" in alternate_errors
+    try:
+        report_data.build_report_data(artifact)
+    except ValueError as error:
+        assert "failed correctness" in str(error)
+    else:
+        raise AssertionError("report cells were generated from correctness-failing samples")
+
+    with tempfile.TemporaryDirectory() as directory:
+        artifact_path = Path(directory) / "synthetic-interleaved.json"
+        report_path = Path(directory) / "synthetic-report.json"
+        artifact_path.write_text(json.dumps(synthetic_artifact, indent=2) + "\n", encoding="utf-8")
+        generated = subprocess.run(
+            [sys.executable, str(REPORT_SCRIPT), "generate", str(artifact_path), "--out", str(report_path)],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert generated.returncode == 0, generated.stderr
+        validated = subprocess.run(
+            [
+                sys.executable,
+                str(REPORT_SCRIPT),
+                "validate",
+                str(report_path),
+                "--artifact",
+                str(artifact_path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert validated.returncode == 0, validated.stderr
+        assert "exact raw samples" in validated.stdout
+        invalid_report = json.loads(report_path.read_text(encoding="utf-8"))
+        invalid_report["cells"][0]["value"] = 999.0
+        report_path.write_text(json.dumps(invalid_report, indent=2) + "\n", encoding="utf-8")
+        rejected = subprocess.run(
+            [
+                sys.executable,
+                str(REPORT_SCRIPT),
+                "validate",
+                str(report_path),
+                "--artifact",
+                str(artifact_path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert rejected.returncode == 1
+        assert "must equal the recomputed min" in rejected.stderr
     try:
         benchmark.execute_interleaved_run(
             ["one", "two"],
