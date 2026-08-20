@@ -5,16 +5,21 @@ on:
   pull_request:
     paths:
       - .github/workflows/pliego-composer-dry-run.yml
+      - Cargo.toml
       - Cargo.lock
       - LICENSE
       - LICENSE_WHATWG_SPECS
       - docs/pliego/third-party-notices.md
       - licenses/**
       - ports/pliego/Cargo.toml
+      - ports/pliego-core-benchmark/Cargo.toml
       - python/check_pliego_release_archive.py
+      - python/check_pliego_version.py
       - resources/resource_protocol/license.html
       - sdk/php/**
       - sdk/laravel/**
+      - tests/pliego/laravel-invoice/composer.json
+      - tests/pliego/laravel-invoice/composer.lock
 
 permissions:
   contents: read
@@ -48,23 +53,61 @@ jobs:
           import tomllib
 
           cargo = tomllib.loads(pathlib.Path("ports/pliego/Cargo.toml").read_text(encoding="utf-8"))
+          benchmark = tomllib.loads(pathlib.Path("ports/pliego-core-benchmark/Cargo.toml").read_text(encoding="utf-8"))
+          workspace = tomllib.loads(pathlib.Path("Cargo.toml").read_text(encoding="utf-8"))
           lock = tomllib.loads(pathlib.Path("Cargo.lock").read_text(encoding="utf-8"))
           laravel = json.loads(pathlib.Path("sdk/laravel/composer.json").read_text(encoding="utf-8"))
+          runtimes = json.loads(pathlib.Path("sdk/laravel/resources/runtimes.json").read_text(encoding="utf-8"))
+          fixture = json.loads(pathlib.Path("tests/pliego/laravel-invoice/composer.json").read_text(encoding="utf-8"))
+          fixture_lock = json.loads(pathlib.Path("tests/pliego/laravel-invoice/composer.lock").read_text(encoding="utf-8"))
           engine_version = cargo["package"]["version"]
           php_version = pathlib.Path("sdk/php/VERSION").read_text(encoding="ascii").strip()
           laravel_version = pathlib.Path("sdk/laravel/VERSION").read_text(encoding="ascii").strip()
-          engine_versions = {
-              "cargo": engine_version,
-              "lock": next(package["version"] for package in lock["package"] if package["name"] == "pliego"),
+          fixture_versions = {
+              package["name"]: package["version"].removeprefix("v")
+              for package in fixture_lock["packages"]
+              if package["name"] in {"oxhq/pliego-php", "oxhq/pliego-laravel"}
           }
-          assert len(set(engine_versions.values())) == 1, engine_versions
-          assert php_version == laravel["require"]["oxhq/pliego-php"]
+          aliases = {
+              name: version
+              for repository in fixture["repositories"]
+              for name, version in repository["options"]["versions"].items()
+          }
+          release_versions = {
+              "cargo-manifest": engine_version,
+              "cargo-workspace-dependency": workspace["workspace"]["dependencies"]["pliego"]["version"].removeprefix("="),
+              "cargo-lock": next(package["version"] for package in lock["package"] if package["name"] == "pliego"),
+              "core-benchmark-manifest": benchmark["package"]["version"],
+              "core-benchmark-lock": next(
+                  package["version"] for package in lock["package"] if package["name"] == "pliego-core-benchmark"
+              ),
+              "php-version": php_version,
+              "laravel-version": laravel_version,
+              "laravel-php-requirement": laravel["require"]["oxhq/pliego-php"],
+              "runtime-manifest": runtimes["version"],
+              "fixture-php-alias": aliases["oxhq/pliego-php"],
+              "fixture-laravel-alias": aliases["oxhq/pliego-laravel"],
+              "fixture-laravel-requirement": fixture["require"]["oxhq/pliego-laravel"],
+              "fixture-lock-php": fixture_versions["oxhq/pliego-php"],
+              "fixture-lock-laravel": fixture_versions["oxhq/pliego-laravel"],
+          }
+          assert len(set(release_versions.values())) == 1, release_versions
+          assert isinstance(runtimes.get("release_ready"), bool), "runtime manifest release state must be explicit"
           with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as environment:
               environment.write(f"PLIEGO_ENGINE_VERSION={engine_version}\n")
               environment.write(f"PLIEGO_PHP_VERSION={php_version}\n")
               environment.write(f"PLIEGO_LARAVEL_VERSION={laravel_version}\n")
+              environment.write(f"PLIEGO_RUNTIME_RELEASE_READY={str(runtimes['release_ready']).lower()}\n")
           print(f"engine/PHP: {engine_version}; Laravel: {laravel_version}")
           PY
+
+      - name: Validate source Composer manifests strictly
+        run: |
+          composer --no-interaction --no-plugins --no-scripts validate --strict sdk/php/composer.json
+          composer --no-interaction --no-plugins --no-scripts validate --strict sdk/laravel/composer.json
+          # This reproducibility fixture deliberately exact-pins Laravel. Suppress only
+          # Composer's generic over-strict-constraint warning; keep strict lock/schema checks.
+          composer --no-interaction --no-plugins --no-scripts validate --strict --no-check-all --check-lock tests/pliego/laravel-invoice/composer.json
 
       - name: Show Composer toolchain
         run: |
@@ -135,6 +178,7 @@ jobs:
           platforms = ["linux-x86_64", "windows-x86_64", "macos-x86_64", "macos-aarch64"]
           assert runtimes["schema"] == runtimes["api"] == 1
           assert runtimes["version"] == engine_version
+          assert runtimes["release_ready"] is (os.environ["PLIEGO_RUNTIME_RELEASE_READY"] == "true")
           assert list(runtimes["assets"]) == platforms
           for platform, asset in runtimes["assets"].items():
               assert isinstance(asset["bytes"], int) and asset["bytes"] > 0, platform
@@ -164,10 +208,42 @@ jobs:
           print("composer distribution check: ok")
           PY
 
-      - name: Record dry-run boundary
-        run: echo "Staged committed package roots and Composer ZIPs only; public repository history, tags, pushes, Packagist publication, and consumer installation remain unproven." >> "$GITHUB_STEP_SUMMARY"
+      - name: Bind finalized Laravel manifest to the promoted native release
+        if: env.PLIEGO_RUNTIME_RELEASE_READY == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir dist/native-release
+          gh release download "v$PLIEGO_ENGINE_VERSION" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern runtimes.json \
+            --dir dist/native-release
+          PLIEGO_RELEASE_RUNTIME_MANIFEST="$GITHUB_WORKSPACE/dist/native-release/runtimes.json" \
+            composer --no-interaction --working-dir=dist/pliego-laravel release:check-runtime
 
-      - name: Retain Composer dry-run artifacts
+      - name: Record non-publishable dry-run boundary
+        if: env.PLIEGO_RUNTIME_RELEASE_READY != 'true'
+        run: echo "Staged committed package roots and Composer ZIPs only. The Laravel archive is intentionally non-publishable until native promotion generates the exact release_ready runtime manifest; public repository history, tags, pushes, Packagist publication, and consumer installation remain unproven." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Record finalized Composer boundary
+        if: env.PLIEGO_RUNTIME_RELEASE_READY == 'true'
+        run: echo "The bundled Laravel runtime manifest is byte-identical to the promoted native release asset. Public split-repository tags, Packagist publication, and consumer installation remain separate gates." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Retain source-only PHP dry-run artifact
+        if: env.PLIEGO_RUNTIME_RELEASE_READY != 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: pliego-composer-php-${{ env.PLIEGO_PHP_VERSION }}-source-only
+          path: |
+            dist/pliego-php/
+            dist/packages/oxhq-pliego-php-${{ env.PLIEGO_PHP_VERSION }}.zip
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Retain finalized Composer dry-run artifacts
+        if: env.PLIEGO_RUNTIME_RELEASE_READY == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: pliego-composer-${{ env.PLIEGO_LARAVEL_VERSION }}

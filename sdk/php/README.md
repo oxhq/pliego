@@ -2,8 +2,11 @@
 
 PHP 8.3+ client for rendering one document per native Pliego process.
 
+The v0.2 command below becomes installable only after the split PHP package tag is
+published. Until then, Packagist's latest stable line remains `^0.1.1`.
+
 ```sh
-composer require oxhq/pliego-php:^0.1.0
+composer require oxhq/pliego-php:^0.2.0
 composer test
 ```
 
@@ -44,6 +47,14 @@ Results and typed render exceptions expose `jobPath`, `inputBundlePath`, and
 `artifactsPath`. These directories may contain private input, PDFs, extracted text,
 URLs, and diagnostics; remove them after acceptance when the evidence is no longer
 needed.
+
+With the v0.2 API 1 runtime, `artifactsPath` is the requested locator, not an
+existence guarantee. Path and publication-parent checks occur before the document
+process; external PDF preparation is held after a normal child exit and before artifact
+visibility. Deterministic overlap, existing-output, preparation, and transaction
+failures create no public artifact tree. Check `is_dir($error->artifactsPath)` before
+reading diagnostics. The SDK job and input-bundle retention record remains available
+for an invoked job.
 
 See the project [support profile](../../docs/pliego/support-profile.md) for the
 current rendering and resource boundaries.

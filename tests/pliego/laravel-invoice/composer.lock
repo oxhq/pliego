@@ -4,7 +4,7 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "ecafc33779bd58f41d624739dea09160",
+    "content-hash": "5084e2c58448abb1ad8c573e653a0f95",
     "packages": [
         {
             "name": "brick/math",
@@ -2418,11 +2418,11 @@
         },
         {
             "name": "oxhq/pliego-laravel",
-            "version": "0.1.0",
+            "version": "0.2.0",
             "dist": {
                 "type": "path",
                 "url": "../../../sdk/laravel",
-                "reference": "d9c09f7dacda99509ea3ebde4eef8c5d452423bc"
+                "reference": "cbb750a03c3741ed0d323e3fca28a0f797431ae3"
             },
             "require": {
                 "illuminate/console": "^13.0",
@@ -2430,7 +2430,7 @@
                 "illuminate/http": "^13.0",
                 "illuminate/support": "^13.0",
                 "illuminate/view": "^13.0",
-                "oxhq/pliego-php": "0.1.0",
+                "oxhq/pliego-php": "0.2.0",
                 "php": "^8.3",
                 "symfony/http-foundation": "^7.4 || ^8.0"
             },
@@ -2451,8 +2451,12 @@
                 "test:runtime": [
                     "@php tests/managed_runtime_test.php"
                 ],
+                "test:timings": [
+                    "@php tests/bridge_timings_test.php"
+                ],
                 "test": [
-                    "@test:runtime"
+                    "@test:runtime",
+                    "@test:timings"
                 ]
             },
             "license": [
@@ -2466,11 +2470,11 @@
         },
         {
             "name": "oxhq/pliego-php",
-            "version": "0.1.0",
+            "version": "0.2.0",
             "dist": {
                 "type": "path",
                 "url": "../../../sdk/php",
-                "reference": "ee3870005b51f7ea1734ed56772f1e82e1b2b278"
+                "reference": "a59363b729a507e514fe5527eb26b83dcd84b788"
             },
             "require": {
                 "php": "^8.3"
@@ -2482,10 +2486,18 @@
                 }
             },
             "scripts": {
+                "test:api2": [
+                    "@php tests/api2_contract_test.php"
+                ],
                 "test:doctor": [
                     "@php tests/doctor_test.php"
                 ],
+                "test:timings": [
+                    "@php tests/bridge_timings_test.php"
+                ],
                 "test": [
+                    "@test:api2",
+                    "@test:timings",
                     "@php tests/self_test.php",
                     "@php tests/timeout_test.php",
                     "@php tests/retention_test.php",

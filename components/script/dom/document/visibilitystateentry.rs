@@ -17,7 +17,9 @@ use crate::dom::bindings::num::Finite;
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::bindings::str::DOMString;
 use crate::dom::globalscope::GlobalScope;
-use crate::dom::performance::performanceentry::{EntryType, PerformanceEntry};
+use crate::dom::performance::performanceentry::{
+    EntryType, PerformanceEntry, PerformanceEntryDuration, PerformanceEntryTime,
+};
 
 #[dom_struct]
 pub(crate) struct VisibilityStateEntry {
@@ -37,8 +39,8 @@ impl VisibilityStateEntry {
             entry: PerformanceEntry::new_inherited(
                 name,
                 EntryType::VisibilityState,
-                Some(timestamp),
-                Duration::ZERO,
+                Some(PerformanceEntryTime::Host(timestamp)),
+                PerformanceEntryDuration::Host(Duration::ZERO),
             ),
         }
     }

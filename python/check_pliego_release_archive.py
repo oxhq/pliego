@@ -21,6 +21,8 @@ import tomllib
 from typing import TypeVar
 import zipfile
 
+from check_pliego_version import check_version_payload, expected_version_payload
+
 
 KRILLA_FILES = (
     "licenses/krilla-0.8.2/ICC_CC0-1.0.txt",
@@ -189,7 +191,16 @@ def _collect_entries(
     return roots.pop(), sizes, payloads
 
 
-def check_archive(archive: Path, *, version: str, bundle: str, repository_url: str) -> list[str]:
+def check_archive(
+    archive: Path,
+    *,
+    version: str,
+    bundle: str,
+    repository_url: str,
+    servo_version: str,
+    git_sha: str,
+    servo_base_sha: str,
+) -> list[str]:
     errors: list[str] = []
     expected_root = f"pliego-{version}-{bundle}"
     extension = ".zip" if bundle.startswith("windows-") else ".tar.gz"
@@ -230,6 +241,19 @@ def check_archive(archive: Path, *, version: str, bundle: str, repository_url: s
             continue
         if actual != expected:
             errors.append(f"{relative} does not match the release contract")
+
+    version_payload = payloads.get("VERSION.txt")
+    if version_payload is not None:
+        errors.extend(
+            check_version_payload(
+                version_payload,
+                pliego_version=version,
+                servo_version=servo_version,
+                git_sha=git_sha,
+                servo_base_sha=servo_base_sha,
+                source="VERSION.txt",
+            )
+        )
 
     report = payloads.get("THIRD_PARTY_LICENSES.html")
     if report is not None:
@@ -273,10 +297,24 @@ def check_source_assets(source_root: Path) -> list[str]:
     return errors
 
 
-def _fixture_files(version: str, bundle: str, repository_url: str) -> dict[str, bytes]:
+def _fixture_files(
+    version: str,
+    bundle: str,
+    repository_url: str,
+    *,
+    servo_version: str,
+    git_sha: str,
+    servo_base_sha: str,
+) -> dict[str, bytes]:
     files = {relative: b"fixture\n" for relative in COMMON_FILES}
     files["SOURCE.txt"] = _source_text(repository_url, version).encode()
     files["NATIVE-LIBRARIES.txt"] = _native_libraries_text(bundle).encode()
+    files["VERSION.txt"] = expected_version_payload(
+        pliego_version=version,
+        servo_version=servo_version,
+        git_sha=git_sha,
+        servo_base_sha=servo_base_sha,
+    )
     files["THIRD_PARTY_LICENSES.html"] = b"\n".join(REPORT_COMPONENTS)
     files["pliego.exe" if bundle.startswith("windows-") else "pliego"] = b"binary"
     if bundle.startswith("windows-"):
@@ -303,22 +341,30 @@ def _write_fixture(archive: Path, root: str, files: dict[str, bytes]) -> None:
 def self_test() -> None:
     version = "0.0.0-test"
     repository_url = "https://github.com/oxhq/pliego"
+    identity = {
+        "servo_version": "0.4.0-test",
+        "git_sha": "0123456789",
+        "servo_base_sha": "a" * 40,
+    }
     with tempfile.TemporaryDirectory() as temporary:
         directory = Path(temporary)
         for bundle, extension in (("linux-x86_64", ".tar.gz"), ("windows-x86_64", ".zip")):
             root = f"pliego-{version}-{bundle}"
             archive = directory / f"{root}{extension}"
-            files = _fixture_files(version, bundle, repository_url)
+            files = _fixture_files(version, bundle, repository_url, **identity)
             _write_fixture(archive, root, files)
             assert not check_archive(
                 archive,
                 version=version,
                 bundle=bundle,
                 repository_url=repository_url,
+                **identity,
             )
 
         root = f"pliego-{version}-windows-x86_64"
         archive = directory / f"{root}.zip"
+        version_lines = expected_version_payload(pliego_version=version, **identity).splitlines(keepends=True)
+        version_error = "VERSION.txt must match the exact ordered four-line Pliego version contract"
         cases = (
             (
                 "licenses/mozangle-0.6.0/ANGLE_LICENSE",
@@ -326,6 +372,7 @@ def self_test() -> None:
                 "missing required file: licenses/mozangle-0.6.0/ANGLE_LICENSE",
             ),
             ("INSTALL.txt", None, "missing required file: INSTALL.txt"),
+            ("VERSION.txt", None, "missing required file: VERSION.txt"),
             (
                 "SOURCE.txt",
                 b"https://example.invalid/source\n",
@@ -336,9 +383,40 @@ def self_test() -> None:
                 b"krilla 0.8.2\n",
                 "THIRD_PARTY_LICENSES.html does not identify mozangle 0.6.0",
             ),
+            ("VERSION.txt", b"".join(version_lines[:-1]), version_error),
+            (
+                "VERSION.txt",
+                b"".join(version_lines) + b"unexpected\n",
+                version_error,
+            ),
+            (
+                "VERSION.txt",
+                b"".join((version_lines[1], version_lines[0], *version_lines[2:])),
+                version_error,
+            ),
+            (
+                "VERSION.txt",
+                b"pliego 9.9.9\n" + b"".join(version_lines[1:]),
+                version_error,
+            ),
+            (
+                "VERSION.txt",
+                version_lines[0] + b"pliego-api 2\n" + b"".join(version_lines[2:]),
+                version_error,
+            ),
+            (
+                "VERSION.txt",
+                b"".join(version_lines[:2]) + b"Servo 0.4.0-test-deadbeef\n" + version_lines[3],
+                version_error,
+            ),
+            (
+                "VERSION.txt",
+                b"".join(version_lines[:3]) + b"Servo base deadbeef\n",
+                version_error,
+            ),
         )
         for relative, replacement, expected in cases:
-            files = _fixture_files(version, "windows-x86_64", repository_url)
+            files = _fixture_files(version, "windows-x86_64", repository_url, **identity)
             if replacement is None:
                 del files[relative]
             else:
@@ -349,10 +427,11 @@ def self_test() -> None:
                 version=version,
                 bundle="windows-x86_64",
                 repository_url=repository_url,
+                **identity,
             )
             assert errors == [expected]
 
-        files = _fixture_files(version, "windows-x86_64", repository_url)
+        files = _fixture_files(version, "windows-x86_64", repository_url, **identity)
         _write_fixture(archive, root, files)
         with zipfile.ZipFile(archive, "a") as target:
             target.writestr("another-root/file.txt", b"fixture")
@@ -361,6 +440,7 @@ def self_test() -> None:
             version=version,
             bundle="windows-x86_64",
             repository_url=repository_url,
+            **identity,
         ) == ["archive must contain exactly one top-level bundle directory"]
 
         _write_fixture(archive, root, files)
@@ -371,6 +451,7 @@ def self_test() -> None:
             version=version,
             bundle="windows-x86_64",
             repository_url=repository_url,
+            **identity,
         ) == ["unsafe archive member: ../escape.txt"]
 
         _write_fixture(archive, root, files)
@@ -384,11 +465,12 @@ def self_test() -> None:
             version=version,
             bundle="windows-x86_64",
             repository_url=repository_url,
+            **identity,
         ) == [f"unsupported archive member: {root}/pliego-link"]
 
         tar_bundle = "linux-x86_64"
         tar_root = f"pliego-{version}-{tar_bundle}"
-        tar_files = _fixture_files(version, tar_bundle, repository_url)
+        tar_files = _fixture_files(version, tar_bundle, repository_url, **identity)
         tar_archive = directory / f"{tar_root}.tar.gz"
         with tarfile.open(tar_archive, "w:gz") as target:
             for relative, payload in tar_files.items():
@@ -404,6 +486,7 @@ def self_test() -> None:
             version=version,
             bundle=tar_bundle,
             repository_url=repository_url,
+            **identity,
         ) == [f"unsupported archive member: {tar_root}/pliego-link"]
 
 
@@ -413,6 +496,9 @@ def main() -> int:
     parser.add_argument("--bundle")
     parser.add_argument("--version")
     parser.add_argument("--repository-url")
+    parser.add_argument("--servo-version")
+    parser.add_argument("--git-sha")
+    parser.add_argument("--servo-base-sha")
     parser.add_argument("--check-source-assets", type=Path)
     parser.add_argument(
         "--native-inventory",
@@ -430,6 +516,9 @@ def main() -> int:
                     args.bundle,
                     args.version,
                     args.repository_url,
+                    args.servo_version,
+                    args.git_sha,
+                    args.servo_base_sha,
                     args.check_source_assets,
                 )
             )
@@ -439,7 +528,16 @@ def main() -> int:
         sys.stdout.write(_native_libraries_text(args.native_inventory))
         return 0
     if (args.self_test or args.check_source_assets is not None) and any(
-        value is not None for value in (args.archive, args.bundle, args.version, args.repository_url)
+        value is not None
+        for value in (
+            args.archive,
+            args.bundle,
+            args.version,
+            args.repository_url,
+            args.servo_version,
+            args.git_sha,
+            args.servo_base_sha,
+        )
     ):
         parser.error("self-test and source checks cannot be combined with archive inputs")
     if args.self_test:
@@ -454,14 +552,26 @@ def main() -> int:
         print("release archive source assets: ok")
     if args.self_test or args.check_source_assets is not None:
         return 0
-    if args.archive is None or args.bundle is None or args.version is None:
-        parser.error("archive, --bundle, and --version are required")
+    required = {
+        "archive": args.archive,
+        "--bundle": args.bundle,
+        "--version": args.version,
+        "--servo-version": args.servo_version,
+        "--git-sha": args.git_sha,
+        "--servo-base-sha": args.servo_base_sha,
+    }
+    missing = [name for name, value in required.items() if value is None]
+    if missing:
+        parser.error("missing required arguments: " + ", ".join(missing))
 
     errors = check_archive(
         args.archive,
         version=args.version,
         bundle=args.bundle,
         repository_url=args.repository_url or "https://github.com/oxhq/pliego",
+        servo_version=args.servo_version,
+        git_sha=args.git_sha,
+        servo_base_sha=args.servo_base_sha,
     )
     for error in errors:
         print(f"error: {error}", file=sys.stderr)

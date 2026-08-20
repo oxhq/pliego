@@ -74,8 +74,22 @@ jobs:
 
           gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID/artifacts?per_page=100" > artifacts.json
           jq -e --argjson run_id "$RUN_ID" '
-            ["pliego-linux-x86_64", "pliego-windows-x86_64", "pliego-macos-x86_64", "pliego-macos-aarch64"] as $expected
-            | .total_count == 4
+            [
+              "pliego-linux-x86_64",
+              "pliego-windows-x86_64",
+              "pliego-macos-x86_64",
+              "pliego-macos-aarch64",
+              "pliego-linux-x86_64-api2-executable-proof",
+              "pliego-windows-x86_64-api2-executable-proof",
+              "pliego-macos-x86_64-api2-executable-proof",
+              "pliego-macos-aarch64-api2-executable-proof",
+              "pliego-linux-x86_64-render-supervisor-proof",
+              "pliego-windows-x86_64-render-supervisor-proof",
+              "pliego-macos-x86_64-render-supervisor-proof",
+              "pliego-macos-aarch64-render-supervisor-proof",
+              "pliego-linux-x86_64-controlled-capture-proof"
+            ] as $expected
+            | .total_count == 13
             and ([.artifacts[].name] | sort) == ($expected | sort)
             and all(.artifacts[]; .expired == false and .workflow_run.id == $run_id)
           ' artifacts.json > /dev/null
@@ -100,16 +114,7 @@ jobs:
               --dir release-artifacts
           done
 
-      - name: Fetch package-pinned runtime manifest
-        shell: bash
-        run: |
-          set -euo pipefail
-          gh api \
-            -H "Accept: application/vnd.github.raw+json" \
-            "repos/$GITHUB_REPOSITORY/contents/sdk/laravel/resources/runtimes.json?ref=$DEFAULT_BRANCH" \
-            > release-artifacts/runtimes.json
-
-      - name: Verify exact release assets
+      - name: Build and verify exact release assets
         shell: bash
         run: |
           set -euo pipefail
@@ -122,88 +127,172 @@ jobs:
           import zipfile
 
           version = os.environ["PLIEGO_VERSION"]
-          archives = {
-              f"pliego-{version}-linux-x86_64.tar.gz",
-              f"pliego-{version}-windows-x86_64.zip",
-              f"pliego-{version}-macos-x86_64.tar.gz",
-              f"pliego-{version}-macos-aarch64.tar.gz",
+          platforms = {
+              "linux-x86_64": f"pliego-{version}-linux-x86_64.tar.gz",
+              "windows-x86_64": f"pliego-{version}-windows-x86_64.zip",
+              "macos-x86_64": f"pliego-{version}-macos-x86_64.tar.gz",
+              "macos-aarch64": f"pliego-{version}-macos-aarch64.tar.gz",
           }
-          expected = archives | {f"{archive}.sha256" for archive in archives} | {"runtimes.json"}
+          archives = set(platforms.values())
+          expected_downloads = archives | {f"{archive}.sha256" for archive in archives}
           root = pathlib.Path("release-artifacts")
           paths = list(root.iterdir())
           actual = {path.name for path in paths}
-          if any(not path.is_file() for path in paths) or actual != expected:
+          if any(not path.is_file() for path in paths) or actual != expected_downloads:
               raise SystemExit(
-                  f"release assets differ: missing={sorted(expected - actual)} "
-                  f"extra={sorted(actual - expected)}"
+                  f"downloaded assets differ: missing={sorted(expected_downloads - actual)} "
+                  f"extra={sorted(actual - expected_downloads)}"
               )
 
-          for name in sorted(archives):
+
+          def safe_relative(path: str) -> bool:
+              if not path or "\\" in path or path.startswith("/") or "\0" in path:
+                  return False
+              return all(segment not in {"", ".", ".."} and ":" not in segment for segment in path.split("/"))
+
+
+          assets = {}
+          archived_files = {}
+          for platform, name in platforms.items():
               archive = root / name
               checksum = (root / f"{name}.sha256").read_text(encoding="ascii").split()
               digest = hashlib.sha256(archive.read_bytes()).hexdigest()
               if checksum != [digest, name]:
                   raise SystemExit(f"invalid checksum for {name}")
+              bundle = f"pliego-{version}-{platform}"
+              prefix = f"{bundle}/"
+              if platform == "windows-x86_64":
+                  with zipfile.ZipFile(archive) as package:
+                      names = [item.filename for item in package.infolist() if not item.is_dir()]
+              else:
+                  with tarfile.open(archive, "r:gz") as package:
+                      members = package.getmembers()
+                      unsupported = [item.name for item in members if not item.isfile() and not item.isdir()]
+                      if unsupported:
+                          raise SystemExit(f"unsupported archive entries for {platform}: {sorted(unsupported)}")
+                      names = [item.name for item in members if item.isfile()]
+              if len(names) != len(set(names)) or any(not name.startswith(prefix) for name in names):
+                  raise SystemExit(f"invalid archive root or duplicate files for {platform}")
+              files = sorted(name.removeprefix(prefix) for name in names)
+              if not files or any(not safe_relative(path) for path in files):
+                  raise SystemExit(f"unsafe or empty runtime inventory for {platform}")
+              executable = "pliego.exe" if platform == "windows-x86_64" else "pliego"
+              if executable not in files:
+                  raise SystemExit(f"runtime inventory has no executable for {platform}")
+              archived_files[platform] = set(names)
+              assets[platform] = {
+                  "bytes": archive.stat().st_size,
+                  "sha256": digest,
+                  "files": files,
+              }
 
-          manifest = json.loads((root / "runtimes.json").read_text(encoding="utf-8"))
-          platforms = ["linux-x86_64", "windows-x86_64", "macos-x86_64", "macos-aarch64"]
+          generated = {"schema": 1, "version": version, "api": 1, "release_ready": True, "assets": assets}
+          manifest_path = root / "runtimes.json"
+          manifest_path.write_text(json.dumps(generated, indent=4) + "\n", encoding="utf-8")
+          manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+          expected_platforms = list(platforms)
           if (
               manifest.get("schema") != 1
               or manifest.get("version") != version
               or manifest.get("api") != 1
-              or list(manifest.get("assets", {})) != platforms
+              or manifest.get("release_ready") is not True
+              or list(manifest.get("assets", {})) != expected_platforms
           ):
               raise SystemExit("runtime manifest contract does not match the selected release")
-          for platform in platforms:
-              extension = "zip" if platform == "windows-x86_64" else "tar.gz"
-              bundle = f"pliego-{version}-{platform}"
-              name = f"{bundle}.{extension}"
+          for platform, name in platforms.items():
               archive = root / name
               asset = manifest["assets"][platform]
               if asset.get("bytes") != archive.stat().st_size:
                   raise SystemExit(f"runtime manifest size mismatch for {platform}")
               if asset.get("sha256") != hashlib.sha256(archive.read_bytes()).hexdigest():
                   raise SystemExit(f"runtime manifest hash mismatch for {platform}")
+              bundle = f"pliego-{version}-{platform}"
               expected_files = {f"{bundle}/{item}" for item in asset.get("files", [])}
-              if extension == "zip":
-                  with zipfile.ZipFile(archive) as package:
-                      actual_files = {item for item in package.namelist() if not item.endswith("/")}
-              else:
-                  with tarfile.open(archive, "r:gz") as package:
-                      actual_files = {item.name for item in package.getmembers() if item.isfile()}
-              if actual_files != expected_files:
+              if archived_files[platform] != expected_files:
                   raise SystemExit(f"runtime manifest file mismatch for {platform}")
+
+          paths = list(root.iterdir())
+          actual = {path.name for path in paths}
+          expected = expected_downloads | {"runtimes.json"}
+          if any(not path.is_file() for path in paths) or actual != expected:
+              raise SystemExit(f"release assets differ: missing={sorted(expected - actual)} extra={sorted(actual - expected)}")
           print("native release assets: ok")
           PY
 
-      # Tags and draft releases are immutable through this workflow.
-      - name: Refuse existing release state
+      # Draft releases are immutable through this workflow. A matching lightweight tag
+      # without a release is the only resumable state after tag creation succeeded.
+      - name: Verify immutable release state
         shell: bash
         run: |
           set -euo pipefail
-          refuse_existing() {
+          get_or_404() {
             local endpoint=$1
-            local kind=$2
+            local output=$2
             local response status
             set +e
             response=$(gh api "$endpoint" 2>&1)
             status=$?
             set -e
             if [[ $status -eq 0 ]]; then
-              echo "$kind $TAG already exists; refusing to mutate it" >&2
-              exit 1
+              printf '%s\n' "$response" > "$output"
+              return 0
             fi
-            if [[ "$response" != *"HTTP 404"* ]]; then
-              echo "$response" >&2
-              exit "$status"
+            if [[ "$response" == *"HTTP 404"* ]]; then
+              rm -f "$output"
+              return 1
             fi
+            echo "$response" >&2
+            exit "$status"
           }
 
-          refuse_existing "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" tag
-          refuse_existing "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" release
+          if get_or_404 "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" release.json; then
+            echo "release $TAG already exists; refusing to mutate release state" >&2
+            exit 1
+          fi
+
+          create_tag=true
+          if get_or_404 "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" tag.json; then
+            read -r tag_type tag_sha < <(
+              jq -er '[.object.type, .object.sha] | @tsv' tag.json
+            )
+            if [[ "$tag_type" != "commit" ]]; then
+              echo "tag $TAG is annotated or otherwise not lightweight; refusing promotion" >&2
+              exit 1
+            fi
+            if [[ "$tag_sha" != "$HEAD_SHA" ]]; then
+              echo "tag $TAG resolves to $tag_sha, not selected package commit $HEAD_SHA" >&2
+              exit 1
+            fi
+            create_tag=false
+            echo "resuming promotion from existing lightweight tag $TAG at $HEAD_SHA"
+          fi
+
+          printf 'CREATE_TAG=%s\n' "$create_tag" >> "$GITHUB_ENV"
+
+      - name: Load exact release notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          notes_path="docs/releases/v${PLIEGO_VERSION}.md"
+          gh api \
+            -H "Accept: application/vnd.github.raw+json" \
+            "repos/$GITHUB_REPOSITORY/contents/$notes_path?ref=$HEAD_SHA" \
+            > release-notes.md
+          if [[ "$(head -n 1 release-notes.md)" != "# Pliego $TAG" ]]; then
+            echo "release notes do not match $TAG at $HEAD_SHA" >&2
+            exit 1
+          fi
+          cat >> release-notes.md <<EOF
+
+          ## Release provenance
+
+          - [Package workflow run](https://github.com/$GITHUB_REPOSITORY/actions/runs/$RUN_ID)
+          - [Exact source commit](https://github.com/$GITHUB_REPOSITORY/commit/$HEAD_SHA)
+          EOF
 
       # github.token is intentional: its tag event cannot start the legacy v* package trigger at HEAD_SHA.
       - name: Create exact-SHA tag without rebuilding
+        if: env.CREATE_TAG == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -226,4 +315,4 @@ jobs:
             --draft \
             --verify-tag \
             --title "Pliego $TAG" \
-            --notes "Draft native bundles and checksums from package run $RUN_ID at $HEAD_SHA. Publishing remains a separate manual gate."
+            --notes-file release-notes.md

@@ -182,6 +182,31 @@ impl WebViewRenderer {
         self.animating
     }
 
+    pub(crate) fn has_capture_blocking_animation(&self) -> bool {
+        self.animating ||
+            self.pipelines.values().any(|pipeline| {
+                pipeline.animations_running ||
+                    pipeline.animation_callbacks_running ||
+                    pipeline.animations.active()
+            }) ||
+            self.touch_handler.has_capture_blocking_work()
+    }
+
+    pub(crate) fn has_pending_scroll_or_zoom(&self) -> bool {
+        !self.pending_scroll_zoom_events.is_empty()
+    }
+
+    pub(crate) fn hidpi_scale_factor(&self) -> Scale<f32, DeviceIndependentPixel, DevicePixel> {
+        self.hidpi_scale_factor
+    }
+
+    pub(crate) fn has_single_connected_root(&self, pipeline_id: PipelineId) -> bool {
+        self.root_pipeline_id == Some(pipeline_id) &&
+            self.pipelines
+                .get(&pipeline_id)
+                .is_some_and(|pipeline| pipeline.children.is_empty())
+    }
+
     pub(crate) fn hidden(&self) -> bool {
         self.hidden
     }

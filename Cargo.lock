@@ -3638,9 +3638,9 @@ dependencies = [
 
 [[package]]
 name = "h2"
-version = "0.4.15"
+version = "0.4.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6cb093c84e8bd9b188d4c4a8cb6579fc016968d14c99882163cd3ff402a4f155"
+checksum = "a9f37a958b41b3b19ee2707c06439c0e9e547e847223eb791ecb0cb821c65e27"
 dependencies = [
  "atomic-waker",
  "bytes",
@@ -5542,6 +5542,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0676bb32a98c1a483ce53e500a81ad9c3d5b3f7c920c28c24e9cb0980d0b5bc8"
 
 [[package]]
+name = "ntapi"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c3b335231dfd352ffb0f8017f3b6027a4917f7df785ea2143d8af2adc66980ae"
+dependencies = [
+ "winapi",
+]
+
+[[package]]
 name = "nu-ansi-term"
 version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6594,34 +6603,55 @@ dependencies = [
 
 [[package]]
 name = "pliego"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "base64",
  "criterion",
+ "crossbeam-channel",
  "data-url",
  "dpi",
  "flate2",
  "http 1.4.2",
  "http-body-util",
  "hyper",
+ "image",
  "imagesize",
  "krilla",
  "libc",
+ "rand 0.10.2",
+ "same-file",
  "serde",
  "serde_json",
  "servo",
+ "servo-base",
  "servo-canvas",
  "servo-embedder-traits",
+ "servo-geometry",
  "servo-layout",
  "servo-net",
+ "servo-timers",
  "servoshell",
  "sha2 0.11.0",
+ "surfman",
+ "sysinfo",
  "tokio",
+ "toml_edit",
  "ttf-parser",
  "unicode-segmentation",
  "url",
  "vello_cpu 0.0.9",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "pliego-core-benchmark"
+version = "0.2.0"
+dependencies = [
+ "criterion",
+ "flate2",
+ "pliego",
+ "sha2 0.11.0",
+ "ttf-parser",
 ]
 
 [[package]]
@@ -8064,6 +8094,7 @@ dependencies = [
  "servo-profile-traits",
  "servo-script-traits",
  "servo-storage-traits",
+ "servo-timers",
  "servo-tracing",
  "servo-url",
  "servo-webgpu",
@@ -8194,6 +8225,7 @@ dependencies = [
  "http 1.4.2",
  "image",
  "inventory",
+ "ipc-channel",
  "keyboard-types",
  "log",
  "malloc_size_of_derive",
@@ -8204,6 +8236,7 @@ dependencies = [
  "servo-hyper-serde",
  "servo-malloc-size-of",
  "servo-pixels",
+ "servo-timers",
  "servo-url",
  "strum",
  "stylo",
@@ -8253,6 +8286,7 @@ dependencies = [
  "servo-net-traits",
  "servo-paint-api",
  "servo-profile-traits",
+ "servo-timers",
  "servo-tracing",
  "servo-url",
  "servo_arc",
@@ -8288,6 +8322,7 @@ dependencies = [
  "servo-base",
  "servo-malloc-size-of",
  "servo-profile-traits",
+ "servo-timers",
  "servo-url",
  "stylo",
  "uuid",
@@ -9156,6 +9191,7 @@ dependencies = [
  "servo-pixels",
  "servo-profile-traits",
  "servo-storage-traits",
+ "servo-timers",
  "servo-url",
  "servo-webgpu-traits",
  "servo-webxr-api",
@@ -9211,6 +9247,8 @@ version = "0.4.0"
 dependencies = [
  "crossbeam-channel",
  "malloc_size_of_derive",
+ "postcard",
+ "serde",
  "servo-malloc-size-of",
 ]
 
@@ -10110,6 +10148,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92ab6a2f8bfe508deb3c6406578252e491d299cbbf3bc0529ecc3313aee4a52f"
 dependencies = [
  "libc",
+ "memchr",
+ "ntapi",
  "objc2-core-foundation",
  "objc2-io-kit",
  "windows 0.62.2",

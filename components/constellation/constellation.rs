@@ -107,12 +107,16 @@ use devtools_traits::{
 use embedder_traits::resources::{self, Resource};
 use embedder_traits::user_contents::{UserContentManagerId, UserContents};
 use embedder_traits::{
-    AnimationState, EmbedderControlId, EmbedderControlResponse, EmbedderProxy, FocusSequenceNumber,
-    GenericEmbedderProxy, InputEvent, InputEventAndId, InputEventOutcome, JSValue,
-    JavaScriptEvaluationError, JavaScriptEvaluationId, KeyboardEvent, MediaSessionActionType,
-    MediaSessionEvent, MediaSessionPlaybackState, MouseButton, MouseButtonAction, MouseButtonEvent,
-    NewWebViewDetails, PaintHitTestResult, Theme, ViewportDetails, WakeLockDelegate, WakeLockType,
-    WebDriverCommandMsg, WebDriverLoadStatus, WebDriverScriptCommand,
+    AnimationState, DocumentCapturePreconditionId, DocumentPaintPresentationTicketId,
+    DocumentTimeControlAction, DocumentTimeControlCancellationId, DocumentTimeControlCommand,
+    DocumentTimeControlError, DocumentTimeControlObservation, DocumentTimeControlOutcome,
+    DocumentTimeControlRequestId, DocumentTimeControlTarget, EmbedderControlId,
+    EmbedderControlResponse, EmbedderProxy, FocusSequenceNumber, GenericEmbedderProxy, InputEvent,
+    InputEventAndId, InputEventOutcome, JSValue, JavaScriptEvaluationError, JavaScriptEvaluationId,
+    KeyboardEvent, MediaSessionActionType, MediaSessionEvent, MediaSessionPlaybackState,
+    MouseButton, MouseButtonAction, MouseButtonEvent, NewWebViewDetails, PaintHitTestResult, Theme,
+    ViewportDetails, WakeLockDelegate, WakeLockType, WebDriverCommandMsg, WebDriverLoadStatus,
+    WebDriverScriptCommand,
 };
 use euclid::Size2D;
 use euclid::default::Size2D as UntypedSize2D;
@@ -174,6 +178,7 @@ use storage_traits::client_storage::ClientStorageThreadMessage;
 use storage_traits::indexeddb::{IndexedDBThreadMsg, SyncOperation};
 use storage_traits::webstorage_thread::{WebStorageThreadMsg, WebStorageType};
 use style::global_style_data::StyleThreadPool;
+use timers::{DocumentClockConfiguration, DocumentTimeSurface, TimerDeadlineSnapshot};
 #[cfg(feature = "webgpu")]
 use webgpu::canvas_context::WebGpuExternalImageMap;
 #[cfg(feature = "webgpu")]
@@ -199,6 +204,17 @@ struct PendingApprovalNavigation {
 }
 
 type PendingApprovalNavigations = FxHashMap<PipelineId, PendingApprovalNavigation>;
+
+enum EventLoopCreationError {
+    Ipc(IpcError),
+    UnsupportedDocumentTime(DocumentTimeSurface),
+}
+
+impl From<IpcError> for EventLoopCreationError {
+    fn from(error: IpcError) -> Self {
+        Self::Ipc(error)
+    }
+}
 
 #[derive(Debug)]
 /// The state used by MessagePortInfo to represent the various states the port can be in.
@@ -340,6 +356,13 @@ pub struct Constellation<STF, SWF> {
 
     /// Bookkeeping data for all webviews in the constellation.
     webviews: FxHashMap<WebViewId, ConstellationWebView>,
+
+    /// Checked sequence for controlled document-time commands.
+    next_document_time_control_request_id: u64,
+
+    /// Callbacks held until ScriptThread responds and the target is revalidated.
+    pending_document_time_controls:
+        FxHashMap<DocumentTimeControlRequestId, PendingDocumentTimeControl>,
 
     /// Channels for the constellation to send messages to the public
     /// resource-related threads. There are two groups of resource threads: one
@@ -524,6 +547,1024 @@ pub struct Constellation<STF, SWF> {
     pub(crate) user_contents_for_manager_id: FxHashMap<UserContentManagerId, UserContents>,
 }
 
+struct PendingDocumentTimeControl {
+    target: DocumentTimeControlTarget,
+    cancellation_id: DocumentTimeControlCancellationId,
+    completion: DocumentTimeControlCompletion,
+    response: GenericCallback<DocumentTimeControlOutcome>,
+}
+
+impl PendingDocumentTimeControl {
+    fn accepts_response_source(
+        &self,
+        source_webview_id: WebViewId,
+        source_pipeline_id: PipelineId,
+    ) -> bool {
+        source_webview_id == self.target.webview_id &&
+            self.target.pipelines.first().copied() == Some(source_pipeline_id)
+    }
+
+    fn committed_success_is_definitive(
+        &self,
+        result: &Result<DocumentTimeControlObservation, DocumentTimeControlError>,
+    ) -> Option<bool> {
+        if !self.completion.has_indeterminate_commit() {
+            return None;
+        }
+        result.as_ref().ok().map(|observation| {
+            observation.target == self.target &&
+                self.completion
+                    .is_matching_committed_observation(observation)
+        })
+    }
+
+    fn send_definitive(
+        self,
+        result: Result<DocumentTimeControlObservation, DocumentTimeControlError>,
+    ) {
+        let outcome = match result {
+            Ok(observation) => DocumentTimeControlOutcome::Completed(Box::new(observation)),
+            Err(error) => DocumentTimeControlOutcome::Rejected(error),
+        };
+        let _ = self.response.send(outcome);
+    }
+
+    fn send_unresolved_outcome(self) {
+        if let Some(outcome) = self.completion.unresolved_outcome(self.target) {
+            let _ = self.response.send(outcome);
+        }
+        // DriveOneTurn and PrepareCapture have receiver-local semantics for an unobserved
+        // completion. Guarded advance and capture consume return their exact typed indeterminate
+        // identities above; dropping is reserved for commands without a protocol outcome.
+    }
+}
+
+fn take_authenticated_document_time_control(
+    pending: &mut FxHashMap<DocumentTimeControlRequestId, PendingDocumentTimeControl>,
+    source_webview_id: WebViewId,
+    source_pipeline_id: PipelineId,
+    request_id: DocumentTimeControlRequestId,
+) -> Option<PendingDocumentTimeControl> {
+    let Some(control) = pending.get(&request_id) else {
+        warn!("Ignoring unknown controlled document-time response {request_id:?}");
+        return None;
+    };
+    if !control.accepts_response_source(source_webview_id, source_pipeline_id) {
+        warn!("Ignoring wrong-source controlled document-time response {request_id:?}");
+        return None;
+    }
+    pending.remove(&request_id)
+}
+
+fn take_cancelled_document_time_control(
+    pending: &mut FxHashMap<DocumentTimeControlRequestId, PendingDocumentTimeControl>,
+    webview_id: WebViewId,
+    cancellation_id: DocumentTimeControlCancellationId,
+) -> Option<PendingDocumentTimeControl> {
+    let request_id = pending.iter().find_map(|(request_id, control)| {
+        (control.target.webview_id == webview_id && control.cancellation_id == cancellation_id)
+            .then_some(*request_id)
+    })?;
+    pending.remove(&request_id)
+}
+
+fn take_document_time_controls_for_pipeline(
+    pending: &mut FxHashMap<DocumentTimeControlRequestId, PendingDocumentTimeControl>,
+    pipeline_id: PipelineId,
+) -> Vec<PendingDocumentTimeControl> {
+    let request_ids: Vec<_> = pending
+        .iter()
+        .filter_map(|(request_id, control)| {
+            control
+                .target
+                .pipelines
+                .contains(&pipeline_id)
+                .then_some(*request_id)
+        })
+        .collect();
+    request_ids
+        .into_iter()
+        .filter_map(|request_id| pending.remove(&request_id))
+        .collect()
+}
+
+fn reject_document_time_control_during_shutdown(
+    shutting_down: bool,
+    completion: DocumentTimeControlCompletion,
+    target: Option<DocumentTimeControlTarget>,
+    response: &GenericCallback<DocumentTimeControlOutcome>,
+) -> bool {
+    if !shutting_down {
+        return false;
+    }
+    let outcome = target
+        .and_then(|target| completion.unresolved_outcome(target))
+        .unwrap_or(DocumentTimeControlOutcome::Rejected(
+            DocumentTimeControlError::ChannelClosed,
+        ));
+    let _ = response.send(outcome);
+    true
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DocumentTimeControlCompletion {
+    Observe,
+    DriveOneTurn,
+    PrepareCapture,
+    GuardedAdvance {
+        token_id: embedder_traits::DocumentTimeAdvanceTokenId,
+        deadline: TimerDeadlineSnapshot,
+    },
+    CaptureConsume {
+        candidate_id: DocumentCapturePreconditionId,
+        ticket_id: DocumentPaintPresentationTicketId,
+        pipeline_id: PipelineId,
+        script_rendering_epoch: Epoch,
+        surface: embedder_traits::DocumentCaptureSurfaceFingerprint,
+        presentation_generation: u64,
+        publish_generation: u64,
+    },
+}
+
+impl DocumentTimeControlCompletion {
+    fn for_command(command: &DocumentTimeControlCommand) -> Self {
+        match command {
+            DocumentTimeControlCommand::AdvanceTo(token) => Self::GuardedAdvance {
+                token_id: token.id(),
+                deadline: token.deadline(),
+            },
+            DocumentTimeControlCommand::Observe => Self::Observe,
+            DocumentTimeControlCommand::DriveOneTurn => Self::DriveOneTurn,
+            DocumentTimeControlCommand::PrepareCapture(_) => Self::PrepareCapture,
+            DocumentTimeControlCommand::ConsumeCapture(request) => Self::CaptureConsume {
+                candidate_id: request.precondition().id(),
+                ticket_id: request.ticket().id(),
+                pipeline_id: request.ticket().pipeline_id(),
+                script_rendering_epoch: request.ticket().script_rendering_epoch(),
+                surface: request.ticket().surface(),
+                presentation_generation: request.ticket().presentation_generation(),
+                publish_generation: request.ticket().publish_generation(),
+            },
+        }
+    }
+
+    fn is_matching_committed_observation(
+        self,
+        observation: &DocumentTimeControlObservation,
+    ) -> bool {
+        match self {
+            Self::GuardedAdvance {
+                deadline: expected, ..
+            } => matches!(
+                observation.action,
+                DocumentTimeControlAction::TimerActivated(observed) if expected == observed
+            ),
+            Self::CaptureConsume {
+                candidate_id,
+                ticket_id,
+                pipeline_id,
+                script_rendering_epoch,
+                surface,
+                presentation_generation,
+                publish_generation,
+            } => {
+                observation.action == DocumentTimeControlAction::CaptureConsumed &&
+                    observation.advance_token.is_none() &&
+                    observation.capture_preparation.is_none() &&
+                    observation.capture_commit.as_ref().is_some_and(|commit| {
+                        commit.candidate_id() == candidate_id &&
+                            commit.ticket_id() == ticket_id &&
+                            commit.target() == &observation.target &&
+                            commit.pipeline_id() == pipeline_id &&
+                            commit.script_rendering_epoch() == script_rendering_epoch &&
+                            commit.surface() == surface &&
+                            commit.presentation_generation() == presentation_generation &&
+                            commit.publish_generation() == publish_generation &&
+                            commit.layout_paint_epoch() == script_rendering_epoch
+                    })
+            },
+            Self::Observe | Self::DriveOneTurn | Self::PrepareCapture => false,
+        }
+    }
+
+    fn has_indeterminate_commit(self) -> bool {
+        matches!(
+            self,
+            Self::GuardedAdvance { .. } | Self::CaptureConsume { .. }
+        )
+    }
+
+    fn unresolved_outcome(
+        self,
+        target: DocumentTimeControlTarget,
+    ) -> Option<DocumentTimeControlOutcome> {
+        match self {
+            Self::Observe => Some(DocumentTimeControlOutcome::Rejected(
+                DocumentTimeControlError::ChannelClosed,
+            )),
+            Self::DriveOneTurn => None,
+            Self::PrepareCapture => None,
+            Self::GuardedAdvance { token_id, deadline } => {
+                Some(DocumentTimeControlOutcome::AdvanceOutcomeIndeterminate {
+                    token_id,
+                    target: Box::new(target),
+                    deadline,
+                })
+            },
+            Self::CaptureConsume {
+                candidate_id,
+                ticket_id,
+                ..
+            } => Some(
+                DocumentTimeControlOutcome::CaptureConsumeOutcomeIndeterminate {
+                    candidate_id,
+                    ticket_id,
+                    target: Box::new(target),
+                },
+            ),
+        }
+    }
+}
+
+fn validate_document_time_command_target(
+    command: &DocumentTimeControlCommand,
+    current: &DocumentTimeControlTarget,
+) -> Result<(), DocumentTimeControlError> {
+    if let DocumentTimeControlCommand::AdvanceTo(token) = command &&
+        token.target() != current
+    {
+        return Err(DocumentTimeControlError::TargetChanged {
+            expected: Box::new(token.target().clone()),
+            observed: Some(Box::new(current.clone())),
+        });
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod controlled_document_time_tests {
+    use std::collections::HashMap;
+    use std::time::Duration;
+
+    use embedder_traits::{
+        DocumentCaptureCommit, DocumentCapturePreconditionId, DocumentCaptureSurfaceFingerprint,
+        DocumentPaintPresentationTicketId, DocumentProducerStability, DocumentTimeAdvanceToken,
+        DocumentTimeAdvanceTokenId, DocumentTimeControlCancellationId, DocumentTimeControlCommand,
+        DocumentTimeControlError, DocumentTimeControlObservation, DocumentTimeControlOutcome,
+        DocumentTimeControlRequestId, DocumentTimeControlTarget, DocumentTimeProducerObservation,
+    };
+    use euclid::{Box2D, Point2D, Size2D};
+    use rustc_hash::FxHashMap;
+    use servo_base::Epoch;
+    use servo_base::generic_channel::GenericCallback;
+    use servo_base::id::{
+        BrowsingContextId, Index, PipelineId, TEST_PIPELINE_ID, TEST_SCRIPT_EVENT_LOOP_ID,
+        TEST_WEBVIEW_ID, WebViewId,
+    };
+    use timers::{
+        DocumentClock, DocumentClockConfiguration, DocumentProducerCheckpoint,
+        DocumentProducerFence, DocumentTime, TimerDeadlineSnapshot, TimerEventRequest,
+        TimerScheduler,
+    };
+
+    use super::{
+        DocumentTimeControlAction, DocumentTimeControlCompletion, PendingDocumentTimeControl,
+        reject_document_time_control_during_shutdown, take_authenticated_document_time_control,
+        take_cancelled_document_time_control, take_document_time_controls_for_pipeline,
+        validate_document_time_command_target,
+    };
+
+    fn target() -> DocumentTimeControlTarget {
+        DocumentTimeControlTarget {
+            webview_id: TEST_WEBVIEW_ID,
+            event_loop_id: TEST_SCRIPT_EVENT_LOOP_ID,
+            webview_epoch: Epoch::default(),
+            pipelines: vec![TEST_PIPELINE_ID],
+            fully_active_pipelines: vec![TEST_PIPELINE_ID],
+        }
+    }
+
+    fn cancellation_id(sequence: u64) -> DocumentTimeControlCancellationId {
+        DocumentTimeControlCancellationId::new(sequence)
+    }
+
+    fn deadline() -> TimerDeadlineSnapshot {
+        let clock = DocumentClock::new(DocumentClockConfiguration::Controlled {
+            initial_time_ns: 0,
+            unix_time_origin_ns: timers::DocumentUnixTime::default(),
+            execution_limits: None,
+        });
+        let mut scheduler = TimerScheduler::with_clock(clock);
+        scheduler.schedule_timer(TimerEventRequest {
+            callback: Box::new(|| {}),
+            duration: Duration::from_nanos(10),
+        });
+        scheduler
+            .finite_deadline_snapshot()
+            .expect("test scheduler is controlled")
+            .expect("test timer has a finite deadline")
+    }
+
+    fn guarded_completion(expected: TimerDeadlineSnapshot) -> DocumentTimeControlCompletion {
+        DocumentTimeControlCompletion::GuardedAdvance {
+            token_id: DocumentTimeAdvanceTokenId::new(7),
+            deadline: expected,
+        }
+    }
+
+    fn capture_completion() -> DocumentTimeControlCompletion {
+        DocumentTimeControlCompletion::CaptureConsume {
+            candidate_id: DocumentCapturePreconditionId::new(17),
+            ticket_id: DocumentPaintPresentationTicketId::new(19),
+            pipeline_id: TEST_PIPELINE_ID,
+            script_rendering_epoch: Epoch(23),
+            surface: capture_surface(),
+            presentation_generation: 29,
+            publish_generation: 31,
+        }
+    }
+
+    fn capture_surface() -> DocumentCaptureSurfaceFingerprint {
+        DocumentCaptureSurfaceFingerprint::new(
+            Size2D::new(800, 600),
+            Box2D::new(Point2D::new(0, 0), Point2D::new(800, 600)),
+            1.0,
+        )
+        .unwrap()
+    }
+
+    fn committed_observation(expected: TimerDeadlineSnapshot) -> DocumentTimeControlObservation {
+        let fence = DocumentProducerFence::default();
+        DocumentTimeControlObservation {
+            target: target(),
+            now: expected.deadline,
+            next_deadline: None,
+            advance_token: None,
+            pending_events: 1,
+            input_batch_saturated: false,
+            action: DocumentTimeControlAction::TimerActivated(expected),
+            producers: DocumentTimeProducerObservation {
+                fence_id: fence.id(),
+                checkpoint: DocumentProducerCheckpoint::ZERO
+                    .checked_next()
+                    .expect("test checkpoint sequence is representable"),
+                snapshot: fence.snapshot(),
+                stability: DocumentProducerStability::UnchangedCheckpoint,
+            },
+            documents: Vec::new(),
+            execution: None,
+            capture_preparation: None,
+            capture_commit: None,
+        }
+    }
+
+    fn capture_committed_observation() -> DocumentTimeControlObservation {
+        let mut observation = committed_observation(deadline());
+        observation.action = DocumentTimeControlAction::CaptureConsumed;
+        observation.capture_commit = Some(Box::new(DocumentCaptureCommit::new_internal(
+            DocumentCapturePreconditionId::new(17),
+            DocumentPaintPresentationTicketId::new(19),
+            target(),
+            TEST_PIPELINE_ID,
+            Epoch(23),
+            capture_surface(),
+            29,
+            31,
+            Epoch(23),
+            "{\"paint_epoch\":23}".to_owned(),
+        )));
+        observation
+    }
+
+    #[test]
+    fn only_exact_guarded_activation_is_a_committed_response() {
+        let expected = deadline();
+        let completion = guarded_completion(expected);
+        let changed = TimerDeadlineSnapshot {
+            id: expected.id,
+            deadline: DocumentTime::from_nanos(11),
+        };
+
+        assert!(completion.is_matching_committed_observation(&committed_observation(expected)));
+        assert!(!completion.is_matching_committed_observation(&committed_observation(changed)));
+        let mut observed = committed_observation(expected);
+        observed.action = DocumentTimeControlAction::Observed;
+        assert!(!completion.is_matching_committed_observation(&observed));
+        assert!(completion.has_indeterminate_commit());
+        assert!(!DocumentTimeControlCompletion::Observe.has_indeterminate_commit());
+        assert!(!DocumentTimeControlCompletion::DriveOneTurn.has_indeterminate_commit());
+        assert!(!DocumentTimeControlCompletion::PrepareCapture.has_indeterminate_commit());
+    }
+
+    #[test]
+    fn only_exact_capture_candidate_ticket_target_and_action_are_committed() {
+        let completion = capture_completion();
+        assert!(completion.is_matching_committed_observation(&capture_committed_observation()));
+        assert!(completion.has_indeterminate_commit());
+
+        let mut mutations = Vec::new();
+        let mut missing_commit = capture_committed_observation();
+        missing_commit.capture_commit = None;
+        mutations.push(missing_commit);
+        let mut wrong_action = capture_committed_observation();
+        wrong_action.action = DocumentTimeControlAction::Observed;
+        mutations.push(wrong_action);
+        let mut wrong_target = capture_committed_observation();
+        wrong_target.target.fully_active_pipelines.clear();
+        mutations.push(wrong_target);
+        let mut wrong_candidate = capture_committed_observation();
+        let old = wrong_candidate.capture_commit.take().unwrap();
+        wrong_candidate.capture_commit = Some(Box::new(DocumentCaptureCommit::new_internal(
+            DocumentCapturePreconditionId::new(old.candidate_id().get() + 1),
+            old.ticket_id(),
+            old.target().clone(),
+            old.pipeline_id(),
+            old.script_rendering_epoch(),
+            old.surface(),
+            old.presentation_generation(),
+            old.publish_generation(),
+            old.layout_paint_epoch(),
+            old.serialized_layout_snapshot().to_owned(),
+        )));
+        mutations.push(wrong_candidate);
+        let mut wrong_ticket = capture_committed_observation();
+        let old = wrong_ticket.capture_commit.take().unwrap();
+        wrong_ticket.capture_commit = Some(Box::new(DocumentCaptureCommit::new_internal(
+            old.candidate_id(),
+            DocumentPaintPresentationTicketId::new(old.ticket_id().get() + 1),
+            old.target().clone(),
+            old.pipeline_id(),
+            old.script_rendering_epoch(),
+            old.surface(),
+            old.presentation_generation(),
+            old.publish_generation(),
+            old.layout_paint_epoch(),
+            old.serialized_layout_snapshot().to_owned(),
+        )));
+        mutations.push(wrong_ticket);
+
+        for observation in mutations {
+            assert!(!completion.is_matching_committed_observation(&observation));
+        }
+    }
+
+    #[test]
+    fn every_capture_commit_correlation_dimension_is_required() {
+        #[derive(Clone, Copy, Debug)]
+        enum Mutation {
+            Candidate,
+            Ticket,
+            Target,
+            Pipeline,
+            ScriptEpoch,
+            Surface,
+            PresentationGeneration,
+            PublishGeneration,
+            LayoutEpoch,
+        }
+
+        let other_pipeline = PipelineId {
+            namespace_id: TEST_PIPELINE_ID.namespace_id,
+            index: Index::new(404).unwrap(),
+        };
+        for mutation in [
+            Mutation::Candidate,
+            Mutation::Ticket,
+            Mutation::Target,
+            Mutation::Pipeline,
+            Mutation::ScriptEpoch,
+            Mutation::Surface,
+            Mutation::PresentationGeneration,
+            Mutation::PublishGeneration,
+            Mutation::LayoutEpoch,
+        ] {
+            let mut observation = capture_committed_observation();
+            let old = observation.capture_commit.take().unwrap();
+            let mut candidate_id = old.candidate_id();
+            let mut ticket_id = old.ticket_id();
+            let mut commit_target = old.target().clone();
+            let mut pipeline_id = old.pipeline_id();
+            let mut script_epoch = old.script_rendering_epoch();
+            let mut surface = old.surface();
+            let mut presentation_generation = old.presentation_generation();
+            let mut publish_generation = old.publish_generation();
+            let mut layout_epoch = old.layout_paint_epoch();
+            match mutation {
+                Mutation::Candidate => {
+                    candidate_id = DocumentCapturePreconditionId::new(candidate_id.get() + 1)
+                },
+                Mutation::Ticket => {
+                    ticket_id = DocumentPaintPresentationTicketId::new(ticket_id.get() + 1)
+                },
+                Mutation::Target => commit_target.fully_active_pipelines.clear(),
+                Mutation::Pipeline => pipeline_id = other_pipeline,
+                Mutation::ScriptEpoch => script_epoch = Epoch(script_epoch.0 + 1),
+                Mutation::Surface => {
+                    surface = DocumentCaptureSurfaceFingerprint::new(
+                        Size2D::new(801, 600),
+                        Box2D::new(Point2D::new(0, 0), Point2D::new(801, 600)),
+                        1.0,
+                    )
+                    .unwrap()
+                },
+                Mutation::PresentationGeneration => presentation_generation += 1,
+                Mutation::PublishGeneration => publish_generation += 1,
+                Mutation::LayoutEpoch => layout_epoch = Epoch(layout_epoch.0 + 1),
+            }
+            observation.capture_commit = Some(Box::new(DocumentCaptureCommit::new_internal(
+                candidate_id,
+                ticket_id,
+                commit_target,
+                pipeline_id,
+                script_epoch,
+                surface,
+                presentation_generation,
+                publish_generation,
+                layout_epoch,
+                old.serialized_layout_snapshot().to_owned(),
+            )));
+            assert!(
+                !capture_completion().is_matching_committed_observation(&observation),
+                "commit mutation {mutation:?} must be outcome-indeterminate"
+            );
+        }
+    }
+
+    #[test]
+    fn nonauthoritative_capture_success_is_indeterminate_and_not_forwarded_as_completed() {
+        let (response, receiver) = GenericCallback::<DocumentTimeControlOutcome>::new_blocking()
+            .expect("test control callback channel should be created");
+        let pending = PendingDocumentTimeControl {
+            target: target(),
+            cancellation_id: cancellation_id(5),
+            completion: capture_completion(),
+            response,
+        };
+        let mut malformed_success = capture_committed_observation();
+        malformed_success.capture_commit = None;
+        assert_eq!(
+            pending.committed_success_is_definitive(&Ok(malformed_success)),
+            Some(false)
+        );
+
+        pending.send_unresolved_outcome();
+        assert!(matches!(
+            receiver
+                .recv()
+                .expect("nonauthoritative consume should resolve callback"),
+            DocumentTimeControlOutcome::CaptureConsumeOutcomeIndeterminate {
+                candidate_id,
+                ticket_id,
+                target: observed_target,
+            } if candidate_id == DocumentCapturePreconditionId::new(17) &&
+                ticket_id == DocumentPaintPresentationTicketId::new(19) &&
+                *observed_target == target()
+        ));
+    }
+
+    #[test]
+    fn unresolved_completion_preserves_each_commands_mutation_semantics() {
+        assert_eq!(
+            DocumentTimeControlCompletion::Observe.unresolved_outcome(target()),
+            Some(DocumentTimeControlOutcome::Rejected(
+                DocumentTimeControlError::ChannelClosed
+            ))
+        );
+        assert_eq!(
+            DocumentTimeControlCompletion::DriveOneTurn.unresolved_outcome(target()),
+            None
+        );
+        assert_eq!(
+            DocumentTimeControlCompletion::PrepareCapture.unresolved_outcome(target()),
+            None
+        );
+        assert!(matches!(
+            guarded_completion(deadline()).unresolved_outcome(target()),
+            Some(DocumentTimeControlOutcome::AdvanceOutcomeIndeterminate { .. })
+        ));
+        assert!(matches!(
+            capture_completion().unresolved_outcome(target()),
+            Some(
+                DocumentTimeControlOutcome::CaptureConsumeOutcomeIndeterminate {
+                    candidate_id,
+                    ticket_id,
+                    target: observed_target,
+                }
+            ) if candidate_id == DocumentCapturePreconditionId::new(17) &&
+                ticket_id == DocumentPaintPresentationTicketId::new(19) &&
+                *observed_target == target()
+        ));
+    }
+
+    #[test]
+    fn shutdown_and_queued_commit_race_disconnects_without_typed_rejection() {
+        let expected = deadline();
+        let request_id = DocumentTimeControlRequestId::new(9);
+        let (shutdown_response, shutdown_receiver) =
+            GenericCallback::<DocumentTimeControlOutcome>::new_blocking()
+                .expect("test control callback channel should be created");
+        let mut pending_controls = HashMap::from([(
+            request_id,
+            PendingDocumentTimeControl {
+                target: target(),
+                cancellation_id: cancellation_id(1),
+                completion: guarded_completion(expected),
+                response: shutdown_response,
+            },
+        )]);
+
+        // Exit wins selection while a committed ScriptThread response may already be queued. The
+        // receiver must learn that the token is consumed and the mutation outcome is unknowable.
+        drop(std::mem::take(&mut pending_controls));
+        assert!(pending_controls.remove(&request_id).is_none());
+        assert!(
+            shutdown_receiver.recv().is_err(),
+            "receiver-local guarded semantics classify the disconnected exact token"
+        );
+    }
+
+    #[test]
+    fn committed_response_processed_before_shutdown_remains_completed() {
+        let expected = deadline();
+        let request_id = DocumentTimeControlRequestId::new(10);
+        let (response, receiver) = GenericCallback::<DocumentTimeControlOutcome>::new_blocking()
+            .expect("test control callback channel should be created");
+        let mut pending_controls = HashMap::from([(
+            request_id,
+            PendingDocumentTimeControl {
+                target: target(),
+                cancellation_id: cancellation_id(2),
+                completion: guarded_completion(expected),
+                response,
+            },
+        )]);
+
+        let pending = pending_controls
+            .remove(&request_id)
+            .expect("test guarded request should still be pending");
+        let result = Ok(committed_observation(expected));
+        assert_eq!(pending.committed_success_is_definitive(&result), Some(true));
+        pending.send_definitive(result);
+        for (_, pending) in std::mem::take(&mut pending_controls) {
+            pending.send_unresolved_outcome();
+        }
+        assert!(matches!(
+            receiver
+                .recv()
+                .expect("committed response should resolve the test callback"),
+            DocumentTimeControlOutcome::Completed(observation)
+                if observation.action == DocumentTimeControlAction::TimerActivated(expected)
+        ));
+    }
+
+    #[test]
+    fn wrong_source_cannot_consume_guarded_request_or_hide_later_commit() {
+        let expected = deadline();
+        let request_id = DocumentTimeControlRequestId::new(11);
+        let (response, receiver) = GenericCallback::<DocumentTimeControlOutcome>::new_blocking()
+            .expect("test control callback channel should be created");
+        let mut pending_controls = FxHashMap::default();
+        pending_controls.insert(
+            request_id,
+            PendingDocumentTimeControl {
+                target: target(),
+                cancellation_id: cancellation_id(3),
+                completion: guarded_completion(expected),
+                response,
+            },
+        );
+        let wrong_webview = WebViewId::mock_for_testing(
+            BrowsingContextId::from_string("BrowsingContext(1234,8766)")
+                .expect("test browsing-context id should parse"),
+        );
+
+        assert!(
+            take_authenticated_document_time_control(
+                &mut pending_controls,
+                wrong_webview,
+                TEST_PIPELINE_ID,
+                request_id,
+            )
+            .is_none()
+        );
+        assert!(pending_controls.contains_key(&request_id));
+        let wrong_pipeline = PipelineId {
+            namespace_id: TEST_PIPELINE_ID.namespace_id,
+            index: Index::new(5679).expect("test pipeline index is non-zero"),
+        };
+        assert!(
+            take_authenticated_document_time_control(
+                &mut pending_controls,
+                TEST_WEBVIEW_ID,
+                wrong_pipeline,
+                request_id,
+            )
+            .is_none()
+        );
+        assert!(pending_controls.contains_key(&request_id));
+
+        let pending = take_authenticated_document_time_control(
+            &mut pending_controls,
+            TEST_WEBVIEW_ID,
+            TEST_PIPELINE_ID,
+            request_id,
+        )
+        .expect("the exact response source should retain authority");
+        let result = Ok(committed_observation(expected));
+        assert_eq!(pending.committed_success_is_definitive(&result), Some(true));
+        pending.send_definitive(result);
+        assert!(matches!(
+            receiver.recv().expect("exact response should resolve callback"),
+            DocumentTimeControlOutcome::Completed(observation)
+                if observation.action == DocumentTimeControlAction::TimerActivated(expected)
+        ));
+        assert!(
+            take_authenticated_document_time_control(
+                &mut pending_controls,
+                TEST_WEBVIEW_ID,
+                TEST_PIPELINE_ID,
+                request_id,
+            )
+            .is_none(),
+            "a late duplicate cannot replace the terminal result"
+        );
+    }
+
+    #[test]
+    fn wrong_target_or_action_after_guarded_success_is_indeterminate() {
+        let expected = deadline();
+        let mut wrong_target = committed_observation(expected);
+        wrong_target.target.fully_active_pipelines.clear();
+        let mut wrong_action = committed_observation(expected);
+        wrong_action.action = DocumentTimeControlAction::Observed;
+
+        for observation in [wrong_target, wrong_action] {
+            let (response, receiver) =
+                GenericCallback::<DocumentTimeControlOutcome>::new_blocking()
+                    .expect("test control callback channel should be created");
+            let pending = PendingDocumentTimeControl {
+                target: target(),
+                cancellation_id: cancellation_id(4),
+                completion: guarded_completion(expected),
+                response,
+            };
+            assert!(pending.accepts_response_source(TEST_WEBVIEW_ID, TEST_PIPELINE_ID));
+            assert_eq!(
+                pending.committed_success_is_definitive(&Ok(observation)),
+                Some(false)
+            );
+            pending.send_unresolved_outcome();
+            assert!(matches!(
+                receiver
+                    .recv()
+                    .expect("indeterminate response should resolve callback"),
+                DocumentTimeControlOutcome::AdvanceOutcomeIndeterminate {
+                    token_id,
+                    target: observed_target,
+                    deadline: observed_deadline,
+                } if token_id == DocumentTimeAdvanceTokenId::new(7) &&
+                    *observed_target == target() && observed_deadline == expected
+            ));
+        }
+    }
+
+    #[test]
+    fn cancellation_nonce_removes_only_the_exact_pending_request() {
+        let expected = deadline();
+        let first_request_id = DocumentTimeControlRequestId::new(20);
+        let (first_response, first_receiver) =
+            GenericCallback::<DocumentTimeControlOutcome>::new_blocking()
+                .expect("test control callback channel should be created");
+        let mut pending_controls = FxHashMap::default();
+        pending_controls.insert(
+            first_request_id,
+            PendingDocumentTimeControl {
+                target: target(),
+                cancellation_id: cancellation_id(7),
+                completion: guarded_completion(expected),
+                response: first_response,
+            },
+        );
+
+        assert!(
+            take_cancelled_document_time_control(
+                &mut pending_controls,
+                TEST_WEBVIEW_ID,
+                cancellation_id(8),
+            )
+            .is_none()
+        );
+        assert!(pending_controls.contains_key(&first_request_id));
+        let wrong_webview = WebViewId::mock_for_testing(
+            BrowsingContextId::from_string("BrowsingContext(1234,8766)")
+                .expect("test browsing-context id should parse"),
+        );
+        assert!(
+            take_cancelled_document_time_control(
+                &mut pending_controls,
+                wrong_webview,
+                cancellation_id(7),
+            )
+            .is_none()
+        );
+        assert!(pending_controls.contains_key(&first_request_id));
+
+        let cancelled = take_cancelled_document_time_control(
+            &mut pending_controls,
+            TEST_WEBVIEW_ID,
+            cancellation_id(7),
+        )
+        .expect("the exact cancellation nonce should remove its request");
+        drop(cancelled);
+        assert!(
+            first_receiver.recv().is_err(),
+            "abandonment should close the now-unobserved callback"
+        );
+
+        let successor_request_id = DocumentTimeControlRequestId::new(21);
+        let (successor_response, successor_receiver) =
+            GenericCallback::<DocumentTimeControlOutcome>::new_blocking()
+                .expect("test successor callback channel should be created");
+        pending_controls.insert(
+            successor_request_id,
+            PendingDocumentTimeControl {
+                target: target(),
+                cancellation_id: cancellation_id(8),
+                completion: DocumentTimeControlCompletion::Observe,
+                response: successor_response,
+            },
+        );
+        assert!(
+            take_cancelled_document_time_control(
+                &mut pending_controls,
+                TEST_WEBVIEW_ID,
+                cancellation_id(7),
+            )
+            .is_none(),
+            "a late cancellation must not consume a successor"
+        );
+        assert!(pending_controls.contains_key(&successor_request_id));
+
+        let successor = take_authenticated_document_time_control(
+            &mut pending_controls,
+            TEST_WEBVIEW_ID,
+            TEST_PIPELINE_ID,
+            successor_request_id,
+        )
+        .expect("the authenticated response should win its race");
+        successor.send_definitive(Err(DocumentTimeControlError::ChannelClosed));
+        assert_eq!(
+            successor_receiver
+                .recv()
+                .expect("response winner should resolve exactly once"),
+            DocumentTimeControlOutcome::Rejected(DocumentTimeControlError::ChannelClosed)
+        );
+        assert!(
+            take_cancelled_document_time_control(
+                &mut pending_controls,
+                TEST_WEBVIEW_ID,
+                cancellation_id(8),
+            )
+            .is_none(),
+            "a cancellation that loses the race is a no-op"
+        );
+    }
+
+    #[test]
+    fn pipeline_loss_drains_only_targets_that_name_the_pipeline() {
+        let first_request_id = DocumentTimeControlRequestId::new(30);
+        let second_request_id = DocumentTimeControlRequestId::new(31);
+        let (first_response, first_receiver) =
+            GenericCallback::<DocumentTimeControlOutcome>::new_blocking()
+                .expect("test first callback channel should be created");
+        let (second_response, _second_receiver) =
+            GenericCallback::<DocumentTimeControlOutcome>::new_blocking()
+                .expect("test second callback channel should be created");
+        let mut other_target = target();
+        let other_pipeline = PipelineId {
+            namespace_id: TEST_PIPELINE_ID.namespace_id,
+            index: Index::new(6789).expect("test pipeline index is non-zero"),
+        };
+        other_target.pipelines = vec![other_pipeline];
+        other_target.fully_active_pipelines = vec![other_pipeline];
+        let mut pending_controls = FxHashMap::from_iter([
+            (
+                first_request_id,
+                PendingDocumentTimeControl {
+                    target: target(),
+                    cancellation_id: cancellation_id(9),
+                    completion: DocumentTimeControlCompletion::DriveOneTurn,
+                    response: first_response,
+                },
+            ),
+            (
+                second_request_id,
+                PendingDocumentTimeControl {
+                    target: other_target,
+                    cancellation_id: cancellation_id(10),
+                    completion: DocumentTimeControlCompletion::Observe,
+                    response: second_response,
+                },
+            ),
+        ]);
+
+        let removed =
+            take_document_time_controls_for_pipeline(&mut pending_controls, TEST_PIPELINE_ID);
+        assert_eq!(removed.len(), 1);
+        drop(removed);
+        assert!(first_receiver.recv().is_err());
+        assert!(!pending_controls.contains_key(&first_request_id));
+        assert!(pending_controls.contains_key(&second_request_id));
+    }
+
+    #[test]
+    fn shutdown_rejects_new_control_before_it_can_be_routed() {
+        let (response, receiver) = GenericCallback::<DocumentTimeControlOutcome>::new_blocking()
+            .expect("test control callback channel should be created");
+
+        assert!(reject_document_time_control_during_shutdown(
+            true,
+            DocumentTimeControlCompletion::Observe,
+            None,
+            &response,
+        ));
+        assert_eq!(
+            receiver
+                .recv()
+                .expect("unrouted shutdown rejection should resolve callback"),
+            DocumentTimeControlOutcome::Rejected(DocumentTimeControlError::ChannelClosed)
+        );
+    }
+
+    #[test]
+    fn shutdown_preserves_consume_as_identity_bound_indeterminate_when_target_is_known() {
+        let (response, receiver) = GenericCallback::<DocumentTimeControlOutcome>::new_blocking()
+            .expect("test control callback channel should be created");
+
+        assert!(reject_document_time_control_during_shutdown(
+            true,
+            capture_completion(),
+            Some(target()),
+            &response,
+        ));
+        assert!(matches!(
+            receiver
+                .recv()
+                .expect("shutdown consume should resolve callback"),
+            DocumentTimeControlOutcome::CaptureConsumeOutcomeIndeterminate {
+                candidate_id,
+                ticket_id,
+                target: observed_target,
+            } if candidate_id == DocumentCapturePreconditionId::new(17) &&
+                ticket_id == DocumentPaintPresentationTicketId::new(19) &&
+                *observed_target == target()
+        ));
+    }
+
+    #[test]
+    fn stale_target_token_is_rejected_before_routing() {
+        let clock = DocumentClock::new(DocumentClockConfiguration::Controlled {
+            initial_time_ns: 0,
+            unix_time_origin_ns: timers::DocumentUnixTime::default(),
+            execution_limits: None,
+        });
+        let fence = DocumentProducerFence::default();
+        let checkpoint = DocumentProducerCheckpoint::ZERO
+            .checked_next()
+            .expect("test checkpoint sequence is representable");
+        let expected_target = target();
+        let token = DocumentTimeAdvanceToken::new_internal(
+            DocumentTimeAdvanceTokenId::new(0),
+            expected_target.clone(),
+            clock.id(),
+            clock.now(),
+            deadline(),
+            0,
+            0,
+            false,
+            DocumentTimeProducerObservation {
+                fence_id: fence.id(),
+                checkpoint,
+                snapshot: fence.snapshot(),
+                stability: DocumentProducerStability::StableEmpty,
+            },
+        );
+        let command = DocumentTimeControlCommand::AdvanceTo(Box::new(token));
+        let mut changed_target = expected_target.clone();
+        changed_target.fully_active_pipelines.clear();
+
+        assert_eq!(
+            validate_document_time_command_target(&command, &expected_target),
+            Ok(())
+        );
+        assert!(matches!(
+            validate_document_time_command_target(&command, &changed_target),
+            Err(DocumentTimeControlError::TargetChanged { expected, observed })
+                if *expected == expected_target && observed == Some(Box::new(changed_target))
+        ));
+    }
+}
+
 /// State needed to construct a constellation.
 pub struct InitialConstellationState {
     /// A channel through which messages can be sent to the embedder. This is not used by the `Constellation`
@@ -606,7 +1647,6 @@ where
     SWF: ServiceWorkerManagerFactory,
 {
     /// Create a new constellation thread.
-    #[servo_tracing::instrument(skip(state, layout_factory))]
     pub fn start(
         embedder_to_constellation_receiver: Receiver<EmbedderToConstellationMessage>,
         state: InitialConstellationState,
@@ -615,6 +1655,26 @@ where
         random_pipeline_closure_seed: Option<usize>,
         hard_fail: bool,
     ) {
+        drop(Self::start_with_join_handle(
+            embedder_to_constellation_receiver,
+            state,
+            layout_factory,
+            random_pipeline_closure_probability,
+            random_pipeline_closure_seed,
+            hard_fail,
+        ));
+    }
+
+    /// Create a new constellation thread and return the handle needed to join it at shutdown.
+    #[servo_tracing::instrument(name = "Constellation::start", skip(state, layout_factory))]
+    pub fn start_with_join_handle(
+        embedder_to_constellation_receiver: Receiver<EmbedderToConstellationMessage>,
+        state: InitialConstellationState,
+        layout_factory: Arc<dyn LayoutFactory>,
+        random_pipeline_closure_probability: Option<f32>,
+        random_pipeline_closure_seed: Option<usize>,
+        hard_fail: bool,
+    ) -> JoinHandle<()> {
         thread::Builder::new()
             .name("Constellation".to_owned())
             .spawn(move || {
@@ -684,6 +1744,8 @@ where
                     constellation_to_embedder_proxy: state.constellation_to_embedder_proxy,
                     paint_proxy: state.paint_proxy,
                     webviews: Default::default(),
+                    next_document_time_control_request_id: 0,
+                    pending_document_time_controls: Default::default(),
                     devtools_sender: state.devtools_sender,
                     script_to_devtools_callback: Default::default(),
                     #[cfg(feature = "bluetooth")]
@@ -745,7 +1807,7 @@ where
 
                 constellation.run();
             })
-            .expect("Thread spawning failed");
+            .expect("Thread spawning failed")
     }
 
     fn event_loops(&self) -> Vec<Rc<EventLoop>> {
@@ -977,7 +2039,19 @@ where
         parent_pipeline_id: Option<PipelineId>,
         load_data: &LoadData,
         is_private: bool,
-    ) -> Result<Rc<EventLoop>, IpcError> {
+    ) -> Result<Rc<EventLoop>, EventLoopCreationError> {
+        let unsupported_event_loop_surface = if opener.is_some() {
+            DocumentTimeSurface::AuxiliaryWebView
+        } else if parent_pipeline_id.is_some() {
+            DocumentTimeSurface::CrossEventLoopIframe
+        } else {
+            DocumentTimeSurface::CrossEventLoopNavigation
+        };
+        let document_clock = self
+            .webviews
+            .get(&webview_id)
+            .map(ConstellationWebView::document_clock)
+            .unwrap_or_default();
         let registered_domain_name = if load_data
             .creation_sandboxing_flag_set
             .contains(SandboxingFlagSet::SANDBOXED_ORIGIN_BROWSING_CONTEXT_FLAG)
@@ -994,10 +2068,46 @@ where
             parent_pipeline_id,
             &registered_domain_name,
         ) {
+            if event_loop.document_clock() != document_clock {
+                if let Some(webview) = self.webviews.get_mut(&webview_id) {
+                    webview.fail_document_time(unsupported_event_loop_surface);
+                }
+                return Err(EventLoopCreationError::UnsupportedDocumentTime(
+                    unsupported_event_loop_surface,
+                ));
+            }
+            if document_clock != DocumentClockConfiguration::Realtime {
+                let Some(webview) = self.webviews.get_mut(&webview_id) else {
+                    return Err(EventLoopCreationError::UnsupportedDocumentTime(
+                        unsupported_event_loop_surface,
+                    ));
+                };
+                webview
+                    .bind_controlled_event_loop(event_loop.id(), unsupported_event_loop_surface)
+                    .map_err(EventLoopCreationError::UnsupportedDocumentTime)?;
+            }
             return Ok(event_loop);
         }
 
-        let event_loop = EventLoop::spawn(self, is_private)?;
+        if document_clock != DocumentClockConfiguration::Realtime &&
+            self.webviews
+                .get(&webview_id)
+                .is_some_and(|webview| webview.controlled_event_loop_id().is_some())
+        {
+            if let Some(webview) = self.webviews.get_mut(&webview_id) {
+                webview.fail_document_time(unsupported_event_loop_surface);
+            }
+            return Err(EventLoopCreationError::UnsupportedDocumentTime(
+                unsupported_event_loop_surface,
+            ));
+        }
+
+        let event_loop = EventLoop::spawn(self, is_private, document_clock)?;
+        if let Some(webview) = self.webviews.get_mut(&webview_id) {
+            webview
+                .bind_controlled_event_loop(event_loop.id(), unsupported_event_loop_surface)
+                .map_err(EventLoopCreationError::UnsupportedDocumentTime)?;
+        }
         if let Some(registered_domain_name) = registered_domain_name {
             self.set_event_loop(&event_loop, registered_domain_name, webview_id, opener);
         }
@@ -1022,9 +2132,9 @@ where
         is_private: bool,
         throttled: bool,
         target_snapshot_params: TargetSnapshotParams,
-    ) {
+    ) -> bool {
         if self.shutting_down {
-            return;
+            return false;
         }
 
         debug!("Creating new pipeline ({new_pipeline_id:?}) in {browsing_context_id}");
@@ -1034,7 +2144,7 @@ where
             .map(ConstellationWebView::theme)
         else {
             warn!("Tried to create Pipeline for uknown WebViewId: {webview_id:?}");
-            return;
+            return false;
         };
 
         let event_loop = match self.get_or_create_event_loop_for_new_pipeline(
@@ -1045,7 +2155,16 @@ where
             is_private,
         ) {
             Ok(event_loop) => event_loop,
-            Err(error) => return self.handle_send_error(new_pipeline_id, error.into()),
+            Err(EventLoopCreationError::Ipc(error)) => {
+                self.handle_send_error(new_pipeline_id, error.into());
+                return false;
+            },
+            Err(EventLoopCreationError::UnsupportedDocumentTime(surface)) => {
+                warn!(
+                    "{webview_id}: controlled document time rejected unsupported surface {surface:?}"
+                );
+                return false;
+            },
         };
 
         let user_content_manager_id = self
@@ -1067,11 +2186,15 @@ where
         };
         let pipeline = match Pipeline::spawn(new_pipeline_info, event_loop, self, throttled) {
             Ok(pipeline) => pipeline,
-            Err(error) => return self.handle_send_error(new_pipeline_id, error),
+            Err(error) => {
+                self.handle_send_error(new_pipeline_id, error);
+                return false;
+            },
         };
 
         assert!(!self.pipelines.contains_key(&new_pipeline_id));
         self.pipelines.insert(new_pipeline_id, pipeline);
+        true
     }
 
     /// Get an iterator for the fully active browsing contexts in a subtree.
@@ -1412,7 +2535,22 @@ where
             // Create a new top level browsing context. Will use response_chan to return
             // the browsing context id.
             EmbedderToConstellationMessage::NewWebView(url, new_webview_details) => {
-                self.handle_new_top_level_browsing_context(url, new_webview_details);
+                self.handle_new_top_level_browsing_context(
+                    url,
+                    new_webview_details,
+                    DocumentClockConfiguration::Realtime,
+                );
+            },
+            EmbedderToConstellationMessage::NewWebViewWithDocumentClock(
+                url,
+                new_webview_details,
+                document_clock,
+            ) => {
+                self.handle_new_top_level_browsing_context(
+                    url,
+                    new_webview_details,
+                    document_clock,
+                );
             },
             // Close a top level browsing context.
             EmbedderToConstellationMessage::CloseWebView(webview_id) => {
@@ -1501,6 +2639,16 @@ where
             EmbedderToConstellationMessage::RequestLayoutDebugSnapshot(webview_id, response) => {
                 self.handle_request_layout_debug_snapshot(webview_id, response)
             },
+            EmbedderToConstellationMessage::ControlDocumentTime(
+                webview_id,
+                cancellation_id,
+                command,
+                response,
+            ) => self.handle_control_document_time(webview_id, cancellation_id, command, response),
+            EmbedderToConstellationMessage::CancelDocumentTimeControl(
+                webview_id,
+                cancellation_id,
+            ) => self.handle_cancel_document_time_control(webview_id, cancellation_id),
             EmbedderToConstellationMessage::CreateMemoryReport(sender) => {
                 self.mem_profiler_chan.send(ProfilerMsg::Report(sender));
             },
@@ -1712,6 +2860,180 @@ where
         {
             let _ = response_on_error.send(None);
         }
+    }
+
+    fn controlled_document_time_target(
+        &self,
+        webview_id: WebViewId,
+    ) -> Result<DocumentTimeControlTarget, DocumentTimeControlError> {
+        let Some(webview) = self.webviews.get(&webview_id) else {
+            return Err(DocumentTimeControlError::WebViewUnavailable);
+        };
+        if webview.document_clock() == DocumentClockConfiguration::Realtime {
+            return Err(DocumentTimeControlError::NotControlled);
+        }
+        if let Some(surface) = webview.document_time_failure() {
+            return Err(DocumentTimeControlError::UnsupportedSurface(surface));
+        }
+        let Some(event_loop_id) = webview.controlled_event_loop_id() else {
+            return Err(DocumentTimeControlError::EventLoopUnavailable);
+        };
+        let webview_epoch = webview.active_top_level_pipeline_epoch;
+
+        if self.pipelines.values().any(|pipeline| {
+            pipeline.event_loop.id() == event_loop_id && pipeline.webview_id != webview_id
+        }) {
+            return Err(DocumentTimeControlError::SharedEventLoopWebView);
+        }
+
+        let mut pipelines: Vec<_> = self
+            .pipelines
+            .values()
+            .filter_map(|pipeline| {
+                (pipeline.webview_id == webview_id)
+                    .then_some((pipeline.id, pipeline.event_loop.id()))
+            })
+            .collect();
+        if pipelines.is_empty() {
+            return Err(DocumentTimeControlError::EventLoopUnavailable);
+        }
+        if pipelines
+            .iter()
+            .any(|(_, pipeline_event_loop_id)| *pipeline_event_loop_id != event_loop_id)
+        {
+            return Err(DocumentTimeControlError::MultipleEventLoops);
+        }
+        let mut pipelines: Vec<_> = pipelines
+            .drain(..)
+            .map(|(pipeline_id, _)| pipeline_id)
+            .collect();
+        pipelines.sort_unstable();
+        pipelines.dedup();
+
+        let mut fully_active_pipelines = Vec::new();
+        for browsing_context in self.fully_active_browsing_contexts_iter(webview_id) {
+            let Some(pipeline) = self.pipelines.get(&browsing_context.pipeline_id) else {
+                return Err(DocumentTimeControlError::EventLoopUnavailable);
+            };
+            if pipeline.event_loop.id() != event_loop_id {
+                return Err(DocumentTimeControlError::MultipleEventLoops);
+            }
+            fully_active_pipelines.push(pipeline.id);
+        }
+        fully_active_pipelines.sort_unstable();
+        fully_active_pipelines.dedup();
+
+        Ok(DocumentTimeControlTarget {
+            webview_id,
+            event_loop_id,
+            webview_epoch,
+            pipelines,
+            fully_active_pipelines,
+        })
+    }
+
+    fn handle_control_document_time(
+        &mut self,
+        webview_id: WebViewId,
+        cancellation_id: DocumentTimeControlCancellationId,
+        command: DocumentTimeControlCommand,
+        response: GenericCallback<DocumentTimeControlOutcome>,
+    ) {
+        let completion = DocumentTimeControlCompletion::for_command(&command);
+        if reject_document_time_control_during_shutdown(
+            self.shutting_down,
+            completion,
+            self.controlled_document_time_target(webview_id).ok(),
+            &response,
+        ) {
+            return;
+        }
+        if self
+            .pending_document_time_controls
+            .values()
+            .any(|pending| pending.target.webview_id == webview_id)
+        {
+            let _ = response.send(DocumentTimeControlOutcome::Rejected(
+                DocumentTimeControlError::CommandAlreadyPending,
+            ));
+            return;
+        }
+
+        let target = match self.controlled_document_time_target(webview_id) {
+            Ok(target) => target,
+            Err(error) => {
+                let _ = response.send(DocumentTimeControlOutcome::Rejected(error));
+                return;
+            },
+        };
+        if let Err(error) = validate_document_time_command_target(&command, &target) {
+            let _ = response.send(DocumentTimeControlOutcome::Rejected(error));
+            return;
+        }
+        let Some(next_request_id) = self.next_document_time_control_request_id.checked_add(1)
+        else {
+            let _ = response.send(DocumentTimeControlOutcome::Rejected(
+                DocumentTimeControlError::RequestSequenceOverflow,
+            ));
+            return;
+        };
+        let request_id =
+            DocumentTimeControlRequestId::new(self.next_document_time_control_request_id);
+        self.next_document_time_control_request_id = next_request_id;
+
+        let Some(event_loop) = target
+            .pipelines
+            .first()
+            .and_then(|pipeline_id| self.pipelines.get(pipeline_id))
+            .map(|pipeline| pipeline.event_loop.clone())
+        else {
+            let _ = response.send(DocumentTimeControlOutcome::Rejected(
+                DocumentTimeControlError::EventLoopUnavailable,
+            ));
+            return;
+        };
+
+        self.pending_document_time_controls.insert(
+            request_id,
+            PendingDocumentTimeControl {
+                target: target.clone(),
+                cancellation_id,
+                completion,
+                response,
+            },
+        );
+        if event_loop
+            .send(ScriptThreadMessage::ControlDocumentTime(
+                request_id, target, command,
+            ))
+            .is_err() &&
+            let Some(pending) = self.pending_document_time_controls.remove(&request_id)
+        {
+            let _ = pending.response.send(DocumentTimeControlOutcome::Rejected(
+                DocumentTimeControlError::ChannelClosed,
+            ));
+        }
+    }
+
+    fn handle_cancel_document_time_control(
+        &mut self,
+        webview_id: WebViewId,
+        cancellation_id: DocumentTimeControlCancellationId,
+    ) {
+        let Some(pending) = take_cancelled_document_time_control(
+            &mut self.pending_document_time_controls,
+            webview_id,
+            cancellation_id,
+        ) else {
+            // The exact response may have won the race and removed this request already. A stale
+            // cancellation nonce must never consume a successor for the same WebView.
+            return;
+        };
+        // The bounded receiver has already timed out, failed transport, or been abandoned. This
+        // removes only Constellation ownership; it does not claim that ScriptThread work was
+        // cancelled. FIFO keeps any successor behind the old command, and guarded/Drive results
+        // remain conservatively indeterminate for the abandoned caller.
+        drop(pending);
     }
 
     #[servo_tracing::instrument(skip_all)]
@@ -2088,6 +3410,14 @@ where
             },
             ScriptToConstellationMessage::FinishJavaScriptEvaluation(evaluation_id, result) => {
                 self.handle_finish_javascript_evaluation(evaluation_id, result)
+            },
+            ScriptToConstellationMessage::ControlledDocumentTimeResponse(request_id, result) => {
+                self.handle_controlled_document_time_response(
+                    webview_id,
+                    source_pipeline_id,
+                    request_id,
+                    *result,
+                )
             },
             ScriptToConstellationMessage::ForwardKeyboardScroll(pipeline_id, scroll) => {
                 if let Some(pipeline) = self.pipelines.get(&pipeline_id) &&
@@ -2717,6 +4047,13 @@ where
         }
         self.shutting_down = true;
 
+        for (_, pending) in std::mem::take(&mut self.pending_document_time_controls) {
+            // Dropping the sole callback lets the receiver classify each command with its bound
+            // local transport semantics. Shutdown cannot safely synthesize rejection after a
+            // DriveOneTurn or guarded command may already have executed.
+            drop(pending);
+        }
+
         self.mem_profiler_chan.send(mem::ProfilerMsg::Exit);
 
         // Tell all BHMs to exit, and to ensure their monitored components exit even when currently
@@ -2976,6 +4313,7 @@ where
 
     fn handle_pipeline_exited(&mut self, pipeline_id: PipelineId) {
         debug!("{}: Exited", pipeline_id);
+        self.fail_pending_document_time_controls_for_pipeline(pipeline_id);
         let Some(pipeline) = self.pipelines.remove(&pipeline_id) else {
             return;
         };
@@ -3098,7 +4436,7 @@ where
         };
 
         let is_private = false;
-        self.new_pipeline(
+        if !self.new_pipeline(
             new_pipeline_id,
             browsing_context_id,
             webview_id,
@@ -3109,7 +4447,9 @@ where
             is_private,
             throttled,
             TargetSnapshotParams::default(),
-        );
+        ) {
+            return;
+        }
         self.add_pending_change(SessionHistoryChange {
             webview_id,
             browsing_context_id,
@@ -3298,6 +4638,7 @@ where
             viewport_details,
             user_content_manager_id,
         }: NewWebViewDetails,
+        document_clock: DocumentClockConfiguration,
     ) {
         let pipeline_id = PipelineId::new();
         let browsing_context_id = BrowsingContextId::from(webview_id);
@@ -3309,7 +4650,12 @@ where
         // its focused browsing context to be itself.
         self.webviews.insert(
             webview_id,
-            ConstellationWebView::new(webview_id, browsing_context_id, user_content_manager_id),
+            ConstellationWebView::new(
+                webview_id,
+                browsing_context_id,
+                user_content_manager_id,
+                document_clock,
+            ),
         );
 
         // https://html.spec.whatwg.org/multipage/#creating-a-new-browsing-context-group
@@ -3321,7 +4667,7 @@ where
         self.browsing_context_group_set
             .insert(new_bc_group_id, new_bc_group);
 
-        self.new_pipeline(
+        if !self.new_pipeline(
             pipeline_id,
             browsing_context_id,
             webview_id,
@@ -3332,7 +4678,9 @@ where
             is_private,
             throttled,
             TargetSnapshotParams::default(),
-        );
+        ) {
+            return;
+        }
         self.add_pending_change(SessionHistoryChange {
             webview_id,
             browsing_context_id,
@@ -3356,6 +4704,7 @@ where
     /// <https://html.spec.whatwg.org/multipage/#destroy-a-top-level-traversable>
     fn handle_close_top_level_browsing_context(&mut self, webview_id: WebViewId) {
         debug!("{webview_id}: Closing");
+        self.fail_pending_document_time_controls_for_webview(webview_id);
         let browsing_context_id = BrowsingContextId::from(webview_id);
         // Step 5. Remove traversable from the user agent's top-level traversable set.
         let browsing_context =
@@ -3416,6 +4765,95 @@ where
         self.constellation_to_embedder_proxy.send(
             ConstellationToEmbedderMsg::FinishJavaScriptEvaluation(evaluation_id, result),
         );
+    }
+
+    fn handle_controlled_document_time_response(
+        &mut self,
+        source_webview_id: WebViewId,
+        source_pipeline_id: PipelineId,
+        request_id: DocumentTimeControlRequestId,
+        result: Result<DocumentTimeControlObservation, DocumentTimeControlError>,
+    ) {
+        let Some(pending) = take_authenticated_document_time_control(
+            &mut self.pending_document_time_controls,
+            source_webview_id,
+            source_pipeline_id,
+            request_id,
+        ) else {
+            return;
+        };
+
+        if let Some(definitive) = pending.committed_success_is_definitive(&result) {
+            if definitive {
+                // ScriptThread crossed the command's single-use linearization point before
+                // replying, so a later navigation cannot retroactively turn this commit into an
+                // error.
+                pending.send_definitive(result);
+            } else {
+                // A successful envelope without the exact target/action and guarded token or
+                // candidate/ticket correlation cannot prove whether the mutation happened.
+                warn!("Single-use document-time response {request_id:?} was not authoritative");
+                pending.send_unresolved_outcome();
+            }
+            return;
+        }
+
+        // ScriptThread owns the exact failure that occurred while validating or executing this
+        // request. Re-deriving the target here may observe a later navigation and must not replace
+        // that authenticated, pre-mutation error with a synthetic TargetChanged result.
+        if result.is_err() {
+            pending.send_definitive(result);
+            return;
+        }
+
+        let response = if let Ok(observation) = &result &&
+            observation.target != pending.target
+        {
+            Err(DocumentTimeControlError::TargetChanged {
+                expected: Box::new(pending.target.clone()),
+                observed: Some(Box::new(observation.target.clone())),
+            })
+        } else {
+            match self.controlled_document_time_target(pending.target.webview_id) {
+                Ok(observed) if observed != pending.target => {
+                    Err(DocumentTimeControlError::TargetChanged {
+                        expected: Box::new(pending.target.clone()),
+                        observed: Some(Box::new(observed)),
+                    })
+                },
+                Ok(_) => result,
+                Err(error @ DocumentTimeControlError::UnsupportedSurface(_)) => Err(error),
+                Err(_) => Err(DocumentTimeControlError::TargetChanged {
+                    expected: Box::new(pending.target.clone()),
+                    observed: None,
+                }),
+            }
+        };
+        pending.send_definitive(response);
+    }
+
+    fn fail_pending_document_time_controls_for_webview(&mut self, webview_id: WebViewId) {
+        let request_ids: Vec<_> = self
+            .pending_document_time_controls
+            .iter()
+            .filter_map(|(request_id, pending)| {
+                (pending.target.webview_id == webview_id).then_some(*request_id)
+            })
+            .collect();
+        for request_id in request_ids {
+            if let Some(pending) = self.pending_document_time_controls.remove(&request_id) {
+                drop(pending);
+            }
+        }
+    }
+
+    fn fail_pending_document_time_controls_for_pipeline(&mut self, pipeline_id: PipelineId) {
+        for pending in take_document_time_controls_for_pipeline(
+            &mut self.pending_document_time_controls,
+            pipeline_id,
+        ) {
+            drop(pending);
+        }
     }
 
     #[servo_tracing::instrument(skip_all)]
@@ -3541,7 +4979,7 @@ where
         }
 
         // Create the new pipeline, attached to the parent and push to pending changes
-        self.new_pipeline(
+        if !self.new_pipeline(
             new_pipeline_id,
             browsing_context_id,
             webview_id,
@@ -3552,7 +4990,9 @@ where
             is_private,
             browsing_context_throttled,
             target_snapshot_params,
-        );
+        ) {
+            return;
+        }
         self.add_pending_change(SessionHistoryChange {
             webview_id,
             browsing_context_id,
@@ -3634,6 +5074,18 @@ where
             response_sender,
         } = load_info;
 
+        if self
+            .webviews
+            .get(&opener_webview_id)
+            .is_some_and(|webview| webview.document_clock() != DocumentClockConfiguration::Realtime)
+        {
+            if let Some(opener_webview) = self.webviews.get_mut(&opener_webview_id) {
+                opener_webview.fail_document_time(DocumentTimeSurface::AuxiliaryWebView);
+            }
+            let _ = response_sender.send(None);
+            return;
+        }
+
         let Some((webview_id_sender, webview_id_receiver)) = generic_channel::channel() else {
             warn!("Failed to create channel");
             let _ = response_sender.send(None);
@@ -3655,6 +5107,7 @@ where
                 return;
             },
         };
+        let document_clock = DocumentClockConfiguration::Realtime;
         let new_browsing_context_id = BrowsingContextId::from(new_webview_id);
 
         let (script_sender, opener_browsing_context_id) =
@@ -3667,6 +5120,16 @@ where
                     );
                 },
             };
+        if script_sender.document_clock() != document_clock {
+            if let Some(opener_webview) = self.webviews.get_mut(&opener_webview_id) {
+                opener_webview.fail_document_time(DocumentTimeSurface::AuxiliaryWebView);
+            }
+            warn!(
+                "{new_webview_id}: auxiliary WebView clock does not match its opener's event loop"
+            );
+            let _ = response_sender.send(None);
+            return;
+        }
         let (is_opener_private, is_opener_throttled, is_opener_secure) =
             match self.browsing_contexts.get(&opener_browsing_context_id) {
                 Some(ctx) => (ctx.is_private, ctx.throttled, ctx.inherited_secure_context),
@@ -3678,6 +5141,21 @@ where
                 },
             };
         let new_pipeline_id = PipelineId::new();
+        let mut new_webview = ConstellationWebView::new(
+            new_webview_id,
+            new_browsing_context_id,
+            user_content_manager_id,
+            document_clock,
+        );
+        if let Err(surface) = new_webview
+            .bind_controlled_event_loop(script_sender.id(), DocumentTimeSurface::AuxiliaryWebView)
+        {
+            if let Some(opener_webview) = self.webviews.get_mut(&opener_webview_id) {
+                opener_webview.fail_document_time(surface);
+            }
+            let _ = response_sender.send(None);
+            return;
+        }
         let pipeline = Pipeline::new_already_spawned(
             new_pipeline_id,
             new_browsing_context_id,
@@ -3696,14 +5174,7 @@ where
 
         assert!(!self.pipelines.contains_key(&new_pipeline_id));
         self.pipelines.insert(new_pipeline_id, pipeline);
-        self.webviews.insert(
-            new_webview_id,
-            ConstellationWebView::new(
-                new_webview_id,
-                new_browsing_context_id,
-                user_content_manager_id,
-            ),
-        );
+        self.webviews.insert(new_webview_id, new_webview);
 
         // https://html.spec.whatwg.org/multipage/#bcg-append
         let Some(opener) = self.browsing_contexts.get(&opener_browsing_context_id) else {
@@ -3958,7 +5429,7 @@ where
                 };
 
                 let new_pipeline_id = PipelineId::new();
-                self.new_pipeline(
+                if !self.new_pipeline(
                     new_pipeline_id,
                     browsing_context_id,
                     webview_id,
@@ -3969,7 +5440,9 @@ where
                     is_private,
                     is_throttled,
                     target_snapshot_params,
-                );
+                ) {
+                    return None;
+                }
                 self.add_pending_change(SessionHistoryChange {
                     webview_id,
                     browsing_context_id,
@@ -4253,7 +5726,7 @@ where
                     None => None,
                 };
                 let new_pipeline_id = PipelineId::new();
-                self.new_pipeline(
+                if !self.new_pipeline(
                     new_pipeline_id,
                     browsing_context_id,
                     webview_id,
@@ -4267,7 +5740,9 @@ where
                     // with the pipeline when it's created, so we can support reloading
                     // a discarded document properly.
                     TargetSnapshotParams::default(),
-                );
+                ) {
+                    return;
+                }
                 self.add_pending_change(SessionHistoryChange {
                     webview_id,
                     browsing_context_id,
@@ -5711,6 +7186,7 @@ where
         exit_mode: ExitPipelineMode,
     ) {
         debug!("{}: Closing", pipeline_id);
+        self.fail_pending_document_time_controls_for_pipeline(pipeline_id);
 
         // Sever connection to browsing context
         let browsing_context_id = self

@@ -51,17 +51,31 @@ fn obtain_bottle_map(
 
 #[test]
 fn test_exit() {
+    install_test_namespace();
     let handle: ClientStorageThreadHandle = ClientStorageThreadFactory::new(None, false);
+    let url = ServoUrl::parse("https://example.com").unwrap();
+    let storage_proxy_map = obtain_bottle_map(
+        &handle,
+        StorageType::Local,
+        Some(WebViewId::new(servo_base::id::TEST_PAINTER_ID)),
+        StorageIdentifier::IndexedDB,
+        url.origin(),
+    );
+    let (database_path, created) = handle
+        .create_database(storage_proxy_map.bottle_id, "exit-test".to_string())
+        .recv()
+        .unwrap()
+        .unwrap();
+    assert!(created);
+    let temporary_root = database_path.ancestors().nth(5).unwrap().to_path_buf();
+    assert!(temporary_root.exists());
 
     let (sender, receiver) = generic_channel::channel().unwrap();
     handle
         .send(ClientStorageThreadMessage::Exit(sender))
         .unwrap();
     receiver.recv().unwrap();
-
-    // Workaround for https://github.com/servo/servo/issues/32912
-    #[cfg(windows)]
-    std::thread::sleep(std::time::Duration::from_millis(1000));
+    assert!(!temporary_root.exists());
 }
 
 #[test]

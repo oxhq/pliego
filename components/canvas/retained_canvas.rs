@@ -10,8 +10,8 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use euclid::default::{Rect, Size2D, Transform2D};
 use pixels::{Snapshot, SnapshotAlphaMode, SnapshotPixelFormat};
 use servo_canvas_traits::canvas::{
-    CanvasId, CompositionOptions, CompositionOrBlending, CompositionStyle, FillOrStrokeStyle,
-    ShadowOptions,
+    CanvasCaptureObservation, CanvasCaptureObservationStatus, CanvasId, CompositionOptions,
+    CompositionOrBlending, CompositionStyle, FillOrStrokeStyle, ShadowOptions,
 };
 use webrender_api::{IdNamespace, ImageKey};
 
@@ -65,6 +65,10 @@ impl FrozenCanvasSnapshots {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FreezeCanvasSnapshotsError {
     RetentionDisabled,
+    GenerationChanged {
+        expected: u64,
+        observed: u64,
+    },
     MissingImageKey {
         namespace: u32,
         key: u32,
@@ -76,6 +80,10 @@ impl fmt::Display for FreezeCanvasSnapshotsError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::RetentionDisabled => formatter.write_str("Canvas command retention is disabled"),
+            Self::GenerationChanged { expected, observed } => write!(
+                formatter,
+                "Canvas registry generation changed from expected {expected} to observed {observed}"
+            ),
             Self::MissingImageKey {
                 namespace,
                 key,
@@ -204,11 +212,30 @@ pub fn freeze_canvas_snapshots(
     freeze_canvas_snapshots_with_observer(image_keys, |_| {})
 }
 
+/// Freeze a complete Canvas bundle only when it still matches a settled source generation.
+///
+/// The generation comparison, budget check, key validation, and immutable snapshot cloning all
+/// occur while holding the registry lock once. Empty key sets still validate the generation.
+pub fn freeze_canvas_snapshots_at_generation(
+    image_keys: &[(u32, u32)],
+    expected_generation: u64,
+) -> Result<FrozenCanvasSnapshots, FreezeCanvasSnapshotsError> {
+    freeze_canvas_snapshots_internal(image_keys, Some(expected_generation), |_| {})
+}
+
 fn freeze_canvas_snapshots_with_observer(
     image_keys: &[(u32, u32)],
+    after_snapshot: impl FnMut(usize),
+) -> Result<FrozenCanvasSnapshots, FreezeCanvasSnapshotsError> {
+    freeze_canvas_snapshots_internal(image_keys, None, after_snapshot)
+}
+
+fn freeze_canvas_snapshots_internal(
+    image_keys: &[(u32, u32)],
+    expected_generation: Option<u64>,
     mut after_snapshot: impl FnMut(usize),
 ) -> Result<FrozenCanvasSnapshots, FreezeCanvasSnapshotsError> {
-    if image_keys.is_empty() {
+    if image_keys.is_empty() && expected_generation.is_none() {
         return Ok(FrozenCanvasSnapshots {
             generation: 0,
             retention_budget_exceeded: false,
@@ -233,6 +260,14 @@ fn freeze_canvas_snapshots_with_observer(
         return Err(FreezeCanvasSnapshotsError::RetentionDisabled);
     }
     let generation = registry.generation;
+    if let Some(expected) = expected_generation &&
+        generation != expected
+    {
+        return Err(FreezeCanvasSnapshotsError::GenerationChanged {
+            expected,
+            observed: generation,
+        });
+    }
     let retention_budget_exceeded = registry.retention_budget_exceeded;
     if retention_budget_exceeded {
         // The capture boundary rejects this bundle before lookup. Preserve budget-failure
@@ -266,8 +301,68 @@ fn freeze_canvas_snapshots_with_observer(
     })
 }
 
+/// Observe one Canvas without changing its retained transcript or registry generation.
+pub(crate) fn observe_canvas_for_capture(
+    canvas_id: CanvasId,
+    expected_image_key: Option<ImageKey>,
+    expected_size: Size2D<u32>,
+) -> CanvasCaptureObservation {
+    if !ENABLED.load(Ordering::Acquire) {
+        return CanvasCaptureObservation {
+            canvas_id,
+            image_key: expected_image_key,
+            size: expected_size,
+            registry_generation: None,
+            status: CanvasCaptureObservationStatus::RetentionDisabled,
+        };
+    }
+
+    let registry = registry();
+    if !ENABLED.load(Ordering::Acquire) {
+        return CanvasCaptureObservation {
+            canvas_id,
+            image_key: expected_image_key,
+            size: expected_size,
+            registry_generation: None,
+            status: CanvasCaptureObservationStatus::RetentionDisabled,
+        };
+    }
+    let generation = Some(registry.generation);
+    let status = if registry.retention_budget_exceeded {
+        CanvasCaptureObservationStatus::RetentionBudgetExceeded
+    } else if !registry.canvases.contains_key(&canvas_id) {
+        CanvasCaptureObservationStatus::MissingCanvas
+    } else if expected_image_key.is_none() {
+        CanvasCaptureObservationStatus::MissingImageKey
+    } else if expected_image_key
+        .is_some_and(|image_key| registry.image_keys.get(&image_key).copied() != Some(canvas_id))
+    {
+        CanvasCaptureObservationStatus::ImageKeyMismatch
+    } else {
+        let canvas = registry
+            .canvases
+            .get(&canvas_id)
+            .expect("Canvas existence was checked above");
+        if (canvas.width, canvas.height) != (expected_size.width, expected_size.height) {
+            CanvasCaptureObservationStatus::SizeMismatch
+        } else if canvas.unsupported.is_some() {
+            CanvasCaptureObservationStatus::UnsupportedTranscript
+        } else {
+            CanvasCaptureObservationStatus::Ready
+        }
+    };
+    CanvasCaptureObservation {
+        canvas_id,
+        image_key: expected_image_key,
+        size: expected_size,
+        registry_generation: generation,
+        status,
+    }
+}
+
 struct Registry {
     canvases: HashMap<CanvasId, Arc<RetainedCanvasSnapshot>>,
+    active_clip_depths: HashMap<CanvasId, usize>,
     image_keys: HashMap<ImageKey, CanvasId>,
     completed: HashMap<ImageKey, Arc<RetainedCanvasSnapshot>>,
     retained_command_count: u64,
@@ -284,6 +379,7 @@ impl Default for Registry {
     fn default() -> Self {
         Self {
             canvases: HashMap::new(),
+            active_clip_depths: HashMap::new(),
             image_keys: HashMap::new(),
             completed: HashMap::new(),
             retained_command_count: 0,
@@ -301,6 +397,7 @@ impl Default for Registry {
 impl Registry {
     fn clear(&mut self) {
         self.canvases.clear();
+        self.active_clip_depths.clear();
         self.image_keys.clear();
         self.completed.clear();
         self.retained_command_count = 0;
@@ -421,6 +518,7 @@ pub(crate) fn register_canvas(canvas_id: CanvasId, size: Size2D<u64>) {
             unsupported: None,
         }),
     );
+    registry.active_clip_depths.insert(canvas_id, 0);
 }
 
 pub(crate) fn recreate_canvas(canvas_id: CanvasId, size: Option<Size2D<u64>>) {
@@ -429,10 +527,11 @@ pub(crate) fn recreate_canvas(canvas_id: CanvasId, size: Option<Size2D<u64>>) {
     }
     let mut registry = registry();
     registry.advance_generation();
-    let Some(canvas) = registry.canvases.get_mut(&canvas_id) else {
+    if !registry.canvases.contains_key(&canvas_id) {
         return;
-    };
-    let canvas = Arc::make_mut(canvas);
+    }
+    registry.active_clip_depths.insert(canvas_id, 0);
+    let canvas = Arc::make_mut(registry.canvases.get_mut(&canvas_id).unwrap());
     if let Some(size) = size {
         let (Ok(width), Ok(height)) = (u32::try_from(size.width), u32::try_from(size.height))
         else {
@@ -472,6 +571,7 @@ pub(crate) fn finish_canvas(canvas_id: CanvasId) {
     let Some(snapshot) = registry.canvases.remove(&canvas_id) else {
         return;
     };
+    registry.active_clip_depths.remove(&canvas_id);
     let image_keys = registry
         .image_keys
         .iter()
@@ -550,6 +650,16 @@ pub(crate) fn retain_fill_rect(
     else {
         return;
     };
+    let has_active_clip = registry.active_clip_depths[&canvas_id] != 0;
+    if has_active_clip {
+        Arc::make_mut(registry.canvases.get_mut(&canvas_id).unwrap())
+            .unsupported
+            .get_or_insert(RetainedCanvasUnsupported {
+                command: "fill_rect",
+                reason: RetainedCanvasUnsupportedReason::Clip,
+            });
+        return;
+    }
     if !registry.reserve_command(canvas_id, 0, false) {
         return;
     }
@@ -565,6 +675,45 @@ pub(crate) fn retain_fill_rect(
         blue: f64::from(srgb.components.2),
         alpha: f64::from(srgb.alpha),
     });
+}
+
+/// Record persistent clip state without treating the clip operation itself as painted output.
+///
+/// A later retained draw while this depth is non-zero fails closed. A full-canvas readback may
+/// still seal every pixel produced so far without discarding this state.
+pub(crate) fn retain_clip_push(canvas_id: CanvasId) {
+    if !ENABLED.load(Ordering::Acquire) {
+        return;
+    }
+    let mut registry = registry();
+    registry.advance_generation();
+    let Some(depth) = registry.active_clip_depths.get(&canvas_id).copied() else {
+        return;
+    };
+    let Some(next_depth) = depth.checked_add(1) else {
+        if let Some(canvas) = registry.canvases.get_mut(&canvas_id) {
+            Arc::make_mut(canvas)
+                .unsupported
+                .get_or_insert(RetainedCanvasUnsupported {
+                    command: "clip_path",
+                    reason: RetainedCanvasUnsupportedReason::Clip,
+                });
+        }
+        return;
+    };
+    registry.active_clip_depths.insert(canvas_id, next_depth);
+}
+
+/// Apply the painter's exact clip-pop count to the retained persistent state.
+pub(crate) fn retain_clip_pop(canvas_id: CanvasId, clips: usize) {
+    if clips == 0 || !ENABLED.load(Ordering::Acquire) {
+        return;
+    }
+    let mut registry = registry();
+    registry.advance_generation();
+    if let Some(depth) = registry.active_clip_depths.get_mut(&canvas_id) {
+        *depth = depth.saturating_sub(clips);
+    }
 }
 
 pub(crate) fn retain_pixel_readback(
@@ -661,7 +810,8 @@ mod tests {
     use euclid::default::{Point2D, Rect, Size2D, Transform2D};
     use pixels::{Snapshot, SnapshotAlphaMode, SnapshotPixelFormat};
     use servo_canvas_traits::canvas::{
-        CanvasId, CompositionOptions, FillOrStrokeStyle, ShadowOptions,
+        CanvasCaptureObservationStatus, CanvasId, CompositionOptions, FillOrStrokeStyle,
+        ShadowOptions,
     };
     use style::color::AbsoluteColor;
     use webrender_api::{IdNamespace, ImageKey};
@@ -669,13 +819,44 @@ mod tests {
     use super::{
         FreezeCanvasSnapshotsError, REGISTRY, Registry, RetainedCanvasCommand,
         RetainedCanvasSnapshot, RetainedCanvasUnsupportedReason, associate_image_key,
-        finish_canvas, freeze_canvas_snapshots, freeze_canvas_snapshots_with_observer,
-        mark_unsupported, recreate_canvas, register_canvas, registry, retain_fill_rect,
-        retain_pixel_readback, start_retaining_canvas_commands,
+        finish_canvas, freeze_canvas_snapshots, freeze_canvas_snapshots_at_generation,
+        freeze_canvas_snapshots_with_observer, mark_unsupported, observe_canvas_for_capture,
+        recreate_canvas, register_canvas, registry, retain_clip_pop, retain_clip_push,
+        retain_fill_rect, retain_pixel_readback, start_retaining_canvas_commands,
         start_retaining_canvas_commands_with_limits,
     };
 
     static RETENTION_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    fn opaque_2x2_snapshot() -> Snapshot {
+        Snapshot::from_vec(
+            Size2D::new(2, 2),
+            SnapshotPixelFormat::RGBA,
+            SnapshotAlphaMode::Transparent {
+                premultiplied: true,
+            },
+            vec![255; 16],
+        )
+    }
+
+    fn retain_supported_fill(canvas_id: CanvasId) {
+        retain_fill_rect(
+            canvas_id,
+            &Rect::new(Point2D::zero(), Size2D::new(2.0, 2.0)),
+            &FillOrStrokeStyle::Color(AbsoluteColor::BLACK),
+            &ShadowOptions {
+                offset_x: 0.0,
+                offset_y: 0.0,
+                blur: 0.0,
+                color: AbsoluteColor::TRANSPARENT_BLACK,
+            },
+            CompositionOptions {
+                alpha: 1.0,
+                composition_operation: Default::default(),
+            },
+            Transform2D::identity(),
+        );
+    }
 
     #[test]
     fn retains_only_while_the_capture_guard_is_live() {
@@ -815,6 +996,52 @@ mod tests {
     }
 
     #[test]
+    fn capture_observation_is_ready_and_does_not_advance_the_registry() {
+        let _serial = RETENTION_TEST_LOCK.lock().unwrap();
+        let _guard = start_retaining_canvas_commands();
+        let canvas_id = CanvasId(43);
+        let key = ImageKey(IdNamespace(11), 7);
+        register_canvas(canvas_id, Size2D::new(12, 8));
+        associate_image_key(canvas_id, key);
+        let generation = registry().generation;
+
+        let observation = observe_canvas_for_capture(canvas_id, Some(key), Size2D::new(12, 8));
+
+        assert_eq!(observation.status, CanvasCaptureObservationStatus::Ready);
+        assert_eq!(observation.registry_generation, Some(generation));
+        assert_eq!(registry().generation, generation);
+    }
+
+    #[test]
+    fn generation_checked_freeze_rejects_changes_and_validates_empty_requests() {
+        let _serial = RETENTION_TEST_LOCK.lock().unwrap();
+        let _guard = start_retaining_canvas_commands();
+        let canvas_id = CanvasId(44);
+        let key = ImageKey(IdNamespace(12), 1);
+        register_canvas(canvas_id, Size2D::new(3, 3));
+        associate_image_key(canvas_id, key);
+        let generation = registry().generation;
+
+        let frozen = freeze_canvas_snapshots_at_generation(&[(12, 1)], generation).unwrap();
+        assert_eq!(frozen.generation(), generation);
+        assert!(frozen.get(12, 1).is_some());
+
+        recreate_canvas(canvas_id, Some(Size2D::new(4, 4)));
+        let observed = registry().generation;
+        assert!(matches!(
+            freeze_canvas_snapshots_at_generation(&[(12, 1)], generation),
+            Err(FreezeCanvasSnapshotsError::GenerationChanged {
+                expected,
+                observed: actual,
+            }) if expected == generation && actual == observed
+        ));
+
+        let empty = freeze_canvas_snapshots_at_generation(&[], observed).unwrap();
+        assert_eq!(empty.generation(), observed);
+        assert!(empty.get(12, 1).is_none());
+    }
+
+    #[test]
     fn aggregate_budget_fails_before_crossing_across_canvases_and_readbacks() {
         let _serial = RETENTION_TEST_LOCK.lock().unwrap();
         let mut registry = Registry {
@@ -936,5 +1163,137 @@ mod tests {
                 ..
             }]
         ));
+        let observation = observe_canvas_for_capture(CanvasId(4), Some(key), Size2D::new(2, 2));
+        assert_eq!(observation.status, CanvasCaptureObservationStatus::Ready);
+    }
+
+    #[test]
+    fn partial_readback_does_not_seal_an_unsupported_transcript() {
+        let _serial = RETENTION_TEST_LOCK.lock().unwrap();
+        let key = ImageKey(IdNamespace(7), 14);
+        let _guard = start_retaining_canvas_commands();
+        register_canvas(CanvasId(5), Size2D::new(2, 2));
+        associate_image_key(CanvasId(5), key);
+        mark_unsupported(
+            CanvasId(5),
+            "fill_path",
+            RetainedCanvasUnsupportedReason::UnsupportedCommand,
+        );
+        let pixels = Snapshot::from_vec(
+            Size2D::new(1, 1),
+            SnapshotPixelFormat::RGBA,
+            SnapshotAlphaMode::Transparent {
+                premultiplied: true,
+            },
+            vec![255; 4],
+        );
+        retain_pixel_readback(
+            CanvasId(5),
+            Some(Rect::new(Point2D::zero(), Size2D::new(1, 1))),
+            &pixels,
+        );
+
+        let observation = observe_canvas_for_capture(CanvasId(5), Some(key), Size2D::new(2, 2));
+        assert_eq!(
+            observation.status,
+            CanvasCaptureObservationStatus::UnsupportedTranscript
+        );
+    }
+
+    #[test]
+    fn full_readback_seals_pixels_while_retaining_active_clip_state() {
+        let _serial = RETENTION_TEST_LOCK.lock().unwrap();
+        let key = ImageKey(IdNamespace(7), 15);
+        let canvas_id = CanvasId(6);
+        let _guard = start_retaining_canvas_commands();
+        register_canvas(canvas_id, Size2D::new(2, 2));
+        associate_image_key(canvas_id, key);
+        retain_clip_push(canvas_id);
+        mark_unsupported(
+            canvas_id,
+            "fill_path",
+            RetainedCanvasUnsupportedReason::UnsupportedCommand,
+        );
+        retain_pixel_readback(
+            canvas_id,
+            Some(Rect::new(Point2D::zero(), Size2D::new(2, 2))),
+            &opaque_2x2_snapshot(),
+        );
+
+        let observation = observe_canvas_for_capture(canvas_id, Some(key), Size2D::new(2, 2));
+        assert_eq!(observation.status, CanvasCaptureObservationStatus::Ready);
+        assert_eq!(registry().active_clip_depths[&canvas_id], 1);
+    }
+
+    #[test]
+    fn retained_draw_after_full_readback_under_active_clip_fails_closed() {
+        let _serial = RETENTION_TEST_LOCK.lock().unwrap();
+        let key = ImageKey(IdNamespace(7), 16);
+        let canvas_id = CanvasId(7);
+        let _guard = start_retaining_canvas_commands();
+        register_canvas(canvas_id, Size2D::new(2, 2));
+        associate_image_key(canvas_id, key);
+        retain_clip_push(canvas_id);
+        retain_pixel_readback(
+            canvas_id,
+            Some(Rect::new(Point2D::zero(), Size2D::new(2, 2))),
+            &opaque_2x2_snapshot(),
+        );
+        assert_eq!(
+            observe_canvas_for_capture(canvas_id, Some(key), Size2D::new(2, 2)).status,
+            CanvasCaptureObservationStatus::Ready
+        );
+
+        retain_supported_fill(canvas_id);
+
+        let observation = observe_canvas_for_capture(canvas_id, Some(key), Size2D::new(2, 2));
+        assert_eq!(
+            observation.status,
+            CanvasCaptureObservationStatus::UnsupportedTranscript
+        );
+        assert_eq!(
+            registry().canvases[&canvas_id]
+                .unsupported
+                .as_ref()
+                .map(|unsupported| unsupported.reason),
+            Some(RetainedCanvasUnsupportedReason::Clip)
+        );
+    }
+
+    #[test]
+    fn exact_clip_pops_restore_retained_draw_support_only_after_the_last_clip() {
+        let _serial = RETENTION_TEST_LOCK.lock().unwrap();
+        let key = ImageKey(IdNamespace(7), 17);
+        let canvas_id = CanvasId(8);
+        let _guard = start_retaining_canvas_commands();
+        register_canvas(canvas_id, Size2D::new(2, 2));
+        associate_image_key(canvas_id, key);
+        retain_clip_push(canvas_id);
+        retain_clip_push(canvas_id);
+        retain_pixel_readback(
+            canvas_id,
+            Some(Rect::new(Point2D::zero(), Size2D::new(2, 2))),
+            &opaque_2x2_snapshot(),
+        );
+
+        retain_clip_pop(canvas_id, 1);
+        retain_supported_fill(canvas_id);
+        assert_eq!(
+            observe_canvas_for_capture(canvas_id, Some(key), Size2D::new(2, 2)).status,
+            CanvasCaptureObservationStatus::UnsupportedTranscript
+        );
+
+        retain_pixel_readback(
+            canvas_id,
+            Some(Rect::new(Point2D::zero(), Size2D::new(2, 2))),
+            &opaque_2x2_snapshot(),
+        );
+        retain_clip_pop(canvas_id, 1);
+        retain_supported_fill(canvas_id);
+        assert_eq!(
+            observe_canvas_for_capture(canvas_id, Some(key), Size2D::new(2, 2)).status,
+            CanvasCaptureObservationStatus::Ready
+        );
+        assert_eq!(registry().active_clip_depths[&canvas_id], 0);
     }
 }

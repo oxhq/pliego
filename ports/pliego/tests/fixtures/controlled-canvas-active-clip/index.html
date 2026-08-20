@@ -1,0 +1,24 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Controlled Canvas active clip rejection</title>
+<canvas id="active-clip" width="16" height="12"></canvas>
+<script>
+  window.pliego?.defer();
+
+  const canvas = document.getElementById("active-clip");
+  const context = canvas.getContext("2d");
+  context.save();
+  context.beginPath();
+  context.rect(0, 0, 8, 6);
+  context.clip();
+  context.fillStyle = "rgb(12, 180, 96)";
+  context.fillRect(0, 0, 8, 6);
+
+  // This exact readback seals every pixel produced so far, but it does not clear the clip stack.
+  context.getImageData(0, 0, canvas.width, canvas.height);
+
+  // A later retained draw still depends on the active clip and must fail closed.
+  context.fillStyle = "rgb(244, 196, 48)";
+  context.fillRect(8, 6, 8, 6);
+  window.pliego?.ready({ fixture: "controlled-canvas-active-clip" });
+</script>

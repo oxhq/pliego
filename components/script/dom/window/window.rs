@@ -24,9 +24,9 @@ use devtools_traits::{ScriptToDevtoolsControlMsg, TimelineMarker, TimelineMarker
 use dom_struct::dom_struct;
 use embedder_traits::user_contents::UserScript;
 use embedder_traits::{
-    AlertResponse, ConfirmResponse, EmbedderMsg, JavaScriptEvaluationError, PromptResponse,
-    ScriptToEmbedderChan, SimpleDialogRequest, Theme, UntrustedNodeAddress, ViewportDetails,
-    WebDriverJSResult, WebDriverLoadStatus,
+    AlertResponse, ConfirmResponse, DocumentTimeReadinessBlocker, EmbedderMsg,
+    JavaScriptEvaluationError, PromptResponse, ScriptToEmbedderChan, SimpleDialogRequest, Theme,
+    UntrustedNodeAddress, ViewportDetails, WebDriverJSResult, WebDriverLoadStatus,
 };
 use euclid::{Point2D, Rect, Scale, Size2D, Vector2D};
 use fonts::{CspViolationHandler, FontContext, NetworkTimingHandler, WebFontDocumentContext};
@@ -95,6 +95,7 @@ use style::stylesheets::UrlExtraData;
 use style_traits::CSSPixel;
 use stylo_atoms::Atom;
 use time::Duration as TimeDuration;
+use timers::{DocumentClockError, DocumentTime, DocumentTimeSurface};
 use webrender_api::ExternalScrollId;
 use webrender_api::units::{DeviceIntSize, DevicePixel, LayoutPixel, LayoutPoint};
 
@@ -188,6 +189,7 @@ use crate::layout_image::fetch_image_for_layout;
 use crate::messaging::{MainThreadScriptMsg, ScriptEventLoopReceiver, ScriptEventLoopSender};
 use crate::microtask::{Microtask, UserMicrotask};
 use crate::network_listener::{ResourceTimingListener, submit_timing};
+use crate::producer_fence::{DocumentProducerEnvelope, fence_image_callback};
 use crate::realms::enter_auto_realm;
 use crate::script_runtime::Runtime;
 use crate::script_thread::ScriptThread;
@@ -290,13 +292,15 @@ pub(crate) struct Window {
     navigator: MutNullableDom<Navigator>,
     crypto: MutNullableDom<Crypto>,
     #[no_trace]
-    image_cache_sender: Sender<ImageCacheResponseMessage>,
+    image_cache_sender: Sender<DocumentProducerEnvelope<ImageCacheResponseMessage>>,
     window_proxy: MutNullableDom<WindowProxy>,
     document: MutNullableDom<Document>,
     location: MutNullableDom<Location>,
     performance: MutNullableDom<Performance>,
     #[no_trace]
     navigation_start: Cell<CrossProcessInstant>,
+    #[no_trace]
+    document_time_origin: Cell<DocumentTime>,
     screen: MutNullableDom<Screen>,
     session_storage: MutNullableDom<Storage>,
     local_storage: MutNullableDom<Storage>,
@@ -496,6 +500,16 @@ impl Window {
         self.upcast::<GlobalScope>()
     }
 
+    /// Return the existing CookieStore without creating observable DOM state.
+    pub(crate) fn get_existing_cookie_store(&self) -> Option<DomRoot<CookieStore>> {
+        self.cookie_store.get()
+    }
+
+    /// Return the existing Navigator without creating observable DOM state.
+    pub(crate) fn get_existing_navigator(&self) -> Option<DomRoot<Navigator>> {
+        self.navigator.get()
+    }
+
     pub(crate) fn layout(&self) -> Ref<'_, Box<dyn Layout>> {
         self.layout.borrow()
     }
@@ -564,13 +578,19 @@ impl Window {
     pub(crate) fn new_script_pair(&self) -> (ScriptEventLoopSender, ScriptEventLoopReceiver) {
         let (sender, receiver) = unbounded();
         (
-            ScriptEventLoopSender::MainThread(sender),
+            ScriptEventLoopSender::MainThread {
+                sender,
+                producer_fence: self.script_thread().document_producer_fence(),
+            },
             ScriptEventLoopReceiver::MainThread(receiver),
         )
     }
 
     pub(crate) fn event_loop_sender(&self) -> ScriptEventLoopSender {
-        ScriptEventLoopSender::MainThread(self.script_chan.clone())
+        ScriptEventLoopSender::MainThread {
+            sender: self.script_chan.clone(),
+            producer_fence: self.script_thread().document_producer_fence(),
+        }
     }
 
     pub(crate) fn image_cache(&self) -> Arc<dyn ImageCache> {
@@ -704,9 +724,10 @@ impl Window {
             .push(PendingImageCallback(Box::new(callback)));
 
         let image_cache_sender = self.image_cache_sender.clone();
-        Box::new(move |message| {
+        let callback = Box::new(move |message| {
             let _ = image_cache_sender.send(message);
-        })
+        });
+        fence_image_callback(&self.script_thread().document_producer_fence(), callback)
     }
 
     fn pending_layout_image_notification(&self, response: PendingImageResponse) {
@@ -1758,8 +1779,14 @@ impl WindowMethods<crate::DomTypeHolder> for Window {
     // https://dvcs.w3.org/hg/webperf/raw-file/tip/specs/
     // NavigationTiming/Overview.html#sec-window.performance-attribute
     fn Performance(&self, cx: &mut JSContext) -> DomRoot<Performance> {
-        self.performance
-            .or_init(|| Performance::new(cx, self.as_global_scope(), self.navigation_start.get()))
+        self.performance.or_init(|| {
+            Performance::new(
+                cx,
+                self.as_global_scope(),
+                self.navigation_start.get(),
+                Some(self.document_time_origin.get()),
+            )
+        })
     }
 
     // https://html.spec.whatwg.org/multipage/#globaleventhandlers
@@ -2776,6 +2803,48 @@ impl Window {
         self.has_pending_screenshot_readiness_request.set(false);
     }
 
+    pub(crate) fn controlled_document_time_readiness(
+        &self,
+        cx: &mut JSContext,
+    ) -> Vec<DocumentTimeReadinessBlocker> {
+        let document = self.Document();
+        let mut blockers = Vec::new();
+        if !document.is_fully_active() {
+            blockers.push(DocumentTimeReadinessBlocker::NotFullyActive);
+        }
+        if document.ReadyState() != DocumentReadyState::Complete {
+            blockers.push(DocumentTimeReadinessBlocker::Loading);
+        }
+        if document.render_blocking_element_count() > 0 {
+            blockers.push(DocumentTimeReadinessBlocker::RenderBlocked);
+        }
+        if document.GetDocumentElement().is_some_and(|element| {
+            element.has_class(&atom!("reftest-wait"), CaseSensitivity::CaseSensitive) ||
+                element.has_class(&Atom::from("test-wait"), CaseSensitivity::CaseSensitive)
+        }) {
+            blockers.push(DocumentTimeReadinessBlocker::WaitMarker);
+        }
+        if self.font_context().web_fonts_still_loading() != 0 {
+            blockers.push(DocumentTimeReadinessBlocker::FontsLoading);
+        }
+        if document.Fonts(cx).waiting_to_fullfill_promise() {
+            blockers.push(DocumentTimeReadinessBlocker::FontReadyPromise);
+        }
+        if !self.pending_layout_images.borrow().is_empty() {
+            blockers.push(DocumentTimeReadinessBlocker::LayoutImages);
+        }
+        if !self.pending_images_for_rasterization.borrow().is_empty() {
+            blockers.push(DocumentTimeReadinessBlocker::RasterImages);
+        }
+        if document.needs_rendering_update() {
+            blockers.push(DocumentTimeReadinessBlocker::RenderingUpdate);
+        }
+        if document.waiting_on_canvas_image_updates() {
+            blockers.push(DocumentTimeReadinessBlocker::CanvasImageUpdates);
+        }
+        blockers
+    }
+
     /// If parsing has taken a long time and reflows are still waiting for the `load` event,
     /// start allowing them. See <https://github.com/servo/servo/pull/6028>.
     pub(crate) fn reflow_if_reflow_timer_expired(&self, cx: &mut JSContext) {
@@ -3536,10 +3605,22 @@ impl Window {
 
     pub(crate) fn set_navigation_start(&self) {
         self.navigation_start.set(CrossProcessInstant::now());
+        self.document_time_origin
+            .set(self.as_global_scope().document_clock().now());
     }
 
-    pub(crate) fn navigation_start(&self) -> CrossProcessInstant {
-        self.navigation_start.get()
+    /// Return a checked timestamp relative to this Window's navigation origin.
+    ///
+    /// Callers must name the observable surface so controlled time cannot silently fall back to a
+    /// host timestamp when a new producer has not been routed yet.
+    pub(crate) fn document_time_since_navigation(
+        &self,
+        observed: DocumentTime,
+        surface: DocumentTimeSurface,
+    ) -> Result<Duration, DocumentClockError> {
+        self.as_global_scope()
+            .document_clock()
+            .duration_since_for_surface(surface, self.document_time_origin.get(), observed)
     }
 
     pub(crate) fn set_last_activation_timestamp(&self, time: UserActivationTimestamp) {
@@ -3626,13 +3707,16 @@ impl Window {
             let mut images = self.pending_images_for_rasterization.borrow_mut();
             if !images.contains_key(&(image.id, image.size)) {
                 let image_cache_sender = self.image_cache_sender.clone();
+                let callback = Box::new(move |response| {
+                    let _ = image_cache_sender.send(response);
+                });
+                let callback =
+                    fence_image_callback(&self.script_thread().document_producer_fence(), callback);
                 image_cache.add_rasterization_complete_listener(
                     pipeline_id,
                     image.id,
                     image.size,
-                    Box::new(move |response| {
-                        let _ = image_cache_sender.send(response);
-                    }),
+                    callback,
                 );
             }
 
@@ -3712,7 +3796,7 @@ impl Window {
         script_chan: Sender<MainThreadScriptMsg>,
         layout: Box<dyn Layout>,
         font_context: Arc<FontContext>,
-        image_cache_sender: Sender<ImageCacheResponseMessage>,
+        image_cache_sender: Sender<DocumentProducerEnvelope<ImageCacheResponseMessage>>,
         resource_threads: ResourceThreads,
         storage_threads: StorageThreads,
         #[cfg(feature = "bluetooth")] bluetooth_thread: GenericSender<BluetoothRequest>,
@@ -3729,6 +3813,7 @@ impl Window {
         creation_url: ServoUrl,
         top_level_creation_url: ServoUrl,
         navigation_start: CrossProcessInstant,
+        document_time_origin: DocumentTime,
         webgl_chan: Option<WebGLChan>,
         #[cfg(feature = "webxr")] webxr_registry: Option<webxr_api::Registry>,
         paint_api: CrossProcessPaintApi,
@@ -3776,6 +3861,7 @@ impl Window {
             document: Default::default(),
             performance: Default::default(),
             navigation_start: Cell::new(navigation_start),
+            document_time_origin: Cell::new(document_time_origin),
             screen: Default::default(),
             session_storage: Default::default(),
             local_storage: Default::default(),

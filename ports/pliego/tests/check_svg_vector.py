@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -84,6 +85,10 @@ def has_unsupported_svg_text(items: list[dict[str, Any]]) -> bool:
     return any(item.get("kind") == "unsupported" and item.get("reason") == "text" for item in items)
 
 
+def retain_failure_evidence(root: Path, output: Path) -> None:
+    shutil.make_archive(str(output / "failure-evidence"), "zip", root_dir=root)
+
+
 def run(binary: Path, fixture: Path, root: Path) -> tuple[bytes, bytes, bytes, bytes]:
     artifacts = root / "artifacts"
     output = root / "document.pdf"
@@ -122,9 +127,15 @@ def run(binary: Path, fixture: Path, root: Path) -> tuple[bytes, bytes, bytes, b
         timeout=60,
         check=False,
     )
+    (root / "process.stdout.log").write_text(result.stdout, encoding="utf-8")
+    (root / "process.stderr.log").write_text(result.stderr, encoding="utf-8")
+    summary = final_json(result)
+    (root / "summary.json").write_text(
+        json.dumps(summary, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
     if result.returncode != 0:
         fail(result.stderr[-4000:] or result.stdout[-4000:])
-    summary = final_json(result)
     require(summary.get("status") == "rendered", repr(summary))
     readiness = summary.get("readiness")
     require(
@@ -246,6 +257,25 @@ def self_test() -> None:
     else:
         fail("media-box length mismatch was silently accepted")
     require(INLINE_PNG.startswith(b"\x89PNG\r\n\x1a\n"), "inline PNG fixture is invalid")
+    with tempfile.TemporaryDirectory(prefix="pliego-svg-retention-self-test-") as temporary:
+        temporary_root = Path(temporary)
+        root = temporary_root / "root"
+        output = temporary_root / "output"
+        output.mkdir()
+        retained = {
+            "process.stdout.log": b'{"status":"failed"}\n',
+            "process.stderr.log": b"worker detail\n",
+            "summary.json": b'{"status":"failed"}\n',
+            ".pliego-runtime-fixture/artifacts/failure.json": b"private evidence\n",
+        }
+        for name, contents in retained.items():
+            path = root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(contents)
+        retain_failure_evidence(root, output)
+        with zipfile.ZipFile(output / "failure-evidence.zip") as archive:
+            for name, contents in retained.items():
+                require(archive.read(name) == contents, f"failure evidence changed: {name}")
 
 
 def main() -> int:
@@ -267,11 +297,15 @@ def main() -> int:
         first_root, second_root = root / "first", root / "second"
         first_root.mkdir()
         second_root.mkdir()
-        first = run(binary, fixture, first_root)
-        second = run(binary, fixture, second_root)
-        require(first == second, "identical live SVG runs changed scene, preview, PDF, or font report")
-        shutil.copytree(first_root / "artifacts", output / "artifacts")
-        shutil.copy2(first_root / "document.pdf", output / "document.pdf")
+        try:
+            first = run(binary, fixture, first_root)
+            second = run(binary, fixture, second_root)
+            require(first == second, "identical live SVG runs changed scene, preview, PDF, or font report")
+            shutil.copytree(first_root / "artifacts", output / "artifacts")
+            shutil.copy2(first_root / "document.pdf", output / "document.pdf")
+        except (Exception, SystemExit):
+            retain_failure_evidence(root, output)
+            raise
     digest = f"sha256:{hashlib.sha256(first[0]).hexdigest()}"
     (output / "comparison.json").write_text(
         json.dumps({"scene_hash": digest, "repeat_equal": True}, indent=2) + "\n", encoding="utf-8"

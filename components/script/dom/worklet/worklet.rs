@@ -35,6 +35,7 @@ use servo_base::id::PipelineId;
 use servo_url::{ImmutableOrigin, ServoUrl};
 use style::thread_state::{self, ThreadState};
 use swapper::{Swapper, swapper};
+use timers::DocumentTimeSurface;
 use uuid::Uuid;
 
 use crate::conversions::Convert;
@@ -142,6 +143,15 @@ impl WorkletMethods<crate::DomTypeHolder> for Worklet {
     ) -> Rc<Promise> {
         // Step 1.
         let promise = Promise::new_in_realm(realm);
+        if let Err(error) = self
+            .window
+            .as_global_scope()
+            .document_clock()
+            .require_surface(DocumentTimeSurface::Worklet)
+        {
+            promise.reject_error(realm, Error::NotSupported(Some(error.to_string())));
+            return promise;
+        }
 
         // Step 3.
         let module_url_record = match self.window.Document().base_url().join(&module_url.0) {

@@ -18,7 +18,7 @@ final class ManagedRuntime
 {
     private const RELEASE_ROOT = 'https://github.com/oxhq/pliego/releases/download';
 
-    /** @var array{schema: int, version: string, api: int, assets: array<string, array{bytes: int, sha256: string, files: list<string>}>} */
+    /** @var array{schema: int, version: string, api: int, release_ready: bool, assets: array<string, array{bytes: int, sha256: string, files: list<string>}>} */
     private array $manifest;
 
     /** @var Closure(string): string */
@@ -74,6 +74,7 @@ final class ManagedRuntime
         if ($this->binaryOverride !== null) {
             return $this->binaryOverride;
         }
+        $this->requireReleaseReady();
 
         $platform ??= self::platformKey();
         $path = $this->runtimeDirectory($this->installRoot, $platform)
@@ -90,6 +91,7 @@ final class ManagedRuntime
         if ($this->binaryOverride !== null) {
             throw new RuntimeException('Unset PLIEGO_BINARY before installing the managed Pliego runtime.');
         }
+        $this->requireReleaseReady();
 
         $platform ??= self::platformKey();
         $asset = $this->asset($platform);
@@ -283,7 +285,7 @@ final class ManagedRuntime
     }
 
     /**
-     * @return array{schema: int, version: string, api: int, assets: array<string, array{bytes: int, sha256: string, files: list<string>}>}
+     * @return array{schema: int, version: string, api: int, release_ready: bool, assets: array<string, array{bytes: int, sha256: string, files: list<string>}>}
      */
     private function readManifest(string $path): array
     {
@@ -307,6 +309,7 @@ final class ManagedRuntime
             || preg_match('/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/D', $version) !== 1
             || !is_int($api)
             || $api < 1
+            || !is_bool($manifest['release_ready'] ?? null)
             || !is_array($assets)
             || array_keys($assets) !== $platforms
         ) {
@@ -335,8 +338,17 @@ final class ManagedRuntime
             }
         }
 
-        /** @var array{schema: int, version: string, api: int, assets: array<string, array{bytes: int, sha256: string, files: list<string>}>} $manifest */
+        /** @var array{schema: int, version: string, api: int, release_ready: bool, assets: array<string, array{bytes: int, sha256: string, files: list<string>}>} $manifest */
         return $manifest;
+    }
+
+    private function requireReleaseReady(): void
+    {
+        if (!$this->manifest['release_ready']) {
+            throw new RuntimeException(
+                'Pliego managed runtime metadata is not finalized; use PLIEGO_BINARY until the native release manifest is published.',
+            );
+        }
     }
 
     private function safeRelativePath(string $path): bool

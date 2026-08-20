@@ -8,7 +8,9 @@
 //! is not exposed in the API or doesn't involve messages sent to the embedding/libservo layer, it
 //! is probably a better fit for the `servo_constellation_traits` crate.
 
+mod document_time;
 pub mod embedder_controls;
+mod generation_capture;
 pub mod input_events;
 pub mod resources;
 pub mod user_contents;
@@ -49,11 +51,13 @@ use webrender_api::units::{
     DeviceVector2D, LayoutPoint, LayoutRect, LayoutSize, LayoutVector2D,
 };
 
+#[doc(hidden)]
+pub use crate::document_time::*;
 pub use crate::embedder_controls::*;
+pub use crate::generation_capture::*;
 pub use crate::input_events::*;
 use crate::user_contents::UserContentManagerId;
 pub use crate::webdriver::*;
-
 /// A point in a `WebView`, either expressed in device pixels or page pixels.
 /// Page pixels are CSS pixels, which take into account device pixel scale,
 /// page zoom, and pinch zoom.
@@ -1139,7 +1143,7 @@ pub struct RgbColor {
 
 /// A Script to Embedder Channel
 #[derive(Clone, Debug, Deserialize, MallocSizeOf, Serialize)]
-pub struct ScriptToEmbedderChan(GenericCallback<EmbedderMsg>);
+pub struct ScriptToEmbedderChan(GenericCallback<EmbedderMsg>, GenericCallback<()>);
 
 impl ScriptToEmbedderChan {
     /// Create a new Channel allowing script to send messages to the Embedder
@@ -1147,6 +1151,7 @@ impl ScriptToEmbedderChan {
         embedder_chan: Sender<EmbedderMsg>,
         waker: Box<dyn EventLoopWaker>,
     ) -> ScriptToEmbedderChan {
+        let wake_only_waker = waker.clone();
         let embedder_callback = GenericCallback::new(move |embedder_msg| {
             let msg = match embedder_msg {
                 Ok(embedder_msg) => embedder_msg,
@@ -1159,12 +1164,61 @@ impl ScriptToEmbedderChan {
             waker.wake();
         })
         .expect("Failed to create channel");
-        ScriptToEmbedderChan(embedder_callback)
+        let wake_only_callback = GenericCallback::new(move |wake| {
+            if let Err(error) = wake {
+                log::warn!("Script to Embedder wake error: {error}");
+                return;
+            }
+            wake_only_waker.wake();
+        })
+        .expect("Failed to create wake channel");
+        ScriptToEmbedderChan(embedder_callback, wake_only_callback)
     }
 
     /// Send a message to and wake the Embedder
     pub fn send(&self, msg: EmbedderMsg) -> SendResult {
         self.0.send(msg)
+    }
+
+    /// Wake the embedding event loop without queueing an embedder message.
+    #[doc(hidden)]
+    pub fn wake(&self) -> SendResult {
+        self.1.send(())
+    }
+}
+
+#[cfg(test)]
+mod script_to_embedder_chan_tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use crossbeam_channel::{TryRecvError, unbounded};
+
+    use super::{EventLoopWaker, ScriptToEmbedderChan};
+
+    #[derive(Clone)]
+    struct CountingWaker(Arc<AtomicUsize>);
+
+    impl EventLoopWaker for CountingWaker {
+        fn clone_box(&self) -> Box<dyn EventLoopWaker> {
+            Box::new(self.clone())
+        }
+
+        fn wake(&self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn wake_only_signal_does_not_queue_an_embedder_message() {
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let (sender, receiver) = unbounded();
+        let channel = ScriptToEmbedderChan::new(sender, Box::new(CountingWaker(wakes.clone())));
+
+        channel.wake().unwrap();
+
+        assert_eq!(wakes.load(Ordering::SeqCst), 1);
+        assert!(matches!(receiver.try_recv(), Err(TryRecvError::Empty)));
     }
 }
 

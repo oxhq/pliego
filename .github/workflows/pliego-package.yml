@@ -2,12 +2,33 @@ name: Pliego package matrix
 
 on:
   workflow_dispatch:
-  pull_request:
-    paths:
-      - .github/workflows/pliego-package.yml
   push:
     branches:
+      - main
       - "release-proof/**"
+    paths: &package-paths
+      - .github/workflows/pliego-package.yml
+      - .cargo/**
+      - .python-version
+      - Cargo.lock
+      - Cargo.toml
+      - contracts/api2/**
+      - LICENSE*
+      - licenses/**
+      - mach
+      - pyproject.toml
+      - rust-toolchain.toml
+      - uv.lock
+      - ports/pliego/**
+      - components/**
+      - docs/pliego/third-party-notices.md
+      - docs/releases/**
+      - resources/**
+      - support/**
+      - third_party/**
+      - python/**
+  pull_request:
+    paths: *package-paths
 
 permissions:
   contents: read
@@ -20,6 +41,7 @@ env:
   CARGO_INCREMENTAL: 0
   RUSTC_WRAPPER: sccache
   SCCACHE_GHA_ENABLED: "true"
+  SERVO_BASE_SHA: "313b6d5ecc113b08010ce434140db3ca5abcc71c"
 
 jobs:
   archive-contract:
@@ -31,6 +53,7 @@ jobs:
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           persist-credentials: false
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
 
       - name: Set up Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
@@ -38,7 +61,9 @@ jobs:
           python-version-file: .python-version
 
       - name: Check release archive contract and source assets
-        run: python python/check_pliego_release_archive.py --self-test --check-source-assets .
+        run: |
+          python python/check_pliego_version.py --self-test
+          python python/check_pliego_release_archive.py --self-test --check-source-assets .
 
   package:
     name: ${{ matrix.name }}
@@ -52,21 +77,29 @@ jobs:
           - name: Linux x64
             runner: ubuntu-22.04
             bundle: linux-x86_64
+            executable: pliego
+            target: x86_64-unknown-linux-gnu
             target_dir: target
             archive_ext: tar.gz
           - name: Windows x64
             runner: windows-2022
             bundle: windows-x86_64
+            executable: pliego.exe
+            target: x86_64-pc-windows-msvc
             target_dir: C:\a\pliego\target
             archive_ext: zip
           - name: macOS Intel
             runner: macos-15-intel
             bundle: macos-x86_64
+            executable: pliego
+            target: x86_64-apple-darwin
             target_dir: target
             archive_ext: tar.gz
           - name: macOS Apple Silicon
             runner: macos-15
             bundle: macos-aarch64
+            executable: pliego
+            target: aarch64-apple-darwin
             target_dir: target
             archive_ext: tar.gz
     env:
@@ -77,6 +110,7 @@ jobs:
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           persist-credentials: false
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
 
       - name: Set up Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
@@ -89,10 +123,10 @@ jobs:
           version: "0.11.16"
           enable-cache: false
 
-      - name: Resolve Pliego version
+      - name: Resolve package versions
         shell: bash
         run: |
-          python -c 'import json, os, subprocess; m=json.loads(subprocess.check_output(["cargo", "metadata", "--no-deps", "--format-version", "1"])); v=next(p["version"] for p in m["packages"] if p["name"] == "pliego"); open(os.environ["GITHUB_ENV"], "a", encoding="utf-8").write(f"PLIEGO_VERSION={v}\n")'
+          python -c 'import json, os, subprocess; m=json.loads(subprocess.check_output(["cargo", "metadata", "--no-deps", "--format-version", "1"])); pliego=next(p["version"] for p in m["packages"] if p["name"] == "pliego"); servo=next(p["version"] for p in m["packages"] if p["name"] == "servo"); open(os.environ["GITHUB_ENV"], "a", encoding="utf-8").write(f"PLIEGO_VERSION={pliego}\nSERVO_VERSION={servo}\n")'
 
       - name: Cache Rust compilation
         uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
@@ -103,6 +137,7 @@ jobs:
         run: |
           echo "LIBCLANG_PATH=/usr/lib/llvm-14/lib" >> "$GITHUB_ENV"
           sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends poppler-utils xauth xvfb
           ./mach bootstrap --yes --skip-lints --skip-nextest
 
       - name: Configure macOS build
@@ -115,8 +150,56 @@ jobs:
           @("LIBCLANG_PATH=C:\Program Files\LLVM\bin", "CC=clang-cl.exe", "CXX=clang-cl.exe") | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           .\mach fetch
 
+      - name: Check production dependency boundary
+        shell: bash
+        run: |
+          tree="$(cargo tree -p pliego --edges normal --prefix none --locked)"
+          printf '%s\n' "$tree"
+          grep -Eq '^servo v[0-9]' <<< "$tree"
+          if grep -Eq '^servoshell v[0-9]' <<< "$tree"; then
+            echo 'default package graph pulled in the nonproduction shell oracle' >&2
+            exit 1
+          fi
+
       - name: Build Pliego only
         run: cargo build -p pliego --locked --profile checked-release
+
+      - name: Test native PDF publication primitives
+        shell: bash
+        run: |
+          set -euo pipefail
+          selected_tests="$({
+            cargo test -p pliego --bin pliego --locked --profile checked-release \
+              session::tests:: -- --list --skip document_session::tests::
+          } | awk 'sub(/: test$/, "") { print }')"
+          native_test_count="$(printf '%s\n' "$selected_tests" | awk '/^session::tests::/ { count++ } END { print count + 0 }')"
+          if [[ "$native_test_count" -lt 1 ]]; then
+            echo '::error::No native session::tests:: publication tests were selected.'
+            exit 1
+          fi
+          unexpected_tests="$(printf '%s\n' "$selected_tests" | awk 'NF && $0 !~ /^session::tests::/ { print }')"
+          if [[ -n "$unexpected_tests" ]]; then
+            echo '::error::The native publication filter selected tests outside session::tests::.'
+            printf '%s\n' "$unexpected_tests"
+            exit 1
+          fi
+          cargo test -p pliego --bin pliego --locked --profile checked-release \
+            session::tests:: -- --skip document_session::tests::
+          supervisor_tests="$(cargo test -p pliego --bin pliego --locked --profile checked-release \
+            render_supervisor::tests:: -- --list | awk 'sub(/: test$/, "") { print }')"
+          supervisor_test_count="$(printf '%s\n' "$supervisor_tests" | awk '/^render_supervisor::tests::/ { count++ } END { print count + 0 }')"
+          if [[ "$supervisor_test_count" -lt 1 ]]; then
+            echo '::error::No render_supervisor::tests:: tests were selected.'
+            exit 1
+          fi
+          unexpected_supervisor_tests="$(printf '%s\n' "$supervisor_tests" | awk 'NF && $0 !~ /^render_supervisor::tests::/ { print }')"
+          if [[ -n "$unexpected_supervisor_tests" ]]; then
+            echo '::error::The render-supervisor filter selected tests outside render_supervisor::tests::.'
+            printf '%s\n' "$unexpected_supervisor_tests"
+            exit 1
+          fi
+          cargo test -p pliego --bin pliego --locked --profile checked-release \
+            render_supervisor::tests::
 
       - name: Package and smoke-test Unix bundle
         if: runner.os != 'Windows'
@@ -135,10 +218,25 @@ jobs:
           printf 'Repository: %s/%s\nSource: %s/%s/tree/v%s\n' "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$PLIEGO_VERSION" > "dist/$bundle/SOURCE.txt"
           python python/check_pliego_release_archive.py --native-inventory '${{ matrix.bundle }}' > "dist/$bundle/NATIVE-LIBRARIES.txt"
           printf '%s\n' '1. Verify the adjacent SHA-256 file.' '2. Put pliego on PATH or set PLIEGO_BINARY.' '3. Run pliego --version.' > "dist/$bundle/INSTALL.txt"
-          "dist/$bundle/pliego" --version | tee "dist/$bundle/VERSION.txt"
-          grep -Fqx 'pliego-api 1' "dist/$bundle/VERSION.txt"
+          revision="$(git rev-parse --short HEAD)"
+          help_stdout="$RUNNER_TEMP/pliego-help-${{ matrix.bundle }}.txt"
+          "dist/$bundle/pliego" --help > "$help_stdout"
+          grep -F 'Runtime: document-session' "$help_stdout"
+          grep -F -- '--allow-partial-scene       Retain diagnostic output (render only; rejected by render-controlled)' "$help_stdout"
+          if grep -F 'NONPRODUCTION ORACLE BUILD' "$help_stdout"; then
+            echo 'release bundle contains the nonproduction shell oracle' >&2
+            exit 1
+          fi
+          version_stderr="$RUNNER_TEMP/pliego-version-${{ matrix.bundle }}.stderr"
+          "dist/$bundle/pliego" --version 2>"$version_stderr" | tee "dist/$bundle/VERSION.txt"
+          if [[ -s "$version_stderr" ]]; then
+            echo 'pliego --version must not write to stderr' >&2
+            cat "$version_stderr" >&2
+            exit 1
+          fi
+          python python/check_pliego_version.py "dist/$bundle/VERSION.txt" --pliego-version "$PLIEGO_VERSION" --servo-version "$SERVO_VERSION" --git-sha "$revision" --servo-base-sha "$SERVO_BASE_SHA"
           tar -C dist -czf "dist/$archive" "$bundle"
-          python python/check_pliego_release_archive.py "dist/$archive" --version "$PLIEGO_VERSION" --bundle '${{ matrix.bundle }}' --repository-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
+          python python/check_pliego_release_archive.py "dist/$archive" --version "$PLIEGO_VERSION" --bundle '${{ matrix.bundle }}' --repository-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" --servo-version "$SERVO_VERSION" --git-sha "$revision" --servo-base-sha "$SERVO_BASE_SHA"
           python -c 'import hashlib, pathlib, sys; p = pathlib.Path(sys.argv[1]); print(f"{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.name}")' "dist/$archive" > "dist/$archive.sha256"
 
       - name: Package and smoke-test Windows bundle
@@ -167,14 +265,166 @@ jobs:
           @("Repository: $env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY", "Source: $env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/tree/v$env:PLIEGO_VERSION") | Set-Content "$directory\SOURCE.txt" -Encoding utf8
           python python/check_pliego_release_archive.py --native-inventory '${{ matrix.bundle }}' | Set-Content "$directory\NATIVE-LIBRARIES.txt" -Encoding utf8
           @('1. Verify the adjacent SHA-256 file.', '2. Put pliego.exe on PATH or set PLIEGO_BINARY.', '3. Run pliego.exe --version.') | Set-Content "$directory\INSTALL.txt" -Encoding ascii
-          & "$directory\pliego.exe" --version | Tee-Object -FilePath "$directory\VERSION.txt"
+          $revision = git rev-parse --short HEAD
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          if ((Get-Content -LiteralPath "$directory\VERSION.txt") -cnotcontains 'pliego-api 1') { throw 'VERSION.txt must contain pliego-api 1' }
+          $help = (& "$directory\pliego.exe" --help | Out-String)
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not $help.Contains('Runtime: document-session')) {
+            throw 'release bundle did not select the document-session runtime'
+          }
+          if (-not $help.Contains('--allow-partial-scene       Retain diagnostic output (render only; rejected by render-controlled)')) {
+            throw 'Pliego help did not disclose render-controlled partial-scene rejection'
+          }
+          if ($help.Contains('NONPRODUCTION ORACLE BUILD')) {
+            throw 'release bundle contains the nonproduction shell oracle'
+          }
+          $llvmReadObj = Join-Path $env:LIBCLANG_PATH 'llvm-readobj.exe'
+          if (-not (Test-Path -LiteralPath $llvmReadObj -PathType Leaf)) {
+            throw "LLVM PE reader does not exist: $llvmReadObj"
+          }
+          $exports = (& $llvmReadObj --coff-exports "$directory\pliego.exe" | Out-String)
+          $readObjExitCode = $LASTEXITCODE
+          if ($readObjExitCode -ne 0) {
+            throw "llvm-readobj failed with exit code $readObjExitCode"
+          }
+          $exports | Write-Output
+          $exportNames = @(
+            $exports -split "`r?`n" | ForEach-Object {
+              if ($_ -cmatch '^\s*Name:\s+(\S+)\s*$') { $Matches[1] }
+            }
+          )
+          foreach ($symbol in @('NvOptimusEnablement', 'AmdPowerXpressRequestHighPerformance')) {
+            $count = @($exportNames | Where-Object { $_ -ceq $symbol }).Count
+            if ($count -ne 1) {
+              throw "release bundle export table contains $count exact entries for GPU selection symbol $symbol"
+            }
+          }
+          if ($exportNames -ccontains '_SURFMAN_LINK_ARGS') {
+            throw 'release bundle unexpectedly exports _SURFMAN_LINK_ARGS'
+          }
+          $versionStderr = Join-Path $env:RUNNER_TEMP 'pliego-version-${{ matrix.bundle }}.stderr'
+          & "$directory\pliego.exe" --version 2> $versionStderr | Tee-Object -FilePath "$directory\VERSION.txt"
+          $versionExitCode = $LASTEXITCODE
+          if ($versionExitCode -ne 0) {
+            Get-Content -LiteralPath $versionStderr | Write-Error
+            exit $versionExitCode
+          }
+          if ((Get-Item -LiteralPath $versionStderr).Length -ne 0) {
+            $versionError = [System.IO.File]::ReadAllText($versionStderr)
+            throw "pliego.exe --version must not write to stderr: $versionError"
+          }
+          python python/check_pliego_version.py "$directory\VERSION.txt" --pliego-version "$env:PLIEGO_VERSION" --servo-version "$env:SERVO_VERSION" --git-sha "$revision" --servo-base-sha "$env:SERVO_BASE_SHA"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Compress-Archive -Path $directory -DestinationPath "dist/$archive"
-          python python/check_pliego_release_archive.py "dist/$archive" --version "$env:PLIEGO_VERSION" --bundle '${{ matrix.bundle }}' --repository-url "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY"
+          python python/check_pliego_release_archive.py "dist/$archive" --version "$env:PLIEGO_VERSION" --bundle '${{ matrix.bundle }}' --repository-url "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY" --servo-version "$env:SERVO_VERSION" --git-sha "$revision" --servo-base-sha "$env:SERVO_BASE_SHA"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $hash = (Get-FileHash "dist/$archive" -Algorithm SHA256).Hash.ToLowerInvariant()
           "$hash  $archive" | Set-Content "dist/$archive.sha256" -Encoding ascii
+
+      - name: Prove the packaged API 2 executable foundation
+        shell: bash
+        run: |
+          set -euo pipefail
+          bundle="pliego-${PLIEGO_VERSION}-${{ matrix.bundle }}"
+          archive="$PWD/dist/${bundle}.${{ matrix.archive_ext }}"
+          unpacked="$RUNNER_TEMP/pliego-packaged-api2-${{ matrix.bundle }}"
+          proof="$PWD/dist/api2-executable-proof-${{ matrix.bundle }}.json"
+          test ! -e "$unpacked"
+          test ! -e "$proof"
+          python - "$archive" "$unpacked" <<'PY'
+          import shutil
+          import sys
+          shutil.unpack_archive(sys.argv[1], sys.argv[2])
+          PY
+          binary="$unpacked/$bundle/${{ matrix.executable }}"
+          test -f "$binary"
+          source_commit="$(git rev-parse HEAD)"
+          python contracts/api2/test_contract.py
+          python ports/pliego/tests/check_api2_contract.py --self-test
+          python ports/pliego/tests/check_api2_contract.py \
+            --binary "$binary" \
+            --expected-version "$PLIEGO_VERSION" \
+            --expected-source-commit "$source_commit" \
+            --expected-target '${{ matrix.target }}' \
+            --expected-servo-base "$SERVO_BASE_SHA" \
+            --valid-request contracts/api2/goldens/accepted/render-request.a4.json \
+            --archive "$archive" \
+            --bundle-version-file "$unpacked/$bundle/VERSION.txt" \
+            --proof-output "$proof"
+
+      - name: Upload packaged API 2 executable proof
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: pliego-${{ matrix.bundle }}-api2-executable-proof
+          path: dist/api2-executable-proof-${{ matrix.bundle }}.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Prove the packaged render-supervisor boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          bundle="pliego-${PLIEGO_VERSION}-${{ matrix.bundle }}"
+          unpacked="$RUNNER_TEMP/pliego-packaged-api2-${{ matrix.bundle }}"
+          binary="$unpacked/$bundle/${{ matrix.executable }}"
+          proof="$PWD/dist/render-supervisor-proof-${{ matrix.bundle }}"
+          test -f "$binary"
+          test ! -e "$proof"
+          python ports/pliego/tests/check_render_supervisor.py --self-test
+          if [[ '${{ runner.os }}' == 'Linux' ]]; then
+            xvfb-run --auto-servernum python ports/pliego/tests/check_render_supervisor.py \
+              --pliego "$binary" \
+              --proof-directory "$proof" \
+              --source-commit "$(git rev-parse HEAD)" \
+              --target '${{ matrix.target }}'
+          else
+            python ports/pliego/tests/check_render_supervisor.py \
+              --pliego "$binary" \
+              --proof-directory "$proof" \
+              --source-commit "$(git rev-parse HEAD)" \
+              --target '${{ matrix.target }}'
+          fi
+
+      - name: Upload packaged render-supervisor proof
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: pliego-${{ matrix.bundle }}-render-supervisor-proof
+          path: dist/render-supervisor-proof-${{ matrix.bundle }}
+          if-no-files-found: error
+          include-hidden-files: true
+          retention-days: 30
+
+      - name: Prove the packaged Linux controlled-capture boundary
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          bundle="pliego-${PLIEGO_VERSION}-${{ matrix.bundle }}"
+          archive="${bundle}.${{ matrix.archive_ext }}"
+          unpacked="$RUNNER_TEMP/pliego-packaged-controlled-capture"
+          proof="$PWD/dist/controlled-capture-proof"
+          test ! -e "$unpacked"
+          test ! -e "$proof"
+          mkdir -p "$unpacked"
+          tar -xzf "dist/$archive" -C "$unpacked"
+          binary="$unpacked/$bundle/pliego"
+          test -x "$binary"
+          python ports/pliego/tests/check_controlled_capture.py --self-test
+          xvfb-run --auto-servernum python ports/pliego/tests/check_controlled_capture.py \
+            "$binary" \
+            "$proof"
+          cp "dist/$archive.sha256" "$proof/archive.sha256"
+          cp "$unpacked/$bundle/VERSION.txt" "$proof/VERSION.txt"
+
+      - name: Upload packaged Linux controlled-capture proof
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: pliego-linux-x86_64-controlled-capture-proof
+          path: dist/controlled-capture-proof
+          if-no-files-found: error
+          retention-days: 7
 
       - name: Upload Pliego bundle
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7

@@ -690,13 +690,17 @@ impl ClientStorageThreadFactory for ClientStorageThreadHandle {
         thread::Builder::new()
             .name("ClientStorageThread".to_owned())
             .spawn(move || {
-                // Keep temp_dir alive while the thread runs.
-                let _ = temp_dir;
                 let engine = SqliteEngine::new(storage_dir).unwrap_or_else(|error| {
                     warn!("Failed to initialize ClientStorage engine into storage dir: {error:?}");
                     SqliteEngine::memory().unwrap()
                 });
-                ClientStorageThread::new(sender_clone, generic_receiver, engine).start();
+                let mut thread = ClientStorageThread::new(sender_clone, generic_receiver, engine);
+                let exit_sender = thread.start();
+                drop(thread);
+                drop(temp_dir);
+                if let Some(sender) = exit_sender {
+                    let _ = sender.send(());
+                }
             })
             .expect("Thread spawning failed");
 
@@ -726,7 +730,7 @@ where
         }
     }
 
-    pub fn start(&mut self) {
+    pub fn start(&mut self) -> Option<GenericSender<()>> {
         while let Ok(message) = self.receiver.recv() {
             match message {
                 ClientStorageThreadMessage::ObtainBottleMap {
@@ -774,11 +778,9 @@ where
                 ClientStorageThreadMessage::Estimate { origin, sender } => {
                     let _ = sender.send(self.engine.estimate(origin));
                 },
-                ClientStorageThreadMessage::Exit(sender) => {
-                    let _ = sender.send(());
-                    break;
-                },
+                ClientStorageThreadMessage::Exit(sender) => return Some(sender),
             }
         }
+        None
     }
 }

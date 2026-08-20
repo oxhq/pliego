@@ -1,7 +1,8 @@
 {
     "schema": 1,
-    "version": "0.1.1",
+    "version": "0.2.0",
     "api": 1,
+    "release_ready": false,
     "assets": {
         "linux-x86_64": {
             "bytes": 68725127,

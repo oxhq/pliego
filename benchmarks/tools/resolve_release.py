@@ -130,11 +130,28 @@ def verify_archive(archive: Path, target: dict[str, Any], runtime: dict[str, Any
     if archive_bytes != target["archive_bytes"] or archive_hash != target["archive_sha256"]:
         raise ReleaseError("release archive size or SHA-256 differs from the immutable target")
 
+    servo_build = target.get("servo_build")
+    if not isinstance(servo_build, str):
+        raise ReleaseError("Servo build identity must be a string")
+    match = re.fullmatch(
+        r"(?P<version>[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)-"
+        r"(?P<revision>[0-9a-f]{7,64})",
+        servo_build,
+    )
+    if match is None:
+        raise ReleaseError("Servo build identity must contain a version and Git revision")
+    servo_revision = match.group("revision")
+    if not target["commit"].startswith(servo_revision):
+        raise ReleaseError("Servo build revision differs from the release commit")
+
     errors = check_archive(
         archive,
         version=target["version"],
         bundle=target["platform"],
         repository_url=target["repository"],
+        servo_version=match.group("version"),
+        git_sha=servo_revision,
+        servo_base_sha=target["servo_base"],
     )
     if errors:
         raise ReleaseError(errors[0])
@@ -158,18 +175,6 @@ def verify_archive(archive: Path, target: dict[str, Any], runtime: dict[str, Any
         binary_hash, binary_bytes = sha256_stream(binary)
         if binary_bytes != target["binary_bytes"] or binary_hash != target["binary_sha256"]:
             raise ReleaseError("release binary size or SHA-256 differs from the immutable target")
-
-        version_file = source.extractfile(files["VERSION.txt"])
-        if version_file is None:
-            raise ReleaseError("VERSION.txt cannot be read")
-        version_text = version_file.read().decode("utf-8").replace("\r\n", "\n")
-        expected_lines = {
-            f"pliego {target['version']}",
-            f"Servo {target['servo_build']}",
-            f"Servo base {target['servo_base']}",
-        }
-        if not expected_lines.issubset(set(version_text.splitlines())):
-            raise ReleaseError("VERSION.txt differs from the pinned native/Servo identity")
 
     return {
         "archive_sha256": archive_hash,

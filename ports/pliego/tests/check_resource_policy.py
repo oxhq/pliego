@@ -7,6 +7,7 @@
 import hashlib
 import html
 import http.client
+import io
 import json
 import os
 import shutil
@@ -16,7 +17,7 @@ import sys
 import tempfile
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stderr
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Iterator
@@ -24,6 +25,8 @@ from typing import Any, Iterator
 POLICY = "pliego.resource-policy.v1"
 RESOURCE_TIMEOUT_MS = 1_000
 PROCESS_TIMEOUT_SECONDS = 30
+SUCCESS_PROCESS_TIMEOUT_SECONDS = 60
+FAILURE_EXIT_STRESS_RUNS_PER_CASE = 10
 MAX_CACHE_ENTRIES = 128
 MAX_RESOURCE_BYTES = 64 * 1024 * 1024
 LOCAL_BODY = 'window.localLoaded = "LOCAL_RESOURCE_BODY_SECRET";\n'
@@ -35,6 +38,15 @@ LEAK_MARKERS = (
     "VIRTUAL_RESOURCE_BODY_SECRET",
     "HTTP_RESOURCE_BODY_SECRET",
     "CACHE_RESOURCE_BODY_SECRET",
+)
+RESOURCE_SOURCES = frozenset(
+    (
+        "asset_cache",
+        "data_url",
+        "document_root",
+        "http",
+        "virtual_resource",
+    )
 )
 
 
@@ -51,22 +63,57 @@ def require(condition: bool, message: str) -> None:
 def read_object(path: Path) -> dict[str, Any]:
     require(path.is_file(), f"artifact does not exist: {path}")
     try:
-        value = json.loads(path.read_bytes())
-    except (OSError, json.JSONDecodeError) as error:
+        value = json.loads(path.read_bytes(), parse_constant=reject_json_constant)
+    except (OSError, UnicodeDecodeError, ValueError) as error:
         fail(f"cannot read JSON artifact {path}: {error}")
     require(isinstance(value, dict), f"JSON artifact is not an object: {path}")
     return value
 
 
-def final_json(result: subprocess.CompletedProcess[str]) -> dict[str, Any]:
-    lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
-    require(bool(lines), "Pliego produced no stdout JSON")
+def canonical_json_line(value: Any) -> bytes:
+    return (json.dumps(value, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
+
+
+def reject_json_constant(value: str) -> None:
+    raise ValueError(f"non-finite JSON number {value}")
+
+
+def final_json(result: subprocess.CompletedProcess[bytes]) -> dict[str, Any]:
+    require(result.stdout.endswith(b"\n"), "Pliego stdout has no final LF")
+    require(b"\r" not in result.stdout, "Pliego stdout contains CR bytes")
+    require(result.stdout.count(b"\n") == 1, "Pliego stdout is not exactly one line")
+    body = result.stdout[:-1]
+    require(body == body.strip(), "Pliego stdout has surrounding whitespace")
     try:
-        value = json.loads(lines[-1])
-    except json.JSONDecodeError as error:
-        fail(f"final stdout line is not JSON: {error}: {lines[-1]!r}")
+        value = json.loads(body, parse_constant=reject_json_constant)
+    except (UnicodeDecodeError, ValueError) as error:
+        fail(f"stdout is not JSON: {error}: {body!r}")
     require(isinstance(value, dict), "final stdout JSON is not an object")
+    require(result.stdout == canonical_json_line(value), "Pliego stdout is not canonical compact JSON plus one LF")
     return value
+
+
+def require_no_private_container(root: Path, fixture: str) -> None:
+    private = sorted(root.glob(".pliego-runtime-*"))
+    closure = {
+        path.name: sorted(child.name for child in path.iterdir()) if path.is_dir() else ["<non-directory>"]
+        for path in private
+    }
+    require(not private, f"{fixture} retained private runtime containers: {closure}")
+
+
+def inline_body_field(value: Any) -> str | None:
+    if isinstance(value, dict):
+        for name, nested in value.items():
+            if name == "body":
+                return name
+            if leaked := inline_body_field(nested):
+                return leaked
+    elif isinstance(value, list):
+        for nested in value:
+            if leaked := inline_body_field(nested):
+                return leaked
+    return None
 
 
 def resource_rows(artifacts: Path, render_id: str) -> list[dict[str, Any]]:
@@ -78,13 +125,18 @@ def resource_rows(artifacts: Path, render_id: str) -> list[dict[str, Any]]:
     rows = []
     for line_number, line in enumerate(raw.splitlines(), 1):
         try:
-            row = json.loads(line)
-        except json.JSONDecodeError as error:
+            row = json.loads(line, parse_constant=reject_json_constant)
+        except ValueError as error:
             fail(f"invalid resources.jsonl line {line_number}: {error}")
         require(isinstance(row, dict), f"resource log line {line_number} is not an object")
         require(row.get("policy") == POLICY, f"resource log omitted policy: {row!r}")
         require(row.get("render_id") == render_id, f"resource log omitted render_id: {row!r}")
-        require("body" not in row and "source" not in row, f"resource log leaked source fields: {row!r}")
+        require(inline_body_field(row) is None, f"resource log leaked an inline body field: {row!r}")
+        source = row.get("source")
+        require(
+            source is None or (isinstance(source, str) and source in RESOURCE_SOURCES),
+            f"resource log has an invalid source classification: {row!r}",
+        )
         rows.append(row)
     require(bool(rows), "resources.jsonl is empty")
     return rows
@@ -209,10 +261,29 @@ def fixture_server() -> Iterator[FixtureServer]:
         thread.join(timeout=5)
 
 
-def retain(root: Path, result: subprocess.CompletedProcess[str], destination: Path) -> None:
+def retain(root: Path, result: subprocess.CompletedProcess[bytes], destination: Path) -> None:
     destination.mkdir(parents=True)
-    (destination / "process.stdout.log").write_text(result.stdout, encoding="utf-8")
-    (destination / "process.stderr.log").write_text(result.stderr, encoding="utf-8")
+    (destination / "process.stdout.log").write_bytes(result.stdout)
+    (destination / "process.stderr.log").write_bytes(result.stderr)
+    (destination / "process.json").write_text(
+        json.dumps(
+            {
+                "returncode": result.returncode,
+                "stderr": {
+                    "bytes": len(result.stderr),
+                    "sha256": hashlib.sha256(result.stderr).hexdigest(),
+                },
+                "stdout": {
+                    "bytes": len(result.stdout),
+                    "sha256": hashlib.sha256(result.stdout).hexdigest(),
+                },
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     inputs = destination / "inputs"
     inputs.mkdir()
     for source in sorted((*root.glob("*.html"), *root.glob("*.js"))):
@@ -232,7 +303,8 @@ def run(
     fixture: str,
     checks: dict[str, str] | None = None,
     options: tuple[str, ...] = (),
-) -> tuple[subprocess.CompletedProcess[str], dict[str, Any]]:
+    process_timeout_seconds: int = PROCESS_TIMEOUT_SECONDS,
+) -> tuple[subprocess.CompletedProcess[bytes], dict[str, Any]]:
     (root / "document.html").write_text(document(fixture, scripts, checks), encoding="utf-8")
     command = [
         str(binary),
@@ -259,24 +331,21 @@ def run(
             cwd=root,
             env=environment,
             capture_output=True,
-            text=True,
-            timeout=PROCESS_TIMEOUT_SECONDS,
+            timeout=process_timeout_seconds,
             check=False,
         )
     except subprocess.TimeoutExpired as error:
-        stdout = error.stdout.decode(errors="replace") if isinstance(error.stdout, bytes) else (error.stdout or "")
-        stderr = error.stderr.decode(errors="replace") if isinstance(error.stderr, bytes) else (error.stderr or "")
+        stdout = error.stdout if isinstance(error.stdout, bytes) else (error.stdout or "").encode("utf-8")
+        stderr = error.stderr if isinstance(error.stderr, bytes) else (error.stderr or "").encode("utf-8")
         result = subprocess.CompletedProcess(command, 124, stdout, stderr)
         retain(root, result, destination)
         (destination / "process-timeout.json").write_text(
-            json.dumps({"case": fixture, "timeout_seconds": PROCESS_TIMEOUT_SECONDS}, indent=2) + "\n",
+            json.dumps({"case": fixture, "timeout_seconds": process_timeout_seconds}, indent=2) + "\n",
             encoding="utf-8",
         )
-        fail(
-            f"{fixture} exceeded {PROCESS_TIMEOUT_SECONDS}s; retained evidence at {destination} "
-            "(possible Servo post-Allow cancellation gap)"
-        )
+        fail(f"{fixture} exceeded its {process_timeout_seconds}s process deadline; retained evidence at {destination}")
     retain(root, result, destination)
+    require_no_private_container(root, fixture)
     summary = final_json(result)
     (destination / "summary.json").write_text(
         json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8"
@@ -301,7 +370,7 @@ def verify_policy(summary: dict[str, Any], artifacts: Path, *, network: str) -> 
 
 
 def verify_failure(
-    result: subprocess.CompletedProcess[str],
+    result: subprocess.CompletedProcess[bytes],
     summary: dict[str, Any],
     root: Path,
     expected_code: str,
@@ -312,6 +381,8 @@ def verify_failure(
     require(summary.get("status") == "failed", repr(summary))
     error = summary.get("error")
     require(isinstance(error, dict) and error.get("code") == expected_code, repr(error))
+    expected_stderr = f"pliego: {expected_code}: {error.get('message')}\n".encode()
+    require(result.stderr == expected_stderr, f"failure stderr drifted: {result.stderr!r}")
     failure = read_object(root / "artifacts/failure.json")
     terminal_failure = {key: summary.get(key) for key in ("status", "render_id", "error")}
     require(
@@ -334,7 +405,7 @@ def verify_failure(
 
 
 def verify_healthy(
-    result: subprocess.CompletedProcess[str],
+    result: subprocess.CompletedProcess[bytes],
     summary: dict[str, Any],
     root: Path,
     expected_readiness: dict[str, Any],
@@ -342,6 +413,7 @@ def verify_healthy(
     network: str,
 ) -> dict[str, Any]:
     require(result.returncode == 0, f"healthy render exited with {result.returncode}: {result.stderr[-2000:]}")
+    require(result.stderr == b"", f"healthy render wrote stderr: {result.stderr!r}")
     require(summary.get("status") == "rendered", repr(summary))
     require(summary.get("readiness") == expected_readiness, repr(summary.get("readiness")))
     require((root / "document.pdf").read_bytes().startswith(b"%PDF-"), "healthy PDF is invalid")
@@ -357,7 +429,7 @@ def create_cache_manifest(root: Path) -> tuple[Path, str]:
     for index in range(MAX_CACHE_ENTRIES + 1):
         name = f"asset-{index:03}.js"
         body = CACHE_BODY if index == 0 else f"// bounded cache fixture {index}\n"
-        (root / name).write_text(body, encoding="utf-8")
+        (root / name).write_bytes(body.encode("utf-8"))
         assets.append(
             {
                 "url": f"https://assets.invalid/{name}",
@@ -396,6 +468,22 @@ def verify_cache(policy: dict[str, Any], *, hits: int, misses: int) -> dict[str,
 
 
 def self_test() -> None:
+    terminal = {"error": {"code": "RESOURCE_TIMEOUT", "message": "timeout"}, "status": "failed"}
+    encoded = canonical_json_line(terminal)
+    require(
+        final_json(subprocess.CompletedProcess([], 1, encoded, b"")) == terminal,
+        "canonical process frame was rejected",
+    )
+    for invalid in (b"", b"{}", b"{}\r\n", b" {}\n", b"{}\n{}\n", b"{}\n\n", b'{"value":NaN}\n'):
+        stderr = io.StringIO()
+        try:
+            with redirect_stderr(stderr):
+                final_json(subprocess.CompletedProcess([], 1, invalid, b""))
+        except SystemExit:
+            pass
+        else:
+            fail(f"invalid process frame was accepted: {invalid!r}")
+
     fixture = document("escape", ['https://example.test/a.js?x="&y=<'], {"loaded": "window.loaded === true"})
     require('src="https://example.test/a.js?x=&quot;&amp;y=&lt;"' in fixture, "fixture URL is not escaped")
     require('"fixture": "escape"' in fixture, "fixture payload is malformed")
@@ -404,6 +492,53 @@ def self_test() -> None:
         parsed = read_object(manifest)
         require(cached_url == "https://assets.invalid/asset-000.js", cached_url)
         require(len(parsed.get("assets", [])) == MAX_CACHE_ENTRIES + 1, repr(parsed))
+    with tempfile.TemporaryDirectory(prefix="pliego-process-proof-self-test-") as temp:
+        root = Path(temp) / "root"
+        destination = Path(temp) / "proof"
+        root.mkdir()
+        result = subprocess.CompletedProcess([], 1, b'{"status":"failed"}\n', b"typed failure\n")
+        retain(root, result, destination)
+        process = read_object(destination / "process.json")
+        require(process.get("returncode") == 1, repr(process))
+        require(process.get("stdout", {}).get("bytes") == len(result.stdout), repr(process))
+        require(process.get("stderr", {}).get("bytes") == len(result.stderr), repr(process))
+    with tempfile.TemporaryDirectory(prefix="pliego-resource-log-self-test-") as temp:
+        artifacts = Path(temp)
+        render_id = "sha256:" + "1" * 64
+        row = {
+            "policy": POLICY,
+            "render_id": render_id,
+            "url": "file:///document.html",
+            "urls": ["file:///document.html"],
+            "status": "loaded",
+            "source": "document_root",
+            "bytes": 16,
+            "sha256": "2" * 64,
+            "resource": "sha256:" + "2" * 64,
+        }
+        resource_log = artifacts / "resources.jsonl"
+        resource_log.write_text(json.dumps(row) + "\n", encoding="utf-8")
+        require(resource_rows(artifacts, render_id) == [row], "provenance metadata was rejected")
+
+        def expect_rejection(invalid: dict[str, Any], message: str) -> None:
+            resource_log.write_text(json.dumps(invalid) + "\n", encoding="utf-8")
+            stderr = io.StringIO()
+            try:
+                with redirect_stderr(stderr):
+                    resource_rows(artifacts, render_id)
+            except SystemExit as error:
+                require(error.code == 1 and message in stderr.getvalue(), stderr.getvalue())
+            else:
+                fail(f"resource log checker accepted invalid evidence: {invalid!r}")
+
+        expect_rejection({**row, "response": {"body": "inline payload"}}, "inline body field")
+        expect_rejection({**row, "body": "top-level inline payload"}, "inline body field")
+        expect_rejection(
+            {**row, "chain": [{"body": "list-nested inline payload"}]},
+            "inline body field",
+        )
+        expect_rejection({**row, "source": "inline source payload"}, "invalid source classification")
+        expect_rejection({**row, "source": {"kind": "document_root"}}, "invalid source classification")
     with fixture_server() as server:
         for path, status, body in (
             ("/ok.js", 200, HTTP_BODY),
@@ -474,8 +609,8 @@ def main() -> int:
 
         healthy_root = temp_root / "allowed"
         healthy_root.mkdir()
-        (healthy_root / "local.js").write_text(LOCAL_BODY, encoding="utf-8")
-        (healthy_root / "virtual.js").write_text(VIRTUAL_BODY, encoding="utf-8")
+        (healthy_root / "local.js").write_bytes(LOCAL_BODY.encode())
+        (healthy_root / "virtual.js").write_bytes(VIRTUAL_BODY.encode())
         virtual_url = "https://virtual.invalid/virtual.js"
         result, summary = run(
             binary,
@@ -489,6 +624,7 @@ def main() -> int:
                 "http": 'window.httpLoaded === "HTTP_RESOURCE_BODY_SECRET"',
             },
             options=(*allow_http, "--virtual-resource", f"{virtual_url}=virtual.js"),
+            process_timeout_seconds=SUCCESS_PROCESS_TIMEOUT_SECONDS,
         )
         policy = verify_healthy(
             result,
@@ -506,7 +642,7 @@ def main() -> int:
         require(server.count("/ok.js") >= 1, "allowed HTTP resource did not reach the server")
 
         outside = temp_root / "outside.js"
-        outside.write_text('window.outsideLoaded = "must not execute";\n', encoding="utf-8")
+        outside.write_bytes(b'window.outsideLoaded = "must not execute";\n')
         failure_cases = (
             ("traversal", ["../outside.js"], (), "RESOURCE_DENIED", "deny"),
             ("denied-network", [f"{server.base_url}ok.js"], (), "RESOURCE_DENIED", "deny"),
@@ -628,6 +764,52 @@ def main() -> int:
                     f"size-limit failure omitted its configured bound: {error!r}",
                 )
 
+        # A typed render failure must return through Rust normally. Hosted runs intermittently
+        # observed abnormal teardown after the correct failure frame had already been emitted while
+        # this path used forced process exit. Repeat both a no-network denial and the exact HTTP
+        # status case in fresh processes, distinguishing a stable exit-1 contract from a
+        # post-result abnormal termination without claiming that process exit was the sole cause.
+        stress_cases = (
+            ("traversal", ["../outside.js"], (), "RESOURCE_DENIED", "deny", None),
+            (
+                "http-408",
+                [f"{server.base_url}timeout.js"],
+                allow_http,
+                "RESOURCE_TIMEOUT",
+                "configured-roots",
+                "/timeout.js",
+            ),
+        )
+        for case, scripts, options, expected_code, network, requested_path in stress_cases:
+            for iteration in range(FAILURE_EXIT_STRESS_RUNS_PER_CASE):
+                name = f"{case}-{iteration + 1:02d}"
+                root = temp_root / f"failure-exit-{name}"
+                root.mkdir()
+                before_requested = server.count(requested_path) if requested_path else 0
+                result, summary = run(
+                    binary,
+                    root,
+                    output / "failure-exit-stress" / name,
+                    scripts,
+                    fixture=name,
+                    options=options,
+                )
+                verify_failure(result, summary, root, expected_code, network=network)
+                if requested_path:
+                    require(
+                        server.count(requested_path) > before_requested,
+                        f"{name} did not reach {requested_path}",
+                    )
+                stdout_lines = [line for line in result.stdout.splitlines() if line.strip()]
+                require(len(stdout_lines) == 1, f"{name} emitted {len(stdout_lines)} stdout frames")
+                stderr = result.stderr.lower()
+                require(
+                    b"mozalloc_abort" not in stderr
+                    and b"redirecting call to abort()" not in stderr
+                    and b"segmentation fault" not in stderr,
+                    f"{name} reached native abort during failure teardown: {result.stderr[-2000:]}",
+                )
+
         cache_store = temp_root / "cache-store"
         manifest, cached_url = create_cache_manifest(cache_store)
         cache_evidence = []
@@ -645,6 +827,7 @@ def main() -> int:
                 fixture=name,
                 checks={"cached": 'window.cachedLoaded === "CACHE_RESOURCE_BODY_SECRET"'},
                 options=("--asset-manifest", str(manifest)),
+                process_timeout_seconds=SUCCESS_PROCESS_TIMEOUT_SECONDS,
             )
             policy = verify_healthy(
                 result,
@@ -676,7 +859,7 @@ def main() -> int:
 
         recovery_root = temp_root / "recovery"
         recovery_root.mkdir()
-        (recovery_root / "local.js").write_text(LOCAL_BODY, encoding="utf-8")
+        (recovery_root / "local.js").write_bytes(LOCAL_BODY.encode())
         result, summary = run(
             binary,
             recovery_root,
@@ -684,6 +867,7 @@ def main() -> int:
             ["local.js"],
             fixture="recovery",
             checks={"local": 'window.localLoaded === "LOCAL_RESOURCE_BODY_SECRET"'},
+            process_timeout_seconds=SUCCESS_PROCESS_TIMEOUT_SECONDS,
         )
         verify_healthy(
             result,

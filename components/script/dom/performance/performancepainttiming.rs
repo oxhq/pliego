@@ -6,10 +6,11 @@ use dom_struct::dom_struct;
 use js::context::JSContext;
 use script_bindings::reflector::reflect_dom_object_with_cx;
 use script_traits::ProgressiveWebMetricType;
-use servo_base::cross_process_instant::CrossProcessInstant;
 use time::Duration;
 
-use super::performanceentry::{EntryType, PerformanceEntry};
+use super::performanceentry::{
+    EntryType, PerformanceEntry, PerformanceEntryDuration, PerformanceEntryTime,
+};
 use crate::dom::bindings::codegen::Bindings::PerformancePaintTimingBinding::PerformancePaintTimingMethods;
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::bindings::str::DOMString;
@@ -23,7 +24,7 @@ pub(crate) struct PerformancePaintTiming {
 impl PerformancePaintTiming {
     fn new_inherited(
         metric_type: ProgressiveWebMetricType,
-        start_time: CrossProcessInstant,
+        start_time: PerformanceEntryTime,
     ) -> PerformancePaintTiming {
         let name = match metric_type {
             ProgressiveWebMetricType::FirstPaint => DOMString::from("first-paint"),
@@ -37,7 +38,7 @@ impl PerformancePaintTiming {
                 name,
                 EntryType::Paint,
                 Some(start_time),
-                Duration::ZERO,
+                PerformanceEntryDuration::for_time(start_time, Duration::ZERO),
             ),
         }
     }
@@ -47,7 +48,7 @@ impl PerformancePaintTiming {
         cx: &mut JSContext,
         global: &GlobalScope,
         metric_type: ProgressiveWebMetricType,
-        start_time: CrossProcessInstant,
+        start_time: PerformanceEntryTime,
     ) -> DomRoot<PerformancePaintTiming> {
         let entry = PerformancePaintTiming::new_inherited(metric_type, start_time);
         reflect_dom_object_with_cx(Box::new(entry), global, cx)

@@ -401,6 +401,33 @@ pub enum FillRule {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, MallocSizeOf, PartialEq, Serialize)]
 pub struct CanvasId(pub u64);
 
+/// Whether one retained Canvas can participate in generation-bound document capture.
+///
+/// This status is produced by the Canvas paint thread after every earlier command for the
+/// requested Canvas has been processed. It is intentionally coarse: detailed retained-command
+/// diagnostics remain owned by the document-capture adapter.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum CanvasCaptureObservationStatus {
+    Ready,
+    RetentionDisabled,
+    MissingCanvas,
+    MissingImageKey,
+    ImageKeyMismatch,
+    SizeMismatch,
+    RetentionBudgetExceeded,
+    UnsupportedTranscript,
+}
+
+/// A mutation-free observation of one retained Canvas registry generation.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CanvasCaptureObservation {
+    pub canvas_id: CanvasId,
+    pub image_key: Option<ImageKey>,
+    pub size: Size2D<u32>,
+    pub registry_generation: Option<u64>,
+    pub status: CanvasCaptureObservationStatus,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, MallocSizeOf, Serialize)]
 pub struct CompositionOptions {
     pub alpha: f64,
@@ -507,6 +534,15 @@ pub enum CanvasCommand {
         CompositionOptions,
         Transform2D<f64>,
     ),
+    /// Observe the retained capture state after every preceding command in this queue.
+    ///
+    /// Unlike `GetImageData`, this is an observation-only barrier: it must never read pixels or
+    /// mutate retained state.
+    ObserveCapture {
+        expected_image_key: Option<ImageKey>,
+        expected_size: Size2D<u32>,
+        response: GenericSender<CanvasCaptureObservation>,
+    },
     GetImageData(Option<Rect<u32>>, GenericSender<SharedSnapshot>),
     PutImageData(Rect<u32>, SharedSnapshot),
     StrokeRect(

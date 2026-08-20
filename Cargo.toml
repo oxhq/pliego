@@ -5,6 +5,7 @@ members = [
     "components/xpath",
     "ffi/capi",
     "ports/pliego",
+    "ports/pliego-core-benchmark",
     "ports/servoshell",
     "tests/capi",
     "tests/unit/*",
@@ -215,6 +216,7 @@ rustc-hash = "2.1.2"
 rustls = { version = "0.23", default-features = false, features = ["logging", "std", "tls12"] }
 rustls-pki-types = "1.14"
 rustls-platform-verifier = "0.7.0"
+same-file = "1"
 sea-query = { version = "=1.0.0-rc.31", default-features = false, features = ["backend-sqlite", "derive"] }
 sea-query-rusqlite = "=0.8.0-rc.15"
 selectors = { git = "https://github.com/oxhq/stylo", rev = "a7c44dc54a3f0f4b84163ad2947a39dc5018285a" }
@@ -245,6 +247,7 @@ swapper = "0.1"
 syn = { version = "2", default-features = false, features = ["clone-impls", "derive", "parsing"] }
 synstructure = "0.13"
 sys-locale = "0.3"
+sysinfo = "0.38.4"
 taffy = { version = "0.12.1", default-features = false, features = ["calc", "detailed_layout_info", "grid", "std"] }
 tempfile = "3"
 tendril = { version = "0.5", features = ["encoding_rs"] }
@@ -297,6 +300,8 @@ zeroize = "1.8"
 ############################################################################################
 ## Workspace-local dependencies
 ############################################################################################
+pliego = { version = "=0.2.0", path = "ports/pliego", default-features = false }
+
 # All local path dependencies in the servo workspace, that use the workspace version, should
 # be listed here, between the `Begin` and `End` comments, so that we can easily find and
 # update the version requirements when bumping the workspace version.

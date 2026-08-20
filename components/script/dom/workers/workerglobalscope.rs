@@ -38,7 +38,7 @@ use servo_base::id::{PipelineId, PipelineNamespace};
 use servo_canvas_traits::webgl::WebGLChan;
 use servo_constellation_traits::WorkerGlobalScopeInit;
 use servo_url::{MutableOrigin, ServoUrl};
-use timers::TimerScheduler;
+use timers::{DocumentClock, TimerScheduler};
 use uuid::Uuid;
 
 use crate::dom::bindings::codegen::Bindings::ImageBitmapBinding::{
@@ -438,7 +438,7 @@ impl WorkerGlobalScope {
     pub(crate) fn perform_a_microtask_checkpoint(&self, cx: &mut JSContext) {
         // Only perform the checkpoint if we're not shutting down.
         if !self.is_closing() {
-            self.microtask_queue.checkpoint(
+            let _ = self.microtask_queue.checkpoint(
                 cx,
                 |_| Some(DomRoot::from_ref(&self.globalscope)),
                 vec![DomRoot::from_ref(&self.globalscope)],
@@ -573,6 +573,14 @@ impl WorkerGlobalScope {
     /// Get a mutable reference to the [`TimerScheduler`] for this [`ServiceWorkerGlobalScope`].
     pub(crate) fn timer_scheduler(&self) -> RefMut<'_, TimerScheduler> {
         self.timer_scheduler.borrow_mut()
+    }
+
+    /// Return the worker's outer scheduler clock.
+    ///
+    /// U1 workers remain realtime-only; controlled worker construction is blocked at its parent
+    /// global until U2 can drive worker and Window event loops as one session.
+    pub(crate) fn document_clock(&self) -> DocumentClock {
+        self.timer_scheduler.borrow().clock()
     }
 
     /// <https://html.spec.whatwg.org/multipage/#initialize-worker-policy-container> and
@@ -1006,7 +1014,7 @@ impl WorkerGlobalScopeMethods<crate::DomTypeHolder> for WorkerGlobalScope {
     fn Performance(&self, cx: &mut JSContext) -> DomRoot<Performance> {
         self.performance.or_init(|| {
             let global_scope = self.upcast::<GlobalScope>();
-            Performance::new(cx, global_scope, self.navigation_start)
+            Performance::new(cx, global_scope, self.navigation_start, None)
         })
     }
 

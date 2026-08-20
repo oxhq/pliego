@@ -1,0 +1,10 @@
+<!DOCTYPE html>
+<title>Font ready schedules a display-list update</title>
+<script src="/resources/testharness.js"></script>
+<script src="/resources/testharnessreport.js"></script>
+<script>
+promise_test(async () => {
+    await document.fonts.ready;
+    assert_array_equals(ServoTestUtils.forceLayout().phases, ["BuiltDisplayList"]);
+}, "Resolving document.fonts.ready schedules a display-list update");
+</script>

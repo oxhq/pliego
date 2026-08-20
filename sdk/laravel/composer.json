@@ -10,7 +10,7 @@
         "illuminate/http": "^13.0",
         "illuminate/support": "^13.0",
         "illuminate/view": "^13.0",
-        "oxhq/pliego-php": "0.1.1",
+        "oxhq/pliego-php": "0.2.0",
         "symfony/http-foundation": "^7.4 || ^8.0"
     },
     "autoload": {
@@ -19,6 +19,7 @@
         }
     },
     "scripts": {
+        "release:check-runtime": "@php tests/release_runtime_manifest_test.php",
         "test:runtime": "@php tests/managed_runtime_test.php",
         "test:timings": "@php tests/bridge_timings_test.php",
         "test": ["@test:runtime", "@test:timings"]

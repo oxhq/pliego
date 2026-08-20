@@ -40,6 +40,7 @@ impl MediaStreamTrack {
         id: MediaStreamId,
         ty: MediaStreamType,
     ) -> DomRoot<MediaStreamTrack> {
+        global.mark_controlled_capture_media_stream_used();
         reflect_dom_object_with_cx(
             Box::new(MediaStreamTrack::new_inherited(id, ty)),
             global,

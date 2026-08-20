@@ -4,6 +4,8 @@
 
 #[path = "../src/asset_cache.rs"]
 mod asset_cache;
+#[path = "../src/controlled_settlement.rs"]
+mod controlled_settlement;
 #[path = "../src/document_session.rs"]
 mod document_session;
 #[path = "../src/owned_resource_store.rs"]
@@ -17,3 +19,7 @@ mod engine {
 }
 #[path = "../src/resource_policy.rs"]
 mod resource_policy;
+#[path = "../src/runtime_policy.rs"]
+mod runtime_policy;
+#[path = "../src/session.rs"]
+mod session;

@@ -40,7 +40,11 @@ servo-url = { workspace = true }
 strum = { workspace = true }
 stylo = { workspace = true }
 stylo_traits = { workspace = true }
+timers = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true }
 webdriver = { workspace = true }
 webrender_api = { workspace = true }
+
+[dev-dependencies]
+ipc-channel = { workspace = true }
