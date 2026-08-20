@@ -184,8 +184,9 @@ This matches the existing 64 MiB per-resource, resident-resource, manifest-asset
 boundary. The separate 512 MiB staged-artifact allowance bounds generated output, not input content.
 
 The only document URL root is the literal `pliego-input:///`. Relative document URLs resolve under
-that root to manifest paths. The entrypoint must be one of the manifest entries. `file:`, a host path,
-an alternate custom-scheme authority, or a second URL root is not accepted.
+that root to manifest paths. The entrypoint must be one of the manifest entries and its canonical
+media type must be `text/html;charset=utf-8`. `file:`, a host path, an alternate custom-scheme
+authority, or a second URL root is not accepted.
 
 The deterministic API 2 core always carries:
 

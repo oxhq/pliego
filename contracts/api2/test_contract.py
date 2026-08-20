@@ -41,6 +41,7 @@ API2_INPUT_MANIFEST_MAX_ENTRIES = 16 * 1024
 API2_INPUT_CONTENT_MAX_BYTES = 64 * 1024 * 1024
 API2_INPUT_TREE_MAX_DEPTH = 32
 API2_INPUT_TREE_MAX_NODES = 16 * 1024
+API2_ENTRYPOINT_MEDIA_TYPE = "text/html;charset=utf-8"
 NANOSECONDS_PER_MILLISECOND = 1_000_000
 A4_APP_UNITS = (47622, 67351)
 PROTOCOL_FIELDS = (
@@ -473,9 +474,17 @@ def request_semantics(
     if not safe_relative_path(entrypoint):
         violations.append(Violation(f"{path}.input.entrypoint", "path is not portable"))
     if manifest is not None:
-        manifest_paths = {entry["path"] for entry in manifest["entries"]}
-        if entrypoint not in manifest_paths:
+        manifest_entries = {entry["path"]: entry for entry in manifest["entries"]}
+        entrypoint_entry = manifest_entries.get(entrypoint)
+        if entrypoint_entry is None:
             violations.append(Violation(f"{path}.input.entrypoint", "entrypoint is absent from input manifest"))
+        elif entrypoint_entry["media_type"] != API2_ENTRYPOINT_MEDIA_TYPE:
+            violations.append(
+                Violation(
+                    f"{path}.input.entrypoint",
+                    f"entrypoint media type must be {API2_ENTRYPOINT_MEDIA_TYPE}",
+                )
+            )
         manifest_bytes = INPUT_MANIFEST_PATH.read_bytes()
         if not descriptor_matches_bytes(request["input"]["manifest"], manifest_bytes):
             violations.append(Violation(f"{path}.input.manifest", "descriptor does not match input manifest bytes"))
@@ -1251,6 +1260,25 @@ def main() -> None:
         "request",
         golden("rejected/render-request.live-network.json"),
         "expected const 'deny'",
+    )
+    non_html_entrypoint = golden("rejected/render-request.non-html-entrypoint.json")
+    assert_rejected(
+        "non-HTML entrypoint",
+        "request",
+        non_html_entrypoint,
+        "entrypoint media type must be text/html;charset=utf-8",
+        request_semantics(non_html_entrypoint, input_manifest),
+    )
+    noncanonical_html_manifest = copy.deepcopy(input_manifest)
+    next(entry for entry in noncanonical_html_manifest["entries"] if entry["path"] == "document.html")["media_type"] = (
+        "text/html"
+    )
+    assert_rejected(
+        "noncanonical HTML entrypoint media type",
+        "request",
+        golden("accepted/render-request.a4.json"),
+        "entrypoint media type must be text/html;charset=utf-8",
+        request_semantics(golden("accepted/render-request.a4.json"), noncanonical_html_manifest),
     )
     for name, kind, relative in (
         ("request unknown member", "request", "rejected/render-request.unknown-member.json"),

@@ -74,6 +74,7 @@ const INPUT_MANIFEST_ENTRY_FIELDS: &[&str] = &["path", "media_type", "sha256", "
 const INPUT_MANIFEST_MAX_ENTRIES: usize = 16 * 1024;
 const INPUT_TREE_MAX_DEPTH: usize = 32;
 const INPUT_TREE_MAX_NODES: usize = 16 * 1024;
+const INPUT_ENTRYPOINT_MEDIA_TYPE: &str = "text/html;charset=utf-8";
 
 #[derive(Debug)]
 pub(crate) struct InvocationError(String);
@@ -597,8 +598,14 @@ fn validate_input_manifest<'a>(
             }
         }
     }
-    if !paths.contains(entrypoint) {
-        return Err("$.input.entrypoint: entrypoint is absent from input manifest".into());
+    let entrypoint_entry = canonical_entries
+        .iter()
+        .find(|entry| entry.path == entrypoint)
+        .ok_or_else(|| "$.input.entrypoint: entrypoint is absent from input manifest".to_owned())?;
+    if entrypoint_entry.media_type != INPUT_ENTRYPOINT_MEDIA_TYPE {
+        return Err(format!(
+            "$.input.entrypoint: entrypoint media type must be {INPUT_ENTRYPOINT_MEDIA_TYPE}"
+        ));
     }
     Ok(CanonicalInputManifest {
         schema: "pliego.input-manifest",
@@ -1078,7 +1085,11 @@ mod tests {
             .map(|index| {
                 serde_json::json!({
                     "path": format!("entry-{index:05}.bin"),
-                    "media_type": "application/octet-stream",
+                    "media_type": if index == 0 {
+                        "text/html;charset=utf-8"
+                    } else {
+                        "application/octet-stream"
+                    },
                     "sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
                     "bytes": 0,
                 })
@@ -1121,7 +1132,7 @@ mod tests {
             "url_root": "pliego-input:///",
             "entries": [{
                 "path": path_at_depth,
-                "media_type": "application/octet-stream",
+                "media_type": "text/html;charset=utf-8",
                 "sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
                 "bytes": 0,
             }],
@@ -1141,7 +1152,11 @@ mod tests {
             .map(|index| {
                 serde_json::json!({
                     "path": format!("d{index:05}/file.bin"),
-                    "media_type": "application/octet-stream",
+                    "media_type": if index == 0 {
+                        "text/html;charset=utf-8"
+                    } else {
+                        "application/octet-stream"
+                    },
                     "sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
                     "bytes": 0,
                 })
@@ -1324,6 +1339,33 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("entrypoint is absent")
+        );
+    }
+
+    #[test]
+    fn rejects_a_non_html_entrypoint_from_the_bound_manifest() {
+        let mut request = decode_render_request(&mut &REQUEST[..]).unwrap();
+        request["input"]["entrypoint"] = Value::from("styles.css");
+        assert!(
+            decode_input_manifest(&request, INPUT_MANIFEST)
+                .unwrap_err()
+                .to_string()
+                .contains("entrypoint media type must be text/html;charset=utf-8")
+        );
+
+        let mut manifest: Value = serde_json::from_slice(INPUT_MANIFEST).unwrap();
+        let entrypoint = manifest["entries"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|entry| entry["path"] == "document.html")
+            .unwrap();
+        entrypoint["media_type"] = Value::from("text/html");
+        assert!(
+            validate_input_manifest(&manifest, "document.html")
+                .err()
+                .unwrap()
+                .contains("entrypoint media type must be text/html;charset=utf-8")
         );
     }
 
