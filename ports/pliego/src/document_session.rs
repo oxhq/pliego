@@ -1047,6 +1047,31 @@ impl DocumentSession {
                 ),
             )
         })?;
+        Self::new_validated_url_with_canvas_retention(
+            input_url,
+            bundle_root,
+            resource_policy,
+            environment,
+            page,
+            allow_host_fonts,
+            runtime,
+            session_host_timeout,
+            start_canvas_retention,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_validated_url_with_canvas_retention(
+        input_url: Url,
+        bundle_root: PathBuf,
+        resource_policy: ResourcePolicy,
+        environment: RenderEnvironment,
+        page: PageDefinition,
+        allow_host_fonts: bool,
+        runtime: DocumentSessionRuntime,
+        session_host_timeout: Duration,
+        start_canvas_retention: impl FnOnce() -> servo_canvas::retained_canvas::CanvasRetentionGuard,
+    ) -> Result<Self, SessionError> {
         let page_reservation = reserve_for_process(page).map_err(|_| {
             SessionError::new(
                 "LAYOUT_CONFIGURATION_FAILED",
@@ -1135,6 +1160,52 @@ impl DocumentSession {
             host_deadline,
             _canvas_retention: canvas_retention,
             rendering_context,
+        })
+    }
+
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    fn from_resolved_url_controlled_for_test(
+        input_url: Url,
+        bundle_root: PathBuf,
+        resource_policy: ResourcePolicy,
+        environment: RenderEnvironment,
+        page: PageDefinition,
+        allow_host_fonts: bool,
+        readiness: ReadinessPolicy,
+        runtime_policy: DeterministicRuntimePolicy,
+    ) -> Result<ControlledDocumentSession, SessionError> {
+        validate_resolved_resource_policy_root(&bundle_root, &resource_policy)?;
+        validate_resource_policy(&resource_policy)?;
+        validate_resource_timeout(resource_policy.timeout_ms)?;
+        let runtime_policy = runtime_policy
+            .validate()
+            .map_err(|error| SessionError::new("INVALID_REQUEST", error.to_string()))?;
+        let host_timeout = runtime_policy.host_wall_duration();
+        let clock = runtime_policy
+            .document_clock_configuration()
+            .map_err(|error| SessionError::new("INVALID_REQUEST", error.to_string()))?;
+        let waker = PliegoEventLoopWaker::new();
+        let session = Self::new_validated_url_with_canvas_retention(
+            input_url,
+            bundle_root,
+            resource_policy,
+            environment,
+            page,
+            allow_host_fonts,
+            DocumentSessionRuntime::Controlled {
+                clock,
+                waker: waker.clone(),
+                readiness,
+            },
+            host_timeout,
+            servo_canvas::retained_canvas::start_retaining_canvas_commands,
+        )?;
+        let surface = session.controlled_capture_surface()?;
+        Ok(ControlledDocumentSession {
+            session,
+            waker,
+            surface,
         })
     }
 
@@ -2004,8 +2075,15 @@ fn validate_resolved_resource_policy(
     document: &LocalDocument,
     resource_policy: &ResourcePolicy,
 ) -> Result<(), SessionError> {
+    validate_resolved_resource_policy_root(document.root(), resource_policy)
+}
+
+fn validate_resolved_resource_policy_root(
+    document_root: &Path,
+    resource_policy: &ResourcePolicy,
+) -> Result<(), SessionError> {
     match resource_policy.resolved_document_root() {
-        Some(root) if root == document.root() => Ok(()),
+        Some(root) if root == document_root => Ok(()),
         Some(_) => Err(SessionError::new(
             "INVALID_REQUEST",
             "resource policy document root does not match the resolved document root",
@@ -2375,9 +2453,12 @@ mod tests {
     };
 
     const ISOLATED_CASE_ENV: &str = "PLIEGO_DOCUMENT_SESSION_FIXTURE";
+    const PLIEGO_INPUT_CASE_ENV: &str = "PLIEGO_DOCUMENT_SESSION_PLIEGO_INPUT_FIXTURE";
     const CHARTJS_INPUT_ENV: &str = "PLIEGO_DOCUMENT_SESSION_CHARTJS_INPUT";
     const HTTP_BASE_ENV: &str = "PLIEGO_DOCUMENT_SESSION_HTTP_BASE";
     const ISOLATED_TEST: &str = "document_session::tests::isolated_resource_and_readiness_fixture";
+    const PLIEGO_INPUT_ISOLATED_TEST: &str =
+        "document_session::tests::isolated_pliego_input_url_fixture";
     const ALLOWED_HTTP_BODY: &[u8] = b"window.pliego.ready({ http_loaded: true });\n";
     const FIXTURE_PNG_DATA_URL: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 
@@ -2917,14 +2998,25 @@ mod tests {
     }
 
     fn run_isolated(case: &str, http_base: &str) -> Output {
-        let mut child = Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", ISOLATED_TEST, "--ignored", "--nocapture"])
-            .env(ISOLATED_CASE_ENV, case)
-            .env(HTTP_BASE_ENV, http_base)
+        run_isolated_test(ISOLATED_TEST, ISOLATED_CASE_ENV, case, Some(http_base))
+    }
+
+    fn run_isolated_test(
+        test: &str,
+        case_env: &str,
+        case: &str,
+        http_base: Option<&str>,
+    ) -> Output {
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args(["--exact", test, "--ignored", "--nocapture"])
+            .env(case_env, case)
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
+            .stderr(Stdio::piped());
+        if let Some(http_base) = http_base {
+            command.env(HTTP_BASE_ENV, http_base);
+        }
+        let mut child = command.spawn().unwrap();
         let stdout = child.stdout.take().unwrap();
         let stderr = child.stderr.take().unwrap();
         let stdout_reader = std::thread::spawn(move || {
@@ -3357,6 +3449,194 @@ window.pliego?.defer();
                     "Paint mutation was not rejected before readback:\n{stdout}",
                 );
             }
+        }
+    }
+
+    #[test]
+    fn pliego_input_url_uses_only_frozen_virtual_resources_and_fails_closed() {
+        for case in ["success", "missing-resource"] {
+            let output = run_isolated_test(
+                PLIEGO_INPUT_ISOLATED_TEST,
+                PLIEGO_INPUT_CASE_ENV,
+                case,
+                None,
+            );
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success(),
+                "isolated pliego-input {case} fixture failed\nstdout:\n{}\nstderr:\n{}",
+                stdout,
+                String::from_utf8_lossy(&output.stderr),
+            );
+            assert!(
+                stdout.contains("running 1 test") && stdout.contains("1 passed; 0 failed"),
+                "isolated pliego-input {case} filter did not execute exactly one passing child test:\n{stdout}",
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "launched in a fresh process by the pliego-input fixture orchestrator"]
+    fn isolated_pliego_input_url_fixture() {
+        let case =
+            std::env::var(PLIEGO_INPUT_CASE_ENV).expect("pliego-input fixture case should be set");
+        let bundle = TempBundle::new(&format!("pliego-input-{case}"));
+        let input_url = url::Url::parse("pliego-input:///entry.html").unwrap();
+        let css_url = url::Url::parse("pliego-input:///styles.css").unwrap();
+        let payload_url = url::Url::parse("pliego-input:///payload.json").unwrap();
+        let missing_url = url::Url::parse("pliego-input:///missing.js").unwrap();
+        let css = b"#marker { color: rgb(1, 2, 3); }\n";
+        let payload = br#"{"expediente":"host-path-free"}"#;
+        let input = match case.as_str() {
+            "success" => br#"<!doctype html>
+<meta charset="utf-8">
+<link rel="stylesheet" href="styles.css">
+<p id="marker">PLIEGO_INPUT_MARKER</p>
+<script>
+window.pliego.defer();
+fetch("payload.json")
+  .then(response => response.text())
+  .then(body => requestAnimationFrame(() => window.pliego.ready({
+    href: location.href,
+    body,
+    color: getComputedStyle(document.getElementById("marker")).color,
+  })))
+  .catch(error => window.pliego.fail({
+    code: "PLIEGO_INPUT_FETCH_FAILED",
+    message: String(error),
+  }));
+</script>
+"#
+            .as_slice(),
+            "missing-resource" => br#"<!doctype html>
+<meta charset="utf-8">
+<script src="missing.js"></script>
+<p>this document must never reach readiness</p>
+<script>window.pliego.ready({});</script>
+"#
+            .as_slice(),
+            _ => panic!("unknown pliego-input fixture case: {case}"),
+        };
+
+        bundle.write("entry.html", input);
+        let mut virtual_resources = vec![VirtualResourceSpec {
+            url: input_url.clone(),
+            path: PathBuf::from("entry.html"),
+        }];
+        if case == "success" {
+            bundle.write("styles.css", css);
+            bundle.write("payload.json", payload);
+            virtual_resources.extend([
+                VirtualResourceSpec {
+                    url: css_url.clone(),
+                    path: PathBuf::from("styles.css"),
+                },
+                VirtualResourceSpec {
+                    url: payload_url.clone(),
+                    path: PathBuf::from("payload.json"),
+                },
+            ]);
+        }
+        let root = bundle.0.clone();
+        let host_path = root.to_string_lossy().replace('\\', "/");
+        let resources = ResourcePolicy::resolve(
+            &ResourcePolicyConfig {
+                virtual_resources,
+                ..ResourcePolicyConfig::default()
+            },
+            &root,
+        );
+        fs::remove_dir_all(&root).expect("backing files should be deleted after resolution");
+        assert!(!root.exists());
+
+        let controlled = DocumentSession::from_resolved_url_controlled_for_test(
+            input_url.clone(),
+            root,
+            resources,
+            RenderEnvironment::default(),
+            a4(),
+            false,
+            ReadinessPolicy {
+                timeout_ms: 1_000,
+                wait_for_fonts: false,
+            },
+            DeterministicRuntimePolicy::default(),
+        )
+        .expect("the frozen pliego-input session should construct without backing files");
+
+        if case == "missing-resource" {
+            let error = controlled
+                .prepare_capture_candidate()
+                .err()
+                .expect("an unregistered pliego-input resource must fail closed");
+            assert_eq!(error.code, "RESOURCE_DENIED");
+            let failure = error
+                .resource_failure
+                .as_ref()
+                .expect("missing resource should retain structured failure evidence");
+            assert_eq!(failure.url, missing_url.as_str());
+            assert!(failure.fatal);
+            assert_eq!(error.resource_accounting.loaded, 1);
+            assert_eq!(error.resource_accounting.failed, 1);
+            assert_eq!(
+                error.resource_store.resolve_url(input_url.as_str()),
+                Some(content_address(input))
+            );
+            assert!(
+                error
+                    .resource_store
+                    .resolve_url(missing_url.as_str())
+                    .is_none()
+            );
+            return;
+        }
+
+        let outcome = controlled
+            .prepare_capture_candidate()
+            .expect("frozen entrypoint, CSS, and fetch should settle")
+            .capture()
+            .and_then(|capture| capture.render())
+            .expect("the host-path-free pliego-input document should render");
+        assert!(outcome.pdf.starts_with(b"%PDF-"));
+        assert_eq!(outcome.readiness["status"], "ready");
+        assert_eq!(outcome.readiness["payload"]["href"], input_url.as_str());
+        assert_eq!(
+            outcome.readiness["payload"]["body"],
+            String::from_utf8_lossy(payload).as_ref()
+        );
+        assert_eq!(outcome.readiness["payload"]["color"], "rgb(1, 2, 3)");
+        assert_eq!(outcome.resource_accounting.requests, 3);
+        assert_eq!(outcome.resource_accounting.loaded, 3);
+        assert_eq!(outcome.resource_accounting.delegated, 0);
+        assert_eq!(outcome.resource_accounting.failed, 0);
+
+        for (url, body) in [
+            (&input_url, input),
+            (&css_url, css.as_slice()),
+            (&payload_url, payload.as_slice()),
+        ] {
+            let evidence = outcome
+                .resources
+                .iter()
+                .find(|evidence| evidence.request.url == *url)
+                .expect("each frozen virtual resource should retain evidence");
+            let address = content_address(body);
+            assert_eq!(evidence.source, Some(ResourceSource::VirtualResource));
+            assert_eq!(evidence.status, "loaded");
+            assert_eq!(evidence.sha256.as_deref(), Some(&address[7..]));
+            assert_eq!(evidence.content_address.as_deref(), Some(address.as_str()));
+            assert_eq!(
+                outcome.resource_store.resolve_url(url.as_str()),
+                Some(address.clone())
+            );
+            assert_eq!(outcome.resource_store.resolve_content(&address), Some(body));
+            assert!(!url.as_str().replace('\\', "/").contains(&host_path));
+            assert!(!address.contains(&host_path));
+            assert!(
+                !String::from_utf8_lossy(body)
+                    .replace('\\', "/")
+                    .contains(&host_path)
+            );
         }
     }
 
