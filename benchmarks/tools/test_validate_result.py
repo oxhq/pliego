@@ -32,7 +32,7 @@ for tool in validate_result.POPPLER_TOOLS:
             f"{tool}_version": f"{tool} 1.0",
         }
     )
-TARGET = TEST_MANIFEST["targets"]["pliego-0.1.1"]
+TARGET = TEST_MANIFEST["targets"]["pliego-0.2.0"]
 FIXTURE = TEST_MANIFEST["fixtures"]["minimal-static"]
 INPUT_HASH, BUNDLE_HASH = validate_result.canonical_fixture_hashes(FIXTURE)
 
@@ -237,7 +237,7 @@ def result() -> dict:
             "measurement_method": "linux-cgroup-v2-v1",
             "percentile_method": "nearest-rank-v1",
         },
-        "target": {"id": "pliego-0.1.1", "label": TARGET["label"]},
+        "target": {"id": "pliego-0.2.0", "label": TARGET["label"]},
         "fixture": {
             "id": "minimal-static",
             "purpose": FIXTURE["purpose"],

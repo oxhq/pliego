@@ -143,11 +143,14 @@ binary="$(python3 benchmarks/tools/resolve_release.py \
   --cache "$cache" --metadata-out "$cache/verified-release.json")"
 python3 benchmarks/tools/run_benchmark.py \
   --binary "$binary" \
-  --out benchmarks/baselines/pliego-0.1.1-linux-x86_64.json
+  --out benchmarks/baselines/pliego-0.2.0-linux-x86_64.json
 ```
 
 The resolver accepts only the committed Linux x86_64 release name, size,
 archive SHA-256, exact file set, binary SHA-256, native commit, and Servo build.
+It also verifies the byte-identical promoted `runtimes.json` retained under
+`benchmarks/releases/`; the monorepo Laravel manifest deliberately remains a
+non-publishable pre-promotion template.
 Use `--offline` after the verified archive is cached. The orchestrator checks
 the binary digest again. With canonical Poppler pins currently absent, it emits
 explicit `not-applicable` results before sampling rather than publish numbers
@@ -255,8 +258,8 @@ checks remain separate audited increments before a signed baseline is published.
 
 Each fixture declares expected correctness in `manifest.toml`. A sample counts
 toward performance only when its checks pass; a wrong result is not "faster".
-Generated-fixture `page_count` targets are pinned to the published Linux 0.1.1
-renderer.
+Generated-fixture `page_count` targets were originally pinned on Linux v0.1.1
+and were revalidated unchanged against the published Linux v0.2.0 renderer.
 
 | Fixture | Category | Purpose | Expected |
 | --- | --- | --- | --- |

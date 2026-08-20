@@ -39,14 +39,16 @@ binary="$(python3 benchmarks/tools/resolve_release.py \
 python3 benchmarks/tools/run_benchmark.py \
   --binary "$binary" \
   --dedicated \
-  --out benchmarks/baselines/pliego-0.1.1-linux-x86_64.json
+  --out benchmarks/baselines/pliego-0.2.0-linux-x86_64.json
 
 python3 benchmarks/tools/validate_result.py \
-  benchmarks/baselines/pliego-0.1.1-linux-x86_64.json
+  benchmarks/baselines/pliego-0.2.0-linux-x86_64.json
 ```
 
 `resolve_release.py` verifies the release archive and binary against the hashes in
-`benchmarks/manifest.toml`. Until the manifest pins the canonical Poppler runtime,
+`benchmarks/manifest.toml` and the retained byte-identical promoted runtime
+manifest. The monorepo Laravel manifest intentionally remains pre-promotion.
+Until the manifest pins the canonical Poppler runtime,
 `run_benchmark.py` emits an explicit `not-applicable` result instead of numbers.
 After those pins exist, it applies the committed warm-up, sample, randomization,
 and cgroup protocol. `--dedicated` records the host assertion and requires the
@@ -126,7 +128,7 @@ seed.
 
 | Target | Runner status | Eligible public claim today |
 | --- | --- | --- |
-| Pliego v0.1.1 | Implemented and pinned | Harness can be reproduced; no committed result |
+| Pliego v0.2.0 | Implemented and pinned | Harness can be reproduced; no committed result |
 | Pliego candidate | Stable-outcome parity comparator only; arbitrary candidate performance runs are not implemented | Parity can be checked locally; no candidate performance claim |
 | dompdf 3.1.6 | Locked one-shot adapter; configured Ubuntu/Poppler smoke | Timing N/A pending image attestation and oracle pins |
 | Browsershot 5.4.0 + Puppeteer 25.8.0 | Locked one-shot adapter; configured network-isolated Ubuntu/Poppler smoke | Timing N/A pending image attestation and oracle pins |

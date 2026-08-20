@@ -5,19 +5,69 @@
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 import hashlib
+import json
 import sys
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "benchmarks" / "tools"))
 sys.path.insert(0, str(ROOT / "python"))
 
 from check_pliego_release_archive import _fixture_files, _write_fixture  # noqa: E402
-from resolve_release import ReleaseError, install_archive, sha256_file, verify_archive  # noqa: E402
+import resolve_release  # noqa: E402
+from resolve_release import ReleaseError, install_archive, load_release, sha256_file, verify_archive  # noqa: E402
+
+
+def assert_committed_manifest_binding() -> None:
+    published_target, published_runtime = load_release(resolve_release.DEFAULT_TARGET)
+    assert published_target["runtime_manifest_sha256"] == (
+        "47d2fe59efe4439fefd1d30e2c8604c776829170bd8cb44d0e5764ed70b9e32d"
+    )
+    assert published_runtime["sha256"] == published_target["archive_sha256"]
+
+    manifest_text = resolve_release.MANIFEST.read_text(encoding="utf-8")
+    runtime_bytes = (resolve_release.ROOT / published_target["runtime_manifest"]).read_bytes()
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        copied_manifest = root / "benchmarks" / "manifest.toml"
+        copied_runtime = root / published_target["runtime_manifest"]
+        copied_manifest.parent.mkdir(parents=True)
+        copied_runtime.parent.mkdir(parents=True)
+        copied_manifest.write_text(manifest_text, encoding="utf-8")
+        copied_runtime.write_bytes(runtime_bytes)
+
+        with patch.object(resolve_release, "ROOT", root), patch.object(resolve_release, "MANIFEST", copied_manifest):
+            copied_runtime.write_bytes(runtime_bytes[:-1] + b" ")
+            try:
+                load_release(resolve_release.DEFAULT_TARGET)
+            except ReleaseError as error:
+                assert "differs from the promoted release asset" in str(error)
+            else:
+                raise AssertionError("altered promoted runtime manifest passed its pinned hash")
+
+            altered = json.loads(runtime_bytes)
+            altered["release_ready"] = False
+            altered_bytes = (json.dumps(altered, indent=4) + "\n").encode()
+            altered_sha256 = hashlib.sha256(altered_bytes).hexdigest()
+            altered_manifest = manifest_text.replace(
+                f"runtime_manifest_bytes = {len(runtime_bytes)}",
+                f"runtime_manifest_bytes = {len(altered_bytes)}",
+            ).replace(published_target["runtime_manifest_sha256"], altered_sha256)
+            copied_manifest.write_text(altered_manifest, encoding="utf-8")
+            copied_runtime.write_bytes(altered_bytes)
+            try:
+                load_release(resolve_release.DEFAULT_TARGET)
+            except ReleaseError as error:
+                assert "contract differs from benchmark target" in str(error)
+            else:
+                raise AssertionError("non-finalized runtime manifest passed release semantics")
 
 
 def main() -> None:
+    assert_committed_manifest_binding()
+
     version = "9.9.9"
     platform = "linux-x86_64"
     repository = "https://github.com/oxhq/pliego"

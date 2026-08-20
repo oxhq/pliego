@@ -19,24 +19,27 @@ contract = "pliego.pdf-oracle.v1"
 # pdfinfo, pdftotext, pdffonts, and pdftoppm. They are deliberately absent until
 # the dedicated Linux oracle runtime is frozen; current numeric results are N/A.
 
-[targets."pliego-0.1.1"]
-label = "Pliego 0.1.1 (published bundle)"
-version = "0.1.1"
+[targets."pliego-0.2.0"]
+label = "Pliego 0.2.0 (published bundle)"
+version = "0.2.0"
 enabled = true
 kind = "pliego"
 repository = "https://github.com/oxhq/pliego"
-release_tag = "v0.1.1"
-commit = "6f5018839738490c4965e1425fba1f9503822a4d"
-servo_build = "0.4.0-6f5018839"
+release_tag = "v0.2.0"
+commit = "556c774242b272b11bc60999449c5debff1ad20f"
+servo_build = "0.4.0-556c77424"
 servo_base = "313b6d5ecc113b08010ce434140db3ca5abcc71c"
+runtime_manifest = "benchmarks/releases/v0.2.0/runtimes.json"
+runtime_manifest_bytes = 3290
+runtime_manifest_sha256 = "47d2fe59efe4439fefd1d30e2c8604c776829170bd8cb44d0e5764ed70b9e32d"
 platform = "linux-x86_64"
 profile = "checked-release"
-archive = "pliego-0.1.1-linux-x86_64.tar.gz"
-archive_bytes = 68725127
-archive_sha256 = "c74f4e3608006451635cd3c8dd70c006f930dcbbeb211ce8c939598cf5398282"
+archive = "pliego-0.2.0-linux-x86_64.tar.gz"
+archive_bytes = 62808123
+archive_sha256 = "c01e60c61f8fac02d7c1631cfe461a4c7e4a2ff8aaa1149e26d629f55146e26b"
 binary = "pliego"
-binary_bytes = 215470920
-binary_sha256 = "632ab7ca4ccd931b392593a9f0f5673cce543891d758fa7737bb859c8244ad27"
+binary_bytes = 197207424
+binary_sha256 = "36fa5c2413e48ad3a21296b9f2c67b8a292fdcfc67b75e07299eb830774a16f0"
 
 [targets."dompdf-3.1.6"]
 label = "dompdf 3.1.6 (cold Composer adapter)"
