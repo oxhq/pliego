@@ -9,6 +9,12 @@
 //! the nonproduction servoshell oracle.
 
 mod input_job;
+#[cfg(all(
+    test,
+    feature = "document-session",
+    not(any(target_os = "android", target_env = "ohos"))
+))]
+mod render_job;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -16,8 +22,14 @@ use std::fs::File;
 use std::io::{self, Read, Write};
 
 pub(crate) use input_job::ResolvedInputJob;
-#[cfg(test)]
-pub(crate) use input_job::resolve_input_job_for_test;
+#[cfg(all(
+    test,
+    feature = "document-session",
+    not(any(target_os = "android", target_env = "ohos"))
+))]
+pub(crate) use render_job::{
+    DiagnosticRetention, ResolvedRenderJob, ResolvedRenderJobParts, resolve_render_job_for_test,
+};
 use serde::Serialize;
 use serde::de::{self, Deserialize, Deserializer, MapAccess, SeqAccess, Visitor};
 use serde_json::{Map, Number, Value};

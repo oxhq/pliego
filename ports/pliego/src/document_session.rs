@@ -64,6 +64,8 @@ use super::resource_policy::{
 use super::runtime_policy::DeterministicRuntimePolicy;
 use super::session::LocalDocument;
 use crate::api2::ResolvedInputJob;
+#[cfg(test)]
+use crate::api2::{DiagnosticRetention, ResolvedRenderJob};
 
 const RESOURCE_EVIDENCE_ENTRY_OVERHEAD_BYTES: u64 = 256;
 const CONSOLE_EVIDENCE_ENTRY_OVERHEAD_BYTES: u64 = 64;
@@ -654,6 +656,19 @@ pub(crate) struct ControlledDocumentSession {
     session: DocumentSession,
     waker: PliegoEventLoopWaker,
     surface: DocumentCaptureSurfaceFingerprint,
+}
+
+/// Test-only owner for one inactive API 2 execution.
+///
+/// The exact request and normalized policy stay attached to the live session because diagnostics,
+/// `post_readiness_resources`, and `process_cpu_ms` are retention gates, not activation-proven
+/// enforcement in this scaffold.
+#[cfg(test)]
+struct InactiveApi2Execution {
+    controlled: ControlledDocumentSession,
+    request: serde_json::Value,
+    diagnostics: DiagnosticRetention,
+    runtime_policy: DeterministicRuntimePolicy,
 }
 
 /// One live session paired with its non-authoritative, generation-bound capture candidate.
@@ -1350,16 +1365,21 @@ impl DocumentSession {
         })
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
-    fn from_resolved_input_job_controlled(
-        job: ResolvedInputJob,
-        environment: RenderEnvironment,
-        page: PageDefinition,
-        allow_host_fonts: bool,
-        readiness: ReadinessPolicy,
-        runtime_policy: DeterministicRuntimePolicy,
-    ) -> Result<ControlledDocumentSession, SessionError> {
-        let (input_url, authority) = FrozenInputAuthority::from_resolved_job(job)?;
+    #[cfg(test)]
+    fn start_inactive_api2_execution_for_test(
+        job: ResolvedRenderJob,
+    ) -> Result<InactiveApi2Execution, SessionError> {
+        let crate::api2::ResolvedRenderJobParts {
+            request,
+            input,
+            environment,
+            page,
+            resources,
+            allow_host_fonts,
+            runtime_policy,
+            diagnostics,
+        } = job.into_parts();
+        let (input_url, authority) = FrozenInputAuthority::from_resolved_job(input)?;
         let runtime_policy = runtime_policy
             .validate()
             .map_err(|error| SessionError::new("INVALID_REQUEST", error.to_string()))?;
@@ -1371,7 +1391,7 @@ impl DocumentSession {
         let session = Self::new_validated_url_with_canvas_retention(
             input_url,
             PathBuf::new(),
-            ResourcePolicy::default(),
+            resources,
             Some(authority),
             environment,
             page,
@@ -1379,16 +1399,26 @@ impl DocumentSession {
             DocumentSessionRuntime::Controlled {
                 clock,
                 waker: waker.clone(),
-                readiness,
+                // Legacy readiness is only a private bridge for the controlled fixture. It is not
+                // accepted from an API 2 caller and must not become part of contract activation.
+                readiness: ReadinessPolicy {
+                    timeout_ms: 1_000,
+                    wait_for_fonts: false,
+                },
             },
             host_timeout,
             servo_canvas::retained_canvas::start_retaining_canvas_commands,
         )?;
         let surface = session.controlled_capture_surface()?;
-        Ok(ControlledDocumentSession {
-            session,
-            waker,
-            surface,
+        Ok(InactiveApi2Execution {
+            controlled: ControlledDocumentSession {
+                session,
+                waker,
+                surface,
+            },
+            request,
+            diagnostics,
+            runtime_policy,
         })
     }
 
@@ -2639,14 +2669,14 @@ mod tests {
         ResourcePolicyFailure, ResourceRequest, ResourceSource, ResponseHeaderEvidence,
         VirtualResourceSpec,
     };
-    use super::super::runtime_policy::DeterministicRuntimePolicy;
+    use super::super::runtime_policy::{DeterministicRuntimePolicy, DocumentSettlementLimits};
     use super::super::session::LocalDocument;
     use super::{
-        ConsoleEvidenceLog, ConsoleLogLevel, ControlledSettlementStep, DocumentSession,
-        FROZEN_INPUT_URL_ROOT, JSValue, MAX_CONSOLE_BYTES, MAX_CONSOLE_EVENTS,
-        PaintTicketAbortGuard, RESOURCE_EVIDENCE_ENTRY_OVERHEAD_BYTES, ReadinessPolicy,
-        RenderEnvironment, ResourceEvidenceLog, ResourcePolicyConfig, SessionCaptureEvidence,
-        SessionError, SessionHostDeadline, console_log_level_name,
+        ConsoleEvidenceLog, ConsoleLogLevel, ControlledSettlementStep, DiagnosticRetention,
+        DocumentSession, FROZEN_INPUT_URL_ROOT, InactiveApi2Execution, JSValue, MAX_CONSOLE_BYTES,
+        MAX_CONSOLE_EVENTS, PaintTicketAbortGuard, RESOURCE_EVIDENCE_ENTRY_OVERHEAD_BYTES,
+        ReadinessPolicy, RenderEnvironment, ResourceEvidenceLog, ResourcePolicyConfig,
+        SessionCaptureEvidence, SessionError, SessionHostDeadline, console_log_level_name,
         controlled_readiness_handshake_counts, session_host_timeout, validate_host_font_policy,
         validate_resolved_resource_policy, validate_resource_policy,
         with_current_readiness_evidence, with_readiness_evaluation_evidence,
@@ -3360,10 +3390,14 @@ window.pliego?.defer();
         )
     }
 
-    fn resolved_input_job(
+    fn resolved_render_job(
         entrypoint: &str,
         entries: &[(&str, &str, &[u8])],
-    ) -> Result<crate::api2::ResolvedInputJob, crate::api2::InvocationError> {
+        diagnostic_retention: &str,
+    ) -> Result<
+        (serde_json::Value, crate::api2::ResolvedRenderJob),
+        crate::api2::InvocationError,
+    > {
         #[derive(serde::Serialize)]
         struct Manifest<'a> {
             schema: &'static str,
@@ -3405,12 +3439,14 @@ window.pliego?.defer();
             serde_json::Value::from(content_address(&canonical_manifest));
         request["input"]["manifest"]["bytes"] =
             serde_json::Value::from(canonical_manifest.len() as u64);
+        request["diagnostics"]["retention"] = serde_json::Value::from(diagnostic_retention);
 
         let mut bodies = BTreeMap::new();
         for (path, _, body) in entries {
             assert!(bodies.insert((*path).to_owned(), body.to_vec()).is_none());
         }
-        crate::api2::resolve_input_job_for_test(&request, &canonical_manifest, bodies)
+        let job = crate::api2::resolve_render_job_for_test(&request, &canonical_manifest, bodies)?;
+        Ok((request, job))
     }
 
     fn fixture_png() -> Vec<u8> {
@@ -3710,6 +3746,14 @@ window.pliego?.defer();
     }
 
     #[test]
+    fn inactive_api2_execution_constructor_accepts_only_a_resolved_job() {
+        let _: fn(
+            crate::api2::ResolvedRenderJob,
+        ) -> Result<InactiveApi2Execution, SessionError> =
+            DocumentSession::start_inactive_api2_execution_for_test;
+    }
+
+    #[test]
     fn pliego_input_url_uses_only_frozen_virtual_resources_and_fails_closed() {
         for case in ["success", "unlisted", "scheme"] {
             let output = run_isolated_test(
@@ -3788,21 +3832,42 @@ fetch("payload.json")
                 ("payload.json", "application/json", payload.as_slice()),
             ]);
         }
-        let job = resolved_input_job("entry.html", &entries)
-            .expect("the in-memory fixture should pass the full API 2 input validators");
+        let (diagnostic_retention, expected_diagnostics) = match case.as_str() {
+            "success" => ("none", DiagnosticRetention::None),
+            "unlisted" => ("on-failure", DiagnosticRetention::OnFailure),
+            "scheme" => ("always", DiagnosticRetention::Always),
+            _ => unreachable!(),
+        };
+        let (expected_request, job) =
+            resolved_render_job("entry.html", &entries, diagnostic_retention)
+                .expect("the in-memory fixture should pass the full API 2 input validators");
 
-        let controlled = DocumentSession::from_resolved_input_job_controlled(
-            job,
-            RenderEnvironment::default(),
-            a4(),
-            false,
-            ReadinessPolicy {
-                timeout_ms: 1_000,
-                wait_for_fonts: false,
-            },
-            DeterministicRuntimePolicy::default(),
-        )
-        .expect("the resolved API 2 input should construct a frozen URL session");
+        let execution = DocumentSession::start_inactive_api2_execution_for_test(job)
+            .expect("the resolved API 2 input should construct a frozen URL session");
+        assert_eq!(execution.request, expected_request);
+        assert_eq!(execution.diagnostics, expected_diagnostics);
+        assert_eq!(
+            execution.request["page"]["css_page_precedence"],
+            "css-page-over-request-defaults"
+        );
+        assert_eq!(
+            execution.runtime_policy,
+            DeterministicRuntimePolicy::default()
+        );
+        assert_eq!(
+            execution.runtime_policy.settlement.limits,
+            DocumentSettlementLimits {
+                virtual_span_ms: 86_400_000,
+                ordinary_tasks: 100_000,
+                microtasks: 1_000_000,
+                rendering_opportunities: 10_000,
+                mutations: 1_000_000,
+                post_readiness_resources: 1_024,
+                process_cpu_ms: 30_000,
+                host_wall_ms: 60_000,
+            }
+        );
+        let controlled = execution.controlled;
         assert!(
             controlled
                 .session
@@ -3927,9 +3992,10 @@ fetch("payload.json")
 
     #[test]
     fn resolved_input_job_rejects_non_utf8_canonical_html() {
-        let error = resolved_input_job(
+        let error = resolved_render_job(
             "entry.html",
             &[("entry.html", "text/html;charset=utf-8", &[0xff, 0xfe])],
+            "always",
         )
         .expect_err("a canonical UTF-8 HTML declaration must reject non-UTF-8 bytes");
         assert!(
@@ -3943,12 +4009,14 @@ fetch("payload.json")
     fn frozen_input_transfers_a_body_above_half_the_inclusive_content_bound() {
         let body_len = (crate::api2::INPUT_CONTENT_MAX_BYTES / 2 + 1) as usize;
         let body = vec![b' '; body_len];
-        let job = resolved_input_job(
+        let (_, job) = resolved_render_job(
             "entry.html",
             &[("entry.html", "text/html;charset=utf-8", &body)],
+            "always",
         )
         .expect("the body should be inside the inclusive API 2 content bound");
-        let (input_url, authority) = super::FrozenInputAuthority::from_resolved_job(job)
+        let parts = job.into_parts();
+        let (input_url, authority) = super::FrozenInputAuthority::from_resolved_job(parts.input)
             .expect("the validated body should map into the frozen authority");
         let mut store =
             super::owned_resource_store_for_session(&ResourcePolicy::default(), Some(&authority))

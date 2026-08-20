@@ -154,6 +154,20 @@ pub(crate) fn load_input_job(
 }
 
 impl ResolvedInputJob {
+    #[cfg(test)]
+    pub(super) fn require_request_binding(&self, request: &Value) -> Result<(), InvocationError> {
+        let input = request_input(request)?;
+        let entrypoint = required_string(input, "$.input", "entrypoint")
+            .map_err(InvocationError::new)?;
+        if entrypoint != self.entrypoint {
+            return Err(InvocationError::new(
+                "resolved input entrypoint does not match the render request",
+            ));
+        }
+        decode_input_manifest(request, &self.canonical_manifest)?;
+        Ok(())
+    }
+
     pub(crate) fn into_session_parts(self) -> (String, BTreeMap<String, LoadedInputResource>) {
         let Self {
             canonical_manifest: _,

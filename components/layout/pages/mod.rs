@@ -100,6 +100,33 @@ impl PageDefinition {
         Ok(definition)
     }
 
+    /// Construct an exact page definition from Servo app units without a floating-point round trip.
+    ///
+    /// The existing `f32` accessors are not a fixed-point API 2 serialization surface.
+    pub fn from_app_units(
+        width: i32,
+        height: i32,
+        margins: [i32; 4],
+    ) -> Result<Self, PageGeometryError> {
+        if width <= 0 || height <= 0 {
+            return Err(PageGeometryError::InvalidPageSize);
+        }
+        if margins.iter().any(|margin| *margin < 0) {
+            return Err(PageGeometryError::InvalidPageMargin);
+        }
+        let [top, right, bottom, left] = margins;
+        if i64::from(left) + i64::from(right) >= i64::from(width)
+            || i64::from(top) + i64::from(bottom) >= i64::from(height)
+        {
+            return Err(PageGeometryError::MarginsConsumePage);
+        }
+
+        Ok(Self {
+            size: Size2D::new(Au(width), Au(height)),
+            margins: PhysicalSides::new(Au(top), Au(right), Au(bottom), Au(left)),
+        })
+    }
+
     pub fn width(&self) -> f32 {
         self.size.width.to_f32_px()
     }
@@ -2192,6 +2219,23 @@ mod tests {
     fn page() -> PageDefinition {
         PageDefinition::new(612.0, 792.0, PageMargins::new(72.0, 54.0, 36.0, 18.0))
             .expect("test page geometry should be valid")
+    }
+
+    #[test]
+    fn exact_app_unit_page_construction_does_not_narrow_large_contract_values() {
+        let page = PageDefinition::from_app_units(i32::MAX, i32::MAX - 1, [1, 2, 3, i32::MAX - 3])
+            .expect("valid app-unit geometry should not pass through f32");
+        assert_eq!(page.size.width, Au(i32::MAX));
+        assert_eq!(page.size.height, Au(i32::MAX - 1));
+        assert_eq!(page.margins.top, Au(1));
+        assert_eq!(page.margins.right, Au(2));
+        assert_eq!(page.margins.bottom, Au(3));
+        assert_eq!(page.margins.left, Au(i32::MAX - 3));
+
+        assert_eq!(
+            PageDefinition::from_app_units(100, 100, [0, 50, 0, 50]),
+            Err(PageGeometryError::MarginsConsumePage)
+        );
     }
 
     fn short_table_page_builder() -> BlockPageBuilder {
