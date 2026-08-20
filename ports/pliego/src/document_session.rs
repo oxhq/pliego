@@ -1270,6 +1270,12 @@ impl DocumentSession {
         session_host_timeout: Duration,
         start_canvas_retention: impl FnOnce() -> servo_canvas::retained_canvas::CanvasRetentionGuard,
     ) -> Result<Self, SessionError> {
+        let surface_size = page.surface_pixel_size().ok_or_else(|| {
+            SessionError::new(
+                "RENDER_CONTEXT_FAILED",
+                "page dimensions cannot be represented by the software rendering surface",
+            )
+        })?;
         let page_reservation = reserve_for_process(page).map_err(|_| {
             SessionError::new(
                 "LAYOUT_CONFIGURATION_FAILED",
@@ -1282,8 +1288,8 @@ impl DocumentSession {
 
         let rendering_context = Rc::new(
             SoftwareRenderingContext::new(PhysicalSize::new(
-                page.width().ceil() as u32,
-                page.height().ceil() as u32,
+                surface_size.width,
+                surface_size.height,
             ))
             .map_err(|error| {
                 SessionError::new(

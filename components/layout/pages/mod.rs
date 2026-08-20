@@ -135,6 +135,17 @@ impl PageDefinition {
         self.size.height.to_f32_px()
     }
 
+    /// Resolve the page's exact app-unit dimensions to the whole-pixel software surface.
+    ///
+    /// Surfman receives signed dimensions internally, so this rejects any value that cannot be
+    /// represented by both the public `u32` surface size and its downstream `i32` boundary.
+    pub fn surface_pixel_size(&self) -> Option<UntypedSize2D<u32>> {
+        Some(UntypedSize2D::new(
+            u32::try_from(self.size.width.ceil_to_px()).ok()?,
+            u32::try_from(self.size.height.ceil_to_px()).ok()?,
+        ))
+    }
+
     pub fn margins(&self) -> PageMargins {
         PageMargins {
             top: self.margins.top.to_f32_px(),
@@ -2250,6 +2261,61 @@ mod tests {
         assert_eq!(
             PageDefinition::from_app_units(100, 100, [0, 50, 0, 50]),
             Err(PageGeometryError::MarginsConsumePage)
+        );
+    }
+
+    #[test]
+    fn surface_pixel_size_ceil_is_exact_at_app_unit_boundaries() {
+        let zero_margins = [0; 4];
+        let maximum = PageDefinition::from_app_units(i32::MAX, i32::MAX, zero_margins)
+            .expect("maximum positive app-unit dimensions should be valid");
+        assert_eq!(
+            maximum.surface_pixel_size(),
+            Some(UntypedSize2D::new(35_791_395, 35_791_395))
+        );
+
+        let exact_multiples = PageDefinition::from_app_units(60, 120, zero_margins)
+            .expect("exact pixel multiples should be valid");
+        assert_eq!(
+            exact_multiples.surface_pixel_size(),
+            Some(UntypedSize2D::new(1, 2))
+        );
+
+        let one_app_unit_remainders = PageDefinition::from_app_units(61, 121, zero_margins)
+            .expect("one-app-unit remainders should be valid");
+        assert_eq!(
+            one_app_unit_remainders.surface_pixel_size(),
+            Some(UntypedSize2D::new(2, 3))
+        );
+
+        let one_app_unit_before_boundaries =
+            PageDefinition::from_app_units(59, 119, zero_margins)
+                .expect("near-boundary app-unit dimensions should be valid");
+        assert_eq!(
+            one_app_unit_before_boundaries.surface_pixel_size(),
+            Some(UntypedSize2D::new(1, 2))
+        );
+    }
+
+    #[test]
+    fn surface_pixel_size_preserves_ordinary_api1_a4_rounding() {
+        let page = PageDefinition::new(
+            793.7008,
+            1122.5197,
+            PageMargins::new(45.3543, 60.4724, 45.3543, 60.4724),
+        )
+        .expect("A4 API 1 geometry should be valid");
+
+        assert_eq!(
+            page.surface_pixel_size(),
+            Some(UntypedSize2D::new(
+                page.width().ceil() as u32,
+                page.height().ceil() as u32,
+            ))
+        );
+        assert_eq!(
+            page.surface_pixel_size(),
+            Some(UntypedSize2D::new(794, 1123))
         );
     }
 
