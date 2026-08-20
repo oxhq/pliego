@@ -9,7 +9,10 @@
  * additionally require its scene report. On Linux, cgroup-v2 supplies
  * authoritative CPU, memory, and I/O accounting for the adapter and every
  * descendant. One correctness preflight and all warmups are discarded before
- * real samples. Aggregation and schema validation happen in run_benchmark.py.
+ * real samples. Internal phase entrypoints let the Python coordinator execute
+ * one preflight, warmup, or indexed timed sample at a time when it owns a
+ * cross-target schedule. Aggregation and schema validation happen in
+ * run_benchmark.py.
  *
  * Invocation contract: the engine resolves the input relative to the process
  * cwd and rejects absolute or parent-traversing paths, so the runner is given
@@ -40,7 +43,8 @@ Usage: php pliego.php --binary <path> --input <file.html> --output <file.pdf> --
   --fixture-input-sha256 HASH --fixture-bundle-sha256 HASH [--fixture-asset PATH]...
   [--isolate-network]
   [--expect-failure] [--expected-code CODE] [--page-size WxH] [--page-margins T,R,B,L]
-  [--locale X] [--timezone Y] [--cwd DIR] [--self-test]
+  [--locale X] [--timezone Y] [--cwd DIR]
+  [--runner-phase full|preflight|warmup|timed] [--sample-index N] [--self-test]
 EOT;
 
 function option(array $options, string $name): ?string
@@ -151,7 +155,7 @@ $options = getopt('', [
     'dimension-tolerance-points:', 'require-scene-report',
     'page-size:', 'page-margins:', 'locale:', 'timezone:', 'cwd:',
     'fixture-input-sha256:', 'fixture-bundle-sha256:', 'fixture-asset:',
-    'isolate-network',
+    'isolate-network', 'runner-phase:', 'sample-index:',
     'self-test',
 ]);
 if ($options === false) {
@@ -191,6 +195,31 @@ $output = option($options, 'output') ?? 'document.pdf';
 $artifacts = option($options, 'artifacts') ?? 'artifacts';
 $samples = max(1, (int) (option($options, 'samples') ?? 1));
 $warmup = max(0, (int) (option($options, 'warmup') ?? 0));
+$runnerPhase = option($options, 'runner-phase') ?? 'full';
+$sampleIndexRaw = option($options, 'sample-index');
+if ($sampleIndexRaw !== null
+    && (preg_match('/^(0|[1-9][0-9]*)$/', $sampleIndexRaw) !== 1
+        || (string) (int) $sampleIndexRaw !== $sampleIndexRaw)) {
+    fail('--sample-index must be a canonical nonnegative integer');
+}
+$sampleIndex = $sampleIndexRaw !== null ? (int) $sampleIndexRaw : null;
+if (!in_array($runnerPhase, ['full', 'preflight', 'warmup', 'timed'], true)) {
+    fail('--runner-phase must be full, preflight, warmup, or timed');
+}
+if (in_array($runnerPhase, ['warmup', 'timed'], true)) {
+    if ($sampleIndex === null || $sampleIndex < 0) {
+        fail("--runner-phase {$runnerPhase} requires a nonnegative --sample-index");
+    }
+    if (array_key_exists('samples', $options) || array_key_exists('warmup', $options)) {
+        fail("--runner-phase {$runnerPhase} does not accept --samples or --warmup");
+    }
+} elseif ($sampleIndex !== null) {
+    fail("--sample-index is not accepted for --runner-phase {$runnerPhase}");
+}
+if ($runnerPhase === 'preflight'
+    && (array_key_exists('samples', $options) || array_key_exists('warmup', $options))) {
+    fail('--runner-phase preflight does not accept --samples or --warmup');
+}
 $pageCount = option($options, 'page-count') !== null ? (int) $options['page-count'] : null;
 $textContains = text_contains_options($options['text-contains'] ?? []);
 $textEquals = option($options, 'text-equals');
@@ -883,10 +912,31 @@ $state = [
 ];
 
 assert_fixture_identity($state);
-$preflight = run_sample($state, -1000000);
-if (!$preflight['ok']) {
-    fail('untimed correctness preflight failed; evidence retained at ' . $preflight['retained']['artifacts_dir']);
+$runPreflight = static function () use ($state): void {
+    $preflight = run_sample($state, -1000000);
+    if (!$preflight['ok']) {
+        fail('untimed correctness preflight failed; evidence retained at ' . $preflight['retained']['artifacts_dir']);
+    }
+};
+
+if ($runnerPhase === 'preflight') {
+    $runPreflight();
+    exit(0);
 }
+if ($runnerPhase === 'warmup') {
+    $sample = run_sample($state, -1 - (int) $sampleIndex);
+    if (!$sample['ok']) {
+        fail('warmup failed; evidence retained at ' . $sample['retained']['artifacts_dir']);
+    }
+    exit(0);
+}
+if ($runnerPhase === 'timed') {
+    $sample = run_sample($state, (int) $sampleIndex);
+    echo json_encode($sample, JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE) . "\n";
+    exit(0);
+}
+
+$runPreflight();
 
 for ($iteration = 0; $iteration < $warmup; $iteration++) {
     $sample = run_sample($state, -1 - $iteration);

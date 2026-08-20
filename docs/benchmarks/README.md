@@ -119,10 +119,16 @@ All four Poppler tool identities must also match manifest pins. Browsershot samp
 with only `lo`; Chromium flags and HTTP(S) request blocking are not treated as
 network isolation.
 The current commands run one target at a time. The committed seed randomizes
-fixture traversal within each target, but not target order between individual
-samples. These commands are implementation proof, not a publishable cross-engine
-report; the next Linux orchestration gate must interleave target order with that
-seed.
+fixture traversal within each target. The harness now contains a deterministic
+SHA-256-ranked cross-target schedule plus phase-separated runner entrypoints.
+Its hash input is the ASCII encoding of compact JSON with every non-ASCII code
+point JSON-escaped, for
+`["pliego.cross-target-schedule.v1", seed, fixture, phase, iteration,
+target_id]`; entries sort by digest bytes and then target-ID UTF-8 bytes. It can
+execute preflight, warmup, and indexed timed rounds without batching a target's
+samples. The public CLI does not yet construct attested multi-target contexts
+or retain that schedule, so these commands remain implementation proof, not a
+publishable cross-engine report.
 
 ## Implemented slice and remaining comparative protocol
 
@@ -154,12 +160,13 @@ Before a cross-engine comparison is published, every target must follow these ru
 - Publish raw samples, hashes, commands, logs, environment metadata, validation
   output, and the report-generation code with the summary.
 
-The remaining dedicated-Linux gates are seeded cross-target sample
-interleaving and automatic traceability from every report cell to retained raw
-samples. Single-target serial throughput now uses the retained outer one-shot
-wall interval from runner process open through sampler exit, which includes
-descendant drain and accounting settlement; it is still not a publishable
-cross-engine comparison until interleaving and report traceability pass.
+The remaining dedicated-Linux gates are wiring the seeded cross-target
+execution primitive into a retained multi-target artifact and automatic
+traceability from every report cell to retained raw samples. Single-target
+serial throughput now uses the retained outer one-shot wall interval from runner
+process open through sampler exit, which includes descendant drain and
+accounting settlement; it is still not a publishable cross-engine comparison
+until interleaving and report traceability pass.
 
 ## Publication gate
 

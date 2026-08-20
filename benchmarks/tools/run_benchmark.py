@@ -43,7 +43,7 @@ import sys
 import tomllib
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from typing import Any, NoReturn
+from typing import Any, Callable, NoReturn
 
 ROOT = Path(__file__).resolve().parents[2]
 MANIFEST = ROOT / "benchmarks" / "manifest.toml"
@@ -54,6 +54,7 @@ DEFAULT_SCHEMA = ROOT / "benchmarks" / "schema" / "benchmark-result.v1.json"
 POPPLER_TOOLS = ("pdfinfo", "pdftotext", "pdffonts", "pdftoppm")
 ORACLE_IDENTITY_REASON = "manifest does not pin canonical Poppler tool identities"
 ADAPTER_ATTESTATION_REASON = "out-of-process OCI image attestation is unavailable"
+CROSS_TARGET_SCHEDULE = "pliego.cross-target-schedule.v1"
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import validate_result  # noqa: E402
@@ -62,6 +63,119 @@ import validate_result  # noqa: E402
 def fail(message: str) -> NoReturn:
     print(f"run_benchmark: {message}", file=sys.stderr)
     raise SystemExit(1)
+
+
+def cross_target_phase_schedule(
+    target_ids: list[str],
+    fixture_id: str,
+    iterations: int,
+    seed: int,
+    phase: str,
+) -> list[dict[str, Any]]:
+    """Return one seeded, target-complete order for every phase iteration.
+
+    Ranking uses SHA-256 over a compact JSON tuple instead of Python's random
+    implementation, making the schedule reproducible in other languages and
+    across Python versions. Every target appears exactly once per iteration.
+    """
+
+    if len(target_ids) < 2:
+        raise ValueError("cross-target scheduling requires at least two targets")
+    if any(not isinstance(target_id, str) or not target_id for target_id in target_ids):
+        raise ValueError("cross-target scheduling requires unique nonempty target ids")
+    if len(set(target_ids)) != len(target_ids):
+        raise ValueError("cross-target scheduling requires unique nonempty target ids")
+    if not isinstance(fixture_id, str) or not fixture_id:
+        raise ValueError("cross-target scheduling requires a fixture id")
+    if not isinstance(iterations, int) or isinstance(iterations, bool) or iterations < 1:
+        raise ValueError("cross-target scheduling requires at least one iteration")
+    if not isinstance(seed, int) or isinstance(seed, bool):
+        raise ValueError("cross-target scheduling requires an integer seed")
+    if phase not in {"preflight", "warmup", "timed"}:
+        raise ValueError("cross-target scheduling phase must be preflight, warmup, or timed")
+
+    canonical_targets = sorted(target_ids, key=lambda target_id: target_id.encode("utf-8"))
+    schedule: list[dict[str, Any]] = []
+    for iteration in range(iterations):
+        ranked: list[tuple[bytes, bytes, str]] = []
+        for target_id in canonical_targets:
+            rank_input = json.dumps(
+                [CROSS_TARGET_SCHEDULE, seed, fixture_id, phase, iteration, target_id],
+                ensure_ascii=True,
+                separators=(",", ":"),
+            ).encode("ascii")
+            ranked.append((hashlib.sha256(rank_input).digest(), target_id.encode("utf-8"), target_id))
+        for _, _, target_id in sorted(ranked):
+            schedule.append(
+                {
+                    "position": len(schedule),
+                    "iteration": iteration,
+                    "target_id": target_id,
+                }
+            )
+    return schedule
+
+
+def execute_interleaved_run(
+    target_ids: list[str],
+    fixture_id: str,
+    warmup_iterations: int,
+    sample_count: int,
+    seed: int,
+    run_preflight: Callable[[str], None],
+    run_warmup: Callable[[str, int], None],
+    run_timed: Callable[[str, int], dict[str, Any]],
+) -> tuple[dict[str, Any], dict[str, list[dict[str, Any]]]]:
+    """Execute callbacks in the canonical cross-target phase schedules.
+
+    This is deliberately not wired into the public single-target CLI yet. A
+    future comparison coordinator must first construct fully attested target
+    contexts, then use this primitive and retain the returned transcript.
+    """
+
+    if not isinstance(warmup_iterations, int) or isinstance(warmup_iterations, bool) or warmup_iterations < 0:
+        raise ValueError("interleaved execution requires a nonnegative integer warmup count")
+    if not isinstance(sample_count, int) or isinstance(sample_count, bool) or sample_count < 1:
+        raise ValueError("interleaved execution requires a positive integer sample count")
+
+    preflight = cross_target_phase_schedule(target_ids, fixture_id, 1, seed, "preflight")
+    warmup = (
+        cross_target_phase_schedule(target_ids, fixture_id, warmup_iterations, seed, "warmup")
+        if warmup_iterations > 0
+        else []
+    )
+    timed = cross_target_phase_schedule(target_ids, fixture_id, sample_count, seed, "timed")
+    samples_by_target = {target_id: [] for target_id in sorted(target_ids, key=lambda value: value.encode("utf-8"))}
+
+    for entry in preflight:
+        run_preflight(entry["target_id"])
+    for entry in warmup:
+        run_warmup(entry["target_id"], entry["iteration"])
+    for entry in timed:
+        sample = run_timed(entry["target_id"], entry["iteration"])
+        sample_index = sample.get("index") if isinstance(sample, dict) else None
+        if not isinstance(sample_index, int) or isinstance(sample_index, bool) or sample_index != entry["iteration"]:
+            fail(
+                "interleaved runner returned a sample whose index does not match "
+                f"the schedule for {entry['target_id']!r}"
+            )
+        samples_by_target[entry["target_id"]].append(sample)
+
+    expected_indices = list(range(sample_count))
+    for target_id, samples in samples_by_target.items():
+        if [sample["index"] for sample in samples] != expected_indices:
+            fail(f"interleaved runner did not retain one ordered sample per round for {target_id!r}")
+
+    transcript = {
+        "contract": CROSS_TARGET_SCHEDULE,
+        "seed": seed,
+        "fixture_id": fixture_id,
+        "targets": sorted(target_ids, key=lambda value: value.encode("utf-8")),
+        "preflight": preflight,
+        "warmup": warmup,
+        "timed": timed,
+    }
+    return transcript, samples_by_target
 
 
 def windows_ram_bytes() -> int:
@@ -442,17 +556,36 @@ def build_command(
     fixture_id: str,
     fixture: dict[str, Any],
     binary: Path,
-    samples: int,
-    warmup: int,
+    samples: int | None,
+    warmup: int | None,
     require_scene_report: bool = True,
     expected_fixture_identity: tuple[str, str] | None = None,
     isolate_network: bool = False,
+    runner_phase: str = "full",
+    sample_index: int | None = None,
 ) -> list[str]:
     # The engine resolves the input relative to the process cwd and rejects
     # absolute or parent-traversing paths (mirroring the PHP SDK). Run with
     # cwd = the input's own directory and pass the bare file name.
     input_path = (ROOT / fixture["input"]).resolve()
     input_sha256, bundle_sha256 = expected_fixture_identity or fixture_identity(fixture)
+    if runner_phase not in {"full", "preflight", "warmup", "timed"}:
+        raise ValueError(f"unsupported runner phase {runner_phase!r}")
+    if runner_phase == "full":
+        if samples is None or warmup is None or sample_index is not None:
+            raise ValueError("full runner phase requires sample and warmup counts and no sample index")
+        if not isinstance(samples, int) or isinstance(samples, bool) or samples < 1:
+            raise ValueError("full runner phase requires a positive integer sample count")
+        if not isinstance(warmup, int) or isinstance(warmup, bool) or warmup < 0:
+            raise ValueError("full runner phase requires a nonnegative integer warmup count")
+    elif samples is not None or warmup is not None:
+        raise ValueError(f"{runner_phase} runner phase does not accept sample or warmup counts")
+    if runner_phase in {"warmup", "timed"}:
+        if not isinstance(sample_index, int) or isinstance(sample_index, bool) or sample_index < 0:
+            raise ValueError(f"{runner_phase} runner phase requires a nonnegative sample index")
+    elif sample_index is not None:
+        raise ValueError(f"{runner_phase} runner phase does not accept a sample index")
+
     command = [
         str(php),
         str(RUNNER),
@@ -464,10 +597,6 @@ def build_command(
         "document.pdf",
         "--artifacts",
         "artifacts",
-        "--samples",
-        str(samples),
-        "--warmup",
-        str(warmup),
         "--cwd",
         str(input_path.parent),
         "--fixture-input-sha256",
@@ -475,6 +604,14 @@ def build_command(
         "--fixture-bundle-sha256",
         bundle_sha256,
     ]
+    if samples is not None:
+        command += ["--samples", str(samples)]
+    if warmup is not None:
+        command += ["--warmup", str(warmup)]
+    if runner_phase != "full":
+        command += ["--runner-phase", runner_phase]
+    if sample_index is not None:
+        command += ["--sample-index", str(sample_index)]
     for asset in fixture.get("assets", []):
         command += ["--fixture-asset", asset]
     if isolate_network:
@@ -515,6 +652,40 @@ def build_command(
     return command
 
 
+def invoke_runner(
+    command: list[str],
+    fixture_id: str,
+    fixture: dict[str, Any],
+    original_identity: tuple[str, str],
+    expected_indices: list[int],
+    timeout: int,
+) -> list[dict[str, Any]]:
+    result = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
+    if result.returncode != 0:
+        fail(f"runner failed for {fixture_id!r}: {result.stderr[-2000:]}")
+
+    samples_out: list[dict[str, Any]] = []
+    for line in (line for line in result.stdout.splitlines() if line.strip()):
+        try:
+            parsed = json.loads(line)
+        except json.JSONDecodeError:
+            fail(f"runner emitted a non-JSON stdout line for {fixture_id!r}: {line[:200]}")
+        if not isinstance(parsed, dict) or "wall_ms" not in parsed:
+            fail(f"runner emitted a non-sample stdout value for {fixture_id!r}")
+        samples_out.append(parsed)
+
+    actual_indices = [sample.get("index") for sample in samples_out]
+    indices_are_integers = all(isinstance(index, int) and not isinstance(index, bool) for index in actual_indices)
+    if not indices_are_integers or actual_indices != expected_indices:
+        fail(
+            f"runner produced sample indices {actual_indices!r}, expected {expected_indices!r} "
+            f"for {fixture_id!r}: {result.stderr[-2000:]}"
+        )
+    if fixture_identity(fixture) != original_identity:
+        fail(f"fixture {fixture_id!r} changed during rendering")
+    return samples_out
+
+
 def collect_samples(
     php: Path,
     fixture_id: str,
@@ -538,24 +709,48 @@ def collect_samples(
         original_identity,
         isolate_network,
     )
-    result = subprocess.run(command, capture_output=True, text=True, timeout=max(600, samples * 60))
-    lines = [line for line in result.stdout.splitlines() if line.strip()]
-    samples_out: list[dict[str, Any]] = []
-    for line in lines:
-        try:
-            parsed = json.loads(line)
-        except json.JSONDecodeError:
-            print(f"runner emitted a non-JSON line: {line[:200]}", file=sys.stderr)
-            continue
-        if isinstance(parsed, dict) and "wall_ms" in parsed:
-            samples_out.append(parsed)
-    if result.returncode != 0:
-        fail(f"runner failed for {fixture_id!r}: {result.stderr[-2000:]}")
-    if len(samples_out) != samples:
-        fail(f"runner produced {len(samples_out)} of {samples} samples for {fixture_id!r}: {result.stderr[-2000:]}")
-    if fixture_identity(fixture) != original_identity:
-        fail(f"fixture {fixture_id!r} changed during rendering")
-    return samples_out
+    return invoke_runner(
+        command,
+        fixture_id,
+        fixture,
+        original_identity,
+        list(range(samples)),
+        max(600, samples * 60),
+    )
+
+
+def run_runner_phase(
+    php: Path,
+    fixture_id: str,
+    fixture: dict[str, Any],
+    binary: Path,
+    runner_phase: str,
+    sample_index: int | None = None,
+    require_scene_report: bool = True,
+    expected_fixture_identity: tuple[str, str] | None = None,
+    isolate_network: bool = False,
+) -> dict[str, Any] | None:
+    """Run exactly one internal preflight, warmup, or timed phase."""
+
+    if runner_phase not in {"preflight", "warmup", "timed"}:
+        raise ValueError("run_runner_phase accepts only preflight, warmup, or timed")
+    original_identity = expected_fixture_identity or fixture_identity(fixture)
+    command = build_command(
+        php,
+        fixture_id,
+        fixture,
+        binary,
+        None,
+        None,
+        require_scene_report,
+        original_identity,
+        isolate_network,
+        runner_phase,
+        sample_index,
+    )
+    expected_indices = [sample_index] if runner_phase == "timed" and sample_index is not None else []
+    samples = invoke_runner(command, fixture_id, fixture, original_identity, expected_indices, 600)
+    return samples[0] if samples else None
 
 
 def aggregates(samples: list[dict[str, Any]], page_count: int | None) -> dict[str, Any]:

@@ -37,7 +37,7 @@ benchmarks/
 │   ├── font-image-heavy/      Font embedding, image decode, resources and I/O (generated)
 │   └── unsupported-paint/     Fail-closed path for unsupported CSS paint
 ├── runners/
-│   └── pliego.php             Target-neutral adapter loop; NDJSON on stdout
+│   └── pliego.php             Target-neutral adapter loop + internal phase entrypoints
 ├── tools/
 │   ├── generate_fixtures.py   Deterministic generation of long/image fixtures
 │   ├── process_tree_sampler.py Linux cgroup-v2 containment and accounting
@@ -193,6 +193,18 @@ The orchestrator:
 4. validates the result against `schema/benchmark-result.v1.json`;
 5. writes the result file (raw samples kept, not just averages).
 
+The runner also has internal `preflight`, `warmup`, and indexed `timed` phase
+entrypoints. `run_benchmark.py` owns a language-neutral
+`pliego.cross-target-schedule.v1` primitive that ranks every target once per
+round. The rank input is the ASCII encoding of compact JSON (no spaces, with
+every non-ASCII code point JSON-escaped) for `["pliego.cross-target-schedule.v1", seed, fixture,
+phase, iteration, target_id]`; entries sort by raw SHA-256 digest bytes and then
+target-ID UTF-8 bytes. Its executor interleaves preflights, warmups, and timed
+samples and fails if a returned timed index differs from the schedule. These
+are prerequisites for the future comparison coordinator, not a standalone
+publication command: the public CLI remains single-target and retains all
+identity, oracle, dedicated-host, and N/A gates.
+
 Each sample gets a fresh root-owned, non-delegated child cgroup. A root launcher
 first stops in a staging cgroup, drops supplementary groups, all real/effective/
 saved IDs, every capability set, and its bounding capabilities, then sets
@@ -239,8 +251,9 @@ protocol's `nearest-rank-v1` percentiles and requires p95 wall overhead below
   samples for short documents or 20 for long ones.
 * Every sample is a cold, one-shot process. The committed seed randomizes
   fixture traversal within a target, preserving the existing `sample_order =
-  "random"` protocol. Cross-target sample interleaving is not implemented in
-  this slice; raw samples and the seed are stored.
+  "random"` protocol. The deterministic cross-target schedule and phase-aware
+  execution primitive are implemented, but no public multi-target coordinator
+  retains that transcript yet; current result files remain single-target.
 * Same host, same binary, same fonts/assets. Network disabled.
 * Results record host info, the exact clean harness commit, the oracle script,
   and all Poppler executable identities; validation requires the matching
@@ -280,13 +293,14 @@ and were revalidated unchanged against the published Linux v0.2.0 renderer.
 * dompdf and Browsershot have direct Ubuntu render + real Poppler smoke for
   `minimal-static`, but publishable measurements remain N/A until immutable
   image digests are pinned; all other fixtures are explicit exclusions.
-* Cross-target sample interleaving and a report generator are not implemented;
-  this slice does not publish comparative numbers.
-* Dedicated-Linux acceptance still needs seeded cross-target interleaving and
-  report-cell to raw-sample traceability. The implemented single-target
-  throughput includes sampler startup, descendant drain, accounting settlement,
-  and sampler exit, but remains a serial per-target diagnostic rather than a
-  publishable cross-engine throughput claim.
+* The cross-target scheduling/execution prerequisite is implemented, but it is
+  not yet wired to attested target contexts or a retained multi-target result;
+  a report generator is also absent. This slice publishes no comparative numbers.
+* Dedicated-Linux acceptance still needs the public multi-target coordinator,
+  retained schedule evidence, and report-cell to raw-sample traceability. The
+  implemented single-target throughput includes sampler startup, descendant
+  drain, accounting settlement, and sampler exit, but remains a serial
+  per-target diagnostic rather than a publishable cross-engine throughput claim.
 * The Ubuntu adapter/Poppler smoke is configured in CI; it is not hosted proof
   until that workflow passes at the exact commit containing this change.
 * Core (Criterion) and Laravel e2e levels live outside this directory.

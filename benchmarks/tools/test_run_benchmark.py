@@ -25,6 +25,95 @@ SPEC.loader.exec_module(benchmark)
 
 
 def main() -> None:
+    target_ids = [
+        "pliego-0.2.0",
+        "dompdf-3.1.6",
+        "browsershot-5.4.0-puppeteer-25.8.0",
+    ]
+    timed_schedule = benchmark.cross_target_phase_schedule(target_ids, "minimal-static", 3, 1, "timed")
+    assert [entry["target_id"] for entry in timed_schedule] == [
+        "dompdf-3.1.6",
+        "pliego-0.2.0",
+        "browsershot-5.4.0-puppeteer-25.8.0",
+        "pliego-0.2.0",
+        "dompdf-3.1.6",
+        "browsershot-5.4.0-puppeteer-25.8.0",
+        "dompdf-3.1.6",
+        "browsershot-5.4.0-puppeteer-25.8.0",
+        "pliego-0.2.0",
+    ]
+    assert timed_schedule == benchmark.cross_target_phase_schedule(
+        list(reversed(target_ids)), "minimal-static", 3, 1, "timed"
+    )
+    assert timed_schedule != benchmark.cross_target_phase_schedule(target_ids, "minimal-static", 3, 2, "timed")
+    for iteration in range(3):
+        round_entries = [entry for entry in timed_schedule if entry["iteration"] == iteration]
+        assert {entry["target_id"] for entry in round_entries} == set(target_ids)
+    for invalid_targets, invalid_iterations, invalid_seed in (
+        (["only-one"], 1, 1),
+        (["duplicate", "duplicate"], 1, 1),
+        (["one", "two"], 0, 1),
+        (["one", "two"], True, 1),
+        (["one", "two"], 1, True),
+    ):
+        try:
+            benchmark.cross_target_phase_schedule(
+                invalid_targets,
+                "minimal-static",
+                invalid_iterations,
+                invalid_seed,
+                "timed",
+            )
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("invalid cross-target schedule input was accepted")
+
+    calls: list[tuple[str, str, int | None]] = []
+
+    def record_preflight(target_id: str) -> None:
+        calls.append(("preflight", target_id, None))
+
+    def record_warmup(target_id: str, iteration: int) -> None:
+        calls.append(("warmup", target_id, iteration))
+
+    def record_timed(target_id: str, iteration: int) -> dict[str, object]:
+        calls.append(("timed", target_id, iteration))
+        return {"index": iteration}
+
+    transcript, interleaved_samples = benchmark.execute_interleaved_run(
+        target_ids,
+        "minimal-static",
+        2,
+        3,
+        1,
+        record_preflight,
+        record_warmup,
+        record_timed,
+    )
+    assert transcript["contract"] == benchmark.CROSS_TARGET_SCHEDULE
+    assert calls == [
+        *[("preflight", entry["target_id"], None) for entry in transcript["preflight"]],
+        *[("warmup", entry["target_id"], entry["iteration"]) for entry in transcript["warmup"]],
+        *[("timed", entry["target_id"], entry["iteration"]) for entry in transcript["timed"]],
+    ]
+    assert all([sample["index"] for sample in samples] == [0, 1, 2] for samples in interleaved_samples.values())
+    try:
+        benchmark.execute_interleaved_run(
+            ["one", "two"],
+            "minimal-static",
+            0,
+            1,
+            1,
+            lambda _target: None,
+            lambda _target, _iteration: None,
+            lambda _target, iteration: {"index": iteration + 1},
+        )
+    except SystemExit as error:
+        assert error.code == 1
+    else:
+        raise AssertionError("interleaved sample/index mismatch was accepted")
+
     mounts = "\n".join(
         [
             "1 0 0:1 / / ro - ext4 root ro",
@@ -37,6 +126,23 @@ def main() -> None:
     adapters = benchmark.ROOT / "benchmarks" / "adapters"
     php = shutil.which("php")
     assert php is not None
+    invalid_phase_command = [
+        php,
+        str(benchmark.RUNNER),
+        "--binary",
+        "missing-adapter",
+        "--input",
+        "input.html",
+        "--runner-phase",
+        "timed",
+        "--sample-index",
+        "01",
+    ]
+    if os.name == "nt" and Path(php).suffix.lower() in {".bat", ".cmd"}:
+        invalid_phase_command = ["cmd.exe", "/d", "/c", *invalid_phase_command]
+    invalid_phase = subprocess.run(invalid_phase_command, capture_output=True, text=True, timeout=30)
+    assert invalid_phase.returncode == 2
+    assert "--sample-index must be a canonical nonnegative integer" in invalid_phase.stderr
     for adapter in (adapters / "dompdf" / "adapter.php", adapters / "browsershot" / "adapter.php"):
         command = [php, str(adapter), "self-test"]
         if os.name == "nt" and Path(php).suffix.lower() in {".bat", ".cmd"}:
@@ -129,6 +235,98 @@ def main() -> None:
     assert neutral[neutral.index("--page-size") + 1] == "793.7008x1122.52"
     assert "--text-equals" not in neutral
     assert "--fixture-input-sha256" in neutral and "--fixture-bundle-sha256" in neutral
+
+    timed = benchmark.build_command(
+        Path("php"),
+        "minimal-static",
+        {"input": "benchmarks/fixtures/minimal-static/input.html"},
+        Path("adapter"),
+        None,
+        None,
+        runner_phase="timed",
+        sample_index=7,
+    )
+    assert timed[timed.index("--runner-phase") + 1] == "timed"
+    assert timed[timed.index("--sample-index") + 1] == "7"
+    assert "--samples" not in timed and "--warmup" not in timed
+    try:
+        benchmark.build_command(
+            Path("php"),
+            "minimal-static",
+            {"input": "benchmarks/fixtures/minimal-static/input.html"},
+            Path("adapter"),
+            1,
+            0,
+            runner_phase="timed",
+            sample_index=0,
+        )
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("phase-specific runner command accepted aggregate counts")
+    try:
+        benchmark.build_command(
+            Path("php"),
+            "minimal-static",
+            {"input": "benchmarks/fixtures/minimal-static/input.html"},
+            Path("adapter"),
+            None,
+            None,
+            runner_phase="timed",
+            sample_index=True,
+        )
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("phase-specific runner command accepted a boolean sample index")
+
+    phase_fixture = {"input": "benchmarks/fixtures/minimal-static/input.html"}
+    with patch.object(
+        benchmark.subprocess,
+        "run",
+        return_value=subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),
+    ):
+        assert (
+            benchmark.run_runner_phase(
+                Path("php"),
+                "minimal-static",
+                phase_fixture,
+                Path("adapter"),
+                "preflight",
+            )
+            is None
+        )
+    with patch.object(
+        benchmark.subprocess,
+        "run",
+        return_value=subprocess.CompletedProcess(args=[], returncode=0, stdout='{"index":3,"wall_ms":1}\n', stderr=""),
+    ):
+        assert benchmark.run_runner_phase(
+            Path("php"),
+            "minimal-static",
+            phase_fixture,
+            Path("adapter"),
+            "timed",
+            sample_index=3,
+        ) == {"index": 3, "wall_ms": 1}
+    with patch.object(
+        benchmark.subprocess,
+        "run",
+        return_value=subprocess.CompletedProcess(args=[], returncode=0, stdout="not-json\n", stderr=""),
+    ):
+        try:
+            benchmark.run_runner_phase(
+                Path("php"),
+                "minimal-static",
+                phase_fixture,
+                Path("adapter"),
+                "timed",
+                sample_index=0,
+            )
+        except SystemExit as error:
+            assert error.code == 1
+        else:
+            raise AssertionError("non-JSON phase stdout was accepted")
 
     manifest = tomllib.loads(benchmark.MANIFEST.read_text(encoding="utf-8"))
     target = manifest["targets"]["dompdf-3.1.6"]
