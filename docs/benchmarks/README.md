@@ -6,10 +6,12 @@ Pliego's benchmark work is designed to answer two separate questions:
 2. For results that pass that gate, what time and resource cost does each supported
    execution model have?
 
-The repository currently contains an implemented Pliego engine harness and pinned
-fixture protocol. It does **not** contain committed publishable performance results,
-and it does not yet contain implemented dompdf or Browsershot runners. No comparative
-speed, memory, or CPU conclusion should be inferred from this document.
+The repository contains an implemented Pliego engine harness, pinned fixture
+protocol, and a first target-neutral competitor slice for dompdf and Browsershot.
+Only `minimal-static` is competitor-eligible; every other competitor/fixture pair is
+an explicit `not-applicable` record with a reason. The repository contains **no
+committed publishable performance results**, so no comparative speed, memory, or CPU
+conclusion should be inferred from this document.
 
 The detailed harness contract, fixture inventory, metric definitions, and target
 manifest live in the [benchmark source directory](../../benchmarks/README.md).
@@ -61,14 +63,53 @@ This command compares the stable outcomes produced by two distinct Pliego binari
 It is not a comparison of benchmark-result JSON files, and it is not a dompdf or
 Browsershot comparison.
 
-## Planned comparative protocol
+## Reproduce the implemented competitor slice
+
+Install the exact Composer and npm lock files as described in the source benchmark
+guide, then run on the same dedicated cgroup-v2 host:
+
+```sh
+python3 benchmarks/tools/run_benchmark.py \
+  --target dompdf-3.1.6 \
+  --fixture minimal-static \
+  --dedicated \
+  --out path/to/dompdf-minimal-static.json
+
+BROWSERSHOT_NODE_BINARY=/usr/bin/node \
+BROWSERSHOT_CHROME_PATH=/opt/chrome/chrome \
+python3 benchmarks/tools/run_benchmark.py \
+  --target browsershot-5.4.0-puppeteer-25.8.0 \
+  --fixture minimal-static \
+  --dedicated \
+  --out path/to/browsershot-minimal-static.json
+```
+
+Each target uses the same order: one discarded correctness preflight, discarded
+warmups, then cold one-shot timed samples. The adapter root and every descendant
+(including PHP, Node, and Chromium) remain in the existing retained cgroup-v2
+accounting subtree. After timing, every output passes the same Poppler-based oracle:
+PDF envelope/parser acceptance, A4 dimensions, one page, required text, and the
+authored link target. A target is never marked supported unless every timed sample
+passes that oracle. The common A4 expectation allows at most 0.75 points of
+print-grid quantization for all targets.
+
+Supported results retain canonical paths, versions, and SHA-256 values for the
+adapter and runtime executables, plus hashes of the committed Composer/npm locks.
+The Browsershot adapter keeps Chromium's sandbox enabled and blocks HTTP(S).
+The current commands run one target at a time. The committed seed randomizes
+fixture traversal within each target, but not target order between individual
+samples. These commands are implementation proof, not a publishable cross-engine
+report; the next Linux orchestration gate must interleave target order with that
+seed.
+
+## Implemented slice and remaining comparative protocol
 
 | Target | Runner status | Eligible public claim today |
 | --- | --- | --- |
 | Pliego v0.1.1 | Implemented and pinned | Harness can be reproduced; no committed result |
 | Pliego candidate | Stable-outcome parity comparator only; arbitrary candidate performance runs are not implemented | Parity can be checked locally; no candidate performance claim |
-| dompdf | Not implemented | Methodology proposal only |
-| Browsershot | Not implemented | Methodology proposal only |
+| dompdf 3.1.6 | Locked one-shot adapter; `minimal-static` only | Correctness-gated local evidence; no committed result |
+| Browsershot 5.4.0 + Puppeteer 25.8.0 | Locked one-shot adapter; `minimal-static` only | Correctness-gated local evidence; no committed result |
 
 Before a cross-engine comparison is published, every target must follow these rules:
 

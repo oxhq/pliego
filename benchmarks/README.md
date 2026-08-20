@@ -9,8 +9,8 @@ Measurements stay separated into three levels:
 
 1. **Core** — `DocumentScene → PDF` in-process (Criterion Rust bench). Not in
    this directory yet; a separate `ports/pliego` bench target.
-2. **Engine** — *this harness*: released binary → PDF + artifacts, one process
-   per render.
+2. **Engine** — *this harness*: one-shot target adapter → PDF + artifacts, one
+   fresh process tree per render.
 3. **Laravel end-to-end** — Blade → pliego-laravel → usable PDF. Lives with the
    Laravel SDK; this harness deliberately does not start PHP web apps.
 
@@ -23,6 +23,9 @@ necessarily improve the Laravel experience, and vice versa.
 benchmarks/
 ├── README.md
 ├── manifest.toml              Single source of truth for fixtures, targets, protocol
+├── adapters/                  One-shot target adapters and committed dependency locks
+│   ├── dompdf/                dompdf 3.1.6 / Composer lock
+│   └── browsershot/           Browsershot 5.4.0 / Composer + Puppeteer locks
 ├── schema/
 │   └── benchmark-result.v1.json
 ├── fixtures/                  Seven frozen fixtures
@@ -34,10 +37,11 @@ benchmarks/
 │   ├── font-image-heavy/      Font embedding, image decode, resources and I/O (generated)
 │   └── unsupported-paint/     Fail-closed path for unsupported CSS paint
 ├── runners/
-│   └── pliego.php             One process per sample; NDJSON on stdout
+│   └── pliego.php             Target-neutral adapter loop; NDJSON on stdout
 ├── tools/
 │   ├── generate_fixtures.py   Deterministic generation of long/image fixtures
 │   ├── process_tree_sampler.py Linux cgroup-v2 containment and accounting
+│   ├── pdf_oracle.py           Shared untimed PDF correctness checks
 │   ├── run_benchmark.py       Orchestrator: manifest → runner → aggregates → result file
 │   ├── test_process_tree_sampler.py Fixture, live cgroup, bridge, and overhead proof
 │   └── validate_result.py     Stdlib-only JSON Schema check for result files
@@ -53,8 +57,14 @@ benchmarks/
   contract requires both `memory.peak` and `pids.peak`.
 * The **published bundle** (`checked-release` profile) resolved by the pinned
   release verifier. Never `cargo run`.
-* `php-cli` ≥ 8.1 (runner), `python3` ≥ 3.11 (orchestrator/validator; stdlib only),
-  and `poppler-utils` (`pdftotext` for text correctness checks).
+* `php-cli` ≥ 8.3 with `dom`, `mbstring`, `fileinfo`, and `json`
+  (runner/adapters), `python3` ≥ 3.11 (orchestrator/validator; stdlib only),
+  and `poppler-utils` (`pdfinfo` and `pdftotext` for the shared correctness
+  oracle).
+* For competitor runs, Composer 2; Browsershot additionally needs Node,
+  Puppeteer installed from the committed npm lock, and one canonical Chromium
+  executable. Exact PHP, Node, Chromium, adapter, and lock identities are
+  retained in every supported result.
 * A root broker in a cgroup-v2 domain parent delegated by the host service with
   `cpu`, `io`, `memory`, and `pids` enabled, plus a fixed non-root account named
   `pliego-benchmark-engine`. The broker must run in the parent's sole direct
@@ -91,6 +101,27 @@ cp ../../../../../components/fonts/tests/support/dejavu-fonts-ttf-2.37/ttf/DejaV
 
 The orchestrator refuses to run it until both files exist.
 
+## Preparing the locked competitor adapters
+
+Install from the committed locks; do not update dependencies on the benchmark
+host:
+
+```sh
+(cd benchmarks/adapters/dompdf && composer install --no-dev --classmap-authoritative)
+(cd benchmarks/adapters/browsershot && \
+  composer install --no-dev --classmap-authoritative && \
+  PUPPETEER_SKIP_DOWNLOAD=1 npm ci --omit=dev)
+
+export BROWSERSHOT_NODE_BINARY=/usr/bin/node
+export BROWSERSHOT_CHROME_PATH=/opt/chrome/chrome
+```
+
+The two runtime paths must be canonical executables unavailable for mutation
+by `pliego-benchmark-engine`. Their version, path, and SHA-256 are captured by
+the adapter before sampling. The Browsershot adapter keeps Chromium's sandbox
+enabled and blocks HTTP(S); the fixture and Ahem font load from the local
+fixture directory only.
+
 ## Running a baseline
 
 ```sh
@@ -107,11 +138,30 @@ archive SHA-256, exact file set, binary SHA-256, native commit, and Servo build.
 Use `--offline` after the verified archive is cached. The orchestrator checks
 the binary digest again before starting a sample.
 
+The equivalent first competitor slice is:
+
+```sh
+python3 benchmarks/tools/run_benchmark.py \
+  --target dompdf-3.1.6 \
+  --fixture minimal-static \
+  --out path/to/dompdf-minimal-static.json
+
+python3 benchmarks/tools/run_benchmark.py \
+  --target browsershot-5.4.0-puppeteer-25.8.0 \
+  --fixture minimal-static \
+  --out path/to/browsershot-minimal-static.json
+```
+
+Omitting `--fixture` emits one supported `minimal-static` result plus explicit
+`not-applicable` records and reasons for every unverified fixture. It does not
+manufacture zero measurements for exclusions.
+
 Subset or override with `--fixture invoice-showcase`, `--samples 50`,
 `--warmup 10`, `--php /usr/bin/php`. The orchestrator:
 
-1. checks the fixture surface (inputs, fonts, chartjs prep) and the binary;
-2. runs `runners/pliego.php` per fixture — warmup discarded, then samples;
+1. checks the fixture surface and immutable target/adapter/runtime identity;
+2. runs one discarded correctness preflight, discarded warmups, then timed
+   samples through the same single-sample adapter contract;
 3. aggregates p50/p95/p99/min/max/mean, determinism, correctness, failures;
 4. validates the result against `schema/benchmark-result.v1.json`;
 5. writes the result file (raw samples kept, not just averages).
@@ -126,6 +176,10 @@ All later descendants, including new sessions, remain contained. The retained
 final `cpu.stat`, `io.stat`, `memory.current`, `memory.peak`, and `pids.peak`
 counters are the accounting source. Engine wall time ends with the root process;
 descendant drain and accounting-settle durations are recorded separately.
+
+The `minimal-static` oracle declares ISO A4 in points and permits at most 0.75
+points of print-grid quantization. The same expectation and tolerance apply to
+all three targets.
 
 Publication fails unless `cgroup.events` drains recursively. After it empties,
 `memory.stat` dirty/writeback must reach zero and two interval-separated
@@ -147,8 +201,12 @@ protocol's `nearest-rank-v1` percentiles and requires p95 wall overhead below
 
 ## Protocol (from `manifest.toml`)
 
-* 10 warm-up iterations, 50 samples for short documents, 20 for long ones.
-* Random order between runners (seed recorded). Raw samples stored.
+* One untimed correctness preflight, 10 warm-up iterations, then 50 timed
+  samples for short documents or 20 for long ones.
+* Every sample is a cold, one-shot process. The committed seed randomizes
+  fixture traversal within a target, preserving the existing `sample_order =
+  "random"` protocol. Cross-target sample interleaving is not implemented in
+  this slice; raw samples and the seed are stored.
 * Same host, same binary, same fonts/assets. Network disabled.
 * Results record host info and versions; a baseline is signed by commit/tag.
 * All aggregate and observer percentiles use `nearest-rank-v1`.
@@ -156,8 +214,9 @@ protocol's `nearest-rank-v1` percentiles and requires p95 wall overhead below
 ## Metrics
 
 This foundation records wall latency (p50/p95/p99/min/max/mean), serial
-throughput, per-page wall time, PDF and artifact bytes, page count, required
-text, capture status, PDF hash variation, and typed failure publication state.
+throughput, per-page wall time, PDF and artifact bytes, page count, page
+dimensions, required text, link targets, capture status, PDF hash variation,
+and typed failure publication state.
 CPU, cgroup memory, and cgroup I/O are exact retained counters. Sampled summed
 RSS/PSS are explicitly lower bounds. Runtime archive size and deeper document
 checks remain separate audited increments before a signed baseline is published.
@@ -171,7 +230,7 @@ renderer.
 
 | Fixture | Category | Purpose | Expected |
 | --- | --- | --- | --- |
-| `minimal-static` | startup | pure startup, no scripts/fonts/images | 1 page, text |
+| `minimal-static` | startup | pure startup, one local font, no scripts/images | A4, 1 page, text, link |
 | `invoice-showcase` | static | fonts, paged table, totals, authored break | 2 pages, `5280.00` |
 | `chartjs-showcase` | scripted | Chart.js 4.5.1 canvas + readiness | 1 page, report text |
 | `ledger-20-pages` | scale | fragmentation, repeated headers | ~20 pages |
@@ -182,6 +241,11 @@ renderer.
 ## Current scope
 
 * Concurrency >1 throughput sampling is not implemented yet (serial only).
+* dompdf and Browsershot are correctness-eligible only for `minimal-static`;
+  all other fixtures are explicit exclusions until their shared oracle mapping
+  passes.
+* Cross-target sample interleaving and a report generator are not implemented;
+  this slice does not publish comparative numbers.
 * Core (Criterion) and Laravel e2e levels live outside this directory.
 * Page-count expectations for generated fixtures are pinned by the first signed baseline.
 * A multi-fixture `--out` file bundles one validated result object per fixture

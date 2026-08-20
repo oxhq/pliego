@@ -504,6 +504,19 @@ def validate_semantics(data: dict[str, Any], path: str, violations: list[Violati
         return
 
     samples = data["samples"]
+    if "correctness_preflight_iterations" in data["protocol"]:
+        require_equal(
+            f"{path}.protocol.correctness_preflight_iterations",
+            data["protocol"]["correctness_preflight_iterations"],
+            1,
+            violations,
+        )
+        require_equal(
+            f"{path}.protocol.execution_order",
+            data["protocol"].get("execution_order"),
+            "untimed-correctness-preflight,warmup,timed",
+            violations,
+        )
     if data["protocol"]["sample_count"] != len(samples):
         violations.append(
             Violation(
@@ -566,7 +579,7 @@ def validate_semantics(data: dict[str, Any], path: str, violations: list[Violati
             require_equal(
                 f"{sample_path}.resource_usage.launch_security.argv[2]",
                 argv[2],
-                data["fixture"]["input"],
+                PurePosixPath(data["fixture"]["input"]).name,
                 violations,
             )
             for flag in ("--output", "--artifacts"):
@@ -634,8 +647,8 @@ def validate_semantics(data: dict[str, Any], path: str, violations: list[Violati
                 if output[field] is None:
                     violations.append(Violation(f"{sample_path}.output.{field}", "must be present for a published PDF"))
         else:
-            for field in ("pdf_bytes", "pdf_sha256", "page_count"):
-                if output[field] is not None:
+            for field in ("pdf_bytes", "pdf_sha256", "page_count", "page_dimensions_points"):
+                if output.get(field) is not None:
                     violations.append(
                         Violation(f"{sample_path}.output.{field}", "must be null when no PDF was published")
                     )
@@ -664,6 +677,46 @@ def validate_semantics(data: dict[str, Any], path: str, violations: list[Violati
                         Violation(
                             f"{sample_path}.output.page_count",
                             f"must equal expected page count {expected_page_count}",
+                        )
+                    )
+                expected_width = data["fixture"].get("expected_page_width_points")
+                expected_height = data["fixture"].get("expected_page_height_points")
+                tolerance = data["fixture"].get("dimension_tolerance_points")
+                if expected_width is not None and expected_height is not None:
+                    dimensions = output.get("page_dimensions_points")
+                    if not isinstance(dimensions, list) or len(dimensions) != output["page_count"]:
+                        violations.append(
+                            Violation(
+                                f"{sample_path}.output.page_dimensions_points",
+                                "must retain one width/height pair for every passing page",
+                            )
+                        )
+                    else:
+                        allowed = float(tolerance or 0)
+                        for page_index, (width, height) in enumerate(dimensions):
+                            if abs(width - expected_width) > allowed or abs(height - expected_height) > allowed:
+                                violations.append(
+                                    Violation(
+                                        f"{sample_path}.output.page_dimensions_points[{page_index}]",
+                                        "must be within the declared fixture dimension tolerance",
+                                    )
+                                )
+                expected_checks = {"pdf_envelope", "pdf_parse"}
+                if expected_page_count is not None:
+                    expected_checks.add("page_count")
+                if expected_width is not None and expected_height is not None:
+                    expected_checks.add("page_dimensions")
+                expected_checks.update(
+                    f"text:{fragment}" for fragment in data["fixture"].get("expected_text_contains", [])
+                )
+                expected_checks.update(f"link:{target}" for target in data["fixture"].get("expected_link_targets", []))
+                check_names = [check["name"] for check in correctness["checks"]]
+                missing_checks = sorted(name for name in expected_checks if check_names.count(name) != 1)
+                if missing_checks:
+                    violations.append(
+                        Violation(
+                            f"{sample_path}.correctness.checks",
+                            f"must contain each shared PDF oracle check exactly once; missing={missing_checks!r}",
                         )
                     )
             else:

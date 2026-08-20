@@ -155,6 +155,11 @@
       ],
       "properties": {
         "warmup_iterations": { "type": "integer", "minimum": 0 },
+        "correctness_preflight_iterations": { "type": "integer", "minimum": 0 },
+        "execution_order": {
+          "type": "string",
+          "enum": ["untimed-correctness-preflight,warmup,timed"]
+        },
         "sample_count": { "type": "integer", "minimum": 1 },
         "sample_order": { "type": "string", "enum": ["random", "sequential"] },
         "seed": { "type": "integer" },
@@ -211,6 +216,17 @@
         "input_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
         "bundle_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
         "expected_page_count": { "type": ["integer", "null"], "minimum": 1 },
+        "expected_page_width_points": { "type": ["number", "null"], "minimum": 0 },
+        "expected_page_height_points": { "type": ["number", "null"], "minimum": 0 },
+        "dimension_tolerance_points": { "type": ["number", "null"], "minimum": 0 },
+        "expected_text_contains": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "expected_link_targets": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
         "expected_failure_code": { "type": ["string", "null"] }
       }
     },
@@ -713,6 +729,15 @@
         "pdf_bytes": { "type": ["integer", "null"], "minimum": 0 },
         "pdf_sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
         "page_count": { "type": ["integer", "null"], "minimum": 1 },
+        "page_dimensions_points": {
+          "type": ["array", "null"],
+          "items": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 2,
+            "items": { "type": "number", "minimum": 0 }
+          }
+        },
         "artifact_bytes": { "type": ["integer", "null"], "minimum": 0 },
         "published_pdf": { "type": "boolean" }
       }

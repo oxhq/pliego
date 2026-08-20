@@ -133,9 +133,20 @@ def fixture_proofs() -> None:
         lambda name: SimpleNamespace(pw_name=name, pw_uid=1234, pw_gid=1234, pw_dir="/nonexistent")
     )
     assert fixture_account.name == process_tree_sampler.ENGINE_ACCOUNT
-    with mock.patch.dict(os.environ, {"GITHUB_TOKEN": "must-not-leak", "LANG": "C"}, clear=True):
+    with mock.patch.dict(
+        os.environ,
+        {
+            "BROWSERSHOT_CHROME_PATH": "/opt/chrome",
+            "BROWSERSHOT_NODE_BINARY": "/usr/bin/node",
+            "GITHUB_TOKEN": "must-not-leak",
+            "LANG": "C",
+        },
+        clear=True,
+    ):
         child_environment = process_tree_sampler.engine_environment(fixture_account)
     assert "GITHUB_TOKEN" not in child_environment and child_environment["LANG"] == "C"
+    assert child_environment["BROWSERSHOT_CHROME_PATH"] == "/opt/chrome"
+    assert child_environment["BROWSERSHOT_NODE_BINARY"] == "/usr/bin/node"
 
     with tempfile.TemporaryDirectory() as raw:
         executable = Path(raw) / "true"

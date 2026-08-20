@@ -2,15 +2,14 @@
 <?php
 
 /**
- * Pliego benchmark runner — one engine process per sample.
+ * Target-neutral benchmark runner — one adapter process per sample.
  *
- * Executes `pliego render` once per sample against a published binary, records
- * wall time, reads the engine's `scene-report.json` and stdout summary, checks
- * the fixture's correctness contract, and emits one JSON object per sample
- * (NDJSON) on stdout. On Linux, cgroup-v2 supplies authoritative CPU, memory,
- * and I/O accounting; sampled RSS/PSS remain lower-bound diagnostics. Warmup
- * samples are executed and discarded before real samples. Aggregation and
- * schema validation happen in tools/run_benchmark.py.
+ * Executes one `ADAPTER render INPUT ...` contract per sample, records wall
+ * time, and runs the shared PDF oracle after timing. The Pliego adapter may
+ * additionally require its scene report. On Linux, cgroup-v2 supplies
+ * authoritative CPU, memory, and I/O accounting for the adapter and every
+ * descendant. One correctness preflight and all warmups are discarded before
+ * real samples. Aggregation and schema validation happen in run_benchmark.py.
  *
  * Invocation contract: the engine resolves the input relative to the process
  * cwd and rejects absolute or parent-traversing paths, so the runner is given
@@ -35,6 +34,8 @@ const SAMPLER_PYTHON = '/usr/bin/python3';
 const USAGE = <<<EOT
 Usage: php pliego.php --binary <path> --input <file.html> --output <file.pdf> --artifacts <dir>
   [--samples N] [--warmup N] [--page-count N] [--text-contains TEXT]...
+  [--link-target URL]... [--page-width-points N] [--page-height-points N]
+  [--dimension-tolerance-points N] [--require-scene-report]
   [--expect-failure] [--expected-code CODE] [--page-size WxH] [--page-margins T,R,B,L]
   [--locale X] [--timezone Y] [--cwd DIR] [--self-test]
 EOT;
@@ -58,6 +59,13 @@ function text_contains_options(mixed $value): array
         $fragments,
         static fn (string $fragment): bool => $fragment !== ''
     ));
+}
+
+function is_bare_input_name(string $value): bool
+{
+    return $value !== '' && $value !== '.' && $value !== '..'
+        && !str_contains($value, '/') && !str_contains($value, '\\')
+        && preg_match('/^[A-Za-z]:/', $value) !== 1;
 }
 
 function fail(string $message, int $code = 2): never
@@ -84,6 +92,8 @@ function sampler_interpreter(): ?string
 $options = getopt('', [
     'binary:', 'input:', 'output:', 'artifacts:', 'samples:', 'warmup:',
     'page-count:', 'text-contains:', 'expect-failure', 'expected-code:',
+    'link-target:', 'page-width-points:', 'page-height-points:',
+    'dimension-tolerance-points:', 'require-scene-report',
     'page-size:', 'page-margins:', 'locale:', 'timezone:', 'cwd:',
     'self-test',
 ]);
@@ -96,6 +106,11 @@ if (array_key_exists('self-test', $options)) {
     $fragments = text_contains_options($options['text-contains'] ?? []);
     if ($fragments !== ['Revenue, net', 'Total', '0']) {
         fail('text-contains self-test failed', 1);
+    }
+    if (!is_bare_input_name('input.html') || is_bare_input_name('../input.html')
+        || is_bare_input_name('..\\input.html') || is_bare_input_name('/input.html')
+        || is_bare_input_name('C:\\input.html')) {
+        fail('bare input self-test failed', 1);
     }
     $summary = parse_stdout_summary(
         "{\"phase_timings_ms\":{\"layout\":1},\"error\":{\"code\":\"TEST\"}}\n[]\n"
@@ -121,6 +136,15 @@ $samples = max(1, (int) (option($options, 'samples') ?? 1));
 $warmup = max(0, (int) (option($options, 'warmup') ?? 0));
 $pageCount = option($options, 'page-count') !== null ? (int) $options['page-count'] : null;
 $textContains = text_contains_options($options['text-contains'] ?? []);
+$linkTargets = text_contains_options($options['link-target'] ?? []);
+$pageWidthPoints = option($options, 'page-width-points') !== null
+    ? (float) $options['page-width-points']
+    : null;
+$pageHeightPoints = option($options, 'page-height-points') !== null
+    ? (float) $options['page-height-points']
+    : null;
+$dimensionTolerancePoints = (float) (option($options, 'dimension-tolerance-points') ?? 0.5);
+$requireSceneReport = array_key_exists('require-scene-report', $options);
 $expectFailure = array_key_exists('expect-failure', $options);
 $expectedCode = option($options, 'expected-code');
 $pageSize = option($options, 'page-size');
@@ -140,17 +164,25 @@ $binary = $resolvedBinary;
 if (!is_dir($cwd)) {
     fail("cwd not found: {$cwd}");
 }
-// The engine resolves the input relative to the process cwd and rejects
-// absolute or parent-traversing paths (mirroring the PHP SDK). Validate
-// against the run cwd here, but keep the bare relative name for the engine
-// command so it resolves inside `cwd`.
-$inputFull = (str_starts_with($input, '/')
-        || str_starts_with($input, '\\')
-        || preg_match('/^[A-Za-z]:/', $input) === 1)
-    ? $input
-    : rtrim($cwd, '/\\') . DIRECTORY_SEPARATOR . $input;
-if (!is_file($inputFull)) {
-    fail("input not found: {$inputFull}");
+$resolvedCwd = realpath($cwd);
+if ($resolvedCwd === false) {
+    fail("cwd must be canonical: {$cwd}");
+}
+$cwd = $resolvedCwd;
+// Every adapter gets the same bare input name and cwd. Reject the historical
+// absolute/relative validation split instead of validating one path and
+// executing another.
+if (!is_bare_input_name($input)) {
+    fail('--input must be one bare file name resolved inside --cwd');
+}
+$inputFull = $cwd . DIRECTORY_SEPARATOR . $input;
+$resolvedInput = realpath($inputFull);
+if ($resolvedInput === false || !is_file($resolvedInput) || dirname($resolvedInput) !== $cwd) {
+    fail("input must resolve to a regular file directly inside cwd: {$inputFull}");
+}
+if (($pageWidthPoints === null) !== ($pageHeightPoints === null)
+    || $dimensionTolerancePoints < 0) {
+    fail('page dimensions must be supplied together and tolerance cannot be negative');
 }
 
 $engineUid = null;
@@ -236,6 +268,12 @@ function run_engine(array $command, string $cwd): array
         $processEnvironment = [
             'PLIEGO_BENCHMARK_CGROUP_PARENT' => (string) getenv('PLIEGO_BENCHMARK_CGROUP_PARENT'),
         ];
+        foreach (['BROWSERSHOT_CHROME_PATH', 'BROWSERSHOT_NODE_BINARY'] as $name) {
+            $value = getenv($name);
+            if (is_string($value) && $value !== '') {
+                $processEnvironment[$name] = $value;
+            }
+        }
     }
     $descriptors = [
         0 => ['file', $nullDevice, 'r'],
@@ -380,26 +418,86 @@ function rrmdir(string $path): void
     @rmdir($path);
 }
 
-function pdftotext_available(): bool
+/** @return array{pass: bool, page_count: int|null, page_dimensions_points: array|null,
+ *     checks: list<array<string, string>>} */
+function run_pdf_oracle(array $state, string $pdfPath): array
 {
-    $lines = [];
-    $code = 0;
-    exec(PHP_OS_FAMILY === 'Windows' ? 'where pdftotext 2>NUL' : 'command -v pdftotext 2>/dev/null', $lines, $code);
-    return $code === 0;
-}
-
-function pdf_text(string $pdfPath): ?string
-{
-    $tmp = tempnam(sys_get_temp_dir(), 'pliego-bench-txt-');
-    $lines = [];
-    $code = 0;
-    exec('pdftotext ' . escapeshellarg($pdfPath) . ' ' . escapeshellarg($tmp), $lines, $code);
-    $text = null;
-    if ($code === 0 && is_file($tmp)) {
-        $text = (string) file_get_contents($tmp);
+    $script = dirname(__DIR__) . '/tools/pdf_oracle.py';
+    $python = PHP_OS_FAMILY === 'Linux' ? sampler_interpreter() : 'python';
+    if ($python === null || !is_file($script)) {
+        return [
+            'pass' => false,
+            'page_count' => null,
+            'page_dimensions_points' => null,
+            'checks' => [[
+                'name' => 'pdf_oracle',
+                'status' => 'fail',
+                'detail' => 'oracle interpreter or script is unavailable',
+            ]],
+        ];
     }
-    @unlink($tmp);
-    return $text;
+    $command = [$python, '-I', $script, '--pdf', $pdfPath];
+    if ($state['pageCount'] !== null) {
+        array_push($command, '--page-count', (string) $state['pageCount']);
+    }
+    if ($state['pageWidthPoints'] !== null && $state['pageHeightPoints'] !== null) {
+        array_push(
+            $command,
+            '--page-width-points',
+            (string) $state['pageWidthPoints'],
+            '--page-height-points',
+            (string) $state['pageHeightPoints'],
+            '--dimension-tolerance-points',
+            (string) $state['dimensionTolerancePoints']
+        );
+    }
+    foreach ($state['textContains'] as $fragment) {
+        array_push($command, '--text-contains', $fragment);
+    }
+    foreach ($state['linkTargets'] as $target) {
+        array_push($command, '--link-target', $target);
+    }
+    $descriptors = [
+        0 => ['file', PHP_OS_FAMILY === 'Windows' ? 'NUL' : '/dev/null', 'r'],
+        1 => ['pipe', 'w'],
+        2 => ['pipe', 'w'],
+    ];
+    $process = proc_open($command, $descriptors, $pipes, $state['cwd']);
+    if (!is_resource($process)) {
+        return [
+            'pass' => false,
+            'page_count' => null,
+            'page_dimensions_points' => null,
+            'checks' => [['name' => 'pdf_oracle', 'status' => 'fail', 'detail' => 'proc_open failed']],
+        ];
+    }
+    $stdout = stream_get_contents($pipes[1]);
+    $stderr = stream_get_contents($pipes[2]);
+    fclose($pipes[1]);
+    fclose($pipes[2]);
+    $exitCode = proc_close($process);
+    $decoded = json_decode((string) $stdout, true);
+    if (!is_array($decoded) || ($decoded['contract'] ?? null) !== 'pliego.pdf-oracle.v1'
+        || !is_bool($decoded['pass'] ?? null) || !is_array($decoded['checks'] ?? null)) {
+        return [
+            'pass' => false,
+            'page_count' => null,
+            'page_dimensions_points' => null,
+            'checks' => [[
+                'name' => 'pdf_oracle',
+                'status' => 'fail',
+                'detail' => trim((string) $stderr) ?: "invalid oracle output (exit {$exitCode})",
+            ]],
+        ];
+    }
+    return [
+        'pass' => $decoded['pass'] && $exitCode === 0,
+        'page_count' => isset($decoded['page_count']) ? (int) $decoded['page_count'] : null,
+        'page_dimensions_points' => is_array($decoded['page_dimensions_points'] ?? null)
+            ? $decoded['page_dimensions_points']
+            : null,
+        'checks' => $decoded['checks'],
+    ];
 }
 
 function prepare_engine_directory(string $path, int $uid, int $gid): void
@@ -478,9 +576,9 @@ function run_sample(array $state, int $index): array
         $captureStatus = is_array($report['capture'] ?? null) ? ($report['capture']['status'] ?? null) : null;
         $captureCode = is_array($report['capture'] ?? null) ? ($report['capture']['code'] ?? null) : null;
     }
-    $pageCount = null;
+    $scenePageCount = null;
     if (is_array($report) && is_array($report['preview'] ?? null)) {
-        $pageCount = $report['preview']['page_count'] ?? null;
+        $scenePageCount = $report['preview']['page_count'] ?? null;
     }
 
     $failureCode = null;
@@ -507,6 +605,9 @@ function run_sample(array $state, int $index): array
     }
 
     $checks = [];
+    $oracle = null;
+    $pageCount = null;
+    $pageDimensions = null;
     if (is_object($exec['resource_usage'])) {
         $drained = $exec['resource_usage']->cgroup_drained ?? false;
         $cleanup = $exec['resource_usage']->cleanup ?? null;
@@ -544,40 +645,37 @@ function run_sample(array $state, int $index): array
             'status' => $exec['exit_code'] === 0 ? 'pass' : 'fail',
             'detail' => "exit={$exec['exit_code']}",
         ];
-        $checks[] = [
-            'name' => 'capture_complete',
-            'status' => $captureStatus === 'complete' ? 'pass' : 'fail',
-            'detail' => (string) ($captureStatus ?? '(no report)'),
-        ];
+        if ($state['requireSceneReport']) {
+            $checks[] = [
+                'name' => 'capture_complete',
+                'status' => $captureStatus === 'complete' ? 'pass' : 'fail',
+                'detail' => (string) ($captureStatus ?? '(no report)'),
+            ];
+        }
         $checks[] = [
             'name' => 'pdf_published',
             'status' => $pdfPublished ? 'pass' : 'fail',
         ];
-        if ($state['pageCount'] !== null) {
+        if ($pdfPublished) {
+            $oracle = run_pdf_oracle($state, $pdfPath);
+            $pageCount = $oracle['page_count'];
+            $pageDimensions = $oracle['page_dimensions_points'];
+            foreach ($oracle['checks'] as $oracleCheck) {
+                $checks[] = $oracleCheck;
+            }
+        } else {
             $checks[] = [
-                'name' => 'page_count',
-                'status' => $pageCount === $state['pageCount'] ? 'pass' : 'fail',
-                'detail' => "expected={$state['pageCount']} actual=" . ($pageCount ?? 'n/a'),
+                'name' => 'pdf_oracle',
+                'status' => 'fail',
+                'detail' => 'PDF was not published',
             ];
         }
-        if ($state['textContains'] !== [] && $pdfPublished) {
-            if (pdftotext_available()) {
-                $text = pdf_text($pdfPath);
-                if ($text === null) {
-                    $checks[] = ['name' => 'text', 'status' => 'fail', 'detail' => 'pdftotext produced no output'];
-                } else {
-                    $normalizedText = preg_replace('/\s+/u', ' ', trim($text)) ?? $text;
-                    foreach ($state['textContains'] as $fragment) {
-                        $normalizedFragment = preg_replace('/\s+/u', ' ', trim($fragment)) ?? $fragment;
-                        $checks[] = [
-                            'name' => "text:{$fragment}",
-                            'status' => str_contains($normalizedText, $normalizedFragment) ? 'pass' : 'fail',
-                        ];
-                    }
-                }
-            } else {
-                $checks[] = ['name' => 'text', 'status' => 'fail', 'detail' => 'pdftotext unavailable'];
-            }
+        if ($state['requireSceneReport'] && $scenePageCount !== null) {
+            $checks[] = [
+                'name' => 'scene_pdf_page_count',
+                'status' => $pageCount === $scenePageCount ? 'pass' : 'fail',
+                'detail' => "scene={$scenePageCount} pdf=" . ($pageCount ?? 'n/a'),
+            ];
         }
     }
 
@@ -611,6 +709,7 @@ function run_sample(array $state, int $index): array
             'pdf_bytes' => $pdfBytes,
             'pdf_sha256' => $pdfSha256,
             'page_count' => $pageCount,
+            'page_dimensions_points' => $pageDimensions,
             'artifact_bytes' => $artifactBytes,
             'published_pdf' => $pdfPublished,
         ],
@@ -645,9 +744,19 @@ $state = [
     'expectedCode' => $expectedCode,
     'pageCount' => $pageCount,
     'textContains' => $textContains,
+    'linkTargets' => $linkTargets,
+    'pageWidthPoints' => $pageWidthPoints,
+    'pageHeightPoints' => $pageHeightPoints,
+    'dimensionTolerancePoints' => $dimensionTolerancePoints,
+    'requireSceneReport' => $requireSceneReport,
     'engineUid' => $engineUid,
     'engineGid' => $engineGid,
 ];
+
+$preflight = run_sample($state, -1000000);
+if (!$preflight['ok']) {
+    fail('untimed correctness preflight failed; evidence retained at ' . $preflight['retained']['artifacts_dir']);
+}
 
 for ($iteration = 0; $iteration < $warmup; $iteration++) {
     $sample = run_sample($state, -1 - $iteration);

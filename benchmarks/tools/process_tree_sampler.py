@@ -686,7 +686,16 @@ def migration_write_probes(paths: dict[str, Path]) -> dict[str, dict[str, str]]:
 
 
 def engine_environment(account: EngineAccount) -> dict[str, str]:
-    allowed = {"LANG", "LC_ALL", "LC_CTYPE", "LD_LIBRARY_PATH", "PATH", "TZ"}
+    allowed = {
+        "BROWSERSHOT_CHROME_PATH",
+        "BROWSERSHOT_NODE_BINARY",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "LD_LIBRARY_PATH",
+        "PATH",
+        "TZ",
+    }
     environment = {
         name: value for name, value in os.environ.items() if name in allowed or name.startswith("FONTCONFIG_")
     }

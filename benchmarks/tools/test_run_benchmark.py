@@ -7,7 +7,13 @@
 from __future__ import annotations
 
 import importlib.util
+import json
+import os
+import shutil
 import subprocess
+import sys
+import tempfile
+import tomllib
 from pathlib import Path
 from unittest.mock import patch
 
@@ -19,6 +25,33 @@ SPEC.loader.exec_module(benchmark)
 
 
 def main() -> None:
+    adapters = benchmark.ROOT / "benchmarks" / "adapters"
+    php = shutil.which("php")
+    assert php is not None
+    for adapter in (adapters / "dompdf" / "adapter.php", adapters / "browsershot" / "adapter.php"):
+        command = [php, str(adapter), "self-test"]
+        if os.name == "nt" and Path(php).suffix.lower() in {".bat", ".cmd"}:
+            command = ["cmd.exe", "/d", "/c", *command]
+        self_test = subprocess.run(command, capture_output=True, text=True, timeout=30)
+        assert self_test.returncode == 0, self_test.stderr
+
+    dompdf_lock = json.loads((adapters / "dompdf" / "composer.lock").read_text(encoding="utf-8"))
+    dompdf_versions = {package["name"]: package["version"].lstrip("v") for package in dompdf_lock["packages"]}
+    assert dompdf_versions["dompdf/dompdf"] == "3.1.6"
+    browsershot_lock = json.loads((adapters / "browsershot" / "composer.lock").read_text(encoding="utf-8"))
+    browsershot_versions = {package["name"]: package["version"].lstrip("v") for package in browsershot_lock["packages"]}
+    assert browsershot_versions["spatie/browsershot"] == "5.4.0"
+    npm_lock = json.loads((adapters / "browsershot" / "package-lock.json").read_text(encoding="utf-8"))
+    assert npm_lock["packages"]["node_modules/puppeteer"]["version"] == "25.8.0"
+
+    oracle_test = subprocess.run(
+        [sys.executable, str(SCRIPT.with_name("test_pdf_oracle.py"))],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert oracle_test.returncode == 0, oracle_test.stderr
+
     with patch.object(
         benchmark.subprocess,
         "run",
@@ -58,6 +91,91 @@ def main() -> None:
     )
     fragments = [command[index + 1] for index, value in enumerate(command) if value == "--text-contains"]
     assert fragments == ["Revenue, net", "Total"]
+
+    neutral = benchmark.build_command(
+        Path("php"),
+        "minimal-static",
+        {
+            "input": "benchmarks/fixtures/minimal-static/input.html",
+            "page_size": "793.7008x1122.52",
+            "page_margins": "0,0,0,0",
+            "correctness": {
+                "page_count": 1,
+                "page_width_points": 595.276,
+                "page_height_points": 841.89,
+                "dimension_tolerance_points": 0.05,
+                "text_contains": ["Minimal"],
+                "link_targets": ["https://pliego.dev/docs"],
+            },
+        },
+        Path("adapter"),
+        1,
+        0,
+        require_scene_report=False,
+    )
+    assert neutral[neutral.index("--input") + 1] == "input.html"
+    assert Path(neutral[neutral.index("--cwd") + 1]).name == "minimal-static"
+    assert "--require-scene-report" not in neutral
+    assert neutral[neutral.index("--link-target") + 1] == "https://pliego.dev/docs"
+    assert neutral[neutral.index("--page-size") + 1] == "793.7008x1122.52"
+
+    manifest = tomllib.loads(benchmark.MANIFEST.read_text(encoding="utf-8"))
+    target = manifest["targets"]["dompdf-3.1.6"]
+    fixture = manifest["fixtures"]["chartjs-showcase"]
+    not_applicable = benchmark.not_applicable_result(
+        generated_at="2026-08-19T00:00:00+00:00",
+        host={
+            "os": "Linux",
+            "arch": "x86_64",
+            "kernel": "test",
+            "cpu_model": "test",
+            "cores": 1,
+            "ram_bytes": 1,
+            "dedicated": True,
+        },
+        toolchain={"engine": {"name": "dompdf", "version": "3.1.6"}, "python_version": "3.11", "php_version": "8.3"},
+        protocol=manifest["protocol"],
+        target_id="dompdf-3.1.6",
+        target=target,
+        fixture_id="chartjs-showcase",
+        fixture=fixture,
+    )
+    assert not_applicable["status"] == "not-applicable"
+    assert "dynamic Canvas" in not_applicable["reason"]
+    assert not_applicable["protocol"]["sample_count"] == 0
+    assert not_applicable["protocol"]["sample_order"] == manifest["protocol"]["sample_order"]
+    schema = json.loads(benchmark.DEFAULT_SCHEMA.read_text(encoding="utf-8"))
+    assert benchmark.validate_result.validate_document(not_applicable, schema) == []
+
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        adapter = root / "adapter"
+        lock = root / "composer.lock"
+        adapter.write_text("adapter", encoding="utf-8")
+        lock.write_text("lock", encoding="utf-8")
+        identity = {
+            "contract": "pliego.benchmark-adapter.v1",
+            "target": "fixture-adapter",
+            "package": "fixture/package",
+            "package_version": "1.2.3",
+            "adapter_path": str(adapter.resolve()),
+            "adapter_sha256": benchmark.file_sha256(adapter),
+            "composer_lock_sha256": benchmark.file_sha256(lock),
+        }
+        completed = subprocess.CompletedProcess([], 0, json.dumps(identity), "")
+        with patch.object(benchmark, "ROOT", root), patch.object(benchmark, "run", return_value=completed):
+            engine, recorded = benchmark.adapter_identity(
+                adapter,
+                "fixture-adapter",
+                {
+                    "package": "fixture/package",
+                    "version": "1.2.3",
+                    "profile": "locked",
+                    "lockfiles": ["composer.lock"],
+                },
+            )
+        assert engine["binary_sha256"] == identity["adapter_sha256"]
+        assert recorded == identity
 
     aggregate = benchmark.aggregates(
         [

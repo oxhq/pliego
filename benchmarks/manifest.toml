@@ -17,6 +17,7 @@ seed = 1
 label = "Pliego 0.1.1 (published bundle)"
 version = "0.1.1"
 enabled = true
+kind = "pliego"
 repository = "https://github.com/oxhq/pliego"
 release_tag = "v0.1.1"
 commit = "6f5018839738490c4965e1425fba1f9503822a4d"
@@ -31,6 +32,49 @@ binary = "pliego"
 binary_bytes = 215470920
 binary_sha256 = "632ab7ca4ccd931b392593a9f0f5673cce543891d758fa7737bb859c8244ad27"
 
+[targets."dompdf-3.1.6"]
+label = "dompdf 3.1.6 (cold Composer adapter)"
+version = "3.1.6"
+enabled = true
+kind = "adapter"
+package = "dompdf/dompdf"
+adapter = "benchmarks/adapters/dompdf/adapter.php"
+profile = "composer-lock-cold-one-shot"
+lockfiles = ["benchmarks/adapters/dompdf/composer.lock"]
+supported_fixtures = ["minimal-static"]
+unsupported_reason = "adapter contract v1 has no verified correctness mapping for this fixture"
+
+[targets."dompdf-3.1.6".not_applicable]
+chartjs-showcase = "dynamic Canvas fixture is outside the verified static adapter slice"
+invoice-showcase = "invoice pagination has not passed the shared cross-target oracle"
+ledger-20-pages = "scale pagination has not passed the shared cross-target oracle"
+statement-100-pages = "scale pagination has not passed the shared cross-target oracle"
+font-image-heavy = "resource-heavy rendering has not passed the shared cross-target oracle"
+unsupported-paint = "Pliego-specific typed fail-closed paint behavior is not a comparable dompdf outcome"
+
+[targets."browsershot-5.4.0-puppeteer-25.8.0"]
+label = "Browsershot 5.4.0 + Puppeteer 25.8.0 (cold Chromium adapter)"
+version = "5.4.0"
+enabled = true
+kind = "adapter"
+package = "spatie/browsershot"
+adapter = "benchmarks/adapters/browsershot/adapter.php"
+profile = "composer-npm-lock-cold-one-shot"
+lockfiles = [
+    "benchmarks/adapters/browsershot/composer.lock",
+    "benchmarks/adapters/browsershot/package-lock.json",
+]
+supported_fixtures = ["minimal-static"]
+unsupported_reason = "adapter contract v1 has no verified correctness mapping for this fixture"
+
+[targets."browsershot-5.4.0-puppeteer-25.8.0".not_applicable]
+chartjs-showcase = "dynamic Canvas fixture is outside the verified static adapter slice"
+invoice-showcase = "invoice pagination has not passed the shared cross-target oracle"
+ledger-20-pages = "scale pagination has not passed the shared cross-target oracle"
+statement-100-pages = "scale pagination has not passed the shared cross-target oracle"
+font-image-heavy = "resource-heavy rendering has not passed the shared cross-target oracle"
+unsupported-paint = "Pliego-specific typed fail-closed paint behavior is not a comparable Browsershot outcome"
+
 [targets."pliego-1.0.0-rc.1"]
 label = "Pliego 1.0.0-rc.1 (document runtime)"
 version = "1.0.0-rc.1"
@@ -42,9 +86,16 @@ category = "static"
 samples = 50
 input = "benchmarks/fixtures/minimal-static/input.html"
 assets = ["Ahem.ttf"]
+page_size = "793.7008x1122.52"
+page_margins = "0,0,0,0"
 
 [fixtures.minimal-static.correctness]
 page_count = 1
+page_width_points = 595.276
+page_height_points = 841.89
+# Chromium quantizes custom paper sizes to its print grid. Keep one A4 oracle
+# for every target while allowing less than 0.27 mm of engine rounding.
+dimension_tolerance_points = 0.75
 text_contains = ["Minimal"]
 link_targets = ["https://pliego.dev/docs"]
 

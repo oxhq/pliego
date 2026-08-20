@@ -180,6 +180,8 @@ def result() -> dict:
         },
         "protocol": {
             "warmup_iterations": 1,
+            "correctness_preflight_iterations": 1,
+            "execution_order": "untimed-correctness-preflight,warmup,timed",
             "sample_count": 1,
             "sample_order": "sequential",
             "network": "disabled",
@@ -192,10 +194,15 @@ def result() -> dict:
             "id": "minimal-static",
             "purpose": "startup",
             "category": "static",
-            "input": "input.html",
+            "input": "benchmarks/fixtures/minimal-static/input.html",
             "input_sha256": HASH,
             "bundle_sha256": HASH,
             "expected_page_count": 1,
+            "expected_page_width_points": 595.276,
+            "expected_page_height_points": 841.89,
+            "dimension_tolerance_points": 0.05,
+            "expected_text_contains": ["Minimal"],
+            "expected_link_targets": ["https://pliego.dev/docs"],
             "expected_failure_code": None,
         },
         "samples": [
@@ -222,10 +229,22 @@ def result() -> dict:
                     "pdf_bytes": 1,
                     "pdf_sha256": HASH,
                     "page_count": 1,
+                    "page_dimensions_points": [[595.276, 841.89]],
                     "artifact_bytes": 0,
                     "published_pdf": True,
                 },
-                "correctness": {"pass": True, "checks": [{"name": "pdf_published", "status": "pass"}]},
+                "correctness": {
+                    "pass": True,
+                    "checks": [
+                        {"name": "pdf_published", "status": "pass"},
+                        {"name": "pdf_envelope", "status": "pass"},
+                        {"name": "pdf_parse", "status": "pass"},
+                        {"name": "page_count", "status": "pass"},
+                        {"name": "page_dimensions", "status": "pass"},
+                        {"name": "text:Minimal", "status": "pass"},
+                        {"name": "link:https://pliego.dev/docs", "status": "pass"},
+                    ],
+                },
                 "failure": {"code": None, "published_pdf": True},
             }
         ],
@@ -346,6 +365,11 @@ def main() -> None:
     )
     changed(
         valid,
+        lambda value: value["samples"][0]["resource_usage"]["launch_security"]["argv"].__setitem__(2, "other.html"),
+        "launch_security.argv[2]",
+    )
+    changed(
+        valid,
         lambda value: value["samples"][0]["resource_usage"]["launch_security"]["status"].update(
             cap_effective_hex="0000000000000001"
         ),
@@ -462,9 +486,24 @@ def main() -> None:
         "aggregates.memory.cgroup_peak_bytes",
     )
     changed(valid, lambda value: value["protocol"].update(sample_count=2), "protocol.sample_count")
+    changed(
+        valid,
+        lambda value: value["protocol"].update(correctness_preflight_iterations=0),
+        "correctness_preflight_iterations",
+    )
     changed(valid, lambda value: value["samples"][0]["correctness"].update({"pass": False}), "correctness.pass")
     changed(valid, lambda value: value["samples"][0]["failure"].update(published_pdf=False), "failure.published_pdf")
     changed(valid, lambda value: value["samples"][0]["output"].update(page_count=2), "expected page count 1")
+    changed(
+        valid,
+        lambda value: value["samples"][0]["output"].update(page_dimensions_points=[[600, 842]]),
+        "dimension tolerance",
+    )
+    changed(
+        valid,
+        lambda value: value["samples"][0]["correctness"]["checks"].pop(),
+        "shared PDF oracle check exactly once",
+    )
     changed(
         timed, lambda value: value["samples"][0]["bridge_timings"].update(bridge_overhead_ms=99), "bridge_overhead_ms"
     )
