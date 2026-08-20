@@ -138,14 +138,16 @@ sample schema, and verifies every binding and hash. This makes later report
 references unambiguous; it does not itself supply target attestation or Linux
 measurement evidence.
 
-The companion `report_data.py` is intentionally smaller than a report format.
-It generates only `wall_ms` min/p50/p95/p99/max/mean cells, and only when every
-timed sample in the validated artifact passed correctness. Each cell contains
-the artifact digest and the exact contributing sample IDs in schedule order;
-the report source also binds fixture, targets, and the complete schedule digest.
-Validation recomputes every value and rejects provenance drift. The contract is
-marked `prerequisite-only`, uses synthetic self-test inputs, and does not render
-tables/charts or authorize comparative claims.
+The companion `report_data.py` generates only `wall_ms`
+min/p50/p95/p99/max/mean cells, and only when every timed sample in the validated
+artifact passed correctness. Each cell contains the artifact digest and the exact
+contributing sample IDs in schedule order; the report source also binds fixture,
+targets, and the complete schedule digest. Validation recomputes every value and
+rejects provenance drift. Its `render` command emits a deterministic Markdown
+table only after that validation, links every displayed value to its full cell ID,
+and retains the contributing sample IDs. Both artifacts remain explicitly
+`prerequisite-only`; the renderer adds no rankings, narrative, or authority to
+publish comparative claims.
 
 ## Implemented slice and remaining comparative protocol
 
@@ -178,12 +180,12 @@ Before a cross-engine comparison is published, every target must follow these ru
   output, and the report-generation code with the summary.
 
 The remaining dedicated-Linux gates are wiring the seeded cross-target executor
-to fully attested target contexts, retaining a genuine run artifact, and making
-the eventual report presentation consume only the validated provenance-bearing
-cells. Single-target serial throughput now uses the retained outer one-shot wall
-interval from runner process open through sampler exit, which includes descendant
-drain and accounting settlement; it is still not a publishable cross-engine
-comparison until those coordination and presentation gates pass.
+to fully attested target contexts, retaining a genuine run artifact, and retaining
+that artifact with its validated cells and generated table as one evidence bundle.
+Single-target serial throughput now uses the retained outer one-shot wall interval
+from runner process open through sampler exit, which includes descendant drain and
+accounting settlement; it is still not a publishable cross-engine comparison until
+the coordination and real-evidence gates pass.
 
 ## Publication gate
 

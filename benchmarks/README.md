@@ -44,7 +44,7 @@ benchmarks/
 │   ├── generate_fixtures.py   Deterministic generation of long/image fixtures
 │   ├── process_tree_sampler.py Linux cgroup-v2 containment and accounting
 │   ├── pdf_oracle.py           Shared untimed PDF correctness checks
-│   ├── report_data.py         Canonical latency cells + raw-sample provenance
+│   ├── report_data.py         Canonical latency cells + provenance-bound Markdown
 │   ├── run_benchmark.py       Orchestrator: manifest → runner → aggregates → result file
 │   ├── test_process_tree_sampler.py Fixture, live cgroup, bridge, and overhead proof
 │   ├── validate_interleaved_run.py Cross-target schedule/raw-sample validator
@@ -247,13 +247,20 @@ python3 benchmarks/tools/report_data.py generate \
   path/to/interleaved-run.json --out path/to/report-data.json
 python3 benchmarks/tools/report_data.py validate \
   path/to/report-data.json --artifact path/to/interleaved-run.json
+python3 benchmarks/tools/report_data.py render \
+  path/to/report-data.json --artifact path/to/interleaved-run.json \
+  --out path/to/latency-table.md
 ```
 
 The validator rejects an invalid source artifact, source schedule/target/fixture
 drift, stale artifact digests, non-canonical cell order, changed aggregates, and
 missing, extra, reordered, or duplicate sample IDs. This contract is machine
-report data, not a chart/table renderer, public report, or authority to run an
-unattested target.
+report data, not authority to run an unattested target. The Markdown renderer
+accepts only a report that validates against its exact interleaved artifact. It
+copies only those cells, labels the output `prerequisite-only`, binds the artifact
+and schedule digests, and links every displayed value to its full cell ID and the
+contributing raw-sample IDs. It produces no ranking, narrative, chart, or
+publication claim.
 
 Each sample gets a fresh root-owned, non-delegated child cgroup. A root launcher
 first stops in a staging cgroup, drops supplementary groups, all real/effective/
@@ -345,16 +352,16 @@ and were revalidated unchanged against the published Linux v0.2.0 renderer.
   `minimal-static`, but publishable measurements remain N/A until immutable
   image digests are pinned; all other fixtures are explicit exclusions.
 * The cross-target executor now emits a validated retention contract with stable
-  raw-sample IDs, and a narrow latency-cell generator preserves exact provenance.
-  Neither is wired to attested target contexts, no genuine multi-target run
-  artifact has been retained, and no chart/table presentation exists. This slice
-  publishes no comparative numbers.
+  raw-sample IDs, a narrow latency-cell generator preserves exact provenance, and
+  a deterministic Markdown table consumes only those validated cells. None is
+  wired to attested target contexts, and no genuine multi-target run artifact has
+  been retained. This slice publishes no comparative numbers.
 * Dedicated-Linux acceptance still needs the public multi-target coordinator, a
-  genuine retained run under all existing gates, and a report presentation that
-  consumes only the validated provenance-bearing cells. The implemented
-  single-target throughput includes sampler startup, descendant drain, accounting
-  settlement, and sampler exit, but remains a serial per-target diagnostic rather
-  than a publishable cross-engine throughput claim.
+  genuine retained run under all existing gates, and retention of its validated
+  cells and generated table as one evidence bundle. The implemented single-target
+  throughput includes sampler startup, descendant drain, accounting settlement,
+  and sampler exit, but remains a serial per-target diagnostic rather than a
+  publishable cross-engine throughput claim.
 * The Ubuntu adapter/Poppler smoke is configured in CI; it is not hosted proof
   until that workflow passes at the exact commit containing this change.
 * Core (Criterion) and Laravel e2e levels live outside this directory.

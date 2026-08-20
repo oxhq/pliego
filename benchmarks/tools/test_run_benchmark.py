@@ -247,6 +247,16 @@ def main() -> None:
     assert all(len(cell["sample_ids"]) == 3 for cell in report["cells"])
     assert alpha_cells[0]["cell_id"] == "0f617e80fc7355b2d5956f184f33c17a63d5b6ab4a90ec5e18b1efbc1638d50b"
     assert not report_data.validate_report_data(report, synthetic_artifact)
+    markdown = report_data.render_markdown(report, synthetic_artifact)
+    assert markdown.startswith("# Benchmark latency table\n")
+    assert "Status: prerequisite-only" in markdown
+    assert synthetic_artifact["artifact_sha256"] in markdown
+    assert report["source"]["schedule_sha256"] in markdown
+    assert f"[10.0](#cell-{alpha_cells[0]['cell_id']})" in markdown
+    assert f' id="cell-{alpha_cells[0]["cell_id"]}"' in markdown
+    assert all(cell["cell_id"] in markdown for cell in report["cells"])
+    assert all(sample_id in markdown for cell in report["cells"] for sample_id in cell["sample_ids"])
+    assert report_data.markdown_text("a|b\n<c>") == "a&#124;b<br>&lt;c&gt;"
 
     for operation, expected_error in (
         (lambda value: value["cells"][0]["sample_ids"].pop(), "is missing contributing sample ids"),
@@ -268,6 +278,15 @@ def main() -> None:
         operation(broken_report)
         report_errors = "\n".join(map(str, report_data.validate_report_data(broken_report, synthetic_artifact)))
         assert expected_error in report_errors, report_errors
+
+    invalid_render = deepcopy(report)
+    invalid_render["cells"][0]["value"] = 999.0
+    try:
+        report_data.render_markdown(invalid_render, synthetic_artifact)
+    except ValueError as error:
+        assert "must equal the recomputed min" in str(error)
+    else:
+        raise AssertionError("Markdown renderer accepted a changed latency cell")
 
     missing_cell = deepcopy(report)
     missing_cell["cells"].pop()
@@ -332,6 +351,24 @@ def main() -> None:
         )
         assert validated.returncode == 0, validated.stderr
         assert "exact raw samples" in validated.stdout
+        markdown_path = Path(directory) / "synthetic-report.md"
+        rendered = subprocess.run(
+            [
+                sys.executable,
+                str(REPORT_SCRIPT),
+                "render",
+                str(report_path),
+                "--artifact",
+                str(artifact_path),
+                "--out",
+                str(markdown_path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert rendered.returncode == 0, rendered.stderr
+        assert markdown_path.read_text(encoding="utf-8") == markdown
         invalid_report = json.loads(report_path.read_text(encoding="utf-8"))
         invalid_report["cells"][0]["value"] = 999.0
         report_path.write_text(json.dumps(invalid_report, indent=2) + "\n", encoding="utf-8")

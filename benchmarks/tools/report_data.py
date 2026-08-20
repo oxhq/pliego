@@ -4,11 +4,12 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-"""Generate and validate prerequisite-only benchmark latency cells."""
+"""Generate, validate, and render prerequisite-only benchmark latency cells."""
 
 from __future__ import annotations
 
 import argparse
+import html
 import json
 import sys
 from pathlib import Path
@@ -203,6 +204,67 @@ def validate_report_data(
     return violations
 
 
+def markdown_text(value: str) -> str:
+    """Escape one untrusted value for a Markdown table cell."""
+
+    return (
+        html.escape(value, quote=False)
+        .replace("|", "&#124;")
+        .replace("\r\n", "<br>")
+        .replace("\r", "<br>")
+        .replace("\n", "<br>")
+    )
+
+
+def render_markdown(data: Any, artifact: Any) -> str:
+    """Render validated latency cells without deriving new claims or values."""
+
+    violations = validate_report_data(data, artifact)
+    if violations:
+        raise ValueError(f"report data failed validation: {violations[0]}")
+
+    assert isinstance(data, dict)
+    cells = {(cell["target_id"], cell["statistic"]): cell for cell in data["cells"]}
+    statistics = data["aggregation"]["statistics"]
+    targets = data["source"]["targets"]
+    lines = [
+        "# Benchmark latency table",
+        "",
+        "> Status: prerequisite-only. This table is not publishable benchmark evidence.",
+        "",
+        f"- Fixture: <code>{markdown_text(data['source']['fixture_id'])}</code>",
+        f"- Interleaved artifact SHA-256: `{data['source']['artifact_sha256']}`",
+        f"- Schedule SHA-256: `{data['source']['schedule_sha256']}`",
+        "- Metric: `wall_ms` (`ms`), nearest-rank-v1 percentiles",
+        "",
+        "| Target | " + " | ".join(f"{statistic} (ms)" for statistic in statistics) + " |",
+        "| --- | " + " | ".join("---:" for _ in statistics) + " |",
+    ]
+    for target_id in targets:
+        values = []
+        for statistic in statistics:
+            cell = cells[(target_id, statistic)]
+            value = json.dumps(cell["value"], allow_nan=False, separators=(",", ":"))
+            values.append(f"[{value}](#cell-{cell['cell_id']})")
+        lines.append(f"| <code>{markdown_text(target_id)}</code> | " + " | ".join(values) + " |")
+
+    lines.extend(["", "## Cell provenance", ""])
+    for target_id in targets:
+        lines.append(f"### <code>{markdown_text(target_id)}</code>")
+        lines.append("")
+        target_cells = [cells[(target_id, statistic)] for statistic in statistics]
+        for cell in target_cells:
+            lines.append(
+                f"- <a id=\"cell-{cell['cell_id']}\"></a>`{cell['statistic']}` cell: `{cell['cell_id']}`"
+            )
+        lines.append(
+            "- Timed sample IDs, in schedule order: "
+            + ", ".join(f"`{sample_id}`" for sample_id in target_cells[0]["sample_ids"])
+        )
+        lines.append("")
+    return "\n".join(lines)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -212,6 +274,10 @@ def main() -> int:
     validate = commands.add_parser("validate", help="validate report data against its source artifact")
     validate.add_argument("report")
     validate.add_argument("--artifact", required=True)
+    render = commands.add_parser("render", help="render a validated provenance-bearing Markdown table")
+    render.add_argument("report")
+    render.add_argument("--artifact", required=True)
+    render.add_argument("--out", required=True)
     args = parser.parse_args()
 
     try:
@@ -226,13 +292,23 @@ def main() -> int:
             out.write_text(json.dumps(report, indent=2, allow_nan=False) + "\n", encoding="utf-8")
             print(f"wrote prerequisite-only report data to {out}")
             return 0
-        report = load_json(Path(args.report))
+        report_path = Path(args.report)
+        report = load_json(report_path)
         violations = validate_report_data(report, artifact)
         if violations:
             for violation in violations:
                 print(f"violation {violation}", file=sys.stderr)
             print(f"report data failed validation with {len(violations)} violation(s)", file=sys.stderr)
             return 1
+        if args.command == "render":
+            out = Path(args.out)
+            for source in (artifact_path, report_path):
+                if out.resolve() == source.resolve() or (out.exists() and out.samefile(source)):
+                    raise ValueError("Markdown output must not overwrite its report data or source artifact")
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text(render_markdown(report, artifact), encoding="utf-8")
+            print(f"wrote prerequisite-only Markdown table to {out}")
+            return 0
     except (OSError, ValueError) as error:
         print(f"report_data: {error}", file=sys.stderr)
         return 1
