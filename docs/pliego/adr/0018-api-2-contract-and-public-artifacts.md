@@ -428,6 +428,13 @@ requires the profile-null encoder, canonical PDF adapter, page/CSS authority, se
 publication, package, SDK, and hosted proof gates. OXH-346 remains a later prerequisite for the first
 semantic/accessibility profile, not for freezing profile-null API 2.
 
+The current paged-layout capture is deliberately narrower than the target policy above. It retains
+exact app units when layout still owns them and labels every page only as `request-defaults`; a
+`css-page` capture source is unrepresentable until Servo/Pliego actually parses and applies `@page`.
+Paint geometry that has already become floating point carries no false fixed-point authority. This
+capture-authority slice therefore prepares a fail-closed encoder but does not satisfy the page/CSS or
+profile-null activation gates.
+
 ## Consequences
 
 - API 2 has one strict, path-independent request/result boundary and an exact binary contract probe.

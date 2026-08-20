@@ -2966,6 +2966,7 @@ mod tests {
                 },
                 operations: vec![],
             }),
+            fixed_point_authority: Default::default(),
             canvas_resources: vec![],
             embedded_image_resources: vec![],
             canvas_diagnostics: vec![],

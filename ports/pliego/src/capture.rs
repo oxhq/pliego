@@ -24,9 +24,20 @@ use crate::{
     Stroke,
 };
 
+const APP_UNITS_PER_CSS_PIXEL: f32 = 60.0;
+
+fn app_units_to_f32_px(value: i32) -> f32 {
+    value as f32 / APP_UNITS_PER_CSS_PIXEL
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct SceneCapture {
     pub scene: DocumentScene,
+    /// Fixed-point source authority for a future API 2 encoder.
+    ///
+    /// This ledger is deliberately absent from the API 1 scene/inspect serialization surface.
+    #[serde(skip_serializing)]
+    pub fixed_point_authority: CapturedFixedPointAuthority,
     #[serde(skip_serializing)]
     pub canvas_resources: Vec<CanvasResource>,
     #[serde(skip_serializing)]
@@ -38,6 +49,83 @@ pub struct SceneCapture {
     pub font_warnings: Vec<CapturedFontWarning>,
     pub unsupported_events: Vec<UnsupportedPaintEvent>,
     pub text_mapping_gaps: Vec<MissingTextMapping>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct CapturedFixedPointAuthority {
+    /// One entry per retained page, in page order. Legacy diagnostic fixtures can lack authority;
+    /// real paged layout always emits both source and geometry.
+    pub pages: Vec<CapturedPageAuthority>,
+    /// One entry per paint event, in its dense traversal order.
+    pub paint_events: Vec<CapturedPaintAuthority>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CapturedPageAuthority {
+    pub index: usize,
+    pub style_source: Option<CapturedPageStyleSource>,
+    pub app_units: Option<CapturedPageAppUnits>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[non_exhaustive]
+#[serde(rename_all = "kebab-case")]
+pub enum CapturedPageStyleSource {
+    RequestDefaults,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct CapturedPageAppUnits {
+    pub width: i32,
+    pub height: i32,
+    pub margin_top: i32,
+    pub margin_right: i32,
+    pub margin_bottom: i32,
+    pub margin_left: i32,
+    pub available_inline_size: i32,
+    pub available_block_size: i32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CapturedPaintAuthority {
+    pub sequence: usize,
+    pub kind: String,
+    pub fragment: Option<CapturedFragmentAuthority>,
+    /// `None` entries are f32-only geometry and are intentionally unencodable as fixed point.
+    pub table_borders: Vec<Option<CapturedRectAppUnits>>,
+    /// `None` entries are f32-only geometry and are intentionally unencodable as fixed point.
+    pub paint_rects: Vec<Option<CapturedRectAppUnits>>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CapturedFragmentAuthority {
+    /// `None` means the fragment had no exact app-unit rectangle at this boundary.
+    pub rect: Option<CapturedRectAppUnits>,
+    pub text: Option<CapturedTextAuthority>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CapturedTextAuthority {
+    pub font_size_app_units: Option<i32>,
+    pub glyphs: Vec<Option<CapturedGlyphAppUnits>>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct CapturedRectAppUnits {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct CapturedGlyphAppUnits {
+    pub x: i32,
+    pub y: i32,
+    pub advance: i32,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -160,6 +248,8 @@ pub enum CaptureError {
         actual: usize,
     },
     InvalidPageGeometry,
+    InvalidPageGeometryAuthority,
+    InvalidPaintGeometryAuthority,
     MissingTextRect {
         sequence: usize,
     },
@@ -301,6 +391,14 @@ impl fmt::Display for CaptureError {
             Self::InvalidPageGeometry => {
                 write!(formatter, "layout snapshot contains invalid page geometry")
             },
+            Self::InvalidPageGeometryAuthority => write!(
+                formatter,
+                "layout snapshot page has incomplete or inconsistent app-unit authority"
+            ),
+            Self::InvalidPaintGeometryAuthority => write!(
+                formatter,
+                "layout snapshot paint geometry disagrees with its app-unit authority"
+            ),
             Self::MissingTextRect { sequence } => {
                 write!(
                     formatter,
@@ -872,7 +970,9 @@ fn capture_layout_with_canvas_limits(
     ) -> Result<Arc<RetainedCanvasSnapshot>, String>,
     canvas_limits: CanvasCaptureLimits,
 ) -> Result<SceneCapture, CaptureError> {
+    validate_paint_app_unit_authority(&capture)?;
     let pages = capture_pages(&capture)?;
+    let fixed_point_authority = capture_fixed_point_authority(&capture);
     let table_group_repeats = capture
         .page_sequence
         .as_ref()
@@ -1323,6 +1423,7 @@ fn capture_layout_with_canvas_limits(
 
     Ok(SceneCapture {
         scene,
+        fixed_point_authority,
         canvas_resources: canvas_resources.into_values().collect(),
         embedded_image_resources: embedded_image_resources.into_values().collect(),
         canvas_diagnostics,
@@ -1333,6 +1434,101 @@ fn capture_layout_with_canvas_limits(
         unsupported_events,
         text_mapping_gaps,
     })
+}
+
+fn capture_fixed_point_authority(capture: &LayoutCapture) -> CapturedFixedPointAuthority {
+    let fragments = capture
+        .fragments
+        .iter()
+        .filter_map(|fragment| Some((fragment.paint_fragment_id?, fragment)))
+        .collect::<HashMap<_, _>>();
+    CapturedFixedPointAuthority {
+        pages: capture
+            .page_sequence
+            .as_ref()
+            .into_iter()
+            .flat_map(|sequence| &sequence.pages)
+            .map(|page| CapturedPageAuthority {
+                index: page.index,
+                style_source: page.style_source,
+                app_units: page.app_units,
+            })
+            .collect(),
+        paint_events: capture
+            .paint_events
+            .iter()
+            .map(|event| CapturedPaintAuthority {
+                sequence: event.sequence,
+                kind: event.kind.clone(),
+                fragment: event
+                    .fragment_id
+                    .and_then(|fragment_id| fragments.get(&fragment_id))
+                    .map(|fragment| CapturedFragmentAuthority {
+                        rect: fragment
+                            .rect
+                            .as_ref()
+                            .and_then(|rect| rect.app_units),
+                        text: fragment.text_run.as_ref().map(|text| CapturedTextAuthority {
+                            font_size_app_units: text.font_size_app_units,
+                            glyphs: text
+                                .glyphs
+                                .iter()
+                                .map(|glyph| glyph.app_units)
+                                .collect(),
+                        }),
+                    }),
+                table_borders: event
+                    .table_borders
+                    .iter()
+                    .map(|border| border.rect.app_units)
+                    .collect(),
+                paint_rects: event
+                    .paint_rects
+                    .iter()
+                    .map(|paint_rect| paint_rect.rect.app_units)
+                    .collect(),
+            })
+            .collect(),
+    }
+}
+
+fn validate_paint_app_unit_authority(capture: &LayoutCapture) -> Result<(), CaptureError> {
+    for fragment in &capture.fragments {
+        if fragment
+            .rect
+            .as_ref()
+            .is_some_and(|rect| !rect.app_unit_authority_matches())
+        {
+            return Err(CaptureError::InvalidPaintGeometryAuthority);
+        }
+        let Some(text_run) = fragment.text_run.as_ref() else {
+            continue;
+        };
+        if text_run
+            .font_size_app_units
+            .is_some_and(|exact| app_units_to_f32_px(exact) != text_run.font_size)
+            || text_run
+                .glyphs
+                .iter()
+                .any(|glyph| !glyph.app_unit_authority_matches())
+        {
+            return Err(CaptureError::InvalidPaintGeometryAuthority);
+        }
+    }
+    for event in &capture.paint_events {
+        if event
+            .table_borders
+            .iter()
+            .any(|border| !border.rect.app_unit_authority_matches())
+            || event
+                .paint_rects
+                .iter()
+                .any(|paint_rect| !paint_rect.rect.app_unit_authority_matches())
+        {
+            return Err(CaptureError::InvalidPaintGeometryAuthority);
+        }
+    }
+    Ok(())
 }
 
 struct CachedRetainedCanvas {
@@ -1578,8 +1774,57 @@ fn capture_pages(capture: &LayoutCapture) -> Result<Vec<CapturePage>, CaptureErr
         {
             return Err(CaptureError::InvalidPageGeometry);
         }
+        match (page.style_source, page.app_units) {
+            (None, None) => {},
+            (Some(CapturedPageStyleSource::RequestDefaults), Some(app_units))
+                if valid_page_app_unit_authority(page, app_units) => {},
+            _ => return Err(CaptureError::InvalidPageGeometryAuthority),
+        }
     }
     Ok(sequence.pages.clone())
+}
+
+fn valid_page_app_unit_authority(page: &CapturePage, app_units: CapturedPageAppUnits) -> bool {
+    if app_units.width <= 0 ||
+        app_units.height <= 0 ||
+        app_units.margin_top < 0 ||
+        app_units.margin_right < 0 ||
+        app_units.margin_bottom < 0 ||
+        app_units.margin_left < 0 ||
+        app_units.available_inline_size <= 0 ||
+        app_units.available_block_size <= 0
+    {
+        return false;
+    }
+    let horizontal_margins =
+        i64::from(app_units.margin_left) + i64::from(app_units.margin_right);
+    let vertical_margins =
+        i64::from(app_units.margin_top) + i64::from(app_units.margin_bottom);
+    if i64::from(app_units.width) - horizontal_margins != i64::from(app_units.available_inline_size)
+        || i64::from(app_units.height) - vertical_margins
+            != i64::from(app_units.available_block_size)
+    {
+        return false;
+    }
+
+    [
+        (app_units.width, page.width),
+        (app_units.height, page.height),
+        (app_units.margin_top, page.margin_top),
+        (app_units.margin_right, page.margin_right),
+        (app_units.margin_bottom, page.margin_bottom),
+        (app_units.margin_left, page.margin_left),
+        (
+            app_units.available_inline_size,
+            page.available_inline_size,
+        ),
+        (
+            app_units.available_block_size,
+            page.available_block_size,
+        ),
+    ]
+    .into_iter()
+    .all(|(exact, compatibility)| app_units_to_f32_px(exact) == compatibility)
 }
 
 #[derive(Clone)]
@@ -2640,6 +2885,10 @@ struct CaptureTableGroupRepeat {
 #[serde(deny_unknown_fields)]
 struct CapturePage {
     index: usize,
+    #[serde(default)]
+    style_source: Option<CapturedPageStyleSource>,
+    #[serde(default)]
+    app_units: Option<CapturedPageAppUnits>,
     width: f32,
     height: f32,
     margin_top: f32,
@@ -2878,6 +3127,8 @@ struct CaptureTextRun {
     selected_family: Option<String>,
     font_size: f32,
     #[serde(default)]
+    font_size_app_units: Option<i32>,
+    #[serde(default)]
     color: CaptureColor,
     glyphs: Vec<CaptureGlyph>,
 }
@@ -2890,7 +3141,19 @@ struct CaptureGlyph {
     y: f32,
     advance: f32,
     #[serde(default)]
+    app_units: Option<CapturedGlyphAppUnits>,
+    #[serde(default)]
     text_range: Option<CaptureUtf8Range>,
+}
+
+impl CaptureGlyph {
+    fn app_unit_authority_matches(&self) -> bool {
+        // The compatibility point is the sum of two independently projected `f32` values
+        // (baseline plus shaping offset), so it can legitimately differ from projecting their
+        // exact app-unit sum. Advance is a direct projection and must still agree.
+        self.app_units
+            .is_none_or(|exact| app_units_to_f32_px(exact.advance) == self.advance)
+    }
 }
 
 #[derive(Clone, Copy, Deserialize)]
@@ -2907,6 +3170,8 @@ struct CaptureRect {
     y: f32,
     width: f32,
     height: f32,
+    #[serde(default)]
+    app_units: Option<CapturedRectAppUnits>,
 }
 
 impl CaptureRect {
@@ -2917,6 +3182,15 @@ impl CaptureRect {
             width: f64::from(self.width),
             height: f64::from(self.height),
         }
+    }
+
+    fn app_unit_authority_matches(&self) -> bool {
+        self.app_units.is_none_or(|exact| {
+            app_units_to_f32_px(exact.x) == self.x
+                && app_units_to_f32_px(exact.y) == self.y
+                && app_units_to_f32_px(exact.width) == self.width
+                && app_units_to_f32_px(exact.height) == self.height
+        })
     }
 }
 
@@ -3447,6 +3721,227 @@ mod tests {
         );
     }
 
+    fn exact_paint_authority_layout() -> serde_json::Value {
+        serde_json::json!({
+            "boxes": [],
+            "fragments": [],
+            "font_resources": [],
+            "font_instances": [],
+            "page_sequence": {
+                "pages": [{
+                    "index": 0,
+                    "style_source": "request-defaults",
+                    "app_units": {
+                        "width": 600,
+                        "height": 600,
+                        "margin_top": 0,
+                        "margin_right": 0,
+                        "margin_bottom": 0,
+                        "margin_left": 0,
+                        "available_inline_size": 600,
+                        "available_block_size": 600
+                    },
+                    "width": 10.0,
+                    "height": 10.0,
+                    "margin_top": 0.0,
+                    "margin_right": 0.0,
+                    "margin_bottom": 0.0,
+                    "margin_left": 0.0,
+                    "available_inline_size": 10.0,
+                    "available_block_size": 10.0
+                }]
+            },
+            "paint_events": [
+                {
+                    "sequence": 0,
+                    "kind": "paint-rect",
+                    "fragment_id": null,
+                    "tag_id": null,
+                    "spatial_node_id": 0,
+                    "clip_id": null,
+                    "paint_rects": [{
+                        "rect": {
+                            "x": 1.0,
+                            "y": 1.0,
+                            "width": 1.0,
+                            "height": 1.0,
+                            "app_units": {"x": 60, "y": 60, "width": 60, "height": 60}
+                        },
+                        "color": {"r": 1.0, "g": 0.0, "b": 0.0, "a": 1.0},
+                        "kind": "background"
+                    }]
+                },
+                {
+                    "sequence": 1,
+                    "kind": "paint-rect",
+                    "fragment_id": null,
+                    "tag_id": null,
+                    "spatial_node_id": 0,
+                    "clip_id": null,
+                    "paint_rects": [{
+                        "rect": {
+                            "x": 2.0,
+                            "y": 2.0,
+                            "width": 1.0,
+                            "height": 1.0,
+                            "app_units": {"x": 120, "y": 120, "width": 60, "height": 60}
+                        },
+                        "color": {"r": 0.0, "g": 0.0, "b": 1.0, "a": 1.0},
+                        "kind": "border"
+                    }]
+                }
+            ],
+            "paint_epoch": 1,
+            "paint_content_width": 10.0,
+            "paint_content_height": 10.0,
+            "paint_scroll_node_count": 1,
+            "paintable": true,
+            "contentful": true,
+            "first_reflow": false,
+            "links": []
+        })
+    }
+
+    #[test]
+    fn exact_paint_authority_preserves_event_operation_order() {
+        let capture = capture_document_scene(
+            &serde_json::to_vec(&exact_paint_authority_layout()).unwrap(),
+            |_| None,
+        )
+        .unwrap();
+
+        let x_positions = capture.scene.pages[0]
+            .operations
+            .iter()
+            .map(|operation| match operation {
+                Operation::Path { bounds, .. } => bounds.x,
+                _ => panic!("paint-rect fixture must emit only paths"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(x_positions, [1.0, 2.0]);
+        assert!(
+            serde_json::to_value(&capture)
+                .unwrap()
+                .get("fixed_point_authority")
+                .is_none(),
+            "capture authority must not change the API 1 inspect serialization"
+        );
+        assert_eq!(
+            capture.fixed_point_authority.pages,
+            [CapturedPageAuthority {
+                index: 0,
+                style_source: Some(CapturedPageStyleSource::RequestDefaults),
+                app_units: Some(CapturedPageAppUnits {
+                    width: 600,
+                    height: 600,
+                    margin_top: 0,
+                    margin_right: 0,
+                    margin_bottom: 0,
+                    margin_left: 0,
+                    available_inline_size: 600,
+                    available_block_size: 600,
+                }),
+            }]
+        );
+        assert_eq!(
+            capture
+                .fixed_point_authority
+                .paint_events
+                .iter()
+                .map(|event| (event.sequence, event.kind.as_str(), event.paint_rects[0]))
+                .collect::<Vec<_>>(),
+            [
+                (
+                    0,
+                    "paint-rect",
+                    Some(CapturedRectAppUnits {
+                        x: 60,
+                        y: 60,
+                        width: 60,
+                        height: 60,
+                    }),
+                ),
+                (
+                    1,
+                    "paint-rect",
+                    Some(CapturedRectAppUnits {
+                        x: 120,
+                        y: 120,
+                        width: 60,
+                        height: 60,
+                    }),
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn capture_structs_retain_large_signed_app_units_without_round_trip() {
+        let x = app_units_to_f32_px(-100_000_001);
+        let events: Vec<CapturePaintEvent> = serde_json::from_value(serde_json::json!([{
+            "sequence": 0,
+            "kind": "paint-rect",
+            "fragment_id": null,
+            "tag_id": null,
+            "spatial_node_id": 0,
+            "clip_id": null,
+            "paint_rects": [{
+                "rect": {
+                    "x": x,
+                    "y": 0.0,
+                    "width": 1.0,
+                    "height": 1.0,
+                    "app_units": {
+                        "x": -100_000_001,
+                        "y": 0,
+                        "width": 60,
+                        "height": 60
+                    }
+                },
+                "color": {"r": 0.0, "g": 0.0, "b": 0.0, "a": 1.0},
+                "kind": "background"
+            }]
+        }]))
+        .unwrap();
+
+        let exact = events[0].paint_rects[0].rect.app_units.unwrap();
+        assert_eq!(exact.x, -100_000_001);
+        assert_ne!((x * APP_UNITS_PER_CSS_PIXEL).round() as i32, exact.x);
+        assert!(events[0].paint_rects[0].rect.app_unit_authority_matches());
+    }
+
+    #[test]
+    fn mismatched_or_incomplete_app_unit_authority_fails_closed() {
+        let mut paint_mismatch = exact_paint_authority_layout();
+        paint_mismatch["paint_events"][0]["paint_rects"][0]["rect"]["app_units"]["x"] =
+            serde_json::json!(61);
+        assert_eq!(
+            capture_document_scene(&serde_json::to_vec(&paint_mismatch).unwrap(), |_| None),
+            Err(CaptureError::InvalidPaintGeometryAuthority)
+        );
+
+        let mut incomplete_page = exact_paint_authority_layout();
+        incomplete_page["page_sequence"]["pages"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("app_units");
+        assert_eq!(
+            capture_document_scene(&serde_json::to_vec(&incomplete_page).unwrap(), |_| None),
+            Err(CaptureError::InvalidPageGeometryAuthority)
+        );
+    }
+
+    #[test]
+    fn css_page_provenance_is_unrepresentable_even_with_equal_geometry() {
+        let mut layout = exact_paint_authority_layout();
+        layout["page_sequence"]["pages"][0]["style_source"] = serde_json::json!("css-page");
+
+        assert!(matches!(
+            capture_document_scene(&serde_json::to_vec(&layout).unwrap(), |_| None),
+            Err(CaptureError::InvalidJson(_))
+        ));
+    }
+
     #[test]
     fn rejects_later_page_paths_without_rewriting_path_data() {
         let mut operation = Operation::Path {
@@ -3515,6 +4010,8 @@ mod tests {
     fn splits_a_solid_background_across_every_intersected_page() {
         let page = |index| CapturePage {
             index,
+            style_source: None,
+            app_units: None,
             width: 100.0,
             height: 100.0,
             margin_top: 10.0,
@@ -3568,6 +4065,8 @@ mod tests {
     fn clips_only_a_centered_table_edge_to_its_owning_page() {
         let page = |index| CapturePage {
             index,
+            style_source: None,
+            app_units: None,
             width: 100.0,
             height: 100.0,
             margin_top: 10.0,

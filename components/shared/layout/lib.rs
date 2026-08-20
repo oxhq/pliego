@@ -480,6 +480,12 @@ pub enum LayoutDebugPageWarning {
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
 pub struct LayoutDebugPage {
     pub index: usize,
+    /// The only page-style authority currently implemented by Pliego's paged root.
+    ///
+    /// CSS `@page` is not represented here until layout actually resolves it.
+    pub style_source: LayoutDebugPageStyleSource,
+    /// Exact fixed-point geometry retained before the compatibility `f32` projection below.
+    pub app_units: LayoutDebugPageAppUnits,
     pub width: f32,
     pub height: f32,
     pub margin_top: f32,
@@ -488,6 +494,24 @@ pub struct LayoutDebugPage {
     pub margin_left: f32,
     pub available_inline_size: f32,
     pub available_block_size: f32,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LayoutDebugPageStyleSource {
+    RequestDefaults,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LayoutDebugPageAppUnits {
+    pub width: i32,
+    pub height: i32,
+    pub margin_top: i32,
+    pub margin_right: i32,
+    pub margin_bottom: i32,
+    pub margin_left: i32,
+    pub available_inline_size: i32,
+    pub available_block_size: i32,
 }
 
 /// Link semantics captured from the live DOM at the same boundary as a layout debug snapshot.
@@ -609,6 +633,20 @@ pub struct LayoutDebugRect {
     pub y: f32,
     pub width: f32,
     pub height: f32,
+    /// Exact geometry when this rectangle was still owned as Servo app units.
+    ///
+    /// `None` means the paint path had already projected the rectangle to floating-point layout
+    /// coordinates. Consumers requiring fixed-point authority must reject that operation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_units: Option<LayoutDebugRectAppUnits>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LayoutDebugRectAppUnits {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -626,6 +664,9 @@ pub struct LayoutDebugTextRun {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selected_family: Option<String>,
     pub font_size: f32,
+    /// Exact font size retained from the layout font descriptor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font_size_app_units: Option<i32>,
     /// Resolved sRGB text color used by the display-list paint traversal.
     #[serde(default)]
     pub color: LayoutDebugColor,
@@ -668,11 +709,21 @@ pub struct LayoutDebugGlyph {
     pub y: f32,
     /// Effective pen advance, including word-justification adjustment.
     pub advance: f32,
+    /// Exact positioned glyph geometry retained before display-list conversion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_units: Option<LayoutDebugGlyphAppUnits>,
     /// Exact UTF-8 byte range in [`LayoutDebugTextRun::text`] for this glyph's
     /// shaping cluster. Multiple glyphs can share a range. `None` explicitly
     /// denotes that Servo could not retain or validate the source cluster.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text_range: Option<LayoutDebugUtf8Range>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LayoutDebugGlyphAppUnits {
+    pub x: i32,
+    pub y: i32,
+    pub advance: i32,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]

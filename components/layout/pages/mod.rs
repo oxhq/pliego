@@ -18,9 +18,9 @@ use euclid::default::Size2D as UntypedSize2D;
 use euclid::{Point2D, Rect, Size2D};
 use layout_api::{
     LayoutDebugContinuation, LayoutDebugPage, LayoutDebugPageContinuation, LayoutDebugPageSequence,
-    LayoutDebugPageWarning, LayoutDebugTableBreak, LayoutDebugTableCellContinuation,
-    LayoutDebugTableConstraint, LayoutDebugTableGroupRepeat,
-    LayoutDebugTableGroupUnsupportedReason,
+    LayoutDebugPageAppUnits, LayoutDebugPageStyleSource, LayoutDebugPageWarning,
+    LayoutDebugTableBreak, LayoutDebugTableCellContinuation, LayoutDebugTableConstraint,
+    LayoutDebugTableGroupRepeat, LayoutDebugTableGroupUnsupportedReason,
 };
 use log::warn;
 use parking_lot::Mutex;
@@ -141,6 +141,19 @@ impl PageDefinition {
             right: self.margins.right.to_f32_px(),
             bottom: self.margins.bottom.to_f32_px(),
             left: self.margins.left.to_f32_px(),
+        }
+    }
+
+    fn debug_app_units(&self) -> LayoutDebugPageAppUnits {
+        LayoutDebugPageAppUnits {
+            width: self.size.width.0,
+            height: self.size.height.0,
+            margin_top: self.margins.top.0,
+            margin_right: self.margins.right.0,
+            margin_bottom: self.margins.bottom.0,
+            margin_left: self.margins.left.0,
+            available_inline_size: self.available_inline_size().0,
+            available_block_size: self.available_block_size().0,
         }
     }
 
@@ -1899,6 +1912,8 @@ impl PageSequence {
                     let margins = page.definition.margins();
                     LayoutDebugPage {
                         index: page.fragmentainer.page_index,
+                        style_source: LayoutDebugPageStyleSource::RequestDefaults,
+                        app_units: page.definition.debug_app_units(),
                         width: page.definition.width(),
                         height: page.definition.height(),
                         margin_top: margins.top,
@@ -2315,6 +2330,30 @@ mod tests {
     }
 
     #[test]
+    fn page_debug_geometry_retains_large_app_units_without_float_round_trip() {
+        let definition =
+            PageDefinition::from_app_units(100_000_001, 100_000_019, [7, 11, 13, 17])
+                .unwrap();
+        let exact = definition.debug_app_units();
+
+        assert_eq!(
+            exact,
+            LayoutDebugPageAppUnits {
+                width: 100_000_001,
+                height: 100_000_019,
+                margin_top: 7,
+                margin_right: 11,
+                margin_bottom: 13,
+                margin_left: 17,
+                available_inline_size: 99_999_973,
+                available_block_size: 99_999_999,
+            }
+        );
+        assert_ne!(Au::from_f32_px(definition.width()).0, exact.width);
+        assert_ne!(Au::from_f32_px(definition.height()).0, exact.height);
+    }
+
+    #[test]
     fn paged_root_creates_exactly_one_page_and_fragmentainer() {
         let page = page();
         let LayoutRoot::Paged(context) = select_layout_root(
@@ -2338,6 +2377,17 @@ mod tests {
             LayoutDebugPageSequence {
                 pages: vec![LayoutDebugPage {
                     index: 0,
+                    style_source: LayoutDebugPageStyleSource::RequestDefaults,
+                    app_units: LayoutDebugPageAppUnits {
+                        width: 36_720,
+                        height: 47_520,
+                        margin_top: 4_320,
+                        margin_right: 3_240,
+                        margin_bottom: 2_160,
+                        margin_left: 1_080,
+                        available_inline_size: 32_400,
+                        available_block_size: 41_040,
+                    },
                     width: 612.0,
                     height: 792.0,
                     margin_top: 72.0,

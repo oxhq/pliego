@@ -7842,6 +7842,7 @@ mod tests {
         scene.pages.push(page);
         let capture = SceneCapture {
             scene,
+            fixed_point_authority: Default::default(),
             canvas_resources: vec![],
             embedded_image_resources: vec![],
             canvas_diagnostics: vec![],
@@ -7911,6 +7912,7 @@ mod tests {
                     meta: OperationMeta::default(),
                 }],
             }),
+            fixed_point_authority: Default::default(),
             canvas_resources: vec![],
             embedded_image_resources: vec![],
             canvas_diagnostics: vec![],
@@ -8125,6 +8127,7 @@ mod tests {
                     meta: OperationMeta::default(),
                 }],
             }),
+            fixed_point_authority: Default::default(),
             canvas_resources: vec![],
             embedded_image_resources: vec![],
             canvas_diagnostics: vec![],
@@ -9639,6 +9642,7 @@ mod tests {
                 },
                 operations: vec![],
             }),
+            fixed_point_authority: Default::default(),
             canvas_resources: vec![],
             embedded_image_resources: vec![],
             canvas_diagnostics: vec![],
