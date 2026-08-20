@@ -65,6 +65,9 @@ const LIMIT_FIELDS: &[&str] = &[
     "host_wall_ms",
 ];
 const DIAGNOSTIC_FIELDS: &[&str] = &["retention"];
+const INPUT_MANIFEST_FIELDS: &[&str] = &["schema", "version", "url_root", "entries"];
+const INPUT_MANIFEST_ENTRY_FIELDS: &[&str] = &["path", "media_type", "sha256", "bytes"];
+const INPUT_MANIFEST_MAX_ENTRIES: usize = 1_000_000;
 
 #[derive(Debug)]
 pub(crate) struct InvocationError(String);
@@ -199,6 +202,22 @@ struct InvocationContract {
     invocation_error_exit_code: i32,
 }
 
+#[derive(Serialize)]
+struct CanonicalInputManifest<'a> {
+    schema: &'static str,
+    version: u32,
+    url_root: &'static str,
+    entries: Vec<CanonicalInputEntry<'a>>,
+}
+
+#[derive(Serialize)]
+struct CanonicalInputEntry<'a> {
+    path: &'a str,
+    media_type: &'a str,
+    sha256: &'a str,
+    bytes: u64,
+}
+
 /// Read one bounded frame and perform strict lexical plus typed API 2 request validation.
 pub(crate) fn decode_render_request(reader: &mut impl Read) -> Result<Value, InvocationError> {
     let mut frame = Vec::with_capacity(8 * 1024);
@@ -211,21 +230,97 @@ pub(crate) fn decode_render_request(reader: &mut impl Read) -> Result<Value, Inv
             "stdin exceeds request_max_bytes ({REQUEST_MAX_BYTES})"
         )));
     }
+    let value = decode_strict_json(&frame, "request", "stdin is empty")?;
+    validate_request(&value).map_err(InvocationError::framing)?;
+    Ok(value)
+}
+
+/// Validate canonical manifest bytes already supplied by a future bounded job-root loader.
+///
+/// This does not inspect the filesystem. `render-api2` remains unavailable before a complete
+/// tuple is advertised, and the loader that will enforce the public manifest-read bound is a
+/// separate foundation slice.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn decode_input_manifest(
+    request: &Value,
+    frame: &[u8],
+) -> Result<Value, InvocationError> {
+    validate_request(request).map_err(InvocationError::framing)?;
+    let request =
+        closed_object(request, "$", TOP_LEVEL_FIELDS).map_err(InvocationError::framing)?;
+    let input = closed_object(
+        required(request, "$", "input").map_err(InvocationError::framing)?,
+        "$.input",
+        INPUT_FIELDS,
+    )
+    .map_err(InvocationError::framing)?;
+    let descriptor = closed_object(
+        required(input, "$.input", "manifest").map_err(InvocationError::framing)?,
+        "$.input.manifest",
+        MANIFEST_FIELDS,
+    )
+    .map_err(InvocationError::framing)?;
+    let declared_bytes = required_u64(
+        descriptor,
+        "$.input.manifest",
+        "bytes",
+        1,
+        9_007_199_254_740_991,
+    )
+    .map_err(InvocationError::framing)?;
+    if u64::try_from(frame.len()).ok() != Some(declared_bytes) {
+        return Err(InvocationError::framing(
+            "$.input.manifest: byte length does not match supplied manifest bytes",
+        ));
+    }
+    let declared_sha256 = required_string(descriptor, "$.input.manifest", "sha256")
+        .map_err(InvocationError::framing)?;
+    let actual_sha256 = format!("sha256:{}", hex_lower(&Sha256::digest(frame)));
+    if declared_sha256 != actual_sha256 {
+        return Err(InvocationError::framing(
+            "$.input.manifest: SHA-256 does not match supplied manifest bytes",
+        ));
+    }
+
+    let manifest = decode_strict_json(frame, "input manifest", "input manifest is empty")?;
+    let canonical = validate_input_manifest(
+        &manifest,
+        required_string(input, "$.input", "entrypoint").map_err(InvocationError::framing)?,
+    )
+    .map_err(InvocationError::framing)?;
+    let mut canonical_bytes = serde_json::to_vec(&canonical).map_err(|error| {
+        InvocationError::framing(format!(
+            "cannot serialize canonical input manifest: {error}"
+        ))
+    })?;
+    canonical_bytes.push(b'\n');
+    if frame != canonical_bytes {
+        return Err(InvocationError::framing(
+            "input manifest is not canonical typed-field-order JSON",
+        ));
+    }
+    Ok(manifest)
+}
+
+fn decode_strict_json(
+    frame: &[u8],
+    label: &str,
+    empty_message: &str,
+) -> Result<Value, InvocationError> {
     if frame.starts_with(&[0xef, 0xbb, 0xbf]) {
         return Err(InvocationError::framing("UTF-8 BOM is not permitted"));
     }
     if frame.is_empty() {
-        return Err(InvocationError::framing("stdin is empty"));
+        return Err(InvocationError::framing(empty_message));
     }
-    reject_negative_zero(&frame)?;
+    reject_negative_zero(frame)?;
 
-    let mut decoder = serde_json::Deserializer::from_slice(&frame);
+    let mut decoder = serde_json::Deserializer::from_slice(frame);
     let StrictJson(value) = StrictJson::deserialize(&mut decoder)
-        .map_err(|error| InvocationError::framing(format!("invalid request JSON: {error}")))?;
+        .map_err(|error| InvocationError::framing(format!("invalid {label} JSON: {error}")))?;
     decoder
         .end()
-        .map_err(|error| InvocationError::framing(format!("invalid request framing: {error}")))?;
-    validate_request(&value).map_err(InvocationError::framing)?;
+        .map_err(|error| InvocationError::framing(format!("invalid {label} framing: {error}")))?;
     Ok(value)
 }
 
@@ -398,6 +493,75 @@ impl<'de> Visitor<'de> for StrictJsonVisitor {
         }
         Ok(StrictJson(Value::Object(values)))
     }
+}
+
+fn validate_input_manifest<'a>(
+    manifest: &'a Value,
+    entrypoint: &str,
+) -> Result<CanonicalInputManifest<'a>, String> {
+    let manifest = closed_object(manifest, "$", INPUT_MANIFEST_FIELDS)?;
+    exact_string(manifest, "$", "schema", "pliego.input-manifest")?;
+    exact_u64(manifest, "$", "version", 1)?;
+    exact_string(manifest, "$", "url_root", "pliego-input:///")?;
+    let entries = required(manifest, "$", "entries")?
+        .as_array()
+        .ok_or_else(|| "$.entries: expected array".to_owned())?;
+    if entries.is_empty() || entries.len() > INPUT_MANIFEST_MAX_ENTRIES {
+        return Err(format!(
+            "$.entries: expected 1..={INPUT_MANIFEST_MAX_ENTRIES} entries"
+        ));
+    }
+
+    let mut canonical_entries = Vec::with_capacity(entries.len());
+    let mut paths = BTreeSet::new();
+    let mut folded_paths = BTreeSet::new();
+    let mut previous_path = None;
+    for (index, entry) in entries.iter().enumerate() {
+        let path = format!("$.entries[{index}]");
+        let entry = closed_object(entry, &path, INPUT_MANIFEST_ENTRY_FIELDS)?;
+        let entry_path = required_string(entry, &path, "path")?;
+        portable_path(entry_path, &format!("{path}.path"))?;
+        if previous_path.is_some_and(|previous| previous >= entry_path) {
+            return Err("$.entries: paths must be in ascending ASCII byte order".into());
+        }
+        previous_path = Some(entry_path);
+        if !paths.insert(entry_path) {
+            return Err("$.entries: paths must be unique".into());
+        }
+        let folded_path = entry_path.to_ascii_lowercase();
+        if !folded_paths.insert(folded_path.clone()) {
+            return Err("$.entries: paths have an ASCII case collision".into());
+        }
+
+        let media_type = required_string(entry, &path, "media_type")?;
+        canonical_media_type(media_type, &format!("{path}.media_type"))?;
+        let sha256 = required_string(entry, &path, "sha256")?;
+        content_address(sha256, &format!("{path}.sha256"))?;
+        let bytes = required_u64(entry, &path, "bytes", 0, 9_007_199_254_740_991)?;
+        canonical_entries.push(CanonicalInputEntry {
+            path: entry_path,
+            media_type,
+            sha256,
+            bytes,
+        });
+    }
+
+    for folded_path in &folded_paths {
+        for (offset, byte) in folded_path.bytes().enumerate() {
+            if byte == b'/' && folded_paths.contains(&folded_path[..offset]) {
+                return Err("$.entries: file and directory paths collide".into());
+            }
+        }
+    }
+    if !paths.contains(entrypoint) {
+        return Err("$.input.entrypoint: entrypoint is absent from input manifest".into());
+    }
+    Ok(CanonicalInputManifest {
+        schema: "pliego.input-manifest",
+        version: 1,
+        url_root: "pliego-input:///",
+        entries: canonical_entries,
+    })
 }
 
 fn validate_request(request: &Value) -> Result<(), String> {
@@ -722,6 +886,36 @@ fn content_address(value: &str, path: &str) -> Result<(), String> {
         .ok_or_else(|| format!("{path}: expected lowercase SHA-256 content address"))
 }
 
+fn canonical_media_type(value: &str, path: &str) -> Result<(), String> {
+    const TOKEN_PUNCTUATION: &[u8] = b"!#$&^_.+-";
+    if !(3..=255).contains(&value.len()) || !value.is_ascii() {
+        return Err(format!("{path}: media type is not canonical"));
+    }
+    let essence = value.strip_suffix(";charset=utf-8").unwrap_or(value);
+    if essence.contains(';') {
+        return Err(format!("{path}: media type is not canonical"));
+    }
+    let Some((type_name, subtype)) = essence.split_once('/') else {
+        return Err(format!("{path}: media type is not canonical"));
+    };
+    if !canonical_media_token(type_name, TOKEN_PUNCTUATION) ||
+        !canonical_media_token(subtype, TOKEN_PUNCTUATION)
+    {
+        return Err(format!("{path}: media type is not canonical"));
+    }
+    Ok(())
+}
+
+fn canonical_media_token(value: &str, punctuation: &[u8]) -> bool {
+    value
+        .as_bytes()
+        .first()
+        .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit()) &&
+        value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || punctuation.contains(&byte)
+        })
+}
+
 fn portable_path(value: &str, path: &str) -> Result<(), String> {
     if value.is_empty() ||
         value.len() > 240 ||
@@ -768,12 +962,141 @@ mod tests {
         env!("CARGO_MANIFEST_DIR"),
         "/../../contracts/api2/goldens/accepted/render-request.a4.json"
     ));
+    const INPUT_MANIFEST: &[u8] = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../contracts/api2/fixtures/input-manifest.json"
+    ));
+
+    fn request_bound_to_manifest(frame: &[u8]) -> Value {
+        let mut request: Value = serde_json::from_slice(REQUEST).unwrap();
+        request["input"]["manifest"]["bytes"] = Value::from(frame.len() as u64);
+        request["input"]["manifest"]["sha256"] =
+            Value::from(format!("sha256:{}", hex_lower(&Sha256::digest(frame))));
+        request
+    }
 
     #[test]
     fn decodes_the_accepted_null_profile_request_without_rendering() {
         let request = decode_render_request(&mut &REQUEST[..]).unwrap();
         assert_eq!(request["schema"], "pliego.render-request");
         assert_eq!(request["profile"], Value::Null);
+    }
+
+    #[test]
+    fn decodes_descriptor_bound_canonical_input_manifest_without_filesystem_access() {
+        let request = decode_render_request(&mut &REQUEST[..]).unwrap();
+        let manifest = decode_input_manifest(&request, INPUT_MANIFEST).unwrap();
+        assert_eq!(manifest["schema"], "pliego.input-manifest");
+        assert_eq!(manifest["entries"].as_array().unwrap().len(), 4);
+    }
+
+    #[test]
+    fn rejects_manifest_bytes_that_do_not_match_the_request_descriptor() {
+        let request = decode_render_request(&mut &REQUEST[..]).unwrap();
+        let short = &INPUT_MANIFEST[..INPUT_MANIFEST.len() - 1];
+        assert!(
+            decode_input_manifest(&request, short)
+                .unwrap_err()
+                .to_string()
+                .contains("byte length does not match")
+        );
+
+        let mut changed = INPUT_MANIFEST.to_vec();
+        changed[0] = b'[';
+        assert!(
+            decode_input_manifest(&request, &changed)
+                .unwrap_err()
+                .to_string()
+                .contains("SHA-256 does not match")
+        );
+    }
+
+    #[test]
+    fn rejects_noncanonical_or_semantically_invalid_bound_manifests() {
+        let mut duplicate = br#"{"schema":"pliego.input-manifest","#.to_vec();
+        duplicate.extend_from_slice(&INPUT_MANIFEST[1..]);
+        let request = request_bound_to_manifest(&duplicate);
+        assert!(
+            decode_input_manifest(&request, &duplicate)
+                .unwrap_err()
+                .to_string()
+                .contains("duplicate JSON object member")
+        );
+
+        for (label, frame, expected) in [
+            (
+                "unknown member",
+                include_bytes!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../../contracts/api2/goldens/rejected/input-manifest.unknown-member.json"
+                ))
+                .as_slice(),
+                "unexpected property",
+            ),
+            (
+                "noncanonical root",
+                include_bytes!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../../contracts/api2/goldens/rejected/input-manifest.noncanonical-root.json"
+                ))
+                .as_slice(),
+                "expected \"pliego-input:///\"",
+            ),
+            (
+                "unsorted paths",
+                include_bytes!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../../contracts/api2/goldens/rejected/input-manifest.unsorted.json"
+                ))
+                .as_slice(),
+                "ascending ASCII byte order",
+            ),
+            (
+                "case collision",
+                include_bytes!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../../contracts/api2/goldens/rejected/input-manifest.case-collision.json"
+                ))
+                .as_slice(),
+                "ASCII case collision",
+            ),
+            (
+                "path prefix collision",
+                include_bytes!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../../contracts/api2/goldens/rejected/input-manifest.path-prefix-collision.json"
+                ))
+                .as_slice(),
+                "file and directory paths collide",
+            ),
+        ] {
+            let request = request_bound_to_manifest(frame);
+            let error = decode_input_manifest(&request, frame).unwrap_err();
+            assert!(error.to_string().contains(expected), "{label}: {error}");
+        }
+
+        let canonical_prefix = br#"{"schema":"pliego.input-manifest","version":1,"#;
+        let mut reordered = br#"{"version":1,"schema":"pliego.input-manifest","#.to_vec();
+        reordered.extend_from_slice(INPUT_MANIFEST.strip_prefix(canonical_prefix).unwrap());
+        let request = request_bound_to_manifest(&reordered);
+        assert!(
+            decode_input_manifest(&request, &reordered)
+                .unwrap_err()
+                .to_string()
+                .contains("typed-field-order")
+        );
+    }
+
+    #[test]
+    fn rejects_an_entrypoint_absent_from_the_bound_manifest() {
+        let mut request = decode_render_request(&mut &REQUEST[..]).unwrap();
+        request["input"]["entrypoint"] = Value::from("missing.html");
+        assert!(
+            decode_input_manifest(&request, INPUT_MANIFEST)
+                .unwrap_err()
+                .to_string()
+                .contains("entrypoint is absent")
+        );
     }
 
     #[test]
