@@ -13,6 +13,12 @@ samples_long = 20
 sample_order = "random"
 seed = 1
 
+[oracle]
+contract = "pliego.pdf-oracle.v1"
+# Publishable results require canonical path, SHA-256, and version pins for
+# pdfinfo, pdftotext, pdffonts, and pdftoppm. They are deliberately absent until
+# the dedicated Linux oracle runtime is frozen; current numeric results are N/A.
+
 [targets."pliego-0.1.1"]
 label = "Pliego 0.1.1 (published bundle)"
 version = "0.1.1"
@@ -41,6 +47,12 @@ package = "dompdf/dompdf"
 adapter = "benchmarks/adapters/dompdf/adapter.php"
 profile = "composer-lock-cold-one-shot"
 lockfiles = ["benchmarks/adapters/dompdf/composer.lock"]
+identity_keys = ["composer_vendor_sha256"]
+# Publishable adapter numbers stay N/A until this target pins an immutable OCI
+# image digest plus canonical dependency/runtime hashes and paths. A lock file
+# plus a mutable vendor tree is not image identity.
+runtime_identity_contract = "pliego.benchmark-runtime-image.v1"
+runtime_attestation = "unavailable"
 supported_fixtures = ["minimal-static"]
 unsupported_reason = "adapter contract v1 has no verified correctness mapping for this fixture"
 
@@ -64,6 +76,10 @@ lockfiles = [
     "benchmarks/adapters/browsershot/composer.lock",
     "benchmarks/adapters/browsershot/package-lock.json",
 ]
+identity_keys = ["composer_vendor_sha256", "node_modules_sha256"]
+runtime_identity_contract = "pliego.benchmark-runtime-image.v1"
+runtime_attestation = "unavailable"
+requires_network_isolation = true
 supported_fixtures = ["minimal-static"]
 unsupported_reason = "adapter contract v1 has no verified correctness mapping for this fixture"
 
@@ -97,6 +113,9 @@ page_height_points = 841.89
 # for every target while allowing less than 0.27 mm of engine rounding.
 dimension_tolerance_points = 0.75
 text_contains = ["Minimal"]
+text_equals = "Minimal Hello, Pliego. This fixture measures pure startup: one small page, one bundled font, no scripts or images."
+font_families = ["Ahem"]
+normalized_raster_sha256 = "0f9edcf2b796a110d1a68efed00ce684921fec9ff7b52ccdc68bb718d1b93444"
 link_targets = ["https://pliego.dev/docs"]
 
 [fixtures.invoice-showcase]

@@ -149,6 +149,69 @@ def fixture_proofs() -> None:
     assert child_environment["BROWSERSHOT_NODE_BINARY"] == "/usr/bin/node"
 
     with tempfile.TemporaryDirectory() as raw:
+        cgroup_root = Path(raw).resolve()
+        staging_path = cgroup_root / "staging"
+        staging_path.mkdir()
+        staging = process_tree_sampler.BoundDirectory(staging_path, -1, 1, 2)
+        pid = 123
+        stopped = (process_tree_sampler.signal.SIGSTOP << 8) | 0x7F
+        network = {
+            "mode": "linux-private-network-namespace-v1",
+            "host_namespace": "net:[1]",
+            "engine_namespace": "net:[2]",
+            "interfaces": ["lo"],
+        }
+        handshake = {
+            "ok": True,
+            "executable_accessible": True,
+            "executable_writable": False,
+            "cwd_accessible": True,
+            "migration_write_probes": {
+                name: {"cgroup.procs": "EACCES", "cgroup.threads": "EPERM"}
+                for name in ("parent", "harness", "staging", "measurement")
+            },
+            "network_isolation": network,
+        }
+        security = {
+            "uid": [fixture_account.uid] * 4,
+            "gid": [fixture_account.gid] * 4,
+            "supplementary_groups": [],
+            "cap_inheritable_hex": "0",
+            "cap_permitted_hex": "0",
+            "cap_effective_hex": "0",
+            "cap_bounding_hex": "0",
+            "cap_ambient_hex": "0",
+            "no_new_privs": 1,
+        }
+
+        def namespace(path: Path) -> str:
+            return (
+                network["host_namespace"] if path.parts[-3:] == ("self", "ns", "net") else network["engine_namespace"]
+            )
+
+        with (
+            mock.patch.object(process_tree_sampler.os, "kill"),
+            mock.patch.object(process_tree_sampler.os, "waitpid", return_value=(pid, stopped)),
+            mock.patch.object(process_tree_sampler.os, "read", return_value=json.dumps(handshake).encode()),
+            mock.patch.object(process_tree_sampler.os, "close"),
+            mock.patch.object(process_tree_sampler.os, "readlink", side_effect=namespace),
+            mock.patch.object(process_tree_sampler, "read_stat", return_value={"start_ticks": 77}),
+            mock.patch.object(process_tree_sampler, "cgroup_relative", return_value="/staging"),
+            mock.patch.object(process_tree_sampler, "cgroup_pids", return_value=[pid]),
+            mock.patch.object(process_tree_sampler, "read_process_security", return_value=security),
+        ):
+            retained = process_tree_sampler.finish_authority_handshake(
+                pid,
+                42,
+                fixture_account,
+                staging,
+                cgroup_root,
+                (pid, 77),
+                cgroup_root,
+            )
+        assert retained["network_isolation"] == network
+
+    with tempfile.TemporaryDirectory() as raw:
         executable = Path(raw) / "true"
         shutil.copy2(shutil.which("true") or "/bin/true", executable)
         executable.chmod(0o555)

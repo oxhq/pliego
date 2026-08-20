@@ -34,8 +34,11 @@ const SAMPLER_PYTHON = '/usr/bin/python3';
 const USAGE = <<<EOT
 Usage: php pliego.php --binary <path> --input <file.html> --output <file.pdf> --artifacts <dir>
   [--samples N] [--warmup N] [--page-count N] [--text-contains TEXT]...
+  [--text-equals TEXT] [--font-family NAME]... [--raster-sha256 HASH]
   [--link-target URL]... [--page-width-points N] [--page-height-points N]
   [--dimension-tolerance-points N] [--require-scene-report]
+  --fixture-input-sha256 HASH --fixture-bundle-sha256 HASH [--fixture-asset PATH]...
+  [--isolate-network]
   [--expect-failure] [--expected-code CODE] [--page-size WxH] [--page-margins T,R,B,L]
   [--locale X] [--timezone Y] [--cwd DIR] [--self-test]
 EOT;
@@ -68,6 +71,57 @@ function is_bare_input_name(string $value): bool
         && preg_match('/^[A-Za-z]:/', $value) !== 1;
 }
 
+function is_safe_fixture_path(string $value): bool
+{
+    if ($value === '' || str_starts_with($value, '/') || str_starts_with($value, '\\')
+        || preg_match('/^[A-Za-z]:/', $value) === 1) {
+        return false;
+    }
+    foreach (preg_split('~[\\\\/]~', $value) ?: [] as $part) {
+        if ($part === '' || $part === '.' || $part === '..') {
+            return false;
+        }
+    }
+    return true;
+}
+
+/** @param list<string> $assets @return array{0: string, 1: string} */
+function fixture_identity(string $cwd, string $input, array $assets): array
+{
+    $paths = [$input, ...$assets];
+    sort($paths, SORT_STRING);
+    $bundle = hash_init('sha256');
+    $inputHash = null;
+    foreach ($paths as $relative) {
+        if (!is_safe_fixture_path($relative)) {
+            fail("unsafe fixture path: {$relative}");
+        }
+        $path = realpath($cwd . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $relative));
+        $prefix = rtrim($cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR;
+        if ($path === false || !is_file($path) || !str_starts_with($path, $prefix)) {
+            fail("fixture path is unavailable or escaped cwd: {$relative}");
+        }
+        $fileHash = hash_file('sha256', $path);
+        if (!is_string($fileHash)) {
+            fail("cannot hash fixture path: {$relative}");
+        }
+        hash_update($bundle, str_replace('\\', '/', $relative) . "\0" . hex2bin($fileHash));
+        if ($relative === $input) {
+            $inputHash = $fileHash;
+        }
+    }
+    return [$inputHash ?? fail('fixture identity omitted input'), hash_final($bundle)];
+}
+
+function assert_fixture_identity(array $state): void
+{
+    [$inputHash, $bundleHash] = fixture_identity($state['cwd'], $state['input'], $state['fixtureAssets']);
+    if (!hash_equals($state['fixtureInputSha256'], $inputHash)
+        || !hash_equals($state['fixtureBundleSha256'], $bundleHash)) {
+        fail('fixture identity changed before or during rendering', 1);
+    }
+}
+
 function fail(string $message, int $code = 2): never
 {
     fwrite(STDERR, "pliego.php: {$message}\n");
@@ -91,10 +145,13 @@ function sampler_interpreter(): ?string
 
 $options = getopt('', [
     'binary:', 'input:', 'output:', 'artifacts:', 'samples:', 'warmup:',
-    'page-count:', 'text-contains:', 'expect-failure', 'expected-code:',
+    'page-count:', 'text-contains:', 'text-equals:', 'font-family:', 'raster-sha256:',
+    'expect-failure', 'expected-code:',
     'link-target:', 'page-width-points:', 'page-height-points:',
     'dimension-tolerance-points:', 'require-scene-report',
     'page-size:', 'page-margins:', 'locale:', 'timezone:', 'cwd:',
+    'fixture-input-sha256:', 'fixture-bundle-sha256:', 'fixture-asset:',
+    'isolate-network',
     'self-test',
 ]);
 if ($options === false) {
@@ -136,6 +193,9 @@ $samples = max(1, (int) (option($options, 'samples') ?? 1));
 $warmup = max(0, (int) (option($options, 'warmup') ?? 0));
 $pageCount = option($options, 'page-count') !== null ? (int) $options['page-count'] : null;
 $textContains = text_contains_options($options['text-contains'] ?? []);
+$textEquals = option($options, 'text-equals');
+$fontFamilies = text_contains_options($options['font-family'] ?? []);
+$rasterSha256 = option($options, 'raster-sha256');
 $linkTargets = text_contains_options($options['link-target'] ?? []);
 $pageWidthPoints = option($options, 'page-width-points') !== null
     ? (float) $options['page-width-points']
@@ -152,6 +212,10 @@ $pageMargins = option($options, 'page-margins');
 $locale = option($options, 'locale');
 $timezone = option($options, 'timezone');
 $cwd = option($options, 'cwd') ?? dirname($input);
+$fixtureInputSha256 = option($options, 'fixture-input-sha256') ?? fail('--fixture-input-sha256 is required');
+$fixtureBundleSha256 = option($options, 'fixture-bundle-sha256') ?? fail('--fixture-bundle-sha256 is required');
+$fixtureAssets = text_contains_options($options['fixture-asset'] ?? []);
+$isolateNetwork = array_key_exists('isolate-network', $options);
 
 if (!is_file($binary)) {
     fail("binary not found: {$binary}");
@@ -184,6 +248,13 @@ if (($pageWidthPoints === null) !== ($pageHeightPoints === null)
     || $dimensionTolerancePoints < 0) {
     fail('page dimensions must be supplied together and tolerance cannot be negative');
 }
+if (preg_match('/^[0-9a-f]{64}$/D', $fixtureInputSha256) !== 1
+    || preg_match('/^[0-9a-f]{64}$/D', $fixtureBundleSha256) !== 1) {
+    fail('fixture hashes must be lowercase SHA-256 values');
+}
+if ($rasterSha256 !== null && preg_match('/^[0-9a-f]{64}$/D', $rasterSha256) !== 1) {
+    fail('--raster-sha256 must be a lowercase SHA-256 value');
+}
 
 $engineUid = null;
 $engineGid = null;
@@ -215,7 +286,7 @@ if (PHP_OS_FAMILY === 'Linux') {
  *     signal: int|null, resource_usage: object|null,
  *     exit_code: int, stdout: string, stderr: string}
  */
-function run_engine(array $command, string $cwd): array
+function run_engine(array $command, string $cwd, bool $isolateNetwork): array
 {
     $nullDevice = PHP_OS_FAMILY === 'Windows' ? 'NUL' : '/dev/null';
     $stdoutTmp = tempnam(sys_get_temp_dir(), 'pliego-bench-out-');
@@ -262,6 +333,7 @@ function run_engine(array $command, string $cwd): array
             '--cwd', $cwd,
             '--stdout', $stdoutTmp,
             '--stderr', $stderrTmp,
+            ...($isolateNetwork ? ['--isolate-network'] : []),
             '--',
             ...$command,
         ];
@@ -419,6 +491,7 @@ function rrmdir(string $path): void
 }
 
 /** @return array{pass: bool, page_count: int|null, page_dimensions_points: array|null,
+ *     normalized_text: string|null, fonts: array, normalized_raster_sha256: string|null,
  *     checks: list<array<string, string>>} */
 function run_pdf_oracle(array $state, string $pdfPath): array
 {
@@ -429,6 +502,9 @@ function run_pdf_oracle(array $state, string $pdfPath): array
             'pass' => false,
             'page_count' => null,
             'page_dimensions_points' => null,
+            'normalized_text' => null,
+            'fonts' => [],
+            'normalized_raster_sha256' => null,
             'checks' => [[
                 'name' => 'pdf_oracle',
                 'status' => 'fail',
@@ -454,6 +530,15 @@ function run_pdf_oracle(array $state, string $pdfPath): array
     foreach ($state['textContains'] as $fragment) {
         array_push($command, '--text-contains', $fragment);
     }
+    if ($state['textEquals'] !== null) {
+        array_push($command, '--text-equals', $state['textEquals']);
+    }
+    foreach ($state['fontFamilies'] as $family) {
+        array_push($command, '--font-family', $family);
+    }
+    if ($state['rasterSha256'] !== null) {
+        array_push($command, '--raster-sha256', $state['rasterSha256']);
+    }
     foreach ($state['linkTargets'] as $target) {
         array_push($command, '--link-target', $target);
     }
@@ -468,6 +553,9 @@ function run_pdf_oracle(array $state, string $pdfPath): array
             'pass' => false,
             'page_count' => null,
             'page_dimensions_points' => null,
+            'normalized_text' => null,
+            'fonts' => [],
+            'normalized_raster_sha256' => null,
             'checks' => [['name' => 'pdf_oracle', 'status' => 'fail', 'detail' => 'proc_open failed']],
         ];
     }
@@ -483,6 +571,9 @@ function run_pdf_oracle(array $state, string $pdfPath): array
             'pass' => false,
             'page_count' => null,
             'page_dimensions_points' => null,
+            'normalized_text' => null,
+            'fonts' => [],
+            'normalized_raster_sha256' => null,
             'checks' => [[
                 'name' => 'pdf_oracle',
                 'status' => 'fail',
@@ -495,6 +586,13 @@ function run_pdf_oracle(array $state, string $pdfPath): array
         'page_count' => isset($decoded['page_count']) ? (int) $decoded['page_count'] : null,
         'page_dimensions_points' => is_array($decoded['page_dimensions_points'] ?? null)
             ? $decoded['page_dimensions_points']
+            : null,
+        'normalized_text' => is_string($decoded['normalized_text'] ?? null)
+            ? $decoded['normalized_text']
+            : null,
+        'fonts' => is_array($decoded['fonts'] ?? null) ? $decoded['fonts'] : [],
+        'normalized_raster_sha256' => is_string($decoded['normalized_raster_sha256'] ?? null)
+            ? $decoded['normalized_raster_sha256']
             : null,
         'checks' => $decoded['checks'],
     ];
@@ -518,13 +616,18 @@ function prepare_engine_directory(string $path, int $uid, int $gid): void
  *     summary: array<string, mixed>|null} */
 function run_sample(array $state, int $index): array
 {
+    assert_fixture_identity($state);
     $artifactsDir = sys_get_temp_dir() . '/pliego-bench-' . bin2hex(random_bytes(8));
     $outDir = sys_get_temp_dir() . '/pliego-bench-out-' . bin2hex(random_bytes(8));
     if (PHP_OS_FAMILY === 'Linux') {
         prepare_engine_directory($outDir, $state['engineUid'], $state['engineGid']);
-        prepare_engine_directory($artifactsDir, $state['engineUid'], $state['engineGid']);
+        if (!$state['requireSceneReport']) {
+            prepare_engine_directory($artifactsDir, $state['engineUid'], $state['engineGid']);
+        }
     } elseif (!mkdir($outDir, 0777, true) && !is_dir($outDir)) {
         fail("cannot create output dir: {$outDir}");
+    } elseif (!$state['requireSceneReport'] && !mkdir($artifactsDir, 0777, true) && !is_dir($artifactsDir)) {
+        fail("cannot create artifacts dir: {$artifactsDir}");
     }
     // The engine requires the requested output to live outside the artifact
     // directory; publish into a sibling temp directory instead.
@@ -552,12 +655,13 @@ function run_sample(array $state, int $index): array
         array_push($command, '--timezone', $state['timezone']);
     }
 
-    $exec = run_engine($command, $state['cwd']);
+    $exec = run_engine($command, $state['cwd'], $state['isolateNetwork']);
     if (isset($exec['error'])) {
         rrmdir($artifactsDir);
         rrmdir($outDir);
         fail("engine run failed: {$exec['error']}");
     }
+    assert_fixture_identity($state);
 
     $report = read_json_file($artifactsDir . DIRECTORY_SEPARATOR . 'scene-report.json');
     $summary = parse_stdout_summary($exec['stdout']);
@@ -608,6 +712,9 @@ function run_sample(array $state, int $index): array
     $oracle = null;
     $pageCount = null;
     $pageDimensions = null;
+    $normalizedText = null;
+    $fonts = [];
+    $normalizedRasterSha256 = null;
     if (is_object($exec['resource_usage'])) {
         $drained = $exec['resource_usage']->cgroup_drained ?? false;
         $cleanup = $exec['resource_usage']->cleanup ?? null;
@@ -660,6 +767,9 @@ function run_sample(array $state, int $index): array
             $oracle = run_pdf_oracle($state, $pdfPath);
             $pageCount = $oracle['page_count'];
             $pageDimensions = $oracle['page_dimensions_points'];
+            $normalizedText = $oracle['normalized_text'];
+            $fonts = $oracle['fonts'];
+            $normalizedRasterSha256 = $oracle['normalized_raster_sha256'];
             foreach ($oracle['checks'] as $oracleCheck) {
                 $checks[] = $oracleCheck;
             }
@@ -710,6 +820,12 @@ function run_sample(array $state, int $index): array
             'pdf_sha256' => $pdfSha256,
             'page_count' => $pageCount,
             'page_dimensions_points' => $pageDimensions,
+            'normalized_text_sha256' => is_string($normalizedText) ? hash('sha256', $normalizedText) : null,
+            'font_families' => array_values(array_unique(array_map(
+                static fn (array $font): string => (string) ($font['name'] ?? ''),
+                $fonts
+            ))),
+            'normalized_raster_sha256' => $normalizedRasterSha256,
             'artifact_bytes' => $artifactBytes,
             'published_pdf' => $pdfPublished,
         ],
@@ -744,6 +860,9 @@ $state = [
     'expectedCode' => $expectedCode,
     'pageCount' => $pageCount,
     'textContains' => $textContains,
+    'textEquals' => $textEquals,
+    'fontFamilies' => $fontFamilies,
+    'rasterSha256' => $rasterSha256,
     'linkTargets' => $linkTargets,
     'pageWidthPoints' => $pageWidthPoints,
     'pageHeightPoints' => $pageHeightPoints,
@@ -751,8 +870,13 @@ $state = [
     'requireSceneReport' => $requireSceneReport,
     'engineUid' => $engineUid,
     'engineGid' => $engineGid,
+    'fixtureInputSha256' => $fixtureInputSha256,
+    'fixtureBundleSha256' => $fixtureBundleSha256,
+    'fixtureAssets' => $fixtureAssets,
+    'isolateNetwork' => $isolateNetwork,
 ];
 
+assert_fixture_identity($state);
 $preflight = run_sample($state, -1000000);
 if (!$preflight['ok']) {
     fail('untimed correctness preflight failed; evidence retained at ' . $preflight['retained']['artifacts_dir']);

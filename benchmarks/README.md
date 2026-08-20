@@ -59,12 +59,19 @@ benchmarks/
   release verifier. Never `cargo run`.
 * `php-cli` ≥ 8.3 with `dom`, `mbstring`, `fileinfo`, and `json`
   (runner/adapters), `python3` ≥ 3.11 (orchestrator/validator; stdlib only),
-  and `poppler-utils` (`pdfinfo` and `pdftotext` for the shared correctness
-  oracle).
-* For competitor runs, Composer 2; Browsershot additionally needs Node,
+  and `poppler-utils` (`pdfinfo`, `pdftotext`, `pdffonts`, and `pdftoppm` for
+  the shared correctness oracle). Publishable results also require the exact
+  path, SHA-256, and version of all four tools to be pinned in `manifest.toml`;
+  those pins are currently absent.
+* For adapter correctness smoke, Composer 2; Browsershot additionally needs Node,
   Puppeteer installed from the committed npm lock, and one canonical Chromium
   executable. Exact PHP, Node, Chromium, adapter, and lock identities are
-  retained in every supported result.
+  retained in every supported result. Publishable competitor timing also
+  requires a manifest-pinned OCI image digest, canonical expected hashes and
+  paths for every dependency/runtime, read-only mounts for the root and every
+  protected path, and out-of-process proof that the running image has the
+  claimed digest. Those pins and that attestation path are absent in this slice,
+  so competitor timing remains N/A.
 * A root broker in a cgroup-v2 domain parent delegated by the host service with
   `cpu`, `io`, `memory`, and `pids` enabled, plus a fixed non-root account named
   `pliego-benchmark-engine`. The broker must run in the parent's sole direct
@@ -118,9 +125,15 @@ export BROWSERSHOT_CHROME_PATH=/opt/chrome/chrome
 
 The two runtime paths must be canonical executables unavailable for mutation
 by `pliego-benchmark-engine`. Their version, path, and SHA-256 are captured by
-the adapter before sampling. The Browsershot adapter keeps Chromium's sandbox
-enabled and blocks HTTP(S); the fixture and Ahem font load from the local
-fixture directory only.
+the adapter before sampling. Installed dependency-tree hashes are captured and
+rechecked, but they become immutable evidence only when they match manifest
+content pins and every executable/dependency path resolves on a read-only
+mount in the pinned image. The launch-supplied image digest is retained as
+provenance but is never accepted as attestation. No supported adapter result is
+allowed until an out-of-process launcher can prove the running image. The
+Browsershot adapter keeps Chromium's sandbox and request blocking as
+defense in depth; the sampler's fresh network namespace, with only `lo`, is the
+enforced no-network boundary.
 
 ## Running a baseline
 
@@ -136,9 +149,13 @@ python3 benchmarks/tools/run_benchmark.py \
 The resolver accepts only the committed Linux x86_64 release name, size,
 archive SHA-256, exact file set, binary SHA-256, native commit, and Servo build.
 Use `--offline` after the verified archive is cached. The orchestrator checks
-the binary digest again before starting a sample.
+the binary digest again. With canonical Poppler pins currently absent, it emits
+explicit `not-applicable` results before sampling rather than publish numbers
+authorized by an unpinned oracle runtime.
 
-The equivalent first competitor slice is:
+The intended first competitor slice, once an out-of-process launcher attests a
+committed `image_digest`, canonical `identity_sha256` and `identity_paths` maps,
+read-only protected paths, and canonical Poppler pins, is:
 
 ```sh
 python3 benchmarks/tools/run_benchmark.py \
@@ -152,14 +169,21 @@ python3 benchmarks/tools/run_benchmark.py \
   --out path/to/browsershot-minimal-static.json
 ```
 
-Omitting `--fixture` emits one supported `minimal-static` result plus explicit
+With the current manifest, these commands emit explicit `not-applicable`
+records because no immutable runtime image or canonical runtime/dependency
+identity, external image attestation, or canonical Poppler identity is pinned.
+Omitting `--fixture`
+also emits explicit
 `not-applicable` records and reasons for every unverified fixture. It does not
 manufacture zero measurements for exclusions.
 
-Subset or override with `--fixture invoice-showcase`, `--samples 50`,
-`--warmup 10`, `--php /usr/bin/php`. The orchestrator:
+Subset with `--fixture invoice-showcase` or select PHP with
+`--php /usr/bin/php`. `--samples` and `--warmup` are accepted only when they
+equal the canonical manifest values; overrides cannot produce a result file.
+The orchestrator:
 
-1. checks the fixture surface and immutable target/adapter/runtime identity;
+1. fingerprints the fixture before preflight and rechecks it around every
+   render; checks exact target/adapter/runtime identity;
 2. runs one discarded correctness preflight, discarded warmups, then timed
    samples through the same single-sample adapter contract;
 3. aggregates p50/p95/p99/min/max/mean, determinism, correctness, failures;
@@ -178,8 +202,12 @@ counters are the accounting source. Engine wall time ends with the root process;
 descendant drain and accounting-settle durations are recorded separately.
 
 The `minimal-static` oracle declares ISO A4 in points and permits at most 0.75
-points of print-grid quantization. The same expectation and tolerance apply to
-all three targets.
+points of print-grid quantization. All text explicitly uses normal-weight Ahem.
+The oracle requires the complete normalized document text, exactly one embedded
+Ahem family, and a shared full-page 24x32 monochrome occupancy signature with
+quantized ink area. It preserves page-relative position and scale within an
+explicit coarse tolerance instead of cropping and rescaling the ink.
+The same expectations apply to all targets.
 
 Publication fails unless `cgroup.events` drains recursively. After it empties,
 `memory.stat` dirty/writeback must reach zero and two interval-separated
@@ -208,7 +236,9 @@ protocol's `nearest-rank-v1` percentiles and requires p95 wall overhead below
   "random"` protocol. Cross-target sample interleaving is not implemented in
   this slice; raw samples and the seed are stored.
 * Same host, same binary, same fonts/assets. Network disabled.
-* Results record host info and versions; a baseline is signed by commit/tag.
+* Results record host info, the exact clean harness commit, the oracle script,
+  and all Poppler executable identities; validation requires the matching
+  checkout. A baseline is signed by commit/tag.
 * All aggregate and observer percentiles use `nearest-rank-v1`.
 
 ## Metrics
@@ -241,11 +271,17 @@ renderer.
 ## Current scope
 
 * Concurrency >1 throughput sampling is not implemented yet (serial only).
-* dompdf and Browsershot are correctness-eligible only for `minimal-static`;
-  all other fixtures are explicit exclusions until their shared oracle mapping
-  passes.
+* dompdf and Browsershot have direct Ubuntu render + real Poppler smoke for
+  `minimal-static`, but publishable measurements remain N/A until immutable
+  image digests are pinned; all other fixtures are explicit exclusions.
 * Cross-target sample interleaving and a report generator are not implemented;
   this slice does not publish comparative numbers.
+* Dedicated-Linux acceptance still needs seeded cross-target interleaving,
+  throughput whose wall boundary includes descendant drain, and report-cell to
+  raw-sample traceability. The existing single-target throughput field is not a
+  publishable cross-engine throughput claim.
+* The Ubuntu adapter/Poppler smoke is configured in CI; it is not hosted proof
+  until that workflow passes at the exact commit containing this change.
 * Core (Criterion) and Laravel e2e levels live outside this directory.
 * Page-count expectations for generated fixtures are pinned by the first signed baseline.
 * A multi-fixture `--out` file bundles one validated result object per fixture

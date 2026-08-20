@@ -15,6 +15,7 @@
       "required": [
         "schema",
         "version",
+        "status",
         "generated_at",
         "host",
         "toolchain",
@@ -30,7 +31,7 @@
         "generated_at": { "type": "string" },
         "status": { "type": "string", "enum": ["supported", "failed"] },
         "host": { "$ref": "#/definitions/host" },
-        "toolchain": { "$ref": "#/definitions/toolchain" },
+        "toolchain": { "$ref": "#/definitions/publishable_toolchain" },
         "protocol": { "$ref": "#/definitions/protocol" },
         "target": { "$ref": "#/definitions/target" },
         "fixture": { "$ref": "#/definitions/fixture" },
@@ -113,12 +114,23 @@
         "engine": { "$ref": "#/definitions/engine" },
         "python_version": { "type": "string" },
         "php_version": { "type": "string" },
-        "harness_revision": { "type": "string", "pattern": "^[0-9a-f]{7,64}$" },
+        "harness_revision": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
         "competitors": {
           "type": "object",
           "additionalProperties": { "type": "string" }
         }
       }
+    },
+    "publishable_toolchain": {
+      "allOf": [
+        { "$ref": "#/definitions/toolchain" },
+        {
+          "required": ["harness_revision", "competitors"],
+          "properties": {
+            "competitors": { "type": "object", "minProperties": 1 }
+          }
+        }
+      ]
     },
     "engine": {
       "type": "object",
@@ -146,6 +158,8 @@
       "additionalProperties": false,
       "required": [
         "warmup_iterations",
+        "correctness_preflight_iterations",
+        "execution_order",
         "sample_count",
         "sample_order",
         "network",
@@ -222,6 +236,15 @@
         "expected_text_contains": {
           "type": "array",
           "items": { "type": "string", "minLength": 1 }
+        },
+        "expected_text": { "type": ["string", "null"] },
+        "expected_font_families": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "expected_normalized_raster_sha256": {
+          "type": ["string", "null"],
+          "pattern": "^[0-9a-f]{64}$"
         },
         "expected_link_targets": {
           "type": "array",
@@ -505,6 +528,25 @@
             "staging": { "$ref": "#/definitions/migration_denials" },
             "measurement": { "$ref": "#/definitions/migration_denials" }
           }
+        },
+        "network_isolation": {
+          "$ref": "#/definitions/network_isolation"
+        }
+      }
+    },
+    "network_isolation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "host_namespace", "engine_namespace", "interfaces"],
+      "properties": {
+        "mode": { "const": "linux-private-network-namespace-v1" },
+        "host_namespace": { "type": "string", "pattern": "^net:\\[[0-9]+\\]$" },
+        "engine_namespace": { "type": "string", "pattern": "^net:\\[[0-9]+\\]$" },
+        "interfaces": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1,
+          "items": { "const": "lo" }
         }
       }
     },
@@ -724,7 +766,16 @@
     "output": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["pdf_bytes", "pdf_sha256", "page_count", "artifact_bytes", "published_pdf"],
+      "required": [
+        "pdf_bytes",
+        "pdf_sha256",
+        "page_count",
+        "artifact_bytes",
+        "published_pdf",
+        "normalized_text_sha256",
+        "font_families",
+        "normalized_raster_sha256"
+      ],
       "properties": {
         "pdf_bytes": { "type": ["integer", "null"], "minimum": 0 },
         "pdf_sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
@@ -738,6 +789,12 @@
             "items": { "type": "number", "minimum": 0 }
           }
         },
+        "normalized_text_sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+        "font_families": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "normalized_raster_sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
         "artifact_bytes": { "type": ["integer", "null"], "minimum": 0 },
         "published_pdf": { "type": "boolean" }
       }

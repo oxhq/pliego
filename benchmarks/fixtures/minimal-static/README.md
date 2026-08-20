@@ -6,4 +6,7 @@ spawn, Servo initialization, load, layout, capture, PDF, persistence, publish.
 `Ahem.ttf` is byte-identical to the existing benchmark asset (SHA-256
 `b719ecb31c5b21fc573c03f6421c74ac63c271a5a3ff841e34f9705fb94b8448`).
 
-Expected (see `manifest.toml`): 1 page, contains "Minimal".
+Expected (see `manifest.toml`): one A4 page, exact normalized document text,
+one embedded Ahem font, the authored link, and a retained normalized raster
+signature. Every heading and paragraph explicitly uses normal-weight Ahem so a
+target cannot pass by substituting its default bold heading face.

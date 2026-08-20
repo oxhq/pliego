@@ -14,6 +14,7 @@ import json
 import re
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -45,8 +46,13 @@ def tool_version(path: Path) -> str:
 
 
 def oracle_identity() -> dict[str, str]:
-    identity = {"contract": "pliego.pdf-oracle.v1"}
-    for name in ("pdfinfo", "pdftotext"):
+    oracle = Path(__file__).resolve(strict=True)
+    identity = {
+        "contract": "pliego.pdf-oracle.v1",
+        "oracle_path": str(oracle),
+        "oracle_sha256": file_sha256(oracle),
+    }
+    for name in ("pdfinfo", "pdftotext", "pdffonts", "pdftoppm"):
         path = resolve_tool(name)
         identity[f"{name}_path"] = str(path)
         identity[f"{name}_sha256"] = file_sha256(path)
@@ -112,6 +118,114 @@ def normalize_text(value: str) -> str:
     return " ".join(value.split())
 
 
+def parse_pdffonts(text: str) -> list[dict[str, Any]]:
+    fonts: list[dict[str, Any]] = []
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) < 8 or parts[-5] not in {"yes", "no"}:
+            continue
+        name = re.sub(r"^[A-Z]{6}\+", "", parts[0])
+        fonts.append(
+            {
+                "name": name,
+                "embedded": parts[-5] == "yes",
+                "subset": parts[-4] == "yes",
+                "unicode": parts[-3] == "yes",
+            }
+        )
+    return fonts
+
+
+def read_pbm(path: Path) -> tuple[int, int, bytes]:
+    data = path.read_bytes()
+    offset = 0
+
+    def token() -> bytes:
+        nonlocal offset
+        while offset < len(data):
+            if data[offset : offset + 1] == b"#":
+                offset = data.find(b"\n", offset)
+                if offset < 0:
+                    raise RuntimeError(f"invalid PBM comment in {path}")
+            elif data[offset] in b" \t\r\n":
+                offset += 1
+            else:
+                break
+        start = offset
+        while offset < len(data) and data[offset] not in b" \t\r\n":
+            offset += 1
+        if start == offset:
+            raise RuntimeError(f"truncated PBM header in {path}")
+        return data[start:offset]
+
+    if token() != b"P4":
+        raise RuntimeError(f"pdftoppm did not produce binary PBM: {path}")
+    width, height = int(token()), int(token())
+    if data[offset : offset + 2] == b"\r\n":
+        offset += 2
+    elif offset < len(data) and data[offset] in b" \t\r\n":
+        offset += 1
+    else:
+        raise RuntimeError(f"PBM header omitted raster separator in {path}")
+    raster = data[offset:]
+    expected = ((width + 7) // 8) * height
+    if width <= 0 or height <= 0 or len(raster) != expected:
+        raise RuntimeError(f"invalid PBM raster length in {path}")
+    return width, height, raster
+
+
+def normalized_page_raster(width: int, height: int, raster: bytes) -> bytes:
+    grid_width = 24
+    grid_height = 32
+    row_bytes = (width + 7) // 8
+    normalized = bytearray((grid_width * grid_height + 7) // 8)
+    ink_count = 0
+    for y in range(height):
+        for x in range(width):
+            if not raster[y * row_bytes + x // 8] & (0x80 >> (x % 8)):
+                continue
+            ink_count += 1
+            normalized_x = min(grid_width - 1, x * grid_width // width)
+            normalized_y = min(grid_height - 1, y * grid_height // height)
+            bit = normalized_y * grid_width + normalized_x
+            normalized[bit // 8] |= 0x80 >> (bit % 8)
+    if ink_count == 0:
+        raise RuntimeError("page has no rasterized ink")
+    ink_bucket = ((ink_count + 128) // 256) * 256
+    return f"{width}x{height}:{grid_width}x{grid_height}:ink={ink_bucket}\0".encode("ascii") + normalized
+
+
+def normalized_raster_sha256(pdf: Path, pdftoppm: Path, page_count: int) -> str:
+    digest = hashlib.sha256()
+    with tempfile.TemporaryDirectory(prefix="pliego-pdf-oracle-") as raw:
+        prefix = Path(raw) / "page"
+        run_tool(
+            [
+                str(pdftoppm),
+                "-f",
+                "1",
+                "-l",
+                str(page_count),
+                "-r",
+                "72",
+                "-mono",
+                str(pdf),
+                str(prefix),
+            ]
+        )
+        pages = sorted(
+            prefix.parent.glob(f"{prefix.name}-*.pbm"),
+            key=lambda path: int(path.stem.rsplit("-", 1)[1]),
+        )
+        if len(pages) != page_count:
+            raise RuntimeError(f"pdftoppm produced {len(pages)} of {page_count} pages")
+        for index, page in enumerate(pages, 1):
+            width, height, raster = read_pbm(page)
+            digest.update(f"page={index}\0".encode("ascii"))
+            digest.update(normalized_page_raster(width, height, raster))
+    return digest.hexdigest()
+
+
 def inspect_pdf(
     pdf: Path,
     *,
@@ -120,9 +234,14 @@ def inspect_pdf(
     expected_height_points: float | None,
     dimension_tolerance_points: float,
     text_contains: list[str],
+    text_equals: str | None,
+    font_families: list[str],
+    expected_raster_sha256: str | None,
     link_targets: list[str],
     pdfinfo: Path,
     pdftotext: Path,
+    pdffonts: Path,
+    pdftoppm: Path,
 ) -> dict[str, Any]:
     checks: list[dict[str, str]] = []
     envelope_ok, envelope_detail = pdf_envelope(pdf)
@@ -167,14 +286,60 @@ def inspect_pdf(
             )
         )
 
-    if text_contains:
+    normalized_document_text: str | None = None
+    if text_contains or text_equals is not None:
         try:
-            extracted = normalize_text(run_tool([str(pdftotext), "-enc", "UTF-8", str(pdf), "-"]))
+            extracted = normalize_text(run_tool([str(pdftotext), "-layout", "-enc", "UTF-8", str(pdf), "-"]))
+            normalized_document_text = extracted
             for fragment in text_contains:
                 normalized = normalize_text(fragment)
                 checks.append(check(f"text:{fragment}", normalized in extracted))
+            if text_equals is not None:
+                expected = normalize_text(text_equals)
+                checks.append(
+                    check(
+                        "text_exact",
+                        extracted == expected,
+                        f"expected_sha256={hashlib.sha256(expected.encode()).hexdigest()} actual_sha256={hashlib.sha256(extracted.encode()).hexdigest()}",
+                    )
+                )
         except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
             checks.append(check("text", False, str(error)))
+
+    fonts: list[dict[str, Any]] = []
+    if font_families:
+        try:
+            fonts = parse_pdffonts(run_tool([str(pdffonts), str(pdf)]))
+            observed = {font["name"] for font in fonts}
+            observed_folded = {name.casefold() for name in observed}
+            expected = set(font_families)
+            expected_folded = {name.casefold() for name in expected}
+            checks.append(
+                check(
+                    "fonts_exact",
+                    bool(fonts) and observed_folded == expected_folded and all(font["embedded"] for font in fonts),
+                    f"expected={sorted(expected)} observed={sorted(observed)}",
+                )
+            )
+        except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
+            checks.append(check("fonts_exact", False, str(error)))
+
+    raster_sha256: str | None = None
+    if expected_raster_sha256 is not None and page_count is not None:
+        try:
+            raster_sha256 = normalized_raster_sha256(pdf, pdftoppm, page_count)
+            checks.append(check("raster_normalized", True, f"sha256={raster_sha256}"))
+            checks.append(
+                check(
+                    "raster_parity",
+                    raster_sha256 == expected_raster_sha256,
+                    f"expected={expected_raster_sha256} actual={raster_sha256}",
+                )
+            )
+        except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
+            checks.append(check("raster_normalized", False, str(error)))
+    elif expected_raster_sha256 is not None:
+        checks.append(check("raster_normalized", False, "page count is unavailable"))
 
     if link_targets:
         try:
@@ -190,6 +355,9 @@ def inspect_pdf(
         "pass": all(item["status"] == "pass" for item in checks),
         "page_count": page_count,
         "page_dimensions_points": [[width, height] for width, height in dimensions],
+        "normalized_text": normalized_document_text,
+        "fonts": fonts,
+        "normalized_raster_sha256": raster_sha256,
         "checks": checks,
     }
 
@@ -203,6 +371,9 @@ def main() -> int:
     parser.add_argument("--page-height-points", type=float)
     parser.add_argument("--dimension-tolerance-points", type=float, default=0.5)
     parser.add_argument("--text-contains", action="append", default=[])
+    parser.add_argument("--text-equals")
+    parser.add_argument("--font-family", action="append", default=[])
+    parser.add_argument("--raster-sha256")
     parser.add_argument("--link-target", action="append", default=[])
     args = parser.parse_args()
 
@@ -216,6 +387,8 @@ def main() -> int:
             parser.error("page width and height must be provided together")
         if args.dimension_tolerance_points < 0:
             parser.error("dimension tolerance cannot be negative")
+        if args.raster_sha256 is not None and re.fullmatch(r"[0-9a-f]{64}", args.raster_sha256) is None:
+            parser.error("--raster-sha256 must be a lowercase SHA-256 value")
         result = inspect_pdf(
             Path(args.pdf),
             expected_page_count=args.page_count,
@@ -223,9 +396,14 @@ def main() -> int:
             expected_height_points=args.page_height_points,
             dimension_tolerance_points=args.dimension_tolerance_points,
             text_contains=args.text_contains,
+            text_equals=args.text_equals,
+            font_families=args.font_family,
+            expected_raster_sha256=args.raster_sha256,
             link_targets=args.link_target,
             pdfinfo=resolve_tool("pdfinfo"),
             pdftotext=resolve_tool("pdftotext"),
+            pdffonts=resolve_tool("pdffonts"),
+            pdftoppm=resolve_tool("pdftoppm"),
         )
     except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
         print(json.dumps({"contract": "pliego.pdf-oracle.v1", "pass": False, "error": str(error)}))

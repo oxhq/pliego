@@ -25,7 +25,7 @@ concurrency:
 jobs:
   contract:
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 20
 
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
@@ -47,3 +47,109 @@ jobs:
           php -l benchmarks/runners/pliego.php
           php benchmarks/runners/pliego.php --self-test \
             --text-contains "Revenue, net" --text-contains " Total " --text-contains 0
+
+      - name: Install locked adapter smoke dependencies
+        env:
+          PUPPETEER_SKIP_DOWNLOAD: "1"
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes php-xml php-mbstring poppler-utils
+          composer install --working-dir=benchmarks/adapters/dompdf \
+            --no-dev --no-interaction --prefer-dist --classmap-authoritative
+          composer install --working-dir=benchmarks/adapters/browsershot \
+            --no-dev --no-interaction --prefer-dist --classmap-authoritative
+          npm ci --prefix benchmarks/adapters/browsershot --omit=dev
+
+      - name: Render each adapter through Poppler oracle
+        shell: bash
+        run: |
+          set -euo pipefail
+          work="$(mktemp -d)"
+          trap 'rm -rf "$work"' EXIT
+          mkdir "$work/dom-artifacts" "$work/browser-artifacts"
+          fixture="$GITHUB_WORKSPACE/benchmarks/fixtures/minimal-static"
+          expected_text='Minimal Hello, Pliego. This fixture measures pure startup: one small page, one bundled font, no scripts or images.'
+          raster='0f9edcf2b796a110d1a68efed00ce684921fec9ff7b52ccdc68bb718d1b93444'
+
+          (
+            cd "$fixture"
+            "$GITHUB_WORKSPACE/benchmarks/adapters/dompdf/adapter.php" render input.html \
+              --output "$work/dompdf.pdf" --artifacts "$work/dom-artifacts" \
+              --page-size 793.7008x1122.52 --page-margins 0,0,0,0
+          )
+
+          node="$(readlink -f "$(command -v node)")"
+          chrome="$(command -v google-chrome-stable || command -v google-chrome || command -v chromium)"
+          chrome="$(readlink -f "$chrome")"
+          adapter="$GITHUB_WORKSPACE/benchmarks/adapters/browsershot/adapter.php"
+          sudo /usr/bin/python3 -I benchmarks/tools/process_tree_sampler.py \
+            --probe-network-isolation > "$work/network-isolation.json"
+          python - "$work/network-isolation.json" <<'PY'
+          import json
+          import sys
+
+          proof = json.load(open(sys.argv[1], encoding="utf-8"))
+          assert proof["mode"] == "linux-private-network-namespace-v1"
+          assert proof["host_namespace"] != proof["engine_namespace"]
+          assert proof["interfaces"] == ["lo"]
+          PY
+          "$GITHUB_WORKSPACE/benchmarks/adapters/dompdf/adapter.php" identity > "$work/dompdf-identity.json"
+          env BROWSERSHOT_NODE_BINARY="$node" BROWSERSHOT_CHROME_PATH="$chrome" \
+            "$adapter" identity > "$work/browsershot-identity.json"
+          python - "$work/dompdf-identity.json" "$work/browsershot-identity.json" <<'PY'
+          import json
+          import os
+          import re
+          import sys
+
+          for path in sys.argv[1:]:
+              identity = json.load(open(path, encoding="utf-8"))
+              assert identity["contract"] == "pliego.benchmark-adapter.v1"
+              for key in ("adapter_sha256", "composer_lock_sha256", "composer_vendor_sha256", "php_sha256"):
+                  assert re.fullmatch(r"[0-9a-f]{64}", identity[key]), (path, key)
+              for key in ("adapter_path", "composer_vendor_path", "php_path"):
+                  assert os.path.isabs(identity[key]), (path, key)
+          browser = json.load(open(sys.argv[2], encoding="utf-8"))
+          for key in ("package_lock_sha256", "node_modules_sha256", "node_sha256", "chrome_sha256"):
+              assert re.fullmatch(r"[0-9a-f]{64}", browser[key]), key
+          for key in ("node_modules_path", "node_path", "chrome_path"):
+              assert os.path.isabs(browser[key]), key
+          PY
+          (
+            cd "$fixture"
+            sudo unshare --net -- setpriv \
+              --reuid="$(id -u)" --regid="$(id -g)" --init-groups \
+              bash -euo pipefail -c '
+                test "$(find /sys/class/net -mindepth 1 -maxdepth 1 -printf "%f\n")" = lo
+                test -z "$(ip route show)"
+                exec env BROWSERSHOT_NODE_BINARY="$1" BROWSERSHOT_CHROME_PATH="$2" \
+                  "$3" render input.html --output "$4" --artifacts "$5" \
+                  --page-size 793.7008x1122.52 --page-margins 0,0,0,0
+              ' _ "$node" "$chrome" "$adapter" "$work/browsershot.pdf" "$work/browser-artifacts"
+          )
+
+          for target in dompdf browsershot; do
+            python benchmarks/tools/pdf_oracle.py \
+              --pdf "$work/$target.pdf" \
+              --page-count 1 \
+              --page-width-points 595.276 \
+              --page-height-points 841.89 \
+              --dimension-tolerance-points 0.75 \
+              --text-contains Minimal \
+              --text-equals "$expected_text" \
+              --font-family Ahem \
+              --raster-sha256 "$raster" \
+              --link-target https://pliego.dev/docs \
+              > "$work/$target-oracle.json"
+          done
+
+          python - "$work/dompdf-oracle.json" "$work/browsershot-oracle.json" <<'PY'
+          import json
+          import sys
+
+          results = [json.load(open(path, encoding="utf-8")) for path in sys.argv[1:]]
+          assert all(result["pass"] for result in results), results
+          for field in ("normalized_text", "normalized_raster_sha256"):
+              assert results[0][field] == results[1][field], (field, results)
+          assert [[font["name"] for font in result["fonts"]] for result in results] == [["Ahem"], ["Ahem"]]
+          PY

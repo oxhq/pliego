@@ -27,6 +27,33 @@ function required_file(string $path): string
     return $resolved;
 }
 
+function tree_sha256(string $path): string
+{
+    $root = realpath($path);
+    if ($root === false || !is_dir($root)) {
+        abort_adapter("dependency tree is unavailable: {$path}");
+    }
+    $entries = [];
+    $iterator = new RecursiveIteratorIterator(
+        new RecursiveDirectoryIterator($root, FilesystemIterator::SKIP_DOTS)
+    );
+    foreach ($iterator as $entry) {
+        $entries[] = $entry->getPathname();
+    }
+    sort($entries, SORT_STRING);
+    $digest = hash_init('sha256');
+    foreach ($entries as $entry) {
+        $relative = str_replace('\\', '/', substr($entry, strlen($root) + 1));
+        if (is_link($entry)) {
+            hash_update($digest, "L\0{$relative}\0" . (string) readlink($entry) . "\0");
+        } elseif (is_file($entry)) {
+            $hash = hash_file('sha256', $entry);
+            hash_update($digest, "F\0{$relative}\0" . hex2bin((string) $hash));
+        }
+    }
+    return hash_final($digest);
+}
+
 function is_bare_input_name(string $value): bool
 {
     return $value !== '' && $value !== '.' && $value !== '..'
@@ -157,6 +184,10 @@ function identity(): void
         'adapter_sha256' => hash_file('sha256', $adapter),
         'composer_lock_sha256' => hash_file('sha256', required_file(__DIR__ . '/composer.lock')),
         'package_lock_sha256' => hash_file('sha256', required_file(__DIR__ . '/package-lock.json')),
+        'composer_vendor_path' => (string) realpath(__DIR__ . '/vendor'),
+        'composer_vendor_sha256' => tree_sha256(__DIR__ . '/vendor'),
+        'node_modules_path' => (string) realpath(__DIR__ . '/node_modules'),
+        'node_modules_sha256' => tree_sha256(__DIR__ . '/node_modules'),
         'php_path' => $php,
         'php_sha256' => hash_file('sha256', $php),
         'php_version' => PHP_VERSION,

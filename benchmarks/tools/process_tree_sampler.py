@@ -45,6 +45,7 @@ PR_SET_NO_NEW_PRIVS = 38
 PR_CAP_AMBIENT = 47
 PR_CAP_AMBIENT_CLEAR_ALL = 4
 CAP_SETPCAP = 8
+CLONE_NEWNET = 0x40000000
 
 
 class MeasurementIncomplete(RuntimeError):
@@ -55,6 +56,57 @@ class MeasurementIncomplete(RuntimeError):
 
 def incomplete(code: str, message: str) -> MeasurementIncomplete:
     return MeasurementIncomplete(code, message)
+
+
+def enter_empty_network_namespace(host_namespace: str) -> dict[str, Any]:
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.unshare(CLONE_NEWNET) != 0:
+        error = ctypes.get_errno()
+        raise incomplete("NETWORK_ISOLATION_UNAVAILABLE", f"unshare(CLONE_NEWNET): {os.strerror(error)}")
+    engine_namespace = os.readlink("/proc/self/ns/net")
+    interfaces = sorted(path.name for path in Path("/sys/class/net").iterdir())
+    if engine_namespace == host_namespace or interfaces != ["lo"]:
+        raise incomplete(
+            "NETWORK_ISOLATION_INVALID",
+            f"private namespace retained external interfaces: host={host_namespace} engine={engine_namespace} interfaces={interfaces}",
+        )
+    return {
+        "mode": "linux-private-network-namespace-v1",
+        "host_namespace": host_namespace,
+        "engine_namespace": engine_namespace,
+        "interfaces": interfaces,
+    }
+
+
+def probe_network_isolation() -> dict[str, Any]:
+    host_namespace = os.readlink("/proc/self/ns/net")
+    read_fd, write_fd = os.pipe2(os.O_CLOEXEC)
+    pid = os.fork()
+    if pid == 0:
+        try:
+            os.close(read_fd)
+            payload = {"ok": True, "proof": enter_empty_network_namespace(host_namespace)}
+            os.write(write_fd, json.dumps(payload, separators=(",", ":")).encode("ascii"))
+            os._exit(0)
+        except BaseException as error:
+            with contextlib.suppress(BaseException):
+                code = error.code if isinstance(error, MeasurementIncomplete) else "NETWORK_ISOLATION_UNAVAILABLE"
+                os.write(
+                    write_fd,
+                    json.dumps({"ok": False, "code": code, "error": str(error)}, separators=(",", ":")).encode(),
+                )
+            os._exit(2)
+    os.close(write_fd)
+    payload = os.read(read_fd, 65536)
+    os.close(read_fd)
+    _, status_value = os.waitpid(pid, 0)
+    try:
+        decoded = json.loads(payload)
+    except json.JSONDecodeError as error:
+        raise incomplete("NETWORK_ISOLATION_UNAVAILABLE", f"invalid isolation probe: {error}") from error
+    if not os.WIFEXITED(status_value) or os.WEXITSTATUS(status_value) != 0 or decoded.get("ok") is not True:
+        raise incomplete(decoded.get("code", "NETWORK_ISOLATION_UNAVAILABLE"), decoded.get("error", "probe failed"))
+    return decoded["proof"]
 
 
 def require_linux(parser: argparse.ArgumentParser, platform: str) -> None:
@@ -718,6 +770,8 @@ def fork_stopped(
     stderr_path: str,
     account: EngineAccount,
     probe_paths: dict[str, Path],
+    isolate_network: bool,
+    host_network_namespace: str,
 ) -> tuple[int, int]:
     descriptors = [
         os.open(os.devnull, os.O_RDONLY | os.O_CLOEXEC),
@@ -738,6 +792,7 @@ def fork_stopped(
                     if descriptor > 2:
                         os.close(descriptor)
                 os.kill(os.getpid(), signal.SIGSTOP)
+                network_isolation = enter_empty_network_namespace(host_network_namespace) if isolate_network else None
                 drop_engine_authority(account)
                 payload = {
                     "ok": True,
@@ -746,6 +801,8 @@ def fork_stopped(
                     "cwd_accessible": os.access(cwd, os.R_OK | os.X_OK),
                     "migration_write_probes": migration_write_probes(probe_paths),
                 }
+                if network_isolation is not None:
+                    payload["network_isolation"] = network_isolation
                 os.write(handshake_write, json.dumps(payload, separators=(",", ":")).encode("ascii"))
                 os.kill(os.getpid(), signal.SIGSTOP)
                 os.execve(command[0], command, engine_environment(account))
@@ -859,13 +916,28 @@ def finish_authority_handshake(
             or any(result not in {"EACCES", "EPERM"} for result in results.values())
         ):
             raise incomplete("ENGINE_CGROUP_WRITABLE", f"engine account can access a migration interface: {probes}")
-    return {
+    result = {
         "account": account.name,
         "uid": account.uid,
         "gid": account.gid,
         "status": security,
         "migration_write_probes": probes,
     }
+    network = handshake.get("network_isolation")
+    if network is not None:
+        if (
+            not isinstance(network, dict)
+            or network.get("mode") != "linux-private-network-namespace-v1"
+            or network.get("interfaces") != ["lo"]
+            or network.get("host_namespace") == network.get("engine_namespace")
+        ):
+            raise incomplete("NETWORK_ISOLATION_INVALID", f"invalid launcher network proof: {network!r}")
+        actual_host = os.readlink(proc_root / "self" / "ns" / "net")
+        actual_engine = os.readlink(proc_root / str(pid) / "ns" / "net")
+        if network.get("host_namespace") != actual_host or network.get("engine_namespace") != actual_engine:
+            raise incomplete("NETWORK_ISOLATION_INVALID", f"launcher network proof changed: {network!r}")
+        result["network_isolation"] = network
+    return result
 
 
 def move_stopped_child(
@@ -1008,6 +1080,7 @@ def sample_command(
     cgroup_root: Path = CGROUP_ROOT,
     proc_root: Path = PROC,
     lock_root: Path | None = None,
+    isolate_network: bool = False,
 ) -> dict[str, Any]:
     if resource is None:
         raise incomplete("CGROUP_V2_REQUIRED", "Linux resource accounting is unavailable")
@@ -1015,6 +1088,7 @@ def sample_command(
         raise incomplete("PIDFD_REQUIRED", "os.pidfd_open is unavailable")
     require_broker_root()
     account = resolve_engine_account()
+    host_network_namespace = os.readlink(proc_root / "self" / "ns" / "net")
     argv, executable = command_identity(command, account)
     parent = require_delegated_parent(cgroup_parent, cgroup_root, proc_root)
     child: BoundDirectory | None = None
@@ -1047,6 +1121,8 @@ def sample_command(
                 stderr_path,
                 account,
                 probe_paths,
+                isolate_network,
+                host_network_namespace,
             )
             root_identity = move_stopped_child(root_pid, staging, cgroup_root, proc_root)
             launch_security = finish_authority_handshake(
@@ -1278,10 +1354,20 @@ def main() -> int:
     parser.add_argument("--pss-interval-ms", type=float, default=250.0)
     parser.add_argument("--descendant-grace-ms", type=float, default=1000.0)
     parser.add_argument("--settle-timeout-ms", type=float, default=10000.0)
+    parser.add_argument("--isolate-network", action="store_true")
+    parser.add_argument("--probe-network-isolation", action="store_true")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
     require_linux(parser, sys.platform)
+    if args.probe_network_isolation:
+        try:
+            print(json.dumps(probe_network_isolation(), separators=(",", ":")))
+            return 0
+        except (MeasurementIncomplete, OSError) as error:
+            code = error.code if isinstance(error, MeasurementIncomplete) else "NETWORK_ISOLATION_UNAVAILABLE"
+            print(f"process_tree_sampler: measurement-incomplete[{code}]: {error}", file=sys.stderr)
+            return 2
     if not command:
         parser.error("a command is required after --")
     if (
@@ -1307,6 +1393,7 @@ def main() -> int:
             args.descendant_grace_ms,
             args.settle_timeout_ms,
             Path(configured_parent),
+            isolate_network=args.isolate_network,
         )
     except (MeasurementIncomplete, OSError) as error:
         code = error.code if isinstance(error, MeasurementIncomplete) else "CGROUP_IO_ERROR"

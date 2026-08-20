@@ -7,7 +7,7 @@
 """Dependency-free JSON Schema validation for benchmark results.
 
 Implements the subset of draft-07 used by `schema/benchmark-result.v1.json`
-(no `jsonschema` required): type (including null unions), const, enum, oneOf,
+(no `jsonschema` required): type (including null unions), const, enum, allOf, oneOf,
 required, properties, additionalProperties, minimum, minLength, minItems,
 maxItems, $ref
 resolution into `definitions`, and pattern.
@@ -19,17 +19,25 @@ Usage:
 from __future__ import annotations
 
 import json
+import hashlib
 import math
 import re
 import statistics
+import subprocess
 import sys
+import tomllib
 from collections import Counter
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_SCHEMA = ROOT / "benchmarks" / "schema" / "benchmark-result.v1.json"
+MANIFEST = ROOT / "benchmarks" / "manifest.toml"
+PDF_ORACLE = ROOT / "benchmarks" / "tools" / "pdf_oracle.py"
 PERCENTILE_METHOD = "nearest-rank-v1"
+POPPLER_TOOLS = ("pdfinfo", "pdftotext", "pdffonts", "pdftoppm")
+ORACLE_IDENTITY_REASON = "manifest does not pin canonical Poppler tool identities"
+ADAPTER_ATTESTATION_REASON = "out-of-process OCI image attestation is unavailable"
 
 
 class Violation:
@@ -61,6 +69,54 @@ def percentiles(values: list[int | float | None]) -> dict[str, float]:
         "max": max(measured),
         "mean": statistics.fmean(measured),
     }
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def canonical_fixture_hashes(fixture: dict[str, Any]) -> tuple[str, str]:
+    input_path = (ROOT / fixture["input"]).resolve(strict=True)
+    paths = [input_path, *(input_path.parent / asset for asset in fixture.get("assets", []))]
+    digest = hashlib.sha256()
+    for path in sorted(paths, key=lambda candidate: candidate.relative_to(input_path.parent).as_posix()):
+        relative = path.relative_to(input_path.parent).as_posix()
+        digest.update(relative.encode("utf-8") + b"\0")
+        digest.update(bytes.fromhex(file_sha256(path)))
+    return file_sha256(input_path), digest.hexdigest()
+
+
+def clean_harness_revision() -> str | None:
+    status = subprocess.run(
+        [
+            "git",
+            "status",
+            "--porcelain",
+            "--",
+            "benchmarks",
+            ".github/workflows/pliego-benchmark.yml",
+            ":(exclude)benchmarks/baselines",
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    revision = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    value = revision.stdout.strip()
+    if status.returncode != 0 or status.stdout.strip() or revision.returncode != 0:
+        return None
+    return value if re.fullmatch(r"[0-9a-f]{40}", value) else None
 
 
 def resolve(schema: dict[str, Any], ref: str) -> dict[str, Any]:
@@ -103,6 +159,10 @@ def validate(
     if "$ref" in schema:
         validate(data, resolve(root, schema["$ref"]), path, violations, root)
         return
+
+    if "allOf" in schema:
+        for branch in schema["allOf"]:
+            validate(data, branch, path, violations, root)
 
     if "oneOf" in schema:
         branch_violations: list[list[Violation]] = []
@@ -169,6 +229,28 @@ def validate(
 def require_equal(path: str, actual: Any, expected: Any, violations: list[Violation]) -> None:
     if actual != expected:
         violations.append(Violation(path, f"must equal {expected!r}, got {actual!r}"))
+
+
+def oracle_manifest_pins_complete(manifest: dict[str, Any]) -> bool:
+    oracle = manifest.get("oracle", {})
+    if oracle.get("contract") != "pliego.pdf-oracle.v1":
+        return False
+    for tool in POPPLER_TOOLS:
+        path = oracle.get(f"{tool}_path")
+        digest = oracle.get(f"{tool}_sha256")
+        version = oracle.get(f"{tool}_version")
+        if (
+            not isinstance(path, str)
+            or not PurePosixPath(path).is_absolute()
+            or ".." in PurePosixPath(path).parts
+            or str(PurePosixPath(path)) != path
+            or not isinstance(digest, str)
+            or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+            or not isinstance(version, str)
+            or not version.strip()
+        ):
+            return False
+    return True
 
 
 def io_total(io_stat: dict[str, dict[str, int]], field: str) -> int:
@@ -495,28 +577,370 @@ def validate_resource_usage(sample: dict[str, Any], path: str, violations: list[
     )
 
 
-def validate_semantics(data: dict[str, Any], path: str, violations: list[Violation]) -> None:
+def validate_manifest_contract(
+    data: dict[str, Any],
+    path: str,
+    violations: list[Violation],
+    manifest: dict[str, Any],
+    expected_harness_revision: str | None,
+) -> None:
+    target_id = data["target"]["id"]
+    fixture_id = data["fixture"]["id"]
+    target = manifest.get("targets", {}).get(target_id)
+    fixture = manifest.get("fixtures", {}).get(fixture_id)
+    if target is None or not target.get("enabled", False):
+        violations.append(Violation(f"{path}.target.id", "must name an enabled canonical manifest target"))
+        return
+    if fixture is None:
+        violations.append(Violation(f"{path}.fixture.id", "must name a canonical manifest fixture"))
+        return
+
+    require_equal(f"{path}.target.label", data["target"]["label"], target["label"], violations)
+    correctness = fixture.get("correctness", {})
+    canonical_fixture = {
+        "purpose": fixture["purpose"],
+        "category": fixture["category"],
+        "input": fixture["input"],
+        "expected_page_count": correctness.get("page_count"),
+        "expected_page_width_points": correctness.get("page_width_points"),
+        "expected_page_height_points": correctness.get("page_height_points"),
+        "dimension_tolerance_points": correctness.get("dimension_tolerance_points"),
+        "expected_text_contains": correctness.get("text_contains", []),
+        "expected_text": correctness.get("text_equals"),
+        "expected_font_families": correctness.get("font_families", []),
+        "expected_normalized_raster_sha256": correctness.get("normalized_raster_sha256"),
+        "expected_link_targets": correctness.get("link_targets", []),
+        "expected_failure_code": correctness.get("failure_code"),
+    }
+    for field, expected in canonical_fixture.items():
+        require_equal(f"{path}.fixture.{field}", data["fixture"].get(field), expected, violations)
+
+    protocol = data["protocol"]
+    canonical_protocol = manifest["protocol"]
+    expected_protocol = {
+        "sample_order": canonical_protocol["sample_order"],
+        "seed": canonical_protocol.get("seed"),
+        "network": canonical_protocol["network"],
+        "binary_profile": target.get("profile", canonical_protocol["binary_profile"]),
+    }
+    if data.get("status") == "not-applicable":
+        expected_protocol.update(warmup_iterations=0, sample_count=0)
+    else:
+        expected_protocol.update(
+            warmup_iterations=canonical_protocol["warmup_iterations"],
+            sample_count=fixture.get("samples", canonical_protocol["samples_short"]),
+            correctness_preflight_iterations=1,
+            execution_order="untimed-correctness-preflight,warmup,timed",
+        )
+    for field, expected in expected_protocol.items():
+        require_equal(f"{path}.protocol.{field}", protocol.get(field), expected, violations)
+
+    supported_fixtures = (
+        set(manifest["fixtures"])
+        if target.get("kind", "pliego") == "pliego"
+        else set(target.get("supported_fixtures", []))
+    )
+    if data.get("status") != "not-applicable" and target.get("kind", "pliego") == "adapter":
+        if fixture_id not in supported_fixtures:
+            violations.append(Violation(f"{path}.fixture.id", "is not supported by the canonical adapter target"))
+
+    if data.get("status") == "not-applicable":
+        if fixture_id not in supported_fixtures:
+            expected_reason = target.get("not_applicable", {}).get(fixture_id, target.get("unsupported_reason"))
+            require_equal(f"{path}.reason", data["reason"], expected_reason, violations)
+        else:
+            if not oracle_manifest_pins_complete(manifest) and ORACLE_IDENTITY_REASON not in data["reason"]:
+                violations.append(Violation(f"{path}.reason", "must identify missing canonical Poppler pins"))
+            if target.get("kind", "pliego") == "adapter":
+                if ADAPTER_ATTESTATION_REASON not in data["reason"]:
+                    violations.append(Violation(f"{path}.reason", "must identify missing external image attestation"))
+                if (
+                    not target.get("image_digest")
+                    and "manifest does not pin an immutable OCI image digest" not in data["reason"]
+                ):
+                    violations.append(Violation(f"{path}.reason", "must identify the missing immutable image digest"))
+        if target.get("kind", "pliego") == "adapter" and fixture_id in supported_fixtures:
+            runtime_names = ["php", *(["node", "chrome"] if target.get("requires_network_isolation") else [])]
+            required_hashes = [
+                *target.get("identity_keys", []),
+                *(f"{name}_sha256" for name in runtime_names),
+            ]
+            required_paths = [
+                "adapter_path",
+                *(key.removesuffix("_sha256") + "_path" for key in target.get("identity_keys", [])),
+                *(f"{name}_path" for name in runtime_names),
+            ]
+            pins = target.get("identity_sha256", {})
+            if any(
+                not isinstance(pins.get(key), str) or re.fullmatch(r"[0-9a-f]{64}", pins[key]) is None
+                for key in required_hashes
+            ) and ("manifest does not pin canonical dependency and runtime SHA-256 values" not in data["reason"]):
+                violations.append(Violation(f"{path}.reason", "must identify missing canonical identity hashes"))
+            paths = target.get("identity_paths", {})
+            if any(
+                not isinstance(paths.get(key), str) or not PurePosixPath(paths[key]).is_absolute()
+                for key in required_paths
+            ) and ("manifest does not pin canonical dependency and runtime paths" not in data["reason"]):
+                violations.append(Violation(f"{path}.reason", "must identify missing canonical identity paths"))
+        return
+
+    host = data["host"]
+    require_equal(f"{path}.host.os", host["os"], "Linux", violations)
+    require_equal(f"{path}.host.arch", host["arch"], "x86_64", violations)
+    require_equal(f"{path}.host.dedicated", host["dedicated"], True, violations)
+    revision = data["toolchain"].get("harness_revision")
+    if not isinstance(revision, str) or re.fullmatch(r"[0-9a-f]{40}", revision) is None:
+        violations.append(Violation(f"{path}.toolchain.harness_revision", "must retain the exact clean harness commit"))
+    elif expected_harness_revision is None:
+        violations.append(
+            Violation(
+                f"{path}.toolchain.harness_revision",
+                "must be validated from a clean checkout of the recorded harness commit",
+            )
+        )
+    else:
+        require_equal(
+            f"{path}.toolchain.harness_revision",
+            revision,
+            expected_harness_revision,
+            violations,
+        )
+    competitors = data["toolchain"].get("competitors")
+    if not isinstance(competitors, dict):
+        violations.append(Violation(f"{path}.toolchain.competitors", "must retain PDF oracle identity"))
+    else:
+        require_equal(
+            f"{path}.toolchain.competitors.oracle.contract",
+            competitors.get("oracle.contract"),
+            "pliego.pdf-oracle.v1",
+            violations,
+        )
+        oracle_path = competitors.get("oracle.oracle_path")
+        if not isinstance(oracle_path, str) or not PurePosixPath(oracle_path).is_absolute():
+            violations.append(Violation(f"{path}.toolchain.competitors.oracle.oracle_path", "must be absolute"))
+        oracle_digest = competitors.get("oracle.oracle_sha256")
+        if not isinstance(oracle_digest, str) or re.fullmatch(r"[0-9a-f]{64}", oracle_digest) is None:
+            violations.append(Violation(f"{path}.toolchain.competitors.oracle.oracle_sha256", "must be SHA-256"))
+        else:
+            require_equal(
+                f"{path}.toolchain.competitors.oracle.oracle_sha256",
+                oracle_digest,
+                file_sha256(PDF_ORACLE),
+                violations,
+            )
+        oracle_manifest = manifest.get("oracle", {})
+        if not oracle_manifest_pins_complete(manifest):
+            violations.append(Violation(f"{path}.toolchain.competitors", ORACLE_IDENTITY_REASON))
+        for tool in POPPLER_TOOLS:
+            tool_path = competitors.get(f"oracle.{tool}_path")
+            if not isinstance(tool_path, str) or not PurePosixPath(tool_path).is_absolute():
+                violations.append(
+                    Violation(f"{path}.toolchain.competitors.oracle.{tool}_path", "must be an absolute path")
+                )
+            digest = competitors.get(f"oracle.{tool}_sha256")
+            if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+                violations.append(Violation(f"{path}.toolchain.competitors.oracle.{tool}_sha256", "must be SHA-256"))
+            version = competitors.get(f"oracle.{tool}_version")
+            if not isinstance(version, str) or not version.strip():
+                violations.append(Violation(f"{path}.toolchain.competitors.oracle.{tool}_version", "is required"))
+            for field, actual in (("path", tool_path), ("sha256", digest), ("version", version)):
+                expected = oracle_manifest.get(f"{tool}_{field}")
+                if isinstance(expected, str) and expected:
+                    require_equal(
+                        f"{path}.toolchain.competitors.oracle.{tool}_{field}",
+                        actual,
+                        expected,
+                        violations,
+                    )
+
+    try:
+        input_hash, bundle_hash = canonical_fixture_hashes(fixture)
+    except OSError as error:
+        violations.append(Violation(f"{path}.fixture", f"cannot verify canonical fixture files: {error}"))
+    else:
+        require_equal(f"{path}.fixture.input_sha256", data["fixture"].get("input_sha256"), input_hash, violations)
+        require_equal(f"{path}.fixture.bundle_sha256", data["fixture"].get("bundle_sha256"), bundle_hash, violations)
+
+    engine = data["toolchain"]["engine"]
+    if target.get("kind", "pliego") == "pliego":
+        expected_engine = {
+            "name": "pliego",
+            "version": target["version"],
+            "commit": target["commit"],
+            "release_tag": target["release_tag"],
+            "servo_build": target["servo_build"],
+            "servo_base": target["servo_base"],
+            "bundle": target["archive"],
+            "bundle_sha256": target["archive_sha256"],
+            "bundle_bytes": target["archive_bytes"],
+            "binary_sha256": target["binary_sha256"],
+            "binary_bytes": target["binary_bytes"],
+            "profile": target["profile"],
+        }
+        for field, expected in expected_engine.items():
+            require_equal(f"{path}.toolchain.engine.{field}", engine.get(field), expected, violations)
+    else:
+        violations.append(
+            Violation(
+                f"{path}.target.id",
+                "adapter target must be N/A until out-of-process OCI image attestation is implemented",
+            )
+        )
+        adapter = (ROOT / target["adapter"]).resolve()
+        expected_adapter_hash = file_sha256(adapter)
+        for field, expected in {
+            "name": target["package"].split("/")[-1],
+            "version": target["version"],
+            "package": target["package"],
+            "binary_sha256": expected_adapter_hash,
+            "binary_bytes": adapter.stat().st_size,
+            "profile": target["profile"],
+        }.items():
+            require_equal(f"{path}.toolchain.engine.{field}", engine.get(field), expected, violations)
+        competitors = data["toolchain"].get("competitors", {})
+        expected_image = target.get("image_digest")
+        hash_pins = target.get("identity_sha256", {})
+        path_pins = target.get("identity_paths", {})
+        expected_adapter_path = path_pins.get("adapter_path") if isinstance(path_pins, dict) else None
+        if not isinstance(expected_adapter_path, str) or not PurePosixPath(expected_adapter_path).is_absolute():
+            violations.append(Violation(f"{path}.target.id", "manifest must pin adapter path 'adapter_path'"))
+        else:
+            require_equal(
+                f"{path}.toolchain.engine.binary_path",
+                engine.get("binary_path"),
+                expected_adapter_path,
+                violations,
+            )
+        if not isinstance(expected_image, str) or re.fullmatch(r"sha256:[0-9a-f]{64}", expected_image) is None:
+            violations.append(
+                Violation(f"{path}.target.id", "adapter target has no pinned immutable image and must be N/A")
+            )
+        for field, expected in {
+            "adapter.contract": "pliego.benchmark-adapter.v1",
+            "adapter.target": target_id,
+            "adapter.package": target["package"],
+            "adapter.package_version": target["version"],
+            "adapter.adapter_path": expected_adapter_path,
+            "adapter.adapter_sha256": expected_adapter_hash,
+            "environment.contract": target.get("runtime_identity_contract"),
+            "environment.image_digest": expected_image,
+            "environment.rootfs_read_only": "true",
+            "environment.read_only.adapter_path": "true",
+        }.items():
+            require_equal(f"{path}.toolchain.competitors.{field}", competitors.get(field), expected, violations)
+        for lock_name in target.get("lockfiles", []):
+            lock = (ROOT / lock_name).resolve()
+            key = f"adapter.{lock.name.removesuffix('.json').replace('-', '_').replace('.', '_')}_sha256"
+            require_equal(f"{path}.toolchain.competitors.{key}", competitors.get(key), file_sha256(lock), violations)
+        for key in target.get("identity_keys", []):
+            value = competitors.get(f"adapter.{key}")
+            if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+                violations.append(
+                    Violation(f"{path}.toolchain.competitors.adapter.{key}", "must retain dependency tree SHA-256")
+                )
+            expected_hash = hash_pins.get(key) if isinstance(hash_pins, dict) else None
+            if not isinstance(expected_hash, str) or re.fullmatch(r"[0-9a-f]{64}", expected_hash) is None:
+                violations.append(Violation(f"{path}.target.id", f"manifest must pin adapter identity {key!r}"))
+            else:
+                require_equal(
+                    f"{path}.toolchain.competitors.adapter.{key}",
+                    value,
+                    expected_hash,
+                    violations,
+                )
+            path_key = key.removesuffix("_sha256") + "_path"
+            expected_path = path_pins.get(path_key) if isinstance(path_pins, dict) else None
+            if not isinstance(expected_path, str) or not PurePosixPath(expected_path).is_absolute():
+                violations.append(Violation(f"{path}.target.id", f"manifest must pin adapter path {path_key!r}"))
+            else:
+                require_equal(
+                    f"{path}.toolchain.competitors.adapter.{path_key}",
+                    competitors.get(f"adapter.{path_key}"),
+                    expected_path,
+                    violations,
+                )
+            require_equal(
+                f"{path}.toolchain.competitors.environment.read_only.{path_key}",
+                competitors.get(f"environment.read_only.{path_key}"),
+                "true",
+                violations,
+            )
+        runtime_names = ["php", *(["node", "chrome"] if target.get("requires_network_isolation") else [])]
+        for runtime in runtime_names:
+            for suffix in ("path", "version"):
+                key = f"adapter.{runtime}_{suffix}"
+                if not competitors.get(key):
+                    violations.append(Violation(f"{path}.toolchain.competitors.{key}", "is required"))
+            digest = competitors.get(f"adapter.{runtime}_sha256")
+            if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+                violations.append(
+                    Violation(f"{path}.toolchain.competitors.adapter.{runtime}_sha256", "must be SHA-256")
+                )
+            for suffix, pins in (("sha256", hash_pins), ("path", path_pins)):
+                key = f"{runtime}_{suffix}"
+                expected = pins.get(key) if isinstance(pins, dict) else None
+                if (
+                    not isinstance(expected, str)
+                    or (suffix == "sha256" and re.fullmatch(r"[0-9a-f]{64}", expected) is None)
+                    or (suffix == "path" and not PurePosixPath(expected).is_absolute())
+                ):
+                    violations.append(Violation(f"{path}.target.id", f"manifest must pin adapter identity {key!r}"))
+                else:
+                    require_equal(
+                        f"{path}.toolchain.competitors.adapter.{key}",
+                        competitors.get(f"adapter.{key}"),
+                        expected,
+                        violations,
+                    )
+            require_equal(
+                f"{path}.toolchain.competitors.environment.read_only.{runtime}_path",
+                competitors.get(f"environment.read_only.{runtime}_path"),
+                "true",
+                violations,
+            )
+        if target.get("requires_network_isolation"):
+            require_equal(
+                f"{path}.toolchain.competitors.environment.network_isolation",
+                competitors.get("environment.network_isolation"),
+                "linux-private-network-namespace-v1",
+                violations,
+            )
+
+
+def validate_semantics(
+    data: dict[str, Any],
+    path: str,
+    violations: list[Violation],
+    manifest: dict[str, Any],
+    expected_harness_revision: str | None,
+) -> None:
     if data["schema"] == "pliego.benchmark-bundle":
         for index, result in enumerate(data["results"]):
-            validate_semantics(result, f"{path}.results[{index}]", violations)
+            validate_semantics(
+                result,
+                f"{path}.results[{index}]",
+                violations,
+                manifest,
+                expected_harness_revision,
+            )
         return
+    validate_manifest_contract(data, path, violations, manifest, expected_harness_revision)
     if data.get("status") == "not-applicable":
         return
 
     samples = data["samples"]
-    if "correctness_preflight_iterations" in data["protocol"]:
-        require_equal(
-            f"{path}.protocol.correctness_preflight_iterations",
-            data["protocol"]["correctness_preflight_iterations"],
-            1,
-            violations,
-        )
-        require_equal(
-            f"{path}.protocol.execution_order",
-            data["protocol"].get("execution_order"),
-            "untimed-correctness-preflight,warmup,timed",
-            violations,
-        )
+    require_equal(
+        f"{path}.protocol.correctness_preflight_iterations",
+        data["protocol"]["correctness_preflight_iterations"],
+        1,
+        violations,
+    )
+    require_equal(
+        f"{path}.protocol.execution_order",
+        data["protocol"]["execution_order"],
+        "untimed-correctness-preflight,warmup,timed",
+        violations,
+    )
     if data["protocol"]["sample_count"] != len(samples):
         violations.append(
             Violation(
@@ -538,6 +962,7 @@ def validate_semantics(data: dict[str, Any], path: str, violations: list[Violati
             )
         )
     engine = data["toolchain"]["engine"]
+    target_manifest = manifest.get("targets", {}).get(data["target"]["id"], {})
     for field in ("binary_path", "binary_sha256"):
         if field not in engine:
             violations.append(Violation(f"{path}.toolchain.engine.{field}", "is required for a publishable engine"))
@@ -561,6 +986,22 @@ def validate_semantics(data: dict[str, Any], path: str, violations: list[Violati
             executable = launch["executable"]
             launch_accounts.append((launch["uid"], launch["gid"]))
             executable_identities.append((executable["device"], executable["inode"]))
+            if target_manifest.get("requires_network_isolation"):
+                network = launch.get("network_isolation")
+                if not isinstance(network, dict):
+                    violations.append(
+                        Violation(
+                            f"{sample_path}.resource_usage.launch_security",
+                            "must retain private network namespace proof",
+                        )
+                    )
+                elif network["host_namespace"] == network["engine_namespace"]:
+                    violations.append(
+                        Violation(
+                            f"{sample_path}.resource_usage.launch_security.network_isolation",
+                            "engine namespace must differ from host namespace",
+                        )
+                    )
             if "binary_path" in engine:
                 require_equal(
                     f"{sample_path}.resource_usage.launch_security.executable.path",
@@ -647,11 +1088,22 @@ def validate_semantics(data: dict[str, Any], path: str, violations: list[Violati
                 if output[field] is None:
                     violations.append(Violation(f"{sample_path}.output.{field}", "must be present for a published PDF"))
         else:
-            for field in ("pdf_bytes", "pdf_sha256", "page_count", "page_dimensions_points"):
+            for field in (
+                "pdf_bytes",
+                "pdf_sha256",
+                "page_count",
+                "page_dimensions_points",
+                "normalized_text_sha256",
+                "normalized_raster_sha256",
+            ):
                 if output.get(field) is not None:
                     violations.append(
                         Violation(f"{sample_path}.output.{field}", "must be null when no PDF was published")
                     )
+            if output["font_families"]:
+                violations.append(
+                    Violation(f"{sample_path}.output.font_families", "must be empty when no PDF was published")
+                )
 
         if not sample["ok"] and "retained" not in sample:
             violations.append(Violation(sample_path, "failed samples must retain output and artifacts"))
@@ -709,6 +1161,36 @@ def validate_semantics(data: dict[str, Any], path: str, violations: list[Violati
                 expected_checks.update(
                     f"text:{fragment}" for fragment in data["fixture"].get("expected_text_contains", [])
                 )
+                expected_text = data["fixture"].get("expected_text")
+                if expected_text is not None:
+                    expected_checks.add("text_exact")
+                    require_equal(
+                        f"{sample_path}.output.normalized_text_sha256",
+                        output["normalized_text_sha256"],
+                        hashlib.sha256(" ".join(expected_text.split()).encode()).hexdigest(),
+                        violations,
+                    )
+                expected_fonts = data["fixture"].get("expected_font_families", [])
+                if expected_fonts:
+                    expected_checks.add("fonts_exact")
+                    require_equal(
+                        f"{sample_path}.output.font_families",
+                        sorted(output["font_families"]),
+                        sorted(expected_fonts),
+                        violations,
+                    )
+                expected_raster = data["fixture"].get("expected_normalized_raster_sha256")
+                if expected_raster is not None:
+                    expected_checks.add("raster_normalized")
+                    expected_checks.add("raster_parity")
+                    if output["normalized_raster_sha256"] is None:
+                        violations.append(Violation(f"{sample_path}.output.normalized_raster_sha256", "is required"))
+                    require_equal(
+                        f"{sample_path}.output.normalized_raster_sha256",
+                        output["normalized_raster_sha256"],
+                        expected_raster,
+                        violations,
+                    )
                 expected_checks.update(f"link:{target}" for target in data["fixture"].get("expected_link_targets", []))
                 check_names = [check["name"] for check in correctness["checks"]]
                 missing_checks = sorted(name for name in expected_checks if check_names.count(name) != 1)
@@ -889,6 +1371,17 @@ def validate_semantics(data: dict[str, Any], path: str, violations: list[Violati
         for sample in samples
         if sample["ok"] and sample["correctness"]["pass"] and sample["output"]["pdf_sha256"]
     ]
+    expected_raster = data["fixture"].get("expected_normalized_raster_sha256")
+    if expected_raster is not None:
+        raster_hashes = [
+            sample["output"]["normalized_raster_sha256"]
+            for sample in passing_samples
+            if sample["output"]["normalized_raster_sha256"]
+        ]
+        if len(raster_hashes) != len(passing_samples) or len(set(raster_hashes)) != 1:
+            violations.append(
+                Violation(f"{path}.samples", "passing samples must share one normalized raster signature")
+            )
     hash_counts = Counter(hashes)
     expected_determinism = {
         "identical_pdf_sha256": max(hash_counts.values(), default=0),
@@ -906,11 +1399,22 @@ def validate_semantics(data: dict[str, Any], path: str, violations: list[Violati
             )
 
 
-def validate_document(data: Any, schema: dict[str, Any]) -> list[Violation]:
+def validate_document(
+    data: Any,
+    schema: dict[str, Any],
+    manifest: dict[str, Any] | None = None,
+    expected_harness_revision: str | None = None,
+) -> list[Violation]:
     violations: list[Violation] = []
     validate(data, schema, "$", violations)
     if not violations:
-        validate_semantics(data, "$", violations)
+        validate_semantics(
+            data,
+            "$",
+            violations,
+            manifest or tomllib.loads(MANIFEST.read_text(encoding="utf-8")),
+            expected_harness_revision or clean_harness_revision(),
+        )
     return violations
 
 
