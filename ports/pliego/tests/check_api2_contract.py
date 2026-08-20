@@ -119,6 +119,7 @@ def validate_probe(
         [
             "request_transport",
             "request_max_bytes",
+            "job_root_transport",
             "result_transport",
             "invocation_error_transport",
             "success_exit_code",
@@ -130,6 +131,7 @@ def validate_probe(
     expected_invocation = {
         "request_transport": "stdin-single-json",
         "request_max_bytes": REQUEST_MAX_BYTES,
+        "job_root_transport": "cwd-v1",
         "result_transport": "stdout-single-json",
         "invocation_error_transport": "stderr-utf8-line",
         "success_exit_code": 0,
@@ -290,6 +292,7 @@ def self_test() -> None:
             "invocation": {
                 "request_transport": "stdin-single-json",
                 "request_max_bytes": REQUEST_MAX_BYTES,
+                "job_root_transport": "cwd-v1",
                 "result_transport": "stdout-single-json",
                 "invocation_error_transport": "stderr-utf8-line",
                 "success_exit_code": 0,
@@ -321,6 +324,22 @@ def self_test() -> None:
                 raise
         else:
             raise AssertionError("self-test accepted a falsely advertised API 2 tuple")
+        wrong_job_root = json.loads(json.dumps(probe))
+        wrong_job_root["invocation"]["job_root_transport"] = "argument-v1"
+        try:
+            validate_probe(
+                wrong_job_root,
+                binary_sha256=binary_sha256,
+                expected_version="0.1.1",
+                expected_source_commit="1" * 40,
+                expected_target="x86_64-unknown-linux-gnu",
+                expected_servo_base="2" * 40,
+            )
+        except AssertionError as error:
+            if "invocation contract differs" not in str(error):
+                raise
+        else:
+            raise AssertionError("self-test accepted a different API 2 job-root transport")
         boolean_version = json.loads(json.dumps(probe))
         boolean_version["version"] = True
         try:

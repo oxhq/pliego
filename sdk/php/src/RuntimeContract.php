@@ -50,6 +50,7 @@ final readonly class RuntimeContract
     private const INVOCATION_KEYS = [
         'request_transport',
         'request_max_bytes',
+        'job_root_transport',
         'result_transport',
         'invocation_error_transport',
         'success_exit_code',
@@ -348,6 +349,7 @@ final readonly class RuntimeContract
         foreach ([
             'request_transport' => 'stdin-single-json',
             'request_max_bytes' => 1_048_576,
+            'job_root_transport' => 'cwd-v1',
             'result_transport' => 'stdout-single-json',
             'invocation_error_transport' => 'stderr-utf8-line',
             'success_exit_code' => 0,

@@ -1023,6 +1023,8 @@ def main() -> None:
         raise AssertionError("probe and both result branches must retain the exact engine identity")
     if runtime["invocation"]["request_max_bytes"] != API2_REQUEST_MAX_BYTES:
         raise AssertionError("API 2 request framing limit drifted")
+    if runtime["invocation"]["job_root_transport"] != "cwd-v1":
+        raise AssertionError("API 2 job-root transport drifted")
 
     assert_rejected(
         "request API mismatch",

@@ -107,6 +107,10 @@ api2Expect(
     $foundation->invocation()['request_max_bytes'] === 1_048_576,
     'probe fixes the inclusive request frame limit',
 );
+api2Expect(
+    $foundation->invocation()['job_root_transport'] === 'cwd-v1',
+    'probe fixes the path-free API 2 job-root transport',
+);
 
 putenv('PLIEGO_API2_FAKE_MODE=slow-probe');
 $slowFoundation = RuntimeContract::probe($command);
@@ -275,6 +279,9 @@ $mutations['invocation member order'] = $badInvocationOrder;
 $badFrameLimit = $valid;
 $badFrameLimit['invocation']['request_max_bytes'] = 1_048_575;
 $mutations['request frame limit'] = $badFrameLimit;
+$badJobRootTransport = $valid;
+$badJobRootTransport['invocation']['job_root_transport'] = 'argument-v1';
+$mutations['job-root transport'] = $badJobRootTransport;
 foreach ($mutations as $message => $mutation) {
     api2Rejected(
         fn () => RuntimeContract::fromProbeResult(0, api2ProbeFrame($mutation), ''),
@@ -354,6 +361,7 @@ if ($binary !== null) {
         $realRuntime->invocation() === [
             'request_transport' => 'stdin-single-json',
             'request_max_bytes' => 1_048_576,
+            'job_root_transport' => 'cwd-v1',
             'result_transport' => 'stdout-single-json',
             'invocation_error_transport' => 'stderr-utf8-line',
             'success_exit_code' => 0,

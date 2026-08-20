@@ -144,6 +144,7 @@ pub(crate) fn write_contract_probe(
         invocation: InvocationContract {
             request_transport: "stdin-single-json",
             request_max_bytes: REQUEST_MAX_BYTES,
+            job_root_transport: "cwd-v1",
             result_transport: "stdout-single-json",
             invocation_error_transport: "stderr-utf8-line",
             success_exit_code: 0,
@@ -190,6 +191,7 @@ struct RuntimeIdentity<'a> {
 struct InvocationContract {
     request_transport: &'static str,
     request_max_bytes: usize,
+    job_root_transport: &'static str,
     result_transport: &'static str,
     invocation_error_transport: &'static str,
     success_exit_code: i32,
@@ -860,7 +862,7 @@ mod tests {
             "unexpected probe order: {serialized}"
         );
         assert!(serialized.contains(&format!(
-            r#""contracts":[],"invocation":{{"request_transport":"stdin-single-json","request_max_bytes":{REQUEST_MAX_BYTES},"result_transport":"stdout-single-json","invocation_error_transport":"stderr-utf8-line","success_exit_code":0,"failed_exit_code":1,"invocation_error_exit_code":64}}"#
+            r#""contracts":[],"invocation":{{"request_transport":"stdin-single-json","request_max_bytes":{REQUEST_MAX_BYTES},"job_root_transport":"cwd-v1","result_transport":"stdout-single-json","invocation_error_transport":"stderr-utf8-line","success_exit_code":0,"failed_exit_code":1,"invocation_error_exit_code":64}}"#
         )));
         let probe: Value = serde_json::from_slice(&output).unwrap();
         assert_eq!(probe["contracts"], serde_json::json!([]));
@@ -868,6 +870,7 @@ mod tests {
         assert_eq!(probe["engine"]["source_commit"], SOURCE_COMMIT);
         assert_eq!(probe["engine"]["runtime"]["target"], BUILD_TARGET);
         assert_eq!(probe["invocation"]["request_max_bytes"], REQUEST_MAX_BYTES);
+        assert_eq!(probe["invocation"]["job_root_transport"], "cwd-v1");
         assert_eq!(probe["invocation"]["invocation_error_exit_code"], 64);
         assert!(
             probe["engine"]["runtime"]["binary_sha256"]

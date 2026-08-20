@@ -81,11 +81,24 @@ exits. Servoshell is not a production fallback. Daemon, browser-pool, and hidden
 semantics are not part of API 2.
 
 The dedicated executable selector is `pliego render-api2` with no render options on the command
-line; the normalized request is supplied only on stdin. During the executable-foundation phase the
-probe advertises no contract tuple, so this selector decodes and validates framing but rejects every
-request as unavailable with the invocation-error contract. Input, delivery, and diagnostic root
-transport must be defined and implemented by a later change before any complete tuple is advertised
-and accepted; the executable-foundation selector accepts no host-root transport today.
+line; the normalized request is supplied only on stdin. The probe reports
+`job_root_transport: "cwd-v1"`. The caller starts the one-shot process inside a newly created,
+exclusive job directory with this fixed layout:
+
+```text
+input-manifest.json
+input/
+delivery/      # absent before invocation; committed only on success
+diagnostics/   # absent before invocation; retained only by request policy
+```
+
+`input-manifest.json` is the descriptor-bound canonical manifest, and `input/` contains exactly its
+listed entries. `delivery/` and `diagnostics/` must not exist when the process starts. The runtime
+does not accept an absolute job path in arguments or normalized JSON, does not derive identity from
+the host current-working-directory string, and does not follow a symlink or reparse-point escape
+from the fixed job layout. During the executable-foundation phase the probe still advertises no
+contract tuple, so `render-api2` rejects every request as unavailable before inspecting this layout.
+The layout becomes active only when a complete tuple is advertised and accepted.
 
 The runtime probe fixes the render transport rather than leaving SDKs to infer it:
 
@@ -93,6 +106,8 @@ The runtime probe fixes the render transport rather than leaving SDKs to infer i
 - stdin is bounded to at most `1,048,576` bytes, inclusive; the probe reports that exact
   `request_max_bytes` value, and the runtime rejects an over-limit frame before allocating or reading
   an unbounded request;
+- the path-free host transport is exactly `cwd-v1`; SDKs create one exclusive job root and never
+  place host paths in normalized request or result bytes;
 - every accepted request writes exactly one `RenderResult` JSON value to stdout;
 - `success` exits `0`, while an accepted request whose result is `failed` exits `1`; and
 - an argument, framing, decoding, normalization, manifest-pairing, or unsupported-contract error
