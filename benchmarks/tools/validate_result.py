@@ -413,6 +413,15 @@ def validate_resource_usage(sample: dict[str, Any], path: str, violations: list[
         require_equal(f"{path}.resource_usage.{field}", usage[field], expected, violations)
 
     settle = usage["accounting_settle"]
+    minimum_one_shot_wall = round(usage["wall_ms"] + usage["drain_ms"] + settle["duration_ms"], 3)
+    if sample["one_shot_wall_ms"] + 0.003 < minimum_one_shot_wall:
+        violations.append(
+            Violation(
+                f"{path}.one_shot_wall_ms",
+                "must cover engine wall, descendant drain, and accounting settle "
+                f"({minimum_one_shot_wall!r} ms minimum)",
+            )
+        )
     observations = settle["stable_observations"]
     if len(observations) != 2:
         violations.append(
@@ -1233,6 +1242,7 @@ def validate_semantics(
     aggregates = data["aggregates"]
     passing_samples = [sample for sample in samples if sample["ok"] and sample["correctness"]["pass"]]
     walls = [sample["wall_ms"] for sample in passing_samples]
+    one_shot_walls = [sample["one_shot_wall_ms"] for sample in passing_samples]
     aggregate_series = {
         f"{path}.aggregates.latency": (aggregates["latency"], percentiles(walls)),
         f"{path}.aggregates.cpu.user_ms": (
@@ -1314,16 +1324,26 @@ def validate_semantics(
             violations.append(
                 Violation(f"{path}.aggregates.scaling", f"must equal passing-sample scaling {expected_scaling!r}")
             )
-    if "throughput" in aggregates:
+    if passing_samples and "throughput" not in aggregates:
+        violations.append(
+            Violation(
+                f"{path}.aggregates.throughput",
+                "is required when correctness-passing timed samples exist",
+            )
+        )
+    elif "throughput" in aggregates:
+        mean_one_shot_wall = statistics.fmean(one_shot_walls) if one_shot_walls else 0.0
         expected_throughput = {
-            "renders_per_minute": round(60_000 / mean_wall, 2) if mean_wall else 0.0,
+            "renders_per_minute": round(60_000 / mean_one_shot_wall, 2) if mean_one_shot_wall else 0.0,
             "concurrency": 1,
+            "mean_one_shot_wall_ms": round(mean_one_shot_wall, 3),
+            "measurement_boundary": "runner-process-open-through-sampler-exit",
         }
         if aggregates["throughput"] != expected_throughput:
             violations.append(
                 Violation(
                     f"{path}.aggregates.throughput",
-                    f"must equal serial passing-sample throughput {expected_throughput!r}",
+                    f"must equal drain-inclusive serial passing-sample throughput {expected_throughput!r}",
                 )
             )
 

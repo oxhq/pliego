@@ -262,6 +262,7 @@ def result() -> dict:
                 "ok": True,
                 "exit_code": 0,
                 "wall_ms": 1,
+                "one_shot_wall_ms": 2,
                 "user_ms": 1,
                 "sys_ms": 0,
                 "memory_current_bytes": 0,
@@ -321,7 +322,12 @@ def result() -> dict:
                 "write_operations": pct(1),
             },
             "scaling": {"per_page_wall_ms": 1, "per_page_memory_peak_bytes": 4096},
-            "throughput": {"renders_per_minute": 60000, "concurrency": 1},
+            "throughput": {
+                "renders_per_minute": 30000,
+                "concurrency": 1,
+                "mean_one_shot_wall_ms": 2,
+                "measurement_boundary": "runner-process-open-through-sampler-exit",
+            },
             "output": {"pdf_bytes": pct(1), "page_count": 1},
             "correctness": {"pass_count": 1, "total": 1, "passed": True},
             "determinism": {"identical_pdf_sha256": 1, "total": 1, "pdf_sha256_variants": 1},
@@ -438,6 +444,11 @@ def main() -> None:
     assert not errors(timed)
 
     changed(valid, lambda value: value["samples"][0].update(resource_usage=None), "resource_usage")
+    changed(
+        valid,
+        lambda value: value["samples"][0].update(one_shot_wall_ms=0),
+        "must cover engine wall, descendant drain, and accounting settle",
+    )
     changed(valid, lambda value: value["samples"][0].update(user_ms=99), "samples[0].user_ms")
     changed(valid, lambda value: value["samples"][0].update(memory_peak_bytes=99), "memory_peak_bytes")
     changed(valid, lambda value: value["samples"][0].update(write_bytes=99), "write_bytes")
@@ -620,6 +631,16 @@ def main() -> None:
         valid,
         lambda value: value["aggregates"]["memory"]["cgroup_peak_bytes"].update(max=99),
         "aggregates.memory.cgroup_peak_bytes",
+    )
+    changed(
+        valid,
+        lambda value: value["aggregates"]["throughput"].update(renders_per_minute=60000),
+        "drain-inclusive serial passing-sample throughput",
+    )
+    changed(
+        valid,
+        lambda value: value["aggregates"].pop("throughput"),
+        "is required when correctness-passing timed samples exist",
     )
     changed(valid, lambda value: value["protocol"].update(sample_count=2), "protocol.sample_count")
     changed(

@@ -261,6 +261,7 @@
         "ok",
         "exit_code",
         "wall_ms",
+        "one_shot_wall_ms",
         "user_ms",
         "sys_ms",
         "memory_current_bytes",
@@ -283,6 +284,7 @@
         "ok": { "type": "boolean" },
         "exit_code": { "type": "integer" },
         "wall_ms": { "type": "number", "minimum": 0 },
+        "one_shot_wall_ms": { "type": "number", "minimum": 0 },
         "user_ms": { "type": ["number", "null"], "minimum": 0 },
         "sys_ms": { "type": ["number", "null"], "minimum": 0 },
         "memory_current_bytes": { "type": ["integer", "null"], "minimum": 0 },
@@ -879,9 +881,12 @@
         "throughput": {
           "type": "object",
           "additionalProperties": false,
+          "required": ["renders_per_minute", "concurrency", "mean_one_shot_wall_ms", "measurement_boundary"],
           "properties": {
             "renders_per_minute": { "type": "number", "minimum": 0 },
-            "concurrency": { "type": "integer", "minimum": 1 }
+            "concurrency": { "type": "integer", "minimum": 1 },
+            "mean_one_shot_wall_ms": { "type": "number", "exclusiveMinimum": 0 },
+            "measurement_boundary": { "const": "runner-process-open-through-sampler-exit" }
           }
         },
         "output": {

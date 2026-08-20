@@ -278,7 +278,7 @@ if (PHP_OS_FAMILY === 'Linux') {
 
 /**
  * @param list<string> $command
- * @return array{error: string}|array{wall_ms: float, user_ms: float|null,
+ * @return array{error: string}|array{wall_ms: float, one_shot_wall_ms: float, user_ms: float|null,
  *     sys_ms: float|null, memory_current_bytes: int|null, memory_peak_bytes: int|null,
  *     sampled_peak_rss_kib_lower_bound: int|null, sampled_peak_pss_kib_lower_bound: int|null,
  *     read_bytes: int|null, write_bytes: int|null, read_operations: int|null,
@@ -399,6 +399,10 @@ function run_engine(array $command, string $cwd, bool $isolateNetwork): array
         }
         return [
             'wall_ms' => (float) $measurement['wall_ms'],
+            // Unlike engine wall time, this includes sampler launch, descendant
+            // drain, retained-counter settlement, and sampler exit. Serial
+            // throughput must use this complete one-shot boundary.
+            'one_shot_wall_ms' => round($wallMs, 3),
             'user_ms' => (float) $measurement['cpu_user_ms'],
             'sys_ms' => (float) $measurement['cpu_sys_ms'],
             'memory_current_bytes' => (int) $measurement['memory_current_bytes'],
@@ -424,6 +428,7 @@ function run_engine(array $command, string $cwd, bool $isolateNetwork): array
 
     return [
         'wall_ms' => round($wallMs, 3),
+        'one_shot_wall_ms' => round($wallMs, 3),
         'user_ms' => null,
         'sys_ms' => null,
         'memory_current_bytes' => null,
@@ -606,7 +611,7 @@ function prepare_engine_directory(string $path, int $uid, int $gid): void
     }
 }
 
-/** @return array{index: int, ok: bool, exit_code: int, wall_ms: float,
+/** @return array{index: int, ok: bool, exit_code: int, wall_ms: float, one_shot_wall_ms: float,
  *     user_ms: float|null, sys_ms: float|null, memory_current_bytes: int|null,
  *     memory_peak_bytes: int|null, read_bytes: int|null, write_bytes: int|null,
  *     phase_timings_ms: array<string, float>|null, output: array<string, mixed>,
@@ -801,6 +806,7 @@ function run_sample(array $state, int $index): array
         'ok' => $pass,
         'exit_code' => $exec['exit_code'],
         'wall_ms' => $exec['wall_ms'],
+        'one_shot_wall_ms' => $exec['one_shot_wall_ms'],
         'user_ms' => $exec['user_ms'],
         'sys_ms' => $exec['sys_ms'],
         'memory_current_bytes' => $exec['memory_current_bytes'],

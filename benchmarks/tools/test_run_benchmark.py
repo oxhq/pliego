@@ -276,6 +276,7 @@ def main() -> None:
                 "ok": True,
                 "correctness": {"pass": True},
                 "wall_ms": 1,
+                "one_shot_wall_ms": 4,
                 "user_ms": 1,
                 "sys_ms": 0,
                 "memory_peak_bytes": 2048,
@@ -297,6 +298,12 @@ def main() -> None:
     assert aggregate["io"]["write_bytes"]["mean"] == 4
     assert aggregate["io"]["read_operations"]["mean"] == 5
     assert aggregate["io"]["write_operations"]["mean"] == 6
+    assert aggregate["throughput"] == {
+        "renders_per_minute": 15000.0,
+        "concurrency": 1,
+        "mean_one_shot_wall_ms": 4.0,
+        "measurement_boundary": "runner-process-open-through-sampler-exit",
+    }
     assert benchmark.validate_result.percentiles([1, 3])["p50"] == 1
 
     print("Pliego benchmark runner-count self-test passed")

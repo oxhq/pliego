@@ -561,6 +561,7 @@ def collect_samples(
 def aggregates(samples: list[dict[str, Any]], page_count: int | None) -> dict[str, Any]:
     valid = [s for s in samples if s.get("ok") and (s.get("correctness") or {}).get("pass")]
     walls = [s["wall_ms"] for s in valid]
+    one_shot_walls = [s["one_shot_wall_ms"] for s in valid]
     users = [value for s in valid if (value := s.get("user_ms")) is not None]
     syss = [value for s in valid if (value := s.get("sys_ms")) is not None]
     memory_peaks = [value for s in valid if (value := s.get("memory_peak_bytes")) is not None]
@@ -585,6 +586,7 @@ def aggregates(samples: list[dict[str, Any]], page_count: int | None) -> dict[st
     passed = sum(1 for s in samples if (s.get("correctness") or {}).get("pass"))
     variants = len(set(pdf_hashes))
     mean_wall = statistics.fmean(walls) if walls else 0.0
+    mean_one_shot_wall = statistics.fmean(one_shot_walls) if one_shot_walls else 0.0
     agg: dict[str, Any] = {
         "latency": validate_result.percentiles(walls),
         "cpu": {
@@ -627,8 +629,13 @@ def aggregates(samples: list[dict[str, Any]], page_count: int | None) -> dict[st
                 round(validate_result.percentiles(memory_peaks)["mean"] / page_count, 1) if memory_peaks else 0.0
             ),
         }
-    if mean_wall > 0:
-        agg["throughput"] = {"renders_per_minute": round(60_000 / mean_wall, 2), "concurrency": 1}
+    if mean_one_shot_wall > 0:
+        agg["throughput"] = {
+            "renders_per_minute": round(60_000 / mean_one_shot_wall, 2),
+            "concurrency": 1,
+            "mean_one_shot_wall_ms": round(mean_one_shot_wall, 3),
+            "measurement_boundary": "runner-process-open-through-sampler-exit",
+        }
     return agg
 
 

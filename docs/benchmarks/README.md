@@ -155,9 +155,11 @@ Before a cross-engine comparison is published, every target must follow these ru
   output, and the report-generation code with the summary.
 
 The remaining dedicated-Linux gates are seeded cross-target sample
-interleaving, descendant-drain-inclusive throughput, and automatic traceability
-from every report cell to retained raw samples. Until those pass, the repository
-publishes no comparative numbers.
+interleaving and automatic traceability from every report cell to retained raw
+samples. Single-target serial throughput now uses the retained outer one-shot
+wall interval from runner process open through sampler exit, which includes
+descendant drain and accounting settlement; it is still not a publishable
+cross-engine comparison until interleaving and report traceability pass.
 
 ## Publication gate
 

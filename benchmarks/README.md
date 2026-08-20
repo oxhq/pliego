@@ -201,8 +201,11 @@ executable hash/argv, and denied migration-interface writes before moving the
 stopped launcher into the clean measurement leaf and starting engine wall time.
 All later descendants, including new sessions, remain contained. The retained
 final `cpu.stat`, `io.stat`, `memory.current`, `memory.peak`, and `pids.peak`
-counters are the accounting source. Engine wall time ends with the root process;
-descendant drain and accounting-settle durations are recorded separately.
+counters are the accounting source. Engine wall time ends with the root process.
+Descendant drain and accounting-settle durations are recorded separately. The
+runner also retains a complete one-shot wall interval from process open through
+sampler exit; serial throughput is derived only from that boundary, so leaked or
+slow descendants cannot inflate the rate.
 
 The `minimal-static` oracle declares ISO A4 in points and permits at most 0.75
 points of print-grid quantization. All text explicitly uses normal-weight Ahem.
@@ -279,9 +282,10 @@ and were revalidated unchanged against the published Linux v0.2.0 renderer.
   image digests are pinned; all other fixtures are explicit exclusions.
 * Cross-target sample interleaving and a report generator are not implemented;
   this slice does not publish comparative numbers.
-* Dedicated-Linux acceptance still needs seeded cross-target interleaving,
-  throughput whose wall boundary includes descendant drain, and report-cell to
-  raw-sample traceability. The existing single-target throughput field is not a
+* Dedicated-Linux acceptance still needs seeded cross-target interleaving and
+  report-cell to raw-sample traceability. The implemented single-target
+  throughput includes sampler startup, descendant drain, accounting settlement,
+  and sampler exit, but remains a serial per-target diagnostic rather than a
   publishable cross-engine throughput claim.
 * The Ubuntu adapter/Poppler smoke is configured in CI; it is not hosted proof
   until that workflow passes at the exact commit containing this change.
