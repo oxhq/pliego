@@ -8,6 +8,12 @@
 //! after strict request decoding so it cannot accidentally route an API 2 request through API 1 or
 //! the nonproduction servoshell oracle.
 
+#[cfg(all(
+    test,
+    feature = "document-session",
+    not(any(target_os = "android", target_env = "ohos"))
+))]
+mod artifacts;
 mod input_job;
 #[cfg(all(
     test,
@@ -21,6 +27,12 @@ use std::fmt;
 use std::fs::File;
 use std::io::{self, Read, Write};
 
+#[cfg(all(
+    test,
+    feature = "document-session",
+    not(any(target_os = "android", target_env = "ohos"))
+))]
+pub(crate) use artifacts::encode_profile_null_scene;
 pub(crate) use input_job::ResolvedInputJob;
 #[cfg(all(
     test,

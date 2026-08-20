@@ -2699,6 +2699,10 @@ mod tests {
         env!("CARGO_MANIFEST_DIR"),
         "/../../contracts/api2/goldens/accepted/render-request.a4.json"
     ));
+    const API2_AHEM_TTF: &[u8] = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/text-scene/Ahem.ttf"
+    ));
     const ALLOWED_HTTP_BODY: &[u8] = b"window.pliego.ready({ http_loaded: true });\n";
     const FIXTURE_PNG_DATA_URL: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 
@@ -3790,10 +3794,19 @@ window.pliego?.defer();
             std::env::var(PLIEGO_INPUT_CASE_ENV).expect("pliego-input fixture case should be set");
         let input_url = url::Url::parse("pliego-input:///entry.html").unwrap();
         let css_url = url::Url::parse("pliego-input:///styles.css").unwrap();
+        let font_url = url::Url::parse("pliego-input:///Ahem.ttf").unwrap();
         let payload_url = url::Url::parse("pliego-input:///payload.json").unwrap();
         let missing_url = url::Url::parse("pliego-input:///missing.js").unwrap();
         let file_url = url::Url::parse("file:///definitely-host-owned/pliego-secret.js").unwrap();
-        let css = b"#marker { color: rgb(1, 2, 3); }\n";
+        let css = br#"@font-face {
+  font-family: "Pliego API2 Ahem";
+  src: url("Ahem.ttf");
+}
+#marker {
+  color: rgb(1, 2, 3);
+  font: 16px/20px "Pliego API2 Ahem";
+}
+"#;
         let payload = br#"{"expediente":"host-path-free"}"#;
         let input = match case.as_str() {
             "success" => br#"<!doctype html>
@@ -3802,7 +3815,8 @@ window.pliego?.defer();
 <p id="marker">PLIEGO_INPUT_MARKER</p>
 <script>
 window.pliego.defer();
-fetch("payload.json")
+document.fonts.ready
+  .then(() => fetch("payload.json"))
   .then(response => response.text())
   .then(body => requestAnimationFrame(() => window.pliego.ready({
     href: location.href,
@@ -3835,6 +3849,7 @@ fetch("payload.json")
         let mut entries = vec![("entry.html", "text/html;charset=utf-8", input)];
         if case == "success" {
             entries.extend([
+                ("Ahem.ttf", "font/ttf", API2_AHEM_TTF),
                 ("styles.css", "text/css;charset=utf-8", css.as_slice()),
                 ("payload.json", "application/json", payload.as_slice()),
             ]);
@@ -3956,9 +3971,55 @@ fetch("payload.json")
             .prepare_capture_candidate()
             .expect("frozen entrypoint, CSS, and fetch should settle")
             .capture()
-            .and_then(|capture| capture.render())
-            .expect("the host-path-free pliego-input document should render");
-        assert!(outcome.pdf.starts_with(b"%PDF-"));
+            .expect("the host-path-free pliego-input document should capture");
+        let encoded = crate::api2::encode_profile_null_scene(
+            &expected_request,
+            &outcome.capture,
+            |resource| outcome.resource_store.resolve_content(resource),
+        )
+        .expect("the exact controlled capture should encode as a profile-null API 2 scene");
+        assert_eq!(
+            encoded.media_type,
+            "application/vnd.pliego.document-scene+json"
+        );
+        assert_eq!(encoded.sha256, content_address(&encoded.bytes));
+        let scene: serde_json::Value = serde_json::from_slice(&encoded.bytes)
+            .expect("the canonical scene should be valid JSON");
+        assert_eq!(scene["schema"], "pliego.document-scene");
+        assert_eq!(scene["version"], 2);
+        assert_eq!(scene["request_page"], expected_request["page"]);
+        assert!(scene["semantic_layer"].is_null());
+        let operations = scene["pages"]
+            .as_array()
+            .expect("the canonical scene should contain pages")
+            .iter()
+            .flat_map(|page| {
+                page["operations"]
+                    .as_array()
+                    .expect("every canonical page should contain operations")
+            })
+            .collect::<Vec<_>>();
+        let marker = operations
+            .iter()
+            .find(|operation| {
+                operation["type"] == "text"
+                    && operation["text"]
+                        .as_str()
+                        .is_some_and(|text| text.contains("PLIEGO_INPUT_MARKER"))
+            })
+            .expect("the canonical scene should retain the marker text");
+        let marker_font_resource = marker["font"]["resource"]
+            .as_str()
+            .expect("the marker text should bind a public font resource");
+        assert_eq!(content_address(API2_AHEM_TTF), AHEM_SOURCE_RESOURCE);
+        assert_eq!(marker_font_resource, AHEM_CAPTURED_RESOURCE);
+        let marker_font = encoded
+            .resources
+            .get(marker_font_resource)
+            .expect("the marker font resource should be retained");
+        assert_eq!(marker_font.media_type, "application/octet-stream");
+        assert_eq!(content_address(&marker_font.bytes), marker_font_resource);
+        assert!(encoded.bytes.ends_with(b"\n"));
         assert_eq!(outcome.readiness["status"], "ready");
         assert_eq!(outcome.readiness["payload"]["href"], input_url.as_str());
         assert_eq!(
@@ -3966,13 +4027,14 @@ fetch("payload.json")
             String::from_utf8_lossy(payload).as_ref()
         );
         assert_eq!(outcome.readiness["payload"]["color"], "rgb(1, 2, 3)");
-        assert_eq!(outcome.resource_accounting.requests, 3);
-        assert_eq!(outcome.resource_accounting.loaded, 3);
+        assert_eq!(outcome.resource_accounting.requests, 4);
+        assert_eq!(outcome.resource_accounting.loaded, 4);
         assert_eq!(outcome.resource_accounting.delegated, 0);
         assert_eq!(outcome.resource_accounting.failed, 0);
 
         for (url, media_type, body) in [
             (&input_url, "text/html;charset=utf-8", input),
+            (&font_url, "font/ttf", API2_AHEM_TTF),
             (&css_url, "text/css;charset=utf-8", css.as_slice()),
             (&payload_url, "application/json", payload.as_slice()),
         ] {
