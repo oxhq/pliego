@@ -8,41 +8,44 @@
 //! below the decoder lets tests prove the filesystem authority boundary before render activation.
 
 use std::collections::BTreeMap;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(test, target_os = "linux", target_os = "macos"))]
 use std::collections::BTreeSet;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::ffi::{OsStr, OsString};
 use std::path::Path;
 
 use serde_json::Value;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(test, target_os = "linux", target_os = "macos"))]
 use sha2::{Digest, Sha256};
 
 use super::InvocationError;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(test, target_os = "linux", target_os = "macos"))]
 use super::{
-    INPUT_FIELDS, INPUT_MANIFEST_MAX_BYTES, INPUT_TREE_MAX_NODES, closed_object,
-    decode_input_manifest, hex_lower, required, required_string, required_u64, validate_request,
+    INPUT_FIELDS, closed_object, decode_input_manifest, hex_lower, required, required_string,
+    validate_request,
 };
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use super::{INPUT_MANIFEST_MAX_BYTES, INPUT_TREE_MAX_NODES, required_u64};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use crate::session::BoundDirectory;
 
 #[derive(Debug, Eq, PartialEq)]
-pub(crate) struct LoadedInputJob {
-    pub(crate) canonical_manifest: Vec<u8>,
-    pub(crate) entrypoint: String,
-    pub(crate) resources: BTreeMap<String, LoadedInputResource>,
+pub(crate) struct ResolvedInputJob {
+    canonical_manifest: Vec<u8>,
+    entrypoint: String,
+    resources: BTreeMap<String, LoadedInputResource>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) struct LoadedInputResource {
-    pub(crate) media_type: String,
-    pub(crate) content_address: String,
-    pub(crate) bytes: Vec<u8>,
+    media_type: String,
+    content_address: String,
+    declared_bytes: u64,
+    bytes: Vec<u8>,
 }
 
 #[derive(Clone, Debug)]
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(test, target_os = "linux", target_os = "macos"))]
 struct ExpectedInputResource {
     media_type: String,
     content_address: String,
@@ -55,7 +58,7 @@ struct ExpectedInputResource {
 pub(crate) fn load_input_job(
     _job_root: &Path,
     _request: &Value,
-) -> Result<LoadedInputJob, InvocationError> {
+) -> Result<ResolvedInputJob, InvocationError> {
     Err(InvocationError::new(
         "cwd-v1 input loading requires descriptor-relative filesystem authority",
     ))
@@ -67,7 +70,7 @@ pub(crate) fn load_input_job(
 pub(crate) fn load_input_job(
     job_root: &Path,
     request: &Value,
-) -> Result<LoadedInputJob, InvocationError> {
+) -> Result<ResolvedInputJob, InvocationError> {
     validate_request(request).map_err(InvocationError::new)?;
     let input = request_input(request)?;
     let entrypoint = required_string(input, "$.input", "entrypoint")
@@ -147,14 +150,103 @@ pub(crate) fn load_input_job(
         ));
     }
 
-    Ok(LoadedInputJob {
+    finish_resolved_input_job(canonical_manifest, entrypoint, loaded)
+}
+
+impl ResolvedInputJob {
+    pub(crate) fn into_session_parts(self) -> (String, BTreeMap<String, LoadedInputResource>) {
+        let Self {
+            canonical_manifest: _,
+            entrypoint,
+            resources,
+        } = self;
+        (entrypoint, resources)
+    }
+}
+
+impl LoadedInputResource {
+    pub(crate) fn into_session_parts(self) -> (String, String, u64, Vec<u8>) {
+        (
+            self.media_type,
+            self.content_address,
+            self.declared_bytes,
+            self.bytes,
+        )
+    }
+}
+
+#[cfg(any(test, target_os = "linux", target_os = "macos"))]
+fn finish_resolved_input_job(
+    canonical_manifest: Vec<u8>,
+    entrypoint: String,
+    resources: BTreeMap<String, LoadedInputResource>,
+) -> Result<ResolvedInputJob, InvocationError> {
+    let entrypoint_resource = resources.get(&entrypoint).ok_or_else(|| {
+        InvocationError::new("validated input manifest lost its declared entrypoint")
+    })?;
+    std::str::from_utf8(&entrypoint_resource.bytes).map_err(|_| {
+        InvocationError::new(format!(
+            "input entrypoint {entrypoint:?} is not valid UTF-8"
+        ))
+    })?;
+    Ok(ResolvedInputJob {
         canonical_manifest,
         entrypoint,
-        resources: loaded,
+        resources,
     })
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(test)]
+pub(crate) fn resolve_input_job_for_test(
+    request: &Value,
+    canonical_manifest: &[u8],
+    mut bodies: BTreeMap<String, Vec<u8>>,
+) -> Result<ResolvedInputJob, InvocationError> {
+    validate_request(request).map_err(InvocationError::new)?;
+    let input = request_input(request)?;
+    let entrypoint = required_string(input, "$.input", "entrypoint")
+        .map_err(InvocationError::new)?
+        .to_owned();
+    let manifest = decode_input_manifest(request, canonical_manifest)?;
+    let (expected_files, _) = expected_input_tree(&manifest)?;
+    let actual_paths = bodies.keys().cloned().collect::<BTreeSet<_>>();
+    let expected_paths = expected_files.keys().cloned().collect::<BTreeSet<_>>();
+    if actual_paths != expected_paths {
+        return Err(InvocationError::new(
+            "input bodies must exactly match the manifest-authorized files",
+        ));
+    }
+
+    let mut resources = BTreeMap::new();
+    for (path, expected) in expected_files {
+        let bytes = bodies
+            .remove(&path)
+            .ok_or_else(|| InvocationError::new("input bodies lost a manifest-authorized file"))?;
+        if u64::try_from(bytes.len()).ok() != Some(expected.bytes) {
+            return Err(InvocationError::new(format!(
+                "input file {path:?} does not match its declared byte count"
+            )));
+        }
+        let content_address = format!("sha256:{}", hex_lower(&Sha256::digest(&bytes)));
+        if content_address != expected.content_address {
+            return Err(InvocationError::new(format!(
+                "input file {path:?} does not match its declared SHA-256"
+            )));
+        }
+        resources.insert(
+            path,
+            LoadedInputResource {
+                media_type: expected.media_type,
+                content_address,
+                declared_bytes: expected.bytes,
+                bytes,
+            },
+        );
+    }
+    finish_resolved_input_job(canonical_manifest.to_vec(), entrypoint, resources)
+}
+
+#[cfg(any(test, target_os = "linux", target_os = "macos"))]
 fn request_input(request: &Value) -> Result<&serde_json::Map<String, Value>, InvocationError> {
     let request =
         closed_object(request, "$", super::TOP_LEVEL_FIELDS).map_err(InvocationError::new)?;
@@ -166,7 +258,7 @@ fn request_input(request: &Value) -> Result<&serde_json::Map<String, Value>, Inv
     .map_err(InvocationError::new)
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(test, target_os = "linux", target_os = "macos"))]
 fn expected_input_tree(
     manifest: &Value,
 ) -> Result<(BTreeMap<String, ExpectedInputResource>, BTreeSet<String>), InvocationError> {
@@ -277,6 +369,7 @@ fn load_directory(
             LoadedInputResource {
                 media_type: expected.media_type.clone(),
                 content_address,
+                declared_bytes: expected.bytes,
                 bytes,
             },
         );

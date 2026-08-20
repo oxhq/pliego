@@ -15,6 +15,9 @@ use std::fmt;
 use std::fs::File;
 use std::io::{self, Read, Write};
 
+pub(crate) use input_job::ResolvedInputJob;
+#[cfg(test)]
+pub(crate) use input_job::resolve_input_job_for_test;
 use serde::Serialize;
 use serde::de::{self, Deserialize, Deserializer, MapAccess, SeqAccess, Visitor};
 use serde_json::{Map, Number, Value};
