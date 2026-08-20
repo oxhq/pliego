@@ -91,7 +91,7 @@
     "page": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["size", "margins_app_units", "css_page_precedence"],
+      "required": ["size", "margins_app_units", "geometry_authority"],
       "properties": {
         "size": {
           "oneOf": [
@@ -100,7 +100,7 @@
           ]
         },
         "margins_app_units": { "$ref": "#/definitions/margins" },
-        "css_page_precedence": { "const": "css-page-over-request-defaults" }
+        "geometry_authority": { "const": "request-only-v1" }
       }
     },
     "named_page_size": {

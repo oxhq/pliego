@@ -606,12 +606,11 @@ def scene_semantics(scene: dict[str, Any], request: dict[str, Any] | None = None
         page_path = f"{path}.pages[{page_index}]"
         if page["number"] != page_index + 1:
             violations.append(Violation(f"{page_path}.number", "page numbers must be contiguous from one"))
-        if page["style_source"] == "request-defaults":
-            size = page["size_app_units"]
-            if (size["width"], size["height"]) != (request_width, request_height):
-                violations.append(Violation(f"{page_path}.size_app_units", "does not resolve request defaults"))
-            if page["margins_app_units"] != request_margins:
-                violations.append(Violation(f"{page_path}.margins_app_units", "does not resolve request defaults"))
+        size = page["size_app_units"]
+        if (size["width"], size["height"]) != (request_width, request_height):
+            violations.append(Violation(f"{page_path}.size_app_units", "does not resolve request authority"))
+        if page["margins_app_units"] != request_margins:
+            violations.append(Violation(f"{page_path}.margins_app_units", "does not resolve request authority"))
         size = page["size_app_units"]
         margins = page["margins_app_units"]
         if margins["left"] + margins["right"] >= size["width"]:
@@ -1319,6 +1318,12 @@ def main() -> None:
         golden("rejected/render-request.live-network.json"),
         "expected const 'deny'",
     )
+    assert_rejected(
+        "legacy CSS page precedence",
+        "request",
+        golden("rejected/render-request.css-page-precedence.json"),
+        "unexpected property 'css_page_precedence'",
+    )
     non_html_entrypoint = golden("rejected/render-request.non-html-entrypoint.json")
     assert_rejected(
         "non-HTML entrypoint",
@@ -1350,6 +1355,12 @@ def main() -> None:
 
     glyph_overflow = golden("rejected/document-scene.glyph-u32-overflow.json")
     assert_rejected("glyph u32 overflow", "scene", glyph_overflow, "maximum 4294967295")
+    assert_rejected(
+        "CSS page provenance",
+        "scene",
+        golden("rejected/document-scene.css-page-source.json"),
+        "expected const 'request-defaults'",
+    )
     range_overflow = copy.deepcopy(scene)
     range_overflow["pages"][0]["operations"][0]["glyphs"][0]["text_range"]["end"] = U32_MAX + 1
     assert_rejected("glyph range u32 overflow", "scene", range_overflow, "maximum 4294967295")
@@ -1603,7 +1614,7 @@ def main() -> None:
         "request-default page geometry drift",
         "scene",
         wrong_default,
-        "does not resolve request defaults",
+        "does not resolve request authority",
         scene_semantics(wrong_default, request_a4),
     )
     oversized_coordinate = copy.deepcopy(scene)

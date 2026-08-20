@@ -12,7 +12,7 @@
       "bottom": 2880,
       "left": 2880
     },
-    "css_page_precedence": "css-page-over-request-defaults"
+    "geometry_authority": "request-only-v1"
   },
   "semantic_layer": null,
   "pages": [

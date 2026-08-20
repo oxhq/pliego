@@ -3848,8 +3848,8 @@ fetch("payload.json")
         assert_eq!(execution.request, expected_request);
         assert_eq!(execution.diagnostics, expected_diagnostics);
         assert_eq!(
-            execution.request["page"]["css_page_precedence"],
-            "css-page-over-request-defaults"
+            execution.request["page"]["geometry_authority"],
+            "request-only-v1"
         );
         assert_eq!(
             execution.runtime_policy,

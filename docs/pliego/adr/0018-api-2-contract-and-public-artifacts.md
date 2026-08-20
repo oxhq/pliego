@@ -247,24 +247,22 @@ Pre-R3.5 paint operations contain no role, label, structure identifier, or gener
 single top-level `semantic_layer` reference is the only scene extension point reserved here; R3.5
 owns the semantic document and its mapping back to paint operations.
 
-### Normalized page policy and CSS `@page`
+### Normalized request-authoritative page policy
 
 The native facade default is named `A4` with 48 CSS-pixel margins. At 60 app units per CSS pixel,
 those margins are `2880` app units. Native A4 resolves once to the nearest app-unit page box:
 `47622 x 67351`. A request may instead contain explicit positive `width_app_units` and
 `height_app_units`; named and explicit forms are mutually exclusive.
 
-The request page is a default, not an instruction to delete document CSS. The only version-1
-precedence value is `css-page-over-request-defaults`:
+The request page is authoritative in contract version 1. Its required `geometry_authority` is the
+single stable value `request-only-v1`. `DocumentScene.request_page` is an exact copy of that accepted
+request policy. Every emitted page records its contiguous one-based number, the resolved request
+size and margins, and the only permitted `style_source`, `request-defaults`.
 
-1. a matching CSS `@page` size or margin declaration supplies that effective value;
-2. an omitted CSS value inherits the corresponding normalized request default; and
-3. an absent matching `@page` rule uses the request size and margins in full.
-
-`DocumentScene.request_page` is an exact copy of the accepted request policy. Every emitted page
-records its contiguous one-based number, effective integer size and margins, and `style_source` of
-`request-defaults` or `css-page`. A `request-defaults` page must equal the resolved request values.
-This binds the request to the scene while preserving standard document-owned `@page` styling.
+Servo/Pliego does not currently parse and apply standard CSS `@page` size or margin declarations to
+the paged layout. API 2 therefore cannot represent `css-page` provenance or let equivalent fixture
+geometry imply it. Supporting document-owned page geometry requires a later contract version or
+explicitly negotiated policy plus renderer-backed evidence; it cannot silently change version 1.
 
 ### Deterministic document time and settlement policy
 
@@ -424,15 +422,14 @@ every API 2 render request. They do not prove facade prefetch/rewrite, a success
 deterministic renderer output, atomic API 2 publication, cross-platform byte identity, consumer
 installation, or release availability. API 2 rendering and Pliego 1.0 remain blocked on those
 independent implementation and hosted proof gates. The schema is also not frozen: OXH-326 still
-requires the profile-null encoder, canonical PDF adapter, page/CSS authority, settlement enforcement,
+requires the profile-null encoder, canonical PDF adapter, request-page binding, settlement enforcement,
 publication, package, SDK, and hosted proof gates. OXH-346 remains a later prerequisite for the first
 semantic/accessibility profile, not for freezing profile-null API 2.
 
-The current paged-layout capture is deliberately narrower than the target policy above. It retains
-exact app units when layout still owns them and labels every page only as `request-defaults`; a
-`css-page` capture source is unrepresentable until Servo/Pliego actually parses and applies `@page`.
-Paint geometry that has already become floating point carries no false fixed-point authority. This
-capture-authority slice therefore prepares a fail-closed encoder but does not satisfy the page/CSS or
+The current paged-layout capture matches the request-only page authority above. It retains exact app
+units when layout still owns them and labels every page only as `request-defaults`. Paint geometry
+that has already become floating point carries no false fixed-point authority. This capture-authority
+slice therefore prepares a fail-closed encoder but does not satisfy the canonical encoder or
 profile-null activation gates.
 
 ## Consequences
@@ -440,7 +437,7 @@ profile-null activation gates.
 - API 2 has one strict, path-independent request/result boundary and an exact binary contract probe.
 - The core renderer cannot silently depend on live network or a host font database.
 - Page geometry and public scene bytes no longer contain floating-point ambiguity.
-- CSS `@page` remains authoritative where declared, while the request supplies explicit defaults.
+- API 2 version 1 page size and margins are request-authoritative; CSS `@page` authority is unsupported.
 - Input and delivery identities are reproducible from actual bytes and portable paths.
 - Stable public error kinds can survive internal error-code refactors.
 - R3.5 can add a versioned semantic layer and deterministic profile evidence without an opaque map or

@@ -109,7 +109,7 @@
       "required": ["number", "style_source", "size_app_units", "margins_app_units", "operations"],
       "properties": {
         "number": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
-        "style_source": { "type": "string", "enum": ["request-defaults", "css-page"] },
+        "style_source": { "const": "request-defaults" },
         "size_app_units": { "$ref": "#/definitions/size" },
         "margins_app_units": { "$ref": "render-request.v1.json#/definitions/margins" },
         "operations": {

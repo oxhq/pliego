@@ -61,7 +61,7 @@ const PROFILE_FIELDS: &[&str] = &["schema", "version"];
 const INPUT_FIELDS: &[&str] = &["entrypoint", "manifest"];
 const MANIFEST_FIELDS: &[&str] = &["path", "media_type", "sha256", "bytes"];
 const ENVIRONMENT_FIELDS: &[&str] = &["locale", "timezone"];
-const PAGE_FIELDS: &[&str] = &["size", "margins_app_units", "css_page_precedence"];
+const PAGE_FIELDS: &[&str] = &["size", "margins_app_units", "geometry_authority"];
 const NAMED_PAGE_FIELDS: &[&str] = &["name"];
 const EXPLICIT_PAGE_FIELDS: &[&str] = &["width_app_units", "height_app_units"];
 const MARGIN_FIELDS: &[&str] = &["top", "right", "bottom", "left"];
@@ -727,12 +727,7 @@ fn validate_request(request: &Value) -> Result<(), String> {
     if top + bottom >= height {
         return Err("$.page.margins_app_units: vertical margins consume the page".into());
     }
-    exact_string(
-        page,
-        "$.page",
-        "css_page_precedence",
-        "css-page-over-request-defaults",
-    )?;
+    exact_string(page, "$.page", "geometry_authority", "request-only-v1")?;
 
     let resources = closed_object(
         required(request, "$", "resources")?,
@@ -1028,6 +1023,10 @@ mod tests {
         env!("CARGO_MANIFEST_DIR"),
         "/../../contracts/api2/goldens/accepted/render-request.a4.json"
     ));
+    const LEGACY_CSS_PAGE_REQUEST: &[u8] = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../contracts/api2/goldens/rejected/render-request.css-page-precedence.json"
+    ));
     const INPUT_MANIFEST: &[u8] = include_bytes!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../contracts/api2/fixtures/input-manifest.json"
@@ -1046,6 +1045,19 @@ mod tests {
         let request = decode_render_request(&mut &REQUEST[..]).unwrap();
         assert_eq!(request["schema"], "pliego.render-request");
         assert_eq!(request["profile"], Value::Null);
+        assert_eq!(request["page"]["geometry_authority"], "request-only-v1");
+    }
+
+    #[test]
+    fn rejects_legacy_css_page_authority_by_name_and_value() {
+        let error = decode_render_request(&mut &LEGACY_CSS_PAGE_REQUEST[..]).unwrap_err();
+        assert!(error.to_string().contains("unexpected property"), "{error}");
+
+        let mut request: Value = serde_json::from_slice(REQUEST).unwrap();
+        request["page"]["geometry_authority"] = Value::from("css-page-over-request-defaults");
+        let encoded = serde_json::to_vec(&request).unwrap();
+        let error = decode_render_request(&mut encoded.as_slice()).unwrap_err();
+        assert!(error.to_string().contains("request-only-v1"), "{error}");
     }
 
     #[test]

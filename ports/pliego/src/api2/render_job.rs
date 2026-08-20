@@ -4,10 +4,10 @@
 
 //! Inactive, profile-null mapping from a validated API 2 request into existing runtime types.
 //!
-//! Activation stays blocked on a fixed-point public scene surface and verified CSS `@page`
-//! precedence. This mapper retains the exact request, including `css_page_precedence`, but does not
-//! claim that the current `f32` inspection surface or the test-only execution bridge enforces the
-//! future public artifact contract.
+//! Activation stays blocked on a complete fixed-point public scene encoder. This mapper retains the
+//! exact request, including the request-only page-geometry authority, but does not claim that the
+//! current `f32` inspection surface or the test-only execution bridge enforces the future public
+//! artifact contract.
 
 #[cfg(test)]
 use std::collections::BTreeMap;
