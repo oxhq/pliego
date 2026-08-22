@@ -100,8 +100,7 @@ def validate_windows_owner_only_dacl(payload: bytes, sid: str) -> None:
         descriptor,
     )
     if match is None or sorted(
-        match.group("flags")[index : index + 2]
-        for index in range(0, len(match.group("flags")), 2)
+        match.group("flags")[index : index + 2] for index in range(0, len(match.group("flags")), 2)
     ) != ["CI", "OI"]:
         raise OSError("Windows job root does not have one protected owner-only full-access DACL")
 
@@ -134,7 +133,9 @@ def run_windows_acl_tool(arguments: list[str], operation: str) -> bytes:
     except (OSError, subprocess.TimeoutExpired) as error:
         raise OSError(f"Windows API 2 job-root {operation} could not run") from error
     if completed.returncode != 0:
-        diagnostic = completed.stderr[:512].decode("utf-8", errors="backslashreplace").replace("\r", "\\r").replace("\n", "\\n")
+        diagnostic = (
+            completed.stderr[:512].decode("utf-8", errors="backslashreplace").replace("\r", "\\r").replace("\n", "\\n")
+        )
         raise OSError(
             f"Windows API 2 job-root {operation} failed with exit {completed.returncode}: {diagnostic or '<empty stderr>'}"
         )
@@ -790,9 +791,7 @@ def self_test() -> None:
         validate_windows_owner_only_dacl(valid_acl, sid)
         invalid_acls = [
             f"fixture\r\nD:AI(A;OICI;FA;;;{sid})\r\n".encode("utf-16-le"),
-            f"fixture\r\nD:PAI(A;OICI;FA;;;{sid})(A;OICI;FA;;;S-1-5-18)\r\n".encode(
-                "utf-16-le"
-            ),
+            f"fixture\r\nD:PAI(A;OICI;FA;;;{sid})(A;OICI;FA;;;S-1-5-18)\r\n".encode("utf-16-le"),
             f"fixture\r\nD:PAI(A;OI;FA;;;{sid})\r\n".encode("utf-16-le"),
         ]
         for invalid_acl in invalid_acls:
