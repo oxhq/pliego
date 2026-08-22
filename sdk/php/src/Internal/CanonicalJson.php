@@ -10,11 +10,16 @@ use UnexpectedValueException;
 /** @internal */
 final class CanonicalJson
 {
+    private const ENCODE_FLAGS = JSON_UNESCAPED_SLASHES
+        | JSON_UNESCAPED_UNICODE
+        | JSON_UNESCAPED_LINE_TERMINATORS
+        | JSON_THROW_ON_ERROR;
+
     /** @param array<string, mixed> $value */
     public static function encodeFrame(array $value, string $label): string
     {
         try {
-            return json_encode($value, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR)."\n";
+            return json_encode($value, self::ENCODE_FLAGS)."\n";
         } catch (JsonException $error) {
             throw new UnexpectedValueException("cannot encode canonical {$label} JSON", previous: $error);
         }
@@ -45,7 +50,7 @@ final class CanonicalJson
         }
 
         try {
-            $canonical = json_encode($value, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
+            $canonical = json_encode($value, self::ENCODE_FLAGS);
         } catch (JsonException $error) {
             throw new UnexpectedValueException("{$label} cannot be canonically encoded", previous: $error);
         }

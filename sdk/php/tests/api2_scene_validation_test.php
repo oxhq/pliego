@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use Pliego\Php\Internal\Api2ResultValidator;
+use Pliego\Php\Internal\CanonicalJson;
 
 require dirname(__DIR__).'/vendor/autoload.php';
 
@@ -16,7 +17,13 @@ function api2SceneExpect(bool $condition, string $message): void
 /** @param array<string, mixed> $value */
 function api2SceneJson(array $value): string
 {
-    return json_encode($value, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR)."\n";
+    return json_encode(
+        $value,
+        JSON_UNESCAPED_SLASHES
+            | JSON_UNESCAPED_UNICODE
+            | JSON_UNESCAPED_LINE_TERMINATORS
+            | JSON_THROW_ON_ERROR,
+    )."\n";
 }
 
 /** @return array{path: string, media_type: string, sha256: string, bytes: int} */
@@ -302,6 +309,35 @@ function api2SceneExpectRejected(string $name, Closure $mutate, string $message)
     }
 }
 
+$lineSeparator = "\xE2\x80\xA8";
+$rawUtf8Value = "café 東京{$lineSeparator}fin";
+$rawUtf8Frame = '{"value":"'.$rawUtf8Value.'"}'."\n";
+$decodedRawUtf8 = CanonicalJson::decodeFrame($rawUtf8Frame, 'raw UTF-8 fixture');
+api2SceneExpect($decodedRawUtf8['value'] === $rawUtf8Value, 'raw UTF-8 and U+2028 survive decoding');
+api2SceneExpect(
+    CanonicalJson::encodeFrame(['value' => $rawUtf8Value], 'raw UTF-8 fixture') === $rawUtf8Frame,
+    'canonical encoding matches native raw UTF-8 and U+2028 bytes',
+);
+api2SceneExpect(
+    api2SceneJson(['value' => $rawUtf8Value]) === $rawUtf8Frame,
+    'scene fixture helper preserves native raw UTF-8 and U+2028 bytes',
+);
+foreach ([
+    'escaped Unicode' => '{"value":"caf\u00e9"}'."\n",
+    'escaped U+2028' => '{"value":"before\u2028after"}'."\n",
+    'escaped slash' => '{"value":"https:\/\/example.test\/"}'."\n",
+] as $name => $frame) {
+    try {
+        CanonicalJson::decodeFrame($frame, $name);
+        throw new RuntimeException("expected noncanonical {$name} rejection");
+    } catch (UnexpectedValueException $error) {
+        api2SceneExpect(
+            str_contains($error->getMessage(), 'canonical compact JSON'),
+            "{$name} produced an unexpected rejection: {$error->getMessage()}",
+        );
+    }
+}
+
 $valid = api2SceneFixture();
 $transaction = api2SceneTransaction($valid['scene'], $valid['resources'], $valid['page']);
 try {
@@ -326,6 +362,33 @@ try {
 
 $valid = api2SceneFixture();
 unset($valid['scene']['pages'][0]['operations'][1]['fill']);
+$transaction = api2SceneTransaction($valid['scene'], $valid['resources'], $valid['page']);
+try {
+    $transaction['validator']->validate($transaction['stdout'], 0);
+} finally {
+    api2SceneRemoveTree($transaction['root']);
+}
+
+$valid = api2SceneFixture();
+$link = $valid['scene']['pages'][0]['operations'][3];
+foreach ([
+    'https://example.test:8443/path',
+    'https://example.test/a%2Fb',
+    'https://example.test/%7B%7D/',
+    'https://example.test/^|',
+    'https://example.test/path?{query}',
+    'https://example.test/path?`query',
+    'https://example.test/path#{fragment}',
+    'https://127.0.0.1/',
+    'https://exa{mple.test/',
+    'https://[::1]/',
+    'https://[abcd::1]/',
+    'mailto:user@example.test',
+] as $target) {
+    $operation = $link;
+    $operation['target'] = $target;
+    $valid['scene']['pages'][0]['operations'][] = $operation;
+}
 $transaction = api2SceneTransaction($valid['scene'], $valid['resources'], $valid['page']);
 try {
     $transaction['validator']->validate($transaction['stdout'], 0);
@@ -448,6 +511,138 @@ $cases = [
     'link-default-port' => [
         static function (array &$scene): void {
             $scene['pages'][0]['operations'][3]['target'] = 'https://example.test:443/invoices/42';
+        },
+        '.target is not canonical',
+    ],
+    'link-empty-port' => [
+        static function (array &$scene): void {
+            $scene['pages'][0]['operations'][3]['target'] = 'https://example.test:/';
+        },
+        '.target is not canonical',
+    ],
+    'link-zero-padded-port' => [
+        static function (array &$scene): void {
+            $scene['pages'][0]['operations'][3]['target'] = 'https://example.test:08443/';
+        },
+        '.target is not canonical',
+    ],
+    'link-out-of-range-port' => [
+        static function (array &$scene): void {
+            $scene['pages'][0]['operations'][3]['target'] = 'https://example.test:65536/';
+        },
+        '.target is not canonical',
+    ],
+    'link-raw-path-braces' => [
+        static function (array &$scene): void {
+            $scene['pages'][0]['operations'][3]['target'] = 'https://example.test/{}/';
+        },
+        '.target is not canonical',
+    ],
+    'link-raw-path-backslash' => [
+        static function (array &$scene): void {
+            $scene['pages'][0]['operations'][3]['target'] = 'https://example.test/\\foo';
+        },
+        '.target is not canonical',
+    ],
+    'link-authority-backslash' => [
+        static function (array &$scene): void {
+            $scene['pages'][0]['operations'][3]['target'] = 'https://example.test\\evil.test/path';
+        },
+        '.target is not canonical',
+    ],
+    'link-short-ipv4' => [
+        static function (array &$scene): void {
+            $scene['pages'][0]['operations'][3]['target'] = 'https://127.1/';
+        },
+        '.target is not canonical',
+    ],
+    'link-hex-ipv4' => [
+        static function (array &$scene): void {
+            $scene['pages'][0]['operations'][3]['target'] = 'https://0x7f000001/';
+        },
+        '.target is not canonical',
+    ],
+    'link-octal-ipv4' => [
+        static function (array &$scene): void {
+            $scene['pages'][0]['operations'][3]['target'] = 'https://0177.0.0.1/';
+        },
+        '.target is not canonical',
+    ],
+    'link-bare-hex-prefix-host' => [
+        static function (array &$scene): void {
+            $scene['pages'][0]['operations'][3]['target'] = 'https://example.0x/';
+        },
+        '.target is not canonical',
+    ],
+    'link-expanded-ipv6' => [
+        static function (array &$scene): void {
+            $scene['pages'][0]['operations'][3]['target'] = 'https://[0:0:0:0:0:0:0:1]/';
+        },
+        '.target is not canonical',
+    ],
+    'link-uppercase-ipv6' => [
+        static function (array &$scene): void {
+            $scene['pages'][0]['operations'][3]['target'] = 'https://[ABCD::1]/';
+        },
+        '.target is not canonical',
+    ],
+    'link-invalid-ipv6' => [
+        static function (array &$scene): void {
+            $scene['pages'][0]['operations'][3]['target'] = 'https://[gggg::1]/';
+        },
+        '.target is not canonical',
+    ],
+    'link-raw-path-backtick' => [
+        static function (array &$scene): void {
+            $scene['pages'][0]['operations'][3]['target'] = 'https://example.test/`';
+        },
+        '.target is not canonical',
+    ],
+    'link-raw-path-quote' => [
+        static function (array &$scene): void {
+            $scene['pages'][0]['operations'][3]['target'] = 'https://example.test/"';
+        },
+        '.target is not canonical',
+    ],
+    'link-raw-path-angle' => [
+        static function (array &$scene): void {
+            $scene['pages'][0]['operations'][3]['target'] = 'https://example.test/<>/';
+        },
+        '.target is not canonical',
+    ],
+    'link-raw-query-apostrophe' => [
+        static function (array &$scene): void {
+            $scene['pages'][0]['operations'][3]['target'] = "https://example.test/path?'x";
+        },
+        '.target is not canonical',
+    ],
+    'link-raw-query-quote' => [
+        static function (array &$scene): void {
+            $scene['pages'][0]['operations'][3]['target'] = 'https://example.test/path?"x';
+        },
+        '.target is not canonical',
+    ],
+    'link-raw-query-angle' => [
+        static function (array &$scene): void {
+            $scene['pages'][0]['operations'][3]['target'] = 'https://example.test/path?<x>';
+        },
+        '.target is not canonical',
+    ],
+    'link-raw-fragment-backtick' => [
+        static function (array &$scene): void {
+            $scene['pages'][0]['operations'][3]['target'] = 'https://example.test/path#`x';
+        },
+        '.target is not canonical',
+    ],
+    'link-raw-fragment-quote' => [
+        static function (array &$scene): void {
+            $scene['pages'][0]['operations'][3]['target'] = 'https://example.test/path#"x';
+        },
+        '.target is not canonical',
+    ],
+    'link-raw-fragment-angle' => [
+        static function (array &$scene): void {
+            $scene['pages'][0]['operations'][3]['target'] = 'https://example.test/path#<x>';
         },
         '.target is not canonical',
     ],

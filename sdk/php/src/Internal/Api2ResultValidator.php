@@ -902,10 +902,19 @@ final class Api2ResultValidator
         ) {
             return false;
         }
-        if (preg_match('/^(https?):\/\/([^\/?#]+)(\/[^?#]*)(?:\?[^#]*)?(?:#.*)?$/D', $target, $matches) === 1) {
+        if (
+            preg_match(
+                '~\A(https?)://([^/?#]+)(/[^?#]*)(?:\?([^#]*))?(?:#(.*))?\z~',
+                $target,
+                $matches,
+                PREG_UNMATCHED_AS_NULL,
+            ) === 1
+        ) {
             $scheme = $matches[1];
             $netloc = $matches[2];
             $path = $matches[3];
+            $query = $matches[4];
+            $fragment = $matches[5];
             try {
                 $parts = parse_url($target);
             } catch (\ValueError) {
@@ -921,9 +930,17 @@ final class Api2ResultValidator
                 || $netloc !== strtolower($netloc)
                 || !str_starts_with($path, '/')
                 || !self::decodedPathHasNoDotSegments($path)
+                || preg_match('/["<>`{}\\\\]/D', $path) === 1
+                || ($query !== null && preg_match('/["<>\']/D', $query) === 1)
+                || ($fragment !== null && preg_match('/["<>`]/D', $fragment) === 1)
             ) {
                 return false;
             }
+            $host = self::canonicalHttpHost($parts['host']);
+            if ($host === null) {
+                return false;
+            }
+            $canonicalNetloc = $host;
             if (isset($parts['port'])) {
                 if (
                     !is_int($parts['port'])
@@ -932,9 +949,10 @@ final class Api2ResultValidator
                 ) {
                     return false;
                 }
+                $canonicalNetloc .= ':'.$parts['port'];
             }
 
-            return true;
+            return $netloc === $canonicalNetloc;
         }
         if (!str_starts_with($target, 'mailto:') || str_contains($target, '#')) {
             return false;
@@ -953,6 +971,39 @@ final class Api2ResultValidator
         $domain = substr($address, $separator + 1);
 
         return $domain === strtolower($domain);
+    }
+
+    private static function canonicalHttpHost(string $host): ?string
+    {
+        if (str_starts_with($host, '[') || str_ends_with($host, ']')) {
+            if (!str_starts_with($host, '[') || !str_ends_with($host, ']')) {
+                return null;
+            }
+            $packed = @inet_pton(substr($host, 1, -1));
+            if (!is_string($packed) || strlen($packed) !== 16) {
+                return null;
+            }
+            $canonical = inet_ntop($packed);
+
+            return is_string($canonical) ? '['.strtolower($canonical).']' : null;
+        }
+        if (filter_var($host, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4) !== false) {
+            $packed = inet_pton($host);
+            $canonical = is_string($packed) ? inet_ntop($packed) : false;
+
+            return is_string($canonical) ? $canonical : null;
+        }
+        $candidate = rtrim($host, '.');
+        $lastDot = strrpos($candidate, '.');
+        $lastLabel = $lastDot === false ? $candidate : substr($candidate, $lastDot + 1);
+        if (
+            preg_match('/^(?:[0-9]+|0[xX][0-9A-Fa-f]*)$/D', $lastLabel) === 1
+            || preg_match('/[\x00-\x20#\/:<>?@\[\]\\\\^|%]/D', $host) === 1
+        ) {
+            return null;
+        }
+
+        return $host;
     }
 
     private static function canonicalPercentEncoding(string $value): bool
