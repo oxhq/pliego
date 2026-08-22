@@ -4,7 +4,7 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "53dec4d27ce3d32fc3c7a4d292d1bccf",
+    "content-hash": "26a027516c708beb487f46130beb4d91",
     "packages": [
         {
             "name": "brick/math",
@@ -2418,11 +2418,11 @@
         },
         {
             "name": "oxhq/pliego-laravel",
-            "version": "0.2.1",
+            "version": "0.3.0",
             "dist": {
                 "type": "path",
                 "url": "../../../sdk/laravel",
-                "reference": "72f1fc22f7ecad92e50ddf8c3b7a84748dc234aa"
+                "reference": "cb4d0290da0828f05d952dea082e6351c6fc80a3"
             },
             "require": {
                 "illuminate/console": "^13.0",
@@ -2430,9 +2430,13 @@
                 "illuminate/http": "^13.0",
                 "illuminate/support": "^13.0",
                 "illuminate/view": "^13.0",
-                "oxhq/pliego-php": "0.2.1",
+                "league/flysystem": "^3.25.1",
+                "oxhq/pliego-php": "0.3.0",
                 "php": "^8.3",
                 "symfony/http-foundation": "^7.4 || ^8.0"
+            },
+            "require-dev": {
+                "laravel/pint": "^1.0"
             },
             "type": "library",
             "extra": {
@@ -2454,12 +2458,20 @@
                 "test:runtime": [
                     "@php tests/managed_runtime_test.php"
                 ],
+                "test:quickstart": [
+                    "@php tests/quickstart_test.php"
+                ],
                 "test:timings": [
                     "@php tests/bridge_timings_test.php"
                 ],
+                "test:storage": [
+                    "@php tests/storage_test.php"
+                ],
                 "test": [
                     "@test:runtime",
-                    "@test:timings"
+                    "@test:quickstart",
+                    "@test:timings",
+                    "@test:storage"
                 ]
             },
             "license": [
@@ -2473,14 +2485,15 @@
         },
         {
             "name": "oxhq/pliego-php",
-            "version": "0.2.1",
+            "version": "0.3.0",
             "dist": {
                 "type": "path",
                 "url": "../../../sdk/php",
-                "reference": "fbd76199a4dc2f589e2c14b5d8090e7a46e34fe7"
+                "reference": "2386ce89ef12f799a34c36e0d8d2614520c72b58"
             },
             "require": {
-                "php": "^8.3"
+                "php": "^8.3",
+                "php-64bit": "*"
             },
             "type": "library",
             "autoload": {
@@ -2492,6 +2505,15 @@
                 "test:api2": [
                     "@php tests/api2_contract_test.php"
                 ],
+                "test:api2-render": [
+                    "@php tests/api2_render_test.php"
+                ],
+                "test:api2-scene": [
+                    "@php tests/api2_scene_validation_test.php"
+                ],
+                "test:windows-job-root": [
+                    "@php tests/windows_private_job_test.php"
+                ],
                 "test:doctor": [
                     "@php tests/doctor_test.php"
                 ],
@@ -2500,6 +2522,9 @@
                 ],
                 "test": [
                     "@test:api2",
+                    "@test:api2-render",
+                    "@test:api2-scene",
+                    "@test:windows-job-root",
                     "@test:timings",
                     "@php tests/self_test.php",
                     "@php tests/timeout_test.php",
@@ -2511,7 +2536,7 @@
             "license": [
                 "MIT"
             ],
-            "description": "PHP client for one-shot Pliego document rendering",
+            "description": "PHP client for deterministic one-shot Pliego document rendering",
             "transport-options": {
                 "symlink": true,
                 "relative": true
