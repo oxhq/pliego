@@ -473,9 +473,10 @@ def assert_render_success(
         raise AssertionError("profile-null result has an invalid conformance disposition")
 
     delivery = exact_keys(root["delivery"], ["pdf", "scene", "bundle"], "render result.delivery")
-    pdf_path = verify_artifact(job_root, delivery["pdf"], "document.pdf")
-    scene_path = verify_artifact(job_root, delivery["scene"], "scene.json")
-    bundle_path = verify_artifact(job_root, delivery["bundle"], "bundle.json")
+    delivery_root = job_root / "delivery"
+    pdf_path = verify_artifact(delivery_root, delivery["pdf"], "document.pdf")
+    scene_path = verify_artifact(delivery_root, delivery["scene"], "scene.json")
+    bundle_path = verify_artifact(delivery_root, delivery["bundle"], "bundle.json")
     if not pdf_path.read_bytes().startswith(b"%PDF-"):
         raise AssertionError("published document.pdf has no PDF header")
     scene = json.loads(scene_path.read_bytes())
@@ -499,7 +500,7 @@ def assert_render_success(
     if "bundle.json" in entry_paths or "document.pdf" not in entry_paths or "scene.json" not in entry_paths:
         raise AssertionError("bundle manifest does not have the required self-excluding closure")
     for entry in entries:
-        verify_artifact(job_root / "delivery", entry)
+        verify_artifact(delivery_root, entry)
 
     diagnostics = exact_keys(root["diagnostics"], ["retained", "artifacts"], "render result.diagnostics")
     if diagnostics["retained"] is not True or not diagnostics["artifacts"]:
