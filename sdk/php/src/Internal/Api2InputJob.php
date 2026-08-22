@@ -7,6 +7,7 @@ namespace Pliego\Php\Internal;
 use InvalidArgumentException;
 use Pliego\Php\InputAsset;
 use RuntimeException;
+use Throwable;
 
 /** @internal */
 final readonly class Api2InputJob
@@ -15,6 +16,17 @@ final readonly class Api2InputJob
     private const MAX_NODES = 16_384;
     private const MAX_MANIFEST_BYTES = 16_777_216;
     private const MAX_CONTENT_BYTES = 67_108_864;
+    private const WINDOWS_TOOL_TIMEOUT_NANOSECONDS = 15_000_000_000;
+    private const WINDOWS_TOOL_OUTPUT_MAX_BYTES = 65_536;
+    private const WINDOWS_DEFAULT_DACL_TRUSTEES = [
+        'S-1-5-18',
+        'S-1-5-32-544',
+        'S-1-5-11',
+        'S-1-5-32-545',
+        'S-1-1-0',
+        'S-1-3-0',
+        'S-1-3-1',
+    ];
 
     /**
      * @param array<string, mixed> $manifestDescriptor
@@ -39,8 +51,10 @@ final readonly class Api2InputJob
 
         $runtimeRoot = $outerJobPath.DIRECTORY_SEPARATOR.'runtime';
         $inputPath = $runtimeRoot.DIRECTORY_SEPARATOR.'input';
-        if (!@mkdir($runtimeRoot, 0700) || !@mkdir($inputPath, 0700)) {
-            throw new RuntimeException("cannot create exclusive API 2 job root {$runtimeRoot}");
+        self::createPrivateRuntimeRoot($runtimeRoot);
+        if (!@mkdir($inputPath, 0700)) {
+            @rmdir($runtimeRoot);
+            throw new RuntimeException("cannot create API 2 input directory {$inputPath}");
         }
 
         $specifications = [[
@@ -146,6 +160,292 @@ final readonly class Api2InputJob
             ],
             $entries,
         );
+    }
+
+    private static function createPrivateRuntimeRoot(string $path): void
+    {
+        if (!@mkdir($path, 0700)) {
+            throw new RuntimeException("cannot create exclusive API 2 job root {$path}");
+        }
+
+        try {
+            if (PHP_OS_FAMILY !== 'Windows') {
+                if (!@chmod($path, 0700)) {
+                    throw new RuntimeException('cannot set Unix mode 0700');
+                }
+                $permissions = @fileperms($path);
+                if (!is_int($permissions) || ($permissions & 0777) !== 0700) {
+                    throw new RuntimeException('Unix job root does not have exact mode 0700');
+                }
+
+                return;
+            }
+
+            self::hardenWindowsPrivateDirectory($path);
+        } catch (Throwable $error) {
+            @rmdir($path);
+            throw new RuntimeException(
+                "cannot create exclusive API 2 job root {$path}: {$error->getMessage()}",
+                0,
+                $error,
+            );
+        }
+    }
+
+    private static function hardenWindowsPrivateDirectory(string $path): void
+    {
+        $whoami = self::resolveWindowsSystemTool('whoami.exe');
+        $icacls = self::resolveWindowsSystemTool('icacls.exe');
+        $sid = self::windowsUserSid(self::executeWindowsTool(
+            [$whoami, '/user', '/fo', 'csv', '/nh'],
+            'current-user lookup',
+        ));
+
+        self::executeWindowsTool(
+            [$icacls, $path, '/setowner', "*{$sid}", '/q'],
+            'owner assignment',
+        );
+        self::executeWindowsTool(
+            [$icacls, $path, '/inheritance:r', '/q'],
+            'DACL inheritance removal',
+        );
+        self::executeWindowsTool(
+            [
+                $icacls,
+                $path,
+                '/remove',
+                ...array_map(
+                    static fn (string $trustee): string => "*{$trustee}",
+                    self::WINDOWS_DEFAULT_DACL_TRUSTEES,
+                ),
+                '/q',
+            ],
+            'default DACL removal',
+        );
+        self::executeWindowsTool(
+            [$icacls, $path, '/grant:r', "*{$sid}:(OI)(CI)F", '/q'],
+            'owner-only DACL assignment',
+        );
+
+        $proofPath = @tempnam(dirname($path), '.pliego-api2-acl-');
+        if (!is_string($proofPath)) {
+            throw new RuntimeException('cannot allocate Windows DACL proof');
+        }
+        try {
+            self::executeWindowsTool(
+                [$icacls, $path, '/save', $proofPath, '/q'],
+                'DACL verification',
+            );
+            $proof = @file_get_contents($proofPath);
+            if (!is_string($proof)) {
+                throw new RuntimeException('cannot read Windows DACL proof');
+            }
+            self::validateWindowsOwnerOnlyDacl($proof, $sid);
+        } finally {
+            @unlink($proofPath);
+        }
+
+        $entries = @scandir($path);
+        if (!is_array($entries) || array_values(array_diff($entries, ['.', '..'])) !== []) {
+            throw new RuntimeException('Windows job root changed before input staging');
+        }
+    }
+
+    private static function resolveWindowsSystemTool(string $name, ?string $systemRoot = null): string
+    {
+        if (!in_array($name, ['whoami.exe', 'icacls.exe'], true)) {
+            throw new RuntimeException("unsupported Windows ACL tool {$name}");
+        }
+        $root = $systemRoot ?? getenv('SystemRoot');
+        if (
+            !is_string($root)
+            || str_contains($root, "\0")
+            || preg_match('/^[A-Za-z]:[\\\\\/]/D', $root) !== 1
+        ) {
+            throw new RuntimeException('SystemRoot does not identify an absolute Windows directory');
+        }
+        $candidate = rtrim($root, "\\/").DIRECTORY_SEPARATOR.'System32'.DIRECTORY_SEPARATOR.$name;
+        $resolved = realpath($candidate);
+        if (
+            !is_string($resolved)
+            || !is_file($resolved)
+            || strtolower(basename($resolved)) !== strtolower($name)
+            || strtolower(pathinfo($resolved, PATHINFO_EXTENSION)) !== 'exe'
+        ) {
+            throw new RuntimeException("required Windows ACL tool is unavailable: {$name}");
+        }
+
+        return $resolved;
+    }
+
+    private static function windowsUserSid(string $payload): string
+    {
+        $count = preg_match_all(
+            '/(?<![A-Za-z0-9-])(S-1-(?:[0-9]+-)+[0-9]+)(?![A-Za-z0-9-])/',
+            $payload,
+            $matches,
+        );
+        if (!is_int($count)) {
+            throw new RuntimeException('cannot parse whoami.exe current-user SID');
+        }
+        $sids = array_values(array_unique($matches[1] ?? []));
+        if (count($sids) !== 1 || !is_string($sids[0])) {
+            throw new RuntimeException('whoami.exe did not return exactly one current-user SID');
+        }
+
+        return $sids[0];
+    }
+
+    private static function validateWindowsOwnerOnlyDacl(string $payload, string $sid): void
+    {
+        $descriptor = self::windowsAclDescriptor($payload);
+        $matched = preg_match(
+            '/\AD:P(?P<control>(?:(?:AI|AR))*)\(A;(?P<flags>[A-Z]*);FA;;;'
+                .preg_quote($sid, '/').'\)\z/D',
+            $descriptor,
+            $matches,
+        );
+        $flags = is_string($matches['flags'] ?? null) ? $matches['flags'] : '';
+        $flagPairs = strlen($flags) % 2 === 0 ? str_split($flags, 2) : [];
+        sort($flagPairs, SORT_STRING);
+        if ($matched !== 1 || $flagPairs !== ['CI', 'OI']) {
+            throw new RuntimeException(
+                'Windows job root does not have one protected owner-only full-access DACL',
+            );
+        }
+    }
+
+    private static function windowsAclDescriptor(string $payload): string
+    {
+        $length = strlen($payload);
+        if ($length === 0 || $length % 2 !== 0 || $length > self::WINDOWS_TOOL_OUTPUT_MAX_BYTES) {
+            throw new RuntimeException('icacls.exe returned an invalid or oversized ACL proof');
+        }
+
+        $decoded = '';
+        for ($offset = 0; $offset < $length; $offset += 2) {
+            $low = ord($payload[$offset]);
+            $high = ord($payload[$offset + 1]);
+            $decoded .= $high === 0 && ($low === 9 || $low === 10 || $low === 13 || ($low >= 32 && $low <= 126))
+                ? chr($low)
+                : '?';
+        }
+        $descriptors = array_values(array_filter(
+            array_map('trim', preg_split('/\r\n|\r|\n/', $decoded) ?: []),
+            static fn (string $line): bool => str_starts_with($line, 'D:'),
+        ));
+        if (count($descriptors) !== 1) {
+            throw new RuntimeException('icacls.exe ACL proof did not contain exactly one DACL');
+        }
+
+        return $descriptors[0];
+    }
+
+    /**
+     * @param non-empty-list<string> $arguments
+     */
+    private static function executeWindowsTool(array $arguments, string $operation): string
+    {
+        $stdoutFile = tmpfile();
+        $stderrFile = tmpfile();
+        if (!is_resource($stdoutFile) || !is_resource($stderrFile)) {
+            if (is_resource($stdoutFile)) {
+                fclose($stdoutFile);
+            }
+            if (is_resource($stderrFile)) {
+                fclose($stderrFile);
+            }
+            throw new RuntimeException("Windows API 2 job-root {$operation} cannot allocate transport streams");
+        }
+
+        $pipes = [];
+        $process = @proc_open(
+            $arguments,
+            [0 => ['pipe', 'r'], 1 => $stdoutFile, 2 => $stderrFile],
+            $pipes,
+            null,
+            null,
+            ['bypass_shell' => true, 'suppress_errors' => true],
+        );
+        if (!is_resource($process)) {
+            fclose($stdoutFile);
+            fclose($stderrFile);
+            throw new RuntimeException("Windows API 2 job-root {$operation} could not start");
+        }
+        fclose($pipes[0]);
+
+        $deadline = hrtime(true) + self::WINDOWS_TOOL_TIMEOUT_NANOSECONDS;
+        $status = proc_get_status($process);
+        while ($status['running']) {
+            if (hrtime(true) >= $deadline) {
+                proc_terminate($process, 9);
+                proc_close($process);
+                fclose($stdoutFile);
+                fclose($stderrFile);
+                throw new RuntimeException("Windows API 2 job-root {$operation} exceeded 15 seconds");
+            }
+            usleep(10_000);
+            $status = proc_get_status($process);
+        }
+        $exitCode = $status['exitcode'];
+        $closedExitCode = proc_close($process);
+        if ($exitCode < 0) {
+            $exitCode = $closedExitCode;
+        }
+
+        $stdout = self::readBoundedWindowsToolStream($stdoutFile, $operation);
+        $stderr = self::readBoundedWindowsToolStream($stderrFile, $operation);
+        fclose($stdoutFile);
+        fclose($stderrFile);
+        if ($exitCode !== 0) {
+            $diagnostic = $stderr !== '' ? $stderr : $stdout;
+            throw new RuntimeException(
+                "Windows API 2 job-root {$operation} failed with exit {$exitCode}: "
+                    .self::formatWindowsToolDiagnostic($diagnostic),
+            );
+        }
+
+        return $stdout;
+    }
+
+    private static function readBoundedWindowsToolStream(mixed $stream, string $operation): string
+    {
+        $stats = fstat($stream);
+        $size = is_array($stats) && is_int($stats['size'] ?? null) ? $stats['size'] : 0;
+        rewind($stream);
+        $bytes = stream_get_contents($stream, self::WINDOWS_TOOL_OUTPUT_MAX_BYTES + 1);
+        if (
+            !is_string($bytes)
+            || $size > self::WINDOWS_TOOL_OUTPUT_MAX_BYTES
+            || strlen($bytes) > self::WINDOWS_TOOL_OUTPUT_MAX_BYTES
+        ) {
+            throw new RuntimeException("Windows API 2 job-root {$operation} returned oversized output");
+        }
+
+        return $bytes;
+    }
+
+    private static function formatWindowsToolDiagnostic(string $bytes): string
+    {
+        if ($bytes === '') {
+            return '<empty output>';
+        }
+        $preview = substr($bytes, 0, 512);
+        $escaped = '';
+        for ($index = 0, $length = strlen($preview); $index < $length; $index++) {
+            $byte = ord($preview[$index]);
+            $escaped .= match ($byte) {
+                0x09 => '\\t',
+                0x0a => '\\n',
+                0x0d => '\\r',
+                0x5c => '\\\\',
+                default => $byte >= 0x20 && $byte <= 0x7e
+                    ? $preview[$index]
+                    : sprintf('\\x%02X', $byte),
+            };
+        }
+
+        return strlen($bytes) > 512 ? "{$escaped} (truncated)" : $escaped;
     }
 
     /**

@@ -59,6 +59,11 @@ Successful results expose:
 `diagnosticsPath`. A caller can copy or stream `pdfPath` into durable application storage and later
 prune the private render job independently.
 
+The SDK creates `runtimeJobPath` with exact Unix mode `0700`. On Windows it fails closed unless the
+standard `%SystemRoot%\\System32\\whoami.exe` and `icacls.exe` tools can establish and verify one
+protected, current-user-only DACL before any input is staged; the tools are invoked directly, never
+through a command shell.
+
 Accepted render failures throw `RenderFailedException` with a stable failure `kind` and validated
 diagnostic inventory. Exit 64 throws `InvocationException`. Framing, timeout, identity, tampering,
 and closure failures throw `TransportException`; an unavailable exact tuple throws
