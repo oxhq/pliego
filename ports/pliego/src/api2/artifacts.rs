@@ -17,8 +17,11 @@ use pliego::capture::{
     CapturedFontInstance, CapturedOperationAuthority, CapturedPageAppUnits,
     CapturedPageStyleSource, CapturedRectAppUnits, SceneCapture,
 };
-use pliego::{Color, FillRule, Operation};
-use serde::Serialize;
+use pliego::pdf::{PdfFontResource, PdfFontVariation, render_document_pdf};
+use pliego::{
+    Color, DocumentScene, FillRule, Glyph, Operation, OperationMeta, Page, Rect, Size, Utf8Range,
+};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -56,9 +59,12 @@ impl fmt::Display for ArtifactError {
     }
 }
 
-#[derive(Clone, Debug, Serialize)]
+impl std::error::Error for ArtifactError {}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PublicDocumentScene {
-    schema: &'static str,
+    schema: PublicSceneSchema,
     version: u32,
     app_units_per_css_px: u32,
     request_page: PublicRequestPage,
@@ -66,7 +72,13 @@ struct PublicDocumentScene {
     pages: Vec<PublicPage>,
 }
 
-#[derive(Clone, Debug, Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+enum PublicSceneSchema {
+    #[serde(rename = "pliego.document-scene")]
+    DocumentScene,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PublicRequestPage {
     size: PublicPageSize,
@@ -74,39 +86,39 @@ struct PublicRequestPage {
     geometry_authority: GeometryAuthority,
 }
 
-#[derive(Clone, Debug, Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 enum PublicPageSize {
     Named(NamedPageSize),
     Explicit(ExplicitPageSize),
 }
 
-#[derive(Clone, Debug, Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct NamedPageSize {
     name: A4Name,
 }
 
-#[derive(Clone, Debug, Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ExplicitPageSize {
     width_app_units: i32,
     height_app_units: i32,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 enum A4Name {
     #[serde(rename = "A4")]
     A4,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 enum GeometryAuthority {
     #[serde(rename = "request-only-v1")]
     RequestOnlyV1,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PublicMargins {
     top: i32,
@@ -115,7 +127,8 @@ struct PublicMargins {
     left: i32,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PublicPage {
     number: u32,
     style_source: PublicPageStyleSource,
@@ -124,20 +137,21 @@ struct PublicPage {
     operations: Vec<PublicOperation>,
 }
 
-#[derive(Clone, Copy, Debug, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 enum PublicPageStyleSource {
     #[serde(rename = "request-defaults")]
     RequestDefaults,
 }
 
-#[derive(Clone, Copy, Debug, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PublicSize {
     width: i32,
     height: i32,
 }
 
-#[derive(Clone, Debug, Serialize)]
-#[serde(tag = "type", rename_all = "lowercase")]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
 enum PublicOperation {
     Text {
         text: String,
@@ -155,7 +169,7 @@ enum PublicOperation {
     Image {
         bounds: PublicRect,
         resource: String,
-        media_type: &'static str,
+        media_type: PublicImageMediaType,
     },
     Link {
         bounds: PublicRect,
@@ -163,7 +177,8 @@ enum PublicOperation {
     },
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PublicFontInstance {
     resource: String,
     face_index: u32,
@@ -171,13 +186,15 @@ struct PublicFontInstance {
     synthetic_bold: bool,
 }
 
-#[derive(Clone, Copy, Debug, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PublicFontVariation {
     tag: u32,
     value_f32_bits: u32,
 }
 
-#[derive(Clone, Copy, Debug, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PublicGlyph {
     id: u32,
     x: i32,
@@ -186,13 +203,15 @@ struct PublicGlyph {
     text_range: PublicTextRange,
 }
 
-#[derive(Clone, Copy, Debug, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PublicTextRange {
     start: u32,
     end: u32,
 }
 
-#[derive(Clone, Copy, Debug, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PublicRect {
     x: i32,
     y: i32,
@@ -200,7 +219,8 @@ struct PublicRect {
     height: i32,
 }
 
-#[derive(Clone, Copy, Debug, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PublicColor {
     r: u8,
     g: u8,
@@ -208,12 +228,35 @@ struct PublicColor {
     a: u8,
 }
 
-#[derive(Clone, Copy, Debug, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 enum PublicFillRule {
     #[serde(rename = "non-zero")]
     NonZero,
     #[serde(rename = "even-odd")]
     EvenOdd,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+enum PublicImageMediaType {
+    #[serde(rename = "image/png")]
+    Png,
+    #[serde(rename = "image/jpeg")]
+    Jpeg,
+    #[serde(rename = "image/gif")]
+    Gif,
+    #[serde(rename = "image/webp")]
+    Webp,
+}
+
+impl PublicImageMediaType {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Png => "image/png",
+            Self::Jpeg => "image/jpeg",
+            Self::Gif => "image/gif",
+            Self::Webp => "image/webp",
+        }
+    }
 }
 
 pub(crate) fn encode_profile_null_scene<'a>(
@@ -325,7 +368,7 @@ pub(crate) fn encode_profile_null_scene<'a>(
     }
 
     let scene = PublicDocumentScene {
-        schema: "pliego.document-scene",
+        schema: PublicSceneSchema::DocumentScene,
         version: 2,
         app_units_per_css_px: 60,
         request_page,
@@ -343,6 +386,507 @@ pub(crate) fn encode_profile_null_scene<'a>(
         media_type: SCENE_MEDIA_TYPE,
         resources,
     })
+}
+
+#[derive(Debug)]
+struct PdfAdapterInput {
+    scene: DocumentScene,
+    fonts: BTreeMap<String, PdfFontBinding>,
+}
+
+#[derive(Debug, PartialEq)]
+struct PdfFontBinding {
+    resource: String,
+    face_index: u32,
+    variations: Vec<PdfFontVariation>,
+    synthetic_bold: bool,
+}
+
+/// Render PDF exclusively from the canonical DocumentScene v2 bytes and their exact resource
+/// closure. The capture-time floating-point scene is deliberately not an input to this boundary.
+pub(crate) fn render_profile_null_pdf(
+    encoded: &EncodedProfileNullScene,
+) -> Result<Vec<u8>, ArtifactError> {
+    let input = decode_pdf_adapter_input(encoded)?;
+    render_document_pdf(
+        &input.scene,
+        |identity| {
+            let binding = input.fonts.get(identity)?;
+            let resource = encoded.resources.get(&binding.resource)?;
+            Some(PdfFontResource {
+                bytes: &resource.bytes,
+                face_index: binding.face_index,
+                variations: &binding.variations,
+                synthetic_bold: binding.synthetic_bold,
+            })
+        },
+        |resource| {
+            encoded
+                .resources
+                .get(resource)
+                .map(|entry| entry.bytes.as_slice())
+        },
+    )
+    .map_err(|error| ArtifactError::new(format!("canonical scene PDF rendering failed: {error}")))
+}
+
+fn decode_pdf_adapter_input(
+    encoded: &EncodedProfileNullScene,
+) -> Result<PdfAdapterInput, ArtifactError> {
+    if encoded.media_type != SCENE_MEDIA_TYPE {
+        return Err(ArtifactError::new(format!(
+            "canonical scene has unexpected media type {}",
+            encoded.media_type
+        )));
+    }
+    let observed_identity = content_address(&encoded.bytes);
+    if encoded.sha256 != observed_identity {
+        return Err(ArtifactError::new(format!(
+            "canonical scene identity {} does not match retained bytes {observed_identity}",
+            encoded.sha256
+        )));
+    }
+
+    let public: PublicDocumentScene = serde_json::from_slice(&encoded.bytes)
+        .map_err(|error| ArtifactError::new(format!("cannot decode canonical scene: {error}")))?;
+    let mut canonical = serde_json::to_vec(&public).map_err(|error| {
+        ArtifactError::new(format!("cannot re-encode canonical scene: {error}"))
+    })?;
+    canonical.push(b'\n');
+    if canonical != encoded.bytes {
+        return Err(ArtifactError::new(
+            "canonical scene bytes are not the strict DocumentScene v2 encoding",
+        ));
+    }
+
+    public_scene_to_pdf_input(&public, &encoded.resources)
+}
+
+fn public_scene_to_pdf_input(
+    public: &PublicDocumentScene,
+    resources: &BTreeMap<String, EncodedResource>,
+) -> Result<PdfAdapterInput, ArtifactError> {
+    if public.version != 2 {
+        return Err(ArtifactError::new(format!(
+            "unsupported canonical scene version {}",
+            public.version
+        )));
+    }
+    if public.app_units_per_css_px != 60 {
+        return Err(ArtifactError::new(format!(
+            "unsupported canonical scene app-unit scale {}",
+            public.app_units_per_css_px
+        )));
+    }
+    if public.pages.is_empty() {
+        return Err(ArtifactError::new(
+            "canonical scene requires at least one page",
+        ));
+    }
+
+    for (resource, body) in resources {
+        require_content_address(resource, &body.bytes)?;
+        if body.bytes.is_empty() {
+            return Err(ArtifactError::new(format!(
+                "canonical scene resource {resource} is empty"
+            )));
+        }
+    }
+
+    let (request_width, request_height) = request_page_dimensions(&public.request_page);
+    validate_page_box(
+        request_width,
+        request_height,
+        public.request_page.margins_app_units,
+        "accepted request page",
+    )?;
+
+    let mut required_resources = BTreeMap::<String, &'static str>::new();
+    let mut fonts = BTreeMap::<String, PdfFontBinding>::new();
+    let mut pages = Vec::with_capacity(public.pages.len());
+    for (page_index, source_page) in public.pages.iter().enumerate() {
+        let number = u32::try_from(page_index + 1)
+            .map_err(|_| ArtifactError::new("canonical scene page count exceeds u32"))?;
+        if source_page.number != number {
+            return Err(ArtifactError::new(format!(
+                "canonical scene page {} has non-sequential number {}",
+                page_index + 1,
+                source_page.number
+            )));
+        }
+        if source_page.size_app_units.width != request_width
+            || source_page.size_app_units.height != request_height
+            || source_page.margins_app_units != public.request_page.margins_app_units
+        {
+            return Err(ArtifactError::new(format!(
+                "canonical scene page {} does not resolve the accepted request page",
+                page_index + 1
+            )));
+        }
+        validate_page_box(
+            source_page.size_app_units.width,
+            source_page.size_app_units.height,
+            source_page.margins_app_units,
+            &format!("canonical scene page {}", page_index + 1),
+        )?;
+
+        let mut operations = Vec::with_capacity(source_page.operations.len());
+        for (operation_index, operation) in source_page.operations.iter().enumerate() {
+            let location = format!(
+                "canonical scene page {} operation {}",
+                page_index + 1,
+                operation_index
+            );
+            operations.push(public_operation_to_pdf(
+                operation,
+                &location,
+                resources,
+                &mut required_resources,
+                &mut fonts,
+            )?);
+        }
+        pages.push(Page {
+            size: Size {
+                width: app_units_to_css(source_page.size_app_units.width),
+                height: app_units_to_css(source_page.size_app_units.height),
+            },
+            operations,
+        });
+    }
+
+    if let Some(resource) = resources
+        .keys()
+        .find(|resource| !required_resources.contains_key(*resource))
+    {
+        return Err(ArtifactError::new(format!(
+            "canonical scene resource closure contains unreferenced resource {resource}"
+        )));
+    }
+    if resources.len() != required_resources.len() {
+        return Err(ArtifactError::new(
+            "canonical scene resource closure is incomplete",
+        ));
+    }
+
+    Ok(PdfAdapterInput {
+        scene: DocumentScene {
+            schema: pliego::SCHEMA.into(),
+            version: pliego::SCHEMA_VERSION,
+            pages,
+        },
+        fonts,
+    })
+}
+
+fn validate_page_box(
+    width: i32,
+    height: i32,
+    margins: PublicMargins,
+    location: &str,
+) -> Result<(), ArtifactError> {
+    if width <= 0 || height <= 0 {
+        return Err(ArtifactError::new(format!(
+            "{location} has non-positive fixed-point dimensions"
+        )));
+    }
+    if [margins.top, margins.right, margins.bottom, margins.left]
+        .into_iter()
+        .any(|margin| margin < 0)
+    {
+        return Err(ArtifactError::new(format!(
+            "{location} has negative fixed-point margins"
+        )));
+    }
+    let inline = width
+        .checked_sub(margins.left)
+        .and_then(|value| value.checked_sub(margins.right));
+    let block = height
+        .checked_sub(margins.top)
+        .and_then(|value| value.checked_sub(margins.bottom));
+    if inline.is_none_or(|value| value <= 0) || block.is_none_or(|value| value <= 0) {
+        return Err(ArtifactError::new(format!(
+            "{location} has no positive fixed-point content box"
+        )));
+    }
+    Ok(())
+}
+
+fn public_operation_to_pdf(
+    operation: &PublicOperation,
+    location: &str,
+    resources: &BTreeMap<String, EncodedResource>,
+    required_resources: &mut BTreeMap<String, &'static str>,
+    fonts: &mut BTreeMap<String, PdfFontBinding>,
+) -> Result<Operation, ArtifactError> {
+    match operation {
+        PublicOperation::Text {
+            text,
+            font,
+            font_size_app_units,
+            color,
+            glyphs,
+        } => {
+            if text.is_empty() || text.len() > u32::MAX as usize {
+                return Err(ArtifactError::new(format!(
+                    "{location} text is empty or exceeds u32 UTF-8 bytes"
+                )));
+            }
+            if *font_size_app_units <= 0 || glyphs.is_empty() {
+                return Err(ArtifactError::new(format!(
+                    "{location} has non-positive font size or no glyphs"
+                )));
+            }
+            require_pdf_resource(
+                &font.resource,
+                FONT_MEDIA_TYPE,
+                location,
+                resources,
+                required_resources,
+            )?;
+            let mut previous_tag = None;
+            let variations = font
+                .variations
+                .iter()
+                .map(|variation| {
+                    if previous_tag.is_some_and(|tag| tag >= variation.tag) {
+                        return Err(ArtifactError::new(format!(
+                            "{location} font variation tags are not strictly ascending"
+                        )));
+                    }
+                    previous_tag = Some(variation.tag);
+                    let value = f32::from_bits(variation.value_f32_bits);
+                    if !value.is_finite() || (value == 0.0 && value.is_sign_negative()) {
+                        return Err(ArtifactError::new(format!(
+                            "{location} font variation is not canonical finite binary32"
+                        )));
+                    }
+                    Ok(PdfFontVariation {
+                        tag: variation.tag,
+                        value,
+                    })
+                })
+                .collect::<Result<Vec<_>, ArtifactError>>()?;
+            let identity = pdf_font_identity(font)?;
+            let binding = PdfFontBinding {
+                resource: font.resource.clone(),
+                face_index: font.face_index,
+                variations,
+                synthetic_bold: font.synthetic_bold,
+            };
+            if let Some(existing) = fonts.get(&identity)
+                && existing != &binding
+            {
+                return Err(ArtifactError::new(format!(
+                    "{location} font tuple identity collision"
+                )));
+            }
+            fonts.entry(identity.clone()).or_insert(binding);
+
+            let glyphs = glyphs
+                .iter()
+                .enumerate()
+                .map(|(glyph_index, glyph)| {
+                    if glyph.id > u16::MAX.into()
+                        || glyph.x < 0
+                        || glyph.y < 0
+                        || glyph.advance < 0
+                    {
+                        return Err(ArtifactError::new(format!(
+                            "{location} glyph {glyph_index} cannot be represented by the PDF backend"
+                        )));
+                    }
+                    validate_text_range(text, glyph.text_range.start, glyph.text_range.end)
+                        .map_err(|message| {
+                            ArtifactError::new(format!(
+                                "{location} glyph {glyph_index} {message}"
+                            ))
+                        })?;
+                    Ok(Glyph {
+                        id: glyph.id,
+                        x: app_units_to_css(glyph.x),
+                        y: app_units_to_css(glyph.y),
+                        advance: app_units_to_css(glyph.advance),
+                        text_range: Some(Utf8Range {
+                            start: glyph.text_range.start,
+                            end: glyph.text_range.end,
+                        }),
+                    })
+                })
+                .collect::<Result<Vec<_>, ArtifactError>>()?;
+            Ok(Operation::Text {
+                text: text.clone(),
+                font: identity,
+                font_size: app_units_to_css(*font_size_app_units),
+                color: pdf_color(*color),
+                glyphs,
+                meta: OperationMeta::default(),
+            })
+        },
+        PublicOperation::Path {
+            bounds,
+            data,
+            fill,
+            fill_rule,
+        } => {
+            validate_pdf_rect(*bounds, false, location)?;
+            let expected = rectangle_path(*bounds, location)?;
+            if data != &expected {
+                return Err(ArtifactError::new(format!(
+                    "{location} path data does not match canonical fixed-point bounds"
+                )));
+            }
+            Ok(Operation::Path {
+                bounds: pdf_rect(*bounds),
+                data: pdf_rectangle_path(*bounds, location)?,
+                fill: Some(pdf_color(*fill)),
+                fill_rule: match fill_rule {
+                    PublicFillRule::NonZero => FillRule::NonZero,
+                    PublicFillRule::EvenOdd => FillRule::EvenOdd,
+                },
+                stroke: None,
+                meta: OperationMeta::default(),
+            })
+        },
+        PublicOperation::Image {
+            bounds,
+            resource,
+            media_type,
+        } => {
+            validate_pdf_rect(*bounds, true, location)?;
+            require_pdf_resource(
+                resource,
+                media_type.as_str(),
+                location,
+                resources,
+                required_resources,
+            )?;
+            Ok(Operation::Image {
+                bounds: pdf_rect(*bounds),
+                resource: resource.clone(),
+                meta: OperationMeta::default(),
+            })
+        },
+        PublicOperation::Link { bounds, target } => {
+            validate_pdf_rect(*bounds, true, location)?;
+            if !canonical_link_target(target) {
+                return Err(ArtifactError::new(format!(
+                    "{location} link target is not canonical"
+                )));
+            }
+            Ok(Operation::Link {
+                bounds: pdf_rect(*bounds),
+                target: target.clone(),
+                meta: OperationMeta::default(),
+            })
+        },
+    }
+}
+
+fn require_pdf_resource(
+    resource: &str,
+    media_type: &'static str,
+    location: &str,
+    resources: &BTreeMap<String, EncodedResource>,
+    required_resources: &mut BTreeMap<String, &'static str>,
+) -> Result<(), ArtifactError> {
+    let body = resources.get(resource).ok_or_else(|| {
+        ArtifactError::new(format!(
+            "{location} references missing canonical resource {resource}"
+        ))
+    })?;
+    if body.media_type != media_type {
+        return Err(ArtifactError::new(format!(
+            "{location} resource {resource} media type {} does not match {media_type}",
+            body.media_type
+        )));
+    }
+    if media_type != FONT_MEDIA_TYPE
+        && image_media_type(&body.bytes).map(PublicImageMediaType::as_str) != Some(media_type)
+    {
+        return Err(ArtifactError::new(format!(
+            "{location} resource {resource} bytes do not match {media_type}"
+        )));
+    }
+    if let Some(existing) = required_resources.insert(resource.to_owned(), media_type)
+        && existing != media_type
+    {
+        return Err(ArtifactError::new(format!(
+            "{location} resource {resource} has conflicting media identities"
+        )));
+    }
+    Ok(())
+}
+
+fn pdf_font_identity(font: &PublicFontInstance) -> Result<String, ArtifactError> {
+    let tuple = serde_json::to_vec(font)
+        .map_err(|error| ArtifactError::new(format!("cannot encode PDF font tuple: {error}")))?;
+    Ok(format!("pliego-font-instance:{}", content_address(&tuple)))
+}
+
+fn validate_pdf_rect(
+    bounds: PublicRect,
+    require_area: bool,
+    location: &str,
+) -> Result<(), ArtifactError> {
+    if bounds.x < 0 || bounds.y < 0 || bounds.width < 0 || bounds.height < 0 {
+        return Err(ArtifactError::new(format!(
+            "{location} has PDF-incompatible negative fixed-point bounds"
+        )));
+    }
+    bounds.x.checked_add(bounds.width).ok_or_else(|| {
+        ArtifactError::new(format!("{location} rectangle right edge exceeds i32"))
+    })?;
+    bounds.y.checked_add(bounds.height).ok_or_else(|| {
+        ArtifactError::new(format!("{location} rectangle bottom edge exceeds i32"))
+    })?;
+    if require_area && (bounds.width == 0 || bounds.height == 0) {
+        return Err(ArtifactError::new(format!(
+            "{location} has an empty PDF rectangle"
+        )));
+    }
+    Ok(())
+}
+
+fn pdf_rect(bounds: PublicRect) -> Rect {
+    Rect {
+        x: app_units_to_css(bounds.x),
+        y: app_units_to_css(bounds.y),
+        width: app_units_to_css(bounds.width),
+        height: app_units_to_css(bounds.height),
+    }
+}
+
+fn pdf_rectangle_path(bounds: PublicRect, location: &str) -> Result<String, ArtifactError> {
+    let right = bounds.x.checked_add(bounds.width).ok_or_else(|| {
+        ArtifactError::new(format!("{location} rectangle right edge exceeds i32"))
+    })?;
+    let bottom = bounds.y.checked_add(bounds.height).ok_or_else(|| {
+        ArtifactError::new(format!("{location} rectangle bottom edge exceeds i32"))
+    })?;
+    Ok(format!(
+        "M {} {} L {} {} L {} {} L {} {} Z",
+        app_units_to_css(bounds.x),
+        app_units_to_css(bounds.y),
+        app_units_to_css(right),
+        app_units_to_css(bounds.y),
+        app_units_to_css(right),
+        app_units_to_css(bottom),
+        app_units_to_css(bounds.x),
+        app_units_to_css(bottom)
+    ))
+}
+
+fn pdf_color(color: PublicColor) -> Color {
+    Color {
+        r: f64::from(color.r) / 255.0,
+        g: f64::from(color.g) / 255.0,
+        b: f64::from(color.b) / 255.0,
+        a: f64::from(color.a) / 255.0,
+    }
+}
+
+fn app_units_to_css(value: i32) -> f64 {
+    f64::from(value) / 60.0
 }
 
 fn request_page_dimensions(page: &PublicRequestPage) -> (i32, i32) {
@@ -533,7 +1077,7 @@ fn encode_operation<'a>(
                     "{location} image resource {resource} has unsupported bytes"
                 ))
             })?;
-            bind_resource(resources, resource, media_type, bytes, &location)?;
+            bind_resource(resources, resource, media_type.as_str(), bytes, &location)?;
             Ok(PublicOperation::Image {
                 bounds: public_rect(*bounds, &location)?,
                 resource: resource.clone(),
@@ -761,15 +1305,15 @@ fn validate_text_range(text: &str, start: u32, end: u32) -> Result<(), &'static 
     Ok(())
 }
 
-fn image_media_type(bytes: &[u8]) -> Option<&'static str> {
+fn image_media_type(bytes: &[u8]) -> Option<PublicImageMediaType> {
     if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
-        Some("image/png")
+        Some(PublicImageMediaType::Png)
     } else if bytes.starts_with(b"\xff\xd8\xff") {
-        Some("image/jpeg")
+        Some(PublicImageMediaType::Jpeg)
     } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
-        Some("image/gif")
+        Some(PublicImageMediaType::Gif)
     } else if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
-        Some("image/webp")
+        Some(PublicImageMediaType::Webp)
     } else {
         None
     }
@@ -916,6 +1460,10 @@ mod tests {
         env!("CARGO_MANIFEST_DIR"),
         "/../../contracts/api2/goldens/accepted/render-request.a4.json"
     ));
+    const PDF_FONT_BYTES: &[u8] = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/text-scene/Ahem.ttf"
+    ));
     const EXPECTED_SCENE: &[u8] = include_bytes!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../contracts/api2/fixtures/delivery/scene.json"
@@ -1056,6 +1604,21 @@ mod tests {
         }
     }
 
+    fn renderable_encoded_scene() -> EncodedProfileNullScene {
+        let mut capture = fixture_capture();
+        let font_resource = content_address(PDF_FONT_BYTES);
+        capture.font_resources = vec![CapturedFontResource {
+            resource: font_resource.clone(),
+            bytes_base64: BASE64_STANDARD.encode(PDF_FONT_BYTES),
+        }];
+        capture.font_instances[0].resource = font_resource;
+        capture.font_instances[0].face_index = 0;
+        capture.font_instances[0].variations.clear();
+        capture.font_instances[0].synthetic_bold = false;
+        let request: Value = serde_json::from_slice(REQUEST).unwrap();
+        encode_profile_null_scene(&request, &capture, |_| None).unwrap()
+    }
+
     #[test]
     fn exact_authority_encodes_the_canonical_profile_null_scene_and_resource_closure() {
         let request: Value = serde_json::from_slice(REQUEST).unwrap();
@@ -1069,6 +1632,161 @@ mod tests {
         assert_eq!(encoded.resources[FONT_RESOURCE].bytes, FONT_BYTES);
         assert_eq!(encoded.resources[IMAGE_RESOURCE].media_type, "image/png");
         assert_eq!(encoded.resources[IMAGE_RESOURCE].bytes, IMAGE_BYTES);
+    }
+
+    #[test]
+    fn pdf_adapter_uses_fixed_point_scene_authority_and_preserves_resource_identities() {
+        let request: Value = serde_json::from_slice(REQUEST).unwrap();
+        let mut capture = fixture_capture();
+        capture.scene.pages[0].size.width = 1.25;
+        let Operation::Text {
+            font_size, glyphs, ..
+        } = &mut capture.scene.pages[0].operations[0]
+        else {
+            unreachable!();
+        };
+        *font_size = 999.5;
+        glyphs[0].x = 777.25;
+        let Operation::Path { bounds, data, .. } = &mut capture.scene.pages[0].operations[1] else {
+            unreachable!();
+        };
+        bounds.x = 321.5;
+        *data = "capture-floating-path-must-not-cross-the-adapter".into();
+
+        let encoded = encode_profile_null_scene(&request, &capture, |_| None).unwrap();
+        assert_eq!(encoded.bytes, EXPECTED_SCENE);
+        let input = decode_pdf_adapter_input(&encoded).unwrap();
+        assert_eq!(input.scene.pages[0].size.width, 47_622.0 / 60.0);
+        let Operation::Text {
+            font,
+            font_size,
+            glyphs,
+            ..
+        } = &input.scene.pages[0].operations[0]
+        else {
+            unreachable!();
+        };
+        assert_eq!(*font_size, 18.0);
+        assert_eq!(glyphs[0].x, 48.0);
+        let binding = &input.fonts[font];
+        assert_eq!(binding.resource, FONT_RESOURCE);
+        assert_eq!(binding.face_index, 2);
+        assert_eq!(binding.variations.len(), 1);
+        assert_eq!(binding.variations[0].tag, 2_003_265_652);
+        assert_eq!(binding.variations[0].value.to_bits(), 1_137_180_672);
+        assert!(binding.synthetic_bold);
+        let Operation::Path { bounds, data, .. } = &input.scene.pages[0].operations[1] else {
+            unreachable!();
+        };
+        assert_eq!(bounds.x, 48.0);
+        assert_eq!(data, "M 48 96 L 745.7 96 L 745.7 97 L 48 97 Z");
+        let Operation::Image { resource, .. } = &input.scene.pages[0].operations[2] else {
+            unreachable!();
+        };
+        assert_eq!(resource, IMAGE_RESOURCE);
+
+        let pdf = render_profile_null_pdf(&renderable_encoded_scene()).unwrap();
+        assert!(pdf.starts_with(b"%PDF-"));
+        assert!(pdf.len() > 1_000);
+    }
+
+    #[test]
+    fn pdf_adapter_requires_strict_canonical_scene_bytes_and_identity() {
+        let request: Value = serde_json::from_slice(REQUEST).unwrap();
+        let encoded = encode_profile_null_scene(&request, &fixture_capture(), |_| None).unwrap();
+
+        let mut mismatched_identity = encoded.clone();
+        mismatched_identity.bytes.push(b' ');
+        assert!(
+            decode_pdf_adapter_input(&mismatched_identity)
+                .unwrap_err()
+                .to_string()
+                .contains("does not match retained bytes")
+        );
+
+        let mut noncanonical = encoded.clone();
+        noncanonical.bytes.push(b' ');
+        noncanonical.sha256 = content_address(&noncanonical.bytes);
+        assert!(
+            decode_pdf_adapter_input(&noncanonical)
+                .unwrap_err()
+                .to_string()
+                .contains("not the strict DocumentScene v2 encoding")
+        );
+
+        let mut unknown_member = encoded.clone();
+        let mut value: Value = serde_json::from_slice(&unknown_member.bytes).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .insert("unexpected".into(), Value::Bool(true));
+        unknown_member.bytes = serde_json::to_vec(&value).unwrap();
+        unknown_member.bytes.push(b'\n');
+        unknown_member.sha256 = content_address(&unknown_member.bytes);
+        assert!(
+            decode_pdf_adapter_input(&unknown_member)
+                .unwrap_err()
+                .to_string()
+                .contains("unknown field")
+        );
+    }
+
+    #[test]
+    fn pdf_adapter_fails_closed_on_missing_forged_or_extra_resources() {
+        let request: Value = serde_json::from_slice(REQUEST).unwrap();
+        let encoded = encode_profile_null_scene(&request, &fixture_capture(), |_| None).unwrap();
+
+        let mut missing = encoded.clone();
+        missing.resources.remove(IMAGE_RESOURCE);
+        assert!(
+            decode_pdf_adapter_input(&missing)
+                .unwrap_err()
+                .to_string()
+                .contains("references missing canonical resource")
+        );
+
+        let mut forged = encoded.clone();
+        forged
+            .resources
+            .get_mut(IMAGE_RESOURCE)
+            .unwrap()
+            .bytes
+            .push(0);
+        assert!(
+            decode_pdf_adapter_input(&forged)
+                .unwrap_err()
+                .to_string()
+                .contains("does not match retained bytes")
+        );
+
+        let mut wrong_media = encoded.clone();
+        wrong_media
+            .resources
+            .get_mut(IMAGE_RESOURCE)
+            .unwrap()
+            .media_type = FONT_MEDIA_TYPE;
+        assert!(
+            decode_pdf_adapter_input(&wrong_media)
+                .unwrap_err()
+                .to_string()
+                .contains("media type application/octet-stream does not match image/png")
+        );
+
+        let mut extra = encoded;
+        let bytes = b"unreferenced";
+        extra.resources.insert(
+            content_address(bytes),
+            EncodedResource {
+                media_type: FONT_MEDIA_TYPE,
+                bytes: bytes.to_vec(),
+            },
+        );
+        assert!(
+            decode_pdf_adapter_input(&extra)
+                .unwrap_err()
+                .to_string()
+                .contains("contains unreferenced resource")
+        );
     }
 
     #[test]
