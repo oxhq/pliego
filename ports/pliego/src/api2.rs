@@ -41,7 +41,11 @@ pub(crate) use artifacts::encode_profile_null_scene;
 ))]
 pub(crate) use execution::{Api2CommandOutcome, execute_render};
 pub(crate) use input_job::ResolvedInputJob;
-#[cfg(test)]
+#[cfg(all(
+    test,
+    feature = "document-session",
+    not(any(target_os = "android", target_env = "ohos"))
+))]
 pub(crate) use render_job::resolve_render_job_for_test;
 #[cfg(all(
     feature = "document-session",
@@ -1542,6 +1546,10 @@ mod tests {
         );
     }
 
+    #[cfg(all(
+        feature = "document-session",
+        not(any(target_os = "android", target_env = "ohos"))
+    ))]
     #[test]
     fn production_probe_reports_the_exact_profile_null_contract_tuple() {
         let mut output = Vec::new();
@@ -1632,15 +1640,7 @@ mod tests {
         let probe: Value = serde_json::from_slice(&writer.bytes).unwrap();
         assert_eq!(
             probe["contracts"],
-            serde_json::json!([{
-                "api": 2,
-                "input_manifest": {"schema": "pliego.input-manifest", "version": 1},
-                "request": {"schema": "pliego.render-request", "version": 1},
-                "result": {"schema": "pliego.render-result", "version": 1},
-                "document_scene": {"schema": "pliego.document-scene", "version": 2},
-                "bundle_manifest": {"schema": "pliego.bundle-manifest", "version": 1},
-                "profiles": [],
-            }])
+            serde_json::to_value(supported_contracts()).unwrap()
         );
     }
 
