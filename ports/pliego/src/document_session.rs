@@ -59,10 +59,11 @@ use super::resource_policy::{
     ResourceAccounting, ResourceEvidence, ResourcePolicy, ResourcePolicyConfig,
     ResourcePolicyDecision, ResourcePolicyFailure, ResourcePolicySetupFailure, ResourceRequest,
     ResourceSource, create_controlled_http_client, fetch_controlled_http,
-    normalize_controlled_response_headers,
+    normalize_controlled_response_headers, sha256_hex,
 };
 use super::runtime_policy::DeterministicRuntimePolicy;
 use super::session::LocalDocument;
+use crate::api2::{ResolvedInputJob, ResolvedRenderJob};
 
 const RESOURCE_EVIDENCE_ENTRY_OVERHEAD_BYTES: u64 = 256;
 const CONSOLE_EVIDENCE_ENTRY_OVERHEAD_BYTES: u64 = 64;
@@ -70,6 +71,186 @@ const MAX_CONSOLE_EVENTS: usize = 4_096;
 const MAX_CONSOLE_BYTES: u64 = 1024 * 1024;
 
 const TIMEOUT: Duration = Duration::from_secs(30);
+const FROZEN_INPUT_URL_ROOT: &str = "pliego-input:///";
+
+/// An exclusive, host-path-free authority over one fully resolved API 2 input closure.
+struct FrozenInputAuthority {
+    resources: BTreeMap<String, FrozenInputResource>,
+}
+
+struct FrozenInputResource {
+    media_type: String,
+    content_type: HeaderValue,
+    content_address: String,
+    body: RefCell<Option<Vec<u8>>>,
+}
+
+impl FrozenInputAuthority {
+    fn from_resolved_job(job: ResolvedInputJob) -> Result<(Url, Self), SessionError> {
+        let url_root = Url::parse(FROZEN_INPUT_URL_ROOT).map_err(|error| {
+            SessionError::new(
+                "INVALID_REQUEST",
+                format!("cannot construct the fixed input URL root: {error}"),
+            )
+        })?;
+        let (entrypoint, input_resources) = job.into_session_parts();
+        let mut resources = BTreeMap::new();
+        let mut resident_bytes = 0u64;
+        for (path, resource) in input_resources {
+            let url = url_root.join(&path).map_err(|error| {
+                SessionError::new(
+                    "INVALID_REQUEST",
+                    format!("cannot map input path {path:?} into its URL authority: {error}"),
+                )
+            })?;
+            if url.scheme() != "pliego-input" ||
+                url.host_str().is_some() ||
+                url.query().is_some() ||
+                url.fragment().is_some() ||
+                url.path().strip_prefix('/') != Some(path.as_str())
+            {
+                return Err(SessionError::new(
+                    "INVALID_REQUEST",
+                    format!("input path {path:?} escaped the fixed URL authority"),
+                ));
+            }
+
+            let (media_type, content_address, declared_bytes, body) = resource.into_session_parts();
+            if u64::try_from(body.len()).ok() != Some(declared_bytes) {
+                return Err(SessionError::new(
+                    "INVALID_REQUEST",
+                    format!("input resource {path:?} changed from its declared byte count"),
+                ));
+            }
+            let actual_content_address = format!("sha256:{}", sha256_hex(&body));
+            if actual_content_address != content_address {
+                return Err(SessionError::new(
+                    "INVALID_REQUEST",
+                    format!("input resource {path:?} changed from its declared SHA-256"),
+                ));
+            }
+            let content_type = HeaderValue::from_str(&media_type).map_err(|error| {
+                SessionError::new(
+                    "INVALID_REQUEST",
+                    format!("input resource {path:?} has an invalid media type: {error}"),
+                )
+            })?;
+            resident_bytes = resident_bytes
+                .checked_add(declared_bytes)
+                .filter(|bytes| *bytes <= MAX_CACHE_BYTES)
+                .ok_or_else(|| {
+                    SessionError::new(
+                        "INVALID_REQUEST",
+                        format!(
+                            "frozen input resources exceed the {MAX_CACHE_BYTES}-byte aggregate bound"
+                        ),
+                    )
+                })?;
+            if resources
+                .insert(
+                    url.to_string(),
+                    FrozenInputResource {
+                        media_type,
+                        content_type,
+                        content_address,
+                        body: RefCell::new(Some(body)),
+                    },
+                )
+                .is_some()
+            {
+                return Err(SessionError::new(
+                    "INVALID_REQUEST",
+                    format!("input path {path:?} aliases another fixed resource URL"),
+                ));
+            }
+        }
+
+        let input_url = url_root.join(&entrypoint).map_err(|error| {
+            SessionError::new(
+                "INVALID_REQUEST",
+                format!("cannot map input entrypoint into its URL authority: {error}"),
+            )
+        })?;
+        if !resources.contains_key(input_url.as_str()) {
+            return Err(SessionError::new(
+                "INVALID_REQUEST",
+                "the frozen input authority has no declared entrypoint",
+            ));
+        }
+        Ok((input_url, Self { resources }))
+    }
+
+    fn resolve(
+        &self,
+        request: &ResourceRequest,
+        retained_resources: &OwnedResourceStore,
+    ) -> Result<(ControlledResource, HeaderMap), ResourcePolicyFailure> {
+        if request.is_redirect {
+            return Err(ResourcePolicyFailure::new(
+                request,
+                "RESOURCE_DENIED",
+                "denied",
+                "redirects are disabled for the frozen input authority",
+            ));
+        }
+        if !matches!(request.method.as_str(), "GET" | "HEAD") {
+            return Err(ResourcePolicyFailure::new(
+                request,
+                "RESOURCE_DENIED",
+                "denied",
+                "only GET and HEAD frozen input requests are allowed",
+            ));
+        }
+        let resource = self.resources.get(request.url.as_str()).ok_or_else(|| {
+            ResourcePolicyFailure::new(
+                request,
+                "RESOURCE_DENIED",
+                "denied",
+                "resource is absent from the frozen pliego-input authority",
+            )
+        })?;
+        let mut headers = HeaderMap::new();
+        headers.insert(CONTENT_TYPE, resource.content_type.clone());
+        let body = if request.method == "HEAD" {
+            Vec::new()
+        } else if let Some(body) = resource.body.borrow_mut().take() {
+            body
+        } else {
+            retained_resources
+                .resolve_content(&resource.content_address)
+                .map(<[u8]>::to_vec)
+                .ok_or_else(|| {
+                    ResourcePolicyFailure::new(
+                        request,
+                        "RESOURCE_CHANGED_DURING_RENDER",
+                        "changed",
+                        "frozen resource was not retained after ownership transfer",
+                    )
+                })?
+        };
+        Ok((
+            ControlledResource {
+                status: 200,
+                content_type: Some(resource.media_type.clone()),
+                body,
+            },
+            headers,
+        ))
+    }
+}
+
+fn owned_resource_store_for_session(
+    resource_policy: &ResourcePolicy,
+    frozen_input_authority: Option<&FrozenInputAuthority>,
+) -> Result<OwnedResourceStore, SessionError> {
+    if frozen_input_authority.is_some() && resource_policy.resident_bytes != 0 {
+        return Err(SessionError::new(
+            "INVALID_REQUEST",
+            "frozen input authority cannot share resident host resources",
+        ));
+    }
+    Ok(OwnedResourceStore::new(resource_policy.resident_bytes))
+}
 
 #[cfg(test)]
 type ResourceEvidenceObserver = Rc<dyn Fn(&ResourceEvidence)>;
@@ -473,6 +654,17 @@ pub(crate) struct ControlledDocumentSession {
     session: DocumentSession,
     waker: PliegoEventLoopWaker,
     surface: DocumentCaptureSurfaceFingerprint,
+}
+
+/// Owner for one accepted API 2 execution and its exact normalized policy.
+pub(crate) struct Api2Execution {
+    controlled: ControlledDocumentSession,
+}
+
+impl Api2Execution {
+    pub(crate) fn capture(self) -> Result<DocumentCaptureOutcome, SessionError> {
+        self.controlled.prepare_capture_candidate()?.capture()
+    }
 }
 
 /// One live session paired with its non-authoritative, generation-bound capture candidate.
@@ -1047,6 +1239,39 @@ impl DocumentSession {
                 ),
             )
         })?;
+        Self::new_validated_url_with_canvas_retention(
+            input_url,
+            bundle_root,
+            resource_policy,
+            None,
+            environment,
+            page,
+            allow_host_fonts,
+            runtime,
+            session_host_timeout,
+            start_canvas_retention,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_validated_url_with_canvas_retention(
+        input_url: Url,
+        bundle_root: PathBuf,
+        resource_policy: ResourcePolicy,
+        frozen_input_authority: Option<FrozenInputAuthority>,
+        environment: RenderEnvironment,
+        page: PageDefinition,
+        allow_host_fonts: bool,
+        runtime: DocumentSessionRuntime,
+        session_host_timeout: Duration,
+        start_canvas_retention: impl FnOnce() -> servo_canvas::retained_canvas::CanvasRetentionGuard,
+    ) -> Result<Self, SessionError> {
+        let surface_size = page.surface_pixel_size().ok_or_else(|| {
+            SessionError::new(
+                "RENDER_CONTEXT_FAILED",
+                "page dimensions cannot be represented by the software rendering surface",
+            )
+        })?;
         let page_reservation = reserve_for_process(page).map_err(|_| {
             SessionError::new(
                 "LAYOUT_CONFIGURATION_FAILED",
@@ -1059,8 +1284,8 @@ impl DocumentSession {
 
         let rendering_context = Rc::new(
             SoftwareRenderingContext::new(PhysicalSize::new(
-                page.width().ceil() as u32,
-                page.height().ceil() as u32,
+                surface_size.width,
+                surface_size.height,
             ))
             .map_err(|error| {
                 SessionError::new(
@@ -1103,10 +1328,14 @@ impl DocumentSession {
             ),
         };
         let servo = servo_builder.preferences(preferences).build();
-        let resource_store = RefCell::new(OwnedResourceStore::new(resource_policy.resident_bytes));
+        let resource_store = RefCell::new(owned_resource_store_for_session(
+            &resource_policy,
+            frozen_input_authority.as_ref(),
+        )?);
         let delegate = Rc::new(DocumentDelegate {
             bundle_root,
             resource_policy,
+            frozen_input_authority,
             resource_store,
             paint_frames_automatically: document_clock.is_none(),
             ..Default::default()
@@ -1135,6 +1364,57 @@ impl DocumentSession {
             host_deadline,
             _canvas_retention: canvas_retention,
             rendering_context,
+        })
+    }
+
+    pub(crate) fn start_api2_execution(
+        job: ResolvedRenderJob,
+    ) -> Result<Api2Execution, SessionError> {
+        let crate::api2::ResolvedRenderJobParts {
+            input,
+            environment,
+            page,
+            resources,
+            allow_host_fonts,
+            runtime_policy,
+        } = job.into_parts();
+        let (input_url, authority) = FrozenInputAuthority::from_resolved_job(input)?;
+        let runtime_policy = runtime_policy
+            .validate()
+            .map_err(|error| SessionError::new("INVALID_REQUEST", error.to_string()))?;
+        let host_timeout = runtime_policy.host_wall_duration();
+        let clock = runtime_policy
+            .document_clock_configuration()
+            .map_err(|error| SessionError::new("INVALID_REQUEST", error.to_string()))?;
+        let waker = PliegoEventLoopWaker::new();
+        let session = Self::new_validated_url_with_canvas_retention(
+            input_url,
+            PathBuf::new(),
+            resources,
+            Some(authority),
+            environment,
+            page,
+            allow_host_fonts,
+            DocumentSessionRuntime::Controlled {
+                clock,
+                waker: waker.clone(),
+                // Legacy readiness is only a private bridge for the controlled fixture. It is not
+                // accepted from an API 2 caller and must not become part of contract activation.
+                readiness: ReadinessPolicy {
+                    timeout_ms: 1_000,
+                    wait_for_fonts: false,
+                },
+            },
+            host_timeout,
+            servo_canvas::retained_canvas::start_retaining_canvas_commands,
+        )?;
+        let surface = session.controlled_capture_surface()?;
+        Ok(Api2Execution {
+            controlled: ControlledDocumentSession {
+                session,
+                waker,
+                surface,
+            },
         })
     }
 
@@ -2004,8 +2284,15 @@ fn validate_resolved_resource_policy(
     document: &LocalDocument,
     resource_policy: &ResourcePolicy,
 ) -> Result<(), SessionError> {
+    validate_resolved_resource_policy_root(document.root(), resource_policy)
+}
+
+fn validate_resolved_resource_policy_root(
+    document_root: &Path,
+    resource_policy: &ResourcePolicy,
+) -> Result<(), SessionError> {
     match resource_policy.resolved_document_root() {
-        Some(root) if root == document.root() => Ok(()),
+        Some(root) if root == document_root => Ok(()),
         Some(_) => Err(SessionError::new(
             "INVALID_REQUEST",
             "resource policy document root does not match the resolved document root",
@@ -2021,6 +2308,7 @@ fn validate_resolved_resource_policy(
 struct DocumentDelegate {
     bundle_root: PathBuf,
     resource_policy: ResourcePolicy,
+    frozen_input_authority: Option<FrozenInputAuthority>,
     controlled_http_client: OnceCell<net::connector::ServoClient>,
     resource_store: RefCell<OwnedResourceStore>,
     console: RefCell<ConsoleEvidenceLog>,
@@ -2073,6 +2361,21 @@ impl WebViewDelegate for DocumentDelegate {
         };
         if let Err(failure) = self.resources.borrow_mut().begin_event(&request) {
             self.cancel_resource(load, failure);
+            return;
+        }
+        if let Some(authority) = self.frozen_input_authority.as_ref() {
+            // A resolved API 2 job never falls through to host files, data URLs, or the network.
+            let resolved = authority.resolve(&request, &self.resource_store.borrow());
+            match resolved {
+                Ok((resource, headers)) => self.serve_owned_resource(
+                    load,
+                    request,
+                    ResourceSource::VirtualResource,
+                    resource,
+                    headers,
+                ),
+                Err(failure) => self.deny_resource(load, request, failure),
+            }
             return;
         }
         match self.resource_policy.decide(&self.bundle_root, &request) {
@@ -2336,6 +2639,7 @@ fn checked_delivered_body_bytes(
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
+    use std::collections::BTreeMap;
     use std::fs;
     use std::io::{self, Read, Write};
     use std::net::{TcpListener, TcpStream};
@@ -2364,20 +2668,31 @@ mod tests {
     use super::super::runtime_policy::DeterministicRuntimePolicy;
     use super::super::session::LocalDocument;
     use super::{
-        ConsoleEvidenceLog, ConsoleLogLevel, ControlledSettlementStep, DocumentSession, JSValue,
-        MAX_CONSOLE_BYTES, MAX_CONSOLE_EVENTS, PaintTicketAbortGuard,
-        RESOURCE_EVIDENCE_ENTRY_OVERHEAD_BYTES, ReadinessPolicy, RenderEnvironment,
-        ResourceEvidenceLog, ResourcePolicyConfig, SessionCaptureEvidence, SessionError,
-        SessionHostDeadline, console_log_level_name, controlled_readiness_handshake_counts,
-        session_host_timeout, validate_host_font_policy, validate_resolved_resource_policy,
-        validate_resource_policy, with_current_readiness_evidence,
-        with_readiness_evaluation_evidence,
+        Api2Execution, ConsoleEvidenceLog, ConsoleLogLevel, ControlledSettlementStep,
+        DocumentSession, FROZEN_INPUT_URL_ROOT, JSValue, MAX_CONSOLE_BYTES, MAX_CONSOLE_EVENTS,
+        PaintTicketAbortGuard, RESOURCE_EVIDENCE_ENTRY_OVERHEAD_BYTES, ReadinessPolicy,
+        RenderEnvironment, ResourceEvidenceLog, ResourcePolicyConfig, SessionCaptureEvidence,
+        SessionError, SessionHostDeadline, console_log_level_name,
+        controlled_readiness_handshake_counts, session_host_timeout, validate_host_font_policy,
+        validate_resolved_resource_policy, validate_resource_policy,
+        with_current_readiness_evidence, with_readiness_evaluation_evidence,
     };
 
     const ISOLATED_CASE_ENV: &str = "PLIEGO_DOCUMENT_SESSION_FIXTURE";
+    const PLIEGO_INPUT_CASE_ENV: &str = "PLIEGO_DOCUMENT_SESSION_PLIEGO_INPUT_FIXTURE";
     const CHARTJS_INPUT_ENV: &str = "PLIEGO_DOCUMENT_SESSION_CHARTJS_INPUT";
     const HTTP_BASE_ENV: &str = "PLIEGO_DOCUMENT_SESSION_HTTP_BASE";
     const ISOLATED_TEST: &str = "document_session::tests::isolated_resource_and_readiness_fixture";
+    const PLIEGO_INPUT_ISOLATED_TEST: &str =
+        "document_session::tests::isolated_pliego_input_url_fixture";
+    const API2_REQUEST: &[u8] = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../contracts/api2/goldens/accepted/render-request.a4.json"
+    ));
+    const API2_AHEM_TTF: &[u8] = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/text-scene/Ahem.ttf"
+    ));
     const ALLOWED_HTTP_BODY: &[u8] = b"window.pliego.ready({ http_loaded: true });\n";
     const FIXTURE_PNG_DATA_URL: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 
@@ -2651,6 +2966,7 @@ mod tests {
                 },
                 operations: vec![],
             }),
+            fixed_point_authority: Default::default(),
             canvas_resources: vec![],
             embedded_image_resources: vec![],
             canvas_diagnostics: vec![],
@@ -2917,14 +3233,25 @@ mod tests {
     }
 
     fn run_isolated(case: &str, http_base: &str) -> Output {
-        let mut child = Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", ISOLATED_TEST, "--ignored", "--nocapture"])
-            .env(ISOLATED_CASE_ENV, case)
-            .env(HTTP_BASE_ENV, http_base)
+        run_isolated_test(ISOLATED_TEST, ISOLATED_CASE_ENV, case, Some(http_base))
+    }
+
+    fn run_isolated_test(
+        test: &str,
+        case_env: &str,
+        case: &str,
+        http_base: Option<&str>,
+    ) -> Output {
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args(["--exact", test, "--ignored", "--nocapture"])
+            .env(case_env, case)
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
+            .stderr(Stdio::piped());
+        if let Some(http_base) = http_base {
+            command.env(HTTP_BASE_ENV, http_base);
+        }
+        let mut child = command.spawn().unwrap();
         let stdout = child.stdout.take().unwrap();
         let stderr = child.stderr.take().unwrap();
         let stdout_reader = std::thread::spawn(move || {
@@ -3062,6 +3389,63 @@ window.pliego?.defer();
                 .map(|byte| format!("{byte:02x}"))
                 .collect::<String>()
         )
+    }
+
+    fn resolved_render_job(
+        entrypoint: &str,
+        entries: &[(&str, &str, &[u8])],
+        diagnostic_retention: &str,
+    ) -> Result<(serde_json::Value, crate::api2::ResolvedRenderJob), crate::api2::InvocationError>
+    {
+        #[derive(serde::Serialize)]
+        struct Manifest<'a> {
+            schema: &'static str,
+            version: u32,
+            url_root: &'static str,
+            entries: Vec<ManifestEntry<'a>>,
+        }
+
+        #[derive(serde::Serialize)]
+        struct ManifestEntry<'a> {
+            path: &'a str,
+            media_type: &'a str,
+            sha256: String,
+            bytes: u64,
+        }
+
+        let mut ordered_entries = entries.to_vec();
+        ordered_entries.sort_unstable_by_key(|(path, _, _)| *path);
+        let manifest = Manifest {
+            schema: "pliego.input-manifest",
+            version: 1,
+            url_root: FROZEN_INPUT_URL_ROOT,
+            entries: ordered_entries
+                .iter()
+                .map(|(path, media_type, body)| ManifestEntry {
+                    path,
+                    media_type,
+                    sha256: content_address(body),
+                    bytes: body.len() as u64,
+                })
+                .collect(),
+        };
+        let mut canonical_manifest = serde_json::to_vec(&manifest).unwrap();
+        canonical_manifest.push(b'\n');
+
+        let mut request: serde_json::Value = serde_json::from_slice(API2_REQUEST).unwrap();
+        request["input"]["entrypoint"] = serde_json::Value::from(entrypoint);
+        request["input"]["manifest"]["sha256"] =
+            serde_json::Value::from(content_address(&canonical_manifest));
+        request["input"]["manifest"]["bytes"] =
+            serde_json::Value::from(canonical_manifest.len() as u64);
+        request["diagnostics"]["retention"] = serde_json::Value::from(diagnostic_retention);
+
+        let mut bodies = BTreeMap::new();
+        for (path, _, body) in entries {
+            assert!(bodies.insert((*path).to_owned(), body.to_vec()).is_none());
+        }
+        let job = crate::api2::resolve_render_job_for_test(&request, &canonical_manifest, bodies)?;
+        Ok((request, job))
     }
 
     fn fixture_png() -> Vec<u8> {
@@ -3358,6 +3742,384 @@ window.pliego?.defer();
                 );
             }
         }
+    }
+
+    #[test]
+    fn api2_execution_constructor_accepts_only_a_resolved_job() {
+        let _: fn(crate::api2::ResolvedRenderJob) -> Result<Api2Execution, SessionError> =
+            DocumentSession::start_api2_execution;
+    }
+
+    #[test]
+    fn pliego_input_url_uses_only_frozen_virtual_resources_and_fails_closed() {
+        for case in ["success", "unlisted", "scheme"] {
+            let output = run_isolated_test(
+                PLIEGO_INPUT_ISOLATED_TEST,
+                PLIEGO_INPUT_CASE_ENV,
+                case,
+                None,
+            );
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success(),
+                "isolated pliego-input {case} fixture failed\nstdout:\n{}\nstderr:\n{}",
+                stdout,
+                String::from_utf8_lossy(&output.stderr),
+            );
+            assert!(
+                stdout.contains("running 1 test") && stdout.contains("1 passed; 0 failed"),
+                "isolated pliego-input {case} filter did not execute exactly one passing child test:\n{stdout}",
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "launched in a fresh process by the pliego-input fixture orchestrator"]
+    fn isolated_pliego_input_url_fixture() {
+        let case =
+            std::env::var(PLIEGO_INPUT_CASE_ENV).expect("pliego-input fixture case should be set");
+        let input_url = url::Url::parse("pliego-input:///entry.html").unwrap();
+        let css_url = url::Url::parse("pliego-input:///styles.css").unwrap();
+        let font_url = url::Url::parse("pliego-input:///Ahem.ttf").unwrap();
+        let payload_url = url::Url::parse("pliego-input:///payload.json").unwrap();
+        let missing_url = url::Url::parse("pliego-input:///missing.js").unwrap();
+        let file_url = url::Url::parse("file:///definitely-host-owned/pliego-secret.js").unwrap();
+        let css = br#"@font-face {
+  font-family: "Pliego API2 Ahem";
+  src: url("Ahem.ttf");
+}
+#marker {
+  color: rgb(1, 2, 3);
+  font: 16px/20px "Pliego API2 Ahem";
+}
+"#;
+        let payload = br#"{"expediente":"host-path-free"}"#;
+        let input = match case.as_str() {
+            "success" => br#"<!doctype html>
+<meta charset="utf-8">
+<link rel="stylesheet" href="styles.css">
+<p id="marker">PLIEGO_INPUT_MARKER</p>
+<script>
+window.pliego.defer();
+document.fonts.ready
+  .then(() => fetch("payload.json"))
+  .then(response => response.text())
+  .then(body => requestAnimationFrame(() => window.pliego.ready({
+    href: location.href,
+    body,
+    color: getComputedStyle(document.getElementById("marker")).color,
+  })))
+  .catch(error => window.pliego.fail({
+    code: "PLIEGO_INPUT_FETCH_FAILED",
+    message: String(error),
+  }));
+</script>
+"#
+            .as_slice(),
+            "unlisted" => br#"<!doctype html>
+<meta charset="utf-8">
+<script src="missing.js"></script>
+<p>this document must never reach readiness</p>
+<script>window.pliego.ready({});</script>
+"#
+            .as_slice(),
+            "scheme" => br#"<!doctype html>
+<meta charset="utf-8">
+<script src="file:///definitely-host-owned/pliego-secret.js"></script>
+<p>this document must never reach readiness</p>
+<script>window.pliego.ready({});</script>
+"#
+            .as_slice(),
+            _ => panic!("unknown pliego-input fixture case: {case}"),
+        };
+        let mut entries = vec![("entry.html", "text/html;charset=utf-8", input)];
+        if case == "success" {
+            entries.extend([
+                ("Ahem.ttf", "font/ttf", API2_AHEM_TTF),
+                ("styles.css", "text/css;charset=utf-8", css.as_slice()),
+                ("payload.json", "application/json", payload.as_slice()),
+            ]);
+        }
+        let diagnostic_retention = match case.as_str() {
+            "success" => "none",
+            "unlisted" => "on-failure",
+            "scheme" => "always",
+            _ => unreachable!(),
+        };
+        let (expected_request, job) =
+            resolved_render_job("entry.html", &entries, diagnostic_retention)
+                .expect("the in-memory fixture should pass the full API 2 input validators");
+
+        let execution = DocumentSession::start_api2_execution(job)
+            .expect("the resolved API 2 input should construct a frozen URL session");
+        assert_eq!(
+            expected_request["page"]["geometry_authority"],
+            "request-only-v1"
+        );
+        let controlled = execution.controlled;
+        assert!(
+            controlled
+                .session
+                .delegate
+                .bundle_root
+                .as_os_str()
+                .is_empty()
+        );
+        assert!(
+            controlled
+                .session
+                .delegate
+                .resource_policy
+                .resolved_document_root()
+                .is_none()
+        );
+        let frozen = controlled
+            .session
+            .delegate
+            .frozen_input_authority
+            .as_ref()
+            .expect("the API 2 path must own an exclusive frozen input authority");
+        let mut expected_urls = entries
+            .iter()
+            .map(|(path, _, _)| format!("{FROZEN_INPUT_URL_ROOT}{path}"))
+            .collect::<Vec<_>>();
+        expected_urls.sort();
+        assert_eq!(
+            frozen.resources.keys().cloned().collect::<Vec<_>>(),
+            expected_urls
+        );
+
+        if case != "success" {
+            let denied_url = if case == "unlisted" {
+                &missing_url
+            } else {
+                &file_url
+            };
+            let error = controlled
+                .prepare_capture_candidate()
+                .err()
+                .expect("an unlisted or foreign-scheme resource must fail closed");
+            assert_eq!(error.code, "RESOURCE_DENIED");
+            let failure = error
+                .resource_failure
+                .as_ref()
+                .expect("denial should retain structured failure evidence");
+            assert_eq!(failure.url, denied_url.as_str());
+            assert!(failure.fatal);
+            assert_eq!(error.resource_accounting.loaded, 1);
+            assert_eq!(error.resource_accounting.failed, 1);
+            assert_eq!(
+                error.resource_store.resolve_url(input_url.as_str()),
+                Some(content_address(input))
+            );
+            assert!(
+                error
+                    .resource_store
+                    .resolve_url(denied_url.as_str())
+                    .is_none()
+            );
+            let entry_evidence = error
+                .resources
+                .iter()
+                .find(|evidence| evidence.request.url == input_url)
+                .expect("the frozen entrypoint must retain exact evidence before denial");
+            assert_eq!(
+                entry_evidence.content_type.as_deref(),
+                Some("text/html;charset=utf-8")
+            );
+            assert_eq!(
+                entry_evidence.content_address.as_deref(),
+                Some(content_address(input).as_str())
+            );
+            return;
+        }
+
+        let outcome = controlled
+            .prepare_capture_candidate()
+            .expect("frozen entrypoint, CSS, and fetch should settle")
+            .capture()
+            .expect("the host-path-free pliego-input document should capture");
+        let encoded = crate::api2::encode_profile_null_scene(
+            &expected_request,
+            &outcome.capture,
+            |resource| outcome.resource_store.resolve_content(resource),
+        )
+        .expect("the exact controlled capture should encode as a profile-null API 2 scene");
+        assert_eq!(
+            encoded.media_type,
+            "application/vnd.pliego.document-scene+json"
+        );
+        assert_eq!(encoded.sha256, content_address(&encoded.bytes));
+        let scene: serde_json::Value = serde_json::from_slice(&encoded.bytes)
+            .expect("the canonical scene should be valid JSON");
+        assert_eq!(scene["schema"], "pliego.document-scene");
+        assert_eq!(scene["version"], 2);
+        assert_eq!(scene["request_page"], expected_request["page"]);
+        assert!(scene["semantic_layer"].is_null());
+        let operations = scene["pages"]
+            .as_array()
+            .expect("the canonical scene should contain pages")
+            .iter()
+            .flat_map(|page| {
+                page["operations"]
+                    .as_array()
+                    .expect("every canonical page should contain operations")
+            })
+            .collect::<Vec<_>>();
+        let marker = operations
+            .iter()
+            .find(|operation| {
+                operation["type"] == "text" &&
+                    operation["text"]
+                        .as_str()
+                        .is_some_and(|text| text.contains("PLIEGO_INPUT_MARKER"))
+            })
+            .expect("the canonical scene should retain the marker text");
+        let marker_font_resource = marker["font"]["resource"]
+            .as_str()
+            .expect("the marker text should bind a public font resource");
+        assert_eq!(content_address(API2_AHEM_TTF), AHEM_SOURCE_RESOURCE);
+        assert_eq!(marker_font_resource, AHEM_CAPTURED_RESOURCE);
+        let marker_font = encoded
+            .resources
+            .get(marker_font_resource)
+            .expect("the marker font resource should be retained");
+        assert_eq!(marker_font.media_type, "application/octet-stream");
+        assert_eq!(content_address(&marker_font.bytes), marker_font_resource);
+        assert!(encoded.bytes.ends_with(b"\n"));
+        assert_eq!(outcome.readiness["status"], "ready");
+        assert_eq!(outcome.readiness["payload"]["href"], input_url.as_str());
+        assert_eq!(
+            outcome.readiness["payload"]["body"],
+            String::from_utf8_lossy(payload).as_ref()
+        );
+        assert_eq!(outcome.readiness["payload"]["color"], "rgb(1, 2, 3)");
+        assert_eq!(outcome.resource_accounting.requests, 4);
+        assert_eq!(outcome.resource_accounting.loaded, 4);
+        assert_eq!(outcome.resource_accounting.delegated, 0);
+        assert_eq!(outcome.resource_accounting.failed, 0);
+
+        for (url, media_type, body) in [
+            (&input_url, "text/html;charset=utf-8", input),
+            (&font_url, "font/ttf", API2_AHEM_TTF),
+            (&css_url, "text/css;charset=utf-8", css.as_slice()),
+            (&payload_url, "application/json", payload.as_slice()),
+        ] {
+            let evidence = outcome
+                .resources
+                .iter()
+                .find(|evidence| evidence.request.url == *url)
+                .expect("each frozen virtual resource should retain evidence");
+            let address = content_address(body);
+            assert_eq!(evidence.source, Some(ResourceSource::VirtualResource));
+            assert_eq!(evidence.status, "loaded");
+            assert_eq!(evidence.content_type.as_deref(), Some(media_type));
+            assert_eq!(evidence.sha256.as_deref(), Some(&address[7..]));
+            assert_eq!(evidence.content_address.as_deref(), Some(address.as_str()));
+            assert_eq!(
+                outcome.resource_store.resolve_url(url.as_str()),
+                Some(address.clone())
+            );
+            assert_eq!(outcome.resource_store.resolve_content(&address), Some(body));
+            assert_eq!(url.scheme(), "pliego-input");
+            assert!(url.host_str().is_none());
+        }
+    }
+
+    #[test]
+    fn resolved_input_job_rejects_non_utf8_canonical_html() {
+        let error = resolved_render_job(
+            "entry.html",
+            &[("entry.html", "text/html;charset=utf-8", &[0xff, 0xfe])],
+            "always",
+        )
+        .expect_err("a canonical UTF-8 HTML declaration must reject non-UTF-8 bytes");
+        assert!(
+            error
+                .to_string()
+                .contains("entrypoint \"entry.html\" is not valid UTF-8")
+        );
+    }
+
+    #[test]
+    fn frozen_input_transfers_a_body_above_half_the_inclusive_content_bound() {
+        let body_len = (crate::api2::INPUT_CONTENT_MAX_BYTES / 2 + 1) as usize;
+        let body = vec![b' '; body_len];
+        let (_, job) = resolved_render_job(
+            "entry.html",
+            &[("entry.html", "text/html;charset=utf-8", &body)],
+            "always",
+        )
+        .expect("the body should be inside the inclusive API 2 content bound");
+        let parts = job.into_parts();
+        let (input_url, authority) = super::FrozenInputAuthority::from_resolved_job(parts.input)
+            .expect("the validated body should map into the frozen authority");
+        let mut store =
+            super::owned_resource_store_for_session(&ResourcePolicy::default(), Some(&authority))
+                .expect(
+                    "frozen input should own the initial body without reserving it in the store",
+                );
+        assert_eq!(store.resident_bytes(), 0);
+
+        let request = ResourceRequest {
+            method: "GET".into(),
+            url: input_url.clone(),
+            destination: "Document".into(),
+            load_role: WebResourceLoadRole::DocumentContent,
+            referrer_url: None,
+            is_for_main_frame: true,
+            is_redirect: false,
+        };
+        let mut head_request = request.clone();
+        head_request.method = "HEAD".into();
+        let (head, _) = authority.resolve(&head_request, &store).unwrap();
+        assert!(head.body.is_empty());
+        assert_eq!(
+            authority.resources[input_url.as_str()]
+                .body
+                .borrow()
+                .as_ref()
+                .map(Vec::len),
+            Some(body_len)
+        );
+
+        let expected_address = content_address(&body);
+        let (first, first_headers) = authority.resolve(&request, &store).unwrap();
+        assert_eq!(first.body.len(), body_len);
+        assert_eq!(content_address(&first.body), expected_address);
+        assert!(
+            authority.resources[input_url.as_str()]
+                .body
+                .borrow()
+                .is_none()
+        );
+        store
+            .retain_with_source(
+                &request,
+                ResourceSource::VirtualResource,
+                first,
+                &first_headers,
+            )
+            .unwrap();
+        assert_eq!(store.resident_bytes(), body_len as u64);
+
+        let (repeated, repeated_headers) = authority.resolve(&request, &store).unwrap();
+        assert_eq!(repeated.body.len(), body_len);
+        assert_eq!(content_address(&repeated.body), expected_address);
+        assert_eq!(repeated_headers, first_headers);
+        store
+            .retain_with_source(
+                &request,
+                ResourceSource::VirtualResource,
+                repeated,
+                &repeated_headers,
+            )
+            .unwrap();
+        assert_eq!(store.resident_bytes(), body_len as u64);
+        assert_eq!(
+            store.resolve_url(input_url.as_str()),
+            Some(expected_address)
+        );
     }
 
     #[test]

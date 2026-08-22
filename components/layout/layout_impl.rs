@@ -25,11 +25,12 @@ use layout_api::{
     AxesOverflow, BoxAreaType, CSSPixelRectVec, DangerousStyleNode, IFrameSizes, Layout,
     LayoutConfig, LayoutDamage, LayoutDebugCanvasImageKey, LayoutDebugColor,
     LayoutDebugFontInstance, LayoutDebugFontResource, LayoutDebugFontVariation,
-    LayoutDebugFragment, LayoutDebugGlyph, LayoutDebugRect, LayoutDebugSnapshot,
-    LayoutDebugTextRun, LayoutDebugUtf8Range, LayoutElement, LayoutFactory, LayoutNode,
-    NodeRenderingType, OffsetParentResponse, PhysicalSides, QueryMsg, ReflowGoal, ReflowPhasesRun,
-    ReflowRequest, ReflowRequestRestyle, ReflowResult, ReflowStatistics, ScrollContainerQueryFlags,
-    ScrollContainerResponse, TrustedNodeAddress, with_layout_state,
+    LayoutDebugFragment, LayoutDebugGlyph, LayoutDebugGlyphAppUnits, LayoutDebugRect,
+    LayoutDebugRectAppUnits, LayoutDebugSnapshot, LayoutDebugTextRun, LayoutDebugUtf8Range,
+    LayoutElement, LayoutFactory, LayoutNode, NodeRenderingType, OffsetParentResponse,
+    PhysicalSides, QueryMsg, ReflowGoal, ReflowPhasesRun, ReflowRequest, ReflowRequestRestyle,
+    ReflowResult, ReflowStatistics, ScrollContainerQueryFlags, ScrollContainerResponse,
+    TrustedNodeAddress, with_layout_state,
 };
 use log::{debug, warn};
 use malloc_size_of::{MallocConditionalSizeOf, MallocSizeOf, MallocSizeOfOps};
@@ -274,6 +275,21 @@ fn restore_continuation_prefix(glyphs: &mut [LayoutDebugGlyph], prefix_len: usiz
     }
 }
 
+fn layout_debug_rect(rect: &Rect<Au, CSSPixel>) -> LayoutDebugRect {
+    LayoutDebugRect {
+        x: rect.origin.x.to_f32_px(),
+        y: rect.origin.y.to_f32_px(),
+        width: rect.size.width.to_f32_px(),
+        height: rect.size.height.to_f32_px(),
+        app_units: Some(LayoutDebugRectAppUnits {
+            x: rect.origin.x.0,
+            y: rect.origin.y.0,
+            width: rect.size.width.0,
+            height: rect.size.height.0,
+        }),
+    }
+}
+
 /// Information needed by layout.
 pub struct LayoutThread {
     /// The ID of the pipeline that we belong to.
@@ -442,12 +458,7 @@ impl Layout for LayoutThread {
                     let physical_rect = fragment
                         .base()
                         .map(|base| base.rect().translate(containing_block.origin.to_vector()));
-                    let rect = physical_rect.as_ref().map(|rect| LayoutDebugRect {
-                        x: rect.origin.x.to_f32_px(),
-                        y: rect.origin.y.to_f32_px(),
-                        width: rect.size.width.to_f32_px(),
-                        height: rect.size.height.to_f32_px(),
-                    });
+                    let rect = physical_rect.as_ref().map(layout_debug_rect);
                     let text_run = match fragment {
                         Fragment::Text(text_fragment)
                             if text_fragment.base.style().get_inherited_box().visibility ==
@@ -503,6 +514,11 @@ impl Layout for LayoutThread {
                                     x: glyph.point.x,
                                     y: glyph.point.y,
                                     advance: glyph.advance.to_f32_px(),
+                                    app_units: Some(LayoutDebugGlyphAppUnits {
+                                        x: glyph.point_app_units.x.0,
+                                        y: glyph.point_app_units.y.0,
+                                        advance: glyph.advance.0,
+                                    }),
                                     text_range: glyph.text_range.map(|range| LayoutDebugUtf8Range {
                                         start: range.start,
                                         end: range.end,
@@ -539,6 +555,9 @@ impl Layout for LayoutThread {
                                     .collect(),
                                 selected_family: text_fragment.font.selected_family_name(),
                                 font_size: text_fragment.font.descriptor.pt_size.to_f32_px(),
+                                font_size_app_units: Some(
+                                    text_fragment.font.descriptor.pt_size.0,
+                                ),
                                 color: LayoutDebugColor {
                                     r: color.components.0.clamp(0.0, 1.0),
                                     g: color.components.1.clamp(0.0, 1.0),
@@ -2270,6 +2289,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn debug_rect_retains_large_signed_app_units_without_round_trip_drift() {
+        let rect = Rect::new(
+            Point2D::new(Au(-100_000_001), Au(100_000_003)),
+            Size2D::new(Au(100_000_005), Au(100_000_007)),
+        );
+
+        let debug = layout_debug_rect(&rect);
+
+        assert_eq!(
+            debug.app_units,
+            Some(LayoutDebugRectAppUnits {
+                x: -100_000_001,
+                y: 100_000_003,
+                width: 100_000_005,
+                height: 100_000_007,
+            })
+        );
+        assert_ne!(Au::from_f32_px(debug.x).0, -100_000_001);
+        assert_ne!(Au::from_f32_px(debug.y).0, 100_000_003);
+    }
+
+    #[test]
     fn continuation_prefix_preserves_decreasing_rtl_ranges() {
         let mut glyphs = [(16, 20), (12, 16), (8, 12), (4, 8), (0, 4)]
             .into_iter()
@@ -2278,6 +2319,7 @@ mod tests {
                 x: 0.0,
                 y: 0.0,
                 advance: 0.0,
+                app_units: None,
                 text_range: Some(LayoutDebugUtf8Range { start, end }),
             })
             .collect::<Vec<_>>();

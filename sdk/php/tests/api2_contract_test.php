@@ -49,7 +49,7 @@ function api2Protocol(int $requestVersion = 1, int $resultVersion = 1): array
         'input_manifest' => ['schema' => 'pliego.input-manifest', 'version' => 1],
         'request' => ['schema' => 'pliego.render-request', 'version' => $requestVersion],
         'result' => ['schema' => 'pliego.render-result', 'version' => $resultVersion],
-        'document_scene' => ['schema' => 'pliego.document-scene', 'version' => 1],
+        'document_scene' => ['schema' => 'pliego.document-scene', 'version' => 2],
         'bundle_manifest' => ['schema' => 'pliego.bundle-manifest', 'version' => 1],
     ];
 }
@@ -266,6 +266,9 @@ $mutations['tuple member order'] = $badTupleOrder;
 $badSchemaType = $valid;
 $badSchemaType['contracts'][0]['request']['version'] = '1';
 $mutations['nested schema version type'] = $badSchemaType;
+$legacyScene = $valid;
+$legacyScene['contracts'][0]['document_scene']['version'] = 1;
+$mutations['legacy document scene tuple'] = $legacyScene;
 $badProfile = $valid;
 $badProfile['contracts'][0]['profiles'][0]['schema'] = 'pliego.profile.PDF-UA';
 $mutations['profile reference'] = $badProfile;
@@ -275,6 +278,18 @@ $mutations['invocation member order'] = $badInvocationOrder;
 $badFrameLimit = $valid;
 $badFrameLimit['invocation']['request_max_bytes'] = 1_048_575;
 $mutations['request frame limit'] = $badFrameLimit;
+$badJobTransport = $valid;
+$badJobTransport['invocation']['job_root_transport'] = 'argument-v1';
+$mutations['job root transport'] = $badJobTransport;
+$badManifestLimit = $valid;
+$badManifestLimit['invocation']['input_manifest_max_bytes']--;
+$mutations['input manifest limit'] = $badManifestLimit;
+$badContentLimit = $valid;
+$badContentLimit['invocation']['input_content_max_bytes']--;
+$mutations['input content limit'] = $badContentLimit;
+$badTransportExit = $valid;
+$badTransportExit['invocation']['transport_error_exit_code'] = 75;
+$mutations['transport error exit code'] = $badTransportExit;
 foreach ($mutations as $message => $mutation) {
     api2Rejected(
         fn () => RuntimeContract::fromProbeResult(0, api2ProbeFrame($mutation), ''),
@@ -330,6 +345,8 @@ foreach ([
     [64, '', 'missing newline'],
     [64, '', "two\nlines\n"],
     [64, '', "carriage return\r\n"],
+    [64, '', "escape sequence \x1B[31m\n"],
+    [64, '', "delete byte \x7F\n"],
     [64, '', "invalid utf8 \xFF\n"],
 ] as [$exitCode, $stdout, $stderr]) {
     api2Rejected(
@@ -344,25 +361,29 @@ $binary = $argv[1] ?? null;
 if ($binary !== null) {
     api2Expect($binary !== '' && is_file($binary), 'optional Pliego binary path must name a file');
     $realRuntime = RuntimeContract::probe([$binary]);
-    api2Expect($realRuntime->contracts() === [], 'real executable foundation advertises no API 2 tuples');
-    api2Expect(!$realRuntime->api2Available(), 'real executable foundation keeps API 2 unavailable');
+    api2Expect($realRuntime->api2Available(), 'real executable advertises API 2');
     api2Expect(
-        $realRuntime->select(api2Protocol()) === null,
-        'real executable foundation does not infer the accepted API 2 tuple',
+        $realRuntime->select(api2Protocol()) !== null,
+        'real executable advertises the exact SDK API 2 tuple',
     );
     api2Expect(
         $realRuntime->invocation() === [
             'request_transport' => 'stdin-single-json',
             'request_max_bytes' => 1_048_576,
+            'job_root_transport' => 'cwd-v1',
+            'input_manifest_max_bytes' => 16_777_216,
+            'input_content_max_bytes' => 67_108_864,
             'result_transport' => 'stdout-single-json',
             'invocation_error_transport' => 'stderr-utf8-line',
+            'transport_error_transport' => 'stderr-utf8-line',
             'success_exit_code' => 0,
             'failed_exit_code' => 1,
             'invocation_error_exit_code' => 64,
+            'transport_error_exit_code' => 74,
         ],
         'real executable foundation advertises the exact API 2 invocation transport',
     );
 }
 
-echo 'Pliego PHP API 2 contract foundation self-test passed'
+echo 'Pliego PHP API 2 contract self-test passed'
     .($binary === null ? '' : ' with real executable probe')."\n";

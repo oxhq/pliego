@@ -31,7 +31,7 @@
         "bottom": 2880,
         "left": 2880
       },
-      "css_page_precedence": "css-page-over-request-defaults"
+      "geometry_authority": "request-only-v1"
     },
     "resources": {
       "network": "deny",
@@ -52,8 +52,6 @@
         "microtasks": 1000000,
         "rendering_opportunities": 10000,
         "mutations": 1000000,
-        "post_readiness_resources": 1024,
-        "process_cpu_ms": 30000,
         "host_wall_ms": 60000
       }
     },
@@ -83,14 +81,14 @@
     "scene": {
       "path": "scene.json",
       "media_type": "application/vnd.pliego.document-scene+json",
-      "sha256": "sha256:a61a60177fe7f72eea028c3a4f8453a90eee4e801cb131b63bffcb4f0dff9e9e",
-      "bytes": 1184
+      "sha256": "sha256:f9a019187521e684605f8833acdce6a798b5ef2fbe398ed237719245b3cfe394",
+      "bytes": 1305
     },
     "bundle": {
       "path": "bundle.json",
       "media_type": "application/vnd.pliego.bundle-manifest+json",
-      "sha256": "sha256:26a30d1e6ca7b19dec015a7debd5fd43d25b648367633d5b89961df57eb3c92c",
-      "bytes": 816
+      "sha256": "sha256:c45693b783fa0844b7ce0fe20db6dd71c0aa0ba8391d4366b1de0f54ddb0a1d4",
+      "bytes": 811
     }
   },
   "conformance": {

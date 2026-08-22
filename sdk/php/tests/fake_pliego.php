@@ -25,7 +25,7 @@ if (($argv[1] ?? null) === '--contract-probe') {
         'input_manifest' => ['schema' => 'pliego.input-manifest', 'version' => 1],
         'request' => ['schema' => 'pliego.render-request', 'version' => 1],
         'result' => ['schema' => 'pliego.render-result', 'version' => 1],
-        'document_scene' => ['schema' => 'pliego.document-scene', 'version' => 1],
+        'document_scene' => ['schema' => 'pliego.document-scene', 'version' => 2],
         'bundle_manifest' => ['schema' => 'pliego.bundle-manifest', 'version' => 1],
         'profiles' => $profiles,
     ];
@@ -48,11 +48,16 @@ if (($argv[1] ?? null) === '--contract-probe') {
         'invocation' => [
             'request_transport' => 'stdin-single-json',
             'request_max_bytes' => 1_048_576,
+            'job_root_transport' => 'cwd-v1',
+            'input_manifest_max_bytes' => 16_777_216,
+            'input_content_max_bytes' => 67_108_864,
             'result_transport' => 'stdout-single-json',
             'invocation_error_transport' => 'stderr-utf8-line',
+            'transport_error_transport' => 'stderr-utf8-line',
             'success_exit_code' => 0,
             'failed_exit_code' => 1,
             'invocation_error_exit_code' => 64,
+            'transport_error_exit_code' => 74,
         ],
     ];
 

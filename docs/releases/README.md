@@ -26,13 +26,14 @@ commit can contain its own archive hashes.
    Composer workflow must download the native release asset and prove the bundled
    file is byte-identical before its finalized gate can pass.
 2. Sync the PHP subtree to `oxhq/pliego-php`, require its public package workflow,
-   tag the exact v0.2 commit, and verify Packagist resolves that version.
+   tag the exact coordinated-version commit, and verify Packagist resolves that
+   version.
 3. Sync the Laravel subtree to `oxhq/pliego-laravel`. Before tagging, its public
    workflow must download the native `runtimes.json`, require
    `release_ready: true`, and compare it byte-for-byte with the bundled file.
-4. Tag Laravel only after PHP 0.2 resolves publicly, then verify Packagist and run
-   the versioned Laravel consumer through install, doctor, render, typed failure,
-   PDF, and artifact checks.
+4. Tag Laravel only after the matching PHP version resolves publicly, then verify
+   Packagist and run the versioned Laravel consumer through install, doctor, render,
+   typed failure, PDF, storage/retrieval, and artifact checks.
 
 Do not reuse or mutate an existing tag or release. A local build, a green source
 workflow, or a Composer ZIP staged from `release_ready: false` is not publication

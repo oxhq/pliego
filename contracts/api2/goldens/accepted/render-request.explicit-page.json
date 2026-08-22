@@ -27,7 +27,7 @@
       "bottom": 2160,
       "left": 2160
     },
-    "css_page_precedence": "css-page-over-request-defaults"
+    "geometry_authority": "request-only-v1"
   },
   "resources": {
     "network": "deny",
@@ -48,8 +48,6 @@
       "microtasks": 2000000,
       "rendering_opportunities": 20000,
       "mutations": 2000000,
-      "post_readiness_resources": 2048,
-      "process_cpu_ms": 60000,
       "host_wall_ms": 120000
     }
   },

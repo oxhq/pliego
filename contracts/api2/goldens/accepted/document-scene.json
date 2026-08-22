@@ -1,6 +1,6 @@
 {
   "schema": "pliego.document-scene",
-  "version": 1,
+  "version": 2,
   "app_units_per_css_px": 60,
   "request_page": {
     "size": {
@@ -12,7 +12,7 @@
       "bottom": 2880,
       "left": 2880
     },
-    "css_page_precedence": "css-page-over-request-defaults"
+    "geometry_authority": "request-only-v1"
   },
   "semantic_layer": null,
   "pages": [
@@ -33,7 +33,17 @@
         {
           "type": "text",
           "text": "Invoice",
-          "font": "sha256:bf0cf8c8fff21d37f18617edb5677ed60cd2ea9dae07bfc8571d9f11da706a00",
+          "font": {
+            "resource": "sha256:bf0cf8c8fff21d37f18617edb5677ed60cd2ea9dae07bfc8571d9f11da706a00",
+            "face_index": 2,
+            "variations": [
+              {
+                "tag": 2003265652,
+                "value_f32_bits": 1137180672
+              }
+            ],
+            "synthetic_bold": true
+          },
           "font_size_app_units": 1080,
           "color": {
             "r": 0,
@@ -79,7 +89,8 @@
             "width": 3840,
             "height": 3840
           },
-          "resource": "sha256:83ee8b728ac4d73ac6454bd63f58ef28f97d40d38ad6ddfd499e3f890b4a8ca4"
+          "resource": "sha256:2fae544893c4d6cdb5e76b60c9a0395b828b2b76a9bdbcd498b2392d9179758a",
+          "media_type": "image/png"
         },
         {
           "type": "link",

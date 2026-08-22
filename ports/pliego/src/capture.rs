@@ -24,9 +24,20 @@ use crate::{
     Stroke,
 };
 
+const APP_UNITS_PER_CSS_PIXEL: f32 = 60.0;
+
+fn app_units_to_f32_px(value: i32) -> f32 {
+    value as f32 / APP_UNITS_PER_CSS_PIXEL
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct SceneCapture {
     pub scene: DocumentScene,
+    /// Fixed-point source authority for a future API 2 encoder.
+    ///
+    /// This ledger is deliberately absent from the API 1 scene/inspect serialization surface.
+    #[serde(skip_serializing)]
+    pub fixed_point_authority: CapturedFixedPointAuthority,
     #[serde(skip_serializing)]
     pub canvas_resources: Vec<CanvasResource>,
     #[serde(skip_serializing)]
@@ -38,6 +49,75 @@ pub struct SceneCapture {
     pub font_warnings: Vec<CapturedFontWarning>,
     pub unsupported_events: Vec<UnsupportedPaintEvent>,
     pub text_mapping_gaps: Vec<MissingTextMapping>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct CapturedFixedPointAuthority {
+    /// One entry per retained page, in page order. Legacy diagnostic fixtures can lack authority;
+    /// real paged layout always emits both source and geometry.
+    pub pages: Vec<CapturedPageAuthority>,
+    /// One entry per final scene page and operation, in the exact emitted order.
+    ///
+    /// `None` means that operation cannot be encoded from retained fixed-point authority. This
+    /// ledger is built alongside final operations; it must never be reconstructed by matching the
+    /// dense paint-event ledger after pagination.
+    pub page_operations: Vec<Vec<Option<CapturedOperationAuthority>>>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CapturedOperationAuthority {
+    Text {
+        font_size_app_units: i32,
+        glyphs: Vec<CapturedGlyphAppUnits>,
+    },
+    /// Exact operation bounds. `Operation` supplies the discriminant; a fixed-point encoder must
+    /// regenerate and validate rectangle path data from these bounds rather than trusting the API
+    /// 1 f64 path data.
+    Bounds(CapturedRectAppUnits),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CapturedPageAuthority {
+    pub index: usize,
+    pub style_source: Option<CapturedPageStyleSource>,
+    pub app_units: Option<CapturedPageAppUnits>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[non_exhaustive]
+#[serde(rename_all = "kebab-case")]
+pub enum CapturedPageStyleSource {
+    RequestDefaults,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct CapturedPageAppUnits {
+    pub width: i32,
+    pub height: i32,
+    pub margin_top: i32,
+    pub margin_right: i32,
+    pub margin_bottom: i32,
+    pub margin_left: i32,
+    pub available_inline_size: i32,
+    pub available_block_size: i32,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct CapturedRectAppUnits {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct CapturedGlyphAppUnits {
+    pub x: i32,
+    pub y: i32,
+    pub advance: i32,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -160,6 +240,8 @@ pub enum CaptureError {
         actual: usize,
     },
     InvalidPageGeometry,
+    InvalidPageGeometryAuthority,
+    InvalidPaintGeometryAuthority,
     MissingTextRect {
         sequence: usize,
     },
@@ -301,6 +383,14 @@ impl fmt::Display for CaptureError {
             Self::InvalidPageGeometry => {
                 write!(formatter, "layout snapshot contains invalid page geometry")
             },
+            Self::InvalidPageGeometryAuthority => write!(
+                formatter,
+                "layout snapshot page has incomplete or inconsistent app-unit authority"
+            ),
+            Self::InvalidPaintGeometryAuthority => write!(
+                formatter,
+                "layout snapshot paint geometry disagrees with its app-unit authority"
+            ),
             Self::MissingTextRect { sequence } => {
                 write!(
                     formatter,
@@ -872,7 +962,9 @@ fn capture_layout_with_canvas_limits(
     ) -> Result<Arc<RetainedCanvasSnapshot>, String>,
     canvas_limits: CanvasCaptureLimits,
 ) -> Result<SceneCapture, CaptureError> {
+    validate_paint_app_unit_authority(&capture)?;
     let pages = capture_pages(&capture)?;
+    let mut fixed_point_authority = capture_fixed_point_authority(&capture);
     let table_group_repeats = capture
         .page_sequence
         .as_ref()
@@ -1005,6 +1097,7 @@ fn capture_layout_with_canvas_limits(
                     sequence: event.sequence,
                     structural_fragment_index: None,
                     bounds,
+                    authority: captured_text_operation_authority(text_run),
                     operation: Operation::Text {
                         text: text_run.text.clone(),
                         font: font.clone(),
@@ -1165,6 +1258,7 @@ fn capture_layout_with_canvas_limits(
                     sequence: event.sequence,
                     structural_fragment_index: None,
                     bounds: bounds.clone(),
+                    authority: rect.app_units.map(CapturedOperationAuthority::Bounds),
                     operation: Operation::Image {
                         bounds,
                         resource,
@@ -1187,6 +1281,10 @@ fn capture_layout_with_canvas_limits(
                         sequence: event.sequence,
                         structural_fragment_index: None,
                         bounds: bounds.clone(),
+                        authority: border
+                            .rect
+                            .app_units
+                            .map(CapturedOperationAuthority::Bounds),
                         operation: Operation::Path {
                             data: rectangle_path_data(&bounds),
                             bounds,
@@ -1227,6 +1325,10 @@ fn capture_layout_with_canvas_limits(
                         sequence: event.sequence,
                         structural_fragment_index: None,
                         bounds: bounds.clone(),
+                        authority: paint_rect
+                            .rect
+                            .app_units
+                            .map(CapturedOperationAuthority::Bounds),
                         operation: Operation::Path {
                             data: rectangle_path_data(&bounds),
                             bounds,
@@ -1308,21 +1410,24 @@ fn capture_layout_with_canvas_limits(
         });
     }
 
+    let distributed = distribute_operations(
+        &pages,
+        operations,
+        &capture.paint_events,
+        &table_group_repeats,
+        &repeated_header_fragments,
+    )?;
     let scene = DocumentScene {
         schema: crate::SCHEMA.into(),
         version: crate::SCHEMA_VERSION,
-        pages: distribute_operations(
-            &pages,
-            operations,
-            &capture.paint_events,
-            &table_group_repeats,
-            &repeated_header_fragments,
-        )?,
+        pages: distributed.pages,
     };
     scene.validate().map_err(CaptureError::InvalidScene)?;
+    fixed_point_authority.page_operations = distributed.page_operations;
 
     Ok(SceneCapture {
         scene,
+        fixed_point_authority,
         canvas_resources: canvas_resources.into_values().collect(),
         embedded_image_resources: embedded_image_resources.into_values().collect(),
         canvas_diagnostics,
@@ -1333,6 +1438,73 @@ fn capture_layout_with_canvas_limits(
         unsupported_events,
         text_mapping_gaps,
     })
+}
+
+fn capture_fixed_point_authority(capture: &LayoutCapture) -> CapturedFixedPointAuthority {
+    CapturedFixedPointAuthority {
+        pages: capture
+            .page_sequence
+            .as_ref()
+            .into_iter()
+            .flat_map(|sequence| &sequence.pages)
+            .map(|page| CapturedPageAuthority {
+                index: page.index,
+                style_source: page.style_source,
+                app_units: page.app_units,
+            })
+            .collect(),
+        page_operations: Vec::new(),
+    }
+}
+
+fn captured_text_operation_authority(text: &CaptureTextRun) -> Option<CapturedOperationAuthority> {
+    Some(CapturedOperationAuthority::Text {
+        font_size_app_units: text.font_size_app_units?,
+        glyphs: text
+            .glyphs
+            .iter()
+            .map(|glyph| glyph.app_units)
+            .collect::<Option<Vec<_>>>()?,
+    })
+}
+
+fn validate_paint_app_unit_authority(capture: &LayoutCapture) -> Result<(), CaptureError> {
+    for fragment in &capture.fragments {
+        if fragment
+            .rect
+            .as_ref()
+            .is_some_and(|rect| !rect.app_unit_authority_matches())
+        {
+            return Err(CaptureError::InvalidPaintGeometryAuthority);
+        }
+        let Some(text_run) = fragment.text_run.as_ref() else {
+            continue;
+        };
+        if text_run
+            .font_size_app_units
+            .is_some_and(|exact| app_units_to_f32_px(exact) != text_run.font_size) ||
+            text_run
+                .glyphs
+                .iter()
+                .any(|glyph| !glyph.app_unit_authority_matches())
+        {
+            return Err(CaptureError::InvalidPaintGeometryAuthority);
+        }
+    }
+    for event in &capture.paint_events {
+        if event
+            .table_borders
+            .iter()
+            .any(|border| !border.rect.app_unit_authority_matches()) ||
+            event
+                .paint_rects
+                .iter()
+                .any(|paint_rect| !paint_rect.rect.app_unit_authority_matches())
+        {
+            return Err(CaptureError::InvalidPaintGeometryAuthority);
+        }
+    }
+    Ok(())
 }
 
 struct CachedRetainedCanvas {
@@ -1459,6 +1631,7 @@ fn append_canvas(
             structural_fragment_index: None,
             bounds,
             operation,
+            authority: None,
         });
     }
     Ok(())
@@ -1578,8 +1751,49 @@ fn capture_pages(capture: &LayoutCapture) -> Result<Vec<CapturePage>, CaptureErr
         {
             return Err(CaptureError::InvalidPageGeometry);
         }
+        match (page.style_source, page.app_units) {
+            (None, None) => {},
+            (Some(CapturedPageStyleSource::RequestDefaults), Some(app_units))
+                if valid_page_app_unit_authority(page, app_units) => {},
+            _ => return Err(CaptureError::InvalidPageGeometryAuthority),
+        }
     }
     Ok(sequence.pages.clone())
+}
+
+fn valid_page_app_unit_authority(page: &CapturePage, app_units: CapturedPageAppUnits) -> bool {
+    if app_units.width <= 0 ||
+        app_units.height <= 0 ||
+        app_units.margin_top < 0 ||
+        app_units.margin_right < 0 ||
+        app_units.margin_bottom < 0 ||
+        app_units.margin_left < 0 ||
+        app_units.available_inline_size <= 0 ||
+        app_units.available_block_size <= 0
+    {
+        return false;
+    }
+    let horizontal_margins = i64::from(app_units.margin_left) + i64::from(app_units.margin_right);
+    let vertical_margins = i64::from(app_units.margin_top) + i64::from(app_units.margin_bottom);
+    if i64::from(app_units.width) - horizontal_margins != i64::from(app_units.available_inline_size) ||
+        i64::from(app_units.height) - vertical_margins !=
+            i64::from(app_units.available_block_size)
+    {
+        return false;
+    }
+
+    [
+        (app_units.width, page.width),
+        (app_units.height, page.height),
+        (app_units.margin_top, page.margin_top),
+        (app_units.margin_right, page.margin_right),
+        (app_units.margin_bottom, page.margin_bottom),
+        (app_units.margin_left, page.margin_left),
+        (app_units.available_inline_size, page.available_inline_size),
+        (app_units.available_block_size, page.available_block_size),
+    ]
+    .into_iter()
+    .all(|(exact, compatibility)| app_units_to_f32_px(exact) == compatibility)
 }
 
 #[derive(Clone)]
@@ -1590,6 +1804,12 @@ struct PositionedOperation {
     structural_fragment_index: Option<usize>,
     bounds: Rect,
     operation: Operation,
+    authority: Option<CapturedOperationAuthority>,
+}
+
+struct DistributedOperations {
+    pages: Vec<Page>,
+    page_operations: Vec<Vec<Option<CapturedOperationAuthority>>>,
 }
 
 fn distribute_operations(
@@ -1598,18 +1818,9 @@ fn distribute_operations(
     paint_events: &[CapturePaintEvent],
     repeats: &[CaptureTableGroupRepeat],
     repeated_header_fragments: &HashMap<u64, RepeatedTableHeaderFragments>,
-) -> Result<Vec<Page>, CaptureError> {
+) -> Result<DistributedOperations, CaptureError> {
     let operations = split_solid_rect_operations(pages, operations)?;
-    let mut scene_pages = pages
-        .iter()
-        .map(|page| Page {
-            size: Size {
-                width: f64::from(page.width),
-                height: f64::from(page.height),
-            },
-            operations: Vec::new(),
-        })
-        .collect::<Vec<_>>();
+    let mut positioned_pages = vec![Vec::new(); pages.len()];
     let mut repeated_operations = vec![Vec::new(); pages.len()];
 
     for repeat in repeats {
@@ -1649,6 +1860,10 @@ fn distribute_operations(
                 });
             }
             let mut repeated = operation.clone();
+            // Repeat placement is currently retained in f32 block coordinates. Until that
+            // transform has its own app-unit source authority, the repeated operation must not
+            // inherit the source operation's exact coordinates.
+            repeated.authority = None;
             repeated.bounds.y += translation;
             translate_operation_y(&mut repeated.operation, -translation, repeated.sequence)?;
             let (page_index, page_origin) = operation_page(pages, &mut repeated)?;
@@ -1659,22 +1874,92 @@ fn distribute_operations(
             }
             translate_operation_y(&mut repeated.operation, page_origin, repeated.sequence)?;
             mark_repeated_table_header(&mut repeated.operation);
-            repeated_operations[page_index].push(repeated.operation);
+            repeated_operations[page_index].push(repeated);
         }
     }
 
     for mut positioned in operations {
         let (page_index, page_origin) = operation_page(pages, &mut positioned)?;
-        translate_operation_y(&mut positioned.operation, page_origin, positioned.sequence)?;
-        scene_pages[page_index]
-            .operations
-            .push(positioned.operation);
+        translate_positioned_operation_to_page(
+            &mut positioned,
+            page_origin,
+            page_origin_app_units(pages, page_index),
+        )?;
+        positioned_pages[page_index].push(positioned);
     }
-    for (page, mut repeated) in scene_pages.iter_mut().zip(repeated_operations) {
-        repeated.append(&mut page.operations);
-        page.operations = repeated;
+
+    let mut scene_pages = Vec::with_capacity(pages.len());
+    let mut page_operations = Vec::with_capacity(pages.len());
+    for ((page, mut positioned), mut repeated) in
+        pages.iter().zip(positioned_pages).zip(repeated_operations)
+    {
+        repeated.append(&mut positioned);
+        let (operations, authority) = repeated
+            .into_iter()
+            .map(|positioned| (positioned.operation, positioned.authority))
+            .unzip();
+        scene_pages.push(Page {
+            size: Size {
+                width: f64::from(page.width),
+                height: f64::from(page.height),
+            },
+            operations,
+        });
+        page_operations.push(authority);
     }
-    Ok(scene_pages)
+    Ok(DistributedOperations {
+        pages: scene_pages,
+        page_operations,
+    })
+}
+
+fn page_origin_app_units(pages: &[CapturePage], page_index: usize) -> Option<i64> {
+    pages[..page_index].iter().try_fold(0_i64, |origin, page| {
+        origin.checked_add(i64::from(page.app_units?.height))
+    })
+}
+
+fn translate_positioned_operation_to_page(
+    positioned: &mut PositionedOperation,
+    page_origin: f64,
+    page_origin_app_units: Option<i64>,
+) -> Result<(), CaptureError> {
+    translate_operation_y(&mut positioned.operation, page_origin, positioned.sequence)?;
+    if let Some(authority) = positioned.authority.take() {
+        positioned.authority = page_origin_app_units
+            .and_then(|origin| translate_operation_authority_y(authority, origin));
+    }
+    Ok(())
+}
+
+fn translate_operation_authority_y(
+    authority: CapturedOperationAuthority,
+    page_origin: i64,
+) -> Option<CapturedOperationAuthority> {
+    let translate_y = |value: i32| i32::try_from(i64::from(value) - page_origin).ok();
+    let translate_rect = |mut bounds: CapturedRectAppUnits| {
+        bounds.y = translate_y(bounds.y)?;
+        Some(bounds)
+    };
+
+    match authority {
+        CapturedOperationAuthority::Text {
+            font_size_app_units,
+            glyphs,
+        } => Some(CapturedOperationAuthority::Text {
+            font_size_app_units,
+            glyphs: glyphs
+                .into_iter()
+                .map(|mut glyph| {
+                    glyph.y = translate_y(glyph.y)?;
+                    Some(glyph)
+                })
+                .collect::<Option<Vec<_>>>()?,
+        }),
+        CapturedOperationAuthority::Bounds(bounds) => {
+            Some(CapturedOperationAuthority::Bounds(translate_rect(bounds)?))
+        },
+    }
 }
 
 fn split_solid_rect_operations(
@@ -1692,6 +1977,7 @@ fn split_solid_rect_operations(
         let bottom = top + operation.bounds.height;
         let mut page_origin = 0.0;
         let mut covered_height = 0.0;
+        let split_start = split.len();
         for page in pages {
             let page_end = page_origin + f64::from(page.height);
             let intersection_top = top.max(page_origin);
@@ -1717,6 +2003,14 @@ fn split_solid_rect_operations(
             return Err(CaptureError::OperationOutsidePageSequence {
                 sequence: operation.sequence,
             });
+        }
+        let part_count = split.len() - split_start;
+        if part_count != 1 || split[split_start].bounds != operation.bounds {
+            for part in &mut split[split_start..] {
+                // Splitting and clipping currently use f64 page intersections. Retaining the
+                // unsplit source rectangle here would give a future encoder stale geometry.
+                part.authority = None;
+            }
         }
     }
     Ok(split)
@@ -1773,6 +2067,8 @@ fn operation_page(
                 operation.bounds.height = end - top;
                 bounds.height = operation.bounds.height;
                 *data = rectangle_path_data(bounds);
+                // The centered-edge clamp is currently calculated in f64 compatibility geometry.
+                operation.authority = None;
             }
             return Ok((page_index, origin));
         }
@@ -2154,10 +2450,16 @@ fn append_link(
         .as_ref()
         .ok_or(CaptureError::MissingLinkRect { sequence })?
         .into_scene_rect();
+    let authority = fragment
+        .rect
+        .as_ref()
+        .and_then(|rect| rect.app_units)
+        .map(CapturedOperationAuthority::Bounds);
     operations.push(PositionedOperation {
         sequence,
         structural_fragment_index: None,
         bounds: bounds.clone(),
+        authority,
         operation: Operation::Link {
             bounds,
             target: target.clone(),
@@ -2180,6 +2482,7 @@ fn append_box_links(
             sequence,
             structural_fragment_index: Some(placement.fragment_index),
             bounds: placement.bounds.clone(),
+            authority: None,
             operation: Operation::Link {
                 bounds: placement.bounds.clone(),
                 target: placement.target.clone(),
@@ -2272,6 +2575,7 @@ fn append_vector_image(
                     sequence,
                     structural_fragment_index: None,
                     bounds: bounds.clone(),
+                    authority: None,
                     operation: Operation::Path {
                         bounds,
                         data: path.to_svg(),
@@ -2319,6 +2623,7 @@ fn append_vector_image(
                     sequence,
                     structural_fragment_index: None,
                     bounds: bounds.clone(),
+                    authority: None,
                     operation: Operation::Image {
                         bounds,
                         resource: resource.clone(),
@@ -2396,6 +2701,7 @@ fn append_vector_image(
                     sequence,
                     structural_fragment_index: None,
                     bounds,
+                    authority: None,
                     operation: Operation::Text {
                         text: text.clone(),
                         font: instance_id,
@@ -2640,6 +2946,10 @@ struct CaptureTableGroupRepeat {
 #[serde(deny_unknown_fields)]
 struct CapturePage {
     index: usize,
+    #[serde(default)]
+    style_source: Option<CapturedPageStyleSource>,
+    #[serde(default)]
+    app_units: Option<CapturedPageAppUnits>,
     width: f32,
     height: f32,
     margin_top: f32,
@@ -2878,6 +3188,8 @@ struct CaptureTextRun {
     selected_family: Option<String>,
     font_size: f32,
     #[serde(default)]
+    font_size_app_units: Option<i32>,
+    #[serde(default)]
     color: CaptureColor,
     glyphs: Vec<CaptureGlyph>,
 }
@@ -2890,7 +3202,19 @@ struct CaptureGlyph {
     y: f32,
     advance: f32,
     #[serde(default)]
+    app_units: Option<CapturedGlyphAppUnits>,
+    #[serde(default)]
     text_range: Option<CaptureUtf8Range>,
+}
+
+impl CaptureGlyph {
+    fn app_unit_authority_matches(&self) -> bool {
+        // The compatibility point is the sum of two independently projected `f32` values
+        // (baseline plus shaping offset), so it can legitimately differ from projecting their
+        // exact app-unit sum. Advance is a direct projection and must still agree.
+        self.app_units
+            .is_none_or(|exact| app_units_to_f32_px(exact.advance) == self.advance)
+    }
 }
 
 #[derive(Clone, Copy, Deserialize)]
@@ -2907,6 +3231,8 @@ struct CaptureRect {
     y: f32,
     width: f32,
     height: f32,
+    #[serde(default)]
+    app_units: Option<CapturedRectAppUnits>,
 }
 
 impl CaptureRect {
@@ -2917,6 +3243,15 @@ impl CaptureRect {
             width: f64::from(self.width),
             height: f64::from(self.height),
         }
+    }
+
+    fn app_unit_authority_matches(&self) -> bool {
+        self.app_units.is_none_or(|exact| {
+            app_units_to_f32_px(exact.x) == self.x &&
+                app_units_to_f32_px(exact.y) == self.y &&
+                app_units_to_f32_px(exact.width) == self.width &&
+                app_units_to_f32_px(exact.height) == self.height
+        })
     }
 }
 
@@ -3447,6 +3782,356 @@ mod tests {
         );
     }
 
+    fn exact_paint_authority_layout() -> serde_json::Value {
+        serde_json::json!({
+            "boxes": [],
+            "fragments": [],
+            "font_resources": [],
+            "font_instances": [],
+            "page_sequence": {
+                "pages": [{
+                    "index": 0,
+                    "style_source": "request-defaults",
+                    "app_units": {
+                        "width": 600,
+                        "height": 600,
+                        "margin_top": 0,
+                        "margin_right": 0,
+                        "margin_bottom": 0,
+                        "margin_left": 0,
+                        "available_inline_size": 600,
+                        "available_block_size": 600
+                    },
+                    "width": 10.0,
+                    "height": 10.0,
+                    "margin_top": 0.0,
+                    "margin_right": 0.0,
+                    "margin_bottom": 0.0,
+                    "margin_left": 0.0,
+                    "available_inline_size": 10.0,
+                    "available_block_size": 10.0
+                }]
+            },
+            "paint_events": [
+                {
+                    "sequence": 0,
+                    "kind": "paint-rect",
+                    "fragment_id": null,
+                    "tag_id": null,
+                    "spatial_node_id": 0,
+                    "clip_id": null,
+                    "paint_rects": [{
+                        "rect": {
+                            "x": 1.0,
+                            "y": 1.0,
+                            "width": 1.0,
+                            "height": 1.0,
+                            "app_units": {"x": 60, "y": 60, "width": 60, "height": 60}
+                        },
+                        "color": {"r": 1.0, "g": 0.0, "b": 0.0, "a": 1.0},
+                        "kind": "background"
+                    }]
+                },
+                {
+                    "sequence": 1,
+                    "kind": "paint-rect",
+                    "fragment_id": null,
+                    "tag_id": null,
+                    "spatial_node_id": 0,
+                    "clip_id": null,
+                    "paint_rects": [{
+                        "rect": {
+                            "x": 2.0,
+                            "y": 2.0,
+                            "width": 1.0,
+                            "height": 1.0,
+                            "app_units": {"x": 120, "y": 120, "width": 60, "height": 60}
+                        },
+                        "color": {"r": 0.0, "g": 0.0, "b": 1.0, "a": 1.0},
+                        "kind": "border"
+                    }]
+                }
+            ],
+            "paint_epoch": 1,
+            "paint_content_width": 10.0,
+            "paint_content_height": 10.0,
+            "paint_scroll_node_count": 1,
+            "paintable": true,
+            "contentful": true,
+            "first_reflow": false,
+            "links": []
+        })
+    }
+
+    fn exact_text_link_layout() -> serde_json::Value {
+        let font_bytes = b"fixed-point-font";
+        let resource_digest: [u8; 32] = Sha256::digest(font_bytes).into();
+        let resource = content_address(&resource_digest);
+        let instance = font_instance_id(&resource_digest, 0, &[], false);
+        let large_x = 100_000_001;
+        let compatibility_x = app_units_to_f32_px(large_x);
+
+        serde_json::json!({
+            "boxes": [],
+            "fragments": [{
+                "depth": 0,
+                "kind": "text",
+                "rect": {
+                    "x": compatibility_x,
+                    "y": 1.0,
+                    "width": 2.0,
+                    "height": 2.0,
+                    "app_units": {
+                        "x": large_x,
+                        "y": 60,
+                        "width": 120,
+                        "height": 120
+                    }
+                },
+                "tag_id": 7,
+                "paint_fragment_id": 0,
+                "text_run": {
+                    "text": "A",
+                    "font_instance_id": instance,
+                    "font_identifier": {"ArrayBuffer": {}},
+                    "requested_families": ["Fixed Point"],
+                    "selected_family": "Fixed Point",
+                    "font_size": 12.0,
+                    "font_size_app_units": 720,
+                    "color": {"r": 0.0, "g": 0.0, "b": 0.0, "a": 1.0},
+                    "glyphs": [{
+                        "id": 42,
+                        "x": compatibility_x,
+                        "y": 2.0,
+                        "advance": 7.0,
+                        "app_units": {
+                            "x": large_x,
+                            "y": 120,
+                            "advance": 420
+                        },
+                        "text_range": {"start": 0, "end": 1}
+                    }]
+                },
+                "image_url": null
+            }],
+            "font_resources": [{
+                "resource": resource,
+                "bytes_base64": BASE64_STANDARD.encode(font_bytes)
+            }],
+            "font_instances": [{
+                "id": instance,
+                "resource": resource,
+                "face_index": 0,
+                "variations": [],
+                "synthetic_bold": false
+            }],
+            "page_sequence": {
+                "pages": [{
+                    "index": 0,
+                    "style_source": "request-defaults",
+                    "app_units": {
+                        "width": 6000,
+                        "height": 6000,
+                        "margin_top": 0,
+                        "margin_right": 0,
+                        "margin_bottom": 0,
+                        "margin_left": 0,
+                        "available_inline_size": 6000,
+                        "available_block_size": 6000
+                    },
+                    "width": 100.0,
+                    "height": 100.0,
+                    "margin_top": 0.0,
+                    "margin_right": 0.0,
+                    "margin_bottom": 0.0,
+                    "margin_left": 0.0,
+                    "available_inline_size": 100.0,
+                    "available_block_size": 100.0
+                }]
+            },
+            "paint_events": [{
+                "sequence": 0,
+                "kind": "text",
+                "fragment_id": 0,
+                "tag_id": 7,
+                "spatial_node_id": 0,
+                "clip_id": null
+            }],
+            "paint_epoch": 1,
+            "paint_content_width": 100.0,
+            "paint_content_height": 100.0,
+            "paint_scroll_node_count": 1,
+            "paintable": true,
+            "contentful": true,
+            "first_reflow": false,
+            "links": [{"tag_id": 7, "url": "https://example.test/exact"}]
+        })
+    }
+
+    #[test]
+    fn exact_paint_authority_preserves_event_operation_order() {
+        let capture = capture_document_scene(
+            &serde_json::to_vec(&exact_paint_authority_layout()).unwrap(),
+            |_| None,
+        )
+        .unwrap();
+
+        let x_positions = capture.scene.pages[0]
+            .operations
+            .iter()
+            .map(|operation| match operation {
+                Operation::Path { bounds, .. } => bounds.x,
+                _ => panic!("paint-rect fixture must emit only paths"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(x_positions, [1.0, 2.0]);
+        assert!(
+            serde_json::to_value(&capture)
+                .unwrap()
+                .get("fixed_point_authority")
+                .is_none(),
+            "capture authority must not change the API 1 inspect serialization"
+        );
+        assert_eq!(
+            capture.fixed_point_authority.pages,
+            [CapturedPageAuthority {
+                index: 0,
+                style_source: Some(CapturedPageStyleSource::RequestDefaults),
+                app_units: Some(CapturedPageAppUnits {
+                    width: 600,
+                    height: 600,
+                    margin_top: 0,
+                    margin_right: 0,
+                    margin_bottom: 0,
+                    margin_left: 0,
+                    available_inline_size: 600,
+                    available_block_size: 600,
+                }),
+            }]
+        );
+        assert_eq!(
+            capture.fixed_point_authority.page_operations,
+            [vec![
+                Some(CapturedOperationAuthority::Bounds(CapturedRectAppUnits {
+                    x: 60,
+                    y: 60,
+                    width: 60,
+                    height: 60,
+                })),
+                Some(CapturedOperationAuthority::Bounds(CapturedRectAppUnits {
+                    x: 120,
+                    y: 120,
+                    width: 60,
+                    height: 60,
+                })),
+            ]]
+        );
+    }
+
+    #[test]
+    fn text_and_fragment_link_keep_exact_authority_in_final_operation_order() {
+        let capture = capture_document_scene(
+            &serde_json::to_vec(&exact_text_link_layout()).unwrap(),
+            |_| None,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            capture.scene.pages[0].operations[0],
+            Operation::Text { .. }
+        ));
+        assert!(matches!(
+            capture.scene.pages[0].operations[1],
+            Operation::Link { .. }
+        ));
+        assert_eq!(
+            capture.fixed_point_authority.page_operations,
+            [vec![
+                Some(CapturedOperationAuthority::Text {
+                    font_size_app_units: 720,
+                    glyphs: vec![CapturedGlyphAppUnits {
+                        x: 100_000_001,
+                        y: 120,
+                        advance: 420,
+                    }],
+                }),
+                Some(CapturedOperationAuthority::Bounds(CapturedRectAppUnits {
+                    x: 100_000_001,
+                    y: 60,
+                    width: 120,
+                    height: 120,
+                })),
+            ]]
+        );
+    }
+
+    #[test]
+    fn capture_structs_retain_large_signed_app_units_without_round_trip() {
+        let x = app_units_to_f32_px(-100_000_001);
+        let events: Vec<CapturePaintEvent> = serde_json::from_value(serde_json::json!([{
+            "sequence": 0,
+            "kind": "paint-rect",
+            "fragment_id": null,
+            "tag_id": null,
+            "spatial_node_id": 0,
+            "clip_id": null,
+            "paint_rects": [{
+                "rect": {
+                    "x": x,
+                    "y": 0.0,
+                    "width": 1.0,
+                    "height": 1.0,
+                    "app_units": {
+                        "x": -100_000_001,
+                        "y": 0,
+                        "width": 60,
+                        "height": 60
+                    }
+                },
+                "color": {"r": 0.0, "g": 0.0, "b": 0.0, "a": 1.0},
+                "kind": "background"
+            }]
+        }]))
+        .unwrap();
+
+        let exact = events[0].paint_rects[0].rect.app_units.unwrap();
+        assert_eq!(exact.x, -100_000_001);
+        assert_ne!((x * APP_UNITS_PER_CSS_PIXEL).round() as i32, exact.x);
+        assert!(events[0].paint_rects[0].rect.app_unit_authority_matches());
+    }
+
+    #[test]
+    fn mismatched_or_incomplete_app_unit_authority_fails_closed() {
+        let mut paint_mismatch = exact_paint_authority_layout();
+        paint_mismatch["paint_events"][0]["paint_rects"][0]["rect"]["app_units"]["x"] =
+            serde_json::json!(61);
+        assert_eq!(
+            capture_document_scene(&serde_json::to_vec(&paint_mismatch).unwrap(), |_| None),
+            Err(CaptureError::InvalidPaintGeometryAuthority)
+        );
+
+        let mut incomplete_page = exact_paint_authority_layout();
+        incomplete_page["page_sequence"]["pages"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("app_units");
+        assert_eq!(
+            capture_document_scene(&serde_json::to_vec(&incomplete_page).unwrap(), |_| None),
+            Err(CaptureError::InvalidPageGeometryAuthority)
+        );
+    }
+
+    #[test]
+    fn css_page_provenance_is_unrepresentable_even_with_equal_geometry() {
+        let mut layout = exact_paint_authority_layout();
+        layout["page_sequence"]["pages"][0]["style_source"] = serde_json::json!("css-page");
+
+        assert!(matches!(
+            capture_document_scene(&serde_json::to_vec(&layout).unwrap(), |_| None),
+            Err(CaptureError::InvalidJson(_))
+        ));
+    }
+
     #[test]
     fn rejects_later_page_paths_without_rewriting_path_data() {
         let mut operation = Operation::Path {
@@ -3512,9 +4197,174 @@ mod tests {
     }
 
     #[test]
+    fn repeated_header_prepending_cannot_inherit_source_authority() {
+        let page = |index| CapturePage {
+            index,
+            style_source: Some(CapturedPageStyleSource::RequestDefaults),
+            app_units: Some(CapturedPageAppUnits {
+                width: 6_000,
+                height: 6_000,
+                margin_top: 0,
+                margin_right: 0,
+                margin_bottom: 0,
+                margin_left: 0,
+                available_inline_size: 6_000,
+                available_block_size: 6_000,
+            }),
+            width: 100.0,
+            height: 100.0,
+            margin_top: 0.0,
+            margin_right: 0.0,
+            margin_bottom: 0.0,
+            margin_left: 0.0,
+            available_inline_size: 100.0,
+            available_block_size: 100.0,
+        };
+        let text_bounds = Rect {
+            x: 10.0,
+            y: 20.0,
+            width: 20.0,
+            height: 10.0,
+        };
+        let image_bounds = Rect {
+            x: 10.0,
+            y: 150.0,
+            width: 20.0,
+            height: 10.0,
+        };
+        let operations = vec![
+            PositionedOperation {
+                sequence: 0,
+                structural_fragment_index: None,
+                bounds: text_bounds,
+                authority: Some(CapturedOperationAuthority::Text {
+                    font_size_app_units: 720,
+                    glyphs: vec![CapturedGlyphAppUnits {
+                        x: 600,
+                        y: 1_800,
+                        advance: 420,
+                    }],
+                }),
+                operation: Operation::Text {
+                    text: "header".into(),
+                    font: "font".into(),
+                    font_size: 12.0,
+                    color: Color::default(),
+                    glyphs: vec![Glyph {
+                        id: 1,
+                        x: 10.0,
+                        y: 30.0,
+                        advance: 7.0,
+                        text_range: None,
+                    }],
+                    meta: OperationMeta::default(),
+                },
+            },
+            PositionedOperation {
+                sequence: 1,
+                structural_fragment_index: None,
+                bounds: image_bounds.clone(),
+                authority: Some(CapturedOperationAuthority::Bounds(CapturedRectAppUnits {
+                    x: 600,
+                    y: 9_000,
+                    width: 1_200,
+                    height: 600,
+                })),
+                operation: Operation::Image {
+                    bounds: image_bounds,
+                    resource:
+                        "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+                            .into(),
+                    meta: OperationMeta::default(),
+                },
+            },
+        ];
+        let paint_events = vec![
+            CapturePaintEvent {
+                sequence: 0,
+                kind: "text".into(),
+                fragment_id: Some(5),
+                tag_id: Some(9),
+                _spatial_node_id: 0,
+                _clip_id: None,
+                table_borders: Vec::new(),
+                paint_rects: Vec::new(),
+            },
+            CapturePaintEvent {
+                sequence: 1,
+                kind: "image".into(),
+                fragment_id: None,
+                tag_id: None,
+                _spatial_node_id: 0,
+                _clip_id: None,
+                table_borders: Vec::new(),
+                paint_rects: Vec::new(),
+            },
+        ];
+        let repeats = [CaptureTableGroupRepeat {
+            page_index: 1,
+            _table_node: Some(1),
+            header_tag_id: 9,
+            _row_group_index: 0,
+            source_block_start: 20.0,
+            target_block_start: 120.0,
+            block_size: 10.0,
+        }];
+        let repeated_fragments = HashMap::from([(
+            9,
+            RepeatedTableHeaderFragments {
+                fragment_indices: 0..0,
+                paint_fragment_ids: HashSet::from([5]),
+            },
+        )]);
+
+        let distributed = distribute_operations(
+            &[page(0), page(1)],
+            operations,
+            &paint_events,
+            &repeats,
+            &repeated_fragments,
+        )
+        .unwrap();
+
+        assert_eq!(
+            distributed.page_operations,
+            [
+                vec![Some(CapturedOperationAuthority::Text {
+                    font_size_app_units: 720,
+                    glyphs: vec![CapturedGlyphAppUnits {
+                        x: 600,
+                        y: 1_800,
+                        advance: 420,
+                    }],
+                })],
+                vec![
+                    None,
+                    Some(CapturedOperationAuthority::Bounds(CapturedRectAppUnits {
+                        x: 600,
+                        y: 3_000,
+                        width: 1_200,
+                        height: 600,
+                    })),
+                ],
+            ]
+        );
+        assert!(matches!(
+            distributed.pages[1].operations[0],
+            Operation::Text { .. }
+        ));
+        assert!(matches!(
+            distributed.pages[1].operations[1],
+            Operation::Image { .. }
+        ));
+    }
+
+    #[test]
     fn splits_a_solid_background_across_every_intersected_page() {
         let page = |index| CapturePage {
             index,
+            style_source: None,
+            app_units: None,
             width: 100.0,
             height: 100.0,
             margin_top: 10.0,
@@ -3536,6 +4386,12 @@ mod tests {
                 sequence: 4,
                 structural_fragment_index: None,
                 bounds: bounds.clone(),
+                authority: Some(CapturedOperationAuthority::Bounds(CapturedRectAppUnits {
+                    x: 300,
+                    y: 3_000,
+                    width: 5_400,
+                    height: 13_200,
+                })),
                 operation: Operation::Path {
                     data: rectangle_path_data(&bounds),
                     bounds,
@@ -3562,12 +4418,18 @@ mod tests {
                 .collect::<Vec<_>>(),
             [(50.0, 50.0), (100.0, 100.0), (200.0, 70.0)]
         );
+        assert!(
+            parts.iter().all(|part| part.authority.is_none()),
+            "split operations must not inherit the unsplit source rectangle"
+        );
     }
 
     #[test]
     fn clips_only_a_centered_table_edge_to_its_owning_page() {
         let page = |index| CapturePage {
             index,
+            style_source: None,
+            app_units: None,
             width: 100.0,
             height: 100.0,
             margin_top: 10.0,
@@ -3587,6 +4449,12 @@ mod tests {
             sequence: 7,
             structural_fragment_index: None,
             bounds: bounds.clone(),
+            authority: Some(CapturedOperationAuthority::Bounds(CapturedRectAppUnits {
+                x: 600,
+                y: 11_940,
+                width: 1_200,
+                height: 120,
+            })),
             operation: Operation::Path {
                 data: rectangle_path_data(&bounds),
                 bounds,
@@ -3620,6 +4488,7 @@ mod tests {
         let (page_index, page_origin) =
             operation_page(&[page(0), page(1)], &mut positioned).unwrap();
         assert_eq!((page_index, page_origin), (1, 100.0));
+        assert_eq!(positioned.authority, None);
         translate_operation_y(&mut positioned.operation, page_origin, positioned.sequence).unwrap();
         let Operation::Path { bounds, data, .. } = positioned.operation else {
             unreachable!();

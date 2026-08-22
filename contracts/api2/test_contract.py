@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import ipaddress
 import json
 import re
+import struct
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -36,6 +38,12 @@ U32_MAX = 2**32 - 1
 API2_EPOCH_LIMIT_MS = 8_640_000_000_000_000
 API2_VIRTUAL_SPAN_MAX_MS = 2**53 - 1
 API2_REQUEST_MAX_BYTES = 1_048_576
+API2_INPUT_MANIFEST_MAX_BYTES = 16 * 1024 * 1024
+API2_INPUT_MANIFEST_MAX_ENTRIES = 16 * 1024
+API2_INPUT_CONTENT_MAX_BYTES = 64 * 1024 * 1024
+API2_INPUT_TREE_MAX_DEPTH = 32
+API2_INPUT_TREE_MAX_NODES = 16 * 1024
+API2_ENTRYPOINT_MEDIA_TYPE = "text/html;charset=utf-8"
 NANOSECONDS_PER_MILLISECOND = 1_000_000
 A4_APP_UNITS = (47622, 67351)
 PROTOCOL_FIELDS = (
@@ -142,7 +150,7 @@ def load_schemas() -> None:
 
     expected = {
         "bundle-manifest.v1.json",
-        "document-scene.v1.json",
+        "document-scene.v2.json",
         "input-manifest.v1.json",
         "render-request.v1.json",
         "render-result.v1.json",
@@ -388,6 +396,15 @@ def path_set_semantics(paths: list[str], path: str) -> list[Violation]:
         for count in range(1, len(parts)):
             if "/".join(parts[:count]) in folded_set:
                 violations.append(Violation(path, "file and directory paths collide"))
+    folded_directories: dict[str, str] = {}
+    for value in paths:
+        parts = value.split("/")
+        for count in range(1, len(parts)):
+            directory = "/".join(parts[:count])
+            folded_directory = directory.lower()
+            previous = folded_directories.setdefault(folded_directory, directory)
+            if previous != directory:
+                violations.append(Violation(path, "directory paths have an ASCII case collision"))
     return violations
 
 
@@ -406,6 +423,31 @@ def input_manifest_semantics(manifest: dict[str, Any], root: Path | None = None,
     entries = manifest["entries"]
     paths = [entry["path"] for entry in entries]
     violations = path_set_semantics(paths, f"{path}.entries")
+    directories = {
+        "/".join(parts[:count]) for value in paths for parts in [value.split("/")] for count in range(1, len(parts))
+    }
+    for index, value in enumerate(paths):
+        if len(value.split("/")) > API2_INPUT_TREE_MAX_DEPTH:
+            violations.append(
+                Violation(
+                    f"{path}.entries[{index}].path",
+                    f"input tree depth exceeds {API2_INPUT_TREE_MAX_DEPTH}",
+                )
+            )
+    if len(paths) + len(directories) > API2_INPUT_TREE_MAX_NODES:
+        violations.append(
+            Violation(
+                f"{path}.entries",
+                f"input tree exceeds {API2_INPUT_TREE_MAX_NODES} total files and directories",
+            )
+        )
+    if sum(entry["bytes"] for entry in entries) > API2_INPUT_CONTENT_MAX_BYTES:
+        violations.append(
+            Violation(
+                f"{path}.entries",
+                f"declared content exceeds the {API2_INPUT_CONTENT_MAX_BYTES}-byte aggregate limit",
+            )
+        )
     if root is None:
         return violations
 
@@ -434,9 +476,17 @@ def request_semantics(
     if not safe_relative_path(entrypoint):
         violations.append(Violation(f"{path}.input.entrypoint", "path is not portable"))
     if manifest is not None:
-        manifest_paths = {entry["path"] for entry in manifest["entries"]}
-        if entrypoint not in manifest_paths:
+        manifest_entries = {entry["path"]: entry for entry in manifest["entries"]}
+        entrypoint_entry = manifest_entries.get(entrypoint)
+        if entrypoint_entry is None:
             violations.append(Violation(f"{path}.input.entrypoint", "entrypoint is absent from input manifest"))
+        elif entrypoint_entry["media_type"] != API2_ENTRYPOINT_MEDIA_TYPE:
+            violations.append(
+                Violation(
+                    f"{path}.input.entrypoint",
+                    f"entrypoint media type must be {API2_ENTRYPOINT_MEDIA_TYPE}",
+                )
+            )
         manifest_bytes = INPUT_MANIFEST_PATH.read_bytes()
         if not descriptor_matches_bytes(request["input"]["manifest"], manifest_bytes):
             violations.append(Violation(f"{path}.input.manifest", "descriptor does not match input manifest bytes"))
@@ -495,14 +545,109 @@ def canonical_percent_encoding(value: str) -> bool:
     return all(chr(int(match.group()[1:], 16)) not in unreserved for match in re.finditer(r"%[0-9A-F]{2}", value))
 
 
+def rust_url_ipv6(address: ipaddress.IPv6Address) -> str:
+    segments = [int.from_bytes(address.packed[offset : offset + 2]) for offset in range(0, 16, 2)]
+    longest_start = -1
+    longest_length = 0
+    start = -1
+    for index, segment in enumerate([*segments, 1]):
+        if segment == 0:
+            if start < 0:
+                start = index
+            continue
+        if start >= 0 and index - start > longest_length:
+            longest_start = start
+            longest_length = index - start
+        start = -1
+    if longest_length < 2:
+        return ":".join(f"{segment:x}" for segment in segments)
+
+    left = ":".join(f"{segment:x}" for segment in segments[:longest_start])
+    right = ":".join(f"{segment:x}" for segment in segments[longest_start + longest_length :])
+    return f"{left}::{right}"
+
+
+def canonical_http_authority(value: str, scheme: str, netloc: str, hostname: str) -> bool:
+    prefix = f"{scheme}://"
+    if not value.startswith(prefix):
+        return False
+    authority = value[len(prefix) :].split("/", 1)[0].split("?", 1)[0].split("#", 1)[0]
+    if authority != netloc:
+        return False
+    if "\\" in authority:
+        return False
+
+    if authority.startswith("["):
+        closing = authority.find("]")
+        if closing < 0:
+            return False
+        raw_host = authority[: closing + 1]
+        port_prefix = authority[closing + 1 :]
+        if port_prefix and not port_prefix.startswith(":"):
+            return False
+        try:
+            canonical_host = f"[{rust_url_ipv6(ipaddress.IPv6Address(hostname))}]"
+        except ValueError:
+            return False
+    else:
+        if authority.count(":") > 1:
+            return False
+        raw_host, separator, raw_port = authority.rpartition(":")
+        if not separator:
+            raw_host = authority
+            raw_port = ""
+        port_prefix = f":{raw_port}" if separator else ""
+        canonical_host = hostname
+        if any(character in "%<>[]\\^|" for character in raw_host):
+            return False
+        labels = hostname.removesuffix(".").split(".")
+        if labels and re.fullmatch(r"(?:0[xX][0-9A-Fa-f]*|[0-9]+)", labels[-1]):
+            try:
+                canonical_host = str(ipaddress.IPv4Address(hostname))
+            except ipaddress.AddressValueError:
+                return False
+
+    if raw_host != canonical_host:
+        return False
+    if port_prefix:
+        raw_port = port_prefix[1:]
+        if not raw_port or not raw_port.isascii() or not raw_port.isdecimal():
+            return False
+        port = int(raw_port)
+        if raw_port != str(port) or port > 65535:
+            return False
+        if port == (80 if scheme == "http" else 443):
+            return False
+    return True
+
+
+def canonical_http_components(path: str, query: str, fragment: str) -> bool:
+    path_percent_encode_set = set(' "<>`{}\\')
+    special_query_percent_encode_set = set(" \"<>'")
+    fragment_percent_encode_set = set(' "<>`')
+    return (
+        not any(character in path_percent_encode_set for character in path)
+        and not any(character in special_query_percent_encode_set for character in query)
+        and not any(character in fragment_percent_encode_set for character in fragment)
+    )
+
+
 def canonical_link_target(value: str) -> bool:
-    if not canonical_percent_encoding(value) or value.endswith(("?", "#")):
+    if (
+        len(value) > 8_192
+        or not canonical_percent_encoding(value)
+        or value.endswith(("?", "#"))
+        or re.search(r"[\x00-\x20\x7f]", value)
+    ):
         return False
     try:
         value.encode("ascii")
     except UnicodeEncodeError:
         return False
-    parsed = urlsplit(value)
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return False
     if parsed.scheme in ("http", "https"):
         try:
             port = parsed.port
@@ -521,10 +666,19 @@ def canonical_link_target(value: str) -> bool:
             parsed.netloc.encode("ascii")
         except UnicodeEncodeError:
             return False
-        return all(segment not in (".", "..") for segment in unquote(parsed.path).split("/"))
+        return (
+            canonical_http_authority(value, parsed.scheme, parsed.netloc, parsed.hostname)
+            and canonical_http_components(parsed.path, parsed.query, parsed.fragment)
+            and all(segment not in (".", "..") for segment in unquote(parsed.path).split("/"))
+        )
     if parsed.scheme == "mailto":
         address = parsed.path
-        if parsed.netloc or parsed.fragment or "@" not in address:
+        if (
+            parsed.netloc
+            or parsed.fragment
+            or any(character in '"<>' for character in parsed.query)
+            or "@" not in address
+        ):
             return False
         local, domain = address.rsplit("@", 1)
         return bool(local and domain and domain == domain.lower())
@@ -543,16 +697,25 @@ def scene_semantics(scene: dict[str, Any], request: dict[str, Any] | None = None
     request_width, request_height = page_dimensions(scene["request_page"])
     request_margins = scene["request_page"]["margins_app_units"]
 
+    resource_media_types: dict[str, str] = {}
+
+    def bind_resource(resource: str, media_type: str, resource_path: str) -> None:
+        existing = resource_media_types.setdefault(resource, media_type)
+        if existing != media_type:
+            violations.append(Violation(resource_path, f"resource media type conflicts with {existing!r}"))
+
+    if semantic_layer is not None:
+        bind_resource(semantic_layer["resource"], semantic_layer["media_type"], f"{path}.semantic_layer.resource")
+
     for page_index, page in enumerate(scene["pages"]):
         page_path = f"{path}.pages[{page_index}]"
         if page["number"] != page_index + 1:
             violations.append(Violation(f"{page_path}.number", "page numbers must be contiguous from one"))
-        if page["style_source"] == "request-defaults":
-            size = page["size_app_units"]
-            if (size["width"], size["height"]) != (request_width, request_height):
-                violations.append(Violation(f"{page_path}.size_app_units", "does not resolve request defaults"))
-            if page["margins_app_units"] != request_margins:
-                violations.append(Violation(f"{page_path}.margins_app_units", "does not resolve request defaults"))
+        size = page["size_app_units"]
+        if (size["width"], size["height"]) != (request_width, request_height):
+            violations.append(Violation(f"{page_path}.size_app_units", "does not resolve request authority"))
+        if page["margins_app_units"] != request_margins:
+            violations.append(Violation(f"{page_path}.margins_app_units", "does not resolve request authority"))
         size = page["size_app_units"]
         margins = page["margins_app_units"]
         if margins["left"] + margins["right"] >= size["width"]:
@@ -567,23 +730,29 @@ def scene_semantics(scene: dict[str, Any], request: dict[str, Any] | None = None
             elif operation["type"] == "link" and not canonical_link_target(operation["target"]):
                 violations.append(Violation(f"{operation_path}.target", "target is not a canonical absolute URL"))
             elif operation["type"] == "text":
+                font = operation["font"]
+                bind_resource(font["resource"], "application/octet-stream", f"{operation_path}.font.resource")
+                tags = [variation["tag"] for variation in font["variations"]]
+                if any(left >= right for left, right in zip(tags, tags[1:])):
+                    violations.append(
+                        Violation(
+                            f"{operation_path}.font.variations",
+                            "variation tags must be strictly ascending",
+                        )
+                    )
                 if len(operation["text"].encode("utf-8")) > U32_MAX:
                     violations.append(
                         Violation(f"{operation_path}.text", "UTF-8 text length exceeds unsigned 32-bit range")
                     )
                 boundaries = utf8_boundaries(operation["text"])
-                last_start = 0
-                last_end = 0
                 for glyph_index, glyph in enumerate(operation["glyphs"]):
                     glyph_path = f"{operation_path}.glyphs[{glyph_index}].text_range"
                     start = glyph["text_range"]["start"]
                     end = glyph["text_range"]["end"]
                     if start >= end or start not in boundaries or end not in boundaries:
                         violations.append(Violation(glyph_path, "range must be nonempty and on UTF-8 boundaries"))
-                    if start < last_start or end < last_end:
-                        violations.append(Violation(glyph_path, "range starts and ends must be nondecreasing"))
-                    last_start = start
-                    last_end = end
+            elif operation["type"] == "image":
+                bind_resource(operation["resource"], operation["media_type"], f"{operation_path}.resource")
     return violations
 
 
@@ -594,10 +763,35 @@ def scene_resources(scene: dict[str, Any]) -> set[str]:
     for page in scene["pages"]:
         for operation in page["operations"]:
             if operation["type"] == "text":
-                resources.add(operation["font"])
+                resources.add(operation["font"]["resource"])
             elif operation["type"] == "image":
                 resources.add(operation["resource"])
     return resources
+
+
+def scene_resource_media_types(scene: dict[str, Any]) -> dict[str, str]:
+    resources: dict[str, str] = {}
+    if scene["semantic_layer"] is not None:
+        resources[scene["semantic_layer"]["resource"]] = scene["semantic_layer"]["media_type"]
+    for page in scene["pages"]:
+        for operation in page["operations"]:
+            if operation["type"] == "text":
+                resources[operation["font"]["resource"]] = "application/octet-stream"
+            elif operation["type"] == "image":
+                resources[operation["resource"]] = operation["media_type"]
+    return resources
+
+
+def bytes_match_resource_media_type(media_type: str, data: bytes) -> bool:
+    if media_type == "image/png":
+        return data.startswith(b"\x89PNG\r\n\x1a\n")
+    if media_type == "image/jpeg":
+        return data.startswith(b"\xff\xd8\xff")
+    if media_type == "image/gif":
+        return data.startswith((b"GIF87a", b"GIF89a"))
+    if media_type == "image/webp":
+        return len(data) >= 12 and data.startswith(b"RIFF") and data[8:12] == b"WEBP"
+    return True
 
 
 def bundle_manifest_semantics(
@@ -625,6 +819,16 @@ def bundle_manifest_semantics(
             violations.append(
                 Violation(f"{path}.entries", f"scene resource closure differs: {expected!r} != {actual!r}")
             )
+        expected_media_types = scene_resource_media_types(scene)
+        for resource, media_type in expected_media_types.items():
+            resource_entry = next((entry for entry in entries if entry["sha256"] == resource), None)
+            if resource_entry is not None and resource_entry["media_type"] != media_type:
+                violations.append(
+                    Violation(
+                        f"{path}.entries",
+                        f"scene resource {resource} requires media type {media_type!r}",
+                    )
+                )
         semantic_layer = scene["semantic_layer"]
         if semantic_layer is not None:
             semantic_entry = next(
@@ -648,6 +852,12 @@ def bundle_manifest_semantics(
             file_path = root / PurePosixPath(entry["path"])
             if file_path.is_file() and not descriptor_matches_bytes(entry, file_path.read_bytes()):
                 violations.append(Violation(f"{path}.entries[{index}]", "hash or byte length does not match fixture"))
+            elif (
+                file_path.is_file()
+                and entry["path"].startswith("resources/")
+                and not bytes_match_resource_media_type(entry["media_type"], file_path.read_bytes())
+            ):
+                violations.append(Violation(f"{path}.entries[{index}]", "resource bytes do not match media type"))
     return violations
 
 
@@ -804,7 +1014,7 @@ def request_runtime_semantics(
         ("pliego.input-manifest", 1),
         (request["schema"], request["version"]),
         ("pliego.render-result", 1),
-        ("pliego.document-scene", 1),
+        ("pliego.document-scene", 2),
         ("pliego.bundle-manifest", 1),
     )
     matches = [contract for contract in runtime["contracts"] if protocol_key(contract) == expected_key]
@@ -823,7 +1033,7 @@ def schema_errors(kind: str, value: Any) -> list[Violation]:
         "request": "render-request.v1.json",
         "result": "render-result.v1.json",
         "runtime": "runtime-contract.v1.json",
-        "scene": "document-scene.v1.json",
+        "scene": "document-scene.v2.json",
     }[kind]
     return validate(value, SCHEMAS[schema_name], schema_name)
 
@@ -959,7 +1169,7 @@ def main() -> None:
 
     assert_canonical_fixture(INPUT_MANIFEST_PATH, input_manifest, "input-manifest.v1.json")
     assert_canonical_fixture(BUNDLE_MANIFEST_PATH, bundle_manifest, "bundle-manifest.v1.json")
-    assert_canonical_fixture(SCENE_PATH, delivery_scene, "document-scene.v1.json")
+    assert_canonical_fixture(SCENE_PATH, delivery_scene, "document-scene.v2.json")
     if scene != delivery_scene:
         raise AssertionError("accepted scene golden and canonical scene bytes differ")
     assert_minimal_pdf_fixture(DELIVERY_ROOT / "document.pdf")
@@ -1023,6 +1233,183 @@ def main() -> None:
         raise AssertionError("probe and both result branches must retain the exact engine identity")
     if runtime["invocation"]["request_max_bytes"] != API2_REQUEST_MAX_BYTES:
         raise AssertionError("API 2 request framing limit drifted")
+    if runtime["invocation"]["job_root_transport"] != "cwd-v1":
+        raise AssertionError("API 2 job-root transport drifted")
+    if runtime["invocation"]["input_manifest_max_bytes"] != API2_INPUT_MANIFEST_MAX_BYTES:
+        raise AssertionError("API 2 input-manifest byte limit drifted")
+    if runtime["invocation"]["input_content_max_bytes"] != API2_INPUT_CONTENT_MAX_BYTES:
+        raise AssertionError("API 2 input-content byte limit drifted")
+
+    exact_manifest_limit = copy.deepcopy(request_a4)
+    exact_manifest_limit["input"]["manifest"]["bytes"] = API2_INPUT_MANIFEST_MAX_BYTES
+    assert_valid("inclusive input-manifest byte limit", "request", exact_manifest_limit)
+    over_manifest_limit = copy.deepcopy(exact_manifest_limit)
+    over_manifest_limit["input"]["manifest"]["bytes"] += 1
+    assert_rejected(
+        "input-manifest byte limit overflow",
+        "request",
+        over_manifest_limit,
+        f"maximum {API2_INPUT_MANIFEST_MAX_BYTES}",
+    )
+
+    maximum_path = f"{'a' * 100}/{'b' * 100}/{'c' * 38}"
+    maximum_entry = {
+        "path": maximum_path,
+        "media_type": f"a/{'b' * 253}",
+        "sha256": f"sha256:{'0' * 64}",
+        "bytes": API2_INPUT_CONTENT_MAX_BYTES,
+    }
+    empty_manifest = {
+        "schema": "pliego.input-manifest",
+        "version": 1,
+        "url_root": "pliego-input:///",
+        "entries": [],
+    }
+    maximum_entry_bytes = len(canonical_json_bytes(maximum_entry)) - 1
+    maximum_manifest_bytes = (
+        len(canonical_json_bytes(empty_manifest))
+        + API2_INPUT_MANIFEST_MAX_ENTRIES * maximum_entry_bytes
+        + API2_INPUT_MANIFEST_MAX_ENTRIES
+        - 1
+    )
+    if maximum_manifest_bytes != 10_207_321 or maximum_manifest_bytes > API2_INPUT_MANIFEST_MAX_BYTES:
+        raise AssertionError("input-manifest byte and entry limits no longer cover the full schema envelope")
+
+    over_entry_limit = copy.deepcopy(input_manifest)
+    over_entry_limit["entries"] = [input_manifest["entries"][0]] * (API2_INPUT_MANIFEST_MAX_ENTRIES + 1)
+    assert_rejected(
+        "input-manifest entry limit overflow",
+        "input_manifest",
+        over_entry_limit,
+        f"at most {API2_INPUT_MANIFEST_MAX_ENTRIES} items",
+    )
+
+    path_at_depth = "/".join(f"d{index}" for index in range(API2_INPUT_TREE_MAX_DEPTH))
+    exact_depth = copy.deepcopy(input_manifest)
+    exact_depth["entries"] = [
+        {
+            "path": path_at_depth,
+            "media_type": "application/octet-stream",
+            "sha256": f"sha256:{'0' * 64}",
+            "bytes": 0,
+        }
+    ]
+    assert_valid(
+        "inclusive input-tree depth limit",
+        "input_manifest",
+        exact_depth,
+        input_manifest_semantics(exact_depth),
+    )
+    over_depth = copy.deepcopy(exact_depth)
+    over_depth["entries"][0]["path"] += "/overflow"
+    assert_rejected(
+        "input-tree depth overflow",
+        "input_manifest",
+        over_depth,
+        f"input tree depth exceeds {API2_INPUT_TREE_MAX_DEPTH}",
+        input_manifest_semantics(over_depth),
+    )
+
+    exact_node_limit = copy.deepcopy(input_manifest)
+    exact_node_limit["entries"] = [
+        {
+            "path": f"d{index:05}/file.bin",
+            "media_type": "application/octet-stream",
+            "sha256": f"sha256:{'0' * 64}",
+            "bytes": 0,
+        }
+        for index in range(API2_INPUT_TREE_MAX_NODES // 2)
+    ]
+    assert_valid(
+        "inclusive input-tree node limit",
+        "input_manifest",
+        exact_node_limit,
+        input_manifest_semantics(exact_node_limit),
+    )
+    over_node_limit = copy.deepcopy(exact_node_limit)
+    over_node_limit["entries"].append(
+        {
+            "path": "d08192/file.bin",
+            "media_type": "application/octet-stream",
+            "sha256": f"sha256:{'0' * 64}",
+            "bytes": 0,
+        }
+    )
+    assert_rejected(
+        "input-tree node overflow",
+        "input_manifest",
+        over_node_limit,
+        f"input tree exceeds {API2_INPUT_TREE_MAX_NODES} total files and directories",
+        input_manifest_semantics(over_node_limit),
+    )
+
+    directory_case_collision = copy.deepcopy(input_manifest)
+    directory_case_collision["entries"] = [
+        {
+            "path": "A/x.bin",
+            "media_type": "application/octet-stream",
+            "sha256": f"sha256:{'0' * 64}",
+            "bytes": 0,
+        },
+        {
+            "path": "a/y.bin",
+            "media_type": "application/octet-stream",
+            "sha256": f"sha256:{'1' * 64}",
+            "bytes": 0,
+        },
+    ]
+    assert_rejected(
+        "input-tree implied-directory case collision",
+        "input_manifest",
+        directory_case_collision,
+        "directory paths have an ASCII case collision",
+        input_manifest_semantics(directory_case_collision),
+    )
+
+    exact_content_limit = copy.deepcopy(input_manifest)
+    exact_content_limit["entries"] = [
+        {
+            "path": "assets/a.bin",
+            "media_type": "application/octet-stream",
+            "sha256": f"sha256:{'0' * 64}",
+            "bytes": API2_INPUT_CONTENT_MAX_BYTES // 4,
+        },
+        {
+            "path": "assets/b.bin",
+            "media_type": "application/octet-stream",
+            "sha256": f"sha256:{'0' * 64}",
+            "bytes": API2_INPUT_CONTENT_MAX_BYTES // 4,
+        },
+        {
+            "path": "document.html",
+            "media_type": "text/html;charset=utf-8",
+            "sha256": f"sha256:{'1' * 64}",
+            "bytes": API2_INPUT_CONTENT_MAX_BYTES // 2,
+        },
+    ]
+    assert_valid(
+        "inclusive aggregate input-content limit",
+        "input_manifest",
+        exact_content_limit,
+        input_manifest_semantics(exact_content_limit),
+    )
+    over_content_limit = copy.deepcopy(exact_content_limit)
+    over_content_limit["entries"][2]["bytes"] += 1
+    assert_rejected(
+        "aggregate input-content limit overflow",
+        "input_manifest",
+        over_content_limit,
+        f"declared content exceeds the {API2_INPUT_CONTENT_MAX_BYTES}-byte aggregate limit",
+        input_manifest_semantics(over_content_limit),
+    )
+    one_oversized_entry = copy.deepcopy(input_manifest)
+    one_oversized_entry["entries"][0]["bytes"] = API2_INPUT_CONTENT_MAX_BYTES + 1
+    assert_rejected(
+        "individual input entry exceeds aggregate limit",
+        "input_manifest",
+        one_oversized_entry,
+        f"maximum {API2_INPUT_CONTENT_MAX_BYTES}",
+    )
 
     assert_rejected(
         "request API mismatch",
@@ -1036,6 +1423,31 @@ def main() -> None:
         golden("rejected/render-request.live-network.json"),
         "expected const 'deny'",
     )
+    assert_rejected(
+        "legacy CSS page precedence",
+        "request",
+        golden("rejected/render-request.css-page-precedence.json"),
+        "unexpected property 'css_page_precedence'",
+    )
+    non_html_entrypoint = golden("rejected/render-request.non-html-entrypoint.json")
+    assert_rejected(
+        "non-HTML entrypoint",
+        "request",
+        non_html_entrypoint,
+        "entrypoint media type must be text/html;charset=utf-8",
+        request_semantics(non_html_entrypoint, input_manifest),
+    )
+    noncanonical_html_manifest = copy.deepcopy(input_manifest)
+    next(entry for entry in noncanonical_html_manifest["entries"] if entry["path"] == "document.html")["media_type"] = (
+        "text/html"
+    )
+    assert_rejected(
+        "noncanonical HTML entrypoint media type",
+        "request",
+        golden("accepted/render-request.a4.json"),
+        "entrypoint media type must be text/html;charset=utf-8",
+        request_semantics(golden("accepted/render-request.a4.json"), noncanonical_html_manifest),
+    )
     for name, kind, relative in (
         ("request unknown member", "request", "rejected/render-request.unknown-member.json"),
         ("scene unknown member", "scene", "rejected/document-scene.unknown-member.json"),
@@ -1046,25 +1458,104 @@ def main() -> None:
     ):
         assert_rejected(name, kind, golden(relative), "unexpected property")
 
+    legacy_scene_identity = copy.deepcopy(scene)
+    legacy_scene_identity["version"] = 1
+    assert_rejected(
+        "shipped internal scene identity reused by public scene",
+        "scene",
+        legacy_scene_identity,
+        "expected const 2",
+    )
+
     glyph_overflow = golden("rejected/document-scene.glyph-u32-overflow.json")
     assert_rejected("glyph u32 overflow", "scene", glyph_overflow, "maximum 4294967295")
+    assert_rejected(
+        "CSS page provenance",
+        "scene",
+        golden("rejected/document-scene.css-page-source.json"),
+        "expected const 'request-defaults'",
+    )
     range_overflow = copy.deepcopy(scene)
     range_overflow["pages"][0]["operations"][0]["glyphs"][0]["text_range"]["end"] = U32_MAX + 1
     assert_rejected("glyph range u32 overflow", "scene", range_overflow, "maximum 4294967295")
-    decreasing_range_end = copy.deepcopy(scene)
-    second_glyph = copy.deepcopy(decreasing_range_end["pages"][0]["operations"][0]["glyphs"][0])
+    descending_rtl_ranges = copy.deepcopy(scene)
+    first_glyph = descending_rtl_ranges["pages"][0]["operations"][0]["glyphs"][0]
+    first_glyph["text_range"] = {"start": 1, "end": 2}
+    second_glyph = copy.deepcopy(first_glyph)
     second_glyph["id"] = 43
-    second_glyph["text_range"] = {"start": 1, "end": 2}
-    decreasing_range_end["pages"][0]["operations"][0]["glyphs"].append(second_glyph)
-    assert_rejected(
-        "decreasing glyph range end",
+    second_glyph["text_range"] = {"start": 0, "end": 1}
+    descending_rtl_ranges["pages"][0]["operations"][0]["glyphs"].append(second_glyph)
+    assert_valid(
+        "descending visual-order RTL glyph ranges",
         "scene",
-        decreasing_range_end,
-        "range starts and ends must be nondecreasing",
-        scene_semantics(decreasing_range_end, request_a4),
+        descending_rtl_ranges,
+        scene_semantics(descending_rtl_ranges, request_a4),
     )
+
+    for name, bits in (
+        ("positive zero font variation", 0),
+        ("minimum positive subnormal font variation", 1),
+        ("maximum positive finite font variation", 2_139_095_039),
+        ("minimum negative subnormal font variation", 2_147_483_649),
+        ("maximum negative finite font variation", 4_286_578_687),
+    ):
+        boundary = copy.deepcopy(scene)
+        boundary["pages"][0]["operations"][0]["font"]["variations"][0]["value_f32_bits"] = bits
+        assert_valid(name, "scene", boundary, scene_semantics(boundary, request_a4))
+        decoded = struct.unpack(">f", bits.to_bytes(4, "big"))[0]
+        if int.from_bytes(struct.pack(">f", decoded), "big") != bits:
+            raise AssertionError(f"{name} did not round-trip through exact IEEE-754 binary32 bits")
+
+    for name, bits in (
+        ("negative font variation bits", -1),
+        ("negative zero font variation", 2_147_483_648),
+        ("positive infinity font variation", 2_139_095_040),
+        ("positive NaN font variation", 2_143_289_344),
+        ("negative infinity font variation", 4_286_578_688),
+        ("negative NaN font variation", 4_290_772_992),
+        ("font variation bits above u32", U32_MAX + 1),
+    ):
+        invalid_variation = copy.deepcopy(scene)
+        invalid_variation["pages"][0]["operations"][0]["font"]["variations"][0]["value_f32_bits"] = bits
+        assert_rejected(name, "scene", invalid_variation, "oneOf")
+
+    reordered_variations = copy.deepcopy(scene)
+    reordered_variations["pages"][0]["operations"][0]["font"]["variations"] = [
+        {"tag": 2, "value_f32_bits": 0},
+        {"tag": 1, "value_f32_bits": 0},
+    ]
+    assert_rejected(
+        "reordered font variation tags",
+        "scene",
+        reordered_variations,
+        "variation tags must be strictly ascending",
+        scene_semantics(reordered_variations, request_a4),
+    )
+    duplicate_variation_tags = copy.deepcopy(scene)
+    duplicate_variation_tags["pages"][0]["operations"][0]["font"]["variations"] = [
+        {"tag": 1, "value_f32_bits": 0},
+        {"tag": 1, "value_f32_bits": 1},
+    ]
+    assert_rejected(
+        "duplicate font variation tags",
+        "scene",
+        duplicate_variation_tags,
+        "variation tags must be strictly ascending",
+        scene_semantics(duplicate_variation_tags, request_a4),
+    )
+    legacy_scalar_font = copy.deepcopy(scene)
+    legacy_scalar_font["pages"][0]["operations"][0]["font"] = scene["pages"][0]["operations"][0]["font"]["resource"]
+    assert_rejected("legacy scalar font identity", "scene", legacy_scalar_font, "expected type ['object']")
     invalid_path = golden("rejected/document-scene.invalid-path-data.json")
     assert_rejected("noncanonical path grammar", "scene", invalid_path, "does not match pattern")
+    unsupported_image_media = copy.deepcopy(scene)
+    unsupported_image_media["pages"][0]["operations"][2]["media_type"] = "image/svg+xml"
+    assert_rejected(
+        "unsupported public scene image media type",
+        "scene",
+        unsupported_image_media,
+        "expected one of",
+    )
     invalid_link = golden("rejected/document-scene.noncanonical-link.json")
     assert_rejected(
         "noncanonical link",
@@ -1073,6 +1564,31 @@ def main() -> None:
         "canonical absolute URL",
         scene_semantics(invalid_link),
     )
+    for target in (
+        "https://example.test/a%2Fb",
+        "https://example.test:8443/path",
+        "https://[::1]/",
+        "https://[abcd::1]/",
+        "https://[::ffff:c000:280]/",
+        "https://[2001::1:0:0:1:1]/",
+        "https://[2001::1:0:0:1]/",
+        "https://[2001:db8:0:1:2:3:4:5]/",
+        "https://127.0.0.1/",
+        "https://exa{mple.test/",
+        "https://example.test/^|",
+        "https://example.test/?q={`",
+        "https://example.test/#{",
+        "mailto:user@example.test",
+        "mailto:user@example.test?subject='",
+        "mailto:user@example.test?subject={`",
+    ):
+        if not canonical_link_target(target):
+            raise AssertionError(f"canonical link was rejected: {target}")
+    exact_link_limit = "https://example.test/" + "a" * (8_192 - len("https://example.test/"))
+    if not canonical_link_target(exact_link_limit):
+        raise AssertionError("canonical link at the 8,192-byte limit was rejected")
+    if canonical_link_target(exact_link_limit + "a"):
+        raise AssertionError("canonical link above the 8,192-byte limit was accepted")
     for name, target in (
         ("link userinfo", "https://user@example.test/a"),
         ("link default port", "https://example.test:443/a"),
@@ -1080,6 +1596,40 @@ def main() -> None:
         ("link lowercase percent escape", "https://example.test/%7euser"),
         ("link escaped unreserved byte", "https://example.test/%7Euser"),
         ("link empty HTTP path", "https://example.test"),
+        ("link empty port", "https://example.test:/"),
+        ("link authority backslash", "https://example.test\\evil/"),
+        ("link zero-padded port", "https://example.test:08443/"),
+        ("link out-of-range port", "https://example.test:65536/"),
+        ("link malformed bracketed authority", "https://[::1/"),
+        ("link invalid IPv6 authority", "https://[gg::1]/"),
+        ("link short IPv4 host", "https://127.1/"),
+        ("link hexadecimal IPv4 host", "https://0x7f.1/"),
+        ("link empty-hex IPv4 label", "https://example.0x/"),
+        ("link percent-encoded host delimiter", "https://exa%3Ample.test/"),
+        ("link octal IPv4 host", "https://0177.0.0.1/"),
+        ("link expanded IPv6 host", "https://[0:0:0:0:0:0:0:1]/"),
+        ("link uppercase IPv6 host", "https://[ABCD::1]/"),
+        ("link dotted mapped IPv6 host", "https://[::ffff:192.0.2.128]/"),
+        ("link rightmost IPv6 compression", "https://[2001:0:0:1::1:1]/"),
+        ("link shorter IPv6 compression", "https://[2001:0:0:0:1::1]/"),
+        ("link lone-zero IPv6 compression", "https://[2001:db8::1:2:3:4:5]/"),
+        ("link raw path braces", "https://example.test/{}/"),
+        ("link raw path backslash", "https://example.test/\\foo"),
+        ("link raw path quote", 'https://example.test/"'),
+        ("link raw path less-than", "https://example.test/<"),
+        ("link raw path greater-than", "https://example.test/>"),
+        ("link raw path backtick", "https://example.test/`"),
+        ("link raw special query quote", "https://example.test/?q='"),
+        ("link raw query double quote", 'https://example.test/?q="'),
+        ("link raw query less-than", "https://example.test/?q=<"),
+        ("link raw query greater-than", "https://example.test/?q=>"),
+        ("link raw fragment quote", 'https://example.test/#"'),
+        ("link raw fragment less-than", "https://example.test/#<"),
+        ("link raw fragment greater-than", "https://example.test/#>"),
+        ("link raw fragment backtick", "https://example.test/#`"),
+        ("mailto raw query quote", 'mailto:user@example.test?subject="'),
+        ("mailto raw query less-than", "mailto:user@example.test?subject=<"),
+        ("mailto raw query greater-than", "mailto:user@example.test?subject=>"),
         ("mailto uppercase domain", "mailto:invoice@Example.test"),
     ):
         noncanonical_url = copy.deepcopy(scene)
@@ -1155,6 +1705,19 @@ def main() -> None:
         "scene resource closure differs",
         bundle_manifest_semantics(missing, scene),
     )
+    mismatched_image_media = copy.deepcopy(bundle_manifest)
+    next(
+        entry
+        for entry in mismatched_image_media["entries"]
+        if entry["sha256"] == scene["pages"][0]["operations"][2]["resource"]
+    )["media_type"] = "image/jpeg"
+    assert_rejected(
+        "bundle image media type differs from scene",
+        "bundle_manifest",
+        mismatched_image_media,
+        "requires media type 'image/png'",
+        bundle_manifest_semantics(mismatched_image_media, scene),
+    )
 
     assert_rejected(
         "failed result with partial delivery",
@@ -1224,7 +1787,7 @@ def main() -> None:
         "request-default page geometry drift",
         "scene",
         wrong_default,
-        "does not resolve request defaults",
+        "does not resolve request authority",
         scene_semantics(wrong_default, request_a4),
     )
     oversized_coordinate = copy.deepcopy(scene)
@@ -1348,6 +1911,49 @@ def main() -> None:
     reordered_scene["pages"][0]["operations"].reverse()
     if content_address(canonical_json_bytes(reordered_scene)) == content_address(SCENE_PATH.read_bytes()):
         raise AssertionError("operation reordering must change scene identity")
+
+    base_scene_identity = content_address(canonical_json_bytes(scene))
+    for name, mutate in (
+        ("font face index", lambda font: font.__setitem__("face_index", font["face_index"] + 1)),
+        (
+            "font variation bits",
+            lambda font: font["variations"][0].__setitem__(
+                "value_f32_bits", font["variations"][0]["value_f32_bits"] + 1
+            ),
+        ),
+        ("synthetic bold", lambda font: font.__setitem__("synthetic_bold", not font["synthetic_bold"])),
+    ):
+        changed_font_scene = copy.deepcopy(scene)
+        mutate(changed_font_scene["pages"][0]["operations"][0]["font"])
+        assert_valid(name, "scene", changed_font_scene, scene_semantics(changed_font_scene, request_a4))
+        if content_address(canonical_json_bytes(changed_font_scene)) == base_scene_identity:
+            raise AssertionError(f"{name} must change scene identity")
+        if scene_resources(changed_font_scene) != scene_resources(scene):
+            raise AssertionError(f"{name} must not create a second raw font resource")
+
+    shared_resource_instances = copy.deepcopy(scene)
+    second_text = copy.deepcopy(shared_resource_instances["pages"][0]["operations"][0])
+    second_text["font"]["face_index"] += 1
+    shared_resource_instances["pages"][0]["operations"].insert(1, second_text)
+    assert_valid(
+        "two font instances sharing one raw resource",
+        "scene",
+        shared_resource_instances,
+        scene_semantics(shared_resource_instances, request_a4),
+    )
+    if scene_resources(shared_resource_instances) != scene_resources(scene):
+        raise AssertionError("two font instances sharing bytes must require only one bundled font resource")
+    if content_address(canonical_json_bytes(shared_resource_instances)) == base_scene_identity:
+        raise AssertionError("adding a distinct font instance must change scene identity")
+
+    font_with_internal_id = copy.deepcopy(scene)
+    font_with_internal_id["pages"][0]["operations"][0]["font"]["id"] = "sha256:" + "0" * 64
+    assert_rejected(
+        "internal font instance id",
+        "scene",
+        font_with_internal_id,
+        "unexpected property 'id'",
+    )
 
     rejected_count = len(list((GOLDEN_DIR / "rejected").glob("*.json")))
     print(

@@ -24,6 +24,7 @@ on:
       - docs/pliego/third-party-notices.md
       - docs/releases/**
       - resources/**
+      - sdk/**
       - support/**
       - third_party/**
       - python/**
@@ -185,6 +186,21 @@ jobs:
           fi
           cargo test -p pliego --bin pliego --locked --profile checked-release \
             session::tests:: -- --skip document_session::tests::
+          api2_artifact_tests="$(cargo test -p pliego --bin pliego --locked --profile checked-release \
+            api2::artifacts::tests:: -- --list | awk 'sub(/: test$/, "") { print }')"
+          api2_artifact_test_count="$(printf '%s\n' "$api2_artifact_tests" | awk '/^api2::artifacts::tests::/ { count++ } END { print count + 0 }')"
+          if [[ "$api2_artifact_test_count" -lt 1 ]]; then
+            echo '::error::No canonical-scene PDF authority tests were selected.'
+            exit 1
+          fi
+          unexpected_api2_artifact_tests="$(printf '%s\n' "$api2_artifact_tests" | awk 'NF && $0 !~ /^api2::artifacts::tests::/ { print }')"
+          if [[ -n "$unexpected_api2_artifact_tests" ]]; then
+            echo '::error::The API 2 artifact filter selected tests outside api2::artifacts::tests::.'
+            printf '%s\n' "$unexpected_api2_artifact_tests"
+            exit 1
+          fi
+          cargo test -p pliego --bin pliego --locked --profile checked-release \
+            api2::artifacts::tests::
           supervisor_tests="$(cargo test -p pliego --bin pliego --locked --profile checked-release \
             render_supervisor::tests:: -- --list | awk 'sub(/: test$/, "") { print }')"
           supervisor_test_count="$(printf '%s\n' "$supervisor_tests" | awk '/^render_supervisor::tests::/ { count++ } END { print count + 0 }')"
@@ -321,7 +337,7 @@ jobs:
           $hash = (Get-FileHash "dist/$archive" -Algorithm SHA256).Hash.ToLowerInvariant()
           "$hash  $archive" | Set-Content "dist/$archive.sha256" -Encoding ascii
 
-      - name: Prove the packaged API 2 executable foundation
+      - name: Prove the packaged API 2 executable closure
         shell: bash
         run: |
           set -euo pipefail

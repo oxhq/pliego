@@ -16,28 +16,42 @@ final class InvocationException extends RuntimeException
         public readonly int $exitCode,
         public readonly string $stdout,
         public readonly string $stderr,
+        public readonly ?string $jobPath,
+        public readonly ?string $runtimeJobPath,
         string $message,
     ) {
         parent::__construct($message);
     }
 
-    public static function fromProcessResult(int $exitCode, string $stdout, string $stderr): self
+    public static function fromProcessResult(
+        int $exitCode,
+        string $stdout,
+        string $stderr,
+        ?string $jobPath = null,
+        ?string $runtimeJobPath = null,
+    ): self
     {
         $diagnostic = str_ends_with($stderr, "\n") ? substr($stderr, 0, -1) : '';
         if (
             $exitCode !== 64
             || $stdout !== ''
             || $diagnostic === ''
-            || str_contains($diagnostic, "\n")
-            || str_contains($diagnostic, "\r")
-            || str_contains($diagnostic, "\0")
+            || preg_match('/[\x00-\x1F\x7F]/', $diagnostic) === 1
             || preg_match('//u', $diagnostic) !== 1
         ) {
             throw new UnexpectedValueException(
-                'API 2 invocation errors require exit 64, empty stdout, and one newline-terminated UTF-8 stderr line',
+                'API 2 invocation errors require exit 64, empty stdout, and one newline-terminated UTF-8 stderr line'
+                    .' without control characters',
             );
         }
 
-        return new self($exitCode, $stdout, $stderr, $diagnostic);
+        return new self(
+            $exitCode,
+            $stdout,
+            $stderr,
+            $jobPath,
+            $runtimeJobPath,
+            $diagnostic,
+        );
     }
 }

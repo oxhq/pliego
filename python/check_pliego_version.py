@@ -13,7 +13,7 @@ from pathlib import Path
 import sys
 
 
-PLIEGO_API_VERSION = "1"
+PLIEGO_API_VERSION = "2"
 
 
 def expected_version_payload(
@@ -85,7 +85,7 @@ def self_test() -> None:
         expected + b"unexpected\n",
         b"".join((lines[1], lines[0], *lines[2:])),
         b"pliego 9.9.9\n" + b"".join(lines[1:]),
-        lines[0] + b"pliego-api 2\n" + b"".join(lines[2:]),
+        lines[0] + b"pliego-api 1\n" + b"".join(lines[2:]),
         b"".join(lines[:2]) + b"Servo 0.4.0-deadbeef\n" + lines[3],
         b"".join(lines[:3]) + b"Servo base deadbeef\n",
         expected.rstrip(b"\n"),

@@ -237,7 +237,7 @@ pub(crate) enum PreparedPublicationError {
 }
 
 #[derive(Debug)]
-struct BoundDirectory {
+pub(crate) struct BoundDirectory {
     requested_path: PathBuf,
     path: PathBuf,
     handle: Handle,
@@ -254,6 +254,18 @@ struct OwnedFile {
 impl BoundDirectory {
     fn open(path: PathBuf) -> io::Result<Self> {
         Self::open_with_move_access(path, false)
+    }
+
+    #[cfg(any(unix, windows))]
+    pub(crate) fn open_private(path: PathBuf) -> io::Result<Self> {
+        let directory = Self::open(path)?;
+        require_private_directory(&directory)?;
+        Ok(directory)
+    }
+
+    pub(crate) fn current_path(&self) -> io::Result<PathBuf> {
+        self.require_current()?;
+        Ok(self.requested_path.clone())
     }
 
     fn open_movable(path: PathBuf) -> io::Result<Self> {
@@ -302,6 +314,136 @@ impl BoundDirectory {
         Ok(())
     }
 
+    #[cfg(any(unix, windows))]
+    pub(crate) fn child_names(&self, maximum: usize) -> io::Result<Vec<OsString>> {
+        self.require_current()?;
+        let names = read_bound_directory_names(self, maximum)?;
+        self.require_current()?;
+        Ok(names)
+    }
+
+    #[cfg(any(unix, windows))]
+    pub(crate) fn open_child(&self, name: &OsStr) -> io::Result<Self> {
+        immediate_child_name(Path::new(name), "bound child name")?;
+        self.require_current()?;
+        let requested_path = self.requested_path.join(name);
+        let path = self.path.join(name);
+        let metadata = std::fs::symlink_metadata(&requested_path)?;
+        if path_metadata_is_alias(&metadata) || !metadata.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "bound child must be a directory, not an alias or special file: {}",
+                    requested_path.display()
+                ),
+            ));
+        }
+        let handle = Handle::from_file(open_bound_child_directory_handle(self, name)?)?;
+        let opened = handle.as_file().metadata()?;
+        if path_metadata_is_alias(&opened) || !opened.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "bound child handle must name a directory, not an alias or special file: {}",
+                    requested_path.display()
+                ),
+            ));
+        }
+        let directory = Self {
+            requested_path,
+            path,
+            handle,
+            movable: false,
+        };
+        directory.require_current()?;
+        self.require_current()?;
+        Ok(directory)
+    }
+
+    #[cfg(any(unix, windows))]
+    pub(crate) fn read_single_link_child(
+        &self,
+        name: &OsStr,
+        expected_bytes: u64,
+    ) -> io::Result<Vec<u8>> {
+        immediate_child_name(Path::new(name), "bound child name")?;
+        self.require_current()?;
+        let path = self.requested_path.join(name);
+        let metadata = std::fs::symlink_metadata(&path)?;
+        if path_metadata_is_alias(&metadata) || !metadata.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "bound child must be a regular file, not an alias or special file: {}",
+                    path.display()
+                ),
+            ));
+        }
+        let handle = Handle::from_file(open_bound_child_file_handle(self, name)?)?;
+        if !path_matches_handle(&path, &handle)? {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("bound child changed while opening: {}", path.display()),
+            ));
+        }
+        let before = handle.as_file().metadata()?;
+        require_single_link_regular_file(handle.as_file(), &before, &path)?;
+        if before.len() != expected_bytes {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "bound child byte length does not match its descriptor: {}",
+                    path.display()
+                ),
+            ));
+        }
+
+        let capacity = usize::try_from(expected_bytes).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("bound child is too large to load: {}", path.display()),
+            )
+        })?;
+        let mut bytes = Vec::with_capacity(capacity);
+        let mut buffer = [0_u8; 64 * 1024];
+        let mut offset = 0_u64;
+        loop {
+            let remaining = expected_bytes.saturating_sub(offset);
+            let bounded = remaining.saturating_add(1).min(buffer.len() as u64) as usize;
+            let read = read_open_file_at(handle.as_file(), &mut buffer[..bounded], offset)?;
+            if read == 0 {
+                break;
+            }
+            offset = offset.checked_add(read as u64).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "bound child byte count overflow",
+                )
+            })?;
+            if offset > expected_bytes {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("bound child grew while loading: {}", path.display()),
+                ));
+            }
+            bytes.extend_from_slice(&buffer[..read]);
+        }
+
+        let after = handle.as_file().metadata()?;
+        require_single_link_regular_file(handle.as_file(), &after, &path)?;
+        if offset != expected_bytes ||
+            after.len() != expected_bytes ||
+            !path_matches_handle(&path, &handle)?
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("bound child changed while loading: {}", path.display()),
+            ));
+        }
+        self.require_current()?;
+        Ok(bytes)
+    }
+
     fn try_clone(&self) -> io::Result<Self> {
         self.require_current()?;
         Ok(Self {
@@ -314,6 +456,10 @@ impl BoundDirectory {
 
     fn identity(&self) -> io::Result<String> {
         self.require_current()?;
+        self.held_identity()
+    }
+
+    fn held_identity(&self) -> io::Result<String> {
         open_file_identity(self.handle.as_file(), &self.path)
     }
 }
@@ -409,7 +555,7 @@ pub(crate) fn validate_staged_artifacts(
     })?;
     let container = BoundDirectory::open(container_path.to_owned())?;
     let staged = BoundDirectory::open_movable(staging.clone())?;
-    require_private_promotion_container(&container)?;
+    require_private_directory(&container)?;
     require_immediate_bound_child(&staging, &container, &staging_name)?;
     if promotion_filesystem_id(container.handle.as_file())? !=
         promotion_filesystem_id(staged.handle.as_file())?
@@ -444,7 +590,7 @@ pub(crate) fn remove_empty_private_container(container: &Path) -> io::Result<boo
     let parent = BoundDirectory::open(parent_path.to_owned())?;
     let container = BoundDirectory::open_movable(container)?;
     require_immediate_bound_child(&container.requested_path, &parent, &name)?;
-    require_private_promotion_container(&container)?;
+    require_private_directory(&container)?;
     let identity = container.identity()?;
     match remove_empty_bound_directory(&container, &parent, &name) {
         Ok(()) => {},
@@ -475,11 +621,52 @@ pub(crate) fn promote_staged_artifacts(
     staging: &Path,
     public: &Path,
 ) -> io::Result<()> {
+    let public = std::path::absolute(public)?;
+    let public_name = immediate_child_name(&public, "public artifact root")?.to_owned();
+    let destination_parent_path = public.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "public artifact root has no parent",
+        )
+    })?;
+    let destination_parent = BoundDirectory::open(destination_parent_path.to_owned())?;
+    require_immediate_bound_child(&public, &destination_parent, &public_name)?;
+    promote_staged_artifacts_to_bound_parent(
+        source_container,
+        staging,
+        &destination_parent,
+        &public_name,
+    )
+}
+
+/// Atomically exposes one private tree below a job root whose directory authority has remained
+/// held since input acceptance. The destination is selected only by a single relative name; its
+/// original host pathname is never reopened as publication authority.
+pub(crate) fn promote_staged_artifacts_into(
+    source_container: &Path,
+    staging: &Path,
+    destination_parent: &BoundDirectory,
+    public_name: &OsStr,
+) -> io::Result<()> {
+    immediate_child_name(Path::new(public_name), "public artifact root")?;
+    require_held_private_directory(destination_parent)?;
+    promote_staged_artifacts_to_bound_parent(
+        source_container,
+        staging,
+        destination_parent,
+        public_name,
+    )
+}
+
+fn promote_staged_artifacts_to_bound_parent(
+    source_container: &Path,
+    staging: &Path,
+    destination_parent: &BoundDirectory,
+    public_name: &OsStr,
+) -> io::Result<()> {
     let source_container = std::path::absolute(source_container)?;
     let staging = std::path::absolute(staging)?;
-    let public = std::path::absolute(public)?;
     let staging_name = immediate_child_name(&staging, "staging artifact root")?.to_owned();
-    let public_name = immediate_child_name(&public, "public artifact root")?.to_owned();
     let staging_parent = staging.parent().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -492,19 +679,11 @@ pub(crate) fn promote_staged_artifacts(
             "staging artifact root must be an immediate child of the supplied private container",
         ));
     }
-    let destination_parent_path = public.parent().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "public artifact root has no parent",
-        )
-    })?;
 
     let source_container = BoundDirectory::open(source_container)?;
-    let destination_parent = BoundDirectory::open(destination_parent_path.to_owned())?;
     let staged = BoundDirectory::open_movable(staging.clone())?;
-    require_private_promotion_container(&source_container)?;
+    require_private_directory(&source_container)?;
     require_immediate_bound_child(&staging, &source_container, &staging_name)?;
-    require_immediate_bound_child(&public, &destination_parent, &public_name)?;
     if handles_match(&source_container.handle, &destination_parent.handle)? {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -514,9 +693,9 @@ pub(crate) fn promote_staged_artifacts(
     require_same_promotion_filesystem(&source_container, &staged, &destination_parent)?;
 
     let source_container_identity = source_container.identity()?;
-    let destination_parent_identity = destination_parent.identity()?;
+    let destination_parent_identity = destination_parent.held_identity()?;
     let staged_identity = staged.identity()?;
-    require_child_absent(&destination_parent, &public_name, "public artifact root")?;
+    require_held_child_absent(destination_parent, public_name, "public artifact root")?;
     let forbidden_prefixes = promotion_private_prefixes(&[
         &staging,
         &staged.path,
@@ -526,61 +705,64 @@ pub(crate) fn promote_staged_artifacts(
     let before = validate_promotion_tree(&staged, &forbidden_prefixes)?;
 
     require_bound_identity(&source_container, &source_container_identity)?;
-    require_bound_identity(&destination_parent, &destination_parent_identity)?;
+    require_held_bound_identity(destination_parent, &destination_parent_identity)?;
     staged.require_current()?;
     rename_bound_directory_no_replace(
         &staged,
         &source_container,
         &staging_name,
-        &destination_parent,
-        &public_name,
+        destination_parent,
+        public_name,
     )?;
 
     let after = (|| {
         require_bound_identity(&source_container, &source_container_identity)?;
-        require_bound_identity(&destination_parent, &destination_parent_identity)?;
+        require_held_bound_identity(destination_parent, &destination_parent_identity)?;
         require_child_absent(&source_container, &staging_name, "staging artifact root")?;
-        let held_identity = open_file_identity(staged.handle.as_file(), &public)?;
-        if held_identity != staged_identity {
+        if staged.held_identity()? != staged_identity {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "held staged artifact root identity changed during promotion",
             ));
         }
-        let promoted = BoundDirectory::open_movable(public.clone())?;
-        if promoted.identity()? != staged_identity {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "promoted artifact root does not match the held private root",
-            ));
-        }
-        let closure = validate_promotion_tree(&promoted, &forbidden_prefixes)?;
+        require_bound_child_identity(
+            destination_parent,
+            public_name,
+            &staged.handle,
+            "promoted artifact root",
+        )?;
+        let closure = validate_held_promotion_tree(&staged, &forbidden_prefixes)?;
         if closure != before {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "promoted artifact tree changed across atomic exposure",
             ));
         }
+        require_bound_child_identity(
+            destination_parent,
+            public_name,
+            &staged.handle,
+            "promoted artifact root",
+        )?;
         Ok(())
     })();
 
     if let Err(validation_error) = after {
         let rollback = rename_bound_directory_no_replace(
             &staged,
-            &destination_parent,
-            &public_name,
+            destination_parent,
+            public_name,
             &source_container,
             &staging_name,
         )
         .and_then(|()| {
-            require_child_absent(&destination_parent, &public_name, "public artifact root")?;
-            staged.require_current()?;
-            if staged.identity()? != staged_identity {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "rolled-back artifact root does not match the held private root",
-                ));
-            }
+            require_held_child_absent(destination_parent, public_name, "public artifact root")?;
+            require_bound_child_identity(
+                &source_container,
+                &staging_name,
+                &staged.handle,
+                "rolled-back artifact root",
+            )?;
             Ok(())
         });
         return match rollback {
@@ -651,16 +833,31 @@ fn require_bound_identity(directory: &BoundDirectory, expected: &str) -> io::Res
     ))
 }
 
+fn require_held_bound_identity(directory: &BoundDirectory, expected: &str) -> io::Result<()> {
+    if directory.held_identity()? == expected {
+        return Ok(());
+    }
+    Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        "held promotion directory identity changed",
+    ))
+}
+
 #[cfg(unix)]
-fn require_private_promotion_container(container: &BoundDirectory) -> io::Result<()> {
+fn require_private_directory(container: &BoundDirectory) -> io::Result<()> {
+    container.require_current()?;
+    require_held_private_directory(container)
+}
+
+#[cfg(unix)]
+fn require_held_private_directory(container: &BoundDirectory) -> io::Result<()> {
     use std::os::unix::fs::MetadataExt;
 
-    container.require_current()?;
     let metadata = container.handle.as_file().metadata()?;
     if metadata.mode() & 0o7777 != 0o700 || metadata.uid() != unsafe { libc::geteuid() } {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            "staging container must be owned by the effective user with mode 0700",
+            "private directory must be owned by the effective user with mode 0700",
         ));
     }
     #[cfg(target_os = "macos")]
@@ -704,13 +901,18 @@ fn require_no_macos_extended_acl(file: &File) -> io::Result<()> {
     let _acl = OwnedAcl(acl);
     Err(io::Error::new(
         io::ErrorKind::PermissionDenied,
-        "private staging directory may not inherit an extended ACL",
+        "private directory may not inherit an extended ACL",
     ))
 }
 
 #[cfg(windows)]
-fn require_private_promotion_container(container: &BoundDirectory) -> io::Result<()> {
+fn require_private_directory(container: &BoundDirectory) -> io::Result<()> {
     container.require_current()?;
+    require_held_private_directory(container)
+}
+
+#[cfg(windows)]
+fn require_held_private_directory(container: &BoundDirectory) -> io::Result<()> {
     require_windows_private_directory(container.handle.as_file())
 }
 
@@ -846,14 +1048,14 @@ fn require_windows_private_directory(file: &File) -> io::Result<()> {
     if owner.is_null() || dacl.is_null() || descriptor.0.is_null() {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            "staging container has no protected owner-only DACL",
+            "private directory has no protected owner-only DACL",
         ));
     }
     // SAFETY: both SIDs are valid while their owning buffers remain live.
     if unsafe { EqualSid(owner, expected_user.as_ptr()) } == 0 {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            "staging container is not owned by the current user",
+            "private directory is not owned by the current user",
         ));
     }
     let mut control = 0_u16;
@@ -865,7 +1067,7 @@ fn require_windows_private_directory(file: &File) -> io::Result<()> {
     if control & SE_DACL_PROTECTED == 0 {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            "staging container DACL is not protected",
+            "private directory DACL is not protected",
         ));
     }
     let mut acl_information = ACL_SIZE_INFORMATION::default();
@@ -884,7 +1086,7 @@ fn require_windows_private_directory(file: &File) -> io::Result<()> {
     if acl_information.AceCount != 1 {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            "staging container DACL must grant exactly one principal",
+            "private directory DACL must grant exactly one principal",
         ));
     }
     let mut ace = std::ptr::null_mut();
@@ -907,17 +1109,25 @@ fn require_windows_private_directory(file: &File) -> io::Result<()> {
     if !valid {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            "staging container DACL is not an owner-only full-access grant",
+            "private directory DACL is not an owner-only full-access grant",
         ));
     }
     Ok(())
 }
 
 #[cfg(not(any(unix, windows)))]
-fn require_private_promotion_container(_container: &BoundDirectory) -> io::Result<()> {
+fn require_private_directory(_container: &BoundDirectory) -> io::Result<()> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
-        "private staged artifact containers are unsupported on this platform",
+        "private directories are unsupported on this platform",
+    ))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn require_held_private_directory(_container: &BoundDirectory) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "private directory authority is unsupported on this platform",
     ))
 }
 
@@ -1015,7 +1225,10 @@ fn append_private_utf8_spellings(candidates: &mut Vec<String>, value: &str) {
 }
 
 fn private_leaf_token(value: &str) -> bool {
-    let Some(nonce) = value.strip_prefix(".pliego-runtime-") else {
+    let Some(nonce) = value
+        .strip_prefix(".pliego-runtime-")
+        .or_else(|| value.strip_prefix(".pliego-api2-stage-"))
+    else {
         return false;
     };
     matches!(nonce.len(), 32 | 64) &&
@@ -1038,6 +1251,197 @@ fn validate_promotion_tree(
     validate_promotion_directory(root, "", 0, filesystem, forbidden_prefixes, &mut closure)?;
     root.require_current()?;
     Ok(closure)
+}
+
+fn validate_held_promotion_tree(
+    root: &BoundDirectory,
+    forbidden_prefixes: &[Vec<u8>],
+) -> io::Result<PromotionTreeClosure> {
+    let identity = root.held_identity()?;
+    let metadata = root.handle.as_file().metadata()?;
+    if path_metadata_is_alias(&metadata) || !metadata.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "held promoted artifact root is not a directory",
+        ));
+    }
+    let filesystem = promotion_filesystem_id(root.handle.as_file())?;
+    let mut closure = PromotionTreeClosure {
+        entries: 0,
+        bytes: 0,
+        artifacts: Vec::new(),
+    };
+    validate_held_promotion_directory(root, "", 0, filesystem, forbidden_prefixes, &mut closure)?;
+    require_held_bound_identity(root, &identity)?;
+    Ok(closure)
+}
+
+fn validate_held_promotion_directory(
+    directory: &BoundDirectory,
+    relative_parent: &str,
+    depth: usize,
+    filesystem: u64,
+    forbidden_prefixes: &[Vec<u8>],
+    closure: &mut PromotionTreeClosure,
+) -> io::Result<()> {
+    if depth > MAX_PROMOTION_TREE_DEPTH {
+        return Err(staged_artifact_limit_error(
+            StagedArtifactLimit::Depth,
+            MAX_PROMOTION_TREE_DEPTH as u64,
+        ));
+    }
+    if promotion_filesystem_id(directory.handle.as_file())? != filesystem {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "held promoted artifact tree crosses a filesystem boundary",
+        ));
+    }
+
+    let maximum = usize::try_from(MAX_PROMOTION_TREE_ENTRIES).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "promotion entry limit is not representable on this platform",
+        )
+    })?;
+    let names = read_bound_directory_names(directory, maximum)?;
+    for name in &names {
+        closure.entries = closure.entries.checked_add(1).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "staged artifact entry count overflow",
+            )
+        })?;
+        if closure.entries > MAX_PROMOTION_TREE_ENTRIES {
+            return Err(staged_artifact_limit_error(
+                StagedArtifactLimit::Entries,
+                MAX_PROMOTION_TREE_ENTRIES,
+            ));
+        }
+
+        let utf8_name = name.to_str().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "staged artifact names must be valid UTF-8",
+            )
+        })?;
+        let relative = if relative_parent.is_empty() {
+            utf8_name.to_owned()
+        } else {
+            format!("{relative_parent}/{utf8_name}")
+        };
+        let display_path = directory.requested_path.join(name);
+        let handle = Handle::from_file(open_bound_child_any_handle(directory, name)?)?;
+        let before = handle.as_file().metadata()?;
+        if path_metadata_is_alias(&before) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "staged artifact tree may not contain symlinks or reparse points: {}",
+                    display_path.display()
+                ),
+            ));
+        }
+
+        if before.is_dir() {
+            let child = BoundDirectory {
+                requested_path: display_path,
+                path: directory.path.join(name),
+                handle,
+                movable: false,
+            };
+            if promotion_filesystem_id(child.handle.as_file())? != filesystem {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "held promoted artifact tree crosses a filesystem boundary",
+                ));
+            }
+            closure.artifacts.push(PromotionTreeEntry {
+                path: relative.clone(),
+                kind: PromotionTreeEntryKind::Directory,
+            });
+            validate_held_promotion_directory(
+                &child,
+                &relative,
+                depth + 1,
+                filesystem,
+                forbidden_prefixes,
+                closure,
+            )?;
+            require_bound_child_identity(
+                directory,
+                name,
+                &child.handle,
+                "promoted artifact directory",
+            )?;
+            continue;
+        }
+        if !before.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "staged artifact tree may only contain regular files and directories: {}",
+                    display_path.display()
+                ),
+            ));
+        }
+
+        require_single_link_regular_file(handle.as_file(), &before, &display_path)?;
+        if promotion_filesystem_id(handle.as_file())? != filesystem {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "staged artifact file is on another filesystem: {}",
+                    display_path.display()
+                ),
+            ));
+        }
+        let next_bytes = closure.bytes.checked_add(before.len()).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "staged artifact byte count overflow",
+            )
+        })?;
+        if next_bytes > MAX_PROMOTION_TREE_BYTES {
+            return Err(staged_artifact_limit_error(
+                StagedArtifactLimit::AggregateBytes,
+                MAX_PROMOTION_TREE_BYTES,
+            ));
+        }
+        let (sha256, bytes) = hash_promotion_file(
+            handle.as_file(),
+            &display_path,
+            before.len(),
+            forbidden_prefixes,
+        )?;
+        let after = handle.as_file().metadata()?;
+        require_single_link_regular_file(handle.as_file(), &after, &display_path)?;
+        let current = Handle::from_file(open_bound_child_any_handle(directory, name)?)?;
+        if bytes != before.len() ||
+            after.len() != before.len() ||
+            !handles_match(&current, &handle)?
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "staged artifact changed during validation: {}",
+                    display_path.display()
+                ),
+            ));
+        }
+        closure.bytes = next_bytes;
+        closure.artifacts.push(PromotionTreeEntry {
+            path: relative,
+            kind: PromotionTreeEntryKind::File { sha256, bytes },
+        });
+    }
+
+    if read_bound_directory_names(directory, maximum)? != names {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "held promoted artifact directory changed during validation",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_promotion_directory(
@@ -1254,7 +1658,7 @@ fn require_single_link_regular_file(
     if succeeded == 0 {
         return Err(io::Error::last_os_error());
     }
-    if metadata.is_file() && information.NumberOfLinks == 1 {
+    if !path_metadata_is_alias(metadata) && metadata.is_file() && information.NumberOfLinks == 1 {
         return Ok(());
     }
     Err(io::Error::new(
@@ -1549,14 +1953,59 @@ fn invalid_json_escape(path: &Path) -> io::Error {
     )
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
+fn require_bound_child_identity(
+    parent: &BoundDirectory,
+    name: &OsStr,
+    expected: &Handle,
+    label: &str,
+) -> io::Result<()> {
+    immediate_child_name(Path::new(name), label)?;
+    // This identity-only reopen must coexist with the Windows DELETE-capable handle retained by
+    // a movable staged directory. The general child-directory opener intentionally denies delete
+    // sharing so input authorities cannot be renamed while held.
+    let current = Handle::from_file(open_bound_child_any_handle(parent, name)?)?;
+    let metadata = current.as_file().metadata()?;
+    if path_metadata_is_alias(&metadata) || !metadata.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{label} is not a directory"),
+        ));
+    }
+    if handles_match(&current, expected)? {
+        return Ok(());
+    }
+    Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("{label} does not match the held private root"),
+    ))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn require_bound_child_identity(
+    _parent: &BoundDirectory,
+    _name: &OsStr,
+    _expected: &Handle,
+    _label: &str,
+) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "relative child identity is unsupported on this platform",
+    ))
+}
+
 fn require_child_absent(parent: &BoundDirectory, name: &OsStr, label: &str) -> io::Result<()> {
+    parent.require_current()?;
+    require_held_child_absent(parent, name, label)
+}
+
+#[cfg(unix)]
+fn require_held_child_absent(parent: &BoundDirectory, name: &OsStr, label: &str) -> io::Result<()> {
     use std::ffi::CString;
     use std::mem::MaybeUninit;
     use std::os::fd::AsRawFd;
     use std::os::unix::ffi::OsStrExt;
 
-    parent.require_current()?;
     let name = CString::new(name.as_bytes()).map_err(|_| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -1588,9 +2037,9 @@ fn require_child_absent(parent: &BoundDirectory, name: &OsStr, label: &str) -> i
 }
 
 #[cfg(windows)]
-fn require_child_absent(parent: &BoundDirectory, name: &OsStr, label: &str) -> io::Result<()> {
-    parent.require_current()?;
-    match std::fs::symlink_metadata(parent.requested_path.join(name)) {
+fn require_held_child_absent(parent: &BoundDirectory, name: &OsStr, label: &str) -> io::Result<()> {
+    immediate_child_name(Path::new(name), label)?;
+    match open_bound_child_any_handle(parent, name) {
         Ok(_) => Err(io::Error::new(
             io::ErrorKind::AlreadyExists,
             format!("{label} already exists"),
@@ -1601,7 +2050,11 @@ fn require_child_absent(parent: &BoundDirectory, name: &OsStr, label: &str) -> i
 }
 
 #[cfg(not(any(unix, windows)))]
-fn require_child_absent(_parent: &BoundDirectory, _name: &OsStr, _label: &str) -> io::Result<()> {
+fn require_held_child_absent(
+    _parent: &BoundDirectory,
+    _name: &OsStr,
+    _label: &str,
+) -> io::Result<()> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "relative child validation is unsupported on this platform",
@@ -4500,6 +4953,468 @@ fn open_directory_handle(path: &Path) -> io::Result<File> {
     File::open(path)
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn read_bound_directory_names(
+    directory: &BoundDirectory,
+    maximum: usize,
+) -> io::Result<Vec<OsString>> {
+    use std::ffi::{CStr, CString};
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::ffi::OsStringExt;
+
+    let current = CString::new(".").unwrap();
+    // SAFETY: the held directory descriptor and static child name remain live. Opening `.` creates
+    // an independent directory description for fdopendir without consulting the replaceable path.
+    let descriptor = unsafe {
+        libc::openat(
+            directory.handle.as_file().as_raw_fd(),
+            current.as_ptr(),
+            libc::O_RDONLY |
+                libc::O_CLOEXEC |
+                libc::O_DIRECTORY |
+                libc::O_NOFOLLOW |
+                libc::O_NONBLOCK,
+        )
+    };
+    if descriptor < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: descriptor is a new owned directory descriptor. fdopendir assumes ownership on
+    // success; on failure we reconstruct a File so the descriptor is closed exactly once.
+    let stream = unsafe { libc::fdopendir(descriptor) };
+    if stream.is_null() {
+        let error = io::Error::last_os_error();
+        drop(unsafe { File::from_raw_fd(descriptor) });
+        return Err(error);
+    }
+
+    struct DirectoryStream(*mut libc::DIR);
+    impl Drop for DirectoryStream {
+        fn drop(&mut self) {
+            // SAFETY: fdopendir returned this live stream and it has not otherwise been closed.
+            unsafe { libc::closedir(self.0) };
+        }
+    }
+    let stream = DirectoryStream(stream);
+    let mut names = Vec::new();
+    loop {
+        // SAFETY: errno is thread-local on the supported Unix targets. Clearing it before readdir
+        // distinguishes clean EOF from an enumeration error, which must not look like closure.
+        unsafe { *directory_errno_pointer() = 0 };
+        // SAFETY: stream is live and this loop does not call readdir concurrently on it.
+        let entry = unsafe { libc::readdir(stream.0) };
+        if entry.is_null() {
+            // SAFETY: this reads the same thread-local errno cleared immediately above.
+            let error = unsafe { *directory_errno_pointer() };
+            if error == 0 {
+                break;
+            }
+            return Err(io::Error::from_raw_os_error(error));
+        }
+        // SAFETY: readdir returned a live entry whose d_name remains valid until the next call.
+        let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
+        if name == b"." || name == b".." {
+            continue;
+        }
+        if names.len() == maximum {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("bound directory contains more than {maximum} entries"),
+            ));
+        }
+        names.push(OsString::from_vec(name.to_vec()));
+    }
+    names.sort();
+    Ok(names)
+}
+
+#[cfg(target_os = "linux")]
+unsafe fn directory_errno_pointer() -> *mut libc::c_int {
+    // SAFETY: caller treats the returned pointer as thread-local libc errno storage.
+    unsafe { libc::__errno_location() }
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn directory_errno_pointer() -> *mut libc::c_int {
+    // SAFETY: caller treats the returned pointer as thread-local libc errno storage.
+    unsafe { libc::__error() }
+}
+
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+fn read_bound_directory_names(
+    _directory: &BoundDirectory,
+    _maximum: usize,
+) -> io::Result<Vec<OsString>> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "descriptor-relative directory enumeration is unsupported on this platform",
+    ))
+}
+
+#[cfg(windows)]
+fn read_bound_directory_names(
+    directory: &BoundDirectory,
+    maximum: usize,
+) -> io::Result<Vec<OsString>> {
+    use std::mem::{align_of, offset_of, size_of};
+    use std::os::windows::ffi::OsStringExt;
+    use std::os::windows::io::AsRawHandle;
+
+    use windows_sys::Win32::Foundation::ERROR_NO_MORE_FILES;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ID_BOTH_DIR_INFO, FileIdBothDirectoryInfo, FileIdBothDirectoryRestartInfo,
+        GetFileInformationByHandleEx,
+    };
+
+    const BUFFER_BYTES: usize = 64 * 1024;
+    let word_count = BUFFER_BYTES.div_ceil(size_of::<usize>());
+    let mut storage = vec![0_usize; word_count];
+    let buffer_bytes = storage.len() * size_of::<usize>();
+    let buffer_bytes_u32 = u32::try_from(buffer_bytes).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "bound directory enumeration buffer is too large",
+        )
+    })?;
+    let name_offset = offset_of!(FILE_ID_BOTH_DIR_INFO, FileName);
+    let mut restart = true;
+    let mut names = Vec::new();
+
+    loop {
+        storage.fill(0);
+        let information_class = if restart {
+            FileIdBothDirectoryRestartInfo
+        } else {
+            FileIdBothDirectoryInfo
+        };
+        // SAFETY: the directory handle and aligned output buffer remain live, and the advertised
+        // byte length covers the complete storage allocation.
+        let succeeded = unsafe {
+            GetFileInformationByHandleEx(
+                directory.handle.as_file().as_raw_handle() as _,
+                information_class,
+                storage.as_mut_ptr().cast(),
+                buffer_bytes_u32,
+            )
+        };
+        restart = false;
+        if succeeded == 0 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() == Some(ERROR_NO_MORE_FILES as i32) {
+                break;
+            }
+            return Err(error);
+        }
+
+        let mut offset = 0usize;
+        loop {
+            if offset % align_of::<FILE_ID_BOTH_DIR_INFO>() != 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "bound directory enumeration returned a misaligned record",
+                ));
+            }
+            let header_end = offset.checked_add(name_offset).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "bound directory enumeration record offset overflow",
+                )
+            })?;
+            if header_end > buffer_bytes {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "bound directory enumeration returned a truncated record",
+                ));
+            }
+            // SAFETY: storage is pointer-aligned and header_end proves the fixed record prefix is
+            // inside the output buffer. Variable-length name bounds are checked before reading it.
+            let information = unsafe {
+                &*storage
+                    .as_ptr()
+                    .cast::<u8>()
+                    .add(offset)
+                    .cast::<FILE_ID_BOTH_DIR_INFO>()
+            };
+            let name_bytes = usize::try_from(information.FileNameLength).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "bound directory entry name is too large",
+                )
+            })?;
+            if name_bytes % size_of::<u16>() != 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "bound directory entry name has an invalid UTF-16 byte length",
+                ));
+            }
+            let record_bytes = name_offset.checked_add(name_bytes).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "bound directory entry length overflow",
+                )
+            })?;
+            let record_end = offset.checked_add(record_bytes).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "bound directory entry offset overflow",
+                )
+            })?;
+            if record_end > buffer_bytes {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "bound directory enumeration returned a truncated name",
+                ));
+            }
+            let next = information.NextEntryOffset as usize;
+            if next != 0 && (next < record_bytes || offset.saturating_add(next) > buffer_bytes) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "bound directory enumeration returned an invalid next-entry offset",
+                ));
+            }
+
+            let name_words = name_bytes / size_of::<u16>();
+            // SAFETY: record_end proves this exact UTF-16 name range lies inside storage.
+            let name = unsafe {
+                std::slice::from_raw_parts(
+                    std::ptr::addr_of!(information.FileName).cast::<u16>(),
+                    name_words,
+                )
+            };
+            if name.contains(&0) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "bound directory entry name contains an embedded NUL",
+                ));
+            }
+            let name = OsString::from_wide(name);
+            if name != OsStr::new(".") && name != OsStr::new("..") {
+                if names.len() == maximum {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("bound directory contains more than {maximum} entries"),
+                    ));
+                }
+                names.push(name);
+            }
+
+            if next == 0 {
+                break;
+            }
+            offset += next;
+        }
+    }
+    names.sort();
+    Ok(names)
+}
+
+#[cfg(unix)]
+fn open_bound_child_any_handle(parent: &BoundDirectory, name: &OsStr) -> io::Result<File> {
+    use std::ffi::CString;
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::ffi::OsStrExt;
+
+    let name = CString::new(name.as_bytes()).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "bound child name contains a NUL byte",
+        )
+    })?;
+    // SAFETY: the held parent descriptor and child name remain live. O_NOFOLLOW binds the opened
+    // object itself rather than an alias, and O_NONBLOCK prevents special files from stalling.
+    let descriptor = unsafe {
+        libc::openat(
+            parent.handle.as_file().as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK,
+        )
+    };
+    if descriptor < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: openat returned this new owned descriptor.
+    Ok(unsafe { File::from_raw_fd(descriptor) })
+}
+
+#[cfg(unix)]
+fn open_bound_child_directory_handle(parent: &BoundDirectory, name: &OsStr) -> io::Result<File> {
+    let file = open_bound_child_any_handle(parent, name)?;
+    let metadata = file.metadata()?;
+    if metadata.is_dir() && !path_metadata_is_alias(&metadata) {
+        Ok(file)
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "bound child is not a directory",
+        ))
+    }
+}
+
+#[cfg(windows)]
+fn open_bound_child_directory_handle(parent: &BoundDirectory, name: &OsStr) -> io::Result<File> {
+    use windows_sys::Wdk::Storage::FileSystem::FILE_DIRECTORY_FILE;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        FILE_TRAVERSE, READ_CONTROL, SYNCHRONIZE,
+    };
+
+    open_bound_child_handle(
+        parent,
+        name,
+        FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | FILE_TRAVERSE | READ_CONTROL | SYNCHRONIZE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        FILE_DIRECTORY_FILE,
+    )
+}
+
+#[cfg(windows)]
+fn open_bound_child_any_handle(parent: &BoundDirectory, name: &OsStr) -> io::Result<File> {
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
+        FILE_SHARE_WRITE, READ_CONTROL, SYNCHRONIZE,
+    };
+
+    open_bound_child_handle(
+        parent,
+        name,
+        FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        0,
+    )
+}
+
+#[cfg(not(any(unix, windows)))]
+fn open_bound_child_any_handle(_parent: &BoundDirectory, _name: &OsStr) -> io::Result<File> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "relative child open is unsupported on this platform",
+    ))
+}
+
+#[cfg(unix)]
+fn open_bound_child_file_handle(parent: &BoundDirectory, name: &OsStr) -> io::Result<File> {
+    use std::ffi::CString;
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::ffi::OsStrExt;
+
+    let name = CString::new(name.as_bytes()).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "bound child name contains a NUL byte",
+        )
+    })?;
+    // SAFETY: the held parent descriptor and child name remain live. O_NOFOLLOW and O_NONBLOCK
+    // make aliases and blocking special files fail before any bytes are read.
+    let descriptor = unsafe {
+        libc::openat(
+            parent.handle.as_file().as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK,
+        )
+    };
+    if descriptor < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: openat returned this new owned descriptor.
+    Ok(unsafe { File::from_raw_fd(descriptor) })
+}
+
+#[cfg(windows)]
+fn open_bound_child_file_handle(parent: &BoundDirectory, name: &OsStr) -> io::Result<File> {
+    use windows_sys::Wdk::Storage::FileSystem::FILE_NON_DIRECTORY_FILE;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_SHARE_READ, READ_CONTROL, SYNCHRONIZE,
+    };
+
+    open_bound_child_handle(
+        parent,
+        name,
+        FILE_READ_DATA | FILE_READ_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE,
+        FILE_SHARE_READ,
+        FILE_NON_DIRECTORY_FILE,
+    )
+}
+
+#[cfg(windows)]
+fn open_bound_child_handle(
+    parent: &BoundDirectory,
+    name: &OsStr,
+    desired_access: u32,
+    share_access: u32,
+    object_kind: u32,
+) -> io::Result<File> {
+    use std::mem::size_of;
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::io::{AsRawHandle, FromRawHandle};
+
+    use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
+    use windows_sys::Wdk::Storage::FileSystem::{
+        FILE_OPEN_FOR_BACKUP_INTENT, FILE_OPEN_REPARSE_POINT, FILE_SYNCHRONOUS_IO_NONALERT,
+        NtOpenFile,
+    };
+    use windows_sys::Win32::Foundation::{OBJ_DONT_REPARSE, RtlNtStatusToDosError, UNICODE_STRING};
+    use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
+
+    let mut name: Vec<u16> = name.encode_wide().collect();
+    if name.is_empty() || name.contains(&0) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "bound child name is empty or contains an embedded NUL",
+        ));
+    }
+    let name_bytes = name
+        .len()
+        .checked_mul(size_of::<u16>())
+        .and_then(|bytes| u16::try_from(bytes).ok())
+        .ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "bound child name is too long")
+        })?;
+    let name = UNICODE_STRING {
+        Length: name_bytes,
+        MaximumLength: name_bytes,
+        Buffer: name.as_mut_ptr(),
+    };
+    let attributes = OBJECT_ATTRIBUTES {
+        Length: size_of::<OBJECT_ATTRIBUTES>() as u32,
+        RootDirectory: parent.handle.as_file().as_raw_handle() as _,
+        ObjectName: &raw const name,
+        Attributes: OBJ_DONT_REPARSE,
+        SecurityDescriptor: std::ptr::null(),
+        SecurityQualityOfService: std::ptr::null(),
+    };
+    let mut handle = std::ptr::null_mut();
+    let mut io_status = IO_STATUS_BLOCK::default();
+    // SAFETY: the held parent, UTF-16 name, object attributes, output handle, and status block all
+    // remain live. RootDirectory makes the single validated name relative to the bound parent,
+    // while OBJ_DONT_REPARSE and FILE_OPEN_REPARSE_POINT prevent traversal through aliases.
+    let status = unsafe {
+        NtOpenFile(
+            &mut handle,
+            desired_access,
+            &attributes,
+            &mut io_status,
+            share_access,
+            object_kind |
+                FILE_OPEN_FOR_BACKUP_INTENT |
+                FILE_OPEN_REPARSE_POINT |
+                FILE_SYNCHRONOUS_IO_NONALERT,
+        )
+    };
+    if status < 0 {
+        // SAFETY: RtlNtStatusToDosError is a pure status-code conversion.
+        let error = unsafe { RtlNtStatusToDosError(status) };
+        return Err(io::Error::from_raw_os_error(error as i32));
+    }
+    if handle.is_null() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "bound child open succeeded without returning a handle",
+        ));
+    }
+    // SAFETY: successful NtOpenFile returned this newly owned handle exactly once.
+    Ok(unsafe { File::from_raw_handle(handle) })
+}
+
 #[cfg(unix)]
 fn open_bound_directory_handle(path: &Path, _movable: bool) -> io::Result<File> {
     open_directory_handle(path)
@@ -4510,14 +5425,16 @@ fn open_directory_handle(path: &Path) -> io::Result<File> {
     use std::os::windows::fs::OpenOptionsExt;
 
     use windows_sys::Win32::Storage::FileSystem::{
-        FILE_ADD_FILE, FILE_ADD_SUBDIRECTORY, FILE_FLAG_BACKUP_SEMANTICS, FILE_READ_ATTRIBUTES,
-        FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE, READ_CONTROL, SYNCHRONIZE,
+        FILE_ADD_FILE, FILE_ADD_SUBDIRECTORY, FILE_FLAG_BACKUP_SEMANTICS, FILE_LIST_DIRECTORY,
+        FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE, READ_CONTROL,
+        SYNCHRONIZE,
     };
 
     OpenOptions::new()
         .access_mode(
             FILE_ADD_FILE |
                 FILE_ADD_SUBDIRECTORY |
+                FILE_LIST_DIRECTORY |
                 FILE_READ_ATTRIBUTES |
                 FILE_TRAVERSE |
                 READ_CONTROL |
@@ -4601,13 +5518,20 @@ fn open_bound_directory_handle(path: &Path, movable: bool) -> io::Result<File> {
     use std::os::windows::fs::OpenOptionsExt;
 
     use windows_sys::Win32::Storage::FileSystem::{
-        DELETE, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
-        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE, READ_CONTROL,
-        SYNCHRONIZE,
+        DELETE, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_LIST_DIRECTORY,
+        FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE,
+        READ_CONTROL, SYNCHRONIZE,
     };
 
     OpenOptions::new()
-        .access_mode(DELETE | FILE_READ_ATTRIBUTES | FILE_TRAVERSE | READ_CONTROL | SYNCHRONIZE)
+        .access_mode(
+            DELETE |
+                FILE_LIST_DIRECTORY |
+                FILE_READ_ATTRIBUTES |
+                FILE_TRAVERSE |
+                READ_CONTROL |
+                SYNCHRONIZE,
+        )
         .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
         .open(path)
@@ -5129,9 +6053,163 @@ mod tests {
         PUBLICATION_LEASE_FILE_NAME, PUBLICATION_OUTCOME_FILE_NAME, PUBLICATION_PLAN_FILE_NAME,
         PUBLICATION_PREPARED_FILE_NAME, PublicationRecoveryState, SessionArtifacts, SessionFailure,
         WebResourceLoadRole, contextualize_clonefileat_error, create_private_directory,
-        path_metadata_is_alias, promote_staged_artifacts, remove_empty_private_container,
-        serialize_publication_outcome, validate_staged_artifacts,
+        path_metadata_is_alias, promote_staged_artifacts, promote_staged_artifacts_into,
+        remove_empty_private_container, serialize_publication_outcome, validate_staged_artifacts,
     };
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    use super::{BoundDirectory, read_bound_directory_names};
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn bound_directory_enumeration_uses_the_held_descriptor_after_path_replacement() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let sandbox = test_temp_dir().join(format!(
+            "pliego-bound-enumeration-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir(&sandbox).unwrap();
+        let requested = sandbox.join("job");
+        create_private_directory(&requested).unwrap();
+        fs::write(requested.join("original"), b"held").unwrap();
+        let bound = BoundDirectory::open_private(requested.clone()).unwrap();
+
+        let held = sandbox.join("held");
+        fs::rename(&requested, &held).unwrap();
+        create_private_directory(&requested).unwrap();
+        fs::write(requested.join("decoy"), b"path").unwrap();
+        assert_eq!(
+            read_bound_directory_names(&bound, 1).unwrap(),
+            [std::ffi::OsString::from("original")]
+        );
+
+        drop(bound);
+        fs::remove_dir_all(&sandbox).unwrap();
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn bound_publication_targets_the_held_job_root_after_path_replacement() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let sandbox = test_temp_dir().join(format!(
+            "pliego-bound-publication-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir(&sandbox).unwrap();
+        let requested = sandbox.join("job");
+        create_private_directory(&requested).unwrap();
+        let bound = BoundDirectory::open_private(requested.clone()).unwrap();
+
+        let container = sandbox.join(format!(".pliego-runtime-{}", "b".repeat(32)));
+        create_private_directory(&container).unwrap();
+        let staged = container.join("delivery");
+        create_private_directory(&staged).unwrap();
+        fs::write(staged.join("document.pdf"), b"%PDF-held-root").unwrap();
+
+        let held = sandbox.join("held-job");
+        fs::rename(&requested, &held).unwrap();
+        create_private_directory(&requested).unwrap();
+        promote_staged_artifacts_into(
+            &container,
+            &staged,
+            &bound,
+            std::ffi::OsStr::new("delivery"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            fs::read(held.join("delivery/document.pdf")).unwrap(),
+            b"%PDF-held-root"
+        );
+        assert!(!requested.join("delivery").exists());
+        drop(bound);
+        fs::remove_dir_all(&sandbox).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_bound_directory_enumerates_reads_and_holds_child_identities() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let sandbox = test_temp_dir().join(format!(
+            "pliego-bound-windows-input-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir(&sandbox).unwrap();
+        let requested = sandbox.join("job");
+        create_private_directory(&requested).unwrap();
+        let input = requested.join("input");
+        fs::create_dir(&input).unwrap();
+        fs::write(input.join("document.html"), b"held input").unwrap();
+
+        let root = BoundDirectory::open_private(requested.clone()).unwrap();
+        assert_eq!(
+            read_bound_directory_names(&root, 1).unwrap(),
+            [std::ffi::OsString::from("input")]
+        );
+        let child = root.open_child(std::ffi::OsStr::new("input")).unwrap();
+        assert_eq!(
+            child.child_names(1).unwrap(),
+            [std::ffi::OsString::from("document.html")]
+        );
+        assert_eq!(
+            child
+                .read_single_link_child(std::ffi::OsStr::new("document.html"), 10)
+                .unwrap(),
+            b"held input"
+        );
+        assert!(fs::rename(&requested, sandbox.join("moved-job")).is_err());
+        assert!(fs::rename(&input, requested.join("moved-input")).is_err());
+
+        drop(child);
+        drop(root);
+        fs::remove_dir_all(&sandbox).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_bound_publication_uses_the_held_job_root_authority() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let sandbox = test_temp_dir().join(format!(
+            "pliego-bound-windows-publication-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir(&sandbox).unwrap();
+        let requested = sandbox.join("job");
+        create_private_directory(&requested).unwrap();
+        let bound = BoundDirectory::open_private(requested.clone()).unwrap();
+        let container = sandbox.join(format!(".pliego-runtime-{}", "c".repeat(32)));
+        create_private_directory(&container).unwrap();
+        let staged = container.join("delivery");
+        create_private_directory(&staged).unwrap();
+        fs::write(staged.join("document.pdf"), b"%PDF-held-root").unwrap();
+
+        assert!(fs::rename(&requested, sandbox.join("moved-job")).is_err());
+        promote_staged_artifacts_into(
+            &container,
+            &staged,
+            &bound,
+            std::ffi::OsStr::new("delivery"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            fs::read(requested.join("delivery/document.pdf")).unwrap(),
+            b"%PDF-held-root"
+        );
+        drop(bound);
+        fs::remove_dir_all(&sandbox).unwrap();
+    }
 
     #[test]
     fn clonefileat_enotsup_reports_destination_volume_without_reclassifying_other_errors() {
@@ -5394,6 +6472,23 @@ mod tests {
         fs::remove_dir_all(&stage).unwrap();
         fs::remove_dir(&container).unwrap();
         fs::remove_dir(&sandbox).unwrap();
+    }
+
+    #[test]
+    fn private_leaf_tokens_cover_runtime_and_api2_staging_names() {
+        assert!(super::private_leaf_token(&format!(
+            ".pliego-runtime-{}",
+            "a".repeat(32)
+        )));
+        assert!(super::private_leaf_token(&format!(
+            ".pliego-runtime-{}",
+            "b".repeat(64)
+        )));
+        assert!(super::private_leaf_token(&format!(
+            ".pliego-api2-stage-{}",
+            "c".repeat(32)
+        )));
+        assert!(!super::private_leaf_token(".pliego-api2-stage-not-a-nonce"));
     }
 
     #[test]

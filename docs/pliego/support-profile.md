@@ -1,6 +1,6 @@
-# Pliego v0.2 support profile
+# Pliego v0.3 support profile
 
-This page defines the supported behavior of the Pliego v0.2 source line. Publication
+This page defines the supported behavior of the Pliego v0.3 source line. Publication
 status comes from the exact tags and assets on GitHub Releases, not from a branch.
 Behavior outside this profile is not implied by Servo or by successful rendering of
 a different document.
@@ -16,15 +16,19 @@ Published bundles target Linux x86_64, Windows x86_64, macOS x86_64, and macOS
 arm64. The same engine API is checked after unpacking on each target; document-level
 regression coverage is deepest on Linux x86_64.
 
-## Controlled-capture runtime
+## API 2 and the controlled-capture runtime
 
-The stable-syntax `render` route—and therefore the
-PHP and Laravel packages that invoke it—use the controlled transaction.
-`render-controlled` remains an explicit alias for that transaction with narrower
-syntax: the alias rejects `--allow-partial-scene`, while `render` retains that
-diagnostic option. Both routes retain engine API 1.
+The preferred PHP and Laravel packages negotiate the exact profile-null API 2 tuple
+and invoke `render-api2`. The command accepts one canonical request through stdin,
+resolves only the fixed cwd-v1 input closure, runs one controlled transaction, and
+publishes a hash-bound PDF, public `DocumentScene` v2, resource set, and bundle
+manifest. Live network access and host-font discovery are rejected by this tuple.
 
-Both routes install the API 1 readiness bootstrap: static pages become ready after
+The stable-syntax `render` route remains as a deprecated engine API 1 compatibility
+boundary. `render-controlled` is its explicit alias with narrower syntax: the alias
+rejects `--allow-partial-scene`, while `render` retains that diagnostic option.
+
+The controlled transaction installs the Pliego readiness bootstrap: static pages become ready after
 load and the font wait, while pages with asynchronous work use
 `window.pliego.defer()`, `ready()`, and `fail()`. After a ready snapshot, the
 transaction settles again and accepts the snapshot only with a fresh capture
@@ -35,7 +39,7 @@ It has no realtime or shell fallback: stale capture state, a lost or indetermina
 consume outcome, and open-ended or unsupported sources all fail without publishing
 the requested PDF or any success-only artifact.
 
-The runtime checks path identity, output occupancy, and transaction preconditions
+The API 1 compatibility routes check path identity, output occupancy, and transaction preconditions
 before starting the document process. After a normal child exit, it prepares and holds
 the external PDF before making the artifact tree visible. An API 1 failure result still
 reports the requested `artifacts` and `document_pdf` strings after a render identity is
@@ -102,14 +106,15 @@ The implemented v0.2 boundary is deliberately narrow:
   an explicit typed disposition and whatever owned lifecycle or producer-fence
   evidence its execution model requires;
 - host- or cross-process-supplied performance timestamps, cross-event-loop navigation,
-  and auxiliary WebViews fail closed; the controlled ledger does not interrupt one
+    and auxiliary WebViews fail closed; the controlled ledger does not interrupt one
   already-running JavaScript turn, so deployments still need an outer process
   deadline; and
 - Unix launchers must preserve the default waitable `SIGCHLD` disposition: custom handlers,
   `SIG_IGN`, and `SA_NOCLDWAIT` are rejected before a document worker is spawned so the
   supervisor can reserve the worker process-group identity until teardown completes; and
-- this profile is not API 2, a hostile-input sandbox, or a cross-platform byte-determinism
-  claim.
+- API 2 advertises only the profile-null tuple; this profile is not a semantic or
+  accessible-PDF profile, a hostile-input sandbox, or a cross-platform
+  byte-determinism claim.
 
 The exact transaction and source inventory are documented in
 [generation capture preconditions](generation-capture-precondition.md) and the
@@ -118,16 +123,18 @@ source requires a typed inventory entry plus owned lifecycle evidence and, for e
 producers, producer-fence coverage; merely rendering one page that uses it does not
 expand this profile.
 
-Unless a section explicitly names alias-only syntax, the remaining capability and
-operational boundaries on this page describe both `render` and `render-controlled`.
+Unless a section explicitly names API 1 compatibility behavior, the remaining
+capability and operational boundaries on this page apply to the controlled runtime
+used by API 2 and the retained API 1 commands.
 
 ## Resource modes
 
-- **Offline:** network denied, assets supplied by the application, and exact bytes
-  recorded in the input and evidence manifests. This is the repeatable default.
-- **Allowlisted:** the caller opts in to explicit HTTP(S) roots. Successful requests
-  record URL, status, content type, byte count, and SHA-256. Repeatability depends on
-  the provider returning the same bytes.
+- **API 2 offline closure:** network and host-font discovery denied, assets supplied
+  by the application, and exact bytes recorded in the input and evidence manifests.
+  This is the preferred and only advertised API 2 resource mode.
+- **Deprecated API 1 allowlisted mode:** the caller opts in to explicit HTTP(S)
+  roots. Successful requests record URL, status, content type, byte count, and
+  SHA-256. Repeatability depends on the provider returning the same bytes.
 
 Host fonts, network access, redirects, and asset caching are disabled by default.
 Google Fonts requires both `https://fonts.googleapis.com/` and
@@ -148,8 +155,9 @@ allow the font origin.
 | Table borders | Partial | Uniform-color sharp ordinary solid borders and collapsed tables with a uniform solid color and width are verified. Non-uniform collapsed borders, mixed-color or non-solid styles, border images, rounded borders, transforms, clips, and unsupported writing modes remain outside the verified contract. |
 | Local TTF, OTF, WOFF, and WOFF2 | Supported | Declared fonts are embedded or subset with Unicode mappings; missing fonts do not silently fall back to the host. |
 | Fonts without embedding rights | Rejected | The application must supply an authorized face. |
-| Allowlisted CSS, images, and fonts | Supported | Every permitted root is explicit and fetched bytes contribute to the resolved input identity. |
-| Google Fonts stylesheet links | Supported | Both stylesheet and font roots must be allowlisted. |
+| Materialized CSS, images, and fonts | Supported | API 2 callers place every authorized byte in the input manifest and identify it by content hash. |
+| Allowlisted CSS, images, and fonts | Deprecated API 1 compatibility | Every permitted root is explicit and fetched bytes contribute to the resolved input identity. |
+| Google Fonts stylesheet links | Deprecated API 1 compatibility | Both stylesheet and font roots must be allowlisted; API 2 callers must prefetch and materialize the stylesheet and font bytes. |
 | Denied URLs | Supported failure | The render records `RESOURCE_DENIED` and publishes no final PDF. |
 | Redirects | Rejected | Redirects produce a typed resource failure. |
 | Variable-font axes | Partial | Use an authorized static instance when an axis combination is not covered. |
@@ -165,8 +173,8 @@ for engine development; it is not a delivery mode.
 
 ## Readiness and final canvas state
 
-The default `render` route and its `render-controlled` alias both install the API 1
-readiness bootstrap. A static HTML or Blade document does not call
+`render-api2` and the retained API 1 commands install the Pliego readiness
+bootstrap. A static HTML or Blade document does not call
 the readiness API itself: once the page load event has fired, Pliego waits for the
 document font set and proceeds automatically. This is the default path, including
 documents with declared local or allowlisted fonts.
