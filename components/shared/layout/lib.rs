@@ -1147,19 +1147,24 @@ pub struct PendingRestyle {
     pub damage: RestyleDamage,
 }
 
+const FRAGMENT_TYPE_MASK: usize = 0b11;
+
 /// The type of fragment that a scroll root is created for.
 ///
 /// This can only ever grow to maximum 4 entries. That's because we cram the value of this enum
 /// into the lower 2 bits of the `OpaqueNodeId`, which otherwise contains a 32-bit-aligned
 /// or 64-bit-aligned heap address depending on the machine.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, MallocSizeOf, PartialEq, Serialize)]
+#[repr(u8)]
 pub enum FragmentType {
     /// A StackingContext for the fragment body itself.
-    FragmentBody,
+    FragmentBody = 0,
     /// A StackingContext created to contain ::before pseudo-element content.
-    BeforePseudoContent,
+    BeforePseudoContent = 1,
     /// A StackingContext created to contain ::after pseudo-element content.
-    AfterPseudoContent,
+    AfterPseudoContent = 2,
+    /// A StackingContext created to contain ::marker pseudo-element content.
+    MarkerPseudoContent = 3,
 }
 
 impl From<Option<PseudoElement>> for FragmentType {
@@ -1167,18 +1172,43 @@ impl From<Option<PseudoElement>> for FragmentType {
         match value {
             Some(PseudoElement::After) => FragmentType::AfterPseudoContent,
             Some(PseudoElement::Before) => FragmentType::BeforePseudoContent,
-            _ => FragmentType::FragmentBody,
+            Some(PseudoElement::Marker) => FragmentType::MarkerPseudoContent,
+            None |
+            Some(
+                PseudoElement::Selection |
+                PseudoElement::FirstLetter |
+                PseudoElement::Backdrop |
+                PseudoElement::DetailsContent |
+                PseudoElement::ColorSwatch |
+                PseudoElement::FileSelectorButton |
+                PseudoElement::Placeholder |
+                PseudoElement::SliderFill |
+                PseudoElement::SliderThumb |
+                PseudoElement::SliderTrack |
+                PseudoElement::ServoTextControlInnerContainer |
+                PseudoElement::ServoTextControlInnerEditor |
+                PseudoElement::ServoAnonymousBox |
+                PseudoElement::ServoAnonymousTable |
+                PseudoElement::ServoAnonymousTableCell |
+                PseudoElement::ServoAnonymousTableRow |
+                PseudoElement::ServoTableGrid |
+                PseudoElement::ServoTableWrapper,
+            ) => FragmentType::FragmentBody,
         }
     }
 }
 
 pub fn combine_id_with_fragment_type(id: usize, fragment_type: FragmentType) -> u64 {
-    debug_assert_eq!(id & (fragment_type as usize), 0);
+    assert_eq!(
+        id & FRAGMENT_TYPE_MASK,
+        0,
+        "fragment IDs reserve their low two bits for FragmentType",
+    );
     (id as u64) | (fragment_type as u64)
 }
 
 pub fn node_id_from_scroll_id(id: usize) -> usize {
-    id & !3
+    id & !FRAGMENT_TYPE_MASK
 }
 
 #[derive(Clone, Debug, MallocSizeOf)]
@@ -1404,8 +1434,118 @@ mod test {
     use std::time::Duration;
 
     use pixels::{CorsStatus, ImageFrame, ImageMetadata, PixelFormat, RasterImage, Repeat};
+    use style::selector_parser::PseudoElement;
 
-    use crate::ImageAnimationState;
+    use crate::{
+        FRAGMENT_TYPE_MASK, FragmentType, ImageAnimationState, combine_id_with_fragment_type,
+        node_id_from_scroll_id,
+    };
+
+    #[test]
+    fn fragment_type_low_bits_are_stable_and_distinct() {
+        let node_id = 0x1000;
+        let cases = [
+            (None, FragmentType::FragmentBody, 0, 0x1000),
+            (
+                Some(PseudoElement::Before),
+                FragmentType::BeforePseudoContent,
+                1,
+                0x1001,
+            ),
+            (
+                Some(PseudoElement::After),
+                FragmentType::AfterPseudoContent,
+                2,
+                0x1002,
+            ),
+            (
+                Some(PseudoElement::Marker),
+                FragmentType::MarkerPseudoContent,
+                3,
+                0x1003,
+            ),
+        ];
+
+        for (pseudo, expected_type, expected_low_bits, expected_id) in cases {
+            assert_eq!(FragmentType::from(pseudo), expected_type);
+            assert_eq!(expected_type as u8, expected_low_bits);
+            assert_eq!(
+                combine_id_with_fragment_type(node_id, expected_type),
+                expected_id
+            );
+        }
+    }
+
+    #[test]
+    fn non_fragment_pseudo_elements_map_to_the_fragment_body() {
+        for pseudo in [
+            PseudoElement::Selection,
+            PseudoElement::FirstLetter,
+            PseudoElement::Backdrop,
+            PseudoElement::DetailsContent,
+            PseudoElement::ColorSwatch,
+            PseudoElement::FileSelectorButton,
+            PseudoElement::Placeholder,
+            PseudoElement::SliderFill,
+            PseudoElement::SliderThumb,
+            PseudoElement::SliderTrack,
+            PseudoElement::ServoTextControlInnerContainer,
+            PseudoElement::ServoTextControlInnerEditor,
+            PseudoElement::ServoAnonymousBox,
+            PseudoElement::ServoAnonymousTable,
+            PseudoElement::ServoAnonymousTableCell,
+            PseudoElement::ServoAnonymousTableRow,
+            PseudoElement::ServoTableGrid,
+            PseudoElement::ServoTableWrapper,
+        ] {
+            assert_eq!(FragmentType::from(Some(pseudo)), FragmentType::FragmentBody);
+        }
+    }
+
+    #[test]
+    fn fragment_type_encoding_rejects_every_reserved_low_bit_for_every_tag() {
+        for low_bits in 1..=FRAGMENT_TYPE_MASK {
+            let misaligned_node_id = 0x1000 | low_bits;
+
+            for fragment_type in [
+                FragmentType::FragmentBody,
+                FragmentType::BeforePseudoContent,
+                FragmentType::AfterPseudoContent,
+                FragmentType::MarkerPseudoContent,
+            ] {
+                assert!(
+                    std::panic::catch_unwind(|| {
+                        combine_id_with_fragment_type(misaligned_node_id, fragment_type)
+                    })
+                    .is_err(),
+                    "accepted node ID {misaligned_node_id:#x} for {fragment_type:?}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn maximum_aligned_node_id_has_four_distinct_round_tripping_fragment_ids() {
+        let node_id = usize::MAX & !FRAGMENT_TYPE_MASK;
+        let cases = [
+            (FragmentType::FragmentBody, 0usize),
+            (FragmentType::BeforePseudoContent, 1),
+            (FragmentType::AfterPseudoContent, 2),
+            (FragmentType::MarkerPseudoContent, 3),
+        ];
+        let mut fragment_ids = Vec::new();
+
+        for (fragment_type, expected_low_bits) in cases {
+            let fragment_id = combine_id_with_fragment_type(node_id, fragment_type);
+            assert_eq!(fragment_id, node_id as u64 | expected_low_bits as u64);
+            assert_eq!(node_id_from_scroll_id(fragment_id as usize), node_id);
+            fragment_ids.push(fragment_id);
+        }
+
+        fragment_ids.sort_unstable();
+        fragment_ids.dedup();
+        assert_eq!(fragment_ids.len(), 4);
+    }
 
     #[test]
     fn test_animated_image_update() {
