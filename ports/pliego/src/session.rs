@@ -1225,7 +1225,10 @@ fn append_private_utf8_spellings(candidates: &mut Vec<String>, value: &str) {
 }
 
 fn private_leaf_token(value: &str) -> bool {
-    let Some(nonce) = value.strip_prefix(".pliego-runtime-") else {
+    let Some(nonce) = value
+        .strip_prefix(".pliego-runtime-")
+        .or_else(|| value.strip_prefix(".pliego-api2-stage-"))
+    else {
         return false;
     };
     matches!(nonce.len(), 32 | 64) &&
@@ -6484,6 +6487,23 @@ mod tests {
         fs::remove_dir_all(&stage).unwrap();
         fs::remove_dir(&container).unwrap();
         fs::remove_dir(&sandbox).unwrap();
+    }
+
+    #[test]
+    fn private_leaf_tokens_cover_runtime_and_api2_staging_names() {
+        assert!(super::private_leaf_token(&format!(
+            ".pliego-runtime-{}",
+            "a".repeat(32)
+        )));
+        assert!(super::private_leaf_token(&format!(
+            ".pliego-runtime-{}",
+            "b".repeat(64)
+        )));
+        assert!(super::private_leaf_token(&format!(
+            ".pliego-api2-stage-{}",
+            "c".repeat(32)
+        )));
+        assert!(!super::private_leaf_token(".pliego-api2-stage-not-a-nonce"));
     }
 
     #[test]
