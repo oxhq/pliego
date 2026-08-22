@@ -686,7 +686,7 @@ fn public_operation_to_pdf(
                 .iter()
                 .enumerate()
                 .map(|(glyph_index, glyph)| {
-                    if glyph.id > u16::MAX.into()
+                    if glyph.id > u32::from(u16::MAX)
                         || glyph.x < 0
                         || glyph.y < 0
                         || glyph.advance < 0
