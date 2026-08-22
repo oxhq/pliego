@@ -1,0 +1,90 @@
+{
+  "schema": "pliego.conformance-evidence.pdfua-1",
+  "version": 1,
+  "profile": {
+    "schema": "pliego.profile.pdfua-1",
+    "version": 1
+  },
+  "subject_pdf": {
+    "resource": "sha256:3b78bf3f4499aa5729f9a387b5ce6082d27b990742dda784c57fa7fe3e73be79",
+    "media_type": "application/pdf",
+    "bytes": 435
+  },
+  "decision": "satisfied",
+  "validation_lock": {
+    "schema": "pliego.pdfua-validation-lock",
+    "version": 1,
+    "profile": {
+      "schema": "pliego.profile.pdfua-1",
+      "version": 1
+    },
+    "state": "ready",
+    "resource": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "media_type": "application/vnd.pliego.pdfua-validation-lock+json",
+    "bytes": 1
+  },
+  "per_render_machine": {
+    "scope": "per-render",
+    "status": "passed",
+    "report": {
+      "resource": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "media_type": "application/json",
+      "bytes": 1
+    },
+    "summary": {
+      "total": 87,
+      "passed": 87,
+      "failed": 0,
+      "not_evaluated": 0
+    }
+  },
+  "release_corpus": {
+    "scope": "release-corpus",
+    "status": "passed",
+    "runtime": {
+      "resource": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "media_type": "application/octet-stream",
+      "bytes": 1
+    },
+    "manifest": {
+      "resource": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+      "media_type": "application/json",
+      "bytes": 1
+    },
+    "report": {
+      "resource": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+      "media_type": "application/json",
+      "bytes": 1
+    }
+  },
+  "author_assurance": {
+    "scope": "document-or-template",
+    "status": "passed",
+    "input": {
+      "path": "pliego/author-assurance.json",
+      "media_type": "application/vnd.pliego.author-assurance+json",
+      "sha256": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+      "bytes": 1
+    },
+    "review_record": {
+      "resource": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+      "media_type": "application/json",
+      "bytes": 1
+    }
+  },
+  "assistive_technology": {
+    "scope": "release-matrix",
+    "status": "passed",
+    "matrix": {
+      "resource": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+      "media_type": "application/json",
+      "bytes": 1
+    },
+    "report": {
+      "resource": "sha256:8888888888888888888888888888888888888888888888888888888888888888",
+      "media_type": "application/json",
+      "bytes": 1
+    }
+  },
+  "blockers": []
+}

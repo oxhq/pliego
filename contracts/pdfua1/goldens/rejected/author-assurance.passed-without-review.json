@@ -1,0 +1,32 @@
+{
+  "schema": "pliego.author-assurance.pdfua-1",
+  "version": 1,
+  "profile": {
+    "schema": "pliego.profile.pdfua-1",
+    "version": 1
+  },
+  "subject": {
+    "scope": "template",
+    "entrypoint": {
+      "path": "document.html",
+      "sha256": "sha256:a519abf942fe2760c32c971b0dbb2a6574e02d2f8fc320b43dc124d99b856ec7",
+      "bytes": 298
+    },
+    "template": {
+      "path": "document.html",
+      "sha256": "sha256:a519abf942fe2760c32c971b0dbb2a6574e02d2f8fc320b43dc124d99b856ec7",
+      "bytes": 298
+    }
+  },
+  "assessment": {
+    "status": "passed",
+    "reviewer_id": null,
+    "review_record": null,
+    "summary": {
+      "total": 47,
+      "passed": 0,
+      "failed": 0,
+      "not_evaluated": 47
+    }
+  }
+}
