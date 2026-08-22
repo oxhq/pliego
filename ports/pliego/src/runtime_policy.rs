@@ -4,9 +4,9 @@
 
 //! Normalized deterministic-time and settlement policy for one Pliego render request.
 //!
-//! These values mirror the closed API 2 version-1 contract. Keeping the full policy together is
-//! deliberate: fields which need later enforcement are still part of render and recovery identity
-//! now, so production cannot silently acquire hidden defaults when those enforcement seams land.
+//! These values mirror the controlled runtime policy. API 2 only advertises the subset enforced by
+//! the controlled clock or host-wall deadline; API 1 recovery identity retains the additional
+//! internal safety fields until their enforcement seam is complete.
 
 use std::fmt;
 use std::time::Duration;

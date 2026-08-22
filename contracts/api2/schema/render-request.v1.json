@@ -163,8 +163,6 @@
         "microtasks",
         "rendering_opportunities",
         "mutations",
-        "post_readiness_resources",
-        "process_cpu_ms",
         "host_wall_ms"
       ],
       "properties": {
@@ -173,8 +171,6 @@
         "microtasks": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
         "rendering_opportunities": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
         "mutations": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
-        "post_readiness_resources": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
-        "process_cpu_ms": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
         "host_wall_ms": { "type": "integer", "minimum": 1, "maximum": 4294967295 }
       }
     },

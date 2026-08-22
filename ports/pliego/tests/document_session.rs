@@ -4,6 +4,8 @@
 
 #[path = "../src/asset_cache.rs"]
 mod asset_cache;
+#[path = "../src/api2.rs"]
+mod api2;
 #[path = "../src/controlled_settlement.rs"]
 mod controlled_settlement;
 #[path = "../src/document_session.rs"]
