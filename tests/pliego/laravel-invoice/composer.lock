@@ -4,7 +4,7 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "5084e2c58448abb1ad8c573e653a0f95",
+    "content-hash": "53dec4d27ce3d32fc3c7a4d292d1bccf",
     "packages": [
         {
             "name": "brick/math",
@@ -1406,16 +1406,16 @@
         },
         {
             "name": "league/commonmark",
-            "version": "2.8.3",
+            "version": "2.10.0",
             "source": {
                 "type": "git",
                 "url": "https://github.com/thephpleague/commonmark.git",
-                "reference": "1902f60f984235023acbe03db6ad614a37b3c3e7"
+                "reference": "d2d1aa8b35e072966c89bc0c66cf926e56767dc4"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/thephpleague/commonmark/zipball/1902f60f984235023acbe03db6ad614a37b3c3e7",
-                "reference": "1902f60f984235023acbe03db6ad614a37b3c3e7",
+                "url": "https://api.github.com/repos/thephpleague/commonmark/zipball/d2d1aa8b35e072966c89bc0c66cf926e56767dc4",
+                "reference": "d2d1aa8b35e072966c89bc0c66cf926e56767dc4",
                 "shasum": ""
             },
             "require": {
@@ -1452,7 +1452,7 @@
             "type": "library",
             "extra": {
                 "branch-alias": {
-                    "dev-main": "2.9-dev"
+                    "dev-main": "2.11-dev"
                 }
             },
             "autoload": {
@@ -1509,7 +1509,7 @@
                     "type": "tidelift"
                 }
             ],
-            "time": "2026-07-12T15:29:16+00:00"
+            "time": "2026-08-11T16:06:25+00:00"
         },
         {
             "name": "league/config",
@@ -2173,16 +2173,16 @@
         },
         {
             "name": "nette/schema",
-            "version": "v1.3.5",
+            "version": "v1.3.6",
             "source": {
                 "type": "git",
                 "url": "https://github.com/nette/schema.git",
-                "reference": "f0ab1a3cda782dbc5da270d28545236aa80c4002"
+                "reference": "c54350438cd6914616f790a49cb424605f421562"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/nette/schema/zipball/f0ab1a3cda782dbc5da270d28545236aa80c4002",
-                "reference": "f0ab1a3cda782dbc5da270d28545236aa80c4002",
+                "url": "https://api.github.com/repos/nette/schema/zipball/c54350438cd6914616f790a49cb424605f421562",
+                "reference": "c54350438cd6914616f790a49cb424605f421562",
                 "shasum": ""
             },
             "require": {
@@ -2234,9 +2234,9 @@
             ],
             "support": {
                 "issues": "https://github.com/nette/schema/issues",
-                "source": "https://github.com/nette/schema/tree/v1.3.5"
+                "source": "https://github.com/nette/schema/tree/v1.3.6"
             },
-            "time": "2026-02-23T03:47:12+00:00"
+            "time": "2026-08-16T21:58:41+00:00"
         },
         {
             "name": "nette/utils",
@@ -2418,11 +2418,11 @@
         },
         {
             "name": "oxhq/pliego-laravel",
-            "version": "0.2.0",
+            "version": "0.2.1",
             "dist": {
                 "type": "path",
                 "url": "../../../sdk/laravel",
-                "reference": "cbb750a03c3741ed0d323e3fca28a0f797431ae3"
+                "reference": "72f1fc22f7ecad92e50ddf8c3b7a84748dc234aa"
             },
             "require": {
                 "illuminate/console": "^13.0",
@@ -2430,7 +2430,7 @@
                 "illuminate/http": "^13.0",
                 "illuminate/support": "^13.0",
                 "illuminate/view": "^13.0",
-                "oxhq/pliego-php": "0.2.0",
+                "oxhq/pliego-php": "0.2.1",
                 "php": "^8.3",
                 "symfony/http-foundation": "^7.4 || ^8.0"
             },
@@ -2448,6 +2448,9 @@
                 }
             },
             "scripts": {
+                "release:check-runtime": [
+                    "@php tests/release_runtime_manifest_test.php"
+                ],
                 "test:runtime": [
                     "@php tests/managed_runtime_test.php"
                 ],
@@ -2470,11 +2473,11 @@
         },
         {
             "name": "oxhq/pliego-php",
-            "version": "0.2.0",
+            "version": "0.2.1",
             "dist": {
                 "type": "path",
                 "url": "../../../sdk/php",
-                "reference": "a59363b729a507e514fe5527eb26b83dcd84b788"
+                "reference": "fbd76199a4dc2f589e2c14b5d8090e7a46e34fe7"
             },
             "require": {
                 "php": "^8.3"

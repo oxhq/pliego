@@ -9,14 +9,14 @@ Chromium, Node.js, or Java with an application.
 
 | Item | Current public boundary |
 | --- | --- |
-| Source release line | v0.2.0 controlled-runtime cutover |
-| Publication status | v0.2.0 tag and native assets are published on GitHub Releases |
+| Source release line | v0.2.1 controlled-runtime patch |
+| Publication status | v0.2.1 tag and native assets are published on GitHub Releases |
 | Engine protocol | API 1 |
 | Supported input trust | Application-owned HTML and assets |
 | Runtime network | Denied by default; explicit URL roots are opt-in |
 | Native bundles | Linux x86_64, Windows x86_64, macOS x86_64, macOS arm64 |
 | Primary integration | PHP and Laravel packages |
-| Composer packages | `oxhq/pliego-php` v0.2.0 and `oxhq/pliego-laravel` v0.2.0 are published on Packagist |
+| Composer packages | `oxhq/pliego-php` v0.2.1 and `oxhq/pliego-laravel` v0.2.1 are published on Packagist |
 | Hostile HTML | Unsupported; Pliego is not a security sandbox |
 | API 2 | Unreleased probe/decoder foundation; advertises no render contract |
 
@@ -62,9 +62,9 @@ records that boundary.
 
 ## What the repository currently proves
 
-- Native v0.2.0 is published for four targets with checksum and notice artifacts;
+- Native v0.2.1 is published for four targets with checksum and notice artifacts;
   the exact tag and assets on GitHub Releases remain authoritative.
-- The PHP and Laravel v0.2.0 packages are published on Packagist and pass their
+- The PHP and Laravel v0.2.1 packages are published on Packagist and pass their
   focused hosted package checks.
 - Focused fixtures cover supported pagination, fonts, images, links, Chart.js usage,
   and unsupported-paint failure behavior.

@@ -28,7 +28,7 @@ an authored page break, a dense 20-row ledger, and calculated totals.
 
 ## Laravel quick start
 
-The v0.2.0 Laravel package is published on Packagist. These commands install its
+The v0.2.1 Laravel package is published on Packagist. These commands install its
 exact PHP bridge dependency, then download and verify its package-pinned native
 runtime:
 
@@ -163,9 +163,9 @@ Composer distributions pass their focused contracts. The support profile remains
 the boundary; Pliego does not claim browser-wide compatibility or safe rendering of
 untrusted HTML.
 
-This source tree and the latest stable native release are v0.2.0 with engine API 1.
+This source tree and the latest stable native release are v0.2.1 with engine API 1.
 The exact tag and native assets on the
-[Releases page](https://github.com/oxhq/pliego/releases/tag/v0.2.0) are the
+[Releases page](https://github.com/oxhq/pliego/releases/tag/v0.2.1) are the
 publication authority. The v0.2 release routes the default command and supported SDK
 path through the Pliego-owned controlled transaction.
 For the project's scope, evidence, release train, and next gates, see:
@@ -176,7 +176,7 @@ For the project's scope, evidence, release train, and next gates, see:
 - [Security threat model](docs/security/threat-model.md)
 - [2026 funding plan](docs/funding/2026.md)
 
-Published v0.2.0 uses engine API 1 through the Pliego-owned controlled transaction.
+Published v0.2.1 uses engine API 1 through the Pliego-owned controlled transaction.
 API 2 remains unreleased: the source tree includes a probe, strict request decoder,
 and PHP tuple validator, but the probe advertises no render contract and
 `render-api2` cannot render a document.

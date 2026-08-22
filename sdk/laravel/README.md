@@ -2,7 +2,7 @@
 
 Laravel 13 integration for application-owned Blade documents.
 
-The v0.2.0 Laravel package is published on Packagist:
+The v0.2.1 Laravel package is published on Packagist:
 
 ```sh
 composer require oxhq/pliego-laravel:^0.2.0
