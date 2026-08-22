@@ -13,22 +13,15 @@ use Illuminate\View\Factory as ViewFactory;
 use Illuminate\View\FileViewFinder;
 use Pliego\Laravel\DocumentFactory;
 use Pliego\Laravel\Facades\Document;
-use Pliego\Php\CliRenderer;
-use Pliego\Php\Exception\EngineRenderException;
+use Pliego\Php\DocumentEngine;
+use Pliego\Php\Exception\RenderFailedException;
 use Pliego\Php\RenderOptions;
 
-$autoload = getenv('PLIEGO_TEST_AUTOLOAD');
-require is_string($autoload) && $autoload !== ''
-    ? $autoload
-    : dirname(__DIR__).'/vendor/autoload.php';
-$localPhpAutoload = dirname(__DIR__, 2).'/php/vendor/autoload.php';
-if (is_file($localPhpAutoload)) {
-    require $localPhpAutoload;
-}
+require dirname(__DIR__).'/vendor/autoload.php';
 
 function bridgeExpect(bool $condition, string $message): void
 {
-    if (!$condition) {
+    if (! $condition) {
         throw new RuntimeException($message);
     }
 }
@@ -39,9 +32,9 @@ function bridgeReconciles(array $timings): bool
     $sum = array_sum(array_filter($timings['phases_ms'], is_float(...)));
 
     return abs($sum - $timings['total_ms']) < 0.02
-        && ($timings['measurement_boundary'] ?? null) === 'render-invocation-before-timing-diagnostics'
-        && is_float($timings['native_engine_ms'])
-        && abs($timings['native_engine_ms'] + $timings['bridge_overhead_ms'] - $timings['total_ms']) < 0.002;
+        && ($timings['schema'] ?? null) === 'pliego.php-bridge-timings'
+        && ($timings['version'] ?? null) === 2
+        && ($timings['measurement_boundary'] ?? null) === 'api2-render-invocation-before-timing-diagnostic';
 }
 
 $root = sys_get_temp_dir().'/pliego-laravel-timings-'.getmypid().'-'.bin2hex(random_bytes(4));
@@ -57,9 +50,9 @@ file_put_contents(
     '<h1>{{ $title }}</h1>@foreach ($rows as $row)<p>{{ $row }}</p>@endforeach',
 );
 
-$container = new Container();
-$files = new Filesystem();
-$resolver = new EngineResolver();
+$container = new Container;
+$files = new Filesystem;
+$resolver = new EngineResolver;
 $compiler = new BladeCompiler($files, $cachePath);
 $resolver->register('blade', static fn (): CompilerEngine => new CompilerEngine($compiler, $files));
 $views = new ViewFactory(
@@ -68,30 +61,27 @@ $views = new ViewFactory(
     new Dispatcher($container),
 );
 $views->setContainer($container);
-$fake = dirname(__DIR__, 2).'/php/tests/fake_pliego.php';
-$container->singleton(DocumentFactory::class, static function () use ($views, $workPath, $fake): DocumentFactory {
+$container->singleton(DocumentFactory::class, static function () use ($views, $workPath): DocumentFactory {
     $runtimeStartedAt = hrtime(true);
     $binary = realpath(PHP_BINARY);
     bridgeExpect(is_string($binary), 'PHP runtime resolves');
 
     return new DocumentFactory(
         $views,
-        new CliRenderer(
-            [$binary, $fake],
+        new DocumentEngine(
+            [$binary, __DIR__.'/fake_api2.php'],
+            $workPath,
             runtimeResolutionNanoseconds: (int) (hrtime(true) - $runtimeStartedAt),
         ),
-        $workPath,
-        new RenderOptions(),
+        new RenderOptions,
     );
 });
 Facade::setFacadeApplication($container);
-if (is_file($localPhpAutoload)) {
-    bridgeExpect(
-        realpath((string) (new ReflectionClass(CliRenderer::class))->getFileName())
-            === realpath(dirname(__DIR__, 2).'/php/src/CliRenderer.php'),
-        'proof uses local PHP bridge source',
-    );
-}
+bridgeExpect(
+    realpath((string) (new ReflectionClass(DocumentFactory::class))->getFileName())
+        === realpath(dirname(__DIR__).'/src/DocumentFactory.php'),
+    'proof uses this split package source',
+);
 
 $startedAt = hrtime(true);
 $result = Document::view('invoice', ['title' => 'Invoice', 'rows' => ['A', 'B']])
@@ -121,8 +111,8 @@ try {
         ->asset('assets/test.txt', $asset)
         ->render();
     throw new RuntimeException('expected typed Laravel failure');
-} catch (EngineRenderException $error) {
-    bridgeExpect($error->errorCode === 'RESOURCE_DENIED', 'typed Laravel failure preserved');
+} catch (RenderFailedException $error) {
+    bridgeExpect($error->kind === 'resource', 'typed Laravel API 2 failure preserved');
     bridgeExpect(is_float($error->bridgeTimings['phases_ms']['view_render']), 'failed Blade render measured');
     bridgeExpect(bridgeReconciles($error->bridgeTimings), 'failed Laravel phases reconcile');
 }

@@ -12,14 +12,26 @@ require is_string($autoload) && $autoload !== ''
 
 function runtimeExpect(bool $condition, string $message): void
 {
-    if (!$condition) {
+    if (! $condition) {
         throw new RuntimeException($message);
     }
 }
 
+$bundled = json_decode(
+    (string) file_get_contents(dirname(__DIR__).'/resources/runtimes.json'),
+    true,
+    flags: JSON_THROW_ON_ERROR,
+);
+runtimeExpect(
+    ($bundled['version'] ?? null) === '0.3.0'
+        && ($bundled['api'] ?? null) === 2
+        && ($bundled['release_ready'] ?? null) === false,
+    'bundled v0.3 runtime manifest must remain pending until native promotion',
+);
+
 function removeRuntimeFixture(string $path): void
 {
-    if (!is_dir($path)) {
+    if (! is_dir($path)) {
         return;
     }
     $iterator = new RecursiveIteratorIterator(
@@ -27,7 +39,7 @@ function removeRuntimeFixture(string $path): void
         RecursiveIteratorIterator::CHILD_FIRST,
     );
     foreach ($iterator as $entry) {
-        $entry->isDir() && !$entry->isLink()
+        $entry->isDir() && ! $entry->isLink()
             ? rmdir($entry->getPathname())
             : unlink($entry->getPathname());
     }
@@ -73,7 +85,7 @@ $archivePath = $tarPath.'.gz';
 $manifest = [
     'schema' => 1,
     'version' => $version,
-    'api' => 1,
+    'api' => 2,
     'release_ready' => true,
     'assets' => [
         'linux-x86_64' => [
@@ -103,10 +115,10 @@ file_put_contents($manifestPath, json_encode($manifest, JSON_PRETTY_PRINT | JSON
 $url = "https://github.com/oxhq/pliego/releases/download/v{$version}/{$bundle}.tar.gz";
 $body = file_get_contents($archivePath);
 runtimeExpect(is_string($body), 'cannot read runtime fixture archive');
-$http = new HttpFactory();
+$http = new HttpFactory;
 $http->fake([$url => HttpFactory::response($body)]);
 $probe = static fn (string $binary): string => is_file($binary)
-    ? "pliego {$version}\npliego-api 1\n"
+    ? "pliego {$version}\npliego-api 2\n"
     : throw new RuntimeException('version probe did not receive the installed binary');
 $runtimeRoot = $fixture.DIRECTORY_SEPARATOR.'installed';
 $runtime = new ManagedRuntime($runtimeRoot, $manifestPath, $http, versionProbe: $probe);
@@ -115,7 +127,7 @@ $binary = $runtime->install('linux-x86_64');
 runtimeExpect(is_file($binary), 'managed binary was not installed');
 runtimeExpect(file_get_contents($binary) === 'fake executable', 'managed binary contents changed');
 runtimeExpect(is_file(dirname($binary).DIRECTORY_SEPARATOR.$nestedLicense), 'nested license was not installed');
-runtimeExpect(!file_exists(dirname($binary).DIRECTORY_SEPARATOR.'unexpected.txt'), 'unlisted archive file was extracted');
+runtimeExpect(! file_exists(dirname($binary).DIRECTORY_SEPARATOR.'unexpected.txt'), 'unlisted archive file was extracted');
 runtimeExpect($runtime->binary('linux-x86_64') === $binary, 'managed binary was not resolved');
 runtimeExpect($runtime->install('linux-x86_64') === $binary, 'managed install is not idempotent');
 runtimeExpect($http->recorded()->count() === 1, 'idempotent install downloaded the archive again');
@@ -128,7 +140,7 @@ try {
     (new ManagedRuntime(
         $fixture.DIRECTORY_SEPARATOR.'pending-install',
         $pendingManifestPath,
-        new HttpFactory(),
+        new HttpFactory,
         versionProbe: $probe,
     ))->install('linux-x86_64');
     throw new RuntimeException('unfinalized managed runtime metadata was installed');
@@ -139,7 +151,7 @@ try {
 $override = new ManagedRuntime(
     $fixture.DIRECTORY_SEPARATOR.'override-root',
     $pendingManifestPath,
-    new HttpFactory(),
+    new HttpFactory,
     'custom-pliego',
     $probe,
 );
@@ -155,7 +167,7 @@ $badManifest = $manifest;
 $badManifest['assets']['linux-x86_64']['sha256'] = str_repeat('0', 64);
 $badManifestPath = $fixture.DIRECTORY_SEPARATOR.'bad-runtimes.json';
 file_put_contents($badManifestPath, json_encode($badManifest, JSON_THROW_ON_ERROR));
-$badHttp = new HttpFactory();
+$badHttp = new HttpFactory;
 $badHttp->fake([$url => HttpFactory::response($body)]);
 try {
     (new ManagedRuntime(
@@ -169,7 +181,7 @@ try {
     runtimeExpect(str_contains($error->getMessage(), 'SHA-256 mismatch'), 'tampered archive error lost its cause');
 }
 runtimeExpect(
-    !is_dir($fixture.DIRECTORY_SEPARATOR."bad-install/{$version}/linux-x86_64"),
+    ! is_dir($fixture.DIRECTORY_SEPARATOR."bad-install/{$version}/linux-x86_64"),
     'tampered runtime reached the final directory',
 );
 
@@ -178,11 +190,11 @@ $unsafeManifest['assets']['linux-x86_64']['files'][] = '../escape';
 $unsafeManifestPath = $fixture.DIRECTORY_SEPARATOR.'unsafe-runtimes.json';
 file_put_contents($unsafeManifestPath, json_encode($unsafeManifest, JSON_THROW_ON_ERROR));
 try {
-    new ManagedRuntime($fixture.DIRECTORY_SEPARATOR.'unsafe-install', $unsafeManifestPath, new HttpFactory(), versionProbe: $probe);
+    new ManagedRuntime($fixture.DIRECTORY_SEPARATOR.'unsafe-install', $unsafeManifestPath, new HttpFactory, versionProbe: $probe);
     throw new RuntimeException('unsafe runtime manifest path was accepted');
 } catch (RuntimeException $error) {
     runtimeExpect(str_contains($error->getMessage(), 'unsafe'), 'unsafe path error lost its cause');
 }
-runtimeExpect(!file_exists($fixture.DIRECTORY_SEPARATOR.'escape'), 'unsafe manifest escaped its install root');
+runtimeExpect(! file_exists($fixture.DIRECTORY_SEPARATOR.'escape'), 'unsafe manifest escaped its install root');
 
 echo "managed runtime: ok\n";
