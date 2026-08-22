@@ -17,7 +17,10 @@ use Pliego\Php\DocumentEngine;
 use Pliego\Php\Exception\RenderFailedException;
 use Pliego\Php\RenderOptions;
 
-require dirname(__DIR__).'/vendor/autoload.php';
+$autoload = getenv('PLIEGO_TEST_AUTOLOAD');
+require is_string($autoload) && $autoload !== ''
+    ? $autoload
+    : dirname(__DIR__).'/vendor/autoload.php';
 
 function bridgeExpect(bool $condition, string $message): void
 {
