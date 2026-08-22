@@ -4,14 +4,17 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-"""Prove the unavailable-but-discoverable API 2 executable foundation."""
+"""Prove the advertised API 2 profile-null tuple and its executable closure."""
 
 from __future__ import annotations
 
 import argparse
 import hashlib
 import json
+import os
 import re
+import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -24,11 +27,34 @@ INPUT_MANIFEST_MAX_BYTES = 16 * 1024 * 1024
 INPUT_CONTENT_MAX_BYTES = 64 * 1024 * 1024
 PROBE_TIMEOUT_SECONDS = 180
 INVOCATION_TIMEOUT_SECONDS = 30
+WINDOWS_ACL_TOOL_TIMEOUT_SECONDS = 15
+WINDOWS_ACL_PROOF_MAX_BYTES = 64 * 1024
 SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 TARGET_COMPONENT = r"[a-z0-9]+(?:_[a-z0-9]+)*"
 TARGET_RE = re.compile(rf"^{TARGET_COMPONENT}(?:-{TARGET_COMPONENT}){{2,3}}$")
 VERSION_RE = re.compile(r"^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$")
+WINDOWS_SID_RE = re.compile(rb"(?<![A-Za-z0-9-])(S-1-(?:[0-9]+-)+[0-9]+)(?![A-Za-z0-9-])")
+WINDOWS_DEFAULT_DACL_TRUSTEES = (
+    "S-1-5-18",  # Local System
+    "S-1-5-32-544",  # Builtin Administrators
+    "S-1-5-11",  # Authenticated Users
+    "S-1-5-32-545",  # Builtin Users
+    "S-1-1-0",  # Everyone
+    "S-1-3-0",  # Creator Owner
+    "S-1-3-1",  # Creator Group
+)
+
+
+SUPPORTED_CONTRACT = {
+    "api": 2,
+    "input_manifest": {"schema": "pliego.input-manifest", "version": 1},
+    "request": {"schema": "pliego.render-request", "version": 1},
+    "result": {"schema": "pliego.render-result", "version": 1},
+    "document_scene": {"schema": "pliego.document-scene", "version": 2},
+    "bundle_manifest": {"schema": "pliego.bundle-manifest", "version": 1},
+    "profiles": [],
+}
 
 
 def sha256_file(path: Path) -> str:
@@ -45,6 +71,138 @@ def sha256_bytes(data: bytes) -> str:
 
 def canonical_json(value: Any) -> bytes:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8") + b"\n"
+
+
+def windows_user_sid(payload: bytes) -> str:
+    matches = {match.group(1).decode("ascii") for match in WINDOWS_SID_RE.finditer(payload)}
+    if len(matches) != 1:
+        raise OSError("whoami.exe did not return exactly one current-user SID")
+    return matches.pop()
+
+
+def windows_acl_descriptor(payload: bytes) -> str:
+    if not payload or len(payload) % 2 != 0 or len(payload) > WINDOWS_ACL_PROOF_MAX_BYTES:
+        raise OSError("icacls.exe returned an invalid or oversized ACL proof")
+    try:
+        text = payload.decode("utf-16-le")
+    except UnicodeDecodeError as error:
+        raise OSError("icacls.exe ACL proof is not UTF-16LE") from error
+    descriptors = [line.strip() for line in text.lstrip("\ufeff").splitlines() if line.strip().startswith("D:")]
+    if len(descriptors) != 1:
+        raise OSError("icacls.exe ACL proof did not contain exactly one DACL")
+    return descriptors[0]
+
+
+def validate_windows_owner_only_dacl(payload: bytes, sid: str) -> None:
+    descriptor = windows_acl_descriptor(payload)
+    match = re.fullmatch(
+        rf"D:P(?P<control>(?:(?:AI|AR))*)\(A;(?P<flags>[A-Z]*);FA;;;{re.escape(sid)}\)",
+        descriptor,
+    )
+    if match is None or sorted(
+        match.group("flags")[index : index + 2]
+        for index in range(0, len(match.group("flags")), 2)
+    ) != ["CI", "OI"]:
+        raise OSError("Windows job root does not have one protected owner-only full-access DACL")
+
+
+def windows_system_tool(name: str) -> Path:
+    system_root = os.environ.get("SystemRoot")
+    if not system_root or not re.fullmatch(r"[A-Za-z]:[\\/].+", system_root):
+        raise OSError("SystemRoot does not identify an absolute Windows directory")
+    candidate = Path(system_root) / "System32" / name
+    try:
+        resolved = candidate.resolve(strict=True)
+    except OSError as error:
+        raise OSError(f"required Windows ACL tool is unavailable: {name}") from error
+    if not resolved.is_file() or resolved.name.lower() != name.lower() or resolved.suffix.lower() != ".exe":
+        raise OSError(f"required Windows ACL tool is not a native executable: {name}")
+    return resolved
+
+
+def run_windows_acl_tool(arguments: list[str], operation: str) -> bytes:
+    try:
+        completed = subprocess.run(
+            arguments,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            shell=False,
+            timeout=WINDOWS_ACL_TOOL_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise OSError(f"Windows API 2 job-root {operation} could not run") from error
+    if completed.returncode != 0:
+        diagnostic = completed.stderr[:512].decode("utf-8", errors="backslashreplace").replace("\r", "\\r").replace("\n", "\\n")
+        raise OSError(
+            f"Windows API 2 job-root {operation} failed with exit {completed.returncode}: {diagnostic or '<empty stderr>'}"
+        )
+    return completed.stdout
+
+
+def create_private_job_root(path: Path) -> None:
+    path.mkdir(mode=0o700)
+    try:
+        if os.name != "nt":
+            path.chmod(0o700)
+            if stat.S_IMODE(path.stat().st_mode) != 0o700:
+                raise OSError("API 2 job root does not have Unix mode 0700")
+            return
+
+        whoami = windows_system_tool("whoami.exe")
+        icacls = windows_system_tool("icacls.exe")
+        sid = windows_user_sid(
+            run_windows_acl_tool(
+                [str(whoami), "/user", "/fo", "csv", "/nh"],
+                "current-user lookup",
+            )
+        )
+        run_windows_acl_tool(
+            [str(icacls), str(path), "/setowner", f"*{sid}", "/q"],
+            "owner assignment",
+        )
+        run_windows_acl_tool(
+            [str(icacls), str(path), "/inheritance:r", "/q"],
+            "DACL inheritance removal",
+        )
+        run_windows_acl_tool(
+            [
+                str(icacls),
+                str(path),
+                "/remove",
+                *(f"*{trustee}" for trustee in WINDOWS_DEFAULT_DACL_TRUSTEES),
+                "/q",
+            ],
+            "default DACL removal",
+        )
+        run_windows_acl_tool(
+            [str(icacls), str(path), "/grant:r", f"*{sid}:(OI)(CI)F", "/q"],
+            "owner-only DACL assignment",
+        )
+        descriptor_fd, descriptor_name = tempfile.mkstemp(
+            prefix=".pliego-api2-acl-",
+            suffix=".txt",
+            dir=path.parent,
+        )
+        os.close(descriptor_fd)
+        descriptor_path = Path(descriptor_name)
+        try:
+            run_windows_acl_tool(
+                [str(icacls), str(path), "/save", str(descriptor_path), "/q"],
+                "DACL verification",
+            )
+            validate_windows_owner_only_dacl(descriptor_path.read_bytes(), sid)
+        finally:
+            descriptor_path.unlink(missing_ok=True)
+        if list(path.iterdir()):
+            raise OSError("Windows API 2 job root changed before input staging")
+    except BaseException:
+        try:
+            path.rmdir()
+        except OSError:
+            pass
+        raise
 
 
 def exact_keys(value: Any, expected: list[str], name: str) -> dict[str, Any]:
@@ -114,8 +272,8 @@ def validate_probe(
     if not COMMIT_RE.fullmatch(runtime["servo_base"]):
         raise AssertionError("probe Servo base is not full lowercase Git identity")
 
-    if root["contracts"] != []:
-        raise AssertionError("the executable foundation must not advertise an API 2 render tuple")
+    if root["contracts"] != [SUPPORTED_CONTRACT]:
+        raise AssertionError("the executable must advertise exactly the supported profile-null tuple")
     invocation = exact_keys(
         root["invocation"],
         [
@@ -228,6 +386,197 @@ def assert_invocation_error(
     }
 
 
+def verify_artifact(job_root: Path, descriptor: Any, expected_path: str | None = None) -> Path:
+    artifact = exact_keys(
+        descriptor,
+        ["path", "media_type", "sha256", "bytes"],
+        f"artifact {expected_path or '<dynamic>'}",
+    )
+    if expected_path is not None and artifact["path"] != expected_path:
+        raise AssertionError(f"artifact path must be {expected_path!r}")
+    if not isinstance(artifact["path"], str) or not isinstance(artifact["media_type"], str):
+        raise AssertionError("artifact path and media type must be strings")
+    if not SHA256_RE.fullmatch(artifact["sha256"]):
+        raise AssertionError("artifact hash is not canonical SHA-256")
+    if type(artifact["bytes"]) is not int or artifact["bytes"] < 1:
+        raise AssertionError("artifact byte count must be a positive integer")
+    path = (job_root / artifact["path"]).resolve(strict=True)
+    if job_root.resolve() not in path.parents:
+        raise AssertionError("artifact path escaped the cwd-v1 job root")
+    if not path.is_file():
+        raise AssertionError(f"artifact is not a regular file: {path}")
+    if path.stat().st_size != artifact["bytes"] or sha256_file(path) != artifact["sha256"]:
+        raise AssertionError(f"artifact descriptor does not bind the published bytes: {path}")
+    return path
+
+
+def assert_render_success(
+    binary: Path,
+    payload: bytes,
+    fixture_root: Path,
+    job_root: Path,
+    probe: dict[str, Any],
+) -> dict[str, Any]:
+    create_private_job_root(job_root)
+    shutil.copy2(fixture_root / "input-manifest.json", job_root / "input-manifest.json")
+    shutil.copytree(fixture_root / "input", job_root / "input")
+    completed = subprocess.run(
+        [str(binary), "render-api2"],
+        cwd=job_root,
+        input=payload,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+        timeout=PROBE_TIMEOUT_SECONDS,
+    )
+    if completed.returncode != 0 or completed.stderr != b"":
+        raise AssertionError(f"valid API 2 render failed: exit={completed.returncode}, stderr={completed.stderr!r}")
+    try:
+        result = json.loads(completed.stdout)
+        request = json.loads(payload)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise AssertionError("valid API 2 render did not emit one UTF-8 JSON result") from error
+    if canonical_json(result) != completed.stdout:
+        raise AssertionError("render result stdout is not canonical compact JSON plus one LF")
+    root = exact_keys(
+        result,
+        [
+            "schema",
+            "version",
+            "api",
+            "status",
+            "request",
+            "engine",
+            "delivery",
+            "conformance",
+            "diagnostics",
+            "error",
+        ],
+        "render result",
+    )
+    if root["schema"] != "pliego.render-result" or root["status"] != "success":
+        raise AssertionError("valid request did not produce a successful RenderResult v1")
+    require_int(root["version"], 1, "render result.version")
+    require_int(root["api"], 2, "render result.api")
+    if root["request"] != request or root["engine"] != probe["engine"] or root["error"] is not None:
+        raise AssertionError("render result lost the accepted request or exact engine identity")
+    if root["conformance"] != {
+        "requested": None,
+        "status": "not-requested",
+        "evidence": None,
+    }:
+        raise AssertionError("profile-null result has an invalid conformance disposition")
+
+    delivery = exact_keys(root["delivery"], ["pdf", "scene", "bundle"], "render result.delivery")
+    pdf_path = verify_artifact(job_root, delivery["pdf"], "document.pdf")
+    scene_path = verify_artifact(job_root, delivery["scene"], "scene.json")
+    bundle_path = verify_artifact(job_root, delivery["bundle"], "bundle.json")
+    if not pdf_path.read_bytes().startswith(b"%PDF-"):
+        raise AssertionError("published document.pdf has no PDF header")
+    scene = json.loads(scene_path.read_bytes())
+    if scene.get("schema") != "pliego.document-scene" or scene.get("version") != 2:
+        raise AssertionError("published scene is not DocumentScene v2")
+
+    bundle_bytes = bundle_path.read_bytes()
+    bundle = json.loads(bundle_bytes)
+    if canonical_json(bundle) != bundle_bytes:
+        raise AssertionError("bundle manifest is not canonical compact JSON plus one LF")
+    bundle_root = exact_keys(bundle, ["schema", "version", "entries"], "bundle manifest")
+    if bundle_root["schema"] != "pliego.bundle-manifest":
+        raise AssertionError("published bundle is not bundle-manifest v1")
+    require_int(bundle_root["version"], 1, "bundle manifest.version")
+    entries = bundle_root["entries"]
+    if not isinstance(entries, list) or not entries:
+        raise AssertionError("bundle manifest has no delivery entries")
+    entry_paths = [entry.get("path") for entry in entries if isinstance(entry, dict)]
+    if len(entry_paths) != len(entries) or entry_paths != sorted(entry_paths) or len(set(entry_paths)) != len(entries):
+        raise AssertionError("bundle entries are not unique canonical path order")
+    if "bundle.json" in entry_paths or "document.pdf" not in entry_paths or "scene.json" not in entry_paths:
+        raise AssertionError("bundle manifest does not have the required self-excluding closure")
+    for entry in entries:
+        verify_artifact(job_root / "delivery", entry)
+
+    diagnostics = exact_keys(root["diagnostics"], ["retained", "artifacts"], "render result.diagnostics")
+    if diagnostics["retained"] is not True or not diagnostics["artifacts"]:
+        raise AssertionError("the always-retained request did not publish diagnostic evidence")
+    for artifact in diagnostics["artifacts"]:
+        verify_artifact(job_root, artifact)
+    if {path.name for path in job_root.iterdir()} != {
+        "input-manifest.json",
+        "input",
+        "delivery",
+        "diagnostics",
+    }:
+        raise AssertionError("render left an unexpected public job-root entry")
+    return {
+        "exit_code": completed.returncode,
+        "stdout_sha256": sha256_bytes(completed.stdout),
+        "result": result,
+        "bundle_sha256": sha256_bytes(bundle_bytes),
+    }
+
+
+def build_execution_fixture(
+    repository_root: Path,
+    root: Path,
+    request_template: bytes,
+) -> tuple[bytes, Path]:
+    font_source = repository_root / "ports" / "pliego" / "tests" / "fixtures" / "text-scene" / "Ahem.ttf"
+    if not font_source.is_file():
+        raise AssertionError("renderer-backed API 2 fixture font is missing")
+    fixture_root = root / "source"
+    input_root = fixture_root / "input"
+    input_root.mkdir(parents=True)
+    bodies = {
+        "document.html": (
+            b'<!doctype html><html lang="en-US"><head><meta charset="utf-8">'
+            b'<link rel="stylesheet" href="styles.css"><title>API 2 executable fixture</title>'
+            b"</head><body><p>API 2</p></body></html>\n"
+        ),
+        "font.ttf": font_source.read_bytes(),
+        "styles.css": (
+            b'@font-face{font-family:Ahem;src:url("font.ttf") format("truetype");}'
+            b"html,body{margin:0}body{font-family:Ahem;font-size:16px;color:#000}\n"
+        ),
+    }
+    media_types = {
+        "document.html": "text/html;charset=utf-8",
+        "font.ttf": "application/octet-stream",
+        "styles.css": "text/css;charset=utf-8",
+    }
+    entries = []
+    for path, body in bodies.items():
+        (input_root / path).write_bytes(body)
+        entries.append(
+            {
+                "path": path,
+                "media_type": media_types[path],
+                "sha256": sha256_bytes(body),
+                "bytes": len(body),
+            }
+        )
+    manifest_bytes = canonical_json(
+        {
+            "schema": "pliego.input-manifest",
+            "version": 1,
+            "url_root": "pliego-input:///",
+            "entries": entries,
+        }
+    )
+    (fixture_root / "input-manifest.json").write_bytes(manifest_bytes)
+    request = json.loads(request_template)
+    request["input"] = {
+        "entrypoint": "document.html",
+        "manifest": {
+            "path": "input-manifest.json",
+            "media_type": "application/vnd.pliego.input-manifest+json",
+            "sha256": sha256_bytes(manifest_bytes),
+            "bytes": len(manifest_bytes),
+        },
+    }
+    return canonical_json(request), fixture_root
+
+
 def framing_cases(valid_request: bytes) -> list[tuple[str, bytes, str, tuple[str, ...]]]:
     return [
         ("empty", b"", "stdin is empty", ()),
@@ -260,12 +609,6 @@ def framing_cases(valid_request: bytes) -> list[tuple[str, bytes, str, tuple[str
             "accepts no command-line options or paths",
             ("--unexpected",),
         ),
-        (
-            "valid-but-unadvertised",
-            valid_request,
-            "no complete API 2 contract tuple is advertised",
-            (),
-        ),
     ]
 
 
@@ -296,7 +639,7 @@ def self_test() -> None:
                     "servo_base": "2" * 40,
                 },
             },
-            "contracts": [],
+            "contracts": [SUPPORTED_CONTRACT],
             "invocation": {
                 "request_transport": "stdin-single-json",
                 "request_max_bytes": REQUEST_MAX_BYTES,
@@ -319,7 +662,7 @@ def self_test() -> None:
             expected_servo_base="2" * 40,
         )
         advertised = json.loads(json.dumps(probe))
-        advertised["contracts"] = [{"api": 2}]
+        advertised["contracts"] = []
         try:
             validate_probe(
                 advertised,
@@ -330,10 +673,10 @@ def self_test() -> None:
                 expected_servo_base="2" * 40,
             )
         except AssertionError as error:
-            if "must not advertise" not in str(error):
+            if "exactly the supported" not in str(error):
                 raise
         else:
-            raise AssertionError("self-test accepted a falsely advertised API 2 tuple")
+            raise AssertionError("self-test accepted a missing API 2 tuple")
         wrong_job_root = json.loads(json.dumps(probe))
         wrong_job_root["invocation"]["job_root_transport"] = "argument-v1"
         try:
@@ -410,13 +753,44 @@ def self_test() -> None:
             "at-limit-invalid-json",
             "over-limit",
             "extra-argument",
-            "valid-but-unadvertised",
         ]:
             raise AssertionError("self-test lost an executable framing proof case")
         if len(cases[7][1]) != REQUEST_MAX_BYTES or len(cases[8][1]) != REQUEST_MAX_BYTES + 1:
             raise AssertionError("self-test lost the inclusive request-size boundary")
         if PROBE_TIMEOUT_SECONDS <= INVOCATION_TIMEOUT_SECONDS:
             raise AssertionError("self-test lost the separate debug-binary probe budget")
+        sid = "S-1-5-21-4080267330-3575100508-2019971957-1001"
+        if windows_user_sid(f'"DOMAIN\\user","{sid}"\r\n'.encode()) != sid:
+            raise AssertionError("self-test did not parse one current-user SID")
+        valid_acl = f"fixture\r\nD:PAI(A;OICI;FA;;;{sid})\r\n".encode("utf-16-le")
+        validate_windows_owner_only_dacl(valid_acl, sid)
+        invalid_acls = [
+            f"fixture\r\nD:AI(A;OICI;FA;;;{sid})\r\n".encode("utf-16-le"),
+            f"fixture\r\nD:PAI(A;OICI;FA;;;{sid})(A;OICI;FA;;;S-1-5-18)\r\n".encode(
+                "utf-16-le"
+            ),
+            f"fixture\r\nD:PAI(A;OI;FA;;;{sid})\r\n".encode("utf-16-le"),
+        ]
+        for invalid_acl in invalid_acls:
+            try:
+                validate_windows_owner_only_dacl(invalid_acl, sid)
+            except OSError:
+                pass
+            else:
+                raise AssertionError("self-test accepted a non-owner-only Windows DACL")
+        try:
+            windows_user_sid(b'"DOMAIN\\user","not-a-sid"\r\n')
+        except OSError:
+            pass
+        else:
+            raise AssertionError("self-test accepted a missing Windows user SID")
+        private_root = Path(temporary) / "private-job-root"
+        create_private_job_root(private_root)
+        if list(private_root.iterdir()):
+            raise AssertionError("private job-root creation introduced public entries")
+        if os.name != "nt" and stat.S_IMODE(private_root.stat().st_mode) != 0o700:
+            raise AssertionError("self-test lost Unix mode 0700")
+        private_root.rmdir()
     print("API 2 executable contract checker self-test: ok")
 
 
@@ -486,6 +860,19 @@ def main() -> None:
         assert_invocation_error(binary, name, payload, diagnostic, *extra_args)
         for name, payload, diagnostic, extra_args in framing_cases(valid_request)
     ]
+    with tempfile.TemporaryDirectory(prefix="pliego-api2-execute-") as temporary:
+        execution_request, fixture_root = build_execution_fixture(
+            valid_request_path.parents[4],
+            Path(temporary),
+            valid_request,
+        )
+        execution = assert_render_success(
+            binary,
+            execution_request,
+            fixture_root,
+            Path(temporary) / "job",
+            probe,
+        )
     archive_evidence = None
     if archive is not None and bundle_version_file is not None:
         archive_evidence = {
@@ -502,9 +889,10 @@ def main() -> None:
         "probe_sha256": sha256_bytes(probe_bytes),
         "probe": probe,
         "invocation_cases": cases,
+        "execution": execution,
     }
     write_proof(args.proof_output.resolve(), proof)
-    print(f"API 2 executable foundation verified: {binary}")
+    print(f"API 2 advertised tuple and executable closure verified: {binary}")
 
 
 if __name__ == "__main__":
