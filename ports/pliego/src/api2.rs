@@ -2,24 +2,27 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-//! Unreleased API 2 executable framing and strict request decoding.
-//!
-//! The current executable advertises no complete render tuple. This module deliberately stops
-//! after strict request decoding so it cannot accidentally route an API 2 request through API 1 or
-//! the nonproduction servoshell oracle.
+//! Versioned API 2 framing, negotiation, input resolution, execution, and publication.
 
 #[cfg(all(
-    test,
     feature = "document-session",
     not(any(target_os = "android", target_env = "ohos"))
 ))]
+#[path = "api2/artifacts.rs"]
 mod artifacts;
+#[cfg(all(
+    feature = "document-session",
+    not(any(target_os = "android", target_env = "ohos"))
+))]
+#[path = "api2/execution.rs"]
+mod execution;
+#[path = "api2/input_job.rs"]
 mod input_job;
 #[cfg(all(
-    test,
     feature = "document-session",
     not(any(target_os = "android", target_env = "ohos"))
 ))]
+#[path = "api2/render_job.rs"]
 mod render_job;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -28,20 +31,23 @@ use std::fs::File;
 use std::io::{self, Read, Write};
 
 #[cfg(all(
-    test,
     feature = "document-session",
     not(any(target_os = "android", target_env = "ohos"))
 ))]
 pub(crate) use artifacts::encode_profile_null_scene;
-pub(crate) use input_job::ResolvedInputJob;
 #[cfg(all(
-    test,
     feature = "document-session",
     not(any(target_os = "android", target_env = "ohos"))
 ))]
-pub(crate) use render_job::{
-    DiagnosticRetention, ResolvedRenderJob, ResolvedRenderJobParts, resolve_render_job_for_test,
-};
+pub(crate) use execution::{Api2CommandOutcome, execute_render};
+pub(crate) use input_job::ResolvedInputJob;
+#[cfg(all(
+    feature = "document-session",
+    not(any(target_os = "android", target_env = "ohos"))
+))]
+pub(crate) use render_job::{ResolvedRenderJob, ResolvedRenderJobParts};
+#[cfg(test)]
+pub(crate) use render_job::resolve_render_job_for_test;
 use serde::Serialize;
 use serde::de::{self, Deserialize, Deserializer, MapAccess, SeqAccess, Visitor};
 use serde_json::{Map, Number, Value};
@@ -52,6 +58,7 @@ pub(crate) const REQUEST_MAX_BYTES: usize = 1_048_576;
 pub(crate) const INPUT_MANIFEST_MAX_BYTES: usize = 16 * 1024 * 1024;
 pub(crate) const INPUT_CONTENT_MAX_BYTES: u64 = 64 * 1024 * 1024;
 pub(crate) const INVOCATION_ERROR_EXIT_CODE: i32 = 64;
+pub(crate) const TRANSPORT_ERROR_EXIT_CODE: i32 = 74;
 
 const SOURCE_COMMIT: &str = env!("PLIEGO_SOURCE_COMMIT");
 const BUILD_TARGET: &str = env!("PLIEGO_BUILD_TARGET");
@@ -91,8 +98,6 @@ const LIMIT_FIELDS: &[&str] = &[
     "microtasks",
     "rendering_opportunities",
     "mutations",
-    "post_readiness_resources",
-    "process_cpu_ms",
     "host_wall_ms",
 ];
 const DIAGNOSTIC_FIELDS: &[&str] = &["retention"];
@@ -118,6 +123,10 @@ impl InvocationError {
         ))
     }
 
+    #[cfg(not(all(
+        feature = "document-session",
+        not(any(target_os = "android", target_env = "ohos"))
+    )))]
     pub(crate) fn unsupported() -> Self {
         Self::framing("no complete API 2 contract tuple is advertised")
     }
@@ -137,47 +146,17 @@ impl fmt::Display for InvocationError {
 
 impl std::error::Error for InvocationError {}
 
-/// Serialize the exact current executable identity and its unavailable API 2 foundation.
+/// Serialize the exact current executable identity and its supported API 2 tuple.
 pub(crate) fn write_contract_probe(
     writer: &mut impl Write,
     servo_base: &str,
 ) -> Result<(), InvocationError> {
     validate_build_identity()?;
-    let executable = std::env::current_exe().map_err(|error| {
-        InvocationError::framing(format!("cannot locate current executable: {error}"))
-    })?;
-    let mut executable = File::open(&executable).map_err(|error| {
-        InvocationError::framing(format!("cannot read current executable: {error}"))
-    })?;
-    let mut hasher = Sha256::new();
-    let mut chunk = [0_u8; 64 * 1024];
-    loop {
-        let read = executable.read(&mut chunk).map_err(|error| {
-            InvocationError::framing(format!("cannot hash current executable: {error}"))
-        })?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&chunk[..read]);
-    }
-    let binary_sha256 = format!("sha256:{}", hex_lower(&hasher.finalize()));
-
     let probe = RuntimeContractProbe {
         schema: "pliego.runtime-contract",
         version: 1,
-        engine: EngineIdentity {
-            name: "pliego",
-            version: env!("CARGO_PKG_VERSION"),
-            api: API_VERSION,
-            source_commit: SOURCE_COMMIT,
-            runtime: RuntimeIdentity {
-                mode: "one-shot",
-                target: BUILD_TARGET,
-                binary_sha256: &binary_sha256,
-                servo_base,
-            },
-        },
-        contracts: [],
+        engine: current_engine_identity(servo_base)?,
+        contracts: supported_contracts(),
         invocation: InvocationContract {
             request_transport: "stdin-single-json",
             request_max_bytes: REQUEST_MAX_BYTES,
@@ -201,29 +180,118 @@ pub(crate) fn write_contract_probe(
 }
 
 #[derive(Serialize)]
-struct RuntimeContractProbe<'a> {
+struct RuntimeContractProbe {
     schema: &'static str,
     version: u32,
-    engine: EngineIdentity<'a>,
-    contracts: [(); 0],
+    engine: EngineIdentity,
+    contracts: Vec<ContractTuple>,
     invocation: InvocationContract,
 }
 
-#[derive(Serialize)]
-struct EngineIdentity<'a> {
+#[derive(Clone, Serialize)]
+pub(crate) struct EngineIdentity {
     name: &'static str,
     version: &'static str,
     api: u32,
     source_commit: &'static str,
-    runtime: RuntimeIdentity<'a>,
+    runtime: RuntimeIdentity,
 }
 
-#[derive(Serialize)]
-struct RuntimeIdentity<'a> {
+#[derive(Clone, Serialize)]
+struct RuntimeIdentity {
     mode: &'static str,
     target: &'static str,
-    binary_sha256: &'a str,
-    servo_base: &'a str,
+    binary_sha256: String,
+    servo_base: String,
+}
+
+#[derive(Clone, Copy, Serialize)]
+struct ContractTuple {
+    api: u32,
+    input_manifest: SchemaReference,
+    request: SchemaReference,
+    result: SchemaReference,
+    document_scene: SchemaReference,
+    bundle_manifest: SchemaReference,
+    profiles: [(); 0],
+}
+
+#[derive(Clone, Copy, Serialize)]
+struct SchemaReference {
+    schema: &'static str,
+    version: u32,
+}
+
+const fn schema_reference(schema: &'static str, version: u32) -> SchemaReference {
+    SchemaReference { schema, version }
+}
+
+const fn supported_contract() -> ContractTuple {
+    ContractTuple {
+        api: API_VERSION,
+        input_manifest: schema_reference("pliego.input-manifest", 1),
+        request: schema_reference("pliego.render-request", 1),
+        result: schema_reference("pliego.render-result", 1),
+        document_scene: schema_reference("pliego.document-scene", 2),
+        bundle_manifest: schema_reference("pliego.bundle-manifest", 1),
+        profiles: [],
+    }
+}
+
+fn supported_contracts() -> Vec<ContractTuple> {
+    #[cfg(all(
+        feature = "document-session",
+        not(any(target_os = "android", target_env = "ohos"))
+    ))]
+    {
+        vec![supported_contract()]
+    }
+    #[cfg(not(all(
+        feature = "document-session",
+        not(any(target_os = "android", target_env = "ohos"))
+    )))]
+    {
+        Vec::new()
+    }
+}
+
+pub(crate) fn current_engine_identity(
+    servo_base: &str,
+) -> Result<EngineIdentity, InvocationError> {
+    validate_build_identity()?;
+    Ok(EngineIdentity {
+        name: "pliego",
+        version: env!("CARGO_PKG_VERSION"),
+        api: API_VERSION,
+        source_commit: SOURCE_COMMIT,
+        runtime: RuntimeIdentity {
+            mode: "one-shot",
+            target: BUILD_TARGET,
+            binary_sha256: current_binary_sha256()?,
+            servo_base: servo_base.to_owned(),
+        },
+    })
+}
+
+fn current_binary_sha256() -> Result<String, InvocationError> {
+    let executable = std::env::current_exe().map_err(|error| {
+        InvocationError::framing(format!("cannot locate current executable: {error}"))
+    })?;
+    let mut executable = File::open(&executable).map_err(|error| {
+        InvocationError::framing(format!("cannot read current executable: {error}"))
+    })?;
+    let mut hasher = Sha256::new();
+    let mut chunk = [0_u8; 64 * 1024];
+    loop {
+        let read = executable.read(&mut chunk).map_err(|error| {
+            InvocationError::framing(format!("cannot hash current executable: {error}"))
+        })?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&chunk[..read]);
+    }
+    Ok(format!("sha256:{}", hex_lower(&hasher.finalize())))
 }
 
 #[derive(Serialize)]
@@ -784,18 +852,10 @@ fn validate_request(request: &Value) -> Result<(), String> {
         "microtasks",
         "rendering_opportunities",
         "mutations",
-        "process_cpu_ms",
         "host_wall_ms",
     ] {
         required_u64(limits, "$.settlement.limits", field, 1, u64::from(u32::MAX))?;
     }
-    required_u64(
-        limits,
-        "$.settlement.limits",
-        "post_readiness_resources",
-        0,
-        u64::from(u32::MAX),
-    )?;
 
     let diagnostics = closed_object(
         required(request, "$", "diagnostics")?,
@@ -1030,6 +1090,8 @@ fn portable_path(value: &str, path: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const TEST_SERVO_BASE_SHA: &str = "313b6d5ecc113b08010ce434140db3ca5abcc71c";
 
     const REQUEST: &[u8] = include_bytes!(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -1479,9 +1541,9 @@ mod tests {
     }
 
     #[test]
-    fn unavailable_foundation_reports_an_empty_contract_array_and_exact_tuple_shape() {
+    fn production_probe_reports_the_exact_profile_null_contract_tuple() {
         let mut output = Vec::new();
-        write_contract_probe(&mut output, super::super::SERVO_BASE_SHA).unwrap();
+        write_contract_probe(&mut output, TEST_SERVO_BASE_SHA).unwrap();
         assert_eq!(output.last(), Some(&b'\n'));
         assert_eq!(output.iter().filter(|byte| **byte == b'\n').count(), 1);
         let serialized = std::str::from_utf8(&output).unwrap();
@@ -1493,11 +1555,20 @@ mod tests {
             )),
             "unexpected probe order: {serialized}"
         );
-        assert!(serialized.contains(&format!(
-            r#""contracts":[],"invocation":{{"request_transport":"stdin-single-json","request_max_bytes":{REQUEST_MAX_BYTES},"job_root_transport":"cwd-v1","input_manifest_max_bytes":{INPUT_MANIFEST_MAX_BYTES},"input_content_max_bytes":{INPUT_CONTENT_MAX_BYTES},"result_transport":"stdout-single-json","invocation_error_transport":"stderr-utf8-line","success_exit_code":0,"failed_exit_code":1,"invocation_error_exit_code":64}}"#
-        )));
+        assert!(serialized.contains(r#""contracts":[{"api":2,"input_manifest":{"schema":"pliego.input-manifest","version":1},"request":{"schema":"pliego.render-request","version":1},"result":{"schema":"pliego.render-result","version":1},"document_scene":{"schema":"pliego.document-scene","version":2},"bundle_manifest":{"schema":"pliego.bundle-manifest","version":1},"profiles":[]}]"#));
         let probe: Value = serde_json::from_slice(&output).unwrap();
-        assert_eq!(probe["contracts"], serde_json::json!([]));
+        assert_eq!(
+            probe["contracts"],
+            serde_json::json!([{
+                "api": 2,
+                "input_manifest": {"schema": "pliego.input-manifest", "version": 1},
+                "request": {"schema": "pliego.render-request", "version": 1},
+                "result": {"schema": "pliego.render-result", "version": 1},
+                "document_scene": {"schema": "pliego.document-scene", "version": 2},
+                "bundle_manifest": {"schema": "pliego.bundle-manifest", "version": 1},
+                "profiles": [],
+            }])
+        );
         assert_eq!(probe["engine"]["api"], API_VERSION);
         assert_eq!(probe["engine"]["source_commit"], SOURCE_COMMIT);
         assert_eq!(probe["engine"]["runtime"]["target"], BUILD_TARGET);
@@ -1540,7 +1611,7 @@ mod tests {
         }
 
         let mut writer = RecordingWriter::default();
-        write_contract_probe(&mut writer, super::super::SERVO_BASE_SHA).unwrap();
+        write_contract_probe(&mut writer, TEST_SERVO_BASE_SHA).unwrap();
 
         assert_eq!(writer.calls, 1);
         assert_eq!(writer.bytes.last(), Some(&b'\n'));
@@ -1549,7 +1620,15 @@ mod tests {
             1
         );
         let probe: Value = serde_json::from_slice(&writer.bytes).unwrap();
-        assert_eq!(probe["contracts"], serde_json::json!([]));
+        assert_eq!(probe["contracts"], serde_json::json!([{
+            "api": 2,
+            "input_manifest": {"schema": "pliego.input-manifest", "version": 1},
+            "request": {"schema": "pliego.render-request", "version": 1},
+            "result": {"schema": "pliego.render-result", "version": 1},
+            "document_scene": {"schema": "pliego.document-scene", "version": 2},
+            "bundle_manifest": {"schema": "pliego.bundle-manifest", "version": 1},
+            "profiles": [],
+        }]));
     }
 
     #[test]

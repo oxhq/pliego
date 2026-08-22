@@ -2,12 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-//! Inactive, profile-null mapping from a validated API 2 request into existing runtime types.
-//!
-//! Activation stays blocked on a complete fixed-point public scene encoder. This mapper retains the
-//! exact request, including the request-only page-geometry authority, but does not claim that the
-//! current `f32` inspection surface or the test-only execution bridge enforces the future public
-//! artifact contract.
+//! Profile-null mapping from a validated API 2 request into controlled runtime types.
 
 #[cfg(test)]
 use std::collections::BTreeMap;
@@ -19,9 +14,9 @@ use super::input_job::ResolvedInputJob;
 #[cfg(test)]
 use super::input_job::resolve_input_job_for_test;
 use super::{
-    DIAGNOSTIC_FIELDS, ENVIRONMENT_FIELDS, InvocationError, LIMIT_FIELDS, MARGIN_FIELDS,
-    PAGE_FIELDS, RESOURCE_FIELDS, SETTLEMENT_FIELDS, TIME_FIELDS, closed_object, required,
-    required_string, required_u64, validate_page_size, validate_request,
+    ENVIRONMENT_FIELDS, InvocationError, LIMIT_FIELDS, MARGIN_FIELDS, PAGE_FIELDS,
+    RESOURCE_FIELDS, SETTLEMENT_FIELDS, TIME_FIELDS, closed_object, required, required_string,
+    required_u64, validate_page_size, validate_request,
 };
 use crate::render_environment::RenderEnvironment;
 use crate::resource_policy::ResourcePolicy;
@@ -30,34 +25,23 @@ use crate::runtime_policy::{
     DocumentTimePolicy, InfiniteSourcePolicy,
 };
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum DiagnosticRetention {
-    None,
-    OnFailure,
-    Always,
-}
-
 #[derive(Debug)]
 pub(crate) struct ResolvedRenderJob {
-    request: Value,
     input: ResolvedInputJob,
     environment: RenderEnvironment,
     page: PageDefinition,
     resources: ResourcePolicy,
     allow_host_fonts: bool,
     runtime_policy: DeterministicRuntimePolicy,
-    diagnostics: DiagnosticRetention,
 }
 
 pub(crate) struct ResolvedRenderJobParts {
-    pub(crate) request: Value,
     pub(crate) input: ResolvedInputJob,
     pub(crate) environment: RenderEnvironment,
     pub(crate) page: PageDefinition,
     pub(crate) resources: ResourcePolicy,
     pub(crate) allow_host_fonts: bool,
     pub(crate) runtime_policy: DeterministicRuntimePolicy,
-    pub(crate) diagnostics: DiagnosticRetention,
 }
 
 impl ResolvedRenderJob {
@@ -207,8 +191,8 @@ impl ResolvedRenderJob {
                     microtasks: limit("microtasks", 1)?,
                     rendering_opportunities: limit("rendering_opportunities", 1)?,
                     mutations: limit("mutations", 1)?,
-                    post_readiness_resources: limit("post_readiness_resources", 0)?,
-                    process_cpu_ms: limit("process_cpu_ms", 1)?,
+                    post_readiness_resources: 1_024,
+                    process_cpu_ms: 30_000,
                     host_wall_ms: limit("host_wall_ms", 1)?,
                 },
             },
@@ -216,43 +200,24 @@ impl ResolvedRenderJob {
         .validate()
         .map_err(|error| InvocationError::new(error.to_string()))?;
 
-        let diagnostics = closed_object(
-            required(root, "$", "diagnostics").map_err(InvocationError::new)?,
-            "$.diagnostics",
-            DIAGNOSTIC_FIELDS,
-        )
-        .map_err(InvocationError::new)?;
-        let diagnostics = match required_string(diagnostics, "$.diagnostics", "retention")
-            .map_err(InvocationError::new)?
-        {
-            "none" => DiagnosticRetention::None,
-            "on-failure" => DiagnosticRetention::OnFailure,
-            "always" => DiagnosticRetention::Always,
-            _ => unreachable!("validate_request accepted an unknown diagnostic policy"),
-        };
-
         Ok(Self {
-            request,
             input,
             environment: RenderEnvironment { locale, timezone },
             page,
             resources: resource_policy,
             allow_host_fonts: false,
             runtime_policy,
-            diagnostics,
         })
     }
 
     pub(crate) fn into_parts(self) -> ResolvedRenderJobParts {
         ResolvedRenderJobParts {
-            request: self.request,
             input: self.input,
             environment: self.environment,
             page: self.page,
             resources: self.resources,
             allow_host_fonts: self.allow_host_fonts,
             runtime_policy: self.runtime_policy,
-            diagnostics: self.diagnostics,
         }
     }
 }
@@ -284,7 +249,8 @@ mod tests {
     ));
 
     fn fixture_job(frame: &[u8]) -> ResolvedRenderJob {
-        let request = decode_render_request(&mut frame.as_ref()).unwrap();
+        let mut reader: &[u8] = frame;
+        let request = decode_render_request(&mut reader).unwrap();
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../contracts/api2/fixtures");
         let manifest = std::fs::read(root.join("input-manifest.json")).unwrap();
         let mut bodies = BTreeMap::new();
@@ -303,9 +269,8 @@ mod tests {
     }
 
     #[test]
-    fn maps_the_complete_profile_null_request_without_hidden_runtime_defaults() {
+    fn maps_the_complete_profile_null_request_to_the_enforced_runtime_policy() {
         let a4 = fixture_job(A4_REQUEST).into_parts();
-        assert_eq!(a4.request["profile"], Value::Null);
         assert_eq!(a4.environment, RenderEnvironment::default());
         assert_eq!(a4.page.width(), 47_622.0 / 60.0);
         assert_eq!(a4.page.height(), 67_351.0 / 60.0);
@@ -314,7 +279,6 @@ mod tests {
         assert!(a4.resources.resolved_document_root().is_none());
         assert!(!a4.allow_host_fonts);
         assert_eq!(a4.runtime_policy, DeterministicRuntimePolicy::default());
-        assert_eq!(a4.diagnostics, DiagnosticRetention::Always);
 
         let explicit = fixture_job(EXPLICIT_REQUEST).into_parts();
         assert_eq!(
@@ -336,17 +300,17 @@ mod tests {
                 microtasks: 2_000_000,
                 rendering_opportunities: 20_000,
                 mutations: 2_000_000,
-                post_readiness_resources: 2_048,
-                process_cpu_ms: 60_000,
+                post_readiness_resources: 1_024,
+                process_cpu_ms: 30_000,
                 host_wall_ms: 120_000,
             }
         );
-        assert_eq!(explicit.diagnostics, DiagnosticRetention::OnFailure);
     }
 
     #[test]
     fn inactive_plan_rejects_a_profile_before_a_session_can_start() {
-        let mut request = decode_render_request(&mut A4_REQUEST.as_ref()).unwrap();
+        let mut reader: &[u8] = A4_REQUEST;
+        let mut request = decode_render_request(&mut reader).unwrap();
         request["profile"] = serde_json::json!({
             "schema": "pliego.profile.future",
             "version": 1,
@@ -371,7 +335,8 @@ mod tests {
 
     #[test]
     fn resolved_input_cannot_be_repaired_with_a_different_request_descriptor() {
-        let request = decode_render_request(&mut A4_REQUEST.as_ref()).unwrap();
+        let mut reader: &[u8] = A4_REQUEST;
+        let request = decode_render_request(&mut reader).unwrap();
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../contracts/api2/fixtures");
         let manifest = std::fs::read(root.join("input-manifest.json")).unwrap();
         let mut bodies = BTreeMap::new();

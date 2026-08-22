@@ -263,6 +263,11 @@ impl BoundDirectory {
         Ok(directory)
     }
 
+    pub(crate) fn current_path(&self) -> io::Result<PathBuf> {
+        self.require_current()?;
+        Ok(self.requested_path.clone())
+    }
+
     fn open_movable(path: PathBuf) -> io::Result<Self> {
         Self::open_with_move_access(path, true)
     }
@@ -451,6 +456,10 @@ impl BoundDirectory {
 
     fn identity(&self) -> io::Result<String> {
         self.require_current()?;
+        self.held_identity()
+    }
+
+    fn held_identity(&self) -> io::Result<String> {
         open_file_identity(self.handle.as_file(), &self.path)
     }
 }
@@ -612,11 +621,52 @@ pub(crate) fn promote_staged_artifacts(
     staging: &Path,
     public: &Path,
 ) -> io::Result<()> {
+    let public = std::path::absolute(public)?;
+    let public_name = immediate_child_name(&public, "public artifact root")?.to_owned();
+    let destination_parent_path = public.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "public artifact root has no parent",
+        )
+    })?;
+    let destination_parent = BoundDirectory::open(destination_parent_path.to_owned())?;
+    require_immediate_bound_child(&public, &destination_parent, &public_name)?;
+    promote_staged_artifacts_to_bound_parent(
+        source_container,
+        staging,
+        &destination_parent,
+        &public_name,
+    )
+}
+
+/// Atomically exposes one private tree below a job root whose directory authority has remained
+/// held since input acceptance. The destination is selected only by a single relative name; its
+/// original host pathname is never reopened as publication authority.
+pub(crate) fn promote_staged_artifacts_into(
+    source_container: &Path,
+    staging: &Path,
+    destination_parent: &BoundDirectory,
+    public_name: &OsStr,
+) -> io::Result<()> {
+    immediate_child_name(Path::new(public_name), "public artifact root")?;
+    require_held_private_directory(destination_parent)?;
+    promote_staged_artifacts_to_bound_parent(
+        source_container,
+        staging,
+        destination_parent,
+        public_name,
+    )
+}
+
+fn promote_staged_artifacts_to_bound_parent(
+    source_container: &Path,
+    staging: &Path,
+    destination_parent: &BoundDirectory,
+    public_name: &OsStr,
+) -> io::Result<()> {
     let source_container = std::path::absolute(source_container)?;
     let staging = std::path::absolute(staging)?;
-    let public = std::path::absolute(public)?;
     let staging_name = immediate_child_name(&staging, "staging artifact root")?.to_owned();
-    let public_name = immediate_child_name(&public, "public artifact root")?.to_owned();
     let staging_parent = staging.parent().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -629,19 +679,11 @@ pub(crate) fn promote_staged_artifacts(
             "staging artifact root must be an immediate child of the supplied private container",
         ));
     }
-    let destination_parent_path = public.parent().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "public artifact root has no parent",
-        )
-    })?;
 
     let source_container = BoundDirectory::open(source_container)?;
-    let destination_parent = BoundDirectory::open(destination_parent_path.to_owned())?;
     let staged = BoundDirectory::open_movable(staging.clone())?;
     require_private_directory(&source_container)?;
     require_immediate_bound_child(&staging, &source_container, &staging_name)?;
-    require_immediate_bound_child(&public, &destination_parent, &public_name)?;
     if handles_match(&source_container.handle, &destination_parent.handle)? {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -651,9 +693,9 @@ pub(crate) fn promote_staged_artifacts(
     require_same_promotion_filesystem(&source_container, &staged, &destination_parent)?;
 
     let source_container_identity = source_container.identity()?;
-    let destination_parent_identity = destination_parent.identity()?;
+    let destination_parent_identity = destination_parent.held_identity()?;
     let staged_identity = staged.identity()?;
-    require_child_absent(&destination_parent, &public_name, "public artifact root")?;
+    require_held_child_absent(destination_parent, public_name, "public artifact root")?;
     let forbidden_prefixes = promotion_private_prefixes(&[
         &staging,
         &staged.path,
@@ -663,61 +705,64 @@ pub(crate) fn promote_staged_artifacts(
     let before = validate_promotion_tree(&staged, &forbidden_prefixes)?;
 
     require_bound_identity(&source_container, &source_container_identity)?;
-    require_bound_identity(&destination_parent, &destination_parent_identity)?;
+    require_held_bound_identity(destination_parent, &destination_parent_identity)?;
     staged.require_current()?;
     rename_bound_directory_no_replace(
         &staged,
         &source_container,
         &staging_name,
-        &destination_parent,
-        &public_name,
+        destination_parent,
+        public_name,
     )?;
 
     let after = (|| {
         require_bound_identity(&source_container, &source_container_identity)?;
-        require_bound_identity(&destination_parent, &destination_parent_identity)?;
+        require_held_bound_identity(destination_parent, &destination_parent_identity)?;
         require_child_absent(&source_container, &staging_name, "staging artifact root")?;
-        let held_identity = open_file_identity(staged.handle.as_file(), &public)?;
-        if held_identity != staged_identity {
+        if staged.held_identity()? != staged_identity {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "held staged artifact root identity changed during promotion",
             ));
         }
-        let promoted = BoundDirectory::open_movable(public.clone())?;
-        if promoted.identity()? != staged_identity {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "promoted artifact root does not match the held private root",
-            ));
-        }
-        let closure = validate_promotion_tree(&promoted, &forbidden_prefixes)?;
+        require_bound_child_identity(
+            destination_parent,
+            public_name,
+            &staged.handle,
+            "promoted artifact root",
+        )?;
+        let closure = validate_held_promotion_tree(&staged, &forbidden_prefixes)?;
         if closure != before {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "promoted artifact tree changed across atomic exposure",
             ));
         }
+        require_bound_child_identity(
+            destination_parent,
+            public_name,
+            &staged.handle,
+            "promoted artifact root",
+        )?;
         Ok(())
     })();
 
     if let Err(validation_error) = after {
         let rollback = rename_bound_directory_no_replace(
             &staged,
-            &destination_parent,
-            &public_name,
+            destination_parent,
+            public_name,
             &source_container,
             &staging_name,
         )
         .and_then(|()| {
-            require_child_absent(&destination_parent, &public_name, "public artifact root")?;
-            staged.require_current()?;
-            if staged.identity()? != staged_identity {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "rolled-back artifact root does not match the held private root",
-                ));
-            }
+            require_held_child_absent(destination_parent, public_name, "public artifact root")?;
+            require_bound_child_identity(
+                &source_container,
+                &staging_name,
+                &staged.handle,
+                "rolled-back artifact root",
+            )?;
             Ok(())
         });
         return match rollback {
@@ -788,11 +833,26 @@ fn require_bound_identity(directory: &BoundDirectory, expected: &str) -> io::Res
     ))
 }
 
+fn require_held_bound_identity(directory: &BoundDirectory, expected: &str) -> io::Result<()> {
+    if directory.held_identity()? == expected {
+        return Ok(());
+    }
+    Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        "held promotion directory identity changed",
+    ))
+}
+
 #[cfg(unix)]
 fn require_private_directory(container: &BoundDirectory) -> io::Result<()> {
+    container.require_current()?;
+    require_held_private_directory(container)
+}
+
+#[cfg(unix)]
+fn require_held_private_directory(container: &BoundDirectory) -> io::Result<()> {
     use std::os::unix::fs::MetadataExt;
 
-    container.require_current()?;
     let metadata = container.handle.as_file().metadata()?;
     if metadata.mode() & 0o7777 != 0o700 || metadata.uid() != unsafe { libc::geteuid() } {
         return Err(io::Error::new(
@@ -848,6 +908,11 @@ fn require_no_macos_extended_acl(file: &File) -> io::Result<()> {
 #[cfg(windows)]
 fn require_private_directory(container: &BoundDirectory) -> io::Result<()> {
     container.require_current()?;
+    require_held_private_directory(container)
+}
+
+#[cfg(windows)]
+fn require_held_private_directory(container: &BoundDirectory) -> io::Result<()> {
     require_windows_private_directory(container.handle.as_file())
 }
 
@@ -1058,6 +1123,14 @@ fn require_private_directory(_container: &BoundDirectory) -> io::Result<()> {
     ))
 }
 
+#[cfg(not(any(unix, windows)))]
+fn require_held_private_directory(_container: &BoundDirectory) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "private directory authority is unsupported on this platform",
+    ))
+}
+
 #[cfg(unix)]
 fn promotion_filesystem_id(file: &File) -> io::Result<u64> {
     use std::os::unix::fs::MetadataExt;
@@ -1175,6 +1248,204 @@ fn validate_promotion_tree(
     validate_promotion_directory(root, "", 0, filesystem, forbidden_prefixes, &mut closure)?;
     root.require_current()?;
     Ok(closure)
+}
+
+fn validate_held_promotion_tree(
+    root: &BoundDirectory,
+    forbidden_prefixes: &[Vec<u8>],
+) -> io::Result<PromotionTreeClosure> {
+    let identity = root.held_identity()?;
+    let metadata = root.handle.as_file().metadata()?;
+    if path_metadata_is_alias(&metadata) || !metadata.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "held promoted artifact root is not a directory",
+        ));
+    }
+    let filesystem = promotion_filesystem_id(root.handle.as_file())?;
+    let mut closure = PromotionTreeClosure {
+        entries: 0,
+        bytes: 0,
+        artifacts: Vec::new(),
+    };
+    validate_held_promotion_directory(
+        root,
+        "",
+        0,
+        filesystem,
+        forbidden_prefixes,
+        &mut closure,
+    )?;
+    require_held_bound_identity(root, &identity)?;
+    Ok(closure)
+}
+
+fn validate_held_promotion_directory(
+    directory: &BoundDirectory,
+    relative_parent: &str,
+    depth: usize,
+    filesystem: u64,
+    forbidden_prefixes: &[Vec<u8>],
+    closure: &mut PromotionTreeClosure,
+) -> io::Result<()> {
+    if depth > MAX_PROMOTION_TREE_DEPTH {
+        return Err(staged_artifact_limit_error(
+            StagedArtifactLimit::Depth,
+            MAX_PROMOTION_TREE_DEPTH as u64,
+        ));
+    }
+    if promotion_filesystem_id(directory.handle.as_file())? != filesystem {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "held promoted artifact tree crosses a filesystem boundary",
+        ));
+    }
+
+    let maximum = usize::try_from(MAX_PROMOTION_TREE_ENTRIES).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "promotion entry limit is not representable on this platform",
+        )
+    })?;
+    let names = read_bound_directory_names(directory, maximum)?;
+    for name in &names {
+        closure.entries = closure.entries.checked_add(1).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "staged artifact entry count overflow",
+            )
+        })?;
+        if closure.entries > MAX_PROMOTION_TREE_ENTRIES {
+            return Err(staged_artifact_limit_error(
+                StagedArtifactLimit::Entries,
+                MAX_PROMOTION_TREE_ENTRIES,
+            ));
+        }
+
+        let utf8_name = name.to_str().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "staged artifact names must be valid UTF-8",
+            )
+        })?;
+        let relative = if relative_parent.is_empty() {
+            utf8_name.to_owned()
+        } else {
+            format!("{relative_parent}/{utf8_name}")
+        };
+        let display_path = directory.requested_path.join(name);
+        let handle = Handle::from_file(open_bound_child_any_handle(directory, name)?)?;
+        let before = handle.as_file().metadata()?;
+        if path_metadata_is_alias(&before) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "staged artifact tree may not contain symlinks or reparse points: {}",
+                    display_path.display()
+                ),
+            ));
+        }
+
+        if before.is_dir() {
+            let child = BoundDirectory {
+                requested_path: display_path,
+                path: directory.path.join(name),
+                handle,
+                movable: false,
+            };
+            if promotion_filesystem_id(child.handle.as_file())? != filesystem {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "held promoted artifact tree crosses a filesystem boundary",
+                ));
+            }
+            closure.artifacts.push(PromotionTreeEntry {
+                path: relative.clone(),
+                kind: PromotionTreeEntryKind::Directory,
+            });
+            validate_held_promotion_directory(
+                &child,
+                &relative,
+                depth + 1,
+                filesystem,
+                forbidden_prefixes,
+                closure,
+            )?;
+            require_bound_child_identity(
+                directory,
+                name,
+                &child.handle,
+                "promoted artifact directory",
+            )?;
+            continue;
+        }
+        if !before.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "staged artifact tree may only contain regular files and directories: {}",
+                    display_path.display()
+                ),
+            ));
+        }
+
+        require_single_link_regular_file(handle.as_file(), &before, &display_path)?;
+        if promotion_filesystem_id(handle.as_file())? != filesystem {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "staged artifact file is on another filesystem: {}",
+                    display_path.display()
+                ),
+            ));
+        }
+        let next_bytes = closure.bytes.checked_add(before.len()).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "staged artifact byte count overflow",
+            )
+        })?;
+        if next_bytes > MAX_PROMOTION_TREE_BYTES {
+            return Err(staged_artifact_limit_error(
+                StagedArtifactLimit::AggregateBytes,
+                MAX_PROMOTION_TREE_BYTES,
+            ));
+        }
+        let (sha256, bytes) = hash_promotion_file(
+            handle.as_file(),
+            &display_path,
+            before.len(),
+            forbidden_prefixes,
+        )?;
+        let after = handle.as_file().metadata()?;
+        require_single_link_regular_file(handle.as_file(), &after, &display_path)?;
+        let current = Handle::from_file(open_bound_child_any_handle(directory, name)?)?;
+        if bytes != before.len() ||
+            after.len() != before.len() ||
+            !handles_match(&current, &handle)?
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "staged artifact changed during validation: {}",
+                    display_path.display()
+                ),
+            ));
+        }
+        closure.bytes = next_bytes;
+        closure.artifacts.push(PromotionTreeEntry {
+            path: relative,
+            kind: PromotionTreeEntryKind::File { sha256, bytes },
+        });
+    }
+
+    if read_bound_directory_names(directory, maximum)? != names {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "held promoted artifact directory changed during validation",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_promotion_directory(
@@ -1686,14 +1957,63 @@ fn invalid_json_escape(path: &Path) -> io::Error {
     )
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
+fn require_bound_child_identity(
+    parent: &BoundDirectory,
+    name: &OsStr,
+    expected: &Handle,
+    label: &str,
+) -> io::Result<()> {
+    immediate_child_name(Path::new(name), label)?;
+    // This identity-only reopen must coexist with the Windows DELETE-capable handle retained by
+    // a movable staged directory. The general child-directory opener intentionally denies delete
+    // sharing so input authorities cannot be renamed while held.
+    let current = Handle::from_file(open_bound_child_any_handle(parent, name)?)?;
+    let metadata = current.as_file().metadata()?;
+    if path_metadata_is_alias(&metadata) || !metadata.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{label} is not a directory"),
+        ));
+    }
+    if handles_match(&current, expected)? {
+        return Ok(());
+    }
+    Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("{label} does not match the held private root"),
+    ))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn require_bound_child_identity(
+    _parent: &BoundDirectory,
+    _name: &OsStr,
+    _expected: &Handle,
+    _label: &str,
+) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "relative child identity is unsupported on this platform",
+    ))
+}
+
 fn require_child_absent(parent: &BoundDirectory, name: &OsStr, label: &str) -> io::Result<()> {
+    parent.require_current()?;
+    require_held_child_absent(parent, name, label)
+}
+
+#[cfg(unix)]
+fn require_held_child_absent(
+    parent: &BoundDirectory,
+    name: &OsStr,
+    label: &str,
+) -> io::Result<()> {
     use std::ffi::CString;
     use std::mem::MaybeUninit;
     use std::os::fd::AsRawFd;
     use std::os::unix::ffi::OsStrExt;
 
-    parent.require_current()?;
     let name = CString::new(name.as_bytes()).map_err(|_| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -1725,9 +2045,13 @@ fn require_child_absent(parent: &BoundDirectory, name: &OsStr, label: &str) -> i
 }
 
 #[cfg(windows)]
-fn require_child_absent(parent: &BoundDirectory, name: &OsStr, label: &str) -> io::Result<()> {
-    parent.require_current()?;
-    match std::fs::symlink_metadata(parent.requested_path.join(name)) {
+fn require_held_child_absent(
+    parent: &BoundDirectory,
+    name: &OsStr,
+    label: &str,
+) -> io::Result<()> {
+    immediate_child_name(Path::new(name), label)?;
+    match open_bound_child_any_handle(parent, name) {
         Ok(_) => Err(io::Error::new(
             io::ErrorKind::AlreadyExists,
             format!("{label} already exists"),
@@ -1738,7 +2062,11 @@ fn require_child_absent(parent: &BoundDirectory, name: &OsStr, label: &str) -> i
 }
 
 #[cfg(not(any(unix, windows)))]
-fn require_child_absent(_parent: &BoundDirectory, _name: &OsStr, _label: &str) -> io::Result<()> {
+fn require_held_child_absent(
+    _parent: &BoundDirectory,
+    _name: &OsStr,
+    _label: &str,
+) -> io::Result<()> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "relative child validation is unsupported on this platform",
@@ -4893,7 +5221,7 @@ fn read_bound_directory_names(
 }
 
 #[cfg(unix)]
-fn open_bound_child_directory_handle(parent: &BoundDirectory, name: &OsStr) -> io::Result<File> {
+fn open_bound_child_any_handle(parent: &BoundDirectory, name: &OsStr) -> io::Result<File> {
     use std::ffi::CString;
     use std::os::fd::{AsRawFd, FromRawFd};
     use std::os::unix::ffi::OsStrExt;
@@ -4910,11 +5238,7 @@ fn open_bound_child_directory_handle(parent: &BoundDirectory, name: &OsStr) -> i
         libc::openat(
             parent.handle.as_file().as_raw_fd(),
             name.as_ptr(),
-            libc::O_RDONLY |
-                libc::O_CLOEXEC |
-                libc::O_DIRECTORY |
-                libc::O_NOFOLLOW |
-                libc::O_NONBLOCK,
+            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK,
         )
     };
     if descriptor < 0 {
@@ -4922,6 +5246,20 @@ fn open_bound_child_directory_handle(parent: &BoundDirectory, name: &OsStr) -> i
     }
     // SAFETY: openat returned this new owned descriptor.
     Ok(unsafe { File::from_raw_fd(descriptor) })
+}
+
+#[cfg(unix)]
+fn open_bound_child_directory_handle(parent: &BoundDirectory, name: &OsStr) -> io::Result<File> {
+    let file = open_bound_child_any_handle(parent, name)?;
+    let metadata = file.metadata()?;
+    if metadata.is_dir() && !path_metadata_is_alias(&metadata) {
+        Ok(file)
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "bound child is not a directory",
+        ))
+    }
 }
 
 #[cfg(windows)]
@@ -4939,6 +5277,30 @@ fn open_bound_child_directory_handle(parent: &BoundDirectory, name: &OsStr) -> i
         FILE_SHARE_READ | FILE_SHARE_WRITE,
         FILE_DIRECTORY_FILE,
     )
+}
+
+#[cfg(windows)]
+fn open_bound_child_any_handle(parent: &BoundDirectory, name: &OsStr) -> io::Result<File> {
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
+        FILE_SHARE_WRITE, READ_CONTROL, SYNCHRONIZE,
+    };
+
+    open_bound_child_handle(
+        parent,
+        name,
+        FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        0,
+    )
+}
+
+#[cfg(not(any(unix, windows)))]
+fn open_bound_child_any_handle(_parent: &BoundDirectory, _name: &OsStr) -> io::Result<File> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "relative child open is unsupported on this platform",
+    ))
 }
 
 #[cfg(unix)]
@@ -5703,8 +6065,8 @@ mod tests {
         PUBLICATION_LEASE_FILE_NAME, PUBLICATION_OUTCOME_FILE_NAME, PUBLICATION_PLAN_FILE_NAME,
         PUBLICATION_PREPARED_FILE_NAME, PublicationRecoveryState, SessionArtifacts, SessionFailure,
         WebResourceLoadRole, contextualize_clonefileat_error, create_private_directory,
-        path_metadata_is_alias, promote_staged_artifacts, remove_empty_private_container,
-        serialize_publication_outcome, validate_staged_artifacts,
+        path_metadata_is_alias, promote_staged_artifacts, promote_staged_artifacts_into,
+        remove_empty_private_container, serialize_publication_outcome, validate_staged_artifacts,
     };
     #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     use super::{BoundDirectory, read_bound_directory_names};
@@ -5735,6 +6097,48 @@ mod tests {
             [std::ffi::OsString::from("original")]
         );
 
+        drop(bound);
+        fs::remove_dir_all(&sandbox).unwrap();
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn bound_publication_targets_the_held_job_root_after_path_replacement() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let sandbox = test_temp_dir().join(format!(
+            "pliego-bound-publication-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir(&sandbox).unwrap();
+        let requested = sandbox.join("job");
+        create_private_directory(&requested).unwrap();
+        let bound = BoundDirectory::open_private(requested.clone()).unwrap();
+
+        let container = sandbox.join(format!(".pliego-runtime-{}", "b".repeat(32)));
+        create_private_directory(&container).unwrap();
+        let staged = container.join("delivery");
+        create_private_directory(&staged).unwrap();
+        fs::write(staged.join("document.pdf"), b"%PDF-held-root").unwrap();
+
+        let held = sandbox.join("held-job");
+        fs::rename(&requested, &held).unwrap();
+        create_private_directory(&requested).unwrap();
+        promote_staged_artifacts_into(
+            &container,
+            &staged,
+            &bound,
+            std::ffi::OsStr::new("delivery"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            fs::read(held.join("delivery/document.pdf")).unwrap(),
+            b"%PDF-held-root"
+        );
+        assert!(!requested.join("delivery").exists());
         drop(bound);
         fs::remove_dir_all(&sandbox).unwrap();
     }
@@ -5778,6 +6182,44 @@ mod tests {
 
         drop(child);
         drop(root);
+        fs::remove_dir_all(&sandbox).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_bound_publication_uses_the_held_job_root_authority() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let sandbox = test_temp_dir().join(format!(
+            "pliego-bound-windows-publication-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir(&sandbox).unwrap();
+        let requested = sandbox.join("job");
+        create_private_directory(&requested).unwrap();
+        let bound = BoundDirectory::open_private(requested.clone()).unwrap();
+        let container = sandbox.join(format!(".pliego-runtime-{}", "c".repeat(32)));
+        create_private_directory(&container).unwrap();
+        let staged = container.join("delivery");
+        create_private_directory(&staged).unwrap();
+        fs::write(staged.join("document.pdf"), b"%PDF-held-root").unwrap();
+
+        assert!(fs::rename(&requested, sandbox.join("moved-job")).is_err());
+        promote_staged_artifacts_into(
+            &container,
+            &staged,
+            &bound,
+            std::ffi::OsStr::new("delivery"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            fs::read(requested.join("delivery/document.pdf")).unwrap(),
+            b"%PDF-held-root"
+        );
+        drop(bound);
         fs::remove_dir_all(&sandbox).unwrap();
     }
 

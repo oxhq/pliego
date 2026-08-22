@@ -2,10 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-//! Inactive, descriptor-bound API 2 input loading.
-//!
-//! The executable still advertises no API 2 tuple and never calls this module. Keeping the loader
-//! below the decoder lets tests prove the filesystem authority boundary before render activation.
+//! Descriptor-bound API 2 input loading.
 
 use std::collections::BTreeMap;
 #[cfg(any(test, target_os = "linux", target_os = "macos", windows))]
@@ -26,8 +23,13 @@ use super::{
 };
 #[cfg(any(target_os = "linux", target_os = "macos", windows))]
 use super::{INPUT_MANIFEST_MAX_BYTES, INPUT_TREE_MAX_NODES, required_u64};
-#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 use crate::session::BoundDirectory;
+
+#[derive(Debug)]
+pub(crate) struct LoadedInputJob {
+    job_root: BoundDirectory,
+    input: ResolvedInputJob,
+}
 
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) struct ResolvedInputJob {
@@ -58,7 +60,7 @@ struct ExpectedInputResource {
 pub(crate) fn load_input_job(
     _job_root: &Path,
     _request: &Value,
-) -> Result<ResolvedInputJob, InvocationError> {
+) -> Result<LoadedInputJob, InvocationError> {
     Err(InvocationError::new(
         "cwd-v1 input loading requires descriptor-relative filesystem authority",
     ))
@@ -70,7 +72,7 @@ pub(crate) fn load_input_job(
 pub(crate) fn load_input_job(
     job_root: &Path,
     request: &Value,
-) -> Result<ResolvedInputJob, InvocationError> {
+) -> Result<LoadedInputJob, InvocationError> {
     validate_request(request).map_err(InvocationError::new)?;
     let input = request_input(request)?;
     let entrypoint = required_string(input, "$.input", "entrypoint")
@@ -150,15 +152,24 @@ pub(crate) fn load_input_job(
         ));
     }
 
-    finish_resolved_input_job(canonical_manifest, entrypoint, loaded)
+    let input = finish_resolved_input_job(canonical_manifest, entrypoint, loaded)?;
+    Ok(LoadedInputJob {
+        job_root: root,
+        input,
+    })
+}
+
+impl LoadedInputJob {
+    pub(super) fn into_parts(self) -> (BoundDirectory, ResolvedInputJob) {
+        (self.job_root, self.input)
+    }
 }
 
 impl ResolvedInputJob {
-    #[cfg(test)]
     pub(super) fn require_request_binding(&self, request: &Value) -> Result<(), InvocationError> {
         let input = request_input(request)?;
-        let entrypoint = required_string(input, "$.input", "entrypoint")
-            .map_err(InvocationError::new)?;
+        let entrypoint =
+            required_string(input, "$.input", "entrypoint").map_err(InvocationError::new)?;
         if entrypoint != self.entrypoint {
             return Err(InvocationError::new(
                 "resolved input entrypoint does not match the render request",
@@ -466,6 +477,7 @@ mod tests {
     fn freezes_the_exact_fixture_into_a_host_path_free_store() {
         let (_sandbox, job) = Sandbox::fixture();
         let loaded = load_input_job(&job, &request()).unwrap();
+        let (_, loaded) = loaded.into_parts();
         assert_eq!(loaded.entrypoint, "document.html");
         assert_eq!(loaded.resources.len(), 4);
         assert_eq!(

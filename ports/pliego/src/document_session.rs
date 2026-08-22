@@ -63,9 +63,7 @@ use super::resource_policy::{
 };
 use super::runtime_policy::DeterministicRuntimePolicy;
 use super::session::LocalDocument;
-use crate::api2::ResolvedInputJob;
-#[cfg(test)]
-use crate::api2::{DiagnosticRetention, ResolvedRenderJob};
+use crate::api2::{ResolvedInputJob, ResolvedRenderJob};
 
 const RESOURCE_EVIDENCE_ENTRY_OVERHEAD_BYTES: u64 = 256;
 const CONSOLE_EVIDENCE_ENTRY_OVERHEAD_BYTES: u64 = 64;
@@ -658,17 +656,15 @@ pub(crate) struct ControlledDocumentSession {
     surface: DocumentCaptureSurfaceFingerprint,
 }
 
-/// Test-only owner for one inactive API 2 execution.
-///
-/// The exact request and normalized policy stay attached to the live session because diagnostics,
-/// `post_readiness_resources`, and `process_cpu_ms` are retention gates, not activation-proven
-/// enforcement in this scaffold.
-#[cfg(test)]
-struct InactiveApi2Execution {
+/// Owner for one accepted API 2 execution and its exact normalized policy.
+pub(crate) struct Api2Execution {
     controlled: ControlledDocumentSession,
-    request: serde_json::Value,
-    diagnostics: DiagnosticRetention,
-    runtime_policy: DeterministicRuntimePolicy,
+}
+
+impl Api2Execution {
+    pub(crate) fn capture(self) -> Result<DocumentCaptureOutcome, SessionError> {
+        self.controlled.prepare_capture_candidate()?.capture()
+    }
 }
 
 /// One live session paired with its non-authoritative, generation-bound capture candidate.
@@ -1371,19 +1367,16 @@ impl DocumentSession {
         })
     }
 
-    #[cfg(test)]
-    fn start_inactive_api2_execution_for_test(
+    pub(crate) fn start_api2_execution(
         job: ResolvedRenderJob,
-    ) -> Result<InactiveApi2Execution, SessionError> {
+    ) -> Result<Api2Execution, SessionError> {
         let crate::api2::ResolvedRenderJobParts {
-            request,
             input,
             environment,
             page,
             resources,
             allow_host_fonts,
             runtime_policy,
-            diagnostics,
         } = job.into_parts();
         let (input_url, authority) = FrozenInputAuthority::from_resolved_job(input)?;
         let runtime_policy = runtime_policy
@@ -1416,15 +1409,12 @@ impl DocumentSession {
             servo_canvas::retained_canvas::start_retaining_canvas_commands,
         )?;
         let surface = session.controlled_capture_surface()?;
-        Ok(InactiveApi2Execution {
+        Ok(Api2Execution {
             controlled: ControlledDocumentSession {
                 session,
                 waker,
                 surface,
             },
-            request,
-            diagnostics,
-            runtime_policy,
         })
     }
 
@@ -2675,11 +2665,11 @@ mod tests {
         ResourcePolicyFailure, ResourceRequest, ResourceSource, ResponseHeaderEvidence,
         VirtualResourceSpec,
     };
-    use super::super::runtime_policy::{DeterministicRuntimePolicy, DocumentSettlementLimits};
+    use super::super::runtime_policy::DeterministicRuntimePolicy;
     use super::super::session::LocalDocument;
     use super::{
-        ConsoleEvidenceLog, ConsoleLogLevel, ControlledSettlementStep, DiagnosticRetention,
-        DocumentSession, FROZEN_INPUT_URL_ROOT, InactiveApi2Execution, JSValue, MAX_CONSOLE_BYTES,
+        Api2Execution, ConsoleEvidenceLog, ConsoleLogLevel, ControlledSettlementStep,
+        DocumentSession, FROZEN_INPUT_URL_ROOT, JSValue, MAX_CONSOLE_BYTES,
         MAX_CONSOLE_EVENTS, PaintTicketAbortGuard, RESOURCE_EVIDENCE_ENTRY_OVERHEAD_BYTES,
         ReadinessPolicy, RenderEnvironment, ResourceEvidenceLog, ResourcePolicyConfig,
         SessionCaptureEvidence, SessionError, SessionHostDeadline, console_log_level_name,
@@ -3757,11 +3747,10 @@ window.pliego?.defer();
     }
 
     #[test]
-    fn inactive_api2_execution_constructor_accepts_only_a_resolved_job() {
+    fn api2_execution_constructor_accepts_only_a_resolved_job() {
         let _: fn(
             crate::api2::ResolvedRenderJob,
-        ) -> Result<InactiveApi2Execution, SessionError> =
-            DocumentSession::start_inactive_api2_execution_for_test;
+        ) -> Result<Api2Execution, SessionError> = DocumentSession::start_api2_execution;
     }
 
     #[test]
@@ -3854,40 +3843,21 @@ document.fonts.ready
                 ("payload.json", "application/json", payload.as_slice()),
             ]);
         }
-        let (diagnostic_retention, expected_diagnostics) = match case.as_str() {
-            "success" => ("none", DiagnosticRetention::None),
-            "unlisted" => ("on-failure", DiagnosticRetention::OnFailure),
-            "scheme" => ("always", DiagnosticRetention::Always),
+        let diagnostic_retention = match case.as_str() {
+            "success" => "none",
+            "unlisted" => "on-failure",
+            "scheme" => "always",
             _ => unreachable!(),
         };
         let (expected_request, job) =
             resolved_render_job("entry.html", &entries, diagnostic_retention)
                 .expect("the in-memory fixture should pass the full API 2 input validators");
 
-        let execution = DocumentSession::start_inactive_api2_execution_for_test(job)
+        let execution = DocumentSession::start_api2_execution(job)
             .expect("the resolved API 2 input should construct a frozen URL session");
-        assert_eq!(execution.request, expected_request);
-        assert_eq!(execution.diagnostics, expected_diagnostics);
         assert_eq!(
-            execution.request["page"]["geometry_authority"],
+            expected_request["page"]["geometry_authority"],
             "request-only-v1"
-        );
-        assert_eq!(
-            execution.runtime_policy,
-            DeterministicRuntimePolicy::default()
-        );
-        assert_eq!(
-            execution.runtime_policy.settlement.limits,
-            DocumentSettlementLimits {
-                virtual_span_ms: 86_400_000,
-                ordinary_tasks: 100_000,
-                microtasks: 1_000_000,
-                rendering_opportunities: 10_000,
-                mutations: 1_000_000,
-                post_readiness_resources: 1_024,
-                process_cpu_ms: 30_000,
-                host_wall_ms: 60_000,
-            }
         );
         let controlled = execution.controlled;
         assert!(
