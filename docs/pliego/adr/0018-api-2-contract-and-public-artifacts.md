@@ -1,6 +1,6 @@
 # ADR 0018: API 2 contract and public artifacts
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-09
 
 ## Context
@@ -17,16 +17,15 @@ Pliego-owned document process without promising servoshell, a daemon, a browser 
 session reuse. It must bind exact input bytes to exact output bytes, separate deterministic delivery
 from diagnostics, and make every failure incapable of looking like partial success.
 
-This ADR defines a proposed render contract whose executable foundation is now under development. In
-addition to the schemas, byte fixtures, goldens, and dependency-free self-test in
-[`contracts/api2`](../../../contracts/api2), the repository contains an unreleased probe, strict
-request decoder, and PHP tuple validator. The probe advertises `contracts: []`: those components do
-not make an API 2 render transaction, profile, package version, or release available, and they do not
-change the API 1 renderer or publication flow.
+This ADR defines the profile-null render contract accepted for Pliego 0.3. In addition to the
+schemas, byte fixtures, goldens, and dependency-free self-test in
+[`contracts/api2`](../../../contracts/api2), the repository contains the production probe, strict
+request and input-manifest decoders, one-shot renderer, atomic delivery publisher, and SDK tuple
+validator. The probe advertises exactly one complete profile-null tuple; API 1 remains a deprecated
+compatibility route and is not part of API 2 negotiation.
 
-These schemas are explicitly **pre-freeze scaffolding**, not the contract freeze requested by
-OXH-326. OXH-326 may freeze the profile-null API 2 tuple independently once its implementation and
-evidence gates pass. R3.5 separately defines the semantic document model, profile decision,
+These schema versions are frozen for the advertised profile-null API 2 tuple. R3.5 separately
+defines the semantic document model, profile decision,
 validation result, and deterministic evidence needed for an accessible-PDF release. OXH-339, not
 this ADR, decides whether that later target is PDF/UA-1, PDF/UA-2, or another precisely named
 profile. This ADR reserves strict versioned extension points so that OXH-346 can add the semantic
@@ -60,10 +59,10 @@ identity that will appear in results. An API 2 schema tuple is usable only when 
 advertised. Advertising request version 1 and result version 2 in separate tuples does not imply that
 request 1/result 2 is supported.
 
-The `contracts` array may be empty. An empty array truthfully reports an executable foundation whose
-probe and decoder exist but which does not yet accept a complete API 2 render transaction. A facade
-must treat it as no supported API 2 tuple; it must not infer capability from the engine API field,
-schema files, or command availability.
+The `contracts` array may be empty in another build. An empty array truthfully reports an executable
+with no complete API 2 render transaction. A facade must treat it as no supported API 2 tuple; it
+must not infer capability from the engine API field, schema files, or command availability. Pliego
+0.3 production archives advertise exactly the profile-null tuple defined here.
 
 Each exact tuple also advertises an ordered array of supported versioned profile references, sorted
 ascending by schema identifier and then version. Complete tuples themselves are unique and
@@ -73,10 +72,9 @@ profile-null fixture advertises an empty array. A profile is usable only when it
 from PDF metadata or formed as a cross-product with protocol versions. One protocol tuple may appear
 only once, so two different profile arrays cannot make capability negotiation ambiguous.
 
-The executable-foundation probe invocation is `pliego --contract-probe`: on success it writes exactly
+The runtime probe invocation is `pliego --contract-probe`: on success it writes exactly
 one compact, typed-field-order JSON object followed by one line feed to stdout, leaves stderr empty,
-and exits zero. A PHP facade validates the exact framing and tuple rather than inferring support. A
-complete render tuple and successful API 2 render transport remain unavailable.
+and exits zero. A PHP facade validates the exact framing and tuple rather than inferring support.
 
 ### One-shot invocation and invocation errors
 
@@ -106,16 +104,14 @@ Regular files must have one link, every directory and file name must match the m
 and the accepted bytes are frozen into a host-path-free in-memory store before rendering.
 The filesystem is not consulted again for accepted input bytes.
 
-The inactive loader foundation currently proves that authority on Linux and macOS. Windows fails
-closed until its implementation can enumerate and open children relative to a held directory
-handle; a path-reopened approximation is not accepted as equivalent evidence.
+Linux and macOS use descriptor-relative directory authority. Windows holds directory and file
+handles, rejects reparse points and multi-link files, and revalidates identity around every bounded
+read; a path-reopened approximation is not accepted as equivalent evidence.
 
 The runtime does not accept an absolute job path in arguments or normalized JSON, does not derive
 identity from the host current-working-directory string, and does not follow a symlink or
-reparse-point escape from the fixed job layout. During the executable-foundation phase the probe
-still advertises no contract tuple, so `render-api2` rejects every request as unavailable before
-inspecting this layout.
-The layout becomes active only when a complete tuple is advertised and accepted.
+reparse-point escape from the fixed job layout. The runtime inspects this layout only after strict
+request acceptance and exact tuple selection.
 
 The runtime probe fixes the render transport rather than leaving SDKs to infer it:
 
@@ -140,10 +136,12 @@ The runtime probe fixes the render transport rather than leaving SDKs to infer i
   exits `74`.
 
 An invocation error is deliberately not a `RenderResult`: there is no accepted normalized request to
-echo and no engine render outcome. Stderr text is diagnostic, not a versioned machine contract. SDKs
-map exit `64` plus empty stdout to their own invocation exception; they must not synthesize a failed
-result or expose staged delivery. Exit `74` is the versioned engine-generated transport-error
-boundary. Any other exit/stdout combination remains an unspecified transport or process failure.
+echo and no engine render outcome. SDKs map exit `64` plus empty stdout to their own invocation
+exception; they must not synthesize a failed result or expose staged delivery. Exit `74` is the
+versioned engine-generated transport-error boundary. Only its exit code, one-line UTF-8 framing, and
+literal `pliego: API2_TRANSPORT_ERROR: ` prefix are stable; the diagnostic payload following that
+prefix is not a versioned machine contract. Any other exit/stdout combination remains an unspecified
+transport or process failure.
 
 Filesystem roots used to supply fixture bytes, stage output, retain diagnostics, or publish a final
 caller path are invocation concerns. Absolute paths, process identifiers, hostnames, temporary
@@ -290,15 +288,13 @@ empty checkpoints, and every render-request-version-1 convergence limit:
 | Microtasks | 1,000,000 |
 | Rendering opportunities | 10,000 |
 | Mutations | 1,000,000 |
-| Post-readiness resources | 1,024 |
-| Process CPU | 30,000 ms |
 | Host wall time | 60,000 ms |
 
-Every override is normalized into request identity. Real CPU and wall limits are host safety bounds;
-they do not become document-observable time. Exhausting a limit returns a failed result and no
-delivery. The detailed clock driver, causal ordering, producer fences, animation behavior, and proof
-remain owned by the deterministic-time and visual-settlement work; this schema does not claim that
-they are implemented.
+Every advertised override is normalized into request identity and enforced by the controlled
+runtime. Host wall time is a host safety bound and does not become document-observable time.
+Exhausting a limit returns a failed result and no delivery. A process-CPU ceiling and a
+post-readiness resource ceiling remain internal compatibility settings rather than public API 2
+fields until the runtime can enforce their exact requested semantics.
 
 ### Unified terminal result and stable errors
 
@@ -409,10 +405,11 @@ join IDs, host timings, and timestamps remain diagnostics.
 The checked-in contract fixtures contain real bytes for the input tree, input manifest, PDF, scene,
 resources, bundle manifest, and diagnostics. The self-test recomputes their byte lengths and SHA-256
 values, verifies exact file closure, and checks that canonical JSON bytes match their parsed values.
-The small font payload exists to exercise manifest/resource byte identity; it is not a font-decoder or
-renderer fixture. The checked-in PDF and scene remain schema/closure fixtures rather than proof that
-the PDF was rendered from that scene. Contract activation requires a separate renderer-backed
-fixture with a real font and a PDF generated from the same canonical fixed-point scene.
+The small font payload exists to exercise manifest/resource byte identity; it is not a font-decoder
+or renderer fixture. The checked-in PDF and scene remain schema/closure fixtures rather than
+standalone proof that the PDF was rendered from that scene. Executable acceptance therefore adds a
+renderer-backed fixture whose PDF adapter consumes the same canonical fixed-point scene and
+content-addressed resources that are published in the delivery.
 
 Accepted goldens cover both page forms, both result branches, the exact runtime tuple, ordered scene,
 and both manifests. Rejected goldens cover unsupported API/schema pairing, unknown members, live
@@ -424,22 +421,17 @@ tuple negotiation, operation-order identity, the absence of premature operation 
 profile advertisement, semantic-layer/profile binding, result/profile echoing, and the ban on
 evidence-free conformance.
 
-The executable-foundation tests separately exercise strict runtime request decoding, canonical probe
-framing, exact PHP tuple negotiation, invocation-error framing, and packaged binary/source/target
-identity. They deliberately require an empty advertised contract array and terminal rejection for
-every API 2 render request. They do not prove facade prefetch/rewrite, a successful API 2 render,
-deterministic renderer output, atomic API 2 publication, cross-platform byte identity, consumer
-installation, or release availability. API 2 rendering and Pliego 1.0 remain blocked on those
-independent implementation and hosted proof gates. The schema is also not frozen: OXH-326 still
-requires the profile-null encoder, canonical PDF adapter, request-page binding, settlement enforcement,
-publication, package, SDK, and hosted proof gates. OXH-346 remains a later prerequisite for the first
-semantic/accessibility profile, not for freezing profile-null API 2.
+Executable tests separately exercise strict runtime request decoding, canonical probe framing, exact
+SDK tuple negotiation, invocation-error framing, successful one-shot rendering, atomic API 2
+publication, artifact byte closure, and packaged binary/source/target identity. Release gates add
+cross-platform archives, package integration, and fresh public-consumer proof. OXH-346 remains a
+later prerequisite for the first semantic/accessibility profile, not for the profile-null API 2
+tuple.
 
-The current paged-layout capture matches the request-only page authority above. It retains exact app
-units when layout still owns them and labels every page only as `request-defaults`. Paint geometry
-that has already become floating point carries no false fixed-point authority. This capture-authority
-slice therefore prepares a fail-closed encoder but does not satisfy the canonical encoder or
-profile-null activation gates.
+The paged-layout capture matches the request-only page authority above. It retains exact app units
+when layout still owns them and labels every page only as `request-defaults`. Paint geometry that
+has already become floating point carries no false fixed-point authority. The canonical encoder and
+PDF adapter consume only this retained authority and fail closed when it is absent.
 
 ## Consequences
 
@@ -480,7 +472,8 @@ profile-null activation gates.
 - [`ports/pliego/src/engine.rs`](../../../ports/pliego/src/engine.rs)
 - [`ports/pliego/src/scene.rs`](../../../ports/pliego/src/scene.rs)
 - [`ports/pliego/src/document_session.rs`](../../../ports/pliego/src/document_session.rs)
-- [`sdk/php/src/CliRenderer.php`](../../../sdk/php/src/CliRenderer.php)
+- [`sdk/php/src/DocumentEngine.php`](../../../sdk/php/src/DocumentEngine.php)
+- [`sdk/php/src/CliRenderer.php`](../../../sdk/php/src/CliRenderer.php) (deprecated API 1 compatibility)
 - [OXH-310: deterministic document time and visual settlement](https://linear.app/oxhq/issue/OXH-310)
 - [OXH-326: freeze versioned public contracts](https://linear.app/oxhq/issue/OXH-326)
 - [OXH-339: choose the PDF/UA target and profile contract](https://linear.app/oxhq/issue/OXH-339)
