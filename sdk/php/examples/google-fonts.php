@@ -2,6 +2,8 @@
 
 declare(strict_types=1);
 
+// Deprecated API 1-only example. API 2 requires callers to prefetch and bundle every remote byte.
+
 use Pliego\Php\CliRenderer;
 use Pliego\Php\Exception\RenderException;
 use Pliego\Php\RenderOptions;

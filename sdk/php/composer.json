@@ -1,10 +1,11 @@
 {
     "name": "oxhq/pliego-php",
-    "description": "PHP client for one-shot Pliego document rendering",
+    "description": "PHP client for deterministic one-shot Pliego document rendering",
     "type": "library",
     "license": "MIT",
     "require": {
-        "php": "^8.3"
+        "php": "^8.3",
+        "php-64bit": "*"
     },
     "autoload": {
         "psr-4": {
@@ -13,10 +14,12 @@
     },
     "scripts": {
         "test:api2": "@php tests/api2_contract_test.php",
+        "test:api2-render": "@php tests/api2_render_test.php",
         "test:doctor": "@php tests/doctor_test.php",
         "test:timings": "@php tests/bridge_timings_test.php",
         "test": [
             "@test:api2",
+            "@test:api2-render",
             "@test:timings",
             "@php tests/self_test.php",
             "@php tests/timeout_test.php",

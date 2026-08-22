@@ -11,9 +11,6 @@ use UnexpectedValueException;
 
 /**
  * Strict decoder and exact-tuple selector for `pliego --contract-probe`.
- *
- * This class negotiates capability only. It does not make API 2 rendering
- * available and it does not alter the API 1 CliRenderer path.
  */
 final readonly class RuntimeContract
 {

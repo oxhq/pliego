@@ -2,6 +2,8 @@
 
 declare(strict_types=1);
 
+// Retained only as an executable API 1 compatibility test during the 0.3 migration release.
+
 if (($argv[1] ?? null) === 'render') {
     $options = [];
     for ($index = 3; $index < count($argv); $index += 2) {
@@ -75,4 +77,4 @@ quickstartExpect(
     'static font examples use zero-config readiness',
 );
 
-echo "Pliego resource-mode examples self-check passed; no live network was used. Evidence: {$root}\n";
+echo "Pliego deprecated API 1 resource-mode compatibility self-check passed; no live network was used. Evidence: {$root}\n";

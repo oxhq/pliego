@@ -3,7 +3,9 @@
 declare(strict_types=1);
 
 use Pliego\Php\CliRenderer;
+use Pliego\Php\DocumentEngine;
 use Pliego\Php\Exception\EngineRenderException;
+use Pliego\Php\RenderOptions;
 
 require dirname(__DIR__).'/vendor/autoload.php';
 
@@ -60,9 +62,44 @@ expectProductionBridge(is_string($binary) && is_file($binary), 'a built Pliego b
 
 $root = sys_get_temp_dir().'/pliego-production-bridge-'.getmypid().'-'.bin2hex(random_bytes(4));
 expectProductionBridge(mkdir($root, 0700), 'cannot create the production bridge fixture');
+$engine = new DocumentEngine([$binary], "{$root}/api2-work", timeoutSeconds: 120);
 $renderer = new CliRenderer([$binary], timeoutSeconds: 120);
 
 try {
+    $api2 = $engine->render(
+        '<!doctype html><meta charset="utf-8"><title>API 2 production gate</title>'
+            .'<p>Pliego API 2 production gate</p>',
+        new RenderOptions(pageSize: 'A4', diagnosticsRetention: 'always'),
+    );
+    expectProductionBridge($api2->metadata['status'] === 'success', 'API 2 result is not successful');
+    expectProductionBridge(
+        $api2->metadata['request']['profile'] === null
+            && $api2->metadata['request']['page']['size'] === ['name' => 'A4'],
+        'production binary did not echo the selected profile-null API 2 request',
+    );
+    expectProductionBridge(str_starts_with($api2->bytes(), '%PDF-'), 'API 2 production PDF is not readable');
+    expectProductionBridge(
+        is_file($api2->scenePath) && is_file($api2->bundlePath),
+        'API 2 production delivery is incomplete',
+    );
+    $api2Scene = json_decode((string) file_get_contents($api2->scenePath), true, flags: JSON_THROW_ON_ERROR);
+    $api2Bundle = json_decode((string) file_get_contents($api2->bundlePath), true, flags: JSON_THROW_ON_ERROR);
+    expectProductionBridge(
+        ($api2Scene['schema'] ?? null) === 'pliego.document-scene'
+            && ($api2Scene['version'] ?? null) === 2,
+        'API 2 production scene has the wrong contract identity',
+    );
+    expectProductionBridge(
+        ($api2Bundle['schema'] ?? null) === 'pliego.bundle-manifest'
+            && ($api2Bundle['version'] ?? null) === 1,
+        'API 2 production bundle has the wrong contract identity',
+    );
+    expectProductionBridge(
+        is_file($api2->diagnosticsPath.'/environment.json'),
+        'API 2 production diagnostics were not retained',
+    );
+
+    // Explicit API 1 compatibility coverage for the deprecated CliRenderer follows.
     $expectedReadiness = [
         'fixture' => 'php-production-bridge',
         'phase' => 'post-5ms',
@@ -167,7 +204,7 @@ HTML,
         "{$root}/success-input",
         "{$root}/success.pdf",
         "{$root}/success-artifacts",
-        new \Pliego\Php\RenderOptions(pageSize: '200x160', pageMargins: '0,0,0,0'),
+        new RenderOptions(pageSize: '200x160', pageMargins: '0,0,0,0'),
     );
     expectProductionBridge(str_starts_with($success->bytes(), '%PDF-'), 'production PDF is not readable');
     expectProductionBridge(
@@ -257,4 +294,4 @@ HTML,
     removeProductionBridgeFixture($root);
 }
 
-echo "Production DocumentSession PHP bridge integration passed\n";
+echo "Production API 2 DocumentEngine and deprecated API 1 compatibility integration passed\n";
