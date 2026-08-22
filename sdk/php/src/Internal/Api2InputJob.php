@@ -18,15 +18,12 @@ final readonly class Api2InputJob
     private const MAX_CONTENT_BYTES = 67_108_864;
     private const WINDOWS_TOOL_TIMEOUT_NANOSECONDS = 15_000_000_000;
     private const WINDOWS_TOOL_OUTPUT_MAX_BYTES = 65_536;
-    private const WINDOWS_DEFAULT_DACL_TRUSTEES = [
-        'S-1-5-18',
-        'S-1-5-32-544',
-        'S-1-5-11',
-        'S-1-5-32-545',
-        'S-1-1-0',
-        'S-1-3-0',
-        'S-1-3-1',
+    private const WINDOWS_FIXED_SDDL_ALIASES = [
+        'S-1-5-18' => 'SY',
+        'S-1-5-19' => 'LS',
+        'S-1-5-20' => 'NS',
     ];
+    private const WINDOWS_LOCAL_ACCOUNT_TOKEN_SID = 'S-1-5-113';
 
     /**
      * @param array<string, mixed> $manifestDescriptor
@@ -200,27 +197,28 @@ final readonly class Api2InputJob
             [$whoami, '/user', '/fo', 'csv', '/nh'],
             'current-user lookup',
         ));
+        $localAccount = false;
+        if (preg_match('/\AS-1-5-21-(?:[0-9]+-){3}500\z/D', $sid) === 1) {
+            $localAccount = self::windowsTokenHasSid(
+                self::executeWindowsTool(
+                    [$whoami, '/groups', '/fo', 'csv', '/nh'],
+                    'current-token group lookup',
+                ),
+                self::WINDOWS_LOCAL_ACCOUNT_TOKEN_SID,
+            );
+        }
 
         self::executeWindowsTool(
             [$icacls, $path, '/setowner', "*{$sid}", '/q'],
             'owner assignment',
         );
         self::executeWindowsTool(
-            [$icacls, $path, '/inheritance:r', '/q'],
-            'DACL inheritance removal',
+            [$icacls, $path, '/reset', '/q'],
+            'DACL reset',
         );
         self::executeWindowsTool(
-            [
-                $icacls,
-                $path,
-                '/remove',
-                ...array_map(
-                    static fn (string $trustee): string => "*{$trustee}",
-                    self::WINDOWS_DEFAULT_DACL_TRUSTEES,
-                ),
-                '/q',
-            ],
-            'default DACL removal',
+            [$icacls, $path, '/inheritance:r', '/q'],
+            'DACL inheritance removal',
         );
         self::executeWindowsTool(
             [$icacls, $path, '/grant:r', "*{$sid}:(OI)(CI)F", '/q'],
@@ -240,7 +238,7 @@ final readonly class Api2InputJob
             if (!is_string($proof)) {
                 throw new RuntimeException('cannot read Windows DACL proof');
             }
-            self::validateWindowsOwnerOnlyDacl($proof, $sid);
+            self::validateWindowsOwnerOnlyDacl($proof, $sid, $localAccount);
         } finally {
             @unlink($proofPath);
         }
@@ -296,19 +294,50 @@ final readonly class Api2InputJob
         return $sids[0];
     }
 
-    private static function validateWindowsOwnerOnlyDacl(string $payload, string $sid): void
+    private static function windowsTokenHasSid(string $payload, string $expectedSid): bool
+    {
+        $count = preg_match_all(
+            '/(?<![A-Za-z0-9-])(S-1-(?:[0-9]+-)+[0-9]+)(?![A-Za-z0-9-])/',
+            $payload,
+            $matches,
+        );
+        if (!is_int($count)) {
+            throw new RuntimeException('cannot parse whoami.exe token SIDs');
+        }
+
+        return in_array($expectedSid, array_unique($matches[1] ?? []), true);
+    }
+
+    private static function validateWindowsOwnerOnlyDacl(
+        string $payload,
+        string $sid,
+        bool $localAccount = false,
+    ): void
     {
         $descriptor = self::windowsAclDescriptor($payload);
         $matched = preg_match(
             '/\AD:P(?P<control>(?:(?:AI|AR))*)\(A;(?P<flags>[A-Z]*);FA;;;'
-                .preg_quote($sid, '/').'\)\z/D',
+                .'(?P<trustee>S-1-(?:[0-9]+-)+[0-9]+|[A-Z]{2})\)\z/D',
             $descriptor,
             $matches,
         );
         $flags = is_string($matches['flags'] ?? null) ? $matches['flags'] : '';
         $flagPairs = strlen($flags) % 2 === 0 ? str_split($flags, 2) : [];
         sort($flagPairs, SORT_STRING);
-        if ($matched !== 1 || $flagPairs !== ['CI', 'OI']) {
+        $trustee = is_string($matches['trustee'] ?? null) ? $matches['trustee'] : '';
+        $expectedTrustees = [$sid];
+        if (isset(self::WINDOWS_FIXED_SDDL_ALIASES[$sid])) {
+            $expectedTrustees[] = self::WINDOWS_FIXED_SDDL_ALIASES[$sid];
+        }
+        if ($localAccount && preg_match('/\AS-1-5-21-(?:[0-9]+-){3}500\z/D', $sid) === 1) {
+            // Windows writes the local Administrator SID as its canonical SDDL alias.
+            $expectedTrustees[] = 'LA';
+        }
+        if (
+            $matched !== 1
+            || $flagPairs !== ['CI', 'OI']
+            || !in_array($trustee, $expectedTrustees, true)
+        ) {
             throw new RuntimeException(
                 'Windows job root does not have one protected owner-only full-access DACL',
             );

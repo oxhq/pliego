@@ -118,6 +118,10 @@ jobs:
         with:
           python-version-file: .python-version
 
+      - name: Fail fast on the Windows private job-root contract
+        if: runner.os == 'Windows'
+        run: python ports/pliego/tests/check_api2_contract.py --self-test
+
       - name: Set up uv
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:

@@ -35,15 +35,13 @@ TARGET_COMPONENT = r"[a-z0-9]+(?:_[a-z0-9]+)*"
 TARGET_RE = re.compile(rf"^{TARGET_COMPONENT}(?:-{TARGET_COMPONENT}){{2,3}}$")
 VERSION_RE = re.compile(r"^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$")
 WINDOWS_SID_RE = re.compile(rb"(?<![A-Za-z0-9-])(S-1-(?:[0-9]+-)+[0-9]+)(?![A-Za-z0-9-])")
-WINDOWS_DEFAULT_DACL_TRUSTEES = (
-    "S-1-5-18",  # Local System
-    "S-1-5-32-544",  # Builtin Administrators
-    "S-1-5-11",  # Authenticated Users
-    "S-1-5-32-545",  # Builtin Users
-    "S-1-1-0",  # Everyone
-    "S-1-3-0",  # Creator Owner
-    "S-1-3-1",  # Creator Group
-)
+WINDOWS_LOCAL_ADMINISTRATOR_SID_RE = re.compile(r"^S-1-5-21-(?:[0-9]+-){3}500$")
+WINDOWS_LOCAL_ACCOUNT_TOKEN_SID = "S-1-5-113"
+WINDOWS_FIXED_SDDL_ALIASES = {
+    "S-1-5-18": "SY",  # Local System
+    "S-1-5-19": "LS",  # Local Service
+    "S-1-5-20": "NS",  # Network Service
+}
 
 
 SUPPORTED_CONTRACT = {
@@ -80,6 +78,10 @@ def windows_user_sid(payload: bytes) -> str:
     return matches.pop()
 
 
+def windows_token_has_sid(payload: bytes, expected_sid: str) -> bool:
+    return expected_sid in {match.group(1).decode("ascii") for match in WINDOWS_SID_RE.finditer(payload)}
+
+
 def windows_acl_descriptor(payload: bytes) -> str:
     if not payload or len(payload) % 2 != 0 or len(payload) > WINDOWS_ACL_PROOF_MAX_BYTES:
         raise OSError("icacls.exe returned an invalid or oversized ACL proof")
@@ -93,15 +95,26 @@ def windows_acl_descriptor(payload: bytes) -> str:
     return descriptors[0]
 
 
-def validate_windows_owner_only_dacl(payload: bytes, sid: str) -> None:
+def validate_windows_owner_only_dacl(payload: bytes, sid: str, *, local_account: bool = False) -> None:
     descriptor = windows_acl_descriptor(payload)
     match = re.fullmatch(
-        rf"D:P(?P<control>(?:(?:AI|AR))*)\(A;(?P<flags>[A-Z]*);FA;;;{re.escape(sid)}\)",
+        r"D:P(?P<control>(?:(?:AI|AR))*)"
+        r"\(A;(?P<flags>[A-Z]*);FA;;;(?P<trustee>S-1-(?:[0-9]+-)+[0-9]+|[A-Z]{2})\)",
         descriptor,
     )
-    if match is None or sorted(
-        match.group("flags")[index : index + 2] for index in range(0, len(match.group("flags")), 2)
-    ) != ["CI", "OI"]:
+    expected_trustees = {sid}
+    fixed_alias = WINDOWS_FIXED_SDDL_ALIASES.get(sid)
+    if fixed_alias is not None:
+        expected_trustees.add(fixed_alias)
+    if local_account and WINDOWS_LOCAL_ADMINISTRATOR_SID_RE.fullmatch(sid):
+        # Windows writes the local Administrator SID as its canonical SDDL alias.
+        expected_trustees.add("LA")
+    if (
+        match is None
+        or match.group("trustee") not in expected_trustees
+        or sorted(match.group("flags")[index : index + 2] for index in range(0, len(match.group("flags")), 2))
+        != ["CI", "OI"]
+    ):
         raise OSError("Windows job root does not have one protected owner-only full-access DACL")
 
 
@@ -153,29 +166,27 @@ def create_private_job_root(path: Path) -> None:
 
         whoami = windows_system_tool("whoami.exe")
         icacls = windows_system_tool("icacls.exe")
-        sid = windows_user_sid(
-            run_windows_acl_tool(
-                [str(whoami), "/user", "/fo", "csv", "/nh"],
-                "current-user lookup",
+        sid = windows_user_sid(run_windows_acl_tool([str(whoami), "/user", "/fo", "csv", "/nh"], "current-user lookup"))
+        local_account = False
+        if WINDOWS_LOCAL_ADMINISTRATOR_SID_RE.fullmatch(sid):
+            local_account = windows_token_has_sid(
+                run_windows_acl_tool(
+                    [str(whoami), "/groups", "/fo", "csv", "/nh"],
+                    "current-token group lookup",
+                ),
+                WINDOWS_LOCAL_ACCOUNT_TOKEN_SID,
             )
-        )
         run_windows_acl_tool(
             [str(icacls), str(path), "/setowner", f"*{sid}", "/q"],
             "owner assignment",
         )
         run_windows_acl_tool(
-            [str(icacls), str(path), "/inheritance:r", "/q"],
-            "DACL inheritance removal",
+            [str(icacls), str(path), "/reset", "/q"],
+            "DACL reset",
         )
         run_windows_acl_tool(
-            [
-                str(icacls),
-                str(path),
-                "/remove",
-                *(f"*{trustee}" for trustee in WINDOWS_DEFAULT_DACL_TRUSTEES),
-                "/q",
-            ],
-            "default DACL removal",
+            [str(icacls), str(path), "/inheritance:r", "/q"],
+            "DACL inheritance removal",
         )
         run_windows_acl_tool(
             [str(icacls), str(path), "/grant:r", f"*{sid}:(OI)(CI)F", "/q"],
@@ -193,7 +204,11 @@ def create_private_job_root(path: Path) -> None:
                 [str(icacls), str(path), "/save", str(descriptor_path), "/q"],
                 "DACL verification",
             )
-            validate_windows_owner_only_dacl(descriptor_path.read_bytes(), sid)
+            validate_windows_owner_only_dacl(
+                descriptor_path.read_bytes(),
+                sid,
+                local_account=local_account,
+            )
         finally:
             descriptor_path.unlink(missing_ok=True)
         if list(path.iterdir()):
@@ -792,12 +807,22 @@ def self_test() -> None:
         sid = "S-1-5-21-4080267330-3575100508-2019971957-1001"
         if windows_user_sid(f'"DOMAIN\\user","{sid}"\r\n'.encode()) != sid:
             raise AssertionError("self-test did not parse one current-user SID")
+        if not windows_token_has_sid(b'"Local account","S-1-5-113"\r\n', WINDOWS_LOCAL_ACCOUNT_TOKEN_SID):
+            raise AssertionError("self-test did not recognize the local-account token SID")
+        if windows_token_has_sid(b'"Domain Users","S-1-5-21-1-2-3-513"\r\n', WINDOWS_LOCAL_ACCOUNT_TOKEN_SID):
+            raise AssertionError("self-test misclassified a domain-only token as a local account")
         valid_acl = f"fixture\r\nD:PAI(A;OICI;FA;;;{sid})\r\n".encode("utf-16-le")
         validate_windows_owner_only_dacl(valid_acl, sid)
+        system_acl = "fixture\r\nD:PAI(A;OICI;FA;;;SY)\r\n".encode("utf-16-le")
+        validate_windows_owner_only_dacl(system_acl, "S-1-5-18")
+        administrator_sid = "S-1-5-21-51256336-3298027356-2228789493-500"
+        administrator_acl = "fixture\r\nD:PAI(A;OICI;FA;;;LA)\r\n".encode("utf-16-le")
+        validate_windows_owner_only_dacl(administrator_acl, administrator_sid, local_account=True)
         invalid_acls = [
             f"fixture\r\nD:AI(A;OICI;FA;;;{sid})\r\n".encode("utf-16-le"),
             f"fixture\r\nD:PAI(A;OICI;FA;;;{sid})(A;OICI;FA;;;S-1-5-18)\r\n".encode("utf-16-le"),
             f"fixture\r\nD:PAI(A;OI;FA;;;{sid})\r\n".encode("utf-16-le"),
+            "fixture\r\nD:PAI(A;OICI;FA;;;LA)\r\n".encode("utf-16-le"),
         ]
         for invalid_acl in invalid_acls:
             try:
@@ -806,6 +831,12 @@ def self_test() -> None:
                 pass
             else:
                 raise AssertionError("self-test accepted a non-owner-only Windows DACL")
+        try:
+            validate_windows_owner_only_dacl(administrator_acl, administrator_sid)
+        except OSError:
+            pass
+        else:
+            raise AssertionError("self-test accepted LA for a nonlocal Administrator SID")
         try:
             windows_user_sid(b'"DOMAIN\\user","not-a-sid"\r\n')
         except OSError:

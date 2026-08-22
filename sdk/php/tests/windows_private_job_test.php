@@ -53,6 +53,15 @@ privateJobExpectFailure(
     static fn (): mixed => $parseSid->invoke(null, "{$sid}\r\nS-1-5-18\r\n"),
     'exactly one current-user SID',
 );
+$tokenHasSid = new ReflectionMethod(Api2InputJob::class, 'windowsTokenHasSid');
+privateJobExpect(
+    $tokenHasSid->invoke(null, "Local account,S-1-5-113\r\n", 'S-1-5-113') === true,
+    'local-account token SID was not recognized',
+);
+privateJobExpect(
+    $tokenHasSid->invoke(null, "Domain Users,S-1-5-21-1-2-3-513\r\n", 'S-1-5-113') === false,
+    'domain-only token was misclassified as a local account',
+);
 
 $validateDacl = new ReflectionMethod(Api2InputJob::class, 'validateWindowsOwnerOnlyDacl');
 $validateDacl->invoke(
@@ -60,11 +69,24 @@ $validateDacl->invoke(
     privateJobUtf16Le("fixture\r\nD:PAI(A;OICI;FA;;;{$sid})\r\n"),
     $sid,
 );
+$validateDacl->invoke(
+    null,
+    privateJobUtf16Le("fixture\r\nD:PAI(A;OICI;FA;;;SY)\r\n"),
+    'S-1-5-18',
+);
+$administratorSid = 'S-1-5-21-51256336-3298027356-2228789493-500';
+$validateDacl->invoke(
+    null,
+    privateJobUtf16Le("fixture\r\nD:PAI(A;OICI;FA;;;LA)\r\n"),
+    $administratorSid,
+    true,
+);
 foreach ([
     "D:AI(A;OICI;FA;;;{$sid})",
     "D:PAI(A;OICI;FA;;;{$sid})(A;OICI;FA;;;S-1-5-18)",
     "D:PAI(A;OI;FA;;;{$sid})",
     'D:PAI(A;OICI;FA;;;S-1-5-18)',
+    'D:PAI(A;OICI;FA;;;LA)',
 ] as $descriptor) {
     privateJobExpectFailure(
         static fn (): mixed => $validateDacl->invoke(
@@ -75,6 +97,14 @@ foreach ([
         'protected owner-only full-access DACL',
     );
 }
+privateJobExpectFailure(
+    static fn (): mixed => $validateDacl->invoke(
+        null,
+        privateJobUtf16Le("fixture\r\nD:PAI(A;OICI;FA;;;LA)\r\n"),
+        $administratorSid,
+    ),
+    'protected owner-only full-access DACL',
+);
 privateJobExpectFailure(
     static fn (): mixed => $validateDacl->invoke(null, "\xFF", $sid),
     'invalid or oversized ACL proof',
