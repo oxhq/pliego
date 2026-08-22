@@ -284,9 +284,11 @@ def validate_probe(
             "input_content_max_bytes",
             "result_transport",
             "invocation_error_transport",
+            "transport_error_transport",
             "success_exit_code",
             "failed_exit_code",
             "invocation_error_exit_code",
+            "transport_error_exit_code",
         ],
         "probe.invocation",
     )
@@ -298,9 +300,11 @@ def validate_probe(
         "input_content_max_bytes": INPUT_CONTENT_MAX_BYTES,
         "result_transport": "stdout-single-json",
         "invocation_error_transport": "stderr-utf8-line",
+        "transport_error_transport": "stderr-utf8-line",
         "success_exit_code": 0,
         "failed_exit_code": 1,
         "invocation_error_exit_code": 64,
+        "transport_error_exit_code": 74,
     }
     if invocation != expected_invocation:
         raise AssertionError("probe invocation contract differs from API 2 framing")
@@ -311,6 +315,7 @@ def validate_probe(
         "success_exit_code",
         "failed_exit_code",
         "invocation_error_exit_code",
+        "transport_error_exit_code",
     ]:
         require_int(invocation[key], expected_invocation[key], f"probe.invocation.{key}")
 
@@ -648,9 +653,11 @@ def self_test() -> None:
                 "input_content_max_bytes": INPUT_CONTENT_MAX_BYTES,
                 "result_transport": "stdout-single-json",
                 "invocation_error_transport": "stderr-utf8-line",
+                "transport_error_transport": "stderr-utf8-line",
                 "success_exit_code": 0,
                 "failed_exit_code": 1,
                 "invocation_error_exit_code": 64,
+                "transport_error_exit_code": 74,
             },
         }
         validate_probe(
@@ -725,6 +732,22 @@ def self_test() -> None:
                 raise
         else:
             raise AssertionError("self-test accepted a different aggregate input-content byte limit")
+        wrong_transport_exit = json.loads(json.dumps(probe))
+        wrong_transport_exit["invocation"]["transport_error_exit_code"] = 75
+        try:
+            validate_probe(
+                wrong_transport_exit,
+                binary_sha256=binary_sha256,
+                expected_version="0.1.1",
+                expected_source_commit="1" * 40,
+                expected_target="x86_64-unknown-linux-gnu",
+                expected_servo_base="2" * 40,
+            )
+        except AssertionError as error:
+            if "invocation contract differs" not in str(error):
+                raise
+        else:
+            raise AssertionError("self-test accepted a different transport-error exit code")
         boolean_version = json.loads(json.dumps(probe))
         boolean_version["version"] = True
         try:

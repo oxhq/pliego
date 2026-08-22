@@ -165,9 +165,11 @@ pub(crate) fn write_contract_probe(
             input_content_max_bytes: INPUT_CONTENT_MAX_BYTES,
             result_transport: "stdout-single-json",
             invocation_error_transport: "stderr-utf8-line",
+            transport_error_transport: "stderr-utf8-line",
             success_exit_code: 0,
             failed_exit_code: 1,
             invocation_error_exit_code: INVOCATION_ERROR_EXIT_CODE,
+            transport_error_exit_code: TRANSPORT_ERROR_EXIT_CODE,
         },
     };
     let mut frame = serde_json::to_vec(&probe).map_err(|error| {
@@ -303,9 +305,11 @@ struct InvocationContract {
     input_content_max_bytes: u64,
     result_transport: &'static str,
     invocation_error_transport: &'static str,
+    transport_error_transport: &'static str,
     success_exit_code: i32,
     failed_exit_code: i32,
     invocation_error_exit_code: i32,
+    transport_error_exit_code: i32,
 }
 
 #[derive(Serialize)]
@@ -1556,6 +1560,9 @@ mod tests {
             "unexpected probe order: {serialized}"
         );
         assert!(serialized.contains(r#""contracts":[{"api":2,"input_manifest":{"schema":"pliego.input-manifest","version":1},"request":{"schema":"pliego.render-request","version":1},"result":{"schema":"pliego.render-result","version":1},"document_scene":{"schema":"pliego.document-scene","version":2},"bundle_manifest":{"schema":"pliego.bundle-manifest","version":1},"profiles":[]}]"#));
+        assert!(serialized.contains(concat!(
+            r#""invocation":{"request_transport":"stdin-single-json","request_max_bytes":1048576,"job_root_transport":"cwd-v1","input_manifest_max_bytes":16777216,"input_content_max_bytes":67108864,"result_transport":"stdout-single-json","invocation_error_transport":"stderr-utf8-line","transport_error_transport":"stderr-utf8-line","success_exit_code":0,"failed_exit_code":1,"invocation_error_exit_code":64,"transport_error_exit_code":74}"#
+        )));
         let probe: Value = serde_json::from_slice(&output).unwrap();
         assert_eq!(
             probe["contracts"],
@@ -1583,6 +1590,11 @@ mod tests {
             INPUT_CONTENT_MAX_BYTES
         );
         assert_eq!(probe["invocation"]["invocation_error_exit_code"], 64);
+        assert_eq!(
+            probe["invocation"]["transport_error_transport"],
+            "stderr-utf8-line"
+        );
+        assert_eq!(probe["invocation"]["transport_error_exit_code"], 74);
         assert!(
             probe["engine"]["runtime"]["binary_sha256"]
                 .as_str()

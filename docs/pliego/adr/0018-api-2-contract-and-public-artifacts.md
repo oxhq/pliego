@@ -133,12 +133,17 @@ The runtime probe fixes the render transport rather than leaving SDKs to infer i
 - `success` exits `0`, while an accepted request whose result is `failed` exits `1`; and
 - an argument, framing, decoding, normalization, manifest-pairing, or unsupported-contract error
   accepts no request, writes no stdout, writes one newline-terminated UTF-8 diagnostic line to stderr,
-  and exits `64`.
+  and exits `64`; and
+- after request acceptance, an engine-detected failure to serialize, retain required diagnostics, or
+  write or flush the terminal result leaves stdout empty or incomplete and therefore unusable, writes
+  one newline-terminated UTF-8 `pliego: API2_TRANSPORT_ERROR: ...` diagnostic line to stderr, and
+  exits `74`.
 
 An invocation error is deliberately not a `RenderResult`: there is no accepted normalized request to
 echo and no engine render outcome. Stderr text is diagnostic, not a versioned machine contract. SDKs
 map exit `64` plus empty stdout to their own invocation exception; they must not synthesize a failed
-result or expose staged delivery. Any other exit/stdout combination is a transport failure.
+result or expose staged delivery. Exit `74` is the versioned engine-generated transport-error
+boundary. Any other exit/stdout combination remains an unspecified transport or process failure.
 
 Filesystem roots used to supply fixture bytes, stage output, retain diagnostics, or publish a final
 caller path are invocation concerns. Absolute paths, process identifiers, hostnames, temporary

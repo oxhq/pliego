@@ -97,9 +97,11 @@
         "input_content_max_bytes",
         "result_transport",
         "invocation_error_transport",
+        "transport_error_transport",
         "success_exit_code",
         "failed_exit_code",
-        "invocation_error_exit_code"
+        "invocation_error_exit_code",
+        "transport_error_exit_code"
       ],
       "properties": {
         "request_transport": { "const": "stdin-single-json" },
@@ -109,9 +111,11 @@
         "input_content_max_bytes": { "const": 67108864 },
         "result_transport": { "const": "stdout-single-json" },
         "invocation_error_transport": { "const": "stderr-utf8-line" },
+        "transport_error_transport": { "const": "stderr-utf8-line" },
         "success_exit_code": { "const": 0 },
         "failed_exit_code": { "const": 1 },
-        "invocation_error_exit_code": { "const": 64 }
+        "invocation_error_exit_code": { "const": 64 },
+        "transport_error_exit_code": { "const": 74 }
       }
     }
   }
