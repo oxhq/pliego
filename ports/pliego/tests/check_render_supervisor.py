@@ -63,7 +63,6 @@ FAILED_REQUIRED_ROOT_FILES = {
     "session-state.jsonl",
 }
 COMMITTED_PUBLICATION_FILES = {"committed.json", "lease", "outcome.json", "plan.json", "prepared.json"}
-PLANNED_PUBLICATION_FILES = {"lease", "plan.json"}
 STDERR_NEWLINE = b"\n"
 
 
@@ -344,14 +343,13 @@ def require_failure_artifact_closure(artifacts: Path) -> None:
         require(
             (artifacts / "render.png").read_bytes().startswith(b"\x89PNG\r\n\x1a\n"), "failure render.png is invalid"
         )
-    require(directories == {"publication", "resources"}, f"failure root directories drifted: {sorted(directories)}")
+    require(directories == {"resources"}, f"failure root directories drifted: {sorted(directories)}")
     resources = require_resource_directory(artifacts / "resources", "failure")
     ledger_resources = failure_ledger_resources(artifacts / "resources.jsonl")
     require(
         resources == ledger_resources,
         f"failure resource closure drifted: files={sorted(resources)}, ledger={sorted(ledger_resources)}",
     )
-    require_publication_directory(artifacts / "publication", PLANNED_PUBLICATION_FILES, "failure")
 
 
 def is_render_id(value: Any) -> bool:
@@ -1092,10 +1090,6 @@ def self_test() -> None:
             (artifacts / name).write_bytes(b"")
         resources = artifacts / "resources"
         resources.mkdir()
-        publication = artifacts / "publication"
-        publication.mkdir()
-        for name in PLANNED_PUBLICATION_FILES:
-            (publication / name).write_bytes(b"")
         (artifacts / "unexpected.bin").write_bytes(b"unexpected")
         expect_rejection(
             lambda: require_failure_artifact_closure(artifacts),
@@ -1114,6 +1108,13 @@ def self_test() -> None:
         expect_rejection(
             lambda: require_failure_artifact_closure(artifacts),
             "digest-valid unreferenced failure resource",
+        )
+        (resources / orphan_digest).unlink()
+        require_failure_artifact_closure(artifacts)
+        (artifacts / "publication").mkdir()
+        expect_rejection(
+            lambda: require_failure_artifact_closure(artifacts),
+            "failure publication controls",
         )
     print("render supervisor checker self-test: PASS")
 

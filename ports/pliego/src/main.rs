@@ -140,7 +140,7 @@ use pliego::Operation;
 ))]
 use pliego::capture::capture_document_scene_with_canvas;
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
-use pliego::capture::{CapturedFontSource, SceneCapture};
+use pliego::capture::{CapturedFontSource, SceneCapture, UnsupportedPaintKind};
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
 use pliego::pdf::{CSS_PX_TO_PDF_PT, PdfFontResource, PdfFontVariation, render_document_pdf};
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
@@ -1664,16 +1664,6 @@ fn render_with_shell_oracle(request: RenderRequest) -> Result<RenderOutcome, Ren
                 &error.to_string(),
             )
         })?;
-    artifacts
-        .write_layout_debug(&layout_debug)
-        .map_err(|error| {
-            fail_session(
-                &artifacts,
-                &document_pdf_path,
-                "SCENE_CAPTURE_LAYOUT_WRITE_FAILED",
-                &error.to_string(),
-            )
-        })?;
     let mut resource_resolution_error = None;
     let scene_capture_started = Instant::now();
     let scene_capture = capture_document_scene_with_canvas(
@@ -1709,6 +1699,18 @@ fn render_with_shell_oracle(request: RenderRequest) -> Result<RenderOutcome, Ren
         )
     })?;
     let scene_capture_ms = elapsed_milliseconds(scene_capture_started);
+    if request.allow_partial_scene || scene_capture_code(&scene_capture).is_none() {
+        artifacts
+            .write_layout_debug(&layout_debug)
+            .map_err(|error| {
+                fail_session(
+                    &artifacts,
+                    &document_pdf_path,
+                    "SCENE_CAPTURE_LAYOUT_WRITE_FAILED",
+                    &error.to_string(),
+                )
+            })?;
+    }
     publish_captured_document(
         &request,
         &document,
@@ -2169,6 +2171,25 @@ fn publish_captured_document(
             ),
         )));
     }
+    if !request.allow_partial_scene &&
+        let Some(failure) = rejected_scene_capture(&scene_capture)
+    {
+        set_document_pdf_environment(
+            &mut environment,
+            &document_pdf_path,
+            "failed",
+            Some(&failure),
+        );
+        let warning = artifacts
+            .write_environment(&environment)
+            .err()
+            .map(|error| format!("cannot record rejected PDF state: {error}"));
+        let mut error = fail(failure.code, &failure.message);
+        if let Some(warning) = warning {
+            error.warnings.insert(0, warning);
+        }
+        return Err(finish_failure(error));
+    }
     let scene_artifacts = match persist_scene_capture(
         &artifacts,
         &scene_capture,
@@ -2198,35 +2219,6 @@ fn publish_captured_document(
             return Err(finish_failure(failure));
         },
     };
-    if scene_artifacts.capture_status != "complete" && !request.allow_partial_scene {
-        let failure = SceneArtifactError::new(
-            scene_artifacts
-                .capture_code
-                .unwrap_or("SCENE_CAPTURE_INCOMPLETE"),
-            format!(
-                "document uses paint outside the supported profile; inspect {}",
-                artifacts
-                    .public_directory()
-                    .join("scene-report.json")
-                    .display()
-            ),
-        );
-        set_document_pdf_environment(
-            &mut environment,
-            &document_pdf_path,
-            "failed",
-            Some(&failure),
-        );
-        let warning = artifacts
-            .write_environment(&environment)
-            .err()
-            .map(|error| format!("cannot record rejected PDF state: {error}"));
-        let mut error = fail(failure.code, &failure.message);
-        if let Some(warning) = warning {
-            error.warnings.insert(0, warning);
-        }
-        return Err(finish_failure(error));
-    }
     let rendered_bytes = std::fs::metadata(&proof)
         .map(|metadata| metadata.len())
         .unwrap_or(0);
@@ -2946,7 +2938,8 @@ fn finish_document_session_render(
         &mut publication,
         Some(&stable_image_png),
         Some(&readiness),
-        Some(&layout_debug),
+        (request.allow_partial_scene || scene_capture_code(&capture).is_none())
+            .then_some(&layout_debug),
         Some(controlled_runtime_ms),
         Some(scene_capture_ms),
         &console,
@@ -4796,6 +4789,66 @@ impl SceneArtifactError {
 }
 
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+fn scene_capture_code(capture: &SceneCapture) -> Option<&'static str> {
+    if !capture.text_mapping_gaps.is_empty() {
+        Some("SCENE_CAPTURE_LIMITATIONS")
+    } else if !capture.unsupported_events.is_empty() {
+        Some("SCENE_CAPTURE_UNSUPPORTED_PAINT_EVENTS")
+    } else {
+        None
+    }
+}
+
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+const fn unsupported_paint_kind_name(kind: UnsupportedPaintKind) -> &'static str {
+    match kind {
+        UnsupportedPaintKind::Box => "box",
+        UnsupportedPaintKind::RootBackground => "root-background",
+        UnsupportedPaintKind::Outline => "outline",
+        UnsupportedPaintKind::CollapsedTableBorders => "collapsed-table-borders",
+        UnsupportedPaintKind::Iframe => "iframe",
+        UnsupportedPaintKind::TextEffects => "text-effects",
+        UnsupportedPaintKind::ContentGeometry => "content-geometry",
+        UnsupportedPaintKind::SvgAnimation => "svg-animation",
+        UnsupportedPaintKind::SvgCompositing => "svg-compositing",
+        UnsupportedPaintKind::SvgStroke => "svg-stroke",
+        UnsupportedPaintKind::SvgPaint => "svg-paint",
+        UnsupportedPaintKind::SvgImage => "svg-image",
+        UnsupportedPaintKind::SvgText => "svg-text",
+        UnsupportedPaintKind::SvgInvalidPath => "svg-invalid-path",
+    }
+}
+
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+fn rejected_scene_capture(capture: &SceneCapture) -> Option<SceneArtifactError> {
+    let code = scene_capture_code(capture)?;
+    let mut limitations = Vec::new();
+    if !capture.unsupported_events.is_empty() {
+        let mut kinds = Vec::new();
+        for event in &capture.unsupported_events {
+            let kind = unsupported_paint_kind_name(event.kind);
+            if !kinds.contains(&kind) {
+                kinds.push(kind);
+            }
+        }
+        limitations.push(format!("unsupported paint kinds: {}", kinds.join(", ")));
+    }
+    if !capture.text_mapping_gaps.is_empty() {
+        limitations.push(format!(
+            "text mapping gaps: {}",
+            capture.text_mapping_gaps.len()
+        ));
+    }
+    Some(SceneArtifactError::new(
+        code,
+        format!(
+            "document scene capture is incomplete ({}); rerun with --allow-partial-scene to inspect scene diagnostics",
+            limitations.join("; ")
+        ),
+    ))
+}
+
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
 #[derive(Debug, PartialEq)]
 struct SceneArtifactSummary {
     scene_hash: String,
@@ -5083,18 +5136,11 @@ fn persist_scene_capture(
     })?;
     let preview_ms = elapsed_milliseconds(preview_started);
 
-    let capture_status =
-        if capture.unsupported_events.is_empty() && capture.text_mapping_gaps.is_empty() {
-            "complete"
-        } else {
-            "partial"
-        };
-    let capture_code = if !capture.text_mapping_gaps.is_empty() {
-        Some("SCENE_CAPTURE_LIMITATIONS")
-    } else if !capture.unsupported_events.is_empty() {
-        Some("SCENE_CAPTURE_UNSUPPORTED_PAINT_EVENTS")
+    let capture_code = scene_capture_code(capture);
+    let capture_status = if capture_code.is_none() {
+        "complete"
     } else {
-        None
+        "partial"
     };
     let render_pdf = capture_status == "complete" || allow_partial_scene;
 

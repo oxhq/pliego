@@ -9,13 +9,14 @@ Chromium, Node.js, or Java with an application.
 
 | Item | Current public boundary |
 | --- | --- |
-| Source release line | v0.2.0 controlled-runtime cutover |
-| Publication status | The exact tag and assets on GitHub Releases are authoritative; a source branch is not a release |
+| Source release line | v0.2.x controlled-runtime line; this source targets v0.2.1 |
+| Publication status | GitHub Releases is authoritative for the latest exact tag and native assets |
 | Engine protocol | API 1 |
 | Supported input trust | Application-owned HTML and assets |
 | Runtime network | Denied by default; explicit URL roots are opt-in |
 | Native bundles | Linux x86_64, Windows x86_64, macOS x86_64, macOS arm64 |
 | Primary integration | PHP and Laravel packages |
+| Composer packages | Packagist is authoritative for the latest stable `oxhq/pliego-php` and `oxhq/pliego-laravel` v0.2.x packages |
 | Hostile HTML | Unsupported; Pliego is not a security sandbox |
 | API 2 | Unreleased probe/decoder foundation; advertises no render contract |
 
@@ -61,10 +62,10 @@ records that boundary.
 
 ## What the repository currently proves
 
-- The v0.2 source surface and native package targets are versioned in the source
-  tree; GitHub Releases remains authoritative for publication status.
-- The package workflow defines native builds, checksum and notice artifacts, and
-  engine-API smoke checks for the four published targets.
+- Native v0.2.x releases target four platforms with checksum and notice artifacts;
+  the latest exact tag and assets on GitHub Releases remain authoritative.
+- The PHP and Laravel v0.2.x package lines are published on Packagist and pass their
+  focused hosted package checks at release time.
 - Focused fixtures cover supported pagination, fonts, images, links, Chart.js usage,
   and unsupported-paint failure behavior.
 - The Laravel package exposes installation, environment diagnosis, rendering, typed

@@ -2,8 +2,8 @@
 
 Laravel 13 integration for application-owned Blade documents.
 
-The v0.2 commands below become installable only after the split Laravel package tag
-is published. Until then, Packagist's latest stable line remains `^0.1.1`.
+The v0.2 Laravel package line is published on Packagist; this compatible constraint
+selects its latest published patch:
 
 ```sh
 composer require oxhq/pliego-laravel:^0.2.0
