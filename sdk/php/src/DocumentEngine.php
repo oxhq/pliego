@@ -578,8 +578,9 @@ final class DocumentEngine
     private function finishBridgeTimings(array $context, int $rendererStartedAt, array $phases): array
     {
         $total = hrtime(true) - $context['total_started_ns'];
-        $outside = $rendererStartedAt - $context['total_started_ns'];
-        $attributed = array_sum($phases) + $outside;
+        $attributed = array_sum($phases)
+            + ($context['laravel_setup_ns'] ?? 0)
+            + ($context['view_render_ns'] ?? 0);
 
         return [
             'schema' => 'pliego.php-bridge-timings',
