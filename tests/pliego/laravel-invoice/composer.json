@@ -11,7 +11,7 @@
             "options": {
                 "symlink": true,
                 "versions": {
-                    "oxhq/pliego-php": "0.3.0"
+                    "oxhq/pliego-php": "0.3.1"
                 }
             }
         },
@@ -21,7 +21,7 @@
             "options": {
                 "symlink": true,
                 "versions": {
-                    "oxhq/pliego-laravel": "0.3.0"
+                    "oxhq/pliego-laravel": "0.3.1"
                 }
             }
         }
@@ -29,7 +29,7 @@
     "require": {
         "php": "^8.3",
         "laravel/framework": "13.22.0",
-        "oxhq/pliego-laravel": "0.3.0"
+        "oxhq/pliego-laravel": "0.3.1"
     },
     "scripts": {
         "post-autoload-dump": [

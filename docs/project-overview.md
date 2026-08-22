@@ -9,7 +9,7 @@ Chromium, Node.js, or Java with an application.
 
 | Item | Current public boundary |
 | --- | --- |
-| Source release line | v0.3.x API 2 base-engine line; this source targets v0.3.0 |
+| Source release line | v0.3.x API 2 base-engine line; this source targets v0.3.1 |
 | Publication status | GitHub Releases is authoritative for the latest exact tag and native assets |
 | Engine protocol | API 2 profile-null tuple; API 1 compatibility commands retained temporarily |
 | Supported input trust | Application-owned HTML and assets |

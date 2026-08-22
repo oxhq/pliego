@@ -6603,7 +6603,7 @@ dependencies = [
 
 [[package]]
 name = "pliego"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "base64",
  "criterion",
@@ -6645,7 +6645,7 @@ dependencies = [
 
 [[package]]
 name = "pliego-core-benchmark"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "criterion",
  "flate2",
