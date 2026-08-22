@@ -256,7 +256,7 @@ impl BoundDirectory {
         Self::open_with_move_access(path, false)
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     pub(crate) fn open_private(path: PathBuf) -> io::Result<Self> {
         let directory = Self::open(path)?;
         require_private_directory(&directory)?;
@@ -309,7 +309,7 @@ impl BoundDirectory {
         Ok(())
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     pub(crate) fn child_names(&self, maximum: usize) -> io::Result<Vec<OsString>> {
         self.require_current()?;
         let names = read_bound_directory_names(self, maximum)?;
@@ -317,7 +317,7 @@ impl BoundDirectory {
         Ok(names)
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     pub(crate) fn open_child(&self, name: &OsStr) -> io::Result<Self> {
         immediate_child_name(Path::new(name), "bound child name")?;
         self.require_current()?;
@@ -334,6 +334,16 @@ impl BoundDirectory {
             ));
         }
         let handle = Handle::from_file(open_bound_child_directory_handle(self, name)?)?;
+        let opened = handle.as_file().metadata()?;
+        if path_metadata_is_alias(&opened) || !opened.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "bound child handle must name a directory, not an alias or special file: {}",
+                    requested_path.display()
+                ),
+            ));
+        }
         let directory = Self {
             requested_path,
             path,
@@ -345,7 +355,7 @@ impl BoundDirectory {
         Ok(directory)
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     pub(crate) fn read_single_link_child(
         &self,
         name: &OsStr,
@@ -1381,7 +1391,7 @@ fn require_single_link_regular_file(
     if succeeded == 0 {
         return Err(io::Error::last_os_error());
     }
-    if metadata.is_file() && information.NumberOfLinks == 1 {
+    if !path_metadata_is_alias(metadata) && metadata.is_file() && information.NumberOfLinks == 1 {
         return Ok(());
     }
     Err(io::Error::new(
@@ -4725,6 +4735,163 @@ fn read_bound_directory_names(
     ))
 }
 
+#[cfg(windows)]
+fn read_bound_directory_names(
+    directory: &BoundDirectory,
+    maximum: usize,
+) -> io::Result<Vec<OsString>> {
+    use std::mem::{align_of, offset_of, size_of};
+    use std::os::windows::ffi::OsStringExt;
+    use std::os::windows::io::AsRawHandle;
+
+    use windows_sys::Win32::Foundation::ERROR_NO_MORE_FILES;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ID_BOTH_DIR_INFO, FileIdBothDirectoryInfo, FileIdBothDirectoryRestartInfo,
+        GetFileInformationByHandleEx,
+    };
+
+    const BUFFER_BYTES: usize = 64 * 1024;
+    let word_count = BUFFER_BYTES.div_ceil(size_of::<usize>());
+    let mut storage = vec![0_usize; word_count];
+    let buffer_bytes = storage.len() * size_of::<usize>();
+    let buffer_bytes_u32 = u32::try_from(buffer_bytes).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "bound directory enumeration buffer is too large",
+        )
+    })?;
+    let name_offset = offset_of!(FILE_ID_BOTH_DIR_INFO, FileName);
+    let mut restart = true;
+    let mut names = Vec::new();
+
+    loop {
+        storage.fill(0);
+        let information_class = if restart {
+            FileIdBothDirectoryRestartInfo
+        } else {
+            FileIdBothDirectoryInfo
+        };
+        // SAFETY: the directory handle and aligned output buffer remain live, and the advertised
+        // byte length covers the complete storage allocation.
+        let succeeded = unsafe {
+            GetFileInformationByHandleEx(
+                directory.handle.as_file().as_raw_handle() as _,
+                information_class,
+                storage.as_mut_ptr().cast(),
+                buffer_bytes_u32,
+            )
+        };
+        restart = false;
+        if succeeded == 0 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() == Some(ERROR_NO_MORE_FILES as i32) {
+                break;
+            }
+            return Err(error);
+        }
+
+        let mut offset = 0usize;
+        loop {
+            if offset % align_of::<FILE_ID_BOTH_DIR_INFO>() != 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "bound directory enumeration returned a misaligned record",
+                ));
+            }
+            let header_end = offset.checked_add(name_offset).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "bound directory enumeration record offset overflow",
+                )
+            })?;
+            if header_end > buffer_bytes {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "bound directory enumeration returned a truncated record",
+                ));
+            }
+            // SAFETY: storage is pointer-aligned and header_end proves the fixed record prefix is
+            // inside the output buffer. Variable-length name bounds are checked before reading it.
+            let information = unsafe {
+                &*storage
+                    .as_ptr()
+                    .cast::<u8>()
+                    .add(offset)
+                    .cast::<FILE_ID_BOTH_DIR_INFO>()
+            };
+            let name_bytes = usize::try_from(information.FileNameLength).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "bound directory entry name is too large",
+                )
+            })?;
+            if name_bytes % size_of::<u16>() != 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "bound directory entry name has an invalid UTF-16 byte length",
+                ));
+            }
+            let record_bytes = name_offset.checked_add(name_bytes).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "bound directory entry length overflow",
+                )
+            })?;
+            let record_end = offset.checked_add(record_bytes).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "bound directory entry offset overflow",
+                )
+            })?;
+            if record_end > buffer_bytes {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "bound directory enumeration returned a truncated name",
+                ));
+            }
+            let next = information.NextEntryOffset as usize;
+            if next != 0 && (next < record_bytes || offset.saturating_add(next) > buffer_bytes) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "bound directory enumeration returned an invalid next-entry offset",
+                ));
+            }
+
+            let name_words = name_bytes / size_of::<u16>();
+            // SAFETY: record_end proves this exact UTF-16 name range lies inside storage.
+            let name = unsafe {
+                std::slice::from_raw_parts(
+                    std::ptr::addr_of!(information.FileName).cast::<u16>(),
+                    name_words,
+                )
+            };
+            if name.contains(&0) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "bound directory entry name contains an embedded NUL",
+                ));
+            }
+            let name = OsString::from_wide(name);
+            if name != OsStr::new(".") && name != OsStr::new("..") {
+                if names.len() == maximum {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("bound directory contains more than {maximum} entries"),
+                    ));
+                }
+                names.push(name);
+            }
+
+            if next == 0 {
+                break;
+            }
+            offset += next;
+        }
+    }
+    names.sort();
+    Ok(names)
+}
+
 #[cfg(unix)]
 fn open_bound_child_directory_handle(parent: &BoundDirectory, name: &OsStr) -> io::Result<File> {
     use std::ffi::CString;
@@ -4757,6 +4924,23 @@ fn open_bound_child_directory_handle(parent: &BoundDirectory, name: &OsStr) -> i
     Ok(unsafe { File::from_raw_fd(descriptor) })
 }
 
+#[cfg(windows)]
+fn open_bound_child_directory_handle(parent: &BoundDirectory, name: &OsStr) -> io::Result<File> {
+    use windows_sys::Wdk::Storage::FileSystem::FILE_DIRECTORY_FILE;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        FILE_TRAVERSE, READ_CONTROL, SYNCHRONIZE,
+    };
+
+    open_bound_child_handle(
+        parent,
+        name,
+        FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | FILE_TRAVERSE | READ_CONTROL | SYNCHRONIZE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        FILE_DIRECTORY_FILE,
+    )
+}
+
 #[cfg(unix)]
 fn open_bound_child_file_handle(parent: &BoundDirectory, name: &OsStr) -> io::Result<File> {
     use std::ffi::CString;
@@ -4785,6 +4969,102 @@ fn open_bound_child_file_handle(parent: &BoundDirectory, name: &OsStr) -> io::Re
     Ok(unsafe { File::from_raw_fd(descriptor) })
 }
 
+#[cfg(windows)]
+fn open_bound_child_file_handle(parent: &BoundDirectory, name: &OsStr) -> io::Result<File> {
+    use windows_sys::Wdk::Storage::FileSystem::FILE_NON_DIRECTORY_FILE;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_SHARE_READ, READ_CONTROL, SYNCHRONIZE,
+    };
+
+    open_bound_child_handle(
+        parent,
+        name,
+        FILE_READ_DATA | FILE_READ_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE,
+        FILE_SHARE_READ,
+        FILE_NON_DIRECTORY_FILE,
+    )
+}
+
+#[cfg(windows)]
+fn open_bound_child_handle(
+    parent: &BoundDirectory,
+    name: &OsStr,
+    desired_access: u32,
+    share_access: u32,
+    object_kind: u32,
+) -> io::Result<File> {
+    use std::mem::size_of;
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::io::{AsRawHandle, FromRawHandle};
+
+    use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
+    use windows_sys::Wdk::Storage::FileSystem::{
+        FILE_OPEN_FOR_BACKUP_INTENT, FILE_OPEN_REPARSE_POINT, FILE_SYNCHRONOUS_IO_NONALERT,
+        NtOpenFile,
+    };
+    use windows_sys::Win32::Foundation::{OBJ_DONT_REPARSE, RtlNtStatusToDosError, UNICODE_STRING};
+    use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
+
+    let mut name: Vec<u16> = name.encode_wide().collect();
+    if name.is_empty() || name.contains(&0) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "bound child name is empty or contains an embedded NUL",
+        ));
+    }
+    let name_bytes = name
+        .len()
+        .checked_mul(size_of::<u16>())
+        .and_then(|bytes| u16::try_from(bytes).ok())
+        .ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "bound child name is too long")
+        })?;
+    let name = UNICODE_STRING {
+        Length: name_bytes,
+        MaximumLength: name_bytes,
+        Buffer: name.as_mut_ptr(),
+    };
+    let attributes = OBJECT_ATTRIBUTES {
+        Length: size_of::<OBJECT_ATTRIBUTES>() as u32,
+        RootDirectory: parent.handle.as_file().as_raw_handle() as _,
+        ObjectName: &raw const name,
+        Attributes: OBJ_DONT_REPARSE,
+        SecurityDescriptor: std::ptr::null(),
+        SecurityQualityOfService: std::ptr::null(),
+    };
+    let mut handle = std::ptr::null_mut();
+    let mut io_status = IO_STATUS_BLOCK::default();
+    // SAFETY: the held parent, UTF-16 name, object attributes, output handle, and status block all
+    // remain live. RootDirectory makes the single validated name relative to the bound parent,
+    // while OBJ_DONT_REPARSE and FILE_OPEN_REPARSE_POINT prevent traversal through aliases.
+    let status = unsafe {
+        NtOpenFile(
+            &mut handle,
+            desired_access,
+            &attributes,
+            &mut io_status,
+            share_access,
+            object_kind
+                | FILE_OPEN_FOR_BACKUP_INTENT
+                | FILE_OPEN_REPARSE_POINT
+                | FILE_SYNCHRONOUS_IO_NONALERT,
+        )
+    };
+    if status < 0 {
+        // SAFETY: RtlNtStatusToDosError is a pure status-code conversion.
+        let error = unsafe { RtlNtStatusToDosError(status) };
+        return Err(io::Error::from_raw_os_error(error as i32));
+    }
+    if handle.is_null() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "bound child open succeeded without returning a handle",
+        ));
+    }
+    // SAFETY: successful NtOpenFile returned this newly owned handle exactly once.
+    Ok(unsafe { File::from_raw_handle(handle) })
+}
+
 #[cfg(unix)]
 fn open_bound_directory_handle(path: &Path, _movable: bool) -> io::Result<File> {
     open_directory_handle(path)
@@ -4795,18 +5075,20 @@ fn open_directory_handle(path: &Path) -> io::Result<File> {
     use std::os::windows::fs::OpenOptionsExt;
 
     use windows_sys::Win32::Storage::FileSystem::{
-        FILE_ADD_FILE, FILE_ADD_SUBDIRECTORY, FILE_FLAG_BACKUP_SEMANTICS, FILE_READ_ATTRIBUTES,
-        FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE, READ_CONTROL, SYNCHRONIZE,
+        FILE_ADD_FILE, FILE_ADD_SUBDIRECTORY, FILE_FLAG_BACKUP_SEMANTICS, FILE_LIST_DIRECTORY,
+        FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE, READ_CONTROL,
+        SYNCHRONIZE,
     };
 
     OpenOptions::new()
         .access_mode(
-            FILE_ADD_FILE |
-                FILE_ADD_SUBDIRECTORY |
-                FILE_READ_ATTRIBUTES |
-                FILE_TRAVERSE |
-                READ_CONTROL |
-                SYNCHRONIZE,
+            FILE_ADD_FILE
+                | FILE_ADD_SUBDIRECTORY
+                | FILE_LIST_DIRECTORY
+                | FILE_READ_ATTRIBUTES
+                | FILE_TRAVERSE
+                | READ_CONTROL
+                | SYNCHRONIZE,
         )
         .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
@@ -4886,13 +5168,20 @@ fn open_bound_directory_handle(path: &Path, movable: bool) -> io::Result<File> {
     use std::os::windows::fs::OpenOptionsExt;
 
     use windows_sys::Win32::Storage::FileSystem::{
-        DELETE, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
-        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE, READ_CONTROL,
-        SYNCHRONIZE,
+        DELETE, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_LIST_DIRECTORY,
+        FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE,
+        READ_CONTROL, SYNCHRONIZE,
     };
 
     OpenOptions::new()
-        .access_mode(DELETE | FILE_READ_ATTRIBUTES | FILE_TRAVERSE | READ_CONTROL | SYNCHRONIZE)
+        .access_mode(
+            DELETE
+                | FILE_LIST_DIRECTORY
+                | FILE_READ_ATTRIBUTES
+                | FILE_TRAVERSE
+                | READ_CONTROL
+                | SYNCHRONIZE,
+        )
         .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
         .open(path)
@@ -5417,7 +5706,7 @@ mod tests {
         path_metadata_is_alias, promote_staged_artifacts, remove_empty_private_container,
         serialize_publication_outcome, validate_staged_artifacts,
     };
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     use super::{BoundDirectory, read_bound_directory_names};
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -5447,6 +5736,48 @@ mod tests {
         );
 
         drop(bound);
+        fs::remove_dir_all(&sandbox).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_bound_directory_enumerates_reads_and_holds_child_identities() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let sandbox = test_temp_dir().join(format!(
+            "pliego-bound-windows-input-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir(&sandbox).unwrap();
+        let requested = sandbox.join("job");
+        create_private_directory(&requested).unwrap();
+        let input = requested.join("input");
+        fs::create_dir(&input).unwrap();
+        fs::write(input.join("document.html"), b"held input").unwrap();
+
+        let root = BoundDirectory::open_private(requested.clone()).unwrap();
+        assert_eq!(
+            read_bound_directory_names(&root, 1).unwrap(),
+            [std::ffi::OsString::from("input")]
+        );
+        let child = root.open_child(std::ffi::OsStr::new("input")).unwrap();
+        assert_eq!(
+            child.child_names(1).unwrap(),
+            [std::ffi::OsString::from("document.html")]
+        );
+        assert_eq!(
+            child
+                .read_single_link_child(std::ffi::OsStr::new("document.html"), 10)
+                .unwrap(),
+            b"held input"
+        );
+        assert!(fs::rename(&requested, sandbox.join("moved-job")).is_err());
+        assert!(fs::rename(&input, requested.join("moved-input")).is_err());
+
+        drop(child);
+        drop(root);
         fs::remove_dir_all(&sandbox).unwrap();
     }
 

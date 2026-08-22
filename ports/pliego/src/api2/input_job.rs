@@ -8,25 +8,25 @@
 //! below the decoder lets tests prove the filesystem authority boundary before render activation.
 
 use std::collections::BTreeMap;
-#[cfg(any(test, target_os = "linux", target_os = "macos"))]
+#[cfg(any(test, target_os = "linux", target_os = "macos", windows))]
 use std::collections::BTreeSet;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 use std::ffi::{OsStr, OsString};
 use std::path::Path;
 
 use serde_json::Value;
-#[cfg(any(test, target_os = "linux", target_os = "macos"))]
+#[cfg(any(test, target_os = "linux", target_os = "macos", windows))]
 use sha2::{Digest, Sha256};
 
 use super::InvocationError;
-#[cfg(any(test, target_os = "linux", target_os = "macos"))]
+#[cfg(any(test, target_os = "linux", target_os = "macos", windows))]
 use super::{
     INPUT_FIELDS, closed_object, decode_input_manifest, hex_lower, required, required_string,
     validate_request,
 };
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 use super::{INPUT_MANIFEST_MAX_BYTES, INPUT_TREE_MAX_NODES, required_u64};
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 use crate::session::BoundDirectory;
 
 #[derive(Debug, Eq, PartialEq)]
@@ -45,7 +45,7 @@ pub(crate) struct LoadedInputResource {
 }
 
 #[derive(Clone, Debug)]
-#[cfg(any(test, target_os = "linux", target_os = "macos"))]
+#[cfg(any(test, target_os = "linux", target_os = "macos", windows))]
 struct ExpectedInputResource {
     media_type: String,
     content_address: String,
@@ -54,7 +54,7 @@ struct ExpectedInputResource {
 
 /// Freeze one fixed-layout cwd-v1 job into an immutable, host-path-free input store.
 #[cfg_attr(not(test), allow(dead_code))]
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 pub(crate) fn load_input_job(
     _job_root: &Path,
     _request: &Value,
@@ -66,7 +66,7 @@ pub(crate) fn load_input_job(
 
 /// Freeze one fixed-layout cwd-v1 job into an immutable, host-path-free input store.
 #[cfg_attr(not(test), allow(dead_code))]
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 pub(crate) fn load_input_job(
     job_root: &Path,
     request: &Value,
@@ -189,7 +189,7 @@ impl LoadedInputResource {
     }
 }
 
-#[cfg(any(test, target_os = "linux", target_os = "macos"))]
+#[cfg(any(test, target_os = "linux", target_os = "macos", windows))]
 fn finish_resolved_input_job(
     canonical_manifest: Vec<u8>,
     entrypoint: String,
@@ -260,7 +260,7 @@ pub(crate) fn resolve_input_job_for_test(
     finish_resolved_input_job(canonical_manifest.to_vec(), entrypoint, resources)
 }
 
-#[cfg(any(test, target_os = "linux", target_os = "macos"))]
+#[cfg(any(test, target_os = "linux", target_os = "macos", windows))]
 fn request_input(request: &Value) -> Result<&serde_json::Map<String, Value>, InvocationError> {
     let request =
         closed_object(request, "$", super::TOP_LEVEL_FIELDS).map_err(InvocationError::new)?;
@@ -272,7 +272,7 @@ fn request_input(request: &Value) -> Result<&serde_json::Map<String, Value>, Inv
     .map_err(InvocationError::new)
 }
 
-#[cfg(any(test, target_os = "linux", target_os = "macos"))]
+#[cfg(any(test, target_os = "linux", target_os = "macos", windows))]
 fn expected_input_tree(
     manifest: &Value,
 ) -> Result<(BTreeMap<String, ExpectedInputResource>, BTreeSet<String>), InvocationError> {
@@ -313,7 +313,7 @@ fn expected_input_tree(
     Ok((files, directories))
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 fn load_directory(
     directory: &BoundDirectory,
     relative_parent: &str,
@@ -399,7 +399,7 @@ fn load_directory(
     Ok(())
 }
 
-#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+#[cfg(all(test, any(target_os = "linux", target_os = "macos", windows)))]
 mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -538,6 +538,7 @@ mod tests {
         assert!(load_input_job(&job, &request()).is_err());
     }
 
+    #[cfg(unix)]
     #[test]
     fn rejects_expected_file_and_input_directory_aliases() {
         use std::os::unix::fs::symlink;
@@ -557,6 +558,25 @@ mod tests {
         assert!(load_input_job(&job, &request()).is_err());
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn rejects_a_junction_as_the_input_directory() {
+        let (sandbox, job) = Sandbox::fixture();
+        let input = job.join("input");
+        let outside = sandbox.0.join("outside-input");
+        fs::rename(&input, &outside).unwrap();
+        let status = std::process::Command::new("cmd.exe")
+            .args(["/d", "/c", "mklink", "/J"])
+            .arg(&input)
+            .arg(&outside)
+            .status()
+            .unwrap();
+        assert!(status.success(), "failed to create junction fixture");
+
+        assert!(load_input_job(&job, &request()).is_err());
+    }
+
+    #[cfg(unix)]
     #[test]
     fn rejects_nonprivate_roots_and_blocking_special_files() {
         use std::os::unix::fs::PermissionsExt;
@@ -575,7 +595,7 @@ mod tests {
     }
 }
 
-#[cfg(all(test, not(any(target_os = "linux", target_os = "macos"))))]
+#[cfg(all(test, not(any(target_os = "linux", target_os = "macos", windows))))]
 mod unsupported_platform_tests {
     use super::*;
 
