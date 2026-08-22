@@ -72,9 +72,11 @@ if (($argv[1] ?? null) === '--contract-probe') {
             'input_content_max_bytes' => 67_108_864,
             'result_transport' => 'stdout-single-json',
             'invocation_error_transport' => 'stderr-utf8-line',
+            'transport_error_transport' => 'stderr-utf8-line',
             'success_exit_code' => 0,
             'failed_exit_code' => 1,
             'invocation_error_exit_code' => 64,
+            'transport_error_exit_code' => 74,
         ],
     ]));
     exit(0);
@@ -92,6 +94,15 @@ if ($mode === 'timeout') {
 if ($mode === 'exit64') {
     fwrite(STDERR, "invalid API 2 fixture request\n");
     exit(64);
+}
+if ($mode === 'exit74') {
+    fwrite(STDOUT, '{"schema":"pliego.render-');
+    fwrite(STDERR, "pliego: API2_TRANSPORT_ERROR: fixture terminal write failed\n");
+    exit(74);
+}
+if ($mode === 'malformed-exit74') {
+    fwrite(STDERR, 'transport diagnostic without newline');
+    exit(74);
 }
 
 $root = getcwd();

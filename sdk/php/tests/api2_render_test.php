@@ -150,6 +150,24 @@ try {
         api2RenderExpect(api2RenderStatus($error->jobPath) === 'failure', 'invocation failure is marked');
     }
 
+    putenv('PLIEGO_API2_RENDER_FAKE_MODE=exit74');
+    try {
+        $engine->render('<!doctype html><p>transport failure</p>');
+        throw new RuntimeException('expected accepted transport exception');
+    } catch (TransportException $error) {
+        api2RenderExpect($error->exitCode === 74, 'transport exception preserves exit 74');
+        api2RenderExpect(
+            $error->getMessage() === 'pliego: API2_TRANSPORT_ERROR: fixture terminal write failed',
+            'transport diagnostic line becomes the exception message',
+        );
+        api2RenderExpect(
+            $error->stdout === '{"schema":"pliego.render-' && str_ends_with($error->stderr, "\n"),
+            'accepted transport failure retains unusable partial stdout and canonical stderr',
+        );
+        api2RenderExpect(is_string($error->jobPath), 'transport exception exposes retained job');
+        api2RenderExpect(api2RenderStatus($error->jobPath) === 'failure', 'transport failure is marked');
+    }
+
     foreach ([
         'tamper-pdf' => 'does not match retained bytes',
         'tamper-bundle' => 'does not match retained bytes',
@@ -159,6 +177,7 @@ try {
         'noncanonical-result' => 'one compact JSON object',
         'stderr-success' => 'unsupported API 2 exit/stderr combination',
         'wrong-exit' => 'unsupported API 2 exit/stderr combination',
+        'malformed-exit74' => 'malformed API 2 transport error',
     ] as $mode => $message) {
         putenv("PLIEGO_API2_RENDER_FAKE_MODE={$mode}");
         try {

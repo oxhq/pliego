@@ -65,8 +65,10 @@ protected, current-user-only DACL before any input is staged; the tools are invo
 through a command shell.
 
 Accepted render failures throw `RenderFailedException` with a stable failure `kind` and validated
-diagnostic inventory. Exit 64 throws `InvocationException`. Framing, timeout, identity, tampering,
-and closure failures throw `TransportException`; an unavailable exact tuple throws
+diagnostic inventory. Exit 64 throws `InvocationException`. The advertised exit 74 boundary throws
+`TransportException` with its validated one-line engine diagnostic while retaining any unusable
+partial stdout for evidence. Other process, framing, timeout, identity, tampering, and closure
+failures also throw `TransportException`; an unavailable exact tuple throws
 `UnsupportedContractException`. All invoked failures retain `jobPath` evidence.
 
 ## API 1 compatibility

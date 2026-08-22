@@ -23,6 +23,8 @@ final class DocumentEngine
     private const REQUEST_MAX_BYTES = 1_048_576;
     private const RESULT_MAX_BYTES = 16_777_216;
     private const STDERR_MAX_BYTES = 1_048_576;
+    private const INVOCATION_ERROR_EXIT_CODE = 64;
+    private const TRANSPORT_ERROR_EXIT_CODE = 74;
     private const BRIDGE_TIMINGS_FILE = '.pliego-bridge-timings.json';
 
     /** @var non-empty-list<string> */
@@ -178,10 +180,10 @@ final class DocumentEngine
                     $process['stderr'],
                 );
             }
-            if ($process['exit_code'] === 64) {
+            if ($process['exit_code'] === self::INVOCATION_ERROR_EXIT_CODE) {
                 try {
                     throw InvocationException::fromProcessResult(
-                        64,
+                        self::INVOCATION_ERROR_EXIT_CODE,
                         $process['stdout'],
                         $process['stderr'],
                         $jobPath,
@@ -194,12 +196,33 @@ final class DocumentEngine
                         'Pliego returned a malformed API 2 invocation error',
                         $jobPath,
                         $runtimeJobPath,
-                        64,
+                        self::INVOCATION_ERROR_EXIT_CODE,
                         $process['stdout'],
                         $process['stderr'],
                         $error,
                     );
                 }
+            }
+            if ($process['exit_code'] === self::TRANSPORT_ERROR_EXIT_CODE) {
+                $diagnostic = self::canonicalStderrLine($process['stderr']);
+                if ($diagnostic === null) {
+                    throw new TransportException(
+                        'Pliego returned a malformed API 2 transport error',
+                        $jobPath,
+                        $runtimeJobPath,
+                        self::TRANSPORT_ERROR_EXIT_CODE,
+                        $process['stdout'],
+                        $process['stderr'],
+                    );
+                }
+                throw new TransportException(
+                    $diagnostic,
+                    $jobPath,
+                    $runtimeJobPath,
+                    self::TRANSPORT_ERROR_EXIT_CODE,
+                    $process['stdout'],
+                    $process['stderr'],
+                );
             }
             if (!in_array($process['exit_code'], [0, 1], true) || $process['stderr'] !== '') {
                 throw new TransportException(
@@ -282,6 +305,23 @@ final class DocumentEngine
                 $this->runtimeResolutionNanoseconds = 0;
             }
         }
+    }
+
+    private static function canonicalStderrLine(string $stderr): ?string
+    {
+        if (!str_ends_with($stderr, "\n")) {
+            return null;
+        }
+        $diagnostic = substr($stderr, 0, -1);
+        if (
+            $diagnostic === ''
+            || preg_match('/[\x00-\x1F\x7F]/', $diagnostic) === 1
+            || preg_match('//u', $diagnostic) !== 1
+        ) {
+            return null;
+        }
+
+        return $diagnostic;
     }
 
     /** @return array<string, mixed> */

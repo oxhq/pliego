@@ -53,9 +53,11 @@ if (($argv[1] ?? null) === '--contract-probe') {
             'input_content_max_bytes' => 67_108_864,
             'result_transport' => 'stdout-single-json',
             'invocation_error_transport' => 'stderr-utf8-line',
+            'transport_error_transport' => 'stderr-utf8-line',
             'success_exit_code' => 0,
             'failed_exit_code' => 1,
             'invocation_error_exit_code' => 64,
+            'transport_error_exit_code' => 74,
         ],
     ];
 

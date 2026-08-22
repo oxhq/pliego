@@ -287,6 +287,9 @@ $mutations['input manifest limit'] = $badManifestLimit;
 $badContentLimit = $valid;
 $badContentLimit['invocation']['input_content_max_bytes']--;
 $mutations['input content limit'] = $badContentLimit;
+$badTransportExit = $valid;
+$badTransportExit['invocation']['transport_error_exit_code'] = 75;
+$mutations['transport error exit code'] = $badTransportExit;
 foreach ($mutations as $message => $mutation) {
     api2Rejected(
         fn () => RuntimeContract::fromProbeResult(0, api2ProbeFrame($mutation), ''),
@@ -372,9 +375,11 @@ if ($binary !== null) {
             'input_content_max_bytes' => 67_108_864,
             'result_transport' => 'stdout-single-json',
             'invocation_error_transport' => 'stderr-utf8-line',
+            'transport_error_transport' => 'stderr-utf8-line',
             'success_exit_code' => 0,
             'failed_exit_code' => 1,
             'invocation_error_exit_code' => 64,
+            'transport_error_exit_code' => 74,
         ],
         'real executable foundation advertises the exact API 2 invocation transport',
     );
