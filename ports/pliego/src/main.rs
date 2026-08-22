@@ -245,7 +245,7 @@ use resource_policy::{
 use runtime_policy::DeterministicRuntimePolicy;
 
 const SERVO_BASE_SHA: &str = "313b6d5ecc113b08010ce434140db3ca5abcc71c";
-const PLIEGO_API_VERSION: u32 = 1;
+const PLIEGO_API_VERSION: u32 = 2;
 const SERVO_BUILD_VERSION: &str = concat!(
     "Servo ",
     env!("PLIEGO_SERVO_VERSION"),
@@ -758,15 +758,34 @@ fn main() -> std::process::ExitCode {
             std::process::ExitCode::SUCCESS
         },
         Command::RenderApi2 => {
-            let result: Result<(), api2::InvocationError> = {
+            #[cfg(all(
+                feature = "document-session",
+                not(any(target_os = "android", target_env = "ohos"))
+            ))]
+            {
                 let mut stdin = std::io::stdin().lock();
-                api2::decode_render_request(&mut stdin)
-                    .and_then(|_| Err(api2::InvocationError::unsupported()))
-            };
-            if let Err(error) = result {
-                api2_invocation_error(&error);
+                let outcome = api2::execute_render(&mut stdin, SERVO_BASE_SHA)
+                    .unwrap_or_else(|error| api2_invocation_error(&error));
+                match outcome {
+                    api2::Api2CommandOutcome::Result { stdout, success } => {
+                        let mut output = std::io::stdout().lock();
+                        match emit_api2_result(&mut output, &stdout, success) {
+                            Ok(exit) => exit,
+                            Err(error) => api2_transport_error(&error),
+                        }
+                    },
+                    api2::Api2CommandOutcome::TransportFailure { diagnostic } => {
+                        api2_transport_error(&diagnostic);
+                    },
+                }
             }
-            std::process::ExitCode::SUCCESS
+            #[cfg(not(all(
+                feature = "document-session",
+                not(any(target_os = "android", target_env = "ohos"))
+            )))]
+            {
+                api2_invocation_error(&api2::InvocationError::unsupported());
+            }
         },
         Command::Api2InvocationError(message) => {
             api2_invocation_error(&api2::InvocationError::new(message));
@@ -852,7 +871,7 @@ fn print_help() {
         "NONPRODUCTION ORACLE BUILD — servoshell is enabled only for explicit parity diagnostics."
     );
     println!(
-        "Pliego — native document rendering on Servo\nRuntime: {}\n\nUsage:\n  pliego render <document.html> --output <document.pdf> --artifacts <directory> [options]\n  pliego render-controlled <document.html> --output <document.pdf> --artifacts <directory> [options]\n  pliego [options] <document.html>\n  pliego --version\n  pliego --contract-probe\n  pliego render-api2\n\nOptions:\n  --locale en-US|es-MX\n  --timezone UTC|PST8PDT\n  --page-size WIDTHxHEIGHT\n  --page-margins TOP,RIGHT,BOTTOM,LEFT\n  --allow-host-fonts          Opt in to observable system-font resolution\n  --allow-partial-scene       Retain diagnostic output (render only; rejected by render-controlled)\n  --allow-http-root URL       Allow GET/HEAD below one explicit http(s) URL root\n  --virtual-resource URL=FILE Serve one exact URL from a host-provided file\n  --asset-manifest FILE       Verify and cache manifest-backed assets locally\n  --resource-timeout-ms MS    Bound controlled network connection time (1..60000)\n\nAPI 2 is an unreleased executable foundation: the probe advertises no complete render tuple, so render-api2 strictly decodes stdin and exits unavailable without rendering.\n\nThe default render route uses the fail-closed controlled transaction. render-controlled remains an explicit alias with narrower syntax: it rejects --allow-partial-scene. The controlled transaction currently accepts one root document plus generation-bound Canvas 2D transcripts in the retained subset; unsupported Canvas modes or final transcripts, and open-ended sources, are rejected. Host fonts, partial scenes, network, redirects, and asset caching are disabled by default. The shorthand form writes outputs to a temporary artifact directory. Page geometry is expressed in CSS pixels.",
+        "Pliego — native document rendering on Servo\nRuntime: {}\n\nUsage:\n  pliego render <document.html> --output <document.pdf> --artifacts <directory> [options]\n  pliego render-controlled <document.html> --output <document.pdf> --artifacts <directory> [options]\n  pliego [options] <document.html>\n  pliego --version\n  pliego --contract-probe\n  pliego render-api2\n\nOptions:\n  --locale en-US|es-MX\n  --timezone UTC|PST8PDT\n  --page-size WIDTHxHEIGHT\n  --page-margins TOP,RIGHT,BOTTOM,LEFT\n  --allow-host-fonts          Opt in to observable system-font resolution\n  --allow-partial-scene       Retain diagnostic output (render only; rejected by render-controlled)\n  --allow-http-root URL       Allow GET/HEAD below one explicit http(s) URL root\n  --virtual-resource URL=FILE Serve one exact URL from a host-provided file\n  --asset-manifest FILE       Verify and cache manifest-backed assets locally\n  --resource-timeout-ms MS    Bound controlled network connection time (1..60000)\n\nAPI 2 accepts one canonical JSON request on stdin, resolves its input manifest from the cwd-v1 job root, and writes one terminal result on stdout. The advertised 0.3 tuple is profile-null only; semantic and accessible-PDF profiles remain unadvertised.\n\nThe API 1 render routes remain available as compatibility entry points. The default render route uses the fail-closed controlled transaction. render-controlled remains an explicit alias with narrower syntax: it rejects --allow-partial-scene. Host fonts, partial scenes, network, redirects, and asset caching are disabled by default. Page geometry is expressed in CSS pixels.",
         active_runtime_name()
     );
 }
@@ -886,6 +905,36 @@ fn api2_invocation_error(error: &api2::InvocationError) -> ! {
     let mut stderr = std::io::stderr().lock();
     let _ = error.write_stderr_line(&mut stderr);
     std::process::exit(api2::INVOCATION_ERROR_EXIT_CODE)
+}
+
+fn emit_api2_result(
+    writer: &mut impl std::io::Write,
+    stdout: &[u8],
+    success: bool,
+) -> Result<std::process::ExitCode, String> {
+    writer
+        .write_all(stdout)
+        .map_err(|error| format!("cannot write the accepted API 2 result frame: {error}"))?;
+    writer
+        .flush()
+        .map_err(|error| format!("cannot flush the accepted API 2 result frame: {error}"))?;
+    Ok(if success {
+        std::process::ExitCode::SUCCESS
+    } else {
+        std::process::ExitCode::from(1)
+    })
+}
+
+fn api2_transport_error(message: &str) -> ! {
+    let message = message.replace(['\r', '\n'], " ");
+    let message = message.trim();
+    let message = if message.is_empty() {
+        "accepted API 2 request failed at the result transport boundary"
+    } else {
+        message
+    };
+    eprintln!("pliego: API2_TRANSPORT_ERROR: {message}");
+    std::process::exit(api2::TRANSPORT_ERROR_EXIT_CODE)
 }
 
 #[derive(Debug, PartialEq)]
@@ -5535,10 +5584,10 @@ mod tests {
         PageDefinition, PageMargins, RenderEnvironment, RenderError, RenderRequest,
         ResourceCapture, ResourcePolicy, ResourcePolicyConfig, ResourcePolicyFailure,
         ResourceRequest, WebResourceLoadRole, classify_controlled_http_status, cli_render_error,
-        cli_render_stderr, create_session_artifacts, default_page, lowercase_hex, page_artifact,
-        parse_args, persist_scene_capture, print_render_error, resolve_scene_resource,
-        runtime_policy, set_document_pdf_environment, sha256_hex, stable_render_id,
-        update_hash_field,
+        cli_render_stderr, create_session_artifacts, default_page, emit_api2_result, lowercase_hex,
+        page_artifact, parse_args, persist_scene_capture, print_render_error,
+        resolve_scene_resource, runtime_policy, set_document_pdf_environment, sha256_hex,
+        stable_render_id, update_hash_field,
     };
     #[cfg(feature = "shell-oracle")]
     use super::{
@@ -6449,6 +6498,64 @@ mod tests {
             ]),
             Ok(Command::Api2InvocationError(_))
         ));
+    }
+
+    #[test]
+    fn accepted_api2_stdout_failure_is_transport_not_invocation_framing() {
+        struct BrokenPipe;
+
+        impl std::io::Write for BrokenPipe {
+            fn write(&mut self, _buffer: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "closed result reader",
+                ))
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let error = emit_api2_result(&mut BrokenPipe, b"{}\n", true).unwrap_err();
+        assert!(error.contains("accepted API 2 result frame"));
+        assert_ne!(
+            super::api2::TRANSPORT_ERROR_EXIT_CODE,
+            super::api2::INVOCATION_ERROR_EXIT_CODE
+        );
+        assert_eq!(super::api2::TRANSPORT_ERROR_EXIT_CODE, 74);
+    }
+
+    #[test]
+    fn accepted_api2_stdout_flush_failure_is_transport_not_invocation_framing() {
+        struct FlushFailure {
+            written: Vec<u8>,
+        }
+
+        impl std::io::Write for FlushFailure {
+            fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+                self.written.extend_from_slice(buffer);
+                Ok(buffer.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "closed result reader while flushing",
+                ))
+            }
+        }
+
+        let mut writer = FlushFailure {
+            written: Vec::new(),
+        };
+        let error = emit_api2_result(&mut writer, b"{}\n", true).unwrap_err();
+        assert_eq!(writer.written, b"{}\n");
+        assert!(error.contains("cannot flush the accepted API 2 result frame"));
+        assert_ne!(
+            super::api2::TRANSPORT_ERROR_EXIT_CODE,
+            super::api2::INVOCATION_ERROR_EXIT_CODE
+        );
     }
 
     #[test]
@@ -7842,6 +7949,7 @@ mod tests {
         scene.pages.push(page);
         let capture = SceneCapture {
             scene,
+            fixed_point_authority: Default::default(),
             canvas_resources: vec![],
             embedded_image_resources: vec![],
             canvas_diagnostics: vec![],
@@ -7911,6 +8019,7 @@ mod tests {
                     meta: OperationMeta::default(),
                 }],
             }),
+            fixed_point_authority: Default::default(),
             canvas_resources: vec![],
             embedded_image_resources: vec![],
             canvas_diagnostics: vec![],
@@ -8125,6 +8234,7 @@ mod tests {
                     meta: OperationMeta::default(),
                 }],
             }),
+            fixed_point_authority: Default::default(),
             canvas_resources: vec![],
             embedded_image_resources: vec![],
             canvas_diagnostics: vec![],
@@ -9639,6 +9749,7 @@ mod tests {
                 },
                 operations: vec![],
             }),
+            fixed_point_authority: Default::default(),
             canvas_resources: vec![],
             embedded_image_resources: vec![],
             canvas_diagnostics: vec![],

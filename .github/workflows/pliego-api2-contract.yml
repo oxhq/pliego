@@ -1,4 +1,4 @@
-name: Pliego API 2 contract foundation
+name: Pliego API 2 contract
 
 on:
   push:
@@ -11,7 +11,11 @@ on:
       - "docs/pliego/adr/0018-api-2-contract-and-public-artifacts.md"
       - "ports/pliego/build.rs"
       - "ports/pliego/src/api2.rs"
+      - "ports/pliego/src/api2/**"
+      - "ports/pliego/src/document_session.rs"
       - "ports/pliego/src/main.rs"
+      - "ports/pliego/src/runtime_policy.rs"
+      - "ports/pliego/src/session.rs"
       - "ports/pliego/tests/check_api2_contract.py"
       - "pyproject.toml"
       - "sdk/php/composer.json"

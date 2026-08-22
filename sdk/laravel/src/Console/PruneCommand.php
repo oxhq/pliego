@@ -18,7 +18,7 @@ final class PruneCommand extends Command
     public function handle(): int
     {
         try {
-            $result = (new JobRetention())->prune(
+            $result = (new JobRetention)->prune(
                 (string) config('pliego.work_dir'),
                 (int) config('pliego.success_retention_seconds'),
                 (int) config('pliego.failure_retention_seconds'),

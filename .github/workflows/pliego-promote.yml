@@ -186,7 +186,7 @@ jobs:
                   "files": files,
               }
 
-          generated = {"schema": 1, "version": version, "api": 1, "release_ready": True, "assets": assets}
+          generated = {"schema": 1, "version": version, "api": 2, "release_ready": True, "assets": assets}
           manifest_path = root / "runtimes.json"
           manifest_path.write_text(json.dumps(generated, indent=4) + "\n", encoding="utf-8")
           manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -194,7 +194,7 @@ jobs:
           if (
               manifest.get("schema") != 1
               or manifest.get("version") != version
-              or manifest.get("api") != 1
+              or manifest.get("api") != 2
               or manifest.get("release_ready") is not True
               or list(manifest.get("assets", {})) != expected_platforms
           ):

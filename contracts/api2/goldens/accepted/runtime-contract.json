@@ -30,7 +30,7 @@
       },
       "document_scene": {
         "schema": "pliego.document-scene",
-        "version": 1
+        "version": 2
       },
       "bundle_manifest": {
         "schema": "pliego.bundle-manifest",
@@ -42,10 +42,15 @@
   "invocation": {
     "request_transport": "stdin-single-json",
     "request_max_bytes": 1048576,
+    "job_root_transport": "cwd-v1",
+    "input_manifest_max_bytes": 16777216,
+    "input_content_max_bytes": 67108864,
     "result_transport": "stdout-single-json",
     "invocation_error_transport": "stderr-utf8-line",
+    "transport_error_transport": "stderr-utf8-line",
     "success_exit_code": 0,
     "failed_exit_code": 1,
-    "invocation_error_exit_code": 64
+    "invocation_error_exit_code": 64,
+    "transport_error_exit_code": 74
   }
 }

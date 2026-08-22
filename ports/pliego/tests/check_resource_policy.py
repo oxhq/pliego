@@ -48,6 +48,8 @@ RESOURCE_SOURCES = frozenset(
         "virtual_resource",
     )
 )
+FIXTURE_DATE = "Thu, 01 Jan 1970 00:00:00 GMT"
+FIXTURE_SERVER = "PliegoResourceFixture/1"
 
 
 def fail(message: str, code: int = 1) -> None:
@@ -189,6 +191,12 @@ class FixtureServer(ThreadingHTTPServer):
 
 class FixtureHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
+
+    def date_time_string(self, _timestamp: float | None = None) -> str:
+        return FIXTURE_DATE
+
+    def version_string(self) -> str:
+        return FIXTURE_SERVER
 
     def do_GET(self) -> None:
         server = self.server
@@ -540,6 +548,7 @@ def self_test() -> None:
         expect_rejection({**row, "source": "inline source payload"}, "invalid source classification")
         expect_rejection({**row, "source": {"kind": "document_root"}}, "invalid source classification")
     with fixture_server() as server:
+        ok_headers: list[tuple[str, str]] | None = None
         for path, status, body in (
             ("/ok.js", 200, HTTP_BODY),
             ("/redirect.js", 302, b""),
@@ -552,8 +561,23 @@ def self_test() -> None:
             connection.request("GET", path)
             response = connection.getresponse()
             require(response.status == status, f"{path} returned {response.status}")
+            require(response.getheader("Date") == FIXTURE_DATE, f"{path} returned a volatile Date header")
+            require(
+                response.getheader("Server") == FIXTURE_SERVER,
+                f"{path} returned a host-dependent Server header",
+            )
+            if path == "/ok.js":
+                ok_headers = response.getheaders()
             require(response.read() == body, f"{path} returned an unexpected body")
             connection.close()
+        require(ok_headers is not None, "healthy fixture response headers were not captured")
+        time.sleep(1.1)
+        connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=2)
+        connection.request("GET", "/ok.js")
+        response = connection.getresponse()
+        require(response.getheaders() == ok_headers, "healthy fixture response headers changed over wall time")
+        require(response.read() == HTTP_BODY, "repeated healthy fixture returned an unexpected body")
+        connection.close()
         connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=0.1)
         connection.request("GET", "/header-stall.js")
         require(server.header_stall_started.wait(1), "header stall endpoint was not accepted")

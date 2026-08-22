@@ -1,7 +1,7 @@
 # Security threat model
 
-This document describes the intended security boundary of the Pliego v0.2
-controlled runtime and its engine API 1 integration. It complements the exact
+This document describes the intended security boundary of the Pliego v0.3
+controlled runtime and its profile-null engine API 2 integration. It complements the exact
 capability limits in the [support profile](../pliego/support-profile.md). It is not
 a claim that the engine is safe for hostile HTML.
 
@@ -17,7 +17,7 @@ limit, and artifact-retention policy.
 | --- | --- |
 | Application template and bundled assets | Trusted and reviewed by the operator |
 | Data inserted into a template | Escaped and validated by the application |
-| Explicitly allowlisted remote URL roots | Trusted for the requested document purpose |
+| Remote URL roots used through the deprecated API 1 compatibility route | Explicitly authorized and trusted for the requested document purpose |
 | Pliego binary and SDK | Obtained from a verified release or a reviewed build |
 | Arbitrary user or tenant HTML/JavaScript | Untrusted and unsupported |
 | Host filesystem and credentials | Sensitive; access must be minimized by deployment |
@@ -47,7 +47,7 @@ for arbitrary documents are outside the current guarantee.
 
 | Threat | Current control | Residual risk and operator action |
 | --- | --- | --- |
-| Server-side request forgery or data exfiltration through remote resources | Network access and cache use are denied by default, redirects are rejected, and remote URL roots require explicit authorization. | An allowlisted service can still expose sensitive data, and a URL root can be broader than intended. Keep egress denied at the OS or container layer unless needed, and grant the narrowest roots. |
+| Server-side request forgery or data exfiltration through remote resources | API 2 profile-null rejects live network and host-font discovery; authorized bytes must be materialized into its fixed input closure. The deprecated API 1 compatibility route denies network and cache use by default, rejects redirects, and requires explicit URL-root authorization. | An API 1 allowlisted service can still expose sensitive data, and a URL root can be broader than intended. Prefer the API 2 offline closure. Keep egress denied at the OS or container layer if API 1 compatibility is required, and grant the narrowest roots. |
 | Unintended local-file or host-font access | Callers provide application-owned inputs and explicit assets; host-font fallback is disabled by default. | The native process still has the permissions of its OS identity. Run it with a minimal working directory, read-only inputs, isolated output, and no ambient credentials. |
 | CPU, memory, disk, or wall-time exhaustion | One document uses one process; the PHP bridge can enforce a wall timeout and kill that process; resource-body and cache limits exist. | There is no engine-wide hard limit for arbitrary HTML, page count, memory, or CPU. Apply OS or container limits and cap input size, retained artifacts, and concurrent jobs. |
 | Native parser, layout, script, font, image, or graphics exploit | The supported model limits inputs to trusted application-owned content; releases track reviewed Servo and dependency changes. | Native vulnerabilities remain possible. Do not accept hostile markup. Use an additional security boundary if the product requires it and keep the engine and OS patched. |
@@ -64,8 +64,9 @@ For the supported trusted-input use case:
 
 1. Verify the Pliego archive and use the SDK-pinned engine version.
 2. Render only application-owned templates; escape and validate inserted data.
-3. Keep network, redirects, host fonts, and cache disabled unless a document requires
-   a narrowly reviewed exception.
+3. Use the API 2 offline input closure. If temporary API 1 compatibility requires a
+   remote resource, keep redirects, host fonts, and cache disabled and authorize only
+   a narrowly reviewed URL root.
 4. Run the process as an unprivileged identity with an isolated writable directory,
    no ambient secrets, and only the required read-only assets.
    On Unix, do not install a custom or auto-reaping `SIGCHLD` disposition around Pliego;
@@ -88,4 +89,4 @@ Servo vulnerabilities may require coordinated upstream disclosure; the project w
 coordinate that handoff rather than asking reporters to disclose twice.
 
 Future work toward stronger isolation must define and test a new trust boundary. It
-must not silently broaden the v0.2 supported-input claim.
+must not silently broaden the v0.3 supported-input claim.

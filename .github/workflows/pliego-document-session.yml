@@ -212,7 +212,7 @@ jobs:
       - name: Test the CLI error boundary
         run: cargo test -p pliego --bin pliego session_failures_preserve_the_engine_error_classes --locked
 
-      - name: Test the unreleased API 2 executable foundation
+      - name: Test the advertised API 2 executable closure
         run: |
           python contracts/api2/test_contract.py
           python ports/pliego/tests/check_api2_contract.py --self-test

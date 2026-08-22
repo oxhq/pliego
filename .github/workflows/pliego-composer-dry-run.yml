@@ -176,7 +176,8 @@ jobs:
 
           runtimes = json.loads((laravel_root / "resources" / "runtimes.json").read_text(encoding="utf-8"))
           platforms = ["linux-x86_64", "windows-x86_64", "macos-x86_64", "macos-aarch64"]
-          assert runtimes["schema"] == runtimes["api"] == 1
+          assert runtimes["schema"] == 1
+          assert runtimes["api"] == 2
           assert runtimes["version"] == engine_version
           assert runtimes["release_ready"] is (os.environ["PLIEGO_RUNTIME_RELEASE_READY"] == "true")
           assert list(runtimes["assets"]) == platforms

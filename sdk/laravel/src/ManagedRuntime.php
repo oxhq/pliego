@@ -79,7 +79,7 @@ final class ManagedRuntime
         $platform ??= self::platformKey();
         $path = $this->runtimeDirectory($this->installRoot, $platform)
             .DIRECTORY_SEPARATOR.$this->executable($platform);
-        if (!is_file($path) || is_link($path)) {
+        if (! is_file($path) || is_link($path)) {
             throw new RuntimeException('Pliego is not installed. Run `php artisan pliego:install`.');
         }
 
@@ -97,7 +97,7 @@ final class ManagedRuntime
         $asset = $this->asset($platform);
         $root = $this->ensureDirectory($this->installRoot);
         $lock = fopen($root.DIRECTORY_SEPARATOR.'.install.lock', 'c+b');
-        if (!is_resource($lock) || !flock($lock, LOCK_EX)) {
+        if (! is_resource($lock) || ! flock($lock, LOCK_EX)) {
             if (is_resource($lock)) {
                 fclose($lock);
             }
@@ -106,7 +106,7 @@ final class ManagedRuntime
 
         try {
             $final = $this->runtimeDirectory($root, $platform);
-            if (is_dir($final) && !is_link($final)) {
+            if (is_dir($final) && ! is_link($final)) {
                 $this->assertInstalled($final, $platform, $asset['files']);
 
                 return $final.DIRECTORY_SEPARATOR.$this->executable($platform);
@@ -116,7 +116,7 @@ final class ManagedRuntime
             }
 
             $stage = $root.DIRECTORY_SEPARATOR.'.install-'.bin2hex(random_bytes(8));
-            if (!mkdir($stage, 0700)) {
+            if (! mkdir($stage, 0700)) {
                 throw new RuntimeException("Cannot create Pliego staging directory {$stage}");
             }
 
@@ -129,7 +129,7 @@ final class ManagedRuntime
 
                 $versionDirectory = dirname($final);
                 $this->ensureDirectory($versionDirectory);
-                if (!rename($candidate, $final)) {
+                if (! rename($candidate, $final)) {
                     throw new RuntimeException("Cannot publish Pliego runtime to {$final}");
                 }
             } finally {
@@ -149,7 +149,7 @@ final class ManagedRuntime
     private function asset(string $platform): array
     {
         $entry = $this->manifest['assets'][$platform] ?? null;
-        if (!is_array($entry)) {
+        if (! is_array($entry)) {
             throw new RuntimeException("Pliego runtime manifest has no {$platform} asset");
         }
 
@@ -185,7 +185,7 @@ final class ManagedRuntime
         }
 
         $actualHash = hash_file('sha256', $archive);
-        if (!is_string($actualHash) || !hash_equals($sha256, $actualHash)) {
+        if (! is_string($actualHash) || ! hash_equals($sha256, $actualHash)) {
             throw new RuntimeException('Pliego archive SHA-256 mismatch');
         }
     }
@@ -193,7 +193,7 @@ final class ManagedRuntime
     /** @param list<string> $files */
     private function extract(string $archive, string $stage, string $bundle, array $files): string
     {
-        if (!class_exists(PharData::class)) {
+        if (! class_exists(PharData::class)) {
             throw new RuntimeException('The PHP Phar extension is required by `pliego:install`');
         }
 
@@ -202,12 +202,12 @@ final class ManagedRuntime
             $package = new PharData($archive);
             foreach ($files as $file) {
                 $entry = "{$bundle}/{$file}";
-                if (!isset($package[$entry]) || !$package[$entry]->isFile() || $package[$entry]->isLink()) {
+                if (! isset($package[$entry]) || ! $package[$entry]->isFile() || $package[$entry]->isLink()) {
                     throw new RuntimeException("Pliego archive is missing safe file {$entry}");
                 }
                 $entries[] = $entry;
             }
-            if (!$package->extractTo($stage, $entries, false)) {
+            if (! $package->extractTo($stage, $entries, false)) {
                 throw new RuntimeException('Cannot extract the Pliego archive');
             }
         } catch (RuntimeException $error) {
@@ -218,13 +218,13 @@ final class ManagedRuntime
 
         $candidate = $stage.DIRECTORY_SEPARATOR.$bundle;
         $resolvedCandidate = realpath($candidate);
-        if ($resolvedCandidate === false || !is_dir($resolvedCandidate) || is_link($candidate)) {
+        if ($resolvedCandidate === false || ! is_dir($resolvedCandidate) || is_link($candidate)) {
             throw new RuntimeException('Pliego archive did not contain its expected root');
         }
         foreach ($files as $file) {
             $path = $candidate.DIRECTORY_SEPARATOR.str_replace('/', DIRECTORY_SEPARATOR, $file);
             $resolved = realpath($path);
-            if ($resolved === false || !is_file($resolved) || is_link($path) || !$this->within($resolved, $resolvedCandidate)) {
+            if ($resolved === false || ! is_file($resolved) || is_link($path) || ! $this->within($resolved, $resolvedCandidate)) {
                 throw new RuntimeException("Pliego archive published an unsafe file {$file}");
             }
         }
@@ -237,19 +237,19 @@ final class ManagedRuntime
     {
         foreach ($files as $file) {
             $path = $directory.DIRECTORY_SEPARATOR.str_replace('/', DIRECTORY_SEPARATOR, $file);
-            if (!is_file($path) || is_link($path)) {
+            if (! is_file($path) || is_link($path)) {
                 throw new RuntimeException("Installed Pliego runtime is missing {$file}");
             }
         }
 
         $binary = $directory.DIRECTORY_SEPARATOR.$this->executable($platform);
-        if ($platform !== 'windows-x86_64' && !chmod($binary, 0755)) {
+        if ($platform !== 'windows-x86_64' && ! chmod($binary, 0755)) {
             throw new RuntimeException("Cannot make Pliego executable {$binary}");
         }
         $lines = preg_split('/\R/', trim(($this->versionProbe)($binary))) ?: [];
         if (
             ($lines[0] ?? null) !== 'pliego '.$this->manifest['version']
-            || !in_array('pliego-api '.$this->manifest['api'], $lines, true)
+            || ! in_array('pliego-api '.$this->manifest['api'], $lines, true)
         ) {
             throw new RuntimeException('Installed Pliego runtime reported an incompatible version');
         }
@@ -267,7 +267,7 @@ final class ManagedRuntime
             ],
             $pipes,
         );
-        if (!is_resource($process)) {
+        if (! is_resource($process)) {
             throw new RuntimeException("Cannot start installed Pliego runtime {$binary}");
         }
 
@@ -295,7 +295,7 @@ final class ManagedRuntime
         } catch (JsonException $error) {
             throw new RuntimeException('Pliego runtime manifest is invalid JSON', 0, $error);
         }
-        if (!is_array($manifest)) {
+        if (! is_array($manifest)) {
             throw new RuntimeException("Cannot read Pliego runtime manifest {$path}");
         }
 
@@ -305,12 +305,12 @@ final class ManagedRuntime
         $platforms = ['linux-x86_64', 'windows-x86_64', 'macos-x86_64', 'macos-aarch64'];
         if (
             ($manifest['schema'] ?? null) !== 1
-            || !is_string($version)
+            || ! is_string($version)
             || preg_match('/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/D', $version) !== 1
-            || !is_int($api)
+            || ! is_int($api)
             || $api < 1
-            || !is_bool($manifest['release_ready'] ?? null)
-            || !is_array($assets)
+            || ! is_bool($manifest['release_ready'] ?? null)
+            || ! is_array($assets)
             || array_keys($assets) !== $platforms
         ) {
             throw new RuntimeException('Pliego runtime manifest contract is invalid');
@@ -318,22 +318,22 @@ final class ManagedRuntime
         foreach ($platforms as $platform) {
             $asset = $assets[$platform];
             if (
-                !is_array($asset)
-                || !is_int($asset['bytes'] ?? null)
+                ! is_array($asset)
+                || ! is_int($asset['bytes'] ?? null)
                 || $asset['bytes'] < 1
-                || !is_string($asset['sha256'] ?? null)
+                || ! is_string($asset['sha256'] ?? null)
                 || preg_match('/^[0-9a-f]{64}$/D', $asset['sha256']) !== 1
-                || !is_array($asset['files'] ?? null)
+                || ! is_array($asset['files'] ?? null)
                 || $asset['files'] === []
             ) {
                 throw new RuntimeException("Pliego runtime manifest asset {$platform} is invalid");
             }
             foreach ($asset['files'] as $file) {
-                if (!is_string($file) || !$this->safeRelativePath($file)) {
+                if (! is_string($file) || ! $this->safeRelativePath($file)) {
                     throw new RuntimeException("Pliego runtime manifest file for {$platform} is unsafe");
                 }
             }
-            if (!in_array($this->executable($platform), $asset['files'], true)) {
+            if (! in_array($this->executable($platform), $asset['files'], true)) {
                 throw new RuntimeException("Pliego runtime manifest asset {$platform} has no executable");
             }
         }
@@ -344,7 +344,7 @@ final class ManagedRuntime
 
     private function requireReleaseReady(): void
     {
-        if (!$this->manifest['release_ready']) {
+        if (! $this->manifest['release_ready']) {
             throw new RuntimeException(
                 'Pliego managed runtime metadata is not finalized; use PLIEGO_BINARY until the native release manifest is published.',
             );
@@ -380,11 +380,11 @@ final class ManagedRuntime
         if (is_link($path)) {
             throw new RuntimeException("Pliego runtime directory cannot be a symlink: {$path}");
         }
-        if (!is_dir($path) && !mkdir($path, 0700, true) && !is_dir($path)) {
+        if (! is_dir($path) && ! mkdir($path, 0700, true) && ! is_dir($path)) {
             throw new RuntimeException("Cannot create Pliego runtime directory {$path}");
         }
         $resolved = realpath($path);
-        if ($resolved === false || !is_dir($resolved) || is_link($path)) {
+        if ($resolved === false || ! is_dir($resolved) || is_link($path)) {
             throw new RuntimeException("Cannot resolve Pliego runtime directory {$path}");
         }
 
@@ -402,7 +402,7 @@ final class ManagedRuntime
 
     private function removeTree(string $path): void
     {
-        if (!file_exists($path) && !is_link($path)) {
+        if (! file_exists($path) && ! is_link($path)) {
             return;
         }
         if (is_file($path) || is_link($path)) {
@@ -416,7 +416,7 @@ final class ManagedRuntime
             RecursiveIteratorIterator::CHILD_FIRST,
         );
         foreach ($iterator as $entry) {
-            $entry->isDir() && !$entry->isLink()
+            $entry->isDir() && ! $entry->isLink()
                 ? @rmdir($entry->getPathname())
                 : @unlink($entry->getPathname());
         }

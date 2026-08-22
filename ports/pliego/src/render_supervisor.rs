@@ -3789,17 +3789,14 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn windows_job_quiesces_a_descendant_after_the_worker_exits() {
-        let powershell = std::env::var_os("SystemRoot")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(r"C:\Windows"))
-            .join(r"System32\WindowsPowerShell\v1.0\powershell.exe");
-        let mut command = ProcessCommand::new(powershell);
+        let mut command =
+            ProcessCommand::new(std::env::current_exe().expect("current test binary"));
         command
             .args([
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                r#"$null = Start-Process -FilePath "$env:SystemRoot\System32\ping.exe" -ArgumentList @("-n","60","127.0.0.1") -WindowStyle Hidden -PassThru; exit 0"#,
+                "--exact",
+                "render_supervisor::tests::windows_job_descendant_fixture",
+                "--ignored",
+                "--nocapture",
             ])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -3811,7 +3808,7 @@ mod tests {
         containment
             .resume()
             .expect("resume job-bound primary thread");
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + PROCESS_TEARDOWN_GRACE;
         let status = loop {
             if let Some(status) = child.try_wait().unwrap() {
                 break status;
@@ -3828,6 +3825,23 @@ mod tests {
 
         containment.quiesce().unwrap();
         assert_eq!(containment.active_processes().unwrap(), 0);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "launched as a job-bound descendant fixture"]
+    fn windows_job_descendant_fixture() {
+        let ping = std::env::var_os("SystemRoot")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(r"C:\Windows"))
+            .join(r"System32\ping.exe");
+        ProcessCommand::new(ping)
+            .args(["-n", "60", "127.0.0.1"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn job-bound descendant fixture");
     }
 
     #[cfg(windows)]

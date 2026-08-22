@@ -14,6 +14,8 @@ use RuntimeException;
 /**
  * One-render-per-process bridge. It deliberately does not model a persistent
  * daemon protocol.
+ *
+ * @deprecated since 0.3.0. Use DocumentEngine for the public API 2 contract.
  */
 final class CliRenderer
 {
@@ -635,11 +637,12 @@ final class CliRenderer
 
             return $timings;
         }
-        if (file_put_contents(
+        $written = file_put_contents(
             $jobPath.DIRECTORY_SEPARATOR.self::BRIDGE_TIMINGS_FILE,
             $json,
             LOCK_EX,
-        ) === false) {
+        );
+        if ($written !== strlen($json)) {
             $timings['diagnostics']['retained'] = false;
         }
 

@@ -11,9 +11,6 @@ use UnexpectedValueException;
 
 /**
  * Strict decoder and exact-tuple selector for `pliego --contract-probe`.
- *
- * This class negotiates capability only. It does not make API 2 rendering
- * available and it does not alter the API 1 CliRenderer path.
  */
 final readonly class RuntimeContract
 {
@@ -50,11 +47,16 @@ final readonly class RuntimeContract
     private const INVOCATION_KEYS = [
         'request_transport',
         'request_max_bytes',
+        'job_root_transport',
+        'input_manifest_max_bytes',
+        'input_content_max_bytes',
         'result_transport',
         'invocation_error_transport',
+        'transport_error_transport',
         'success_exit_code',
         'failed_exit_code',
         'invocation_error_exit_code',
+        'transport_error_exit_code',
     ];
 
     /** @param array<string, mixed> $document */
@@ -305,6 +307,7 @@ final readonly class RuntimeContract
             $contract['document_scene'],
             'pliego.document-scene',
             "{$path}.document_scene",
+            2,
         );
         self::validateExactSchemaReference(
             $contract['bundle_manifest'],
@@ -348,11 +351,16 @@ final readonly class RuntimeContract
         foreach ([
             'request_transport' => 'stdin-single-json',
             'request_max_bytes' => 1_048_576,
+            'job_root_transport' => 'cwd-v1',
+            'input_manifest_max_bytes' => 16_777_216,
+            'input_content_max_bytes' => 67_108_864,
             'result_transport' => 'stdout-single-json',
             'invocation_error_transport' => 'stderr-utf8-line',
+            'transport_error_transport' => 'stderr-utf8-line',
             'success_exit_code' => 0,
             'failed_exit_code' => 1,
             'invocation_error_exit_code' => 64,
+            'transport_error_exit_code' => 74,
         ] as $key => $expected) {
             self::assertLiteral($invocation[$key], $expected, "runtime contract.invocation.{$key}");
         }
@@ -374,11 +382,16 @@ final readonly class RuntimeContract
         }
     }
 
-    private static function validateExactSchemaReference(mixed $reference, string $schema, string $path): void
+    private static function validateExactSchemaReference(
+        mixed $reference,
+        string $schema,
+        string $path,
+        int $version = 1,
+    ): void
     {
         self::validateSchemaReference($reference, $schema, $path);
         /** @var array<string, mixed> $reference */
-        self::assertLiteral($reference['version'], 1, "{$path}.version");
+        self::assertLiteral($reference['version'], $version, "{$path}.version");
     }
 
     private static function validateSchemaReference(mixed $reference, string $schema, string $path): void

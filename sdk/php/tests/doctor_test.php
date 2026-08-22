@@ -28,66 +28,71 @@ function doctorFailure(Doctor $doctor, string $root, string $message): void
 
 $root = sys_get_temp_dir().'/pliego-doctor-test-'.getmypid().'-'.bin2hex(random_bytes(4));
 mkdir($root, 0700);
-$doctor = new Doctor([PHP_BINARY, __DIR__.'/fake_pliego.php'], 3);
-$report = $doctor->run($root);
-doctorExpect($report['version'] === '0.1.0', 'CLI version is reported');
-doctorExpect($report['api_version'] === 1, 'Pliego API v1 is reported');
-doctorExpect($report['platform'] !== '', 'platform is reported');
-doctorExpect(str_starts_with((string) file_get_contents($report['smoke_pdf']), '%PDF-'), 'offline PDF smoke passes');
-$manifest = json_decode(
-    (string) file_get_contents(dirname($report['smoke_pdf']).'/input/input-bundle.json'),
-    true,
-    flags: JSON_THROW_ON_ERROR,
-);
-doctorExpect($manifest['environment']['network']['policy'] === 'deny', 'doctor smoke denies network');
-doctorExpect(isset($manifest['assets']['assets/doctor.css']), 'doctor smoke bundles its style');
-$doctorHtml = (string) file_get_contents(dirname($report['smoke_pdf']).'/input/document.html');
-doctorExpect(
-    !str_contains($doctorHtml, 'window.pliego'),
-    'doctor smoke uses zero-config readiness',
-);
-$font = dirname(__DIR__).'/resources/HasubiMono-Regular.woff2';
-doctorExpect(is_file(dirname(__DIR__).'/resources/HasubiMono-OFL.txt'), 'bundled font retains its OFL license');
-doctorExpect(
-    ($manifest['assets']['assets/doctor.woff2']['sha256'] ?? null) === 'sha256:'.hash_file('sha256', $font),
-    'doctor smoke bundles its licensed font',
-);
-$doctorCss = (string) file_get_contents(dirname($report['smoke_pdf']).'/input/assets/doctor.css');
-doctorExpect(str_contains($doctorCss, 'url("doctor.woff2")'), 'doctor smoke selects its bundled font');
-$command = json_decode(
-    (string) file_get_contents(dirname($report['smoke_pdf']).'/artifacts/command.json'),
-    true,
-    flags: JSON_THROW_ON_ERROR,
-);
-doctorExpect(!isset($command['options']['--allow-http-root']), 'doctor smoke passes no network root');
+$doctor = new Doctor([PHP_BINARY, __DIR__.'/fake_api2.php'], 3);
 
-putenv('PLIEGO_DOCTOR_FAKE_MODE=blank-pdf');
-doctorFailure($doctor, $root, 'evidence is incomplete');
-putenv('PLIEGO_DOCTOR_FAKE_MODE=host-font');
-doctorFailure($doctor, $root, 'evidence is incomplete');
-putenv('PLIEGO_DOCTOR_FAKE_MODE');
+try {
+    $report = $doctor->run($root);
+    doctorExpect($report['version'] === '0.3.0', 'probed engine version is reported');
+    doctorExpect($report['api_version'] === 2, 'Pliego API v2 is reported');
+    doctorExpect($report['platform'] !== '', 'platform is reported');
+    doctorExpect(str_starts_with((string) file_get_contents($report['smoke_pdf']), '%PDF-'), 'offline PDF smoke passes');
+    doctorExpect(is_file($report['smoke_scene']), 'offline scene smoke passes');
+    doctorExpect(is_file($report['smoke_bundle']), 'offline bundle smoke passes');
+    doctorExpect(
+        $report['delivery_identity'] === 'sha256:'.hash_file('sha256', $report['smoke_bundle']),
+        'doctor reports the validated bundle identity',
+    );
+    $resultRoot = dirname(dirname($report['smoke_pdf']));
+    $manifest = json_decode(
+        (string) file_get_contents($resultRoot.'/input-manifest.json'),
+        true,
+        flags: JSON_THROW_ON_ERROR,
+    );
+    doctorExpect(
+        array_column($manifest['entries'], 'path') === [
+            'assets/doctor.css',
+            'assets/doctor.woff2',
+            'document.html',
+        ],
+        'doctor uses a canonical offline input closure',
+    );
+    doctorExpect(
+        ($manifest['entries'][1]['sha256'] ?? null)
+            === 'sha256:'.hash_file('sha256', dirname(__DIR__).'/resources/HasubiMono-Regular.woff2'),
+        'doctor binds its licensed font bytes',
+    );
+    doctorExpect(
+        (glob($root.'/.doctor-*') ?: []) === [],
+        'doctor removes host-side staging without touching retained evidence',
+    );
 
-doctorFailure(new Doctor([$root.'/missing-pliego']), $root, 'not found');
-$notExecutable = $root.'/not-executable.txt';
-file_put_contents($notExecutable, "not executable\n");
-doctorFailure(new Doctor([$notExecutable]), $root, 'not executable');
+    putenv('PLIEGO_API2_RENDER_FAKE_MODE=failed');
+    doctorFailure($doctor, $root, 'offline smoke failed');
+    putenv('PLIEGO_API2_RENDER_FAKE_MODE=tamper-pdf');
+    doctorFailure($doctor, $root, 'does not match retained bytes');
+    putenv('PLIEGO_API2_RENDER_FAKE_MODE');
 
-putenv('PLIEGO_DOCTOR_FAKE_MODE=incompatible');
-doctorFailure($doctor, $root, 'compatible executable');
-putenv('PLIEGO_DOCTOR_FAKE_MODE');
+    putenv('PLIEGO_API2_PROBE_FAKE_MODE=empty');
+    doctorFailure($doctor, $root, 'compatible API 2 contract');
+    putenv('PLIEGO_API2_PROBE_FAKE_MODE=invalid');
+    doctorFailure($doctor, $root, 'compatible API 2 contract');
+    putenv('PLIEGO_API2_PROBE_FAKE_MODE');
 
-putenv('PLIEGO_DOCTOR_FAKE_MODE=api-missing');
-doctorFailure($doctor, $root, 'requires Pliego API v1');
-putenv('PLIEGO_DOCTOR_FAKE_MODE=api-mismatch');
-doctorFailure($doctor, $root, 'unsupported Pliego API v2');
-putenv('PLIEGO_DOCTOR_FAKE_MODE');
+    doctorFailure(new Doctor([$root.'/missing-pliego']), $root, 'not found');
+    $notExecutable = $root.'/not-executable.txt';
+    file_put_contents($notExecutable, "not executable\n");
+    doctorFailure(new Doctor([$notExecutable]), $root, 'not executable');
 
-$filesystemRoot = DIRECTORY_SEPARATOR === '\\'
-    ? substr((string) realpath($root), 0, 3)
-    : DIRECTORY_SEPARATOR;
-doctorFailure($doctor, $filesystemRoot, 'unsafe filesystem root');
-$notDirectory = $root.'/not-a-directory';
-file_put_contents($notDirectory, "file\n");
-doctorFailure($doctor, $notDirectory, 'cannot be created');
+    $filesystemRoot = DIRECTORY_SEPARATOR === '\\'
+        ? substr((string) realpath($root), 0, 3)
+        : DIRECTORY_SEPARATOR;
+    doctorFailure($doctor, $filesystemRoot, 'filesystem root');
+    $notDirectory = $root.'/not-a-directory';
+    file_put_contents($notDirectory, "file\n");
+    doctorFailure($doctor, $notDirectory, 'cannot create');
+} finally {
+    putenv('PLIEGO_API2_RENDER_FAKE_MODE');
+    putenv('PLIEGO_API2_PROBE_FAKE_MODE');
+}
 
-echo "Pliego doctor focused self-test passed; evidence retained at {$root}\n";
+echo "Pliego API 2 doctor focused self-test passed; evidence retained at {$root}\n";

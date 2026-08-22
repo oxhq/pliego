@@ -9,16 +9,16 @@ Chromium, Node.js, or Java with an application.
 
 | Item | Current public boundary |
 | --- | --- |
-| Source release line | v0.2.x controlled-runtime line; this source targets v0.2.1 |
+| Source release line | v0.3.x API 2 base-engine line; this source targets v0.3.0 |
 | Publication status | GitHub Releases is authoritative for the latest exact tag and native assets |
-| Engine protocol | API 1 |
+| Engine protocol | API 2 profile-null tuple; API 1 compatibility commands retained temporarily |
 | Supported input trust | Application-owned HTML and assets |
 | Runtime network | Denied by default; explicit URL roots are opt-in |
 | Native bundles | Linux x86_64, Windows x86_64, macOS x86_64, macOS arm64 |
 | Primary integration | PHP and Laravel packages |
-| Composer packages | Packagist is authoritative for the latest stable `oxhq/pliego-php` and `oxhq/pliego-laravel` v0.2.x packages |
+| Composer packages | Packagist is authoritative for the latest stable `oxhq/pliego-php` and `oxhq/pliego-laravel` packages |
 | Hostile HTML | Unsupported; Pliego is not a security sandbox |
-| API 2 | Unreleased probe/decoder foundation; advertises no render contract |
+| API 2 | Exact manifest v1/request v1/result v1/scene v2/bundle v1 tuple; no semantic profile advertised |
 
 The [support profile](pliego/support-profile.md) is authoritative for current CSS,
 paint, resource, platform, and operational limits.
@@ -48,23 +48,24 @@ artifacts instead of a success-shaped response when the supported path cannot fi
 5. The caller receives either a completed PDF and artifact metadata or a typed
    failure.
 
-For the v0.2 API 1 compatibility boundary, failure path fields identify the caller's
+For the retained API 1 compatibility boundary, failure path fields identify the caller's
 requested locations but do not guarantee that those locations exist. Deterministic
 publication preflight failures create no public artifact tree, leave an existing
 output unchanged, and retain no private runtime container. A public failure tree
 exists only when staged engine evidence passes the supervisor contract and can be
 promoted atomically.
 
-The stable CLI and SDK contract is engine API 1. The internal `DocumentScene` format
-is versioned for repository use but is not currently a stable public interchange
-format. [ADR 0014](pliego/adr/0014-document-scene-v1-and-canonical-ordering.md)
-records that boundary.
+The preferred CLI and SDK contract is engine API 2. Its public fixed-point
+`DocumentScene` starts at version 2 and is delivered only through the exact negotiated
+tuple. Internal API 1 `DocumentScene` version 1 remains an implementation and
+compatibility artifact. [ADR 0018](pliego/adr/0018-api-2-contract-and-public-artifacts.md)
+records the public boundary.
 
 ## What the repository currently proves
 
-- Native v0.2.x releases target four platforms with checksum and notice artifacts;
+- Native releases target four platforms with checksum and notice artifacts;
   the latest exact tag and assets on GitHub Releases remain authoritative.
-- The PHP and Laravel v0.2.x package lines are published on Packagist and pass their
+- The PHP and Laravel package lines are published on Packagist and pass their
   focused hosted package checks at release time.
 - Focused fixtures cover supported pagination, fonts, images, links, Chart.js usage,
   and unsupported-paint failure behavior.

@@ -124,6 +124,7 @@ pub(crate) struct TextFragmentSource {
 pub(crate) struct PositionedGlyph {
     pub id: u32,
     pub point: PhysicalPoint<f32>,
+    pub point_app_units: PhysicalPoint<Au>,
     pub advance: Au,
     /// UTF-8 byte range in [`TextFragment::rendered_text`] for this glyph's
     /// shaping cluster. `None` means the shaping source range was unavailable or
@@ -465,6 +466,10 @@ impl TextFragment {
                         point: PhysicalPoint::new(
                             baseline_origin.x.to_f32_px() + glyph_offset.x.to_f32_px(),
                             baseline_origin.y.to_f32_px() + glyph_offset.y.to_f32_px(),
+                        ),
+                        point_app_units: PhysicalPoint::new(
+                            baseline_origin.x + glyph_offset.x,
+                            baseline_origin.y + glyph_offset.y,
                         ),
                         advance,
                         text_range: retained_text.and_then(|retained_text| {

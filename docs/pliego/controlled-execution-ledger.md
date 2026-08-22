@@ -46,8 +46,9 @@ two new unchanged checkpoints are required. A clock without a ledger retains the
 observer behavior.
 
 The ScriptThread-owned producer fence also records a clearly named owned_resource_events total. It
-is evidence, not enforcement of API 2's post_readiness_resources budget: this slice has no truthful
-readiness-phase transition from which to start that counter.
+is retained evidence, not an advertised API 2 budget: the profile-null contract deliberately omits
+a post-readiness resource limit until the runtime has a truthful readiness-phase transition from
+which to start that counter.
 
 ## Remaining seams
 

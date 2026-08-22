@@ -401,7 +401,7 @@ def self_test() -> None:
             ),
             (
                 "VERSION.txt",
-                version_lines[0] + b"pliego-api 2\n" + b"".join(version_lines[2:]),
+                version_lines[0] + b"pliego-api 1\n" + b"".join(version_lines[2:]),
                 version_error,
             ),
             (
