@@ -383,6 +383,12 @@ foreach ([
     'https://exa{mple.test/',
     'https://[::1]/',
     'https://[abcd::1]/',
+    'https://[::ffff:c000:280]/',
+    'https://[::]/',
+    'https://[1:0:2:3:4:5:6:7]/',
+    'https://[1::2:0:0:3:4]/',
+    'https://[1:0:0:2::3]/',
+    'https://[1:2:3:4:5:6::]/',
     'mailto:user@example.test',
     "mailto:user@example.test?subject='",
     'mailto:user@example.test?subject={',
@@ -592,6 +598,30 @@ $cases = [
     'link-invalid-ipv6' => [
         static function (array &$scene): void {
             $scene['pages'][0]['operations'][3]['target'] = 'https://[gggg::1]/';
+        },
+        '.target is not canonical',
+    ],
+    'link-dotted-ipv4-mapped-ipv6' => [
+        static function (array &$scene): void {
+            $scene['pages'][0]['operations'][3]['target'] = 'https://[::ffff:192.0.2.128]/';
+        },
+        '.target is not canonical',
+    ],
+    'link-second-tied-ipv6-run' => [
+        static function (array &$scene): void {
+            $scene['pages'][0]['operations'][3]['target'] = 'https://[1:0:0:2::3:4]/';
+        },
+        '.target is not canonical',
+    ],
+    'link-shorter-ipv6-run' => [
+        static function (array &$scene): void {
+            $scene['pages'][0]['operations'][3]['target'] = 'https://[1::2:0:0:0:3]/';
+        },
+        '.target is not canonical',
+    ],
+    'link-compressed-single-ipv6-zero' => [
+        static function (array &$scene): void {
+            $scene['pages'][0]['operations'][3]['target'] = 'https://[1::2:3:4:5:6:7]/';
         },
         '.target is not canonical',
     ],

@@ -989,9 +989,9 @@ final class Api2ResultValidator
             if (!is_string($packed) || strlen($packed) !== 16) {
                 return null;
             }
-            $canonical = inet_ntop($packed);
+            $canonical = self::canonicalIpv6($packed);
 
-            return is_string($canonical) ? '['.strtolower($canonical).']' : null;
+            return $canonical !== null ? '['.$canonical.']' : null;
         }
         if (filter_var($host, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4) !== false) {
             $packed = inet_pton($host);
@@ -1010,6 +1010,54 @@ final class Api2ResultValidator
         }
 
         return $host;
+    }
+
+    private static function canonicalIpv6(string $packed): ?string
+    {
+        $segments = unpack('n8', $packed);
+        if (!is_array($segments) || count($segments) !== 8) {
+            return null;
+        }
+        $longestStart = -1;
+        $longestLength = 0;
+        $currentStart = -1;
+        for ($index = 0; $index <= 8; $index++) {
+            if ($index < 8 && $segments[$index + 1] === 0) {
+                if ($currentStart < 0) {
+                    $currentStart = $index;
+                }
+                continue;
+            }
+            if ($currentStart >= 0) {
+                $length = $index - $currentStart;
+                if ($length > $longestLength) {
+                    $longestStart = $currentStart;
+                    $longestLength = $length;
+                }
+                $currentStart = -1;
+            }
+        }
+        if ($longestLength < 2) {
+            $longestStart = -1;
+        }
+
+        $canonical = '';
+        for ($index = 0; $index < 8; $index++) {
+            if ($index === $longestStart) {
+                $canonical .= $index === 0 ? '::' : ':';
+                $index += $longestLength - 1;
+                if ($index === 7) {
+                    break;
+                }
+                continue;
+            }
+            $canonical .= dechex($segments[$index + 1]);
+            if ($index < 7) {
+                $canonical .= ':';
+            }
+        }
+
+        return $canonical;
     }
 
     private static function canonicalPercentEncoding(string $value): bool
