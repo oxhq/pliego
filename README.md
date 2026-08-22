@@ -8,8 +8,8 @@ Pliego focuses on predictable document workflows:
 
 - authored page breaks, paged tables, repeated headers, and row constraints;
 - selectable text, links, and embedded TTF, OTF, WOFF, and WOFF2 fonts;
-- network-denied rendering by default, with explicit URL allowlists for remote
-  stylesheets, images, and fonts;
+- network-denied rendering with application-authorized stylesheets, images, and
+  fonts materialized into the input closure;
 - typed failures and retained input, resource, scene, PDF, and diagnostic artifacts;
   and
 - native bundles for Linux x86_64, Windows x86_64, macOS x86_64, and macOS arm64.
@@ -28,12 +28,12 @@ an authored page break, a dense 20-row ledger, and calculated totals.
 
 ## Laravel quick start
 
-The v0.2 Laravel package line is published on Packagist. The compatible constraint
-below selects its latest published patch, installs the exact PHP bridge dependency,
-then downloads and verifies the package-pinned native runtime:
+The v0.3 Laravel package line is the supported companion to this source line. The
+compatible constraint below selects its latest published patch, installs the exact
+PHP bridge dependency, then downloads and verifies the package-pinned native runtime:
 
 ```sh
-composer require oxhq/pliego-laravel:^0.2.0
+composer require oxhq/pliego-laravel:^0.3.0
 php artisan pliego:install
 php artisan pliego:doctor
 ```
@@ -54,7 +54,7 @@ use Pliego\Laravel\Facades\Document;
 
 return Document::view('invoices.show', ['invoice' => $invoice])
     ->locale('es-MX')
-    ->timezone('PST8PDT')
+    ->timezone('America/Tijuana')
     ->denyNetwork()
     ->asset('fonts/invoice.woff2', resource_path('fonts/invoice.woff2'))
     ->download('invoice.pdf');
@@ -163,10 +163,10 @@ Composer distributions pass their focused contracts. The support profile remains
 the boundary; Pliego does not claim browser-wide compatibility or safe rendering of
 untrusted HTML.
 
-This source tree targets v0.2.1 with engine API 1. The latest exact tag and native
+This source tree targets v0.3.0 with engine API 2. The latest exact tag and native
 assets on the [Releases page](https://github.com/oxhq/pliego/releases/latest) are the
-publication authority. The v0.2 release line routes the default command and supported
-SDK path through the Pliego-owned controlled transaction.
+publication authority. API 1 render commands remain as a deprecated compatibility
+surface, while supported SDKs negotiate and invoke the exact API 2 tuple.
 For the project's scope, evidence, release train, and next gates, see:
 
 - [Project overview](docs/project-overview.md)
@@ -175,10 +175,11 @@ For the project's scope, evidence, release train, and next gates, see:
 - [Security threat model](docs/security/threat-model.md)
 - [2026 funding plan](docs/funding/2026.md)
 
-Published v0.2.x uses engine API 1 through the Pliego-owned controlled transaction.
-API 2 remains unreleased: the source tree includes a probe, strict request decoder,
-and PHP tuple validator, but the probe advertises no render contract and
-`render-api2` cannot render a document.
+Pliego 0.3 advertises one profile-null API 2 tuple: input manifest v1, render request
+v1, render result v1, DocumentScene v2, and bundle manifest v1. `render-api2` accepts
+one canonical request on stdin from an exclusive cwd-v1 job root and returns one
+terminal result plus a hash-bound delivery closure. Semantic and accessible-PDF
+profiles are deliberately unadvertised until their later release gates are met.
 
 Every native archive includes the project and specification licenses, an exact tagged
 source pointer, the generated Cargo dependency report, and pinned notices for copied

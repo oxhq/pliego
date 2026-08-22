@@ -6,15 +6,16 @@ and available funding.
 
 ## Starting point
 
-This roadmap started from Pliego v0.1.1. The current public v0.2.x line retains
-engine API 1 and targets trusted, application-owned HTML for invoices, statements,
-and operational reports. GitHub Releases is authoritative for the latest exact
-version and publication status. The support and deployment boundary is documented
-in the [support profile](docs/pliego/support-profile.md).
+This roadmap started from Pliego v0.1.1. The v0.2.x line established the controlled
+API 1 runtime for trusted, application-owned HTML. The v0.3 source line promotes the
+exact profile-null API 2 tuple while retaining API 1 as a temporary compatibility
+route. GitHub Releases is authoritative for the latest exact version and publication
+status. The support and deployment boundary is documented in the
+[support profile](docs/pliego/support-profile.md).
 
-The v0.2 source line adds controlled capture. The repository also contains an
-unreleased API 2 executable foundation whose probe, strict request decoder, and SDK
-tuple validator advertise no render contract and cannot render through API 2.
+API 2 uses a strict probe, request decoder, fixed cwd-v1 input closure, one-shot
+render, canonical result and bundle, and exact SDK tuple negotiation. It does not
+advertise a semantic or accessible-PDF profile.
 Comparative benchmark results have not yet been published from the repository's
 benchmark protocol.
 
@@ -56,7 +57,8 @@ public behavior change follows the minor-release rule above.
 
 The current installed base is small enough that waiting for a broad API 1 adoption
 sample would preserve the weaker boundary without buying meaningful compatibility
-evidence. Therefore 0.3.0 is the immediate planned product release after 0.2.1.
+evidence. Therefore 0.3.0 is the immediate product release after the compatible
+0.2.x work.
 The representative-application target remains useful parallel evidence, but it is not
 a prerequisite for API 2. The 0.3 packages make API 2 preferred, deprecate API 1 with
 an explicit migration path, and retain the old route only as a temporary transition
@@ -125,10 +127,10 @@ boundary; it does not change accepted inputs or the support profile. Its package
 and consumer evidence is recorded in the
 [v0.2.1 release notes](docs/releases/v0.2.1.md).
 
-The next planned compatible package release is `oxhq/pliego-laravel` 0.2.2. A
-real Laravel consumer rehearsal proved that `render()` and `download()` are not
-enough for business documents that must outlive Pliego's prunable retained-job
-directory. Version 0.2.2 adds a first-class durable-storage handoff that:
+The `oxhq/pliego-laravel` 0.2.2 package is released. A real Laravel consumer
+rehearsal proved that `render()` and `download()` were not enough for business
+documents that must outlive Pliego's prunable retained-job directory. Version 0.2.2
+adds a first-class durable-storage handoff that:
 
 - accepts an application storage path, optional Laravel disk, and write options;
 - streams only a successfully validated PDF from `RenderResult::pdfPath`, without
