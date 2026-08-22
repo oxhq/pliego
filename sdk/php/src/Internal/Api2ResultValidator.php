@@ -299,28 +299,44 @@ final class Api2ResultValidator
         if ($sceneDocument['semantic_layer'] !== null) {
             throw new UnexpectedValueException('profile-null document scene requires semantic_layer null');
         }
-        $pages = self::list($sceneDocument['pages'], 'document scene.pages', 1, 1_000_000);
+        $expectedPageSize = $this->requestPageDimensions();
+        $sceneResources = [];
+        $pages = self::list($sceneDocument['pages'], 'document scene.pages', 1, 4_294_967_295);
         foreach ($pages as $index => $page) {
-            $page = self::object($page, "document scene.pages[{$index}]");
+            $pagePath = "document scene.pages[{$index}]";
+            $page = self::object($page, $pagePath);
             self::assertKeys(
                 $page,
                 ['number', 'style_source', 'size_app_units', 'margins_app_units', 'operations'],
-                "document scene.pages[{$index}]",
+                $pagePath,
             );
-            self::positiveInteger($page['number'], "document scene.pages[{$index}].number", 4_294_967_295);
+            self::assertLiteral($page['number'], $index + 1, "{$pagePath}.number");
             self::assertLiteral(
                 $page['style_source'],
                 'request-defaults',
-                "document scene.pages[{$index}].style_source",
+                "{$pagePath}.style_source",
             );
-            $size = self::object($page['size_app_units'], "document scene.pages[{$index}].size_app_units");
-            self::assertKeys($size, ['width', 'height'], "document scene.pages[{$index}].size_app_units");
-            self::positiveInteger($size['width'], 'document scene page width', 2_147_483_647);
-            self::positiveInteger($size['height'], 'document scene page height', 2_147_483_647);
-            if ($page['margins_app_units'] !== $this->request['page']['margins_app_units']) {
-                throw new UnexpectedValueException('document scene page margins contradict the request');
+            $size = self::object($page['size_app_units'], "{$pagePath}.size_app_units");
+            self::assertKeys($size, ['width', 'height'], "{$pagePath}.size_app_units");
+            if ($size !== $expectedPageSize) {
+                throw new UnexpectedValueException("{$pagePath}.size_app_units contradicts the request");
             }
-            self::list($page['operations'], "document scene.pages[{$index}].operations", 0, 1_000_000);
+            if ($page['margins_app_units'] !== $this->request['page']['margins_app_units']) {
+                throw new UnexpectedValueException("{$pagePath}.margins_app_units contradicts the request");
+            }
+            $this->validatePageBox(
+                $size,
+                self::object($page['margins_app_units'], "{$pagePath}.margins_app_units"),
+                $pagePath,
+            );
+            $operations = self::list($page['operations'], "{$pagePath}.operations", 0, 4_294_967_295);
+            foreach ($operations as $operationIndex => $operation) {
+                $this->validateSceneOperation(
+                    $operation,
+                    "{$pagePath}.operations[{$operationIndex}]",
+                    $sceneResources,
+                );
+            }
         }
 
         $bundleBytes = file_get_contents($deliveryRoot.DIRECTORY_SEPARATOR.'bundle.json');
@@ -364,7 +380,8 @@ final class Api2ResultValidator
                 $expectedMediaType = 'application/vnd.pliego.document-scene+json';
             } elseif (preg_match('/^resources\/[0-9a-f]{64}$/D', $path) === 1) {
                 $expectedMediaType = null;
-                if ($entry['sha256'] !== 'sha256:'.substr($path, strlen('resources/'))) {
+                $resource = 'sha256:'.substr($path, strlen('resources/'));
+                if ($entry['sha256'] !== $resource) {
                     throw new UnexpectedValueException('bundle resource path does not match its content address');
                 }
                 if (
@@ -375,6 +392,11 @@ final class Api2ResultValidator
                     ) !== 1
                 ) {
                     throw new UnexpectedValueException('bundle resource media type is not canonical');
+                }
+                if (isset($sceneResources[$resource]) && $entry['media_type'] !== $sceneResources[$resource]) {
+                    throw new UnexpectedValueException(
+                        "bundle resource {$resource} media type contradicts its document scene use",
+                    );
                 }
                 $resourcePaths[] = $path;
             } else {
@@ -387,6 +409,14 @@ final class Api2ResultValidator
                 $expectedMediaType,
                 "bundle manifest.entries[{$index}]",
             );
+            if (isset($resource)) {
+                $this->validateResourceRepresentation(
+                    $deliveryRoot.DIRECTORY_SEPARATOR.str_replace('/', DIRECTORY_SEPARATOR, $path),
+                    $entry['media_type'],
+                    $resource,
+                );
+                unset($resource);
+            }
             $expectedFiles[] = $path;
             self::addParentDirectories($path, $expectedDirectories);
         }
@@ -394,8 +424,6 @@ final class Api2ResultValidator
             throw new UnexpectedValueException('result PDF/scene descriptors do not equal bundle entries');
         }
 
-        $sceneResources = [];
-        self::collectResourceReferences($sceneDocument, $sceneResources);
         $expectedResourcePaths = array_map(
             static fn (string $address): string => 'resources/'.substr($address, strlen('sha256:')),
             array_keys($sceneResources),
@@ -524,22 +552,438 @@ final class Api2ResultValidator
         }
     }
 
-    /** @param array<string, true> $resources */
-    private static function collectResourceReferences(mixed $value, array &$resources): void
+    /** @return array{width: int, height: int} */
+    private function requestPageDimensions(): array
     {
-        if (!is_array($value)) {
+        $page = self::object($this->request['page'] ?? null, 'accepted request.page');
+        self::assertKeys(
+            $page,
+            ['size', 'margins_app_units', 'geometry_authority'],
+            'accepted request.page',
+        );
+        self::assertLiteral(
+            $page['geometry_authority'],
+            'request-only-v1',
+            'accepted request.page.geometry_authority',
+        );
+        $size = self::object($page['size'], 'accepted request.page.size');
+        if ($size === ['name' => 'A4']) {
+            $dimensions = ['width' => 47_622, 'height' => 67_351];
+        } else {
+            self::assertKeys(
+                $size,
+                ['width_app_units', 'height_app_units'],
+                'accepted request.page.size',
+            );
+            self::positiveInteger(
+                $size['width_app_units'],
+                'accepted request.page.size.width_app_units',
+                2_147_483_647,
+            );
+            self::positiveInteger(
+                $size['height_app_units'],
+                'accepted request.page.size.height_app_units',
+                2_147_483_647,
+            );
+            $dimensions = [
+                'width' => $size['width_app_units'],
+                'height' => $size['height_app_units'],
+            ];
+        }
+        $this->validatePageBox(
+            $dimensions,
+            self::object($page['margins_app_units'], 'accepted request.page.margins_app_units'),
+            'accepted request.page',
+        );
+
+        return $dimensions;
+    }
+
+    /**
+     * @param array{width: mixed, height: mixed} $size
+     * @param array<string, mixed> $margins
+     */
+    private function validatePageBox(array $size, array $margins, string $path): void
+    {
+        self::assertKeys($margins, ['top', 'right', 'bottom', 'left'], "{$path}.margins_app_units");
+        self::positiveInteger($size['width'], "{$path}.size_app_units.width", 2_147_483_647);
+        self::positiveInteger($size['height'], "{$path}.size_app_units.height", 2_147_483_647);
+        foreach (['top', 'right', 'bottom', 'left'] as $side) {
+            self::nonnegativeInteger(
+                $margins[$side],
+                "{$path}.margins_app_units.{$side}",
+                2_147_483_647,
+            );
+        }
+        if (
+            $size['width'] - $margins['left'] - $margins['right'] <= 0
+            || $size['height'] - $margins['top'] - $margins['bottom'] <= 0
+        ) {
+            throw new UnexpectedValueException("{$path} has no positive fixed-point content box");
+        }
+    }
+
+    /** @param array<string, string> $resources */
+    private function validateSceneOperation(mixed $operation, string $path, array &$resources): void
+    {
+        $operation = self::object($operation, $path);
+        $type = $operation['type'] ?? null;
+        if ($type === 'text') {
+            self::assertKeys(
+                $operation,
+                ['type', 'text', 'font', 'font_size_app_units', 'color', 'glyphs'],
+                $path,
+            );
+            if (
+                !is_string($operation['text'])
+                || $operation['text'] === ''
+                || strlen($operation['text']) > 4_294_967_295
+            ) {
+                throw new UnexpectedValueException("{$path}.text must be a non-empty UTF-8 string");
+            }
+            $font = self::object($operation['font'], "{$path}.font");
+            self::assertKeys(
+                $font,
+                ['resource', 'face_index', 'variations', 'synthetic_bold'],
+                "{$path}.font",
+            );
+            $fontResource = self::contentAddress($font['resource'], "{$path}.font.resource");
+            self::bindSceneResource($resources, $fontResource, 'application/octet-stream', $path);
+            self::unsignedInteger($font['face_index'], "{$path}.font.face_index");
+            if (!is_bool($font['synthetic_bold'])) {
+                throw new UnexpectedValueException("{$path}.font.synthetic_bold must be boolean");
+            }
+            $variations = self::list($font['variations'], "{$path}.font.variations", 0, 4_294_967_295);
+            $previousTag = null;
+            foreach ($variations as $variationIndex => $variation) {
+                $variationPath = "{$path}.font.variations[{$variationIndex}]";
+                $variation = self::object($variation, $variationPath);
+                self::assertKeys($variation, ['tag', 'value_f32_bits'], $variationPath);
+                self::unsignedInteger($variation['tag'], "{$variationPath}.tag");
+                if ($previousTag !== null && $previousTag >= $variation['tag']) {
+                    throw new UnexpectedValueException("{$path}.font variation tags must be strictly ascending");
+                }
+                $previousTag = $variation['tag'];
+                self::finiteF32Bits($variation['value_f32_bits'], "{$variationPath}.value_f32_bits");
+            }
+            self::positiveInteger(
+                $operation['font_size_app_units'],
+                "{$path}.font_size_app_units",
+                2_147_483_647,
+            );
+            self::validateColor($operation['color'], "{$path}.color");
+            $glyphs = self::list($operation['glyphs'], "{$path}.glyphs", 1, 4_294_967_295);
+            foreach ($glyphs as $glyphIndex => $glyph) {
+                $glyphPath = "{$path}.glyphs[{$glyphIndex}]";
+                $glyph = self::object($glyph, $glyphPath);
+                self::assertKeys($glyph, ['id', 'x', 'y', 'advance', 'text_range'], $glyphPath);
+                self::unsignedInteger($glyph['id'], "{$glyphPath}.id");
+                foreach (['x', 'y', 'advance'] as $member) {
+                    self::signedInteger($glyph[$member], "{$glyphPath}.{$member}");
+                }
+                $range = self::object($glyph['text_range'], "{$glyphPath}.text_range");
+                self::assertKeys($range, ['start', 'end'], "{$glyphPath}.text_range");
+                self::unsignedInteger($range['start'], "{$glyphPath}.text_range.start");
+                self::positiveInteger(
+                    $range['end'],
+                    "{$glyphPath}.text_range.end",
+                    4_294_967_295,
+                );
+                self::validateUtf8Range(
+                    $operation['text'],
+                    $range['start'],
+                    $range['end'],
+                    "{$glyphPath}.text_range",
+                );
+            }
+
             return;
         }
-        foreach ($value as $key => $member) {
-            if (
-                $key === 'resource'
-                && is_string($member)
-                && preg_match('/^sha256:[0-9a-f]{64}$/D', $member) === 1
-            ) {
-                $resources[$member] = true;
+        if ($type === 'path') {
+            $hasFill = array_key_exists('fill', $operation);
+            $hasStroke = array_key_exists('stroke', $operation);
+            $keys = ['type', 'bounds', 'data'];
+            if ($hasFill) {
+                $keys[] = 'fill';
             }
-            self::collectResourceReferences($member, $resources);
+            $keys[] = 'fill_rule';
+            if ($hasStroke) {
+                $keys[] = 'stroke';
+            }
+            self::assertKeys($operation, $keys, $path);
+            if (!$hasFill && !$hasStroke) {
+                throw new UnexpectedValueException("{$path} requires fill, stroke, or both");
+            }
+            self::validateRect($operation['bounds'], "{$path}.bounds");
+            self::validatePathData($operation['data'], "{$path}.data");
+            if ($hasFill) {
+                self::validateColor($operation['fill'], "{$path}.fill");
+            }
+            if (!in_array($operation['fill_rule'], ['non-zero', 'even-odd'], true)) {
+                throw new UnexpectedValueException("{$path}.fill_rule is unsupported");
+            }
+            if ($hasStroke) {
+                $stroke = self::object($operation['stroke'], "{$path}.stroke");
+                self::assertKeys($stroke, ['color', 'width_app_units'], "{$path}.stroke");
+                self::validateColor($stroke['color'], "{$path}.stroke.color");
+                self::positiveInteger(
+                    $stroke['width_app_units'],
+                    "{$path}.stroke.width_app_units",
+                    2_147_483_647,
+                );
+            }
+
+            return;
         }
+        if ($type === 'image') {
+            self::assertKeys($operation, ['type', 'bounds', 'resource', 'media_type'], $path);
+            self::validateRect($operation['bounds'], "{$path}.bounds");
+            $resource = self::contentAddress($operation['resource'], "{$path}.resource");
+            if (!in_array($operation['media_type'], ['image/gif', 'image/jpeg', 'image/png', 'image/webp'], true)) {
+                throw new UnexpectedValueException("{$path}.media_type is unsupported");
+            }
+            self::bindSceneResource($resources, $resource, $operation['media_type'], $path);
+
+            return;
+        }
+        if ($type === 'link') {
+            self::assertKeys($operation, ['type', 'bounds', 'target'], $path);
+            self::validateRect($operation['bounds'], "{$path}.bounds");
+            if (!is_string($operation['target']) || !self::canonicalLinkTarget($operation['target'])) {
+                throw new UnexpectedValueException("{$path}.target is not canonical");
+            }
+
+            return;
+        }
+
+        throw new UnexpectedValueException("{$path}.type is unsupported");
+    }
+
+    /** @return array{x: int, y: int, width: int, height: int} */
+    private static function validateRect(mixed $value, string $path): array
+    {
+        $rect = self::object($value, $path);
+        self::assertKeys($rect, ['x', 'y', 'width', 'height'], $path);
+        self::signedInteger($rect['x'], "{$path}.x");
+        self::signedInteger($rect['y'], "{$path}.y");
+        self::nonnegativeInteger($rect['width'], "{$path}.width", 2_147_483_647);
+        self::nonnegativeInteger($rect['height'], "{$path}.height", 2_147_483_647);
+
+        return $rect;
+    }
+
+    private static function validatePathData(mixed $value, string $path): void
+    {
+        if (!is_string($value) || strlen($value) < 5 || strlen($value) > 16_777_216) {
+            throw new UnexpectedValueException("{$path} is outside the canonical path length range");
+        }
+        $tokens = explode(' ', $value);
+        if ($tokens[0] !== 'M' || in_array('', $tokens, true)) {
+            throw new UnexpectedValueException("{$path} must begin with absolute M and use one ASCII space");
+        }
+        $arity = ['M' => 2, 'L' => 2, 'Q' => 4, 'C' => 6, 'Z' => 0];
+        for ($index = 0, $count = count($tokens); $index < $count;) {
+            $command = $tokens[$index];
+            if (!isset($arity[$command])) {
+                throw new UnexpectedValueException("{$path} contains an unsupported path command");
+            }
+            $index++;
+            $coordinates = $arity[$command];
+            if ($index + $coordinates > $count) {
+                throw new UnexpectedValueException("{$path} contains a truncated path command");
+            }
+            for ($offset = 0; $offset < $coordinates; $offset++, $index++) {
+                $coordinate = $tokens[$index];
+                if (preg_match('/^(?:0|-?[1-9][0-9]*)$/D', $coordinate) !== 1) {
+                    throw new UnexpectedValueException("{$path} contains a noncanonical path coordinate");
+                }
+                $integer = (int) $coordinate;
+                if ($integer < -2_147_483_648 || $integer > 2_147_483_647) {
+                    throw new UnexpectedValueException("{$path} contains a coordinate outside signed i32");
+                }
+            }
+        }
+    }
+
+    private static function validateColor(mixed $value, string $path): void
+    {
+        $color = self::object($value, $path);
+        self::assertKeys($color, ['r', 'g', 'b', 'a'], $path);
+        foreach (['r', 'g', 'b', 'a'] as $channel) {
+            self::nonnegativeInteger($color[$channel], "{$path}.{$channel}", 255);
+        }
+    }
+
+    private static function validateUtf8Range(string $text, int $start, int $end, string $path): void
+    {
+        if (
+            $start >= $end
+            || $end > strlen($text)
+            || !self::isUtf8Boundary($text, $start)
+            || !self::isUtf8Boundary($text, $end)
+        ) {
+            throw new UnexpectedValueException("{$path} is empty, outside the text, or not on UTF-8 boundaries");
+        }
+    }
+
+    private static function isUtf8Boundary(string $text, int $offset): bool
+    {
+        return $offset === 0
+            || $offset === strlen($text)
+            || (ord($text[$offset]) & 0xc0) !== 0x80;
+    }
+
+    private static function finiteF32Bits(mixed $value, string $path): void
+    {
+        self::unsignedInteger($value, $path);
+        if (
+            !($value >= 0 && $value <= 2_139_095_039)
+            && !($value >= 2_147_483_649 && $value <= 4_286_578_687)
+        ) {
+            throw new UnexpectedValueException("{$path} is not canonical finite binary32");
+        }
+    }
+
+    private static function contentAddress(mixed $value, string $path): string
+    {
+        if (!is_string($value) || preg_match('/^sha256:[0-9a-f]{64}$/D', $value) !== 1) {
+            throw new UnexpectedValueException("{$path} is not a content address");
+        }
+
+        return $value;
+    }
+
+    /** @param array<string, string> $resources */
+    private static function bindSceneResource(
+        array &$resources,
+        string $resource,
+        string $mediaType,
+        string $path,
+    ): void {
+        if (isset($resources[$resource]) && $resources[$resource] !== $mediaType) {
+            throw new UnexpectedValueException("{$path} gives {$resource} conflicting media identities");
+        }
+        $resources[$resource] = $mediaType;
+    }
+
+    private function validateResourceRepresentation(string $path, mixed $mediaType, string $resource): void
+    {
+        if (!is_string($mediaType) || !str_starts_with($mediaType, 'image/')) {
+            return;
+        }
+        $prefix = file_get_contents($path, false, null, 0, 12);
+        if (!is_string($prefix)) {
+            throw new UnexpectedValueException("cannot read bundle resource {$resource}");
+        }
+        $matches = match ($mediaType) {
+            'image/png' => str_starts_with($prefix, "\x89PNG\r\n\x1a\n"),
+            'image/jpeg' => str_starts_with($prefix, "\xff\xd8\xff"),
+            'image/gif' => str_starts_with($prefix, 'GIF87a') || str_starts_with($prefix, 'GIF89a'),
+            'image/webp' => strlen($prefix) >= 12
+                && str_starts_with($prefix, 'RIFF')
+                && substr($prefix, 8, 4) === 'WEBP',
+            default => true,
+        };
+        if (!$matches) {
+            throw new UnexpectedValueException("bundle resource {$resource} bytes contradict {$mediaType}");
+        }
+    }
+
+    private static function canonicalLinkTarget(string $target): bool
+    {
+        if (
+            $target === ''
+            || strlen($target) > 8_192
+            || preg_match('/[^\x00-\x7f]/D', $target) === 1
+            || preg_match('/[\x00-\x20\x7f]/D', $target) === 1
+            || str_ends_with($target, '?')
+            || str_ends_with($target, '#')
+            || !self::canonicalPercentEncoding($target)
+        ) {
+            return false;
+        }
+        if (preg_match('/^(https?):\/\/([^\/?#]+)(\/[^?#]*)(?:\?[^#]*)?(?:#.*)?$/D', $target, $matches) === 1) {
+            $scheme = $matches[1];
+            $netloc = $matches[2];
+            $path = $matches[3];
+            try {
+                $parts = parse_url($target);
+            } catch (\ValueError) {
+                return false;
+            }
+            if (
+                !is_array($parts)
+                || !isset($parts['host'])
+                || !is_string($parts['host'])
+                || $parts['host'] === ''
+                || array_key_exists('user', $parts)
+                || array_key_exists('pass', $parts)
+                || $netloc !== strtolower($netloc)
+                || !str_starts_with($path, '/')
+                || !self::decodedPathHasNoDotSegments($path)
+            ) {
+                return false;
+            }
+            if (isset($parts['port'])) {
+                if (
+                    !is_int($parts['port'])
+                    || ($scheme === 'http' && $parts['port'] === 80)
+                    || ($scheme === 'https' && $parts['port'] === 443)
+                ) {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+        if (!str_starts_with($target, 'mailto:') || str_contains($target, '#')) {
+            return false;
+        }
+        $address = substr($target, strlen('mailto:'));
+        if (($query = strpos($address, '?')) !== false) {
+            $address = substr($address, 0, $query);
+        }
+        if ($address === '' || str_starts_with($address, '//')) {
+            return false;
+        }
+        $separator = strrpos($address, '@');
+        if ($separator === false || $separator === 0 || $separator === strlen($address) - 1) {
+            return false;
+        }
+        $domain = substr($address, $separator + 1);
+
+        return $domain === strtolower($domain);
+    }
+
+    private static function canonicalPercentEncoding(string $value): bool
+    {
+        for ($index = 0, $length = strlen($value); $index < $length; $index++) {
+            if ($value[$index] !== '%') {
+                continue;
+            }
+            $pair = substr($value, $index + 1, 2);
+            if (strlen($pair) !== 2 || preg_match('/^[0-9A-F]{2}$/D', $pair) !== 1) {
+                return false;
+            }
+            $decoded = chr((int) hexdec($pair));
+            if (preg_match('/^[A-Za-z0-9._~-]$/D', $decoded) === 1) {
+                return false;
+            }
+            $index += 2;
+        }
+
+        return true;
+    }
+
+    private static function decodedPathHasNoDotSegments(string $path): bool
+    {
+        foreach (explode('/', rawurldecode($path)) as $segment) {
+            if ($segment === '.' || $segment === '..') {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     /** @param array<string, mixed> $object @param list<string> $keys */
@@ -613,6 +1057,25 @@ final class Api2ResultValidator
         if (!is_int($value) || $value < 1 || $value > $maximum) {
             throw new UnexpectedValueException("{$path} is outside its integer range");
         }
+    }
+
+    private static function nonnegativeInteger(mixed $value, string $path, int $maximum): void
+    {
+        if (!is_int($value) || $value < 0 || $value > $maximum) {
+            throw new UnexpectedValueException("{$path} is outside its integer range");
+        }
+    }
+
+    private static function signedInteger(mixed $value, string $path): void
+    {
+        if (!is_int($value) || $value < -2_147_483_648 || $value > 2_147_483_647) {
+            throw new UnexpectedValueException("{$path} is outside its integer range");
+        }
+    }
+
+    private static function unsignedInteger(mixed $value, string $path): void
+    {
+        self::nonnegativeInteger($value, $path, 4_294_967_295);
     }
 
     private static function assertLiteral(mixed $actual, mixed $expected, string $path): void
