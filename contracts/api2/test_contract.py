@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import ipaddress
 import json
 import re
 import struct
@@ -544,14 +545,82 @@ def canonical_percent_encoding(value: str) -> bool:
     return all(chr(int(match.group()[1:], 16)) not in unreserved for match in re.finditer(r"%[0-9A-F]{2}", value))
 
 
+def canonical_http_authority(value: str, scheme: str, netloc: str, hostname: str) -> bool:
+    prefix = f"{scheme}://"
+    if not value.startswith(prefix):
+        return False
+    authority = value[len(prefix) :].split("/", 1)[0].split("?", 1)[0].split("#", 1)[0]
+    if authority != netloc:
+        return False
+    if "\\" in authority:
+        return False
+
+    if authority.startswith("["):
+        closing = authority.find("]")
+        if closing < 0:
+            return False
+        raw_host = authority[: closing + 1]
+        port_prefix = authority[closing + 1 :]
+        if port_prefix and not port_prefix.startswith(":"):
+            return False
+        try:
+            canonical_host = f"[{ipaddress.IPv6Address(hostname).compressed}]"
+        except ValueError:
+            return False
+    else:
+        if authority.count(":") > 1:
+            return False
+        raw_host, separator, raw_port = authority.rpartition(":")
+        if not separator:
+            raw_host = authority
+            raw_port = ""
+        port_prefix = f":{raw_port}" if separator else ""
+        canonical_host = hostname
+        if any(character in "%<>[]\\^|" for character in raw_host):
+            return False
+        labels = hostname.removesuffix(".").split(".")
+        if labels and re.fullmatch(r"(?:0[xX][0-9A-Fa-f]*|[0-9]+)", labels[-1]):
+            try:
+                canonical_host = str(ipaddress.IPv4Address(hostname))
+            except ipaddress.AddressValueError:
+                return False
+
+    if raw_host != canonical_host:
+        return False
+    if port_prefix:
+        raw_port = port_prefix[1:]
+        if not raw_port or not raw_port.isascii() or not raw_port.isdecimal():
+            return False
+        port = int(raw_port)
+        if raw_port != str(port) or port > 65535:
+            return False
+        if port == (80 if scheme == "http" else 443):
+            return False
+    return True
+
+
+def canonical_http_components(path: str, query: str, fragment: str) -> bool:
+    path_percent_encode_set = set(' "<>`{}\\')
+    special_query_percent_encode_set = set(" \"<>'")
+    fragment_percent_encode_set = set(' "<>`')
+    return (
+        not any(character in path_percent_encode_set for character in path)
+        and not any(character in special_query_percent_encode_set for character in query)
+        and not any(character in fragment_percent_encode_set for character in fragment)
+    )
+
+
 def canonical_link_target(value: str) -> bool:
-    if not canonical_percent_encoding(value) or value.endswith(("?", "#")):
+    if not canonical_percent_encoding(value) or value.endswith(("?", "#")) or re.search(r"[\x00-\x20\x7f]", value):
         return False
     try:
         value.encode("ascii")
     except UnicodeEncodeError:
         return False
-    parsed = urlsplit(value)
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return False
     if parsed.scheme in ("http", "https"):
         try:
             port = parsed.port
@@ -570,7 +639,11 @@ def canonical_link_target(value: str) -> bool:
             parsed.netloc.encode("ascii")
         except UnicodeEncodeError:
             return False
-        return all(segment not in (".", "..") for segment in unquote(parsed.path).split("/"))
+        return (
+            canonical_http_authority(value, parsed.scheme, parsed.netloc, parsed.hostname)
+            and canonical_http_components(parsed.path, parsed.query, parsed.fragment)
+            and all(segment not in (".", "..") for segment in unquote(parsed.path).split("/"))
+        )
     if parsed.scheme == "mailto":
         address = parsed.path
         if parsed.netloc or parsed.fragment or "@" not in address:
@@ -1459,6 +1532,20 @@ def main() -> None:
         "canonical absolute URL",
         scene_semantics(invalid_link),
     )
+    for target in (
+        "https://example.test/a%2Fb",
+        "https://example.test:8443/path",
+        "https://[::1]/",
+        "https://[abcd::1]/",
+        "https://127.0.0.1/",
+        "https://exa{mple.test/",
+        "https://example.test/^|",
+        "https://example.test/?q={`",
+        "https://example.test/#{",
+        "mailto:user@example.test",
+    ):
+        if not canonical_link_target(target):
+            raise AssertionError(f"canonical link was rejected: {target}")
     for name, target in (
         ("link userinfo", "https://user@example.test/a"),
         ("link default port", "https://example.test:443/a"),
@@ -1466,6 +1553,33 @@ def main() -> None:
         ("link lowercase percent escape", "https://example.test/%7euser"),
         ("link escaped unreserved byte", "https://example.test/%7Euser"),
         ("link empty HTTP path", "https://example.test"),
+        ("link empty port", "https://example.test:/"),
+        ("link authority backslash", "https://example.test\\evil/"),
+        ("link zero-padded port", "https://example.test:08443/"),
+        ("link out-of-range port", "https://example.test:65536/"),
+        ("link malformed bracketed authority", "https://[::1/"),
+        ("link invalid IPv6 authority", "https://[gg::1]/"),
+        ("link short IPv4 host", "https://127.1/"),
+        ("link hexadecimal IPv4 host", "https://0x7f.1/"),
+        ("link empty-hex IPv4 label", "https://example.0x/"),
+        ("link percent-encoded host delimiter", "https://exa%3Ample.test/"),
+        ("link octal IPv4 host", "https://0177.0.0.1/"),
+        ("link expanded IPv6 host", "https://[0:0:0:0:0:0:0:1]/"),
+        ("link uppercase IPv6 host", "https://[ABCD::1]/"),
+        ("link raw path braces", "https://example.test/{}/"),
+        ("link raw path backslash", "https://example.test/\\foo"),
+        ("link raw path quote", 'https://example.test/"'),
+        ("link raw path less-than", "https://example.test/<"),
+        ("link raw path greater-than", "https://example.test/>"),
+        ("link raw path backtick", "https://example.test/`"),
+        ("link raw special query quote", "https://example.test/?q='"),
+        ("link raw query double quote", 'https://example.test/?q="'),
+        ("link raw query less-than", "https://example.test/?q=<"),
+        ("link raw query greater-than", "https://example.test/?q=>"),
+        ("link raw fragment quote", 'https://example.test/#"'),
+        ("link raw fragment less-than", "https://example.test/#<"),
+        ("link raw fragment greater-than", "https://example.test/#>"),
+        ("link raw fragment backtick", "https://example.test/#`"),
         ("mailto uppercase domain", "mailto:invoice@Example.test"),
     ):
         noncanonical_url = copy.deepcopy(scene)
