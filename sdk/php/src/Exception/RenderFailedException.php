@@ -11,13 +11,17 @@ final class RenderFailedException extends RuntimeException
 {
     public readonly int $exitCode;
 
-    /** @param array<string, mixed> $result */
+    /**
+     * @param array<string, mixed> $result
+     * @param array<string, mixed> $bridgeTimings
+     */
     public function __construct(
         public readonly string $kind,
         public readonly array $result,
         public readonly string $jobPath,
         public readonly string $runtimeJobPath,
         public readonly string $diagnosticsPath,
+        public readonly array $bridgeTimings = [],
     ) {
         $this->exitCode = 1;
         parent::__construct("Pliego render failed: {$kind}; evidence retained at {$jobPath}");

@@ -132,6 +132,11 @@ try {
         api2RenderExpect($error->result['delivery'] === null, 'failed result has no delivery');
         api2RenderExpect(is_file($error->diagnosticsPath.DIRECTORY_SEPARATOR.'failure.json'), 'failure evidence retained');
         api2RenderExpect(api2RenderStatus($error->jobPath) === 'failure', 'accepted failure is marked');
+        api2RenderExpect(
+            ($error->bridgeTimings['schema'] ?? null) === 'pliego.php-bridge-timings'
+                && ($error->bridgeTimings['version'] ?? null) === 2,
+            'accepted failure retains bridge timings',
+        );
     }
 
     putenv('PLIEGO_API2_RENDER_FAKE_MODE=exit64');

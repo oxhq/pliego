@@ -233,13 +233,20 @@ final class DocumentEngine
             $phases['validation'] = hrtime(true) - $validationStartedAt;
 
             if ($result['status'] === 'failed') {
+                $cleanupStartedAt = hrtime(true);
                 JobRetention::mark($jobPath, 'failure');
+                $phases['cleanup'] = hrtime(true) - $cleanupStartedAt;
+                $bridgeTimings = $this->persistBridgeTimings(
+                    $jobPath,
+                    $this->finishBridgeTimings($context, $rendererStartedAt, $phases),
+                );
                 throw new RenderFailedException(
                     $result['error']['kind'],
                     $result,
                     $jobPath,
                     $runtimeJobPath,
                     $runtimeJobPath.DIRECTORY_SEPARATOR.'diagnostics',
+                    $bridgeTimings,
                 );
             }
 
