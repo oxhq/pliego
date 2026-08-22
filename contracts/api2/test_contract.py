@@ -545,6 +545,28 @@ def canonical_percent_encoding(value: str) -> bool:
     return all(chr(int(match.group()[1:], 16)) not in unreserved for match in re.finditer(r"%[0-9A-F]{2}", value))
 
 
+def rust_url_ipv6(address: ipaddress.IPv6Address) -> str:
+    segments = [int.from_bytes(address.packed[offset : offset + 2]) for offset in range(0, 16, 2)]
+    longest_start = -1
+    longest_length = 0
+    start = -1
+    for index, segment in enumerate([*segments, 1]):
+        if segment == 0:
+            if start < 0:
+                start = index
+            continue
+        if start >= 0 and index - start > longest_length:
+            longest_start = start
+            longest_length = index - start
+        start = -1
+    if longest_length < 2:
+        return ":".join(f"{segment:x}" for segment in segments)
+
+    left = ":".join(f"{segment:x}" for segment in segments[:longest_start])
+    right = ":".join(f"{segment:x}" for segment in segments[longest_start + longest_length :])
+    return f"{left}::{right}"
+
+
 def canonical_http_authority(value: str, scheme: str, netloc: str, hostname: str) -> bool:
     prefix = f"{scheme}://"
     if not value.startswith(prefix):
@@ -564,7 +586,7 @@ def canonical_http_authority(value: str, scheme: str, netloc: str, hostname: str
         if port_prefix and not port_prefix.startswith(":"):
             return False
         try:
-            canonical_host = f"[{ipaddress.IPv6Address(hostname).compressed}]"
+            canonical_host = f"[{rust_url_ipv6(ipaddress.IPv6Address(hostname))}]"
         except ValueError:
             return False
     else:
@@ -1542,6 +1564,10 @@ def main() -> None:
         "https://example.test:8443/path",
         "https://[::1]/",
         "https://[abcd::1]/",
+        "https://[::ffff:c000:280]/",
+        "https://[2001::1:0:0:1:1]/",
+        "https://[2001::1:0:0:1]/",
+        "https://[2001:db8:0:1:2:3:4:5]/",
         "https://127.0.0.1/",
         "https://exa{mple.test/",
         "https://example.test/^|",
@@ -1573,6 +1599,10 @@ def main() -> None:
         ("link octal IPv4 host", "https://0177.0.0.1/"),
         ("link expanded IPv6 host", "https://[0:0:0:0:0:0:0:1]/"),
         ("link uppercase IPv6 host", "https://[ABCD::1]/"),
+        ("link dotted mapped IPv6 host", "https://[::ffff:192.0.2.128]/"),
+        ("link rightmost IPv6 compression", "https://[2001:0:0:1::1:1]/"),
+        ("link shorter IPv6 compression", "https://[2001:0:0:0:1::1]/"),
+        ("link lone-zero IPv6 compression", "https://[2001:db8::1:2:3:4:5]/"),
         ("link raw path braces", "https://example.test/{}/"),
         ("link raw path backslash", "https://example.test/\\foo"),
         ("link raw path quote", 'https://example.test/"'),
