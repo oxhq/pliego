@@ -43,8 +43,8 @@ the upstream engine.
 | Intended version | Public purpose | Release gate |
 | --- | --- | --- |
 | **0.2.0 — Pliego-owned controlled document runtime** | Make the default `render` command and supported SDK path use the Pliego-owned `DocumentSession` controlled transaction. The normal Pliego package graph has no `servoshell` dependency, fallback, or runtime entry. | Existing v0.1 supported inputs are either truthfully settled by the controlled runtime or covered by an explicit migration boundary; controlled time, generation-bound capture, and fail-closed publication pass from packaged binaries; API 1 compatibility tests remain green. The source cutover is not release proof: the exact packaged and hosted gates must still pass, and they do not establish cross-platform byte determinism. |
-| **0.2.x — adoption and compatibility** | Put the released API 1 runtime into representative PHP/Laravel applications before freezing its successor. Patch releases carry backwards-compatible fixes discovered through installation, provisioning, fonts, paths, containers, CI, queues, concurrency, permissions, and binary updates. | At least three real applications cover distinct deployment shapes, including one independently maintained or design-partner consumer; Linux container/CI and at least one desktop package are exercised; install, doctor, render, typed failure, artifacts, queue/concurrency, and update flows retain reproducible evidence. |
-| **0.3.0 — public API 2 base engine** | Graduate the empty-contract executable foundation into one complete advertised profile-null tuple and migrate the PHP/Laravel path to exact-tuple negotiation. API 1 remains supported until API 2 has real package adoption. | `--contract-probe`, canonical request/result transport, typed errors, artifact manifest, render identity, compatibility rules, accepted and rejected goldens, package smoke tests, cross-platform conformance, and API 1 migration behavior pass against packaged binaries. The base tuple reserves typed semantic/profile extension slots without freezing or claiming accessible-PDF semantics. |
+| **0.2.x — adoption and compatibility** | Put the released API 1 runtime into representative PHP/Laravel applications while API 2 proceeds. Patch releases carry backwards-compatible fixes discovered through installation, provisioning, fonts, paths, containers, CI, queues, concurrency, permissions, and binary updates. | Representative applications, Linux container/CI, and at least one desktop package exercise install, doctor, render, typed failure, artifacts, queue/concurrency, and update flows. This evidence channel informs compatible 0.2.x fixes but does not block 0.3.0. |
+| **0.3.0 — public API 2 base engine** | Graduate the empty-contract executable foundation into one complete advertised profile-null tuple and make exact-tuple negotiation the preferred PHP/Laravel path. API 1 enters a documented deprecation period with a migration bridge. | `--contract-probe`, canonical request/result transport, typed errors, artifact manifest, render identity, compatibility rules, accepted and rejected goldens, package smoke tests, cross-platform conformance, deprecation behavior, and API 1 migration behavior pass against packaged binaries. The base tuple reserves typed semantic/profile extension slots without freezing or claiming accessible-PDF semantics. |
 | **0.4.0 — semantic document layer and one accessible profile** | Make a canonical semantic `DocumentScene` the source of one precisely named tagged/accessible-PDF profile and its diagnostics. This is not a blanket claim of “PDF/UA support.” | OXH-339 selects the exact profile and validator versions; OXH-346 freezes its semantic/evidence contract; structure, language, alternate text, reading order, provenance, pagination, authoring diagnostics, validator output, failure policy, fixtures, and retained evidence are independently reproducible from the advertised API 2 tuple. |
 | **0.5.0 — hardened operational support boundary** | Make Pliego deployable and maintainable without project-author involvement: documented limits, supply-chain evidence, support diagnostics, repeated Servo synchronization, and correctness-first comparative reports. | The reviewed threat model, deployment/resource limits, signed and verifiable release assets, SBOM/notices/provenance, support bundle, security policy, repeated upstream-sync reports, packaged consumer, conformance matrix, and internal/dompdf/Browsershot reports are public and reproducible against exact tagged binaries. |
 | **1.0.0 — stable supported contract** | Freeze only the runtime, protocol, semantic profile, SDK, compatibility, security-reporting, and maintenance commitments that real consumers and repeated releases have shown the project can preserve. | Every 1.0 gate below passes on immutable artifacts; API 2 and the semantic profile have representative external use; installation and updates are routine; multiple Servo syncs have completed; and no known required contract change remains. An unmet gate keeps Pliego on 0.x. |
@@ -53,6 +53,15 @@ Package reduction, code hygiene, dependency security, benchmark infrastructure, 
 Servo synchronization are continuous evidence tracks. They do not reserve product
 version numbers. A compatible result may ship in a patch release with real fixes; a
 public behavior change follows the minor-release rule above.
+
+The current installed base is small enough that waiting for a broad API 1 adoption
+sample would preserve the weaker boundary without buying meaningful compatibility
+evidence. Therefore 0.3.0 is the immediate planned product release after 0.2.1.
+The representative-application target remains useful parallel evidence, but it is not
+a prerequisite for API 2. The 0.3 packages make API 2 preferred, deprecate API 1 with
+an explicit migration path, and retain the old route only as a temporary transition
+and rollback boundary. A later pre-1.0 minor may remove API 1 after packaged migration
+proof; removal is not conditioned on reaching an arbitrary consumer count.
 
 The explicit 0.2 API 1 migration boundary is that deterministic publication
 preflight no longer creates a public artifact tree. Failure results still carry the
@@ -108,7 +117,7 @@ The release gate required all of the following to be public and reproducible:
 
 ### 2. Pliego 0.2.x adoption and compatibility channel
 
-Goal: learn from representative applications before freezing API 2.
+Goal: learn from representative applications without delaying the API 2 contract.
 
 The v0.2.1 patch corrects validated failure-evidence promotion and strict
 partial-capture failure retention by restoring the documented API 1 failure
@@ -116,7 +125,7 @@ boundary; it does not change accepted inputs or the support profile. Its package
 and consumer evidence is recorded in the
 [v0.2.1 release notes](docs/releases/v0.2.1.md).
 
-Done means:
+The parallel evidence target is:
 
 - at least three real PHP/Laravel applications cover distinct deployment shapes,
   including at least one independently maintained or design-partner consumer;
@@ -127,8 +136,8 @@ Done means:
   are exercised without fixture-only assumptions;
 - backwards-compatible findings ship as 0.2.x fixes with packaged and consumer proof;
   and
-- API 2 implementation may proceed in parallel, but API 1 is not deprecated merely
-  because the new protocol compiles.
+- API 2 implementation proceeds in parallel; adoption findings can still produce
+  compatible 0.2.x patches, but they do not hold the 0.3.0 release train.
 
 ### 3. Pliego 0.3.0 public API 2 base engine
 
@@ -146,10 +155,12 @@ Done means:
   committed with accepted and rejected goldens;
 - the tuple reserves reviewed typed extension points for future profile and semantic
   schemas without freezing an internal scene representation;
-- PHP and Laravel negotiate the exact tuple and pass API 1 migration/compatibility
-  tests against packaged binaries on every supported target;
+- PHP and Laravel prefer the exact tuple, emit a documented API 1 deprecation signal,
+  and pass API 1 migration/compatibility tests against packaged binaries on every
+  supported target;
 - publication remains atomic and fail closed, with retained conformance evidence; and
-- API 1 remains supported until API 2 has been exercised through real package adoption.
+- the temporary API 1 route and its removal policy are explicit rather than inferred
+  from consumer-count thresholds.
 
 The final all-profile 1.0 contract tracked by
 [OXH-326](https://linear.app/oxhq/issue/OXH-326) is not reused as the 0.3 base-tuple
