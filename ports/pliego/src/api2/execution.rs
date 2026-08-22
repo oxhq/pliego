@@ -57,11 +57,12 @@ pub(crate) fn execute_render(
     reader: &mut impl Read,
     servo_base: &str,
 ) -> Result<Api2CommandOutcome, InvocationError> {
-    // Establish fallible executable identity before decoding or pairing input. Once the input job is
-    // accepted, every remaining failure is either a terminal RenderResult or a transport failure;
-    // it must never be mislabeled as an invocation error.
-    let engine = current_engine_identity(servo_base)?;
+    // Reject malformed request frames before performing the comparatively expensive executable
+    // identity hash. Establish identity before pairing the decoded request with its input job: once
+    // that job is accepted, every remaining failure is either a terminal RenderResult or a
+    // transport failure and must never be mislabeled as an invocation error.
     let request = decode_render_request(reader)?;
+    let engine = current_engine_identity(servo_base)?;
     let job_root_path = std::env::current_dir().map_err(|error| {
         InvocationError::new(format!("cannot resolve the cwd-v1 job root: {error}"))
     })?;

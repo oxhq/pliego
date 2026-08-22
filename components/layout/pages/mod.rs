@@ -17,8 +17,8 @@ use app_units::Au;
 use euclid::default::Size2D as UntypedSize2D;
 use euclid::{Point2D, Rect, Size2D};
 use layout_api::{
-    LayoutDebugContinuation, LayoutDebugPage, LayoutDebugPageContinuation, LayoutDebugPageSequence,
-    LayoutDebugPageAppUnits, LayoutDebugPageStyleSource, LayoutDebugPageWarning,
+    LayoutDebugContinuation, LayoutDebugPage, LayoutDebugPageAppUnits, LayoutDebugPageContinuation,
+    LayoutDebugPageSequence, LayoutDebugPageStyleSource, LayoutDebugPageWarning,
     LayoutDebugTableBreak, LayoutDebugTableCellContinuation, LayoutDebugTableConstraint,
     LayoutDebugTableGroupRepeat, LayoutDebugTableGroupUnsupportedReason,
 };
@@ -115,8 +115,8 @@ impl PageDefinition {
             return Err(PageGeometryError::InvalidPageMargin);
         }
         let [top, right, bottom, left] = margins;
-        if i64::from(left) + i64::from(right) >= i64::from(width)
-            || i64::from(top) + i64::from(bottom) >= i64::from(height)
+        if i64::from(left) + i64::from(right) >= i64::from(width) ||
+            i64::from(top) + i64::from(bottom) >= i64::from(height)
         {
             return Err(PageGeometryError::MarginsConsumePage);
         }
@@ -2288,9 +2288,8 @@ mod tests {
             Some(UntypedSize2D::new(2, 3))
         );
 
-        let one_app_unit_before_boundaries =
-            PageDefinition::from_app_units(59, 119, zero_margins)
-                .expect("near-boundary app-unit dimensions should be valid");
+        let one_app_unit_before_boundaries = PageDefinition::from_app_units(59, 119, zero_margins)
+            .expect("near-boundary app-unit dimensions should be valid");
         assert_eq!(
             one_app_unit_before_boundaries.surface_pixel_size(),
             Some(UntypedSize2D::new(1, 2))
@@ -2398,8 +2397,7 @@ mod tests {
     #[test]
     fn page_debug_geometry_retains_large_app_units_without_float_round_trip() {
         let definition =
-            PageDefinition::from_app_units(100_000_001, 100_000_019, [7, 11, 13, 17])
-                .unwrap();
+            PageDefinition::from_app_units(100_000_001, 100_000_019, [7, 11, 13, 17]).unwrap();
         let exact = definition.debug_app_units();
 
         assert_eq!(

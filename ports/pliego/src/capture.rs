@@ -1457,9 +1457,7 @@ fn capture_fixed_point_authority(capture: &LayoutCapture) -> CapturedFixedPointA
     }
 }
 
-fn captured_text_operation_authority(
-    text: &CaptureTextRun,
-) -> Option<CapturedOperationAuthority> {
+fn captured_text_operation_authority(text: &CaptureTextRun) -> Option<CapturedOperationAuthority> {
     Some(CapturedOperationAuthority::Text {
         font_size_app_units: text.font_size_app_units?,
         glyphs: text
@@ -1484,8 +1482,8 @@ fn validate_paint_app_unit_authority(capture: &LayoutCapture) -> Result<(), Capt
         };
         if text_run
             .font_size_app_units
-            .is_some_and(|exact| app_units_to_f32_px(exact) != text_run.font_size)
-            || text_run
+            .is_some_and(|exact| app_units_to_f32_px(exact) != text_run.font_size) ||
+            text_run
                 .glyphs
                 .iter()
                 .any(|glyph| !glyph.app_unit_authority_matches())
@@ -1497,8 +1495,8 @@ fn validate_paint_app_unit_authority(capture: &LayoutCapture) -> Result<(), Capt
         if event
             .table_borders
             .iter()
-            .any(|border| !border.rect.app_unit_authority_matches())
-            || event
+            .any(|border| !border.rect.app_unit_authority_matches()) ||
+            event
                 .paint_rects
                 .iter()
                 .any(|paint_rect| !paint_rect.rect.app_unit_authority_matches())
@@ -1775,13 +1773,11 @@ fn valid_page_app_unit_authority(page: &CapturePage, app_units: CapturedPageAppU
     {
         return false;
     }
-    let horizontal_margins =
-        i64::from(app_units.margin_left) + i64::from(app_units.margin_right);
-    let vertical_margins =
-        i64::from(app_units.margin_top) + i64::from(app_units.margin_bottom);
-    if i64::from(app_units.width) - horizontal_margins != i64::from(app_units.available_inline_size)
-        || i64::from(app_units.height) - vertical_margins
-            != i64::from(app_units.available_block_size)
+    let horizontal_margins = i64::from(app_units.margin_left) + i64::from(app_units.margin_right);
+    let vertical_margins = i64::from(app_units.margin_top) + i64::from(app_units.margin_bottom);
+    if i64::from(app_units.width) - horizontal_margins != i64::from(app_units.available_inline_size) ||
+        i64::from(app_units.height) - vertical_margins !=
+            i64::from(app_units.available_block_size)
     {
         return false;
     }
@@ -1793,14 +1789,8 @@ fn valid_page_app_unit_authority(page: &CapturePage, app_units: CapturedPageAppU
         (app_units.margin_right, page.margin_right),
         (app_units.margin_bottom, page.margin_bottom),
         (app_units.margin_left, page.margin_left),
-        (
-            app_units.available_inline_size,
-            page.available_inline_size,
-        ),
-        (
-            app_units.available_block_size,
-            page.available_block_size,
-        ),
+        (app_units.available_inline_size, page.available_inline_size),
+        (app_units.available_block_size, page.available_block_size),
     ]
     .into_iter()
     .all(|(exact, compatibility)| app_units_to_f32_px(exact) == compatibility)
@@ -1900,10 +1890,8 @@ fn distribute_operations(
 
     let mut scene_pages = Vec::with_capacity(pages.len());
     let mut page_operations = Vec::with_capacity(pages.len());
-    for ((page, mut positioned), mut repeated) in pages
-        .iter()
-        .zip(positioned_pages)
-        .zip(repeated_operations)
+    for ((page, mut positioned), mut repeated) in
+        pages.iter().zip(positioned_pages).zip(repeated_operations)
     {
         repeated.append(&mut positioned);
         let (operations, authority) = repeated
@@ -1936,11 +1924,7 @@ fn translate_positioned_operation_to_page(
     page_origin: f64,
     page_origin_app_units: Option<i64>,
 ) -> Result<(), CaptureError> {
-    translate_operation_y(
-        &mut positioned.operation,
-        page_origin,
-        positioned.sequence,
-    )?;
+    translate_operation_y(&mut positioned.operation, page_origin, positioned.sequence)?;
     if let Some(authority) = positioned.authority.take() {
         positioned.authority = page_origin_app_units
             .and_then(|origin| translate_operation_authority_y(authority, origin));
@@ -1972,9 +1956,9 @@ fn translate_operation_authority_y(
                 })
                 .collect::<Option<Vec<_>>>()?,
         }),
-        CapturedOperationAuthority::Bounds(bounds) => Some(
-            CapturedOperationAuthority::Bounds(translate_rect(bounds)?),
-        ),
+        CapturedOperationAuthority::Bounds(bounds) => {
+            Some(CapturedOperationAuthority::Bounds(translate_rect(bounds)?))
+        },
     }
 }
 
@@ -3263,10 +3247,10 @@ impl CaptureRect {
 
     fn app_unit_authority_matches(&self) -> bool {
         self.app_units.is_none_or(|exact| {
-            app_units_to_f32_px(exact.x) == self.x
-                && app_units_to_f32_px(exact.y) == self.y
-                && app_units_to_f32_px(exact.width) == self.width
-                && app_units_to_f32_px(exact.height) == self.height
+            app_units_to_f32_px(exact.x) == self.x &&
+                app_units_to_f32_px(exact.y) == self.y &&
+                app_units_to_f32_px(exact.width) == self.width &&
+                app_units_to_f32_px(exact.height) == self.height
         })
     }
 }
@@ -4052,8 +4036,14 @@ mod tests {
         )
         .unwrap();
 
-        assert!(matches!(capture.scene.pages[0].operations[0], Operation::Text { .. }));
-        assert!(matches!(capture.scene.pages[0].operations[1], Operation::Link { .. }));
+        assert!(matches!(
+            capture.scene.pages[0].operations[0],
+            Operation::Text { .. }
+        ));
+        assert!(matches!(
+            capture.scene.pages[0].operations[1],
+            Operation::Link { .. }
+        ));
         assert_eq!(
             capture.fixed_point_authority.page_operations,
             [vec![
@@ -4282,8 +4272,9 @@ mod tests {
                 })),
                 operation: Operation::Image {
                     bounds: image_bounds,
-                    resource: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
-                        .into(),
+                    resource:
+                        "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+                            .into(),
                     meta: OperationMeta::default(),
                 },
             },
@@ -4358,8 +4349,14 @@ mod tests {
                 ],
             ]
         );
-        assert!(matches!(distributed.pages[1].operations[0], Operation::Text { .. }));
-        assert!(matches!(distributed.pages[1].operations[1], Operation::Image { .. }));
+        assert!(matches!(
+            distributed.pages[1].operations[0],
+            Operation::Text { .. }
+        ));
+        assert!(matches!(
+            distributed.pages[1].operations[1],
+            Operation::Image { .. }
+        ));
     }
 
     #[test]

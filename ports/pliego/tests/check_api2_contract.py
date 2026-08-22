@@ -355,14 +355,19 @@ def assert_invocation_error(
     expected_diagnostic: str,
     *extra_args: str,
 ) -> dict[str, Any]:
-    completed = subprocess.run(
-        [str(binary), "render-api2", *extra_args],
-        input=payload,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
-        timeout=INVOCATION_TIMEOUT_SECONDS,
-    )
+    try:
+        completed = subprocess.run(
+            [str(binary), "render-api2", *extra_args],
+            input=payload,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            timeout=INVOCATION_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise AssertionError(
+            f"{name}: invocation framing did not terminate within {INVOCATION_TIMEOUT_SECONDS} seconds"
+        ) from error
     if completed.returncode != 64:
         raise AssertionError(f"{name}: expected exit 64, got {completed.returncode}")
     if completed.stdout != b"":

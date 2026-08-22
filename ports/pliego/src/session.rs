@@ -1271,14 +1271,7 @@ fn validate_held_promotion_tree(
         bytes: 0,
         artifacts: Vec::new(),
     };
-    validate_held_promotion_directory(
-        root,
-        "",
-        0,
-        filesystem,
-        forbidden_prefixes,
-        &mut closure,
-    )?;
+    validate_held_promotion_directory(root, "", 0, filesystem, forbidden_prefixes, &mut closure)?;
     require_held_bound_identity(root, &identity)?;
     Ok(closure)
 }
@@ -2007,11 +2000,7 @@ fn require_child_absent(parent: &BoundDirectory, name: &OsStr, label: &str) -> i
 }
 
 #[cfg(unix)]
-fn require_held_child_absent(
-    parent: &BoundDirectory,
-    name: &OsStr,
-    label: &str,
-) -> io::Result<()> {
+fn require_held_child_absent(parent: &BoundDirectory, name: &OsStr, label: &str) -> io::Result<()> {
     use std::ffi::CString;
     use std::mem::MaybeUninit;
     use std::os::fd::AsRawFd;
@@ -2048,11 +2037,7 @@ fn require_held_child_absent(
 }
 
 #[cfg(windows)]
-fn require_held_child_absent(
-    parent: &BoundDirectory,
-    name: &OsStr,
-    label: &str,
-) -> io::Result<()> {
+fn require_held_child_absent(parent: &BoundDirectory, name: &OsStr, label: &str) -> io::Result<()> {
     immediate_child_name(Path::new(name), label)?;
     match open_bound_child_any_handle(parent, name) {
         Ok(_) => Err(io::Error::new(
@@ -5409,10 +5394,10 @@ fn open_bound_child_handle(
             &attributes,
             &mut io_status,
             share_access,
-            object_kind
-                | FILE_OPEN_FOR_BACKUP_INTENT
-                | FILE_OPEN_REPARSE_POINT
-                | FILE_SYNCHRONOUS_IO_NONALERT,
+            object_kind |
+                FILE_OPEN_FOR_BACKUP_INTENT |
+                FILE_OPEN_REPARSE_POINT |
+                FILE_SYNCHRONOUS_IO_NONALERT,
         )
     };
     if status < 0 {
@@ -5447,13 +5432,13 @@ fn open_directory_handle(path: &Path) -> io::Result<File> {
 
     OpenOptions::new()
         .access_mode(
-            FILE_ADD_FILE
-                | FILE_ADD_SUBDIRECTORY
-                | FILE_LIST_DIRECTORY
-                | FILE_READ_ATTRIBUTES
-                | FILE_TRAVERSE
-                | READ_CONTROL
-                | SYNCHRONIZE,
+            FILE_ADD_FILE |
+                FILE_ADD_SUBDIRECTORY |
+                FILE_LIST_DIRECTORY |
+                FILE_READ_ATTRIBUTES |
+                FILE_TRAVERSE |
+                READ_CONTROL |
+                SYNCHRONIZE,
         )
         .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
@@ -5540,12 +5525,12 @@ fn open_bound_directory_handle(path: &Path, movable: bool) -> io::Result<File> {
 
     OpenOptions::new()
         .access_mode(
-            DELETE
-                | FILE_LIST_DIRECTORY
-                | FILE_READ_ATTRIBUTES
-                | FILE_TRAVERSE
-                | READ_CONTROL
-                | SYNCHRONIZE,
+            DELETE |
+                FILE_LIST_DIRECTORY |
+                FILE_READ_ATTRIBUTES |
+                FILE_TRAVERSE |
+                READ_CONTROL |
+                SYNCHRONIZE,
         )
         .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)

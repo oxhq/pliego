@@ -2669,10 +2669,10 @@ mod tests {
     use super::super::session::LocalDocument;
     use super::{
         Api2Execution, ConsoleEvidenceLog, ConsoleLogLevel, ControlledSettlementStep,
-        DocumentSession, FROZEN_INPUT_URL_ROOT, JSValue, MAX_CONSOLE_BYTES,
-        MAX_CONSOLE_EVENTS, PaintTicketAbortGuard, RESOURCE_EVIDENCE_ENTRY_OVERHEAD_BYTES,
-        ReadinessPolicy, RenderEnvironment, ResourceEvidenceLog, ResourcePolicyConfig,
-        SessionCaptureEvidence, SessionError, SessionHostDeadline, console_log_level_name,
+        DocumentSession, FROZEN_INPUT_URL_ROOT, JSValue, MAX_CONSOLE_BYTES, MAX_CONSOLE_EVENTS,
+        PaintTicketAbortGuard, RESOURCE_EVIDENCE_ENTRY_OVERHEAD_BYTES, ReadinessPolicy,
+        RenderEnvironment, ResourceEvidenceLog, ResourcePolicyConfig, SessionCaptureEvidence,
+        SessionError, SessionHostDeadline, console_log_level_name,
         controlled_readiness_handshake_counts, session_host_timeout, validate_host_font_policy,
         validate_resolved_resource_policy, validate_resource_policy,
         with_current_readiness_evidence, with_readiness_evaluation_evidence,
@@ -3395,10 +3395,8 @@ window.pliego?.defer();
         entrypoint: &str,
         entries: &[(&str, &str, &[u8])],
         diagnostic_retention: &str,
-    ) -> Result<
-        (serde_json::Value, crate::api2::ResolvedRenderJob),
-        crate::api2::InvocationError,
-    > {
+    ) -> Result<(serde_json::Value, crate::api2::ResolvedRenderJob), crate::api2::InvocationError>
+    {
         #[derive(serde::Serialize)]
         struct Manifest<'a> {
             schema: &'static str,
@@ -3748,9 +3746,8 @@ window.pliego?.defer();
 
     #[test]
     fn api2_execution_constructor_accepts_only_a_resolved_job() {
-        let _: fn(
-            crate::api2::ResolvedRenderJob,
-        ) -> Result<Api2Execution, SessionError> = DocumentSession::start_api2_execution;
+        let _: fn(crate::api2::ResolvedRenderJob) -> Result<Api2Execution, SessionError> =
+            DocumentSession::start_api2_execution;
     }
 
     #[test]
@@ -3972,8 +3969,8 @@ document.fonts.ready
         let marker = operations
             .iter()
             .find(|operation| {
-                operation["type"] == "text"
-                    && operation["text"]
+                operation["type"] == "text" &&
+                    operation["text"]
                         .as_str()
                         .is_some_and(|text| text.contains("PLIEGO_INPUT_MARKER"))
             })

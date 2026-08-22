@@ -5585,9 +5585,9 @@ mod tests {
         ResourceCapture, ResourcePolicy, ResourcePolicyConfig, ResourcePolicyFailure,
         ResourceRequest, WebResourceLoadRole, classify_controlled_http_status, cli_render_error,
         cli_render_stderr, create_session_artifacts, default_page, emit_api2_result, lowercase_hex,
-        page_artifact, parse_args, persist_scene_capture, print_render_error, resolve_scene_resource,
-        runtime_policy, set_document_pdf_environment, sha256_hex, stable_render_id,
-        update_hash_field,
+        page_artifact, parse_args, persist_scene_capture, print_render_error,
+        resolve_scene_resource, runtime_policy, set_document_pdf_environment, sha256_hex,
+        stable_render_id, update_hash_field,
     };
     #[cfg(feature = "shell-oracle")]
     use super::{

@@ -41,13 +41,13 @@ pub(crate) use artifacts::encode_profile_null_scene;
 ))]
 pub(crate) use execution::{Api2CommandOutcome, execute_render};
 pub(crate) use input_job::ResolvedInputJob;
+#[cfg(test)]
+pub(crate) use render_job::resolve_render_job_for_test;
 #[cfg(all(
     feature = "document-session",
     not(any(target_os = "android", target_env = "ohos"))
 ))]
 pub(crate) use render_job::{ResolvedRenderJob, ResolvedRenderJobParts};
-#[cfg(test)]
-pub(crate) use render_job::resolve_render_job_for_test;
 use serde::Serialize;
 use serde::de::{self, Deserialize, Deserializer, MapAccess, SeqAccess, Visitor};
 use serde_json::{Map, Number, Value};
@@ -257,9 +257,7 @@ fn supported_contracts() -> Vec<ContractTuple> {
     }
 }
 
-pub(crate) fn current_engine_identity(
-    servo_base: &str,
-) -> Result<EngineIdentity, InvocationError> {
+pub(crate) fn current_engine_identity(servo_base: &str) -> Result<EngineIdentity, InvocationError> {
     validate_build_identity()?;
     Ok(EngineIdentity {
         name: "pliego",
@@ -1632,15 +1630,18 @@ mod tests {
             1
         );
         let probe: Value = serde_json::from_slice(&writer.bytes).unwrap();
-        assert_eq!(probe["contracts"], serde_json::json!([{
-            "api": 2,
-            "input_manifest": {"schema": "pliego.input-manifest", "version": 1},
-            "request": {"schema": "pliego.render-request", "version": 1},
-            "result": {"schema": "pliego.render-result", "version": 1},
-            "document_scene": {"schema": "pliego.document-scene", "version": 2},
-            "bundle_manifest": {"schema": "pliego.bundle-manifest", "version": 1},
-            "profiles": [],
-        }]));
+        assert_eq!(
+            probe["contracts"],
+            serde_json::json!([{
+                "api": 2,
+                "input_manifest": {"schema": "pliego.input-manifest", "version": 1},
+                "request": {"schema": "pliego.render-request", "version": 1},
+                "result": {"schema": "pliego.render-result", "version": 1},
+                "document_scene": {"schema": "pliego.document-scene", "version": 2},
+                "bundle_manifest": {"schema": "pliego.bundle-manifest", "version": 1},
+                "profiles": [],
+            }])
+        );
     }
 
     #[test]

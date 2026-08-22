@@ -293,8 +293,8 @@ pub(crate) fn encode_profile_null_scene<'a>(
             "canonical scene requires at least one page",
         ));
     }
-    if capture.scene.pages.len() != capture.fixed_point_authority.pages.len()
-        || capture.scene.pages.len() != capture.fixed_point_authority.page_operations.len()
+    if capture.scene.pages.len() != capture.fixed_point_authority.pages.len() ||
+        capture.scene.pages.len() != capture.fixed_point_authority.page_operations.len()
     {
         return Err(ArtifactError::new(
             "fixed-point page authority does not match final scene pages",
@@ -514,9 +514,9 @@ fn public_scene_to_pdf_input(
                 source_page.number
             )));
         }
-        if source_page.size_app_units.width != request_width
-            || source_page.size_app_units.height != request_height
-            || source_page.margins_app_units != public.request_page.margins_app_units
+        if source_page.size_app_units.width != request_width ||
+            source_page.size_app_units.height != request_height ||
+            source_page.margins_app_units != public.request_page.margins_app_units
         {
             return Err(ArtifactError::new(format!(
                 "canonical scene page {} does not resolve the accepted request page",
@@ -673,8 +673,8 @@ fn public_operation_to_pdf(
                 variations,
                 synthetic_bold: font.synthetic_bold,
             };
-            if let Some(existing) = fonts.get(&identity)
-                && existing != &binding
+            if let Some(existing) = fonts.get(&identity) &&
+                existing != &binding
             {
                 return Err(ArtifactError::new(format!(
                     "{location} font tuple identity collision"
@@ -800,15 +800,15 @@ fn require_pdf_resource(
             body.media_type
         )));
     }
-    if media_type != FONT_MEDIA_TYPE
-        && image_media_type(&body.bytes).map(PublicImageMediaType::as_str) != Some(media_type)
+    if media_type != FONT_MEDIA_TYPE &&
+        image_media_type(&body.bytes).map(PublicImageMediaType::as_str) != Some(media_type)
     {
         return Err(ArtifactError::new(format!(
             "{location} resource {resource} bytes do not match {media_type}"
         )));
     }
-    if let Some(existing) = required_resources.insert(resource.to_owned(), media_type)
-        && existing != media_type
+    if let Some(existing) = required_resources.insert(resource.to_owned(), media_type) &&
+        existing != media_type
     {
         return Err(ArtifactError::new(format!(
             "{location} resource {resource} has conflicting media identities"
@@ -905,8 +905,8 @@ fn exact_page(
     request_height: i32,
     request_margins: PublicMargins,
 ) -> Result<CapturedPageAppUnits, ArtifactError> {
-    if authority_index != page_index
-        || !matches!(style_source, Some(CapturedPageStyleSource::RequestDefaults))
+    if authority_index != page_index ||
+        !matches!(style_source, Some(CapturedPageStyleSource::RequestDefaults))
     {
         return Err(ArtifactError::new(format!(
             "page {} lacks request-default fixed-point provenance",
@@ -919,12 +919,12 @@ fn exact_page(
             page_index + 1
         ))
     })?;
-    if page.width != request_width
-        || page.height != request_height
-        || page.margin_top != request_margins.top
-        || page.margin_right != request_margins.right
-        || page.margin_bottom != request_margins.bottom
-        || page.margin_left != request_margins.left
+    if page.width != request_width ||
+        page.height != request_height ||
+        page.margin_top != request_margins.top ||
+        page.margin_right != request_margins.right ||
+        page.margin_bottom != request_margins.bottom ||
+        page.margin_left != request_margins.left
     {
         return Err(ArtifactError::new(format!(
             "page {} geometry does not resolve the accepted request",
@@ -939,12 +939,12 @@ fn exact_page(
         .height
         .checked_sub(page.margin_top)
         .and_then(|value| value.checked_sub(page.margin_bottom));
-    if page.width <= 0
-        || page.height <= 0
-        || expected_inline != Some(page.available_inline_size)
-        || expected_block != Some(page.available_block_size)
-        || page.available_inline_size <= 0
-        || page.available_block_size <= 0
+    if page.width <= 0 ||
+        page.height <= 0 ||
+        expected_inline != Some(page.available_inline_size) ||
+        expected_block != Some(page.available_block_size) ||
+        page.available_inline_size <= 0 ||
+        page.available_block_size <= 0
     {
         return Err(ArtifactError::new(format!(
             "page {} fixed-point content box is invalid",
@@ -1156,8 +1156,8 @@ fn captured_image_resources(
         .chain(&capture.embedded_image_resources)
     {
         require_content_address(&resource.resource, &resource.png)?;
-        if let Some(existing) = result.insert(resource.resource.as_str(), resource.png.as_slice())
-            && existing != resource.png
+        if let Some(existing) = result.insert(resource.resource.as_str(), resource.png.as_slice()) &&
+            existing != resource.png
         {
             return Err(ArtifactError::new(format!(
                 "captured image resource {} has conflicting bytes",
@@ -1200,8 +1200,8 @@ fn encode_font(
                 )));
             }
             previous_tag = Some(variation.tag);
-            if !variation.value.is_finite()
-                || (variation.value == 0.0 && variation.value.is_sign_negative())
+            if !variation.value.is_finite() ||
+                (variation.value == 0.0 && variation.value.is_sign_negative())
             {
                 return Err(ArtifactError::new(format!(
                     "{location} font variation is not canonical finite binary32"
@@ -1238,8 +1238,8 @@ fn bind_resource(
         media_type,
         bytes: bytes.to_vec(),
     };
-    if let Some(existing) = resources.get(resource)
-        && existing != &candidate
+    if let Some(existing) = resources.get(resource) &&
+        existing != &candidate
     {
         return Err(ArtifactError::new(format!(
             "{location} resource {resource} has conflicting bytes or media type"
@@ -1320,10 +1320,10 @@ fn image_media_type(bytes: &[u8]) -> Option<PublicImageMediaType> {
 }
 
 fn canonical_link_target(target: &str) -> bool {
-    if target.len() > 8_192
-        || !target.is_ascii()
-        || target.ends_with(['?', '#'])
-        || !canonical_percent_encoding(target)
+    if target.len() > 8_192 ||
+        !target.is_ascii() ||
+        target.ends_with(['?', '#']) ||
+        !canonical_percent_encoding(target)
     {
         return false;
     }
@@ -1335,11 +1335,11 @@ fn canonical_link_target(target: &str) -> bool {
     }
     match parsed.scheme() {
         "http" | "https" => {
-            parsed.host_str().is_some()
-                && parsed.username().is_empty()
-                && parsed.password().is_none()
-                && parsed.path().starts_with('/')
-                && decoded_path_has_no_dot_segments(parsed.path())
+            parsed.host_str().is_some() &&
+                parsed.username().is_empty() &&
+                parsed.password().is_none() &&
+                parsed.path().starts_with('/') &&
+                decoded_path_has_no_dot_segments(parsed.path())
         },
         "mailto" => {
             if parsed.host_str().is_some() || parsed.fragment().is_some() {
@@ -2086,8 +2086,8 @@ mod tests {
             assert!(
                 error
                     .to_string()
-                    .contains("range is empty or outside UTF-8 text")
-                    || error
+                    .contains("range is empty or outside UTF-8 text") ||
+                    error
                         .to_string()
                         .contains("range is not on UTF-8 boundaries")
             );
