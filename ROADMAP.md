@@ -111,8 +111,9 @@ The release gate required all of the following to be public and reproducible:
 Goal: learn from representative applications before freezing API 2.
 
 The v0.2.1 patch corrects validated failure-evidence promotion and strict
-partial-capture failure retention without changing engine API 1, accepted inputs,
-or the support profile. Its package and consumer evidence is recorded in the
+partial-capture failure retention by restoring the documented API 1 failure
+boundary; it does not change accepted inputs or the support profile. Its package
+and consumer evidence is recorded in the
 [v0.2.1 release notes](docs/releases/v0.2.1.md).
 
 Done means:
