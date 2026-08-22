@@ -633,7 +633,12 @@ def canonical_http_components(path: str, query: str, fragment: str) -> bool:
 
 
 def canonical_link_target(value: str) -> bool:
-    if not canonical_percent_encoding(value) or value.endswith(("?", "#")) or re.search(r"[\x00-\x20\x7f]", value):
+    if (
+        len(value) > 8_192
+        or not canonical_percent_encoding(value)
+        or value.endswith(("?", "#"))
+        or re.search(r"[\x00-\x20\x7f]", value)
+    ):
         return False
     try:
         value.encode("ascii")
@@ -1579,6 +1584,11 @@ def main() -> None:
     ):
         if not canonical_link_target(target):
             raise AssertionError(f"canonical link was rejected: {target}")
+    exact_link_limit = "https://example.test/" + "a" * (8_192 - len("https://example.test/"))
+    if not canonical_link_target(exact_link_limit):
+        raise AssertionError("canonical link at the 8,192-byte limit was rejected")
+    if canonical_link_target(exact_link_limit + "a"):
+        raise AssertionError("canonical link above the 8,192-byte limit was accepted")
     for name, target in (
         ("link userinfo", "https://user@example.test/a"),
         ("link default port", "https://example.test:443/a"),
