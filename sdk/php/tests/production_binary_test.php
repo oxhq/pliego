@@ -110,9 +110,7 @@ try {
         'epochUnixMs' => 946684800005,
         'performanceNowMs' => 5,
     ];
-    $fontBytes = file_get_contents(
-        dirname(__DIR__, 3).'/components/fonts/tests/support/dejavu-fonts-ttf-2.37/ttf/DejaVuSans.ttf',
-    );
+    $fontBytes = file_get_contents(dirname(__DIR__).'/resources/HasubiMono-Regular.woff2');
     expectProductionBridge(is_string($fontBytes), 'cannot read the pinned controlled-capture font');
     $fontBase64 = base64_encode($fontBytes);
     $successHtml = str_replace(
@@ -123,7 +121,7 @@ try {
 <style>
 @font-face {
   font-family: "Pliego Production Bridge";
-  src: url("data:font/ttf;base64,__PLIEGO_PRODUCTION_BRIDGE_FONT__") format("truetype");
+  src: url("data:font/woff2;base64,__PLIEGO_PRODUCTION_BRIDGE_FONT__") format("woff2");
 }
 html,
 body {
