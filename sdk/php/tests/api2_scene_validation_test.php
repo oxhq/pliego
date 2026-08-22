@@ -384,6 +384,9 @@ foreach ([
     'https://[::1]/',
     'https://[abcd::1]/',
     'mailto:user@example.test',
+    "mailto:user@example.test?subject='",
+    'mailto:user@example.test?subject={',
+    'mailto:user@example.test?subject=`',
 ] as $target) {
     $operation = $link;
     $operation['target'] = $target;
@@ -649,6 +652,24 @@ $cases = [
     'link-dot-segment' => [
         static function (array &$scene): void {
             $scene['pages'][0]['operations'][3]['target'] = 'https://example.test/a/../b';
+        },
+        '.target is not canonical',
+    ],
+    'link-mailto-query-quote' => [
+        static function (array &$scene): void {
+            $scene['pages'][0]['operations'][3]['target'] = 'mailto:user@example.test?subject="';
+        },
+        '.target is not canonical',
+    ],
+    'link-mailto-query-left-angle' => [
+        static function (array &$scene): void {
+            $scene['pages'][0]['operations'][3]['target'] = 'mailto:user@example.test?subject=<';
+        },
+        '.target is not canonical',
+    ],
+    'link-mailto-query-right-angle' => [
+        static function (array &$scene): void {
+            $scene['pages'][0]['operations'][3]['target'] = 'mailto:user@example.test?subject=>';
         },
         '.target is not canonical',
     ],

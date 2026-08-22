@@ -958,10 +958,16 @@ final class Api2ResultValidator
             return false;
         }
         $address = substr($target, strlen('mailto:'));
-        if (($query = strpos($address, '?')) !== false) {
-            $address = substr($address, 0, $query);
+        $query = null;
+        if (($queryOffset = strpos($address, '?')) !== false) {
+            $query = substr($address, $queryOffset + 1);
+            $address = substr($address, 0, $queryOffset);
         }
-        if ($address === '' || str_starts_with($address, '//')) {
+        if (
+            $address === ''
+            || str_starts_with($address, '//')
+            || ($query !== null && preg_match('/["<>]/D', $query) === 1)
+        ) {
             return false;
         }
         $separator = strrpos($address, '@');
