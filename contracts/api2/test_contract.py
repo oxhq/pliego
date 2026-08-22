@@ -646,7 +646,12 @@ def canonical_link_target(value: str) -> bool:
         )
     if parsed.scheme == "mailto":
         address = parsed.path
-        if parsed.netloc or parsed.fragment or "@" not in address:
+        if (
+            parsed.netloc
+            or parsed.fragment
+            or any(character in '"<>' for character in parsed.query)
+            or "@" not in address
+        ):
             return False
         local, domain = address.rsplit("@", 1)
         return bool(local and domain and domain == domain.lower())
@@ -1543,6 +1548,8 @@ def main() -> None:
         "https://example.test/?q={`",
         "https://example.test/#{",
         "mailto:user@example.test",
+        "mailto:user@example.test?subject='",
+        "mailto:user@example.test?subject={`",
     ):
         if not canonical_link_target(target):
             raise AssertionError(f"canonical link was rejected: {target}")
@@ -1580,6 +1587,9 @@ def main() -> None:
         ("link raw fragment less-than", "https://example.test/#<"),
         ("link raw fragment greater-than", "https://example.test/#>"),
         ("link raw fragment backtick", "https://example.test/#`"),
+        ("mailto raw query quote", 'mailto:user@example.test?subject="'),
+        ("mailto raw query less-than", "mailto:user@example.test?subject=<"),
+        ("mailto raw query greater-than", "mailto:user@example.test?subject=>"),
         ("mailto uppercase domain", "mailto:invoice@Example.test"),
     ):
         noncanonical_url = copy.deepcopy(scene)
