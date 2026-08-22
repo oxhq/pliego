@@ -6,11 +6,11 @@ and available funding.
 
 ## Starting point
 
-This roadmap started from Pliego v0.1.1. Pliego v0.2.1 is the current public
-release. It retains engine API 1 and targets trusted, application-owned HTML for
-invoices, statements, and operational reports. GitHub Releases is authoritative
-for current publication status. The exact support and deployment boundary is
-documented in the [support profile](docs/pliego/support-profile.md).
+This roadmap started from Pliego v0.1.1. The current public v0.2.x line retains
+engine API 1 and targets trusted, application-owned HTML for invoices, statements,
+and operational reports. GitHub Releases is authoritative for the latest exact
+version and publication status. The support and deployment boundary is documented
+in the [support profile](docs/pliego/support-profile.md).
 
 The v0.2 source line adds controlled capture. The repository also contains an
 unreleased API 2 executable foundation whose probe, strict request decoder, and SDK

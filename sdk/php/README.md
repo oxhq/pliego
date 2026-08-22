@@ -2,7 +2,8 @@
 
 PHP 8.3+ client for rendering one document per native Pliego process.
 
-The v0.2.1 PHP package is published on Packagist:
+The v0.2 PHP package line is published on Packagist; this compatible constraint
+selects its latest published patch:
 
 ```sh
 composer require oxhq/pliego-php:^0.2.0
