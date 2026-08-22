@@ -125,6 +125,27 @@ boundary; it does not change accepted inputs or the support profile. Its package
 and consumer evidence is recorded in the
 [v0.2.1 release notes](docs/releases/v0.2.1.md).
 
+The next planned compatible package release is `oxhq/pliego-laravel` 0.2.2. A
+real Laravel consumer rehearsal proved that `render()` and `download()` are not
+enough for business documents that must outlive Pliego's prunable retained-job
+directory. Version 0.2.2 adds a first-class durable-storage handoff that:
+
+- accepts an application storage path, optional Laravel disk, and write options;
+- streams only a successfully validated PDF from `RenderResult::pdfPath`, without
+  buffering the whole document in PHP memory;
+- returns the durable disk/path together with the underlying render identity and
+  retained evidence;
+- distinguishes a storage write failure from a render failure and never reports a
+  durable object when the write was false, short, or exceptional; and
+- passes local/fake-disk, failed-write, large-stream, queue, and consumer tests while
+  documenting that Pliego evidence and application storage have separate retention
+  policies.
+
+This is a Laravel SDK patch, not a reason to rebuild an unchanged native engine.
+The package may continue to pin the exact public native/PHP runtime version that it
+verified; SDK and native product versions are independent unless an engine fix also
+requires a coordinated patch.
+
 The parallel evidence target is:
 
 - at least three real PHP/Laravel applications cover distinct deployment shapes,
