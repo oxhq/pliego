@@ -731,7 +731,21 @@ fn parse_timezone(value: &OsString) -> Result<&'static str, String> {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn configure_linux_software_rendering() {
+    // SAFETY: `main` calls this before Servo initialization or any application thread is
+    // created. Pinning Mesa here, rather than only on the supervised worker command, keeps
+    // the public API 2 stderr channel clean when a headless host would otherwise probe
+    // unavailable DRI/Zink devices during parent-process initialization.
+    unsafe {
+        std::env::set_var("LIBGL_ALWAYS_SOFTWARE", "1");
+    }
+}
+
 fn main() -> std::process::ExitCode {
+    #[cfg(target_os = "linux")]
+    configure_linux_software_rendering();
+
     #[cfg(all(
         feature = "document-session",
         not(any(target_os = "android", target_env = "ohos"))
