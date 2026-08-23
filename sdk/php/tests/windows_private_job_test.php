@@ -120,11 +120,44 @@ privateJobExpectFailure(
     'required Windows ACL tool is unavailable',
 );
 
+$hardeningOperations = new ReflectionMethod(Api2InputJob::class, 'windowsAclHardeningOperations');
+privateJobExpect(
+    $hardeningOperations->invoke(null, 'icacls.exe', 'C:\\runtime', $sid) === [
+        [['icacls.exe', 'C:\\runtime', '/reset', '/q'], 'DACL reset'],
+        [['icacls.exe', 'C:\\runtime', '/inheritance:r', '/q'], 'DACL inheritance removal'],
+        [['icacls.exe', 'C:\\runtime', '/grant:r', "*{$sid}:(OI)(CI)F", '/q'], 'owner-only DACL assignment'],
+        [['icacls.exe', 'C:\\runtime', '/setowner', "*{$sid}", '/q'], 'owner assignment'],
+    ],
+    'Windows ACL hardening must acquire WRITE_OWNER before owner assignment',
+);
+
 $outer = sys_get_temp_dir().DIRECTORY_SEPARATOR.'pliego-private-root-'.getmypid().'-'.bin2hex(random_bytes(4));
 $runtimeRoot = $outer.DIRECTORY_SEPARATOR.'private & shell (literal)';
 privateJobExpect(@mkdir($outer, 0700), 'cannot allocate private job-root test directory');
 $createRoot = new ReflectionMethod(Api2InputJob::class, 'createPrivateRuntimeRoot');
+$executeTool = new ReflectionMethod(Api2InputJob::class, 'executeWindowsTool');
+$icacls = null;
+$currentSid = null;
 try {
+    if (PHP_OS_FAMILY === 'Windows') {
+        $whoami = $resolveTool->invoke(null, 'whoami.exe');
+        $icacls = $resolveTool->invoke(null, 'icacls.exe');
+        $currentSid = $parseSid->invoke(
+            null,
+            $executeTool->invoke(null, [$whoami, '/user', '/fo', 'csv', '/nh'], 'test SID lookup'),
+        );
+        $executeTool->invoke(
+            null,
+            [$icacls, $outer, '/grant:r', "*{$currentSid}:(OI)(CI)M", '/q'],
+            'test parent Modify grant',
+        );
+        $executeTool->invoke(
+            null,
+            [$icacls, $outer, '/inheritance:r', '/q'],
+            'test parent inheritance removal',
+        );
+    }
+
     $createRoot->invoke(null, $runtimeRoot);
     privateJobExpect(is_dir($runtimeRoot), 'private job root was not created');
     privateJobExpect(
@@ -140,6 +173,17 @@ try {
     }
 } finally {
     @rmdir($runtimeRoot);
+    if (is_string($icacls) && is_string($currentSid)) {
+        try {
+            $executeTool->invoke(
+                null,
+                [$icacls, $outer, '/grant:r', "*{$currentSid}:(OI)(CI)F", '/q'],
+                'test parent cleanup grant',
+            );
+        } catch (Throwable) {
+            // Preserve the original test failure; the unique path remains available for diagnosis.
+        }
+    }
     @rmdir($outer);
 }
 

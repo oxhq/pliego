@@ -7,7 +7,7 @@ function fakeApi2Engine(): array
 {
     return [
         'name' => 'pliego',
-        'version' => '0.3.1',
+        'version' => '0.3.2',
         'api' => 2,
         'source_commit' => str_repeat('1', 40),
         'runtime' => [
@@ -212,7 +212,7 @@ if (!$failed) {
 
 $engine = fakeApi2Engine();
 if ($mode === 'engine-mismatch') {
-    $engine['version'] = '0.3.2';
+    $engine['version'] = '0.3.3';
 }
 $result = [
     'schema' => 'pliego.render-result',

@@ -1,6 +1,6 @@
 [package]
 name = "pliego-core-benchmark"
-version = "0.3.1"
+version = "0.3.2"
 authors = ["OxHQ"]
 license = "MPL-2.0"
 edition.workspace = true

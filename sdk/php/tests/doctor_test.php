@@ -32,7 +32,7 @@ $doctor = new Doctor([PHP_BINARY, __DIR__.'/fake_api2.php'], 3);
 
 try {
     $report = $doctor->run($root);
-    doctorExpect($report['version'] === '0.3.1', 'probed engine version is reported');
+    doctorExpect($report['version'] === '0.3.2', 'probed engine version is reported');
     doctorExpect($report['api_version'] === 2, 'Pliego API v2 is reported');
     doctorExpect($report['platform'] !== '', 'platform is reported');
     doctorExpect(str_starts_with((string) file_get_contents($report['smoke_pdf']), '%PDF-'), 'offline PDF smoke passes');

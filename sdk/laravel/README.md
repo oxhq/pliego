@@ -2,10 +2,10 @@
 
 Laravel 13 integration for application-owned Blade documents.
 
-The v0.3 package uses Pliego API 2 and pins `oxhq/pliego-php` 0.3.1:
+The v0.3 package uses Pliego API 2 and pins `oxhq/pliego-php` 0.3.2:
 
 ```sh
-composer require oxhq/pliego-laravel:^0.3.1
+composer require oxhq/pliego-laravel:^0.3.2
 php artisan pliego:install
 php artisan pliego:doctor
 ```
