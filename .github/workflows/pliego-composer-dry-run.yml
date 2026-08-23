@@ -254,3 +254,19 @@ jobs:
             dist/packages/
           if-no-files-found: error
           retention-days: 7
+
+  windows-private-job-root:
+    name: Windows private API 2 job root
+    runs-on: windows-2022
+    timeout-minutes: 10
+    steps:
+      - name: Check out Pliego
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+      - uses: shivammathur/setup-php@b604ade2a87db23f8871b7182e69ec5e75effb45 # v2
+        with:
+          php-version: '8.3'
+          coverage: none
+      - run: composer --no-interaction --no-plugins --no-scripts --working-dir=sdk/php install --no-progress
+      - run: composer --no-interaction --no-plugins --working-dir=sdk/php test:windows-job-root

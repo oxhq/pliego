@@ -208,22 +208,9 @@ final readonly class Api2InputJob
             );
         }
 
-        self::executeWindowsTool(
-            [$icacls, $path, '/setowner', "*{$sid}", '/q'],
-            'owner assignment',
-        );
-        self::executeWindowsTool(
-            [$icacls, $path, '/reset', '/q'],
-            'DACL reset',
-        );
-        self::executeWindowsTool(
-            [$icacls, $path, '/inheritance:r', '/q'],
-            'DACL inheritance removal',
-        );
-        self::executeWindowsTool(
-            [$icacls, $path, '/grant:r', "*{$sid}:(OI)(CI)F", '/q'],
-            'owner-only DACL assignment',
-        );
+        foreach (self::windowsAclHardeningOperations($icacls, $path, $sid) as [$arguments, $operation]) {
+            self::executeWindowsTool($arguments, $operation);
+        }
 
         $proofPath = @tempnam(dirname($path), '.pliego-api2-acl-');
         if (!is_string($proofPath)) {
@@ -247,6 +234,19 @@ final readonly class Api2InputJob
         if (!is_array($entries) || array_values(array_diff($entries, ['.', '..'])) !== []) {
             throw new RuntimeException('Windows job root changed before input staging');
         }
+    }
+
+    /**
+     * @return list<array{0: non-empty-list<string>, 1: string}>
+     */
+    private static function windowsAclHardeningOperations(string $icacls, string $path, string $sid): array
+    {
+        return [
+            [[$icacls, $path, '/reset', '/q'], 'DACL reset'],
+            [[$icacls, $path, '/inheritance:r', '/q'], 'DACL inheritance removal'],
+            [[$icacls, $path, '/grant:r', "*{$sid}:(OI)(CI)F", '/q'], 'owner-only DACL assignment'],
+            [[$icacls, $path, '/setowner', "*{$sid}", '/q'], 'owner assignment'],
+        ];
     }
 
     private static function resolveWindowsSystemTool(string $name, ?string $systemRoot = null): string
