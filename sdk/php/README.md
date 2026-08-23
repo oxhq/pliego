@@ -3,7 +3,7 @@
 PHP 8.3+ 64-bit client for deterministic, one-document-per-process Pliego rendering.
 
 ```sh
-composer require oxhq/pliego-php:^0.3.1
+composer require oxhq/pliego-php:^0.3.2
 ```
 
 ## API 2 rendering
