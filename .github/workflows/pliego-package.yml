@@ -473,6 +473,15 @@ jobs:
         with:
           python-version-file: .python-version
 
+      - name: Install documented Linux runtime dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ca-certificates \
+            libegl1 \
+            libfontconfig1 \
+            libgl1-mesa-dri
+
       - name: Download the exact Linux package
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
@@ -488,11 +497,14 @@ jobs:
           archive="dist/${bundle}.tar.gz"
           unpacked="$RUNNER_TEMP/pliego-linux-headless-api2"
           proof="$RUNNER_TEMP/pliego-linux-headless-api2-proof.json"
+          xdg_runtime_dir="$RUNNER_TEMP/pliego-linux-headless-xdg"
+          install -d -m 0700 "$xdg_runtime_dir"
           mkdir "$unpacked"
           tar -xzf "$archive" -C "$unpacked"
           binary="$unpacked/$bundle/pliego"
           chmod +x "$binary"
           env -u LIBGL_ALWAYS_SOFTWARE -u EGL_LOG_LEVEL -u MESA_LOG_LEVEL \
+            XDG_RUNTIME_DIR="$xdg_runtime_dir" \
             python ports/pliego/tests/check_api2_contract.py \
               --binary "$binary" \
               --expected-version "$version" \
