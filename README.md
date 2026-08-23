@@ -33,7 +33,7 @@ compatible constraint below selects its latest published patch, installs the exa
 PHP bridge dependency, then downloads and verifies the package-pinned native runtime:
 
 ```sh
-composer require oxhq/pliego-laravel:^0.3.0
+composer require oxhq/pliego-laravel:^0.3.1
 php artisan pliego:install
 php artisan pliego:doctor
 ```
@@ -163,7 +163,7 @@ Composer distributions pass their focused contracts. The support profile remains
 the boundary; Pliego does not claim browser-wide compatibility or safe rendering of
 untrusted HTML.
 
-This source tree targets v0.3.0 with engine API 2. The latest exact tag and native
+This source tree targets v0.3.1 with engine API 2. The latest exact tag and native
 assets on the [Releases page](https://github.com/oxhq/pliego/releases/latest) are the
 publication authority. API 1 render commands remain as a deprecated compatibility
 surface, while supported SDKs negotiate and invoke the exact API 2 tuple.

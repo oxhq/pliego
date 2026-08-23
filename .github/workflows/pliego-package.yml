@@ -455,3 +455,63 @@ jobs:
             dist/pliego-*.${{ matrix.archive_ext }}.sha256
           if-no-files-found: error
           retention-days: 7
+
+  linux-headless-api2:
+    name: Linux headless API 2 stderr contract
+    needs: package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out Pliego
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version-file: .python-version
+
+      - name: Install documented Linux runtime dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ca-certificates \
+            libegl1 \
+            libfontconfig1 \
+            libgl1-mesa-dri
+
+      - name: Download the exact Linux package
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: pliego-linux-x86_64
+          path: dist
+
+      - name: Prove a caller-clean headless API 2 channel on Ubuntu 24.04
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(python -c 'import pathlib, tomllib; print(tomllib.loads(pathlib.Path("ports/pliego/Cargo.toml").read_text(encoding="utf-8"))["package"]["version"])')
+          bundle="pliego-${version}-linux-x86_64"
+          archive="dist/${bundle}.tar.gz"
+          unpacked="$RUNNER_TEMP/pliego-linux-headless-api2"
+          proof="$RUNNER_TEMP/pliego-linux-headless-api2-proof.json"
+          xdg_runtime_dir="$RUNNER_TEMP/pliego-linux-headless-xdg"
+          install -d -m 0700 "$xdg_runtime_dir"
+          mkdir "$unpacked"
+          tar -xzf "$archive" -C "$unpacked"
+          binary="$unpacked/$bundle/pliego"
+          chmod +x "$binary"
+          env -u LIBGL_ALWAYS_SOFTWARE -u EGL_LOG_LEVEL -u MESA_LOG_LEVEL \
+            XDG_RUNTIME_DIR="$xdg_runtime_dir" \
+            python ports/pliego/tests/check_api2_contract.py \
+              --binary "$binary" \
+              --expected-version "$version" \
+              --expected-source-commit "$(git rev-parse HEAD)" \
+              --expected-target x86_64-unknown-linux-gnu \
+              --expected-servo-base "$SERVO_BASE_SHA" \
+              --valid-request contracts/api2/goldens/accepted/render-request.a4.json \
+              --archive "$archive" \
+              --bundle-version-file "$unpacked/$bundle/VERSION.txt" \
+              --proof-output "$proof"

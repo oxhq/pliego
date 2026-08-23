@@ -202,7 +202,7 @@ function api2SceneTransaction(array $scene, array $resources, array $page): arra
     ];
     $engine = [
         'name' => 'pliego',
-        'version' => '0.3.0',
+        'version' => '0.3.1',
         'api' => 2,
         'source_commit' => str_repeat('1', 40),
         'runtime' => [

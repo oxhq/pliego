@@ -23,7 +23,7 @@ $bundled = json_decode(
     flags: JSON_THROW_ON_ERROR,
 );
 runtimeExpect(
-    ($bundled['version'] ?? null) === '0.3.0'
+    ($bundled['version'] ?? null) === '0.3.1'
         && ($bundled['api'] ?? null) === 2
         && ($bundled['release_ready'] ?? null) === false,
     'bundled v0.3 runtime manifest must remain pending until native promotion',
