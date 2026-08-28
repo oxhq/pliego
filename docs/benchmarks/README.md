@@ -8,12 +8,14 @@ Pliego's benchmark work is designed to answer two separate questions:
 
 The repository contains an implemented Pliego engine harness, pinned fixture
 protocol, and a first target-neutral competitor slice for dompdf and Browsershot.
-Only `minimal-static` has a competitor correctness mapping. All timing remains
-N/A until canonical Poppler identities are pinned; competitor timing also needs
-externally attested immutable images. Every other competitor/fixture pair is an
-explicit `not-applicable` record with a reason. The repository contains **no
-committed publishable performance results**, so no comparative speed, memory, or CPU
-conclusion should be inferred from this document.
+Only `minimal-static` has a competitor correctness mapping. Authoritative timing
+remains N/A until canonical Poppler identities and externally attested immutable
+competitor images are pinned. A separate manual workflow can produce measured,
+directional `github-hosted-exploratory` snapshots; those can never validate as a
+dedicated baseline or support a general production ranking. Every other
+competitor/fixture pair is an explicit `not-applicable` record with a reason. The
+repository contains **no committed performance snapshot yet**, so no comparative
+speed, memory, or CPU conclusion should be inferred from this document.
 
 The detailed harness contract, fixture inventory, metric definitions, and target
 manifest live in the [benchmark source directory](../../benchmarks/README.md).
@@ -92,10 +94,16 @@ python3 benchmarks/tools/run_benchmark.py \
 The current commands deliberately return `not-applicable` for competitor timing:
 the manifest does not yet pin immutable OCI image digests, canonical
 dependency/runtime hashes and paths, or canonical Poppler identities, and no
-out-of-process image attestation path exists. The hosted benchmark workflow installs
+out-of-process image attestation path exists. The correctness workflow installs
 both locked graphs and directly renders `minimal-static` through Pliego API 2 and
-each adapter, then runs real Poppler checks. That lane now passes as hosted
-one-fixture correctness proof. It remains a smoke, not measurement evidence.
+each adapter, then runs real Poppler checks. A separate manual performance
+workflow runs all three targets in one GitHub-hosted VM with 100 timed, globally
+interleaved samples per target and retains exact cgroup CPU/memory/I/O plus raw
+sample provenance. Its output is measurement evidence for that exact hosted run,
+but not an authoritative or generalized benchmark. Three independent jobs are
+sealed into one no-selection series: all repeats, per-metric p50 ranges, and
+repeat-to-repeat spread are retained, so the published report cannot silently
+choose the most favorable VM.
 
 After immutable images are pinned, each target uses the same order: one discarded correctness preflight, discarded
 warmups, then cold one-shot timed samples. The adapter root and every descendant
@@ -117,7 +125,7 @@ adapter timing stays N/A until an external launcher proves the running image.
 All four Poppler tool identities must also match manifest pins. Browsershot samples require a fresh Linux network namespace
 with only `lo`; Chromium flags and HTTP(S) request blocking are not treated as
 network isolation.
-The current commands run one target at a time. The committed seed randomizes
+The authoritative CLI commands run one target at a time. The committed seed randomizes
 fixture traversal within each target. The harness now contains a deterministic
 SHA-256-ranked cross-target schedule plus phase-separated runner entrypoints.
 Its hash input is the ASCII encoding of compact JSON with every non-ASCII code
@@ -126,8 +134,10 @@ point JSON-escaped, for
 target_id]`; entries sort by digest bytes and then target-ID UTF-8 bytes. It can
 execute preflight, warmup, and indexed timed rounds without batching a target's
 samples. The public CLI does not yet construct attested multi-target contexts
-or persist a real run, so these commands remain implementation proof, not a
-publishable cross-engine report. The executor does produce a
+or persist an attested multi-target run, so these commands remain implementation
+proof, not an authoritative cross-engine report. The separate hosted coordinator
+does persist exact three-target runs under its narrower exploratory claim. The
+executor produces a
 `pliego.benchmark-interleaved-run` version 1 envelope marked
 `prerequisite-only`: its global timed order embeds the unmodified raw samples,
 with content-bound sample IDs and a digest content-addressing the entire
@@ -148,16 +158,25 @@ and retains the contributing sample IDs. Both artifacts remain explicitly
 `prerequisite-only`; the renderer adds no rankings, narrative, or authority to
 publish comparative claims.
 
+The hosted lane instead uses `comparison_metrics.py` and `run_comparison.py` to
+aggregate every top-level performance/output metric plus available phase and
+bridge timings from 100 correctness-passing samples per target. Lower-level
+cgroup diagnostics remain in the raw samples. The lane binds those values to
+exact runtime and sample identities and seals three complete repeats without
+selecting a winner. That is real measurement for the named GitHub-hosted run,
+but it does not satisfy or weaken the authoritative gates above.
+
 ## Implemented slice and remaining comparative protocol
 
 | Target | Runner status | Eligible public claim today |
 | --- | --- | --- |
-| Pliego v0.3.2 API 2 | Implemented and pinned | Published bundle and correctness harness can be reproduced; no committed performance result |
+| Pliego v0.3.2 API 2 | Implemented and pinned | Published bundle and correctness harness can be reproduced; no committed hosted snapshot yet |
 | Pliego candidate | Stable-outcome parity comparator only; arbitrary candidate performance runs are not implemented | Parity can be checked locally; no candidate performance claim |
-| dompdf 3.1.6 | Locked one-shot adapter; configured Ubuntu/Poppler smoke | Timing N/A pending image attestation and oracle pins |
-| Browsershot 5.4.0 + Puppeteer 25.8.0 | Locked one-shot adapter; configured network-isolated Ubuntu/Poppler smoke | Timing N/A pending image attestation and oracle pins |
+| dompdf 3.1.6 | Locked one-shot adapter; configured Ubuntu/Poppler smoke | Authoritative timing N/A pending image attestation and oracle pins; eligible only for exact-run hosted snapshots |
+| Browsershot 5.4.0 + Puppeteer 25.8.0 | Locked one-shot adapter; configured network-isolated Ubuntu/Poppler smoke | Authoritative timing N/A pending image attestation and oracle pins; eligible only for exact-run hosted snapshots |
 
-Before a cross-engine comparison is published, every target must follow these rules:
+Before an authoritative cross-engine baseline or generalized ranking is
+published, every target must follow these rules:
 
 - Pin the engine, wrapper, runtime, operating-system image, native dependencies, and
   container or host identity.
@@ -178,17 +197,17 @@ Before a cross-engine comparison is published, every target must follow these ru
 - Publish raw samples, hashes, commands, logs, environment metadata, validation
   output, and the report-generation code with the summary.
 
-The remaining dedicated-Linux gates are wiring the seeded cross-target executor
-to fully attested target contexts, retaining a genuine run artifact, and retaining
-that artifact with its validated cells and generated table as one evidence bundle.
+The remaining dedicated-Linux gates are fully attested target contexts, a
+canonical Poppler runtime, a genuine dedicated run artifact, and durable
+retention of that artifact with its validated cells and generated table.
 Single-target serial throughput now uses the retained outer one-shot wall interval
 from runner process open through sampler exit, which includes descendant drain and
-accounting settlement; it is still not a publishable cross-engine comparison until
-the coordination and real-evidence gates pass.
+accounting settlement; it is still not an authoritative cross-engine comparison
+until the dedicated identity and evidence gates pass.
 
-## Publication gate
+## Authoritative publication gate
 
-A benchmark report is publishable only when a fresh checkout can verify target
+A dedicated baseline or generalized benchmark report is publishable only when a fresh checkout can verify target
 identity, regenerate fixtures, reproduce the commands, validate every included
 result from the exact recorded clean harness commit, verify the retained oracle
 script and all four Poppler executable identities, and trace each chart or table
