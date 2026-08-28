@@ -181,7 +181,26 @@ def fixture_proofs() -> None:
     assert child_environment["BROWSERSHOT_NODE_BINARY"] == "/usr/bin/node"
     assert child_environment["TMPDIR"] == "/engine-owned-artifacts"
     if sys.platform == "linux":
-        with tempfile.TemporaryDirectory() as raw:
+        with tempfile.TemporaryDirectory(prefix="pliego mount ") as raw:
+            root = Path(raw).resolve()
+            nested = root / "nested mount"
+            leaf = nested / "leaf"
+            leaf.mkdir(parents=True)
+            escaped_root = str(root).replace(" ", "\\040")
+            escaped_nested = str(nested).replace(" ", "\\040")
+            mountinfo = (
+                f"36 25 8:1 / {escaped_root} rw,relatime - ext4 /dev/root rw\n"
+                f"37 36 8:2 / {escaped_nested} rw,relatime - xfs /dev/fixture rw\n"
+            )
+            assert process_tree_sampler.decode_mountinfo_path(escaped_nested) == str(nested)
+            assert process_tree_sampler.mountinfo_filesystem_type(root, mountinfo) == "ext4"
+            assert process_tree_sampler.mountinfo_filesystem_type(leaf, mountinfo) == "xfs"
+
+        with (
+            tempfile.TemporaryDirectory() as raw,
+            mock.patch.object(process_tree_sampler, "mountinfo_filesystem_type", return_value="ext4"),
+            mock.patch.object(process_tree_sampler, "directory_has_dirsync", return_value=True),
+        ):
             artifacts = Path(raw).resolve()
             artifacts.chmod(0o700)
             current_account = process_tree_sampler.EngineAccount(
@@ -191,12 +210,20 @@ def fixture_proofs() -> None:
                 "/nonexistent",
             )
             adapter_command = ("/adapter", "render", "input.html", "--artifacts", str(artifacts))
-            assert process_tree_sampler.engine_temporary_directory(
-                adapter_command, current_account, None
-            ) == str(artifacts)
+            assert process_tree_sampler.engine_temporary_directory(adapter_command, current_account, None) == str(
+                artifacts
+            )
             assert process_tree_sampler.engine_temporary_directory(
                 ("/pliego", "render-api2"), current_account, str(artifacts)
             ) == str(artifacts)
+            identity = process_tree_sampler.engine_temporary_directory_identity(artifacts)
+            process_tree_sampler.revalidate_engine_temporary_directory(artifacts, current_account, identity)
+            must_be_incomplete(
+                "ENGINE_TEMPORARY_DIRECTORY_REPLACED",
+                lambda: process_tree_sampler.revalidate_engine_temporary_directory(
+                    artifacts, current_account, (identity[0], identity[1] + 1)
+                ),
+            )
             must_be_incomplete(
                 "ENGINE_TEMPORARY_DIRECTORY_REQUIRED",
                 lambda: process_tree_sampler.engine_temporary_directory(
@@ -208,6 +235,17 @@ def fixture_proofs() -> None:
                 "ENGINE_TEMPORARY_DIRECTORY_UNSAFE",
                 lambda: process_tree_sampler.engine_temporary_directory(adapter_command, current_account, None),
             )
+            artifacts.chmod(0o700)
+            with mock.patch.object(process_tree_sampler, "mountinfo_filesystem_type", return_value="tmpfs"):
+                must_be_incomplete(
+                    "ENGINE_TEMPORARY_BACKING_UNSAFE",
+                    lambda: process_tree_sampler.validate_engine_temporary_directory(artifacts, current_account),
+                )
+            with mock.patch.object(process_tree_sampler, "directory_has_dirsync", return_value=False):
+                must_be_incomplete(
+                    "ENGINE_TEMPORARY_DIRECTORY_UNSAFE",
+                    lambda: process_tree_sampler.validate_engine_temporary_directory(artifacts, current_account),
+                )
 
     with tempfile.TemporaryDirectory() as raw:
         cgroup_root = Path(raw).resolve()
@@ -642,7 +680,9 @@ def workload_command(engine: str) -> list[str]:
 
 def sampled(command: list[str], descendant_grace_ms: float = 1000.0) -> dict:
     account = process_tree_sampler.resolve_engine_account()
-    with tempfile.TemporaryDirectory() as raw:
+    temporary_root = os.environ.get("PLIEGO_BENCHMARK_ENGINE_TEMP_ROOT")
+    assert temporary_root, "live sampler proof requires PLIEGO_BENCHMARK_ENGINE_TEMP_ROOT"
+    with tempfile.TemporaryDirectory(dir=temporary_root) as raw:
         temporary = Path(raw).resolve()
         os.chown(temporary, account.uid, account.gid)
         temporary.chmod(0o700)
@@ -817,13 +857,6 @@ def php_integration_proof() -> None:
 import base64, hashlib, json, os, pathlib, sys
 
 
-def read_synced(path):
-    with path.open('rb') as source:
-        payload = source.read()
-        os.fsync(source.fileno())
-        return payload
-
-
 def write_synced(path, payload):
     with path.open('wb') as output:
         output.write(payload)
@@ -842,22 +875,20 @@ def sync_directory(path):
 
 assert sys.argv[1:] == ['render-api2']
 request_bytes = sys.stdin.buffer.read()
-os.fsync(sys.stdin.fileno())
 request = json.loads(request_bytes)
 assert request_bytes == (json.dumps(request, separators=(',', ':')) + '\\n').encode()
 assert request['api'] == 2
 root = pathlib.Path.cwd()
 temporary = pathlib.Path(os.environ['TMPDIR'])
-assert temporary.parent == root.parent and temporary.name == 'temporary'
 assert temporary.is_dir()
 assert sorted(path.name for path in root.iterdir()) == ['input', 'input-manifest.json']
-manifest_bytes = read_synced(root / 'input-manifest.json')
+manifest_bytes = (root / 'input-manifest.json').read_bytes()
 manifest_descriptor = request['input']['manifest']
 assert manifest_descriptor['bytes'] == len(manifest_bytes)
 assert manifest_descriptor['sha256'] == 'sha256:' + hashlib.sha256(manifest_bytes).hexdigest()
 manifest = json.loads(manifest_bytes)
 assert manifest['entries'][0]['path'] == 'input.html'
-assert manifest['entries'][0]['sha256'] == 'sha256:' + hashlib.sha256(read_synced(root / 'input/input.html')).hexdigest()
+assert manifest['entries'][0]['sha256'] == 'sha256:' + hashlib.sha256((root / 'input/input.html').read_bytes()).hexdigest()
 delivery = root / 'delivery'
 delivery.mkdir()
 diagnostics = pathlib.Path.cwd() / 'diagnostics'
@@ -887,7 +918,7 @@ result = {{
         'runtime': {{
             'mode': 'one-shot',
             'target': 'x86_64-unknown-linux-gnu',
-            'binary_sha256': 'sha256:' + hashlib.sha256(read_synced(pathlib.Path(sys.argv[0]))).hexdigest(),
+            'binary_sha256': 'sha256:' + hashlib.sha256(pathlib.Path(sys.argv[0]).read_bytes()).hexdigest(),
             'servo_base': '1' * 40,
         }},
     }},

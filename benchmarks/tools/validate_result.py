@@ -329,6 +329,16 @@ def validate_resource_usage(sample: dict[str, Any], path: str, violations: list[
         require_equal(f"{path}.resource_usage.exit_code", usage["exit_code"], 128 + usage["signal"], violations)
 
     launch = usage["launch_security"]
+    require_equal(
+        f"{path}.resource_usage.launch_security.temporary_storage",
+        launch["temporary_storage"],
+        {
+            "directory_sync": "FS_DIRSYNC_FL",
+            "filesystem": "ext4",
+            "scope": "per-invocation-private",
+        },
+        violations,
+    )
     status = launch["status"]
     require_equal(f"{path}.resource_usage.launch_security.status.uid", status["uid"], [launch["uid"]] * 4, violations)
     require_equal(f"{path}.resource_usage.launch_security.status.gid", status["gid"], [launch["gid"]] * 4, violations)

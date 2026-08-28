@@ -39,7 +39,7 @@ jobs:
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install --yes \
-            acl ca-certificates iproute2 libegl1 libfontconfig1 libgl1-mesa-dri \
+            acl ca-certificates e2fsprogs iproute2 libegl1 libfontconfig1 libgl1-mesa-dri \
             php-xml php-mbstring poppler-utils util-linux
           composer install --working-dir=benchmarks/adapters/dompdf \
             --no-dev --no-interaction --prefer-dist --classmap-authoritative
@@ -87,6 +87,12 @@ jobs:
           test "$(id -g pliego-benchmark-engine)" -gt 0
           engine_uid="$(id -u pliego-benchmark-engine)"
           engine_gid="$(id -g pliego-benchmark-engine)"
+          engine_temp_root=/var/lib/pliego-benchmark-engine-temp
+          test ! -e "$engine_temp_root"
+          sudo install -d -o root -g root -m 0711 "$engine_temp_root"
+          sudo chattr +D "$engine_temp_root"
+          test "$(findmnt -T "$engine_temp_root" -n -o FSTYPE)" = ext4
+          [[ "$(sudo lsattr -d "$engine_temp_root" | awk '{print $1}')" == *D* ]]
           engine_test=(sudo setpriv --reuid="$engine_uid" --regid="$engine_gid" --clear-groups \
             --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs /usr/bin/test)
           engine_find=(sudo setpriv --reuid="$engine_uid" --regid="$engine_gid" --clear-groups \
@@ -180,6 +186,7 @@ jobs:
           CHROME: ${{ steps.runtime.outputs.chrome }}
           OUTPUT: ${{ steps.evidence.outputs.output }}
           ENVIRONMENT_FILE: ${{ steps.evidence.outputs.environment }}
+          ENGINE_TEMP_ROOT: /var/lib/pliego-benchmark-engine-temp
         run: |
           set -euo pipefail
           sudo systemd-run --quiet --wait --pipe --collect --expand-environment=no \
@@ -203,6 +210,7 @@ jobs:
               printf "+cpu +io +memory +pids" > "$parent/cgroup.subtree_control"
               . "$1"
               export PLIEGO_BENCHMARK_CGROUP_PARENT="$parent"
+              export PLIEGO_BENCHMARK_ENGINE_TEMP_ROOT="$6"
               export GIT_OPTIONAL_LOCKS=0
               /usr/bin/python3 -E -s benchmarks/tools/test_process_tree_sampler.py --live --php-integration >/dev/null
               /usr/bin/python3 -E -s benchmarks/tools/process_tree_sampler.py --probe-network-isolation >/dev/null
@@ -210,11 +218,12 @@ jobs:
                 BROWSERSHOT_NODE_BINARY="$2" \
                 BROWSERSHOT_CHROME_PATH="$3" \
                 PLIEGO_BENCHMARK_CGROUP_PARENT="$parent" \
+                PLIEGO_BENCHMARK_ENGINE_TEMP_ROOT="$6" \
                 /usr/bin/python3 -E -s benchmarks/tools/run_comparison.py \
                   --binary "$4" \
                   --out "$5"
             ' pliego-hosted-comparison \
-              "$ENVIRONMENT_FILE" "$NODE" "$CHROME" "$BINARY" "$OUTPUT"
+              "$ENVIRONMENT_FILE" "$NODE" "$CHROME" "$BINARY" "$OUTPUT" "$ENGINE_TEMP_ROOT"
           sudo chown -R "$(id -u):$(id -g)" "$OUTPUT"
 
       - name: Revalidate retained evidence

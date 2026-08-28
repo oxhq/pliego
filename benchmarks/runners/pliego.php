@@ -32,6 +32,7 @@ declare(strict_types=1);
 
 const ENGINE_ACCOUNT = 'pliego-benchmark-engine';
 const SAMPLER_PYTHON = '/usr/bin/python3';
+const ENGINE_TEMP_ROOT_ENV = 'PLIEGO_BENCHMARK_ENGINE_TEMP_ROOT';
 
 const USAGE = <<<EOT
 Usage: php pliego.php --binary <path> --input <file.html> --output <file.pdf> --artifacts <dir>
@@ -842,7 +843,19 @@ function sync_benchmark_path(string $path, bool $directory): void
         fail('PHP fsync support is required to seal benchmark staging');
     }
     $stream = @fopen($path, $directory ? 'rb' : 'r+b');
-    if ($stream === false || !fsync($stream)) {
+    if ($stream === false) {
+        fail("cannot durably seal benchmark staging path: {$path}");
+    }
+    if (!$directory) {
+        while (!feof($stream)) {
+            $bytes = fread($stream, 1_048_576);
+            if ($bytes === false || ($bytes === '' && !feof($stream))) {
+                fclose($stream);
+                fail("cannot pre-read benchmark staging path: {$path}");
+            }
+        }
+    }
+    if (!fsync($stream)) {
         if (is_resource($stream)) {
             fclose($stream);
         }
@@ -902,7 +915,9 @@ function stage_api2_job(array $state): array
 {
     $sandboxRoot = sys_get_temp_dir() . '/pliego-bench-api2-' . bin2hex(random_bytes(8));
     $jobRoot = $sandboxRoot . DIRECTORY_SEPARATOR . 'job';
-    $temporaryRoot = $sandboxRoot . DIRECTORY_SEPARATOR . 'temporary';
+    $temporaryRoot = PHP_OS_FAMILY === 'Linux'
+        ? benchmark_engine_temporary_path('pliego-bench-api2-temp-')
+        : $sandboxRoot . DIRECTORY_SEPARATOR . 'temporary';
     if (PHP_OS_FAMILY === 'Linux') {
         prepare_engine_directory($sandboxRoot, $state['engineUid'], $state['engineGid']);
     } elseif (!mkdir($sandboxRoot, 0700) || !chmod($sandboxRoot, 0700)) {
@@ -913,7 +928,8 @@ function stage_api2_job(array $state): array
     }
 
     $inputRoot = $jobRoot . DIRECTORY_SEPARATOR . 'input';
-    if (!mkdir($jobRoot, 0700) || !mkdir($temporaryRoot, 0700) || !mkdir($inputRoot, 0700)) {
+    if (!mkdir($jobRoot, 0700) || !mkdir($inputRoot, 0700)
+        || (PHP_OS_FAMILY !== 'Linux' && !mkdir($temporaryRoot, 0700))) {
         rrmdir($sandboxRoot);
         fail("cannot create private API 2 sandbox directories below: {$sandboxRoot}");
     }
@@ -985,8 +1001,8 @@ function stage_api2_job(array $state): array
         || !chmod($manifestPath, 0600)) {
         fail('cannot write canonical API 2 input manifest');
     }
-    // Charge the first read and any relatime metadata to staging, then flush it
-    // with the tree below instead of contaminating the measured engine cgroup.
+    // Verify the canonical bytes here; seal_benchmark_tree performs a second,
+    // complete read after the final ownership/mode changes and then fsyncs it.
     verify_staged_bytes($manifestPath, $manifest, 'input manifest');
 
     if (PHP_OS_FAMILY !== 'Windows') {
@@ -1068,7 +1084,6 @@ function stage_api2_job(array $state): array
     if (strlen($request) > 1_048_576) {
         fail('canonical API 2 render request exceeds 1 MiB');
     }
-
     return [
         'sandbox' => $sandboxRoot,
         'root' => $jobRoot,
@@ -1226,6 +1241,22 @@ function prepare_engine_directory(string $path, int $uid, int $gid): void
     }
 }
 
+function benchmark_engine_temporary_path(string $prefix): string
+{
+    if (PHP_OS_FAMILY !== 'Linux') {
+        return sys_get_temp_dir() . DIRECTORY_SEPARATOR . $prefix . bin2hex(random_bytes(8));
+    }
+    $configured = getenv(ENGINE_TEMP_ROOT_ENV);
+    $root = is_string($configured) && $configured !== '' ? realpath($configured) : false;
+    $metadata = $root !== false ? lstat($root) : false;
+    if ($root === false || $root !== $configured || !is_dir($root) || is_link($root)
+        || !is_array($metadata) || (int) ($metadata['uid'] ?? -1) !== 0
+        || (int) ($metadata['gid'] ?? -1) !== 0 || ((int) $metadata['mode'] & 07777) !== 0711) {
+        fail(ENGINE_TEMP_ROOT_ENV . ' must name a canonical root-owned directory with mode 0711');
+    }
+    return $root . DIRECTORY_SEPARATOR . $prefix . bin2hex(random_bytes(8));
+}
+
 /** @return array{index: int, ok: bool, exit_code: int, wall_ms: float, one_shot_wall_ms: float,
  *     user_ms: float|null, sys_ms: float|null, memory_current_bytes: int|null,
  *     memory_peak_bytes: int|null, read_bytes: int|null, write_bytes: int|null,
@@ -1237,7 +1268,7 @@ function prepare_engine_directory(string $path, int $uid, int $gid): void
 function run_adapter_sample(array $state, int $index): array
 {
     assert_fixture_identity($state);
-    $artifactsDir = sys_get_temp_dir() . '/pliego-bench-' . bin2hex(random_bytes(8));
+    $artifactsDir = benchmark_engine_temporary_path('pliego-bench-');
     $outDir = sys_get_temp_dir() . '/pliego-bench-out-' . bin2hex(random_bytes(8));
     if (PHP_OS_FAMILY === 'Linux') {
         prepare_engine_directory($outDir, $state['engineUid'], $state['engineGid']);
@@ -1481,6 +1512,9 @@ function run_api2_sample(array $state, int $index): array
     assert_fixture_identity($state);
     $job = stage_api2_job($state);
     $requestPath = api2_request_file($job['request']);
+    if (PHP_OS_FAMILY === 'Linux') {
+        prepare_engine_directory($job['temporary'], $state['engineUid'], $state['engineGid']);
+    }
     try {
         $exec = run_engine(
             [$state['binary'], 'render-api2'],
@@ -1491,6 +1525,7 @@ function run_api2_sample(array $state, int $index): array
         );
     } finally {
         rrmdir(dirname($requestPath));
+        rrmdir($job['temporary']);
     }
     if (isset($exec['error'])) {
         rrmdir($job['sandbox']);

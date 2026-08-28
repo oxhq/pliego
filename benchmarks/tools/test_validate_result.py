@@ -107,6 +107,11 @@ def resource_usage() -> dict:
                 label: {"cgroup.procs": "EACCES", "cgroup.threads": "EACCES"}
                 for label in ("parent", "harness", "staging", "measurement")
             },
+            "temporary_storage": {
+                "directory_sync": "FS_DIRSYNC_FL",
+                "filesystem": "ext4",
+                "scope": "per-invocation-private",
+            },
         },
         "wall_ms": 1,
         "exit_code": 0,
@@ -524,6 +529,13 @@ def main() -> None:
         valid,
         lambda value: value["samples"][0]["resource_usage"]["launch_security"]["executable"].update(sha256="1" * 64),
         "launch_security.executable.sha256",
+    )
+    changed(
+        valid,
+        lambda value: value["samples"][0]["resource_usage"]["launch_security"]["temporary_storage"].update(
+            filesystem="tmpfs"
+        ),
+        "launch_security.temporary_storage",
     )
     changed(
         valid,

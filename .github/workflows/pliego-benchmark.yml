@@ -60,7 +60,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes \
-            acl ca-certificates libegl1 libfontconfig1 libgl1-mesa-dri \
+            acl ca-certificates e2fsprogs libegl1 libfontconfig1 libgl1-mesa-dri \
             php-xml php-mbstring poppler-utils util-linux
           composer install --working-dir=benchmarks/adapters/dompdf \
             --no-dev --no-interaction --prefer-dist --classmap-authoritative
@@ -114,6 +114,12 @@ jobs:
           test "$(id -g pliego-benchmark-engine)" -gt 0
           engine_uid="$(id -u pliego-benchmark-engine)"
           engine_gid="$(id -g pliego-benchmark-engine)"
+          engine_temp_root=/var/lib/pliego-benchmark-engine-temp
+          test ! -e "$engine_temp_root"
+          sudo install -d -o root -g root -m 0711 "$engine_temp_root"
+          sudo chattr +D "$engine_temp_root"
+          test "$(findmnt -T "$engine_temp_root" -n -o FSTYPE)" = ext4
+          [[ "$(sudo lsattr -d "$engine_temp_root" | awk '{print $1}')" == *D* ]]
           engine_test=(sudo setpriv --reuid="$engine_uid" --regid="$engine_gid" --clear-groups \
             --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs /usr/bin/test)
           engine_find=(sudo setpriv --reuid="$engine_uid" --regid="$engine_gid" --clear-groups \
@@ -217,6 +223,7 @@ jobs:
               parent="/sys/fs/cgroup${relative%/harness}"
               printf "+cpu +io +memory +pids" > "$parent/cgroup.subtree_control"
               export PLIEGO_BENCHMARK_CGROUP_PARENT="$parent"
+              export PLIEGO_BENCHMARK_ENGINE_TEMP_ROOT="$4"
               export GIT_OPTIONAL_LOCKS=0
               /usr/bin/python3 -E -s benchmarks/tools/test_process_tree_sampler.py --live --php-integration
               /usr/bin/python3 -E -s benchmarks/tools/process_tree_sampler.py --probe-network-isolation >/dev/null
@@ -224,10 +231,11 @@ jobs:
                 BROWSERSHOT_NODE_BINARY="$1" \
                 BROWSERSHOT_CHROME_PATH="$2" \
                 PLIEGO_BENCHMARK_CGROUP_PARENT="$parent" \
+                PLIEGO_BENCHMARK_ENGINE_TEMP_ROOT="$4" \
                 /usr/bin/python3 -E -s benchmarks/tools/run_comparison.py \
                   --preflight-all \
                   --binary "$3"
-            ' pliego-hosted-preflight "$NODE" "$CHROME" "$BINARY"
+            ' pliego-hosted-preflight "$NODE" "$CHROME" "$BINARY" "$engine_temp_root"
 
       - name: Check shared PDF oracle
         run: python benchmarks/tools/test_pdf_oracle.py

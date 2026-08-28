@@ -54,6 +54,8 @@ IFF_UP = 0x1
 API2_REQUEST_MAX_BYTES = 1024 * 1024
 DURABLE_WRITE_FLAG = getattr(os, "O_DSYNC", getattr(os, "O_SYNC", 0))
 ENGINE_OUTPUT_OPEN_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_CLOEXEC | DURABLE_WRITE_FLAG
+FS_IOC_GETFLAGS = 0x80086601
+FS_DIRSYNC_FL = 0x00010000
 
 
 class MeasurementIncomplete(RuntimeError):
@@ -849,12 +851,83 @@ def validate_engine_temporary_directory(requested: Path, account: EngineAccount)
             "ENGINE_TEMPORARY_DIRECTORY_UNSAFE",
             f"engine temporary path must be owned by {account.uid}:{account.gid} with mode 0700",
         )
+    if mountinfo_filesystem_type(resolved) != "ext4":
+        raise incomplete(
+            "ENGINE_TEMPORARY_BACKING_UNSAFE",
+            "engine temporary path must be backed by ext4",
+        )
+    if not directory_has_dirsync(resolved):
+        raise incomplete(
+            "ENGINE_TEMPORARY_DIRECTORY_UNSAFE",
+            "engine temporary path must carry the inherited FS_DIRSYNC_FL flag",
+        )
     return str(resolved)
 
 
-def engine_temporary_directory(
-    command: tuple[str, ...], account: EngineAccount, explicit: str | None
-) -> str:
+def decode_mountinfo_path(value: str) -> str:
+    return value.replace("\\040", " ").replace("\\011", "\t").replace("\\012", "\n").replace("\\134", "\\")
+
+
+def mountinfo_filesystem_type(path: Path, mountinfo: str | None = None) -> str | None:
+    resolved = path.resolve(strict=True)
+    text = (PROC / "self" / "mountinfo").read_text(encoding="utf-8") if mountinfo is None else mountinfo
+    selected: tuple[int, str] | None = None
+    for line in text.splitlines():
+        fields = line.split()
+        try:
+            separator = fields.index("-")
+            mount = Path(decode_mountinfo_path(fields[4]))
+            filesystem = fields[separator + 1]
+        except (IndexError, ValueError):
+            continue
+        if resolved == mount or mount in resolved.parents:
+            candidate = (len(mount.parts), filesystem)
+            if selected is None or candidate[0] > selected[0]:
+                selected = candidate
+    return selected[1] if selected is not None else None
+
+
+def directory_has_dirsync(path: Path) -> bool:
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        flags = ctypes.c_ulong()
+        libc = ctypes.CDLL(None, use_errno=True)
+        if libc.ioctl(descriptor, FS_IOC_GETFLAGS, ctypes.byref(flags)) != 0:
+            error = ctypes.get_errno()
+            raise incomplete(
+                "ENGINE_TEMPORARY_DIRECTORY_UNSAFE",
+                f"cannot read engine temporary inode flags: {os.strerror(error)}",
+            )
+        return bool(flags.value & FS_DIRSYNC_FL)
+    finally:
+        os.close(descriptor)
+
+
+def engine_temporary_directory_identity(path: Path) -> tuple[int, int]:
+    try:
+        metadata = os.stat(path, follow_symlinks=False)
+    except OSError as error:
+        raise incomplete(
+            "ENGINE_TEMPORARY_DIRECTORY_UNSAFE",
+            f"cannot bind engine temporary directory identity: {error}",
+        ) from error
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise incomplete("ENGINE_TEMPORARY_DIRECTORY_UNSAFE", "engine temporary path is no longer a directory")
+    return metadata.st_dev, metadata.st_ino
+
+
+def revalidate_engine_temporary_directory(
+    path: Path, account: EngineAccount, expected_identity: tuple[int, int]
+) -> None:
+    validate_engine_temporary_directory(path, account)
+    if engine_temporary_directory_identity(path) != expected_identity:
+        raise incomplete(
+            "ENGINE_TEMPORARY_DIRECTORY_REPLACED",
+            "engine temporary directory identity changed during execution",
+        )
+
+
+def engine_temporary_directory(command: tuple[str, ...], account: EngineAccount, explicit: str | None) -> str:
     if len(command) >= 2 and command[1] == "render":
         positions = [index for index, value in enumerate(command) if value == "--artifacts"]
         if len(positions) != 1 or positions[0] + 1 >= len(command):
@@ -1257,6 +1330,7 @@ def sample_command(
     require_broker_root()
     account = resolve_engine_account()
     engine_tmpdir = engine_temporary_directory(tuple(command), account, temporary_directory)
+    engine_tmpdir_identity = engine_temporary_directory_identity(Path(engine_tmpdir))
     host_network_namespace = os.readlink(proc_root / "self" / "ns" / "net")
     argv, executable = command_identity(command, account)
     parent = require_delegated_parent(cgroup_parent, cgroup_root, proc_root)
@@ -1434,6 +1508,12 @@ def sample_command(
             final, settle = wait_for_accounting_quiescence(child, interval_ms, settle_timeout_ms)
             if final["cgroup_events"]["populated"] != 0:
                 raise incomplete("CGROUP_CLEANUP_FAILED", "render cgroup repopulated during accounting settle")
+            revalidate_engine_temporary_directory(Path(engine_tmpdir), account, engine_tmpdir_identity)
+            launch_security["temporary_storage"] = {
+                "directory_sync": "FS_DIRSYNC_FL",
+                "filesystem": "ext4",
+                "scope": "per-invocation-private",
+            }
 
             exit_code, child_signal = exit_fields(status_value)
             usage_end = resource.getrusage(resource.RUSAGE_SELF)

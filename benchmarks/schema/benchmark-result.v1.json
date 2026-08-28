@@ -473,7 +473,7 @@
     "launch_security": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["account", "uid", "gid", "argv", "executable", "status", "migration_write_probes"],
+      "required": ["account", "uid", "gid", "argv", "executable", "status", "migration_write_probes", "temporary_storage"],
       "properties": {
         "account": { "const": "pliego-benchmark-engine" },
         "uid": { "type": "integer", "minimum": 1 },
@@ -529,6 +529,16 @@
             "harness": { "$ref": "#/definitions/migration_denials" },
             "staging": { "$ref": "#/definitions/migration_denials" },
             "measurement": { "$ref": "#/definitions/migration_denials" }
+          }
+        },
+        "temporary_storage": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["directory_sync", "filesystem", "scope"],
+          "properties": {
+            "directory_sync": { "const": "FS_DIRSYNC_FL" },
+            "filesystem": { "const": "ext4" },
+            "scope": { "const": "per-invocation-private" }
           }
         },
         "network_isolation": {
