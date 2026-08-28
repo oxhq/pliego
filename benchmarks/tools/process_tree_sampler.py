@@ -21,6 +21,7 @@ import select
 import signal
 import socket
 import stat
+import struct
 import sys
 import time
 from dataclasses import dataclass
@@ -47,6 +48,9 @@ PR_CAP_AMBIENT = 47
 PR_CAP_AMBIENT_CLEAR_ALL = 4
 CAP_SETPCAP = 8
 CLONE_NEWNET = 0x40000000
+SIOCGIFFLAGS = 0x8913
+SIOCSIFFLAGS = 0x8914
+IFF_UP = 0x1
 API2_REQUEST_MAX_BYTES = 1024 * 1024
 
 
@@ -60,11 +64,30 @@ def incomplete(code: str, message: str) -> MeasurementIncomplete:
     return MeasurementIncomplete(code, message)
 
 
+def enable_loopback() -> None:
+    if fcntl is None:
+        raise incomplete("NETWORK_ISOLATION_UNAVAILABLE", "loopback control requires Linux fcntl")
+    request = struct.pack("16sH22x", b"lo", 0)
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as control:
+            response = fcntl.ioctl(control.fileno(), SIOCGIFFLAGS, request)
+            flags = struct.unpack_from("H", response, 16)[0]
+            if flags & IFF_UP == 0:
+                fcntl.ioctl(control.fileno(), SIOCSIFFLAGS, struct.pack("16sH22x", b"lo", flags | IFF_UP))
+                response = fcntl.ioctl(control.fileno(), SIOCGIFFLAGS, request)
+                flags = struct.unpack_from("H", response, 16)[0]
+    except OSError as error:
+        raise incomplete("NETWORK_ISOLATION_UNAVAILABLE", f"cannot enable private loopback: {error}") from error
+    if flags & IFF_UP == 0:
+        raise incomplete("NETWORK_ISOLATION_INVALID", "private loopback remained down")
+
+
 def enter_empty_network_namespace(host_namespace: str) -> dict[str, Any]:
     libc = ctypes.CDLL(None, use_errno=True)
     if libc.unshare(CLONE_NEWNET) != 0:
         error = ctypes.get_errno()
         raise incomplete("NETWORK_ISOLATION_UNAVAILABLE", f"unshare(CLONE_NEWNET): {os.strerror(error)}")
+    enable_loopback()
     engine_namespace = os.readlink("/proc/self/ns/net")
     # A sysfs mount can remain bound to the parent network namespace after
     # unshare(CLONE_NEWNET). Query the current namespace through the socket API

@@ -138,15 +138,20 @@ jobs:
           PY
           (
             cd "$fixture"
-            sudo unshare --net -- setpriv \
-              --reuid="$(id -u)" --regid="$(id -g)" --init-groups \
-              bash -euo pipefail -c '
-                /usr/bin/python3 -I -c "import socket; assert [name for _, name in socket.if_nameindex()] == [\"lo\"]"
+            sudo unshare --net -- bash -euo pipefail -c '
+                ip link set lo up
+                test "$(ip -o link show | wc -l)" -eq 1
+                ip link show lo > /dev/null
                 test -z "$(ip route show)"
-                exec env BROWSERSHOT_NODE_BINARY="$1" BROWSERSHOT_CHROME_PATH="$2" \
-                  "$3" render input.html --output "$4" --artifacts "$5" \
+                uid="$1"
+                gid="$2"
+                shift 2
+                exec setpriv --reuid="$uid" --regid="$gid" --init-groups "$@"
+              ' _ "$(id -u)" "$(id -g)" \
+                env BROWSERSHOT_NODE_BINARY="$node" BROWSERSHOT_CHROME_PATH="$chrome" \
+                "$adapter" render input.html \
+                  --output "$work/browsershot.pdf" --artifacts "$work/browser-artifacts" \
                   --page-size 793.7008x1122.52 --page-margins 0,0,0,0
-              ' _ "$node" "$chrome" "$adapter" "$work/browsershot.pdf" "$work/browser-artifacts"
           )
 
           for target in pliego dompdf browsershot; do
