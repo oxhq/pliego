@@ -395,6 +395,22 @@ def main() -> None:
         errors = "\n".join(map(str, run_comparison.validate_bundle(directory)))
         assert "$bundle.files" in errors
 
+    with tempfile.TemporaryDirectory() as temporary:
+        directory = Path(temporary)
+        write_bundle(directory, source, data)
+        malformed = deepcopy(data)
+        malformed.pop("targets")
+        (directory / "hosted-comparison.v1.json").write_text(
+            json.dumps(malformed, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        run_comparison.write_checksums(
+            directory,
+            [directory / name for name in run_comparison.REQUIRED_BUNDLE_FILES if name != "SHA256SUMS"],
+        )
+        errors = "\n".join(map(str, run_comparison.validate_bundle(directory)))
+        assert "targets" in errors
+
 
 if __name__ == "__main__":
     main()

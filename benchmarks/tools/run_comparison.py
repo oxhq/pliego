@@ -614,8 +614,9 @@ def validate_bundle(directory: Path) -> list[validate_result.Violation]:
         checksum_lines = (directory / "SHA256SUMS").read_text(encoding="ascii").splitlines()
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
         return [validate_result.Violation("$bundle", f"cannot read retained bundle: {error}")]
-    violations.extend(validate_comparison(data, artifact))
-    if isinstance(data, dict):
+    comparison_violations = validate_comparison(data, artifact)
+    violations.extend(comparison_violations)
+    if not comparison_violations and isinstance(data, dict):
         violations.extend(validate_verified_release(release, data))
         validate_result.require_equal("$bundle.all-metrics.md", report, render_markdown(data), violations)
     expected_checksummed = REQUIRED_BUNDLE_FILES - {"SHA256SUMS"}
