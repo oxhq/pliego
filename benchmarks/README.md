@@ -30,6 +30,7 @@ benchmarks/
 │   ├── benchmark-interleaved-run.v1.json
 │   ├── benchmark-hosted-comparison.v1.json
 │   ├── benchmark-hosted-series.v1.json
+│   ├── benchmark-evidence-archive.v1.json
 │   ├── benchmark-report-data.v1.json
 │   └── benchmark-result.v1.json
 ├── fixtures/                  Seven frozen fixtures
@@ -51,6 +52,7 @@ benchmarks/
 │   ├── run_benchmark.py       Orchestrator: manifest → runner → aggregates → result file
 │   ├── run_comparison.py      GitHub-hosted three-target snapshot coordinator
 │   ├── summarize_comparisons.py Sealed three-repeat spread report
+│   ├── package_hosted_evidence.py Canonical durable series archive + validator
 │   ├── test_process_tree_sampler.py Fixture, live cgroup, bridge, and overhead proof
 │   ├── validate_interleaved_run.py Cross-target schedule/raw-sample validator
 │   └── validate_result.py     Stdlib-only JSON Schema check for result files
@@ -298,6 +300,45 @@ with per-metric p50 ranges and relative spread. Selected renderer runtimes,
 dependency-tree hashes, and the GitHub runner image identity are captured, but
 the runner is not a manifest-pinned OCI environment. That is one reason this
 evidence remains directional rather than an authoritative baseline.
+
+### Package the final hosted evidence
+
+After downloading the final `pliego-hosted-performance-series-*` artifact as one
+tree containing the series bundle and all three retained comparison bundles,
+build the two release-ready evidence assets with:
+
+```sh
+python3 benchmarks/tools/package_hosted_evidence.py build \
+  path/to/downloaded-series-artifact \
+  --out path/to/evidence-assets
+```
+
+For GitHub run `RUN_ID`, attempt `ATTEMPT`, the command emits exactly:
+
+```text
+pliego-benchmark-v0.3.3-minimal-static-gh-run-RUN_ID-attempt-ATTEMPT.tar.gz
+pliego-benchmark-v0.3.3-minimal-static-gh-run-RUN_ID-attempt-ATTEMPT.tar.gz.sha256
+```
+
+The intended non-latest tag is
+`benchmark-v0.3.3-minimal-static-gh-RUN_ID-aATTEMPT`. Inside the archive, one
+same-named root contains `evidence-manifest.v1.json`, `series/`, and
+`repeats/repeat-{1,2,3}/`. The manifest binds the exact source revision, GitHub
+run and attempt, Pliego v0.3.3, `minimal-static`, the GitHub-hosted evidence
+class, every nested evidence seal, and every retained file hash and size.
+
+Validate a downloaded pair without extracting it yourself:
+
+```sh
+python3 benchmarks/tools/package_hosted_evidence.py validate \
+  path/to/pliego-benchmark-v0.3.3-minimal-static-gh-run-RUN_ID-attempt-ATTEMPT.tar.gz
+```
+
+Validation rejects links, hardlinks, special files, path traversal, duplicate or
+case-colliding paths, unexpected entries, metadata drift, checksum/name/root
+drift, and any nested bundle failure. It also rebuilds the canonical USTAR +
+gzip stream and requires byte equality. Packaging is checksum-bound evidence;
+it does not publish a GitHub release or make mutable hosting immutable.
 
 Subset with `--fixture invoice-showcase` or select PHP with
 `--php /usr/bin/php`. `--samples` and `--warmup` are accepted only when they

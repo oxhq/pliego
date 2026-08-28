@@ -106,6 +106,26 @@ sealed into one no-selection series: all repeats, per-metric p50 ranges, and
 repeat-to-repeat spread are retained, so the published report cannot silently
 choose the most favorable VM.
 
+The final downloaded series artifact can be normalized into one durable,
+checksum-bound archive without changing the measurements:
+
+```sh
+python3 benchmarks/tools/package_hosted_evidence.py build \
+  path/to/downloaded-series-artifact \
+  --out path/to/evidence-assets
+
+python3 benchmarks/tools/package_hosted_evidence.py validate \
+  path/to/evidence-assets/pliego-benchmark-v0.3.3-minimal-static-gh-run-RUN_ID-attempt-ATTEMPT.tar.gz
+```
+
+The archive retains the complete series under `series/` and the three exact raw
+sources under `repeats/repeat-{1,2,3}/`. Its manifest binds the GitHub run,
+attempt, source revision, v0.3.3 target, fixture, evidence class, nested seals,
+and every file digest. Validation rejects unsafe archive entries and requires a
+byte-identical canonical rebuild. This packages evidence; it does not by itself
+publish a release or upgrade GitHub-hosted measurements into dedicated-host
+evidence.
+
 Each target's measured engine or PHP adapter gets a fresh private on-disk
 `TMPDIR` below the same ext4 scratch root. The workflow sets and verifies
 inherited Linux `FS_NOATIME_FL`,
