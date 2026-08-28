@@ -19,6 +19,7 @@ import os
 import secrets
 import select
 import signal
+import socket
 import stat
 import sys
 import time
@@ -65,7 +66,10 @@ def enter_empty_network_namespace(host_namespace: str) -> dict[str, Any]:
         error = ctypes.get_errno()
         raise incomplete("NETWORK_ISOLATION_UNAVAILABLE", f"unshare(CLONE_NEWNET): {os.strerror(error)}")
     engine_namespace = os.readlink("/proc/self/ns/net")
-    interfaces = sorted(path.name for path in Path("/sys/class/net").iterdir())
+    # A sysfs mount can remain bound to the parent network namespace after
+    # unshare(CLONE_NEWNET). Query the current namespace through the socket API
+    # instead of accepting that stale mount as isolation evidence.
+    interfaces = sorted(name for _, name in socket.if_nameindex())
     if engine_namespace == host_namespace or interfaces != ["lo"]:
         raise incomplete(
             "NETWORK_ISOLATION_INVALID",

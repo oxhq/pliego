@@ -141,7 +141,7 @@ jobs:
             sudo unshare --net -- setpriv \
               --reuid="$(id -u)" --regid="$(id -g)" --init-groups \
               bash -euo pipefail -c '
-                test "$(find /sys/class/net -mindepth 1 -maxdepth 1 -printf "%f\n")" = lo
+                /usr/bin/python3 -I -c "import socket; assert [name for _, name in socket.if_nameindex()] == [\"lo\"]"
                 test -z "$(ip route show)"
                 exec env BROWSERSHOT_NODE_BINARY="$1" BROWSERSHOT_CHROME_PATH="$2" \
                   "$3" render input.html --output "$4" --artifacts "$5" \
