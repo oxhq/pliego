@@ -1098,6 +1098,9 @@ function run_pdf_oracle(array $state, string $pdfPath): array
     $decoded = json_decode((string) $stdout, true);
     if (!is_array($decoded) || ($decoded['contract'] ?? null) !== 'pliego.pdf-oracle.v1'
         || !is_bool($decoded['pass'] ?? null) || !is_array($decoded['checks'] ?? null)) {
+        $oracleError = is_array($decoded) && is_string($decoded['error'] ?? null)
+            ? $decoded['error']
+            : null;
         return [
             'pass' => false,
             'page_count' => null,
@@ -1108,7 +1111,7 @@ function run_pdf_oracle(array $state, string $pdfPath): array
             'checks' => [[
                 'name' => 'pdf_oracle',
                 'status' => 'fail',
-                'detail' => trim((string) $stderr) ?: "invalid oracle output (exit {$exitCode})",
+                'detail' => $oracleError ?? (trim((string) $stderr) ?: "invalid oracle output (exit {$exitCode})"),
             ]],
         ];
     }

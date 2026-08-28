@@ -54,6 +54,20 @@ jobs:
           php benchmarks/runners/pliego.php --self-test \
             --text-contains "Revenue, net" --text-contains " Total " --text-contains 0
 
+      - name: Install locked adapter smoke dependencies
+        env:
+          PUPPETEER_SKIP_DOWNLOAD: "1"
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            ca-certificates libegl1 libfontconfig1 libgl1-mesa-dri \
+            php-xml php-mbstring poppler-utils
+          composer install --working-dir=benchmarks/adapters/dompdf \
+            --no-dev --no-interaction --prefer-dist --classmap-authoritative
+          composer install --working-dir=benchmarks/adapters/browsershot \
+            --no-dev --no-interaction --prefer-dist --classmap-authoritative
+          npm ci --prefix benchmarks/adapters/browsershot --omit=dev
+
       - name: Check hosted delegated-cgroup preflight
         run: |
           set -euo pipefail
@@ -89,20 +103,6 @@ jobs:
               /usr/bin/python3 -E -s benchmarks/tools/test_process_tree_sampler.py --live --php-integration
               /usr/bin/python3 -E -s benchmarks/tools/process_tree_sampler.py --probe-network-isolation >/dev/null
             '
-
-      - name: Install locked adapter smoke dependencies
-        env:
-          PUPPETEER_SKIP_DOWNLOAD: "1"
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes \
-            ca-certificates libegl1 libfontconfig1 libgl1-mesa-dri \
-            php-xml php-mbstring poppler-utils
-          composer install --working-dir=benchmarks/adapters/dompdf \
-            --no-dev --no-interaction --prefer-dist --classmap-authoritative
-          composer install --working-dir=benchmarks/adapters/browsershot \
-            --no-dev --no-interaction --prefer-dist --classmap-authoritative
-          npm ci --prefix benchmarks/adapters/browsershot --omit=dev
 
       - name: Check shared PDF oracle
         run: python benchmarks/tools/test_pdf_oracle.py
