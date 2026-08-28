@@ -776,6 +776,15 @@ def php_integration_proof() -> None:
         engine.write_text(
             f"""#!/usr/bin/env python3
 import base64, hashlib, json, os, pathlib, sys
+
+
+def write_synced(path, payload):
+    with path.open('wb') as output:
+        output.write(payload)
+        output.flush()
+        os.fsync(output.fileno())
+
+
 assert sys.argv[1:] == ['render-api2']
 request_bytes = sys.stdin.buffer.read()
 request = json.loads(request_bytes)
@@ -798,10 +807,10 @@ pdf = base64.b64decode({pdf_base64!r})
 scene = base64.b64decode({scene_base64!r})
 bundle = base64.b64decode({bundle_base64!r})
 environment = b'{{"fixture":true}}\\n'
-(delivery / 'document.pdf').write_bytes(pdf)
-(delivery / 'scene.json').write_bytes(scene)
-(delivery / 'bundle.json').write_bytes(bundle)
-(diagnostics / 'environment.json').write_bytes(environment)
+write_synced(delivery / 'document.pdf', pdf)
+write_synced(delivery / 'scene.json', scene)
+write_synced(delivery / 'bundle.json', bundle)
+write_synced(diagnostics / 'environment.json', environment)
 result = {{
     'schema': 'pliego.render-result',
     'version': 1,
