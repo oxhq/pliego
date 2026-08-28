@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -72,6 +73,8 @@ def verify_current_copy() -> None:
         "pliego --contract-probe",
         "There are no committed publishable performance numbers.",
         "Link annotations are also outside the advertised v0.3.2 API 2 profile.",
+        "passes it to Laravel Storage",
+        "version-locked adapter dependency graphs",
         "docs/pliego/showcase/manifest.json",
     )
     for needle in required_readme:
@@ -82,6 +85,8 @@ def verify_current_copy() -> None:
         "chartjs-report.pdf",
         "chartjs-report.png",
         "Pliego is faster",
+        "pinned one-shot paths",
+        "`store()` never buffers",
     )
     combined = "\n".join((readme, overview, launch))
     for needle in forbidden:
@@ -106,9 +111,20 @@ def verify_current_copy() -> None:
 
 def verified_manifest_path(relative: str) -> Path:
     require(isinstance(relative, str) and relative, "showcase file path must be a non-empty string")
-    candidate = (SHOWCASE / relative).resolve(strict=True)
+    relative_path = Path(relative)
+    require(not relative_path.is_absolute(), f"showcase path must be relative: {relative!r}")
+    lexical_candidate = Path(os.path.abspath(SHOWCASE / relative_path))
+    require(
+        lexical_candidate == ROOT or ROOT in lexical_candidate.parents,
+        f"showcase path escapes repository: {relative!r}",
+    )
+    current = ROOT
+    for part in lexical_candidate.relative_to(ROOT).parts:
+        current /= part
+        require(not current.is_symlink(), f"showcase path is not a regular file: {relative!r}")
+    candidate = lexical_candidate.resolve(strict=True)
     require(candidate == ROOT or ROOT in candidate.parents, f"showcase path escapes repository: {relative!r}")
-    require(candidate.is_file() and not candidate.is_symlink(), f"showcase path is not a regular file: {relative!r}")
+    require(candidate.is_file(), f"showcase path is not a regular file: {relative!r}")
     return candidate
 
 
@@ -133,7 +149,10 @@ def verify_showcase() -> None:
         relative = descriptor["path"]
         require(isinstance(relative, str) and relative not in indexed, "showcase file path is invalid or duplicated")
         require(isinstance(descriptor["bytes"], int) and descriptor["bytes"] >= 0, "showcase byte count is invalid")
-        require(isinstance(descriptor["sha256"], str) and SHA256.fullmatch(descriptor["sha256"]), "showcase SHA-256 is invalid")
+        require(
+            isinstance(descriptor["sha256"], str) and SHA256.fullmatch(descriptor["sha256"]),
+            "showcase SHA-256 is invalid",
+        )
         path = verified_manifest_path(relative)
         payload = path.read_bytes()
         require(len(payload) == descriptor["bytes"], f"showcase byte count drifted: {relative}")
@@ -141,7 +160,11 @@ def verify_showcase() -> None:
         indexed[relative] = descriptor
 
     documents = data.get("documents")
-    require(isinstance(documents, list) and {item.get("id") for item in documents if isinstance(item, dict)} == {"invoice", "operating-report"}, "showcase document set changed")
+    require(
+        isinstance(documents, list)
+        and {item.get("id") for item in documents if isinstance(item, dict)} == {"invoice", "operating-report"},
+        "showcase document set changed",
+    )
     for document in documents:
         require(isinstance(document, dict), "showcase document is not an object")
         for field in ("source", "pdf"):
@@ -150,7 +173,10 @@ def verify_showcase() -> None:
         require(document.get("repeat_render_sha256_matched") is True, "showcase repeat-render proof is absent")
         require(document.get("all_pages_visually_reviewed") is True, "showcase visual review is absent")
         for field in ("input_manifest_sha256", "request_sha256"):
-            require(isinstance(document.get(field), str) and SHA256.fullmatch(document[field]), f"showcase {field} is invalid")
+            require(
+                isinstance(document.get(field), str) and SHA256.fullmatch(document[field]),
+                f"showcase {field} is invalid",
+            )
 
 
 def markdown_target(raw: str) -> str | None:
@@ -171,7 +197,10 @@ def verify_local_links() -> None:
             if target is None:
                 continue
             candidate = (source.parent / target).resolve()
-            require(candidate == ROOT or ROOT in candidate.parents, f"local Markdown link escapes repository: {source.relative_to(ROOT)} -> {target}")
+            require(
+                candidate == ROOT or ROOT in candidate.parents,
+                f"local Markdown link escapes repository: {source.relative_to(ROOT)} -> {target}",
+            )
             require(candidate.exists(), f"broken local Markdown link: {source.relative_to(ROOT)} -> {target}")
 
 

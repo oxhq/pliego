@@ -16,6 +16,7 @@ on:
       - "docs/security/**"
       - "python/check_pliego_public_surface.py"
       - "sdk/laravel/README.md"
+      - "sdk/php/README.md"
       - "sdk/php/resources/HasubiMono-Regular.woff2"
   pull_request:
     paths:
@@ -31,6 +32,7 @@ on:
       - "docs/security/**"
       - "python/check_pliego_public_surface.py"
       - "sdk/laravel/README.md"
+      - "sdk/php/README.md"
       - "sdk/php/resources/HasubiMono-Regular.woff2"
 
 permissions:
@@ -52,3 +54,15 @@ jobs:
 
       - name: Verify buyer-facing release evidence
         run: python python/check_pliego_public_surface.py
+
+      - name: Prove showcase symlinks fail closed
+        shell: bash
+        run: |
+          set -euo pipefail
+          showcase="docs/pliego/showcase"
+          mv "$showcase/invoice.pdf" "$showcase/invoice.original.pdf"
+          ln -s invoice.original.pdf "$showcase/invoice.pdf"
+          if python python/check_pliego_public_surface.py; then
+            echo "showcase guard accepted a symlinked artifact" >&2
+            exit 1
+          fi

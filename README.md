@@ -60,10 +60,11 @@ return Storage::disk($stored->disk)->download(
 );
 ```
 
-`store()` never buffers the complete PDF in PHP memory. It returns the durable disk
-and path together with the underlying render identity and retained evidence. A
-storage failure is distinct from a render failure and is never reported as a stored
-document.
+Pliego opens the validated PDF as a stream and passes it to Laravel Storage instead
+of reading the complete PDF into a PHP string. The configured filesystem adapter
+owns downstream buffering. `store()` returns the durable disk and path together with
+the underlying render identity and retained evidence. A storage failure is distinct
+from a render failure and is never reported as a stored document.
 
 For a direct HTTP response that does not need durable application storage:
 
@@ -141,8 +142,9 @@ produce a link operation without exact fixed-point authority fail closed with
 
 ## Benchmark evidence
 
-The hosted comparator lane now renders pinned one-shot paths for Pliego v0.3.2,
-dompdf 3.1.6, and Browsershot 5.4.0 with Puppeteer 25.8.0. Their shared
+The hosted comparator lane now renders the published Pliego v0.3.2 bundle and
+version-locked adapter dependency graphs for dompdf 3.1.6 and Browsershot 5.4.0
+with Puppeteer 25.8.0. Their shared
 `minimal-static` correctness slice passes PDF parsing, page geometry, normalized
 text, the embedded font, and raster output through the same Poppler oracle.
 

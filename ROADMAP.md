@@ -18,9 +18,9 @@ support and deployment boundary is documented in the
 API 2 uses a strict probe, request decoder, fixed cwd-v1 input closure, one-shot
 render, canonical result and bundle, and exact SDK tuple negotiation. It does not
 advertise a semantic or accessible-PDF profile.
-The repository now has pinned Pliego, dompdf, and Browsershot adapters plus a shared
-correctness slice. Comparative performance results have not yet been published from
-the benchmark protocol.
+The repository now has the published Pliego v0.3.2 identity, version-locked dompdf
+and Browsershot adapter graphs, and a shared correctness slice. Comparative
+performance results have not yet been published from the benchmark protocol.
 
 ## Versioning policy and intended release train
 
@@ -146,9 +146,9 @@ adds a first-class durable-storage handoff that:
   policies.
 
 This is a Laravel SDK patch, not a reason to rebuild an unchanged native engine.
-The package may continue to pin the exact public native/PHP runtime version that it
-verified; SDK and native product versions are independent unless an engine fix also
-requires a coordinated patch.
+v0.2.2 was a Laravel-only patch under the pre-0.3 release policy. From 0.3 onward,
+the native runtime and supported PHP/Laravel SDKs use the coordinated version line
+described above.
 
 The representative-application target moved to the active 0.3.x lane once API 2
 became the preferred public contract.
@@ -174,9 +174,9 @@ Released evidence includes:
   committed with accepted and rejected goldens;
 - the tuple reserves reviewed typed extension points for future profile and semantic
   schemas without freezing an internal scene representation;
-- PHP and Laravel prefer the exact tuple, emit a documented API 1 deprecation signal,
-  and pass API 1 migration/compatibility tests against packaged binaries on every
-  supported target;
+- PHP and Laravel prefer the exact tuple and expose the documented API 1 migration
+  boundary in focused package checks; packaged native API 2 conformance passes on
+  every supported target;
 - publication remains atomic and fail closed, with retained conformance evidence; and
 - the temporary API 1 route and its removal policy are explicit rather than inferred
   from consumer-count thresholds.
