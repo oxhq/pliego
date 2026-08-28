@@ -146,8 +146,13 @@ jobs:
                 */harness) ;;
                 *) echo "unexpected delegated cgroup: $relative" >&2; exit 1 ;;
               esac
-              parent="/sys/fs/cgroup${relative%/harness}"
-              printf "+cpu +io +memory +pids" > "$parent/cgroup.subtree_control"
+              delegated="/sys/fs/cgroup$relative"
+              namespace_root="/sys/fs/cgroup${relative%/harness}"
+              printf "+cpu +io +memory +pids" > "$namespace_root/cgroup.subtree_control"
+              mkdir "$delegated/harness"
+              printf "%s\n" "$$" > "$delegated/harness/cgroup.procs"
+              printf "+cpu +io +memory +pids" > "$delegated/cgroup.subtree_control"
+              parent="$delegated"
               . "$1"
               export PLIEGO_BENCHMARK_CGROUP_PARENT="$parent"
               /usr/bin/python3 -E -s benchmarks/tools/test_process_tree_sampler.py --live --php-integration >/dev/null
