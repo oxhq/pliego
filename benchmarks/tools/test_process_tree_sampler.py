@@ -813,8 +813,15 @@ def php_integration_proof() -> None:
         scene_base64 = base64.b64encode((delivery_fixture / "scene.json").read_bytes()).decode("ascii")
         bundle_base64 = base64.b64encode((delivery_fixture / "bundle.json").read_bytes()).decode("ascii")
         engine.write_text(
-            f"""#!/usr/bin/env python3
+            f"""#!/usr/bin/python3 -B
 import base64, hashlib, json, os, pathlib, sys
+
+
+def read_synced(path):
+    with path.open('rb') as source:
+        payload = source.read()
+        os.fsync(source.fileno())
+        return payload
 
 
 def write_synced(path, payload):
@@ -843,13 +850,13 @@ temporary = pathlib.Path(os.environ['TMPDIR'])
 assert temporary.parent == root.parent and temporary.name == 'temporary'
 assert temporary.is_dir()
 assert sorted(path.name for path in root.iterdir()) == ['input', 'input-manifest.json']
-manifest_bytes = (root / 'input-manifest.json').read_bytes()
+manifest_bytes = read_synced(root / 'input-manifest.json')
 manifest_descriptor = request['input']['manifest']
 assert manifest_descriptor['bytes'] == len(manifest_bytes)
 assert manifest_descriptor['sha256'] == 'sha256:' + hashlib.sha256(manifest_bytes).hexdigest()
 manifest = json.loads(manifest_bytes)
 assert manifest['entries'][0]['path'] == 'input.html'
-assert manifest['entries'][0]['sha256'] == 'sha256:' + hashlib.sha256((root / 'input/input.html').read_bytes()).hexdigest()
+assert manifest['entries'][0]['sha256'] == 'sha256:' + hashlib.sha256(read_synced(root / 'input/input.html')).hexdigest()
 delivery = root / 'delivery'
 delivery.mkdir()
 diagnostics = pathlib.Path.cwd() / 'diagnostics'
@@ -879,7 +886,7 @@ result = {{
         'runtime': {{
             'mode': 'one-shot',
             'target': 'x86_64-unknown-linux-gnu',
-            'binary_sha256': 'sha256:' + hashlib.sha256(pathlib.Path(sys.argv[0]).read_bytes()).hexdigest(),
+            'binary_sha256': 'sha256:' + hashlib.sha256(read_synced(pathlib.Path(sys.argv[0]))).hexdigest(),
             'servo_base': '1' * 40,
         }},
     }},
