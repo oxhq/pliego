@@ -139,9 +139,9 @@ jobs:
             -p "WorkingDirectory=$GITHUB_WORKSPACE" \
             /bin/bash -c '
               set -euo pipefail
-              mapfile -t unified < <(awk -F: "\$1 == \"0\" && \$2 == \"\" {print \$3}" /proc/self/cgroup)
-              test "${#unified[@]}" -eq 1
-              relative="${unified[0]}"
+              unified_line="$(grep -E "^0::/" /proc/self/cgroup)"
+              test "$(grep -Ec "^0::/" /proc/self/cgroup)" -eq 1
+              relative="${unified_line#0::}"
               case "$relative" in
                 */harness) ;;
                 *) echo "unexpected delegated cgroup: $relative" >&2; exit 1 ;;
