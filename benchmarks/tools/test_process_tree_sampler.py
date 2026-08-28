@@ -228,6 +228,20 @@ def fixture_proofs() -> None:
     assert "xdg-cache/newer.bin:file:size=6" in diagnostics
     assert "home/older.bin" not in diagnostics
     assert "browser-runtime-file-count=2" in diagnostics
+    with tempfile.TemporaryDirectory() as raw:
+        diagnostic_root = Path(raw).resolve()
+        diagnostic_file = diagnostic_root / "payload.bin"
+        diagnostic_file.write_bytes(b"dirty")
+        dirty = {"memory_file_dirty_bytes": 4096, "memory_file_writeback_bytes": 0}
+        clean = {"memory_file_dirty_bytes": 0, "memory_file_writeback_bytes": 0}
+        with mock.patch.object(process_tree_sampler, "counter_snapshot", side_effect=[dirty, dirty, clean]):
+            attribution = process_tree_sampler.accounting_failure_diagnostics(
+                mock.sentinel.cgroup,
+                {"fixture": diagnostic_root},
+                {},
+            )
+    assert "initial=4096/0" in attribution
+    assert "cleared_by=fixture:file:payload.bin" in attribution
     if sys.platform == "linux":
         with tempfile.TemporaryDirectory(prefix="pliego mount ") as raw:
             root = Path(raw).resolve()

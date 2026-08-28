@@ -1063,6 +1063,125 @@ def runtime_directory_diagnostics(root: Path, limit: int = 12) -> str:
     return f"browser-runtime-files-newest={retained!r}; browser-runtime-file-count={len(files)}"
 
 
+def diagnostic_fsync_candidates(
+    roots: dict[str, Path], explicit_files: dict[str, Path], limit: int = 256
+) -> tuple[list[tuple[str, Path]], list[str]]:
+    """Bind regular files and directories for failure-only writeback attribution."""
+
+    files: list[tuple[int, str, Path]] = []
+    directories: list[tuple[int, int, str, Path]] = []
+    errors: list[str] = []
+    seen: set[tuple[int, int]] = set()
+
+    def retain(label: str, path: Path, metadata: os.stat_result, depth: int) -> None:
+        identity = (metadata.st_dev, metadata.st_ino)
+        if identity in seen:
+            return
+        if stat.S_ISREG(metadata.st_mode):
+            files.append((metadata.st_mtime_ns, label, path))
+        elif stat.S_ISDIR(metadata.st_mode):
+            directories.append((depth, metadata.st_mtime_ns, label, path))
+        else:
+            return
+        seen.add(identity)
+
+    for label, path in explicit_files.items():
+        try:
+            retain(label, path, os.lstat(path), 0)
+        except OSError as error:
+            errors.append(f"{label}={type(error).__name__}:{error.errno}")
+
+    for root_label, requested in roots.items():
+        try:
+            root = requested.resolve(strict=True)
+            if root != requested or not root.is_dir():
+                errors.append(f"{root_label}=noncanonical")
+                continue
+            root_metadata = os.lstat(root)
+            retain(f"{root_label}:dir:.", root, root_metadata, 0)
+            for current, names, leaves in os.walk(root, topdown=True, followlinks=False):
+                current_path = Path(current)
+                safe_names: list[str] = []
+                for name in sorted(names):
+                    path = current_path / name
+                    metadata = os.lstat(path)
+                    if stat.S_ISDIR(metadata.st_mode):
+                        safe_names.append(name)
+                        relative = path.relative_to(root).as_posix()
+                        retain(f"{root_label}:dir:{relative}", path, metadata, len(path.parts))
+                names[:] = safe_names
+                for name in sorted(leaves):
+                    path = current_path / name
+                    metadata = os.lstat(path)
+                    relative = path.relative_to(root).as_posix()
+                    retain(f"{root_label}:file:{relative}", path, metadata, len(path.parts))
+        except OSError as error:
+            errors.append(f"{root_label}={type(error).__name__}:{error.errno}")
+
+    files.sort(key=lambda item: (-item[0], item[1]))
+    directories.sort(key=lambda item: (-item[0], -item[1], item[2]))
+    candidates = [(label, path) for _, label, path in files]
+    candidates.extend((label, path) for _, _, label, path in directories)
+    return candidates[:limit], errors
+
+
+def accounting_failure_diagnostics(
+    cgroup: BoundDirectory,
+    roots: dict[str, Path],
+    explicit_files: dict[str, Path],
+) -> str:
+    """Attribute a dirty page after failure without ever making the sample pass."""
+
+    initial = counter_snapshot(cgroup)
+    candidates, errors = diagnostic_fsync_candidates(roots, explicit_files)
+    cleared_by: str | None = None
+    transitions: list[str] = []
+    previous = initial
+    flags = os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)
+    for label, path in candidates:
+        observed = counter_snapshot(cgroup)
+        observed_pair = (observed["memory_file_dirty_bytes"], observed["memory_file_writeback_bytes"])
+        previous_pair = (previous["memory_file_dirty_bytes"], previous["memory_file_writeback_bytes"])
+        if observed_pair != previous_pair:
+            transitions.append(f"natural:{previous_pair[0]}/{previous_pair[1]}->{observed_pair[0]}/{observed_pair[1]}")
+        if observed_pair == (0, 0):
+            cleared_by = "natural-before-fsync"
+            break
+        previous = observed
+        try:
+            metadata = os.lstat(path)
+            open_flags = flags | (os.O_DIRECTORY if stat.S_ISDIR(metadata.st_mode) else 0)
+            descriptor = os.open(path, open_flags)
+            try:
+                opened = os.fstat(descriptor)
+                if (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino):
+                    raise OSError(errno.ESTALE, "candidate identity changed")
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+            snapshot = counter_snapshot(cgroup)
+        except OSError as error:
+            errors.append(f"{label}={type(error).__name__}:{error.errno}")
+            continue
+        before = observed_pair
+        after = (snapshot["memory_file_dirty_bytes"], snapshot["memory_file_writeback_bytes"])
+        if after != before:
+            shortened = label if len(label) <= 140 else "..." + label[-137:]
+            transitions.append(f"{shortened}:{before[0]}/{before[1]}->{after[0]}/{after[1]}")
+        if after == (0, 0):
+            cleared_by = label
+            break
+        previous = snapshot
+    if cleared_by is not None and len(cleared_by) > 160:
+        cleared_by = "..." + cleared_by[-157:]
+    return (
+        "failure-only-fsync-attribution="
+        f"initial={initial['memory_file_dirty_bytes']}/{initial['memory_file_writeback_bytes']};"
+        f"cleared_by={cleared_by or 'none'};candidate_count={len(candidates)};"
+        f"transitions={transitions[:8]!r};errors={errors[:8]!r}"
+    )
+
+
 def runtime_directory_bindings(
     root: Path,
     root_identity: tuple[int, int],
@@ -1706,9 +1825,20 @@ def sample_command(
             try:
                 final, settle = wait_for_accounting_quiescence(child, interval_ms, settle_timeout_ms)
             except MeasurementIncomplete as error:
-                if error.code == "CGROUP_ACCOUNTING_NOT_QUIESCENT" and private_browser_runtime:
-                    diagnostics = runtime_directory_diagnostics(Path(engine_tmpdir))
-                    raise incomplete(error.code, f"{error}; {diagnostics}") from error
+                if error.code == "CGROUP_ACCOUNTING_NOT_QUIESCENT":
+                    roots = {"cwd": Path(cwd), "engine-tmp": Path(engine_tmpdir)}
+                    explicit_files = {
+                        "stdout": Path(stdout_path),
+                        "stderr": Path(stderr_path),
+                        "executable": executable.path,
+                    }
+                    if stdin_path is not None:
+                        explicit_files["stdin"] = Path(stdin_path)
+                    attribution = accounting_failure_diagnostics(child, roots, explicit_files)
+                    browser_inventory = (
+                        f"; {runtime_directory_diagnostics(Path(engine_tmpdir))}" if private_browser_runtime else ""
+                    )
+                    raise incomplete(error.code, f"{error}; {attribution}{browser_inventory}") from error
                 raise
             if final["cgroup_events"]["populated"] != 0:
                 raise incomplete("CGROUP_CLEANUP_FAILED", "render cgroup repopulated during accounting settle")
