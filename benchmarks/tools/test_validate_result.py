@@ -10,6 +10,7 @@ from copy import deepcopy
 import json
 from pathlib import Path
 import tomllib
+from unittest.mock import patch
 
 import validate_result
 
@@ -17,10 +18,6 @@ SCHEMA = json.loads(
     (Path(__file__).resolve().parents[1] / "schema" / "benchmark-result.v1.json").read_text(encoding="utf-8")
 )
 HASH = "0" * 64
-TEXT = (
-    "Minimal Hello, Pliego. This fixture measures pure startup: one small page, one bundled font, no scripts or images."
-)
-RASTER_HASH = "0f9edcf2b796a110d1a68efed00ce684921fec9ff7b52ccdc68bb718d1b93444"
 TEST_MANIFEST = tomllib.loads(validate_result.MANIFEST.read_text(encoding="utf-8"))
 TEST_MANIFEST["protocol"]["warmup_iterations"] = 1
 TEST_MANIFEST["fixtures"]["minimal-static"]["samples"] = 1
@@ -34,6 +31,9 @@ for tool in validate_result.POPPLER_TOOLS:
     )
 TARGET = TEST_MANIFEST["targets"]["pliego-0.3.2"]
 FIXTURE = TEST_MANIFEST["fixtures"]["minimal-static"]
+FIXTURE_CORRECTNESS = FIXTURE["correctness"]
+TEXT = FIXTURE_CORRECTNESS["text_equals"]
+RASTER_HASH = FIXTURE_CORRECTNESS["normalized_raster_sha256"]
 INPUT_HASH, BUNDLE_HASH = validate_result.canonical_fixture_hashes(FIXTURE)
 
 
@@ -236,20 +236,20 @@ def result() -> dict:
         "fixture": {
             "id": "minimal-static",
             "purpose": FIXTURE["purpose"],
-            "category": "static",
-            "input": "benchmarks/fixtures/minimal-static/comparator.html",
+            "category": FIXTURE["category"],
+            "input": FIXTURE["input"],
             "input_sha256": INPUT_HASH,
             "bundle_sha256": BUNDLE_HASH,
-            "expected_page_count": 1,
-            "expected_page_width_points": 595.276,
-            "expected_page_height_points": 841.89,
-            "dimension_tolerance_points": 0.75,
-            "expected_text_contains": ["Minimal"],
+            "expected_page_count": FIXTURE_CORRECTNESS["page_count"],
+            "expected_page_width_points": FIXTURE_CORRECTNESS["page_width_points"],
+            "expected_page_height_points": FIXTURE_CORRECTNESS["page_height_points"],
+            "dimension_tolerance_points": FIXTURE_CORRECTNESS["dimension_tolerance_points"],
+            "expected_text_contains": FIXTURE_CORRECTNESS["text_contains"],
             "expected_text": TEXT,
-            "expected_font_families": ["Ahem"],
+            "expected_font_families": FIXTURE_CORRECTNESS["font_families"],
             "expected_normalized_raster_sha256": RASTER_HASH,
-            "expected_link_targets": [],
-            "expected_failure_code": None,
+            "expected_link_targets": FIXTURE_CORRECTNESS.get("link_targets", []),
+            "expected_failure_code": FIXTURE_CORRECTNESS.get("failure_code"),
         },
         "samples": [
             {
@@ -275,10 +275,15 @@ def result() -> dict:
                 "output": {
                     "pdf_bytes": 1,
                     "pdf_sha256": HASH,
-                    "page_count": 1,
-                    "page_dimensions_points": [[595.276, 841.89]],
+                    "page_count": FIXTURE_CORRECTNESS["page_count"],
+                    "page_dimensions_points": [
+                        [
+                            FIXTURE_CORRECTNESS["page_width_points"],
+                            FIXTURE_CORRECTNESS["page_height_points"],
+                        ]
+                    ],
                     "normalized_text_sha256": validate_result.hashlib.sha256(TEXT.encode()).hexdigest(),
-                    "font_families": ["Ahem"],
+                    "font_families": FIXTURE_CORRECTNESS["font_families"],
                     "normalized_raster_sha256": RASTER_HASH,
                     "artifact_bytes": 0,
                     "published_pdf": True,
@@ -291,7 +296,7 @@ def result() -> dict:
                         {"name": "pdf_parse", "status": "pass"},
                         {"name": "page_count", "status": "pass"},
                         {"name": "page_dimensions", "status": "pass"},
-                        {"name": "text:Minimal", "status": "pass"},
+                        {"name": f"text:{FIXTURE_CORRECTNESS['text_contains'][0]}", "status": "pass"},
                         {"name": "text_exact", "status": "pass"},
                         {"name": "fonts_exact", "status": "pass"},
                         {"name": "raster_normalized", "status": "pass"},
@@ -350,6 +355,37 @@ def main() -> None:
     assert not errors(valid), errors(valid)
     assert validate_result.percentile([1, 3], 50) == 1
     assert validate_result.PERCENTILE_METHOD == "nearest-rank-v1"
+
+    with patch.object(validate_result.subprocess, "run", side_effect=OSError("git unavailable")):
+        assert validate_result.clean_harness_revision() is None
+    successful_status = validate_result.subprocess.CompletedProcess(
+        args=["git", "status"],
+        returncode=0,
+        stdout="",
+        stderr="",
+    )
+    with patch.object(
+        validate_result.subprocess,
+        "run",
+        side_effect=[
+            successful_status,
+            validate_result.subprocess.TimeoutExpired(cmd="git", timeout=30),
+        ],
+    ):
+        assert validate_result.clean_harness_revision() is None
+
+    schema_violations: list[validate_result.Violation] = []
+    validate_result.validate({}, {"type": "object", "minProperties": 1}, "$", schema_violations)
+    assert schema_violations and "expected >= 1 properties" in str(schema_violations[0])
+    schema_violations = []
+    validate_result.validate(0, {"type": "number", "exclusiveMinimum": 0}, "$", schema_violations)
+    assert schema_violations and "exclusive minimum 0" in str(schema_violations[0])
+    changed(valid, lambda value: value["toolchain"]["competitors"].clear(), "expected >= 1 properties")
+    changed(
+        valid,
+        lambda value: value["aggregates"]["throughput"].update(mean_one_shot_wall_ms=0),
+        "exclusive minimum 0",
+    )
 
     not_applicable = {
         key: deepcopy(valid[key])
@@ -654,7 +690,11 @@ def main() -> None:
     )
     changed(valid, lambda value: value["samples"][0]["correctness"].update({"pass": False}), "correctness.pass")
     changed(valid, lambda value: value["samples"][0]["failure"].update(published_pdf=False), "failure.published_pdf")
-    changed(valid, lambda value: value["samples"][0]["output"].update(page_count=2), "expected page count 1")
+    changed(
+        valid,
+        lambda value: value["samples"][0]["output"].update(page_count=FIXTURE_CORRECTNESS["page_count"] + 1),
+        f"expected page count {FIXTURE_CORRECTNESS['page_count']}",
+    )
     changed(
         valid,
         lambda value: value["samples"][0]["output"].update(page_dimensions_points=[[600, 842]]),

@@ -51,7 +51,10 @@ function tree_sha256(string $path): string
             hash_update($digest, "L\0{$relative}\0" . (string) readlink($entry) . "\0");
         } elseif (is_file($entry)) {
             $hash = hash_file('sha256', $entry);
-            hash_update($digest, "F\0{$relative}\0" . hex2bin((string) $hash));
+            if (!is_string($hash)) {
+                abort_adapter("cannot hash dependency file: {$entry}");
+            }
+            hash_update($digest, "F\0{$relative}\0" . hex2bin($hash));
         }
     }
     return hash_final($digest);

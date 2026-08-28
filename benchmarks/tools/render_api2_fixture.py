@@ -16,10 +16,10 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -28,7 +28,9 @@ PORTABLE_PATH = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._/-]*[A-Za-z0-9_-])?$")
 SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 COMMIT = re.compile(r"^[0-9a-f]{40}$")
 SEMVER = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$")
-TARGET = re.compile(r"^[a-z0-9]+(?:_[a-z0-9]+)*-[a-z0-9]+(?:_[a-z0-9]+)*-[a-z0-9]+(?:_[a-z0-9]+)*(?:-[a-z0-9]+(?:_[a-z0-9]+)*)?$")
+TARGET = re.compile(
+    r"^[a-z0-9]+(?:_[a-z0-9]+)*-[a-z0-9]+(?:_[a-z0-9]+)*-[a-z0-9]+(?:_[a-z0-9]+)*(?:-[a-z0-9]+(?:_[a-z0-9]+)*)?$"
+)
 DIAGNOSTIC_PATH = re.compile(r"^diagnostics/[A-Za-z0-9](?:[A-Za-z0-9._/-]*[A-Za-z0-9_-])?$")
 
 
@@ -215,9 +217,7 @@ def verified_diagnostics(job_root: Path, diagnostics: Any) -> None:
     if root.is_symlink() or not root.is_dir():
         raise FixtureError("API 2 retained diagnostics directory is absent")
     actual = {
-        path.relative_to(job_root).as_posix()
-        for path in root.rglob("*")
-        if path.is_file() and not path.is_symlink()
+        path.relative_to(job_root).as_posix() for path in root.rglob("*") if path.is_file() and not path.is_symlink()
     }
     if any(path.is_symlink() for path in root.rglob("*")) or actual != described:
         raise FixtureError("API 2 diagnostic descriptor set differs from retained files")
@@ -386,7 +386,7 @@ def main() -> int:
         print(canonical_json(summary).decode("utf-8"), end="")
         return 0
     except (FixtureError, OSError, subprocess.TimeoutExpired, ValueError) as error:
-        print(f"render_api2_fixture: {error}", file=os.sys.stderr)
+        print(f"render_api2_fixture: {error}", file=sys.stderr)
         return 1
 
 

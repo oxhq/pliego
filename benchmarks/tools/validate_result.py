@@ -91,28 +91,31 @@ def canonical_fixture_hashes(fixture: dict[str, Any]) -> tuple[str, str]:
 
 
 def clean_harness_revision() -> str | None:
-    status = subprocess.run(
-        [
-            "git",
-            "status",
-            "--porcelain",
-            "--",
-            "benchmarks",
-            ".github/workflows/pliego-benchmark.yml",
-            ":(exclude)benchmarks/baselines",
-        ],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
-    revision = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
+    try:
+        status = subprocess.run(
+            [
+                "git",
+                "status",
+                "--porcelain",
+                "--",
+                "benchmarks",
+                ".github/workflows/pliego-benchmark.yml",
+                ":(exclude)benchmarks/baselines",
+            ],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        revision = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
     value = revision.stdout.strip()
     if status.returncode != 0 or status.stdout.strip() or revision.returncode != 0:
         return None
@@ -201,6 +204,8 @@ def validate(
     if isinstance(data, (int, float)) and not isinstance(data, bool):
         if "minimum" in schema and data < schema["minimum"]:
             violations.append(Violation(path, f"{data} < minimum {schema['minimum']}"))
+        if "exclusiveMinimum" in schema and data <= schema["exclusiveMinimum"]:
+            violations.append(Violation(path, f"{data} <= exclusive minimum {schema['exclusiveMinimum']}"))
 
     if isinstance(data, list):
         if "minItems" in schema and len(data) < schema["minItems"]:
@@ -212,6 +217,8 @@ def validate(
                 validate(item, schema["items"], f"{path}[{index}]", violations, root)
 
     if isinstance(data, dict):
+        if "minProperties" in schema and len(data) < schema["minProperties"]:
+            violations.append(Violation(path, f"expected >= {schema['minProperties']} properties, got {len(data)}"))
         properties = schema.get("properties", {})
         for required in schema.get("required", []):
             if required not in data:

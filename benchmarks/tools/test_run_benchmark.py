@@ -426,6 +426,18 @@ def main() -> None:
     )
     assert benchmark.mountinfo_path_is_read_only(PurePosixPath("/workspace/app"), mounts)
     assert not benchmark.mountinfo_path_is_read_only(PurePosixPath("/workspace/vendor/package.php"), mounts)
+    stacked_mounts = "\n".join(
+        [
+            "1 0 0:1 / / ro - ext4 root ro",
+            "2 1 0:2 / /workspace ro - bind workspace ro",
+            "3 1 0:3 / /workspace rw - bind workspace rw",
+        ]
+    )
+    assert not benchmark.mountinfo_path_is_read_only(PurePosixPath("/workspace/app"), stacked_mounts)
+    assert benchmark.mountinfo_path_is_read_only(
+        PurePosixPath("/workspace/app"),
+        "\n".join(reversed(stacked_mounts.splitlines())),
+    )
 
     adapters = benchmark.ROOT / "benchmarks" / "adapters"
     php = shutil.which("php")

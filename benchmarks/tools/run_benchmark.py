@@ -566,7 +566,7 @@ def mountinfo_path_is_read_only(path: PurePosixPath, mountinfo: str) -> bool:
         mount = PurePosixPath(decoded)
         if path == mount or mount in path.parents:
             candidate = (len(mount.parts), "ro" in fields[5].split(","))
-            if match is None or candidate[0] > match[0]:
+            if match is None or candidate[0] >= match[0]:
                 match = candidate
     return match[1] if match is not None else False
 

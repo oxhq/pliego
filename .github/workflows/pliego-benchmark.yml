@@ -175,7 +175,8 @@ jobs:
           results = [json.load(open(path, encoding="utf-8")) for path in sys.argv[1:]]
           assert all(result["pass"] for result in results), results
           for field in ("normalized_text", "normalized_raster_sha256"):
-              assert results[0][field] == results[1][field], (field, results)
+              for other in results[1:]:
+                  assert results[0][field] == other[field], (field, results)
           assert [[font["name"] for font in result["fonts"]] for result in results] == [
               ["Ahem"], ["Ahem"], ["Ahem"]
           ]
