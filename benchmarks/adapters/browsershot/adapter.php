@@ -339,6 +339,9 @@ function render(array $arguments): void
             'allow-file-access-from-files',
             'disable-background-networking',
             'disable-component-update',
+            // Chromium's benchmark-only Crashpad metrics mmap can outlive the
+            // deleted Puppeteer profile as a dirty page after browser exit.
+            'disable-crashpad-metrics',
             'disable-domain-reliability',
             'disable-sync',
             'metrics-recording-only',
