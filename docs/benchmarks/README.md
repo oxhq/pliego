@@ -114,10 +114,11 @@ cgroup totals. The sampler binds the scratch inode, revalidates the storage
 contract after descendant drain, and records it in every sample. These are
 deliberate non-default benchmark conditions; synchronous-write cost is included
 in wall and I/O measurements.
-`HOME`, `XDG_CACHE_HOME`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`,
-`XDG_RUNTIME_DIR`, and `XDG_STATE_HOME` are fresh private children of that same
-measured scratch root for every target invocation; browser state cannot escape
-into a host account.
+Browsershot receives fresh private `HOME`, `XDG_CACHE_HOME`, `XDG_CONFIG_HOME`,
+`XDG_DATA_HOME`, `XDG_RUNTIME_DIR`, and `XDG_STATE_HOME` children below that
+same measured scratch root. Pliego and dompdf retain the fixed unprivileged
+account home (nonexistent on the hosted lane) with no XDG roots, so they cannot
+create user caches and browser state cannot escape into a host account.
 
 After immutable images are pinned, each target uses the same order: one discarded correctness preflight, discarded
 warmups, then cold one-shot timed samples. The adapter root and every descendant

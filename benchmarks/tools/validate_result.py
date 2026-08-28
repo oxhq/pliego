@@ -35,6 +35,7 @@ DEFAULT_SCHEMA = ROOT / "benchmarks" / "schema" / "benchmark-result.v1.json"
 MANIFEST = ROOT / "benchmarks" / "manifest.toml"
 PDF_ORACLE = ROOT / "benchmarks" / "tools" / "pdf_oracle.py"
 PERCENTILE_METHOD = "nearest-rank-v1"
+BROWSERSHOT_ADAPTER_SUFFIX = ("benchmarks", "adapters", "browsershot", "adapter.php")
 POPPLER_TOOLS = ("pdfinfo", "pdftotext", "pdffonts", "pdftoppm")
 ORACLE_IDENTITY_REASON = "manifest does not pin canonical Poppler tool identities"
 ADAPTER_ATTESTATION_REASON = "out-of-process OCI image attestation is unavailable"
@@ -329,17 +330,30 @@ def validate_resource_usage(sample: dict[str, Any], path: str, violations: list[
         require_equal(f"{path}.resource_usage.exit_code", usage["exit_code"], 128 + usage["signal"], violations)
 
     launch = usage["launch_security"]
+    temporary_storage = launch["temporary_storage"]
     require_equal(
-        f"{path}.resource_usage.launch_security.temporary_storage",
-        launch["temporary_storage"],
+        f"{path}.resource_usage.launch_security.temporary_storage.contract",
+        {key: value for key, value in temporary_storage.items() if key != "runtime_environment"},
         {
             "access_time": "FS_NOATIME_FL",
             "directory_sync": "FS_DIRSYNC_FL",
             "file_sync": "FS_SYNC_FL",
             "filesystem": "ext4",
-            "runtime_environment": "fresh-private-home-xdg-v1",
             "scope": "per-invocation-private",
         },
+        violations,
+    )
+    launch_argv = launch["argv"]
+    launch_path = PurePosixPath(launch_argv[0])
+    private_browser_runtime = (
+        len(launch_argv) >= 2
+        and launch_argv[1] == "render"
+        and tuple(launch_path.parts[-len(BROWSERSHOT_ADAPTER_SUFFIX) :]) == BROWSERSHOT_ADAPTER_SUFFIX
+    )
+    require_equal(
+        f"{path}.resource_usage.launch_security.temporary_storage.runtime_environment",
+        temporary_storage["runtime_environment"],
+        "fresh-private-home-xdg-v1" if private_browser_runtime else "fixed-account-home-v1",
         violations,
     )
     status = launch["status"]

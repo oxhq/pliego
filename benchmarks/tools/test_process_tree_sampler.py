@@ -180,12 +180,23 @@ def fixture_proofs() -> None:
     assert child_environment["BROWSERSHOT_CHROME_PATH"] == "/opt/chrome"
     assert child_environment["BROWSERSHOT_NODE_BINARY"] == "/usr/bin/node"
     assert child_environment["TMPDIR"] == "/engine-owned-artifacts"
-    assert child_environment["HOME"] == "/engine-owned-artifacts/home"
-    assert child_environment["XDG_CACHE_HOME"] == "/engine-owned-artifacts/xdg-cache"
-    assert child_environment["XDG_CONFIG_HOME"] == "/engine-owned-artifacts/xdg-config"
-    assert child_environment["XDG_DATA_HOME"] == "/engine-owned-artifacts/xdg-data"
-    assert child_environment["XDG_RUNTIME_DIR"] == "/engine-owned-artifacts/xdg-runtime"
-    assert child_environment["XDG_STATE_HOME"] == "/engine-owned-artifacts/xdg-state"
+    assert child_environment["HOME"] == "/nonexistent"
+    assert not (set(process_tree_sampler.RUNTIME_DIRECTORY_NAMES) - {"HOME"}).intersection(child_environment)
+    private_runtime = {
+        variable: f"/engine-owned-artifacts/{name}"
+        for variable, name in process_tree_sampler.RUNTIME_DIRECTORY_NAMES.items()
+    }
+    private_environment = process_tree_sampler.engine_environment(
+        fixture_account, "/engine-owned-artifacts", private_runtime
+    )
+    assert {variable: private_environment[variable] for variable in private_runtime} == private_runtime
+    assert process_tree_sampler.requires_private_browser_runtime(
+        ("/repo/benchmarks/adapters/browsershot/adapter.php", "render")
+    )
+    assert not process_tree_sampler.requires_private_browser_runtime(
+        ("/repo/benchmarks/adapters/dompdf/adapter.php", "render")
+    )
+    assert not process_tree_sampler.requires_private_browser_runtime(("/usr/lib/pliego", "render-api2"))
     if sys.platform == "linux":
         with tempfile.TemporaryDirectory(prefix="pliego mount ") as raw:
             root = Path(raw).resolve()
@@ -931,9 +942,6 @@ assert request['api'] == 2
 root = pathlib.Path.cwd()
 temporary = pathlib.Path(os.environ['TMPDIR'])
 assert temporary.is_dir()
-for variable in ('HOME', 'XDG_CACHE_HOME', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_RUNTIME_DIR', 'XDG_STATE_HOME'):
-    runtime_directory = pathlib.Path(os.environ[variable])
-    assert runtime_directory.parent == temporary
 assert sorted(path.name for path in root.iterdir()) == ['input', 'input-manifest.json']
 manifest_bytes = (root / 'input-manifest.json').read_bytes()
 manifest_descriptor = request['input']['manifest']

@@ -540,7 +540,9 @@
             "directory_sync": { "const": "FS_DIRSYNC_FL" },
             "file_sync": { "const": "FS_SYNC_FL" },
             "filesystem": { "const": "ext4" },
-            "runtime_environment": { "const": "fresh-private-home-xdg-v1" },
+            "runtime_environment": {
+              "enum": ["fixed-account-home-v1", "fresh-private-home-xdg-v1"]
+            },
             "scope": { "const": "per-invocation-private" }
           }
         },

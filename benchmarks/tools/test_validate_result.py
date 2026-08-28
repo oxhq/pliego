@@ -112,7 +112,7 @@ def resource_usage() -> dict:
                 "directory_sync": "FS_DIRSYNC_FL",
                 "file_sync": "FS_SYNC_FL",
                 "filesystem": "ext4",
-                "runtime_environment": "fresh-private-home-xdg-v1",
+                "runtime_environment": "fixed-account-home-v1",
                 "scope": "per-invocation-private",
             },
         },
@@ -361,6 +361,15 @@ def changed(value: dict, operation: object, expected: str) -> None:
 def main() -> None:
     valid = result()
     assert not errors(valid), errors(valid)
+    browser_sample = deepcopy(valid["samples"][0])
+    browser_launch = browser_sample["resource_usage"]["launch_security"]
+    browser_path = "/repo/benchmarks/adapters/browsershot/adapter.php"
+    browser_launch["argv"] = [browser_path, "render"]
+    browser_launch["executable"]["path"] = browser_path
+    browser_launch["temporary_storage"]["runtime_environment"] = "fresh-private-home-xdg-v1"
+    browser_violations: list[validate_result.Violation] = []
+    validate_result.validate_resource_usage(browser_sample, "$.sample", browser_violations)
+    assert not browser_violations, browser_violations
     assert validate_result.percentile([1, 3], 50) == 1
     assert validate_result.PERCENTILE_METHOD == "nearest-rank-v1"
 
@@ -552,7 +561,14 @@ def main() -> None:
         lambda value: value["samples"][0]["resource_usage"]["launch_security"]["temporary_storage"].update(
             runtime_environment="host-home"
         ),
-        "launch_security.temporary_storage",
+        "runtime_environment",
+    )
+    changed(
+        valid,
+        lambda value: value["samples"][0]["resource_usage"]["launch_security"]["temporary_storage"].update(
+            runtime_environment="fresh-private-home-xdg-v1"
+        ),
+        "runtime_environment",
     )
     changed(
         valid,

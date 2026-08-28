@@ -112,9 +112,15 @@ def measured_sample(target_id: str, index: int) -> dict[str, Any]:
         "interfaces": ["lo"],
     }
     identity = IDENTITY_BY_ID[target_id]
-    usage["launch_security"]["argv"] = [identity["engine"]["binary_path"], "render"]
+    usage["launch_security"]["argv"] = [
+        identity["engine"]["binary_path"],
+        "render-api2" if target_id == "pliego-0.3.3" else "render",
+    ]
     usage["launch_security"]["executable"]["path"] = identity["engine"]["binary_path"]
     usage["launch_security"]["executable"]["sha256"] = identity["engine"]["binary_sha256"]
+    usage["launch_security"]["temporary_storage"]["runtime_environment"] = (
+        "fresh-private-home-xdg-v1" if target_id == "browsershot-5.4.0-puppeteer-25.8.0" else "fixed-account-home-v1"
+    )
     sample.update(
         {
             "measurement_method": "linux-cgroup-v2-v1",

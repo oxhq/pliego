@@ -66,6 +66,7 @@ RUNTIME_DIRECTORY_NAMES = {
     "XDG_RUNTIME_DIR": "xdg-runtime",
     "XDG_STATE_HOME": "xdg-state",
 }
+BROWSERSHOT_ADAPTER_SUFFIX = ("benchmarks", "adapters", "browsershot", "adapter.php")
 
 
 class MeasurementIncomplete(RuntimeError):
@@ -979,6 +980,13 @@ def prepare_runtime_directories(root: Path, account: EngineAccount) -> dict[str,
     return environment
 
 
+def requires_private_browser_runtime(command: tuple[str, ...]) -> bool:
+    if len(command) < 2 or command[1] != "render":
+        return False
+    parts = Path(command[0]).parts
+    return tuple(parts[-len(BROWSERSHOT_ADAPTER_SUFFIX) :]) == BROWSERSHOT_ADAPTER_SUFFIX
+
+
 def engine_temporary_directory(command: tuple[str, ...], account: EngineAccount, explicit: str | None) -> str:
     if len(command) >= 2 and command[1] == "render":
         positions = [index for index, value in enumerate(command) if value == "--artifacts"]
@@ -1027,18 +1035,17 @@ def engine_environment(
     environment = {
         name: value for name, value in os.environ.items() if name in allowed or name.startswith("FONTCONFIG_")
     }
-    private_runtime = runtime_directories or {
-        variable: str(Path(temporary_directory) / name) for variable, name in RUNTIME_DIRECTORY_NAMES.items()
-    }
     environment.update(
         {
-            **private_runtime,
+            "HOME": account.home,
             "LOGNAME": account.name,
             "PATH": environment.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
             "TMPDIR": temporary_directory,
             "USER": account.name,
         }
     )
+    if runtime_directories is not None:
+        environment.update(runtime_directories)
     return environment
 
 
@@ -1053,7 +1060,7 @@ def fork_stopped(
     isolate_network: bool,
     host_network_namespace: str,
     temporary_directory: str,
-    runtime_directories: dict[str, str],
+    runtime_directories: dict[str, str] | None,
 ) -> tuple[int, int]:
     descriptors = [open_stdin_descriptor(stdin_path)]
     if DURABLE_WRITE_FLAG == 0:
@@ -1402,7 +1409,8 @@ def sample_command(
     argv, executable = command_identity(command, account)
     engine_tmpdir = engine_temporary_directory(tuple(command), account, temporary_directory)
     engine_tmpdir_identity = engine_temporary_directory_identity(Path(engine_tmpdir))
-    runtime_directories = prepare_runtime_directories(Path(engine_tmpdir), account)
+    private_browser_runtime = requires_private_browser_runtime(argv)
+    runtime_directories = prepare_runtime_directories(Path(engine_tmpdir), account) if private_browser_runtime else None
     host_network_namespace = os.readlink(proc_root / "self" / "ns" / "net")
     parent = require_delegated_parent(cgroup_parent, cgroup_root, proc_root)
     child: BoundDirectory | None = None
@@ -1586,7 +1594,9 @@ def sample_command(
                 "directory_sync": "FS_DIRSYNC_FL",
                 "file_sync": "FS_SYNC_FL",
                 "filesystem": "ext4",
-                "runtime_environment": "fresh-private-home-xdg-v1",
+                "runtime_environment": (
+                    "fresh-private-home-xdg-v1" if private_browser_runtime else "fixed-account-home-v1"
+                ),
                 "scope": "per-invocation-private",
             }
 
