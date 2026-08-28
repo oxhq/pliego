@@ -114,6 +114,13 @@ jobs:
           test "$(id -g pliego-benchmark-engine)" -gt 0
           engine_uid="$(id -u pliego-benchmark-engine)"
           engine_gid="$(id -g pliego-benchmark-engine)"
+          engine_home="$(getent passwd pliego-benchmark-engine | cut -d: -f6)"
+          test "$engine_home" = /nonexistent/pliego-benchmark-engine
+          if [[ -e "$engine_home" ]]; then
+            sudo setpriv --reuid="$engine_uid" --regid="$engine_gid" --clear-groups \
+              --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
+              /usr/bin/test ! -w "$engine_home"
+          fi
           engine_temp_root=/var/lib/pliego-benchmark-engine-temp
           test ! -e "$engine_temp_root"
           sudo install -d -o root -g root -m 0711 "$engine_temp_root"

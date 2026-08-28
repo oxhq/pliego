@@ -109,10 +109,16 @@ def resource_usage() -> dict:
             },
             "temporary_storage": {
                 "access_time": "FS_NOATIME_FL",
+                "account_home": {
+                    "path": "/nonexistent/pliego-benchmark-engine",
+                    "state": "absent",
+                },
                 "directory_sync": "FS_DIRSYNC_FL",
                 "file_sync": "FS_SYNC_FL",
                 "filesystem": "ext4",
                 "runtime_environment": "fixed-account-home-v1",
+                "runtime_path_bindings": None,
+                "runtime_target": "generic-benchmark-engine-v1",
                 "scope": "per-invocation-private",
             },
         },
@@ -367,9 +373,51 @@ def main() -> None:
     browser_launch["argv"] = [browser_path, "render"]
     browser_launch["executable"]["path"] = browser_path
     browser_launch["temporary_storage"]["runtime_environment"] = "fresh-private-home-xdg-v1"
+    browser_launch["temporary_storage"]["runtime_target"] = "browsershot-adapter-v1"
+    runtime_bindings = {
+        "contract": "runtime-path-bindings-v1",
+        "temporary_root": {
+            "path": "/var/tmp/pliego/invocation",
+            "identity": {"device": 1, "inode": 10},
+        },
+        "bindings": {
+            variable: {
+                "relative_path": relative,
+                "identity": {"device": 1, "inode": index + 11},
+            }
+            for index, (variable, relative) in enumerate(validate_result.RUNTIME_DIRECTORY_NAMES.items())
+        },
+    }
+    browser_launch["temporary_storage"]["runtime_path_bindings"] = {
+        "pre": deepcopy(runtime_bindings),
+        "post": deepcopy(runtime_bindings),
+    }
+    browser_schema_violations: list[validate_result.Violation] = []
+    validate_result.validate(
+        browser_launch["temporary_storage"],
+        SCHEMA["definitions"]["launch_security"]["properties"]["temporary_storage"],
+        "$.temporary_storage",
+        browser_schema_violations,
+        SCHEMA,
+    )
+    assert not browser_schema_violations, browser_schema_violations
     browser_violations: list[validate_result.Violation] = []
     validate_result.validate_resource_usage(browser_sample, "$.sample", browser_violations)
     assert not browser_violations, browser_violations
+    tampered_browser = deepcopy(browser_sample)
+    tampered_browser["resource_usage"]["launch_security"]["temporary_storage"]["runtime_path_bindings"]["post"][
+        "bindings"
+    ]["HOME"]["identity"]["inode"] += 1
+    tampered_violations: list[validate_result.Violation] = []
+    validate_result.validate_resource_usage(tampered_browser, "$.sample", tampered_violations)
+    assert any("runtime_path_bindings.post" in str(item) for item in tampered_violations)
+    escaped_browser = deepcopy(browser_sample)
+    escaped_browser["resource_usage"]["launch_security"]["temporary_storage"]["runtime_path_bindings"]["pre"][
+        "bindings"
+    ]["HOME"]["relative_path"] = "../home"
+    escaped_violations: list[validate_result.Violation] = []
+    validate_result.validate_resource_usage(escaped_browser, "$.sample", escaped_violations)
+    assert any("HOME.relative_path" in str(item) for item in escaped_violations)
     assert validate_result.percentile([1, 3], 50) == 1
     assert validate_result.PERCENTILE_METHOD == "nearest-rank-v1"
 

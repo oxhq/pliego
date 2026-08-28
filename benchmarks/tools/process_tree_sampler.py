@@ -28,6 +28,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
+from benchmark_runtime import BROWSERSHOT_TARGET, runtime_contract, runtime_target
+
 fcntl = None
 pwd = None
 resource = None
@@ -41,6 +43,7 @@ CGROUP_ROOT = Path("/sys/fs/cgroup")
 REQUIRED_CONTROLLERS = frozenset({"cpu", "io", "memory", "pids"})
 HARNESS_CHILD = "harness"
 ENGINE_ACCOUNT = "pliego-benchmark-engine"
+ENGINE_ACCOUNT_HOME = "/nonexistent/pliego-benchmark-engine"
 KILL_GRACE_MS = 1000.0
 PR_CAPBSET_DROP = 24
 PR_SET_NO_NEW_PRIVS = 38
@@ -66,7 +69,6 @@ RUNTIME_DIRECTORY_NAMES = {
     "XDG_RUNTIME_DIR": "xdg-runtime",
     "XDG_STATE_HOME": "xdg-state",
 }
-BROWSERSHOT_ADAPTER_SUFFIX = ("benchmarks", "adapters", "browsershot", "adapter.php")
 
 
 class MeasurementIncomplete(RuntimeError):
@@ -195,7 +197,60 @@ def resolve_engine_account(
     gid = int(entry.pw_gid)
     if uid <= 0 or gid <= 0:
         raise incomplete("ENGINE_ACCOUNT_UNSAFE", f"{ENGINE_ACCOUNT!r} must have non-root UID and GID")
-    return EngineAccount(ENGINE_ACCOUNT, uid, gid, str(entry.pw_dir))
+    home = str(entry.pw_dir)
+    if home != ENGINE_ACCOUNT_HOME:
+        raise incomplete(
+            "ENGINE_ACCOUNT_UNSAFE",
+            f"{ENGINE_ACCOUNT!r} must have canonical home {ENGINE_ACCOUNT_HOME!r}, got {home!r}",
+        )
+    account = EngineAccount(ENGINE_ACCOUNT, uid, gid, home)
+    validate_engine_account_home(account)
+    return account
+
+
+def engine_account_can_write(path: Path, account: EngineAccount) -> bool:
+    """Ask with the engine account's effective authority, including POSIX ACLs."""
+    read_fd, write_fd = os.pipe2(os.O_CLOEXEC)
+    pid = os.fork()
+    if pid == 0:
+        try:
+            os.close(read_fd)
+            os.setgroups([])
+            os.setgid(account.gid)
+            os.setuid(account.uid)
+            writable = os.access(path, os.W_OK, effective_ids=True)
+            os.write(write_fd, b"1" if writable else b"0")
+            os._exit(0)
+        except BaseException:
+            os._exit(2)
+    os.close(write_fd)
+    result = os.read(read_fd, 1)
+    os.close(read_fd)
+    _, status_value = os.waitpid(pid, 0)
+    if not os.WIFEXITED(status_value) or os.WEXITSTATUS(status_value) != 0 or result not in {b"0", b"1"}:
+        raise incomplete("ENGINE_ACCOUNT_UNSAFE", "cannot prove engine-account home write authority")
+    return result == b"1"
+
+
+def validate_engine_account_home(account: EngineAccount) -> dict[str, Any]:
+    path = Path(account.home)
+    if account.home != ENGINE_ACCOUNT_HOME or not path.is_absolute() or ".." in path.parts:
+        raise incomplete("ENGINE_ACCOUNT_UNSAFE", "engine account home is not the required canonical path")
+    try:
+        metadata = os.stat(path, follow_symlinks=False)
+    except FileNotFoundError:
+        return {"path": ENGINE_ACCOUNT_HOME, "state": "absent"}
+    except OSError as error:
+        raise incomplete("ENGINE_ACCOUNT_UNSAFE", f"cannot inspect engine account home: {error}") from error
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise incomplete("ENGINE_ACCOUNT_UNSAFE", "engine account home must be absent or a non-writable directory")
+    if engine_account_can_write(path, account):
+        raise incomplete("ENGINE_ACCOUNT_UNSAFE", "engine account home is writable by the engine account")
+    return {
+        "path": ENGINE_ACCOUNT_HOME,
+        "state": "non-writable",
+        "identity": {"device": metadata.st_dev, "inode": metadata.st_ino},
+    }
 
 
 def read_text(path: Path) -> str:
@@ -1008,11 +1063,39 @@ def runtime_directory_diagnostics(root: Path, limit: int = 12) -> str:
     return f"browser-runtime-files-newest={retained!r}; browser-runtime-file-count={len(files)}"
 
 
-def requires_private_browser_runtime(command: tuple[str, ...]) -> bool:
-    if len(command) < 2 or command[1] != "render":
-        return False
-    parts = Path(command[0]).parts
-    return tuple(parts[-len(BROWSERSHOT_ADAPTER_SUFFIX) :]) == BROWSERSHOT_ADAPTER_SUFFIX
+def runtime_directory_bindings(
+    root: Path,
+    root_identity: tuple[int, int],
+    environment: dict[str, str],
+    account: EngineAccount,
+    expected: dict[str, tuple[int, int]] | None = None,
+) -> dict[str, Any]:
+    if set(environment) != set(RUNTIME_DIRECTORY_NAMES):
+        raise incomplete("ENGINE_RUNTIME_DIRECTORY_UNSAFE", "private runtime environment has unexpected variables")
+    bindings: dict[str, Any] = {}
+    for variable, name in RUNTIME_DIRECTORY_NAMES.items():
+        path = Path(environment[variable])
+        if path != root / name or not path.is_absolute():
+            raise incomplete("ENGINE_RUNTIME_DIRECTORY_UNSAFE", f"{variable} escaped the private temporary root")
+        validate_engine_temporary_directory(path, account)
+        identity = engine_temporary_directory_identity(path)
+        if expected is not None and identity != expected[variable]:
+            raise incomplete("ENGINE_RUNTIME_DIRECTORY_REPLACED", f"private {variable} directory identity changed")
+        bindings[variable] = {
+            "relative_path": name,
+            "identity": {"device": identity[0], "inode": identity[1]},
+        }
+    identities = {(item["identity"]["device"], item["identity"]["inode"]) for item in bindings.values()}
+    if len(identities) != len(bindings) or root_identity in identities:
+        raise incomplete("ENGINE_RUNTIME_DIRECTORY_UNSAFE", "private runtime directories do not have unique identities")
+    return {
+        "contract": "runtime-path-bindings-v1",
+        "temporary_root": {
+            "path": str(root),
+            "identity": {"device": root_identity[0], "inode": root_identity[1]},
+        },
+        "bindings": bindings,
+    }
 
 
 def engine_temporary_directory(command: tuple[str, ...], account: EngineAccount, explicit: str | None) -> str:
@@ -1434,11 +1517,18 @@ def sample_command(
         raise incomplete("PIDFD_REQUIRED", "os.pidfd_open is unavailable")
     require_broker_root()
     account = resolve_engine_account()
+    account_home_before = validate_engine_account_home(account)
     argv, executable = command_identity(command, account)
     engine_tmpdir = engine_temporary_directory(tuple(command), account, temporary_directory)
     engine_tmpdir_identity = engine_temporary_directory_identity(Path(engine_tmpdir))
-    private_browser_runtime = requires_private_browser_runtime(argv)
+    target_classification = runtime_target(argv)
+    private_browser_runtime = target_classification == BROWSERSHOT_TARGET
     runtime_directories = prepare_runtime_directories(Path(engine_tmpdir), account) if private_browser_runtime else None
+    runtime_bindings_before = (
+        runtime_directory_bindings(Path(engine_tmpdir), engine_tmpdir_identity, runtime_directories, account)
+        if runtime_directories is not None
+        else None
+    )
     host_network_namespace = os.readlink(proc_root / "self" / "ns" / "net")
     parent = require_delegated_parent(cgroup_parent, cgroup_root, proc_root)
     child: BoundDirectory | None = None
@@ -1623,14 +1713,34 @@ def sample_command(
             if final["cgroup_events"]["populated"] != 0:
                 raise incomplete("CGROUP_CLEANUP_FAILED", "render cgroup repopulated during accounting settle")
             revalidate_engine_temporary_directory(Path(engine_tmpdir), account, engine_tmpdir_identity)
+            account_home_after = validate_engine_account_home(account)
+            if account_home_after != account_home_before:
+                raise incomplete("ENGINE_ACCOUNT_HOME_REPLACED", "engine account home state changed during execution")
+            runtime_path_bindings = None
+            if runtime_directories is not None and runtime_bindings_before is not None:
+                expected_runtime_identities = {
+                    variable: (binding["identity"]["device"], binding["identity"]["inode"])
+                    for variable, binding in runtime_bindings_before["bindings"].items()
+                }
+                runtime_path_bindings = {
+                    "pre": runtime_bindings_before,
+                    "post": runtime_directory_bindings(
+                        Path(engine_tmpdir),
+                        engine_tmpdir_identity,
+                        runtime_directories,
+                        account,
+                        expected_runtime_identities,
+                    ),
+                }
             launch_security["temporary_storage"] = {
                 "access_time": "FS_NOATIME_FL",
                 "directory_sync": "FS_DIRSYNC_FL",
                 "file_sync": "FS_SYNC_FL",
                 "filesystem": "ext4",
-                "runtime_environment": (
-                    "fresh-private-home-xdg-v1" if private_browser_runtime else "fixed-account-home-v1"
-                ),
+                "runtime_environment": runtime_contract(target_classification),
+                "runtime_target": target_classification,
+                "account_home": account_home_after,
+                "runtime_path_bindings": runtime_path_bindings,
                 "scope": "per-invocation-private",
             }
 

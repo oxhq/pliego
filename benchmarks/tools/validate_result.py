@@ -30,12 +30,22 @@ from collections import Counter
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from benchmark_runtime import BROWSERSHOT_TARGET, runtime_contract, runtime_target
+
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_SCHEMA = ROOT / "benchmarks" / "schema" / "benchmark-result.v1.json"
 MANIFEST = ROOT / "benchmarks" / "manifest.toml"
 PDF_ORACLE = ROOT / "benchmarks" / "tools" / "pdf_oracle.py"
 PERCENTILE_METHOD = "nearest-rank-v1"
-BROWSERSHOT_ADAPTER_SUFFIX = ("benchmarks", "adapters", "browsershot", "adapter.php")
+ENGINE_ACCOUNT_HOME = "/nonexistent/pliego-benchmark-engine"
+RUNTIME_DIRECTORY_NAMES = {
+    "HOME": "home",
+    "XDG_CACHE_HOME": "xdg-cache",
+    "XDG_CONFIG_HOME": "xdg-config",
+    "XDG_DATA_HOME": "xdg-data",
+    "XDG_RUNTIME_DIR": "xdg-runtime",
+    "XDG_STATE_HOME": "xdg-state",
+}
 POPPLER_TOOLS = ("pdfinfo", "pdftotext", "pdffonts", "pdftoppm")
 ORACLE_IDENTITY_REASON = "manifest does not pin canonical Poppler tool identities"
 ADAPTER_ATTESTATION_REASON = "out-of-process OCI image attestation is unavailable"
@@ -331,31 +341,97 @@ def validate_resource_usage(sample: dict[str, Any], path: str, violations: list[
 
     launch = usage["launch_security"]
     temporary_storage = launch["temporary_storage"]
-    require_equal(
-        f"{path}.resource_usage.launch_security.temporary_storage.contract",
-        {key: value for key, value in temporary_storage.items() if key != "runtime_environment"},
-        {
-            "access_time": "FS_NOATIME_FL",
-            "directory_sync": "FS_DIRSYNC_FL",
-            "file_sync": "FS_SYNC_FL",
-            "filesystem": "ext4",
-            "scope": "per-invocation-private",
-        },
-        violations,
-    )
+    for field, expected in {
+        "access_time": "FS_NOATIME_FL",
+        "directory_sync": "FS_DIRSYNC_FL",
+        "file_sync": "FS_SYNC_FL",
+        "filesystem": "ext4",
+        "scope": "per-invocation-private",
+    }.items():
+        require_equal(
+            f"{path}.resource_usage.launch_security.temporary_storage.{field}",
+            temporary_storage[field],
+            expected,
+            violations,
+        )
     launch_argv = launch["argv"]
-    launch_path = PurePosixPath(launch_argv[0])
-    private_browser_runtime = (
-        len(launch_argv) >= 2
-        and launch_argv[1] == "render"
-        and tuple(launch_path.parts[-len(BROWSERSHOT_ADAPTER_SUFFIX) :]) == BROWSERSHOT_ADAPTER_SUFFIX
-    )
+    target_classification = runtime_target(launch_argv)
     require_equal(
         f"{path}.resource_usage.launch_security.temporary_storage.runtime_environment",
         temporary_storage["runtime_environment"],
-        "fresh-private-home-xdg-v1" if private_browser_runtime else "fixed-account-home-v1",
+        runtime_contract(target_classification),
         violations,
     )
+    require_equal(
+        f"{path}.resource_usage.launch_security.temporary_storage.runtime_target",
+        temporary_storage["runtime_target"],
+        target_classification,
+        violations,
+    )
+    account_home = temporary_storage["account_home"]
+    require_equal(
+        f"{path}.resource_usage.launch_security.temporary_storage.account_home.path",
+        account_home["path"],
+        ENGINE_ACCOUNT_HOME,
+        violations,
+    )
+    bindings_proof = temporary_storage["runtime_path_bindings"]
+    if target_classification == BROWSERSHOT_TARGET:
+        if not isinstance(bindings_proof, dict):
+            violations.append(
+                Violation(
+                    f"{path}.resource_usage.launch_security.temporary_storage.runtime_path_bindings",
+                    "Browsershot must retain private runtime path identities",
+                )
+            )
+        else:
+            pre = bindings_proof["pre"]
+            post = bindings_proof["post"]
+            require_equal(
+                f"{path}.resource_usage.launch_security.temporary_storage.runtime_path_bindings.post",
+                post,
+                pre,
+                violations,
+            )
+            root_path = PurePosixPath(pre["temporary_root"]["path"])
+            if (
+                not root_path.is_absolute()
+                or ".." in root_path.parts
+                or str(root_path) != pre["temporary_root"]["path"]
+            ):
+                violations.append(
+                    Violation(
+                        f"{path}.resource_usage.launch_security.temporary_storage.runtime_path_bindings.pre.temporary_root.path",
+                        "must be an absolute canonical path",
+                    )
+                )
+            root_identity_data = pre["temporary_root"]["identity"]
+            root_identity = (root_identity_data["device"], root_identity_data["inode"])
+            identities: set[tuple[int, int]] = set()
+            for variable, relative_path in RUNTIME_DIRECTORY_NAMES.items():
+                binding = pre["bindings"][variable]
+                require_equal(
+                    f"{path}.resource_usage.launch_security.temporary_storage.runtime_path_bindings.pre.bindings.{variable}.relative_path",
+                    binding["relative_path"],
+                    relative_path,
+                    violations,
+                )
+                identity = binding["identity"]
+                identities.add((identity["device"], identity["inode"]))
+            if len(identities) != len(RUNTIME_DIRECTORY_NAMES) or root_identity in identities:
+                violations.append(
+                    Violation(
+                        f"{path}.resource_usage.launch_security.temporary_storage.runtime_path_bindings.pre.bindings",
+                        "must bind unique child directory identities distinct from the temporary root",
+                    )
+                )
+    elif bindings_proof is not None:
+        violations.append(
+            Violation(
+                f"{path}.resource_usage.launch_security.temporary_storage.runtime_path_bindings",
+                "non-browser targets must not claim private browser runtime roots",
+            )
+        )
     status = launch["status"]
     require_equal(f"{path}.resource_usage.launch_security.status.uid", status["uid"], [launch["uid"]] * 4, violations)
     require_equal(f"{path}.resource_usage.launch_security.status.gid", status["gid"], [launch["gid"]] * 4, violations)
@@ -1060,6 +1136,16 @@ def validate_semantics(
                 )
             argv = launch["argv"]
             target_kind = target_manifest.get("kind")
+            expected_runtime_argv = [
+                engine.get("binary_path", ""),
+                "render" if target_kind == "adapter" else "render-api2",
+            ]
+            require_equal(
+                f"{sample_path}.resource_usage.launch_security.temporary_storage.runtime_target",
+                launch["temporary_storage"]["runtime_target"],
+                runtime_target(expected_runtime_argv),
+                violations,
+            )
             if target_kind == "pliego":
                 require_equal(
                     f"{sample_path}.resource_usage.launch_security.argv",

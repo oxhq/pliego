@@ -95,9 +95,10 @@ benchmarks/
   block-I/O-accounted while inherited no-atime and synchronous file/directory
   updates prevent scratch access or deletion from escaping the zero-dirty gate.
   Browsershot additionally receives fresh private `HOME` and XDG roots below
-  that same measured scratch directory. Pliego and dompdf retain the fixed
-  unprivileged account home (nonexistent in hosted runs) and receive no XDG
-  roots, preventing user-cache creation where those engines do not require it.
+  that same measured scratch directory. Pliego and dompdf retain the exact
+  `/nonexistent/pliego-benchmark-engine` account home and receive no XDG roots.
+  The sampler and both hosted workflows reject any other passwd home and require
+  that exact path to be absent or non-writable to the engine account.
   This is a deliberate non-default benchmark condition; its synchronous
   metadata cost remains included in the retained wall-time and I/O totals.
 * All resources local, network disabled, same fonts and assets for every run.
@@ -331,8 +332,11 @@ The sampler also verifies that each private per-invocation temporary directory
 is ext4-backed and carries inherited `FS_NOATIME_FL`, `FS_SYNC_FL`, and
 `FS_DIRSYNC_FL` both before launch and after descendant drain; that storage
 remains on disk, inside the measured process tree, and is not replaced by
-tmpfs. Each sample also retains whether it used the fixed account environment
-or Browsershot's fresh private HOME/XDG environment.
+tmpfs. Each sample retains the centrally classified runtime target and
+environment contract. Browsershot evidence additionally binds normalized
+HOME/XDG child paths to unique filesystem device/inode identities before
+launch and revalidates the same identities after descendant drain; non-browser
+samples must not carry that private-browser proof.
 Descendant drain and accounting-settle durations are recorded separately. The
 runner also retains a complete one-shot wall interval from process open through
 sampler exit; serial throughput is derived only from that boundary, so leaked or

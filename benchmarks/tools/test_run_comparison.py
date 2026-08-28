@@ -16,6 +16,7 @@ from typing import Any
 import comparison_metrics
 import run_benchmark
 import run_comparison
+import validate_result
 from test_comparison_metrics import passing_sample
 from test_validate_result import resource_usage
 
@@ -118,9 +119,25 @@ def measured_sample(target_id: str, index: int) -> dict[str, Any]:
     ]
     usage["launch_security"]["executable"]["path"] = identity["engine"]["binary_path"]
     usage["launch_security"]["executable"]["sha256"] = identity["engine"]["binary_sha256"]
-    usage["launch_security"]["temporary_storage"]["runtime_environment"] = (
-        "fresh-private-home-xdg-v1" if target_id == "browsershot-5.4.0-puppeteer-25.8.0" else "fixed-account-home-v1"
-    )
+    temporary_storage = usage["launch_security"]["temporary_storage"]
+    if target_id == "browsershot-5.4.0-puppeteer-25.8.0":
+        temporary_storage["runtime_environment"] = "fresh-private-home-xdg-v1"
+        temporary_storage["runtime_target"] = "browsershot-adapter-v1"
+        snapshot = {
+            "contract": "runtime-path-bindings-v1",
+            "temporary_root": {
+                "path": f"/var/lib/pliego-benchmark-engine-temp/invocation-{index}",
+                "identity": {"device": 1, "inode": index * 10 + 1},
+            },
+            "bindings": {
+                variable: {
+                    "relative_path": relative,
+                    "identity": {"device": 1, "inode": index * 10 + offset + 2},
+                }
+                for offset, (variable, relative) in enumerate(validate_result.RUNTIME_DIRECTORY_NAMES.items())
+            },
+        }
+        temporary_storage["runtime_path_bindings"] = {"pre": snapshot, "post": deepcopy(snapshot)}
     sample.update(
         {
             "measurement_method": "linux-cgroup-v2-v1",

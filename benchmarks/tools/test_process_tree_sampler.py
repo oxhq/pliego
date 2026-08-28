@@ -28,6 +28,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 import process_tree_sampler
+from benchmark_runtime import BROWSERSHOT_TARGET, GENERIC_TARGET, runtime_target
 import validate_result
 
 SAMPLER = Path(__file__).with_name("process_tree_sampler.py")
@@ -161,10 +162,30 @@ def fixture_proofs() -> None:
             lambda name: SimpleNamespace(pw_name=name, pw_uid=0, pw_gid=0, pw_dir="/root")
         ),
     )
+    must_be_incomplete(
+        "ENGINE_ACCOUNT_UNSAFE",
+        lambda: process_tree_sampler.resolve_engine_account(
+            lambda name: SimpleNamespace(pw_name=name, pw_uid=1234, pw_gid=1234, pw_dir="/nonexistent")
+        ),
+    )
     fixture_account = process_tree_sampler.resolve_engine_account(
-        lambda name: SimpleNamespace(pw_name=name, pw_uid=1234, pw_gid=1234, pw_dir="/nonexistent")
+        lambda name: SimpleNamespace(
+            pw_name=name,
+            pw_uid=1234,
+            pw_gid=1234,
+            pw_dir=process_tree_sampler.ENGINE_ACCOUNT_HOME,
+        )
     )
     assert fixture_account.name == process_tree_sampler.ENGINE_ACCOUNT
+    writable_home = SimpleNamespace(st_mode=0o040700, st_dev=1, st_ino=2)
+    with (
+        mock.patch.object(process_tree_sampler.os, "stat", return_value=writable_home),
+        mock.patch.object(process_tree_sampler, "engine_account_can_write", return_value=True),
+    ):
+        must_be_incomplete(
+            "ENGINE_ACCOUNT_UNSAFE",
+            lambda: process_tree_sampler.validate_engine_account_home(fixture_account),
+        )
     with mock.patch.dict(
         os.environ,
         {
@@ -180,7 +201,7 @@ def fixture_proofs() -> None:
     assert child_environment["BROWSERSHOT_CHROME_PATH"] == "/opt/chrome"
     assert child_environment["BROWSERSHOT_NODE_BINARY"] == "/usr/bin/node"
     assert child_environment["TMPDIR"] == "/engine-owned-artifacts"
-    assert child_environment["HOME"] == "/nonexistent"
+    assert child_environment["HOME"] == process_tree_sampler.ENGINE_ACCOUNT_HOME
     assert not (set(process_tree_sampler.RUNTIME_DIRECTORY_NAMES) - {"HOME"}).intersection(child_environment)
     private_runtime = {
         variable: f"/engine-owned-artifacts/{name}"
@@ -190,13 +211,9 @@ def fixture_proofs() -> None:
         fixture_account, "/engine-owned-artifacts", private_runtime
     )
     assert {variable: private_environment[variable] for variable in private_runtime} == private_runtime
-    assert process_tree_sampler.requires_private_browser_runtime(
-        ("/repo/benchmarks/adapters/browsershot/adapter.php", "render")
-    )
-    assert not process_tree_sampler.requires_private_browser_runtime(
-        ("/repo/benchmarks/adapters/dompdf/adapter.php", "render")
-    )
-    assert not process_tree_sampler.requires_private_browser_runtime(("/usr/lib/pliego", "render-api2"))
+    assert runtime_target(("/repo/benchmarks/adapters/browsershot/adapter.php", "render")) == BROWSERSHOT_TARGET
+    assert runtime_target(("/repo/benchmarks/adapters/dompdf/adapter.php", "render")) == GENERIC_TARGET
+    assert runtime_target(("/usr/lib/pliego", "render-api2")) == GENERIC_TARGET
     with tempfile.TemporaryDirectory() as raw:
         runtime_root = Path(raw)
         older = runtime_root / "home" / "older.bin"
@@ -249,13 +266,46 @@ def fixture_proofs() -> None:
                 "fixture-engine",
                 os.getuid(),
                 os.getgid(),
-                "/nonexistent",
+                process_tree_sampler.ENGINE_ACCOUNT_HOME,
             )
             runtime_environment = process_tree_sampler.prepare_runtime_directories(temporary, current_account)
             assert runtime_environment == {
                 variable: str(temporary / name)
                 for variable, name in process_tree_sampler.RUNTIME_DIRECTORY_NAMES.items()
             }
+            root_identity = process_tree_sampler.engine_temporary_directory_identity(temporary)
+            runtime_binding = process_tree_sampler.runtime_directory_bindings(
+                temporary, root_identity, runtime_environment, current_account
+            )
+            expected_identities = {
+                variable: (binding["identity"]["device"], binding["identity"]["inode"])
+                for variable, binding in runtime_binding["bindings"].items()
+            }
+            assert (
+                process_tree_sampler.runtime_directory_bindings(
+                    temporary, root_identity, runtime_environment, current_account, expected_identities
+                )
+                == runtime_binding
+            )
+            escaped = dict(runtime_environment)
+            escaped["HOME"] = str(root)
+            must_be_incomplete(
+                "ENGINE_RUNTIME_DIRECTORY_UNSAFE",
+                lambda: process_tree_sampler.runtime_directory_bindings(
+                    temporary, root_identity, escaped, current_account
+                ),
+            )
+            original_home = temporary / process_tree_sampler.RUNTIME_DIRECTORY_NAMES["HOME"]
+            replaced_home = temporary / "replaced-home"
+            original_home.rename(replaced_home)
+            original_home.mkdir(mode=0o700)
+            original_home.chmod(0o700)
+            must_be_incomplete(
+                "ENGINE_RUNTIME_DIRECTORY_REPLACED",
+                lambda: process_tree_sampler.runtime_directory_bindings(
+                    temporary, root_identity, runtime_environment, current_account, expected_identities
+                ),
+            )
             adapter_command = ("/adapter", "render", "input.html", "--artifacts", str(artifacts))
             assert process_tree_sampler.engine_temporary_directory(
                 adapter_command, current_account, str(temporary)

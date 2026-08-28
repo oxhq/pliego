@@ -534,14 +534,27 @@
         "temporary_storage": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["access_time", "directory_sync", "file_sync", "filesystem", "runtime_environment", "scope"],
+          "required": ["access_time", "account_home", "directory_sync", "file_sync", "filesystem", "runtime_environment", "runtime_path_bindings", "runtime_target", "scope"],
           "properties": {
             "access_time": { "const": "FS_NOATIME_FL" },
+            "account_home": { "$ref": "#/definitions/account_home_proof" },
             "directory_sync": { "const": "FS_DIRSYNC_FL" },
             "file_sync": { "const": "FS_SYNC_FL" },
             "filesystem": { "const": "ext4" },
             "runtime_environment": {
               "enum": ["fixed-account-home-v1", "fresh-private-home-xdg-v1"]
+            },
+            "runtime_path_bindings": {
+              "type": ["object", "null"],
+              "additionalProperties": false,
+              "required": ["pre", "post"],
+              "properties": {
+                "pre": { "$ref": "#/definitions/runtime_path_snapshot" },
+                "post": { "$ref": "#/definitions/runtime_path_snapshot" }
+              }
+            },
+            "runtime_target": {
+              "enum": ["browsershot-adapter-v1", "generic-benchmark-engine-v1"]
             },
             "scope": { "const": "per-invocation-private" }
           }
@@ -549,6 +562,77 @@
         "network_isolation": {
           "$ref": "#/definitions/network_isolation"
         }
+      }
+    },
+    "account_home_proof": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "state"],
+          "properties": {
+            "path": { "const": "/nonexistent/pliego-benchmark-engine" },
+            "state": { "const": "absent" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["identity", "path", "state"],
+          "properties": {
+            "identity": { "$ref": "#/definitions/filesystem_identity" },
+            "path": { "const": "/nonexistent/pliego-benchmark-engine" },
+            "state": { "const": "non-writable" }
+          }
+        }
+      ]
+    },
+    "filesystem_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["device", "inode"],
+      "properties": {
+        "device": { "type": "integer", "minimum": 0 },
+        "inode": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "runtime_path_snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bindings", "contract", "temporary_root"],
+      "properties": {
+        "bindings": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["HOME", "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_RUNTIME_DIR", "XDG_STATE_HOME"],
+          "properties": {
+            "HOME": { "$ref": "#/definitions/runtime_path_binding" },
+            "XDG_CACHE_HOME": { "$ref": "#/definitions/runtime_path_binding" },
+            "XDG_CONFIG_HOME": { "$ref": "#/definitions/runtime_path_binding" },
+            "XDG_DATA_HOME": { "$ref": "#/definitions/runtime_path_binding" },
+            "XDG_RUNTIME_DIR": { "$ref": "#/definitions/runtime_path_binding" },
+            "XDG_STATE_HOME": { "$ref": "#/definitions/runtime_path_binding" }
+          }
+        },
+        "contract": { "const": "runtime-path-bindings-v1" },
+        "temporary_root": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["identity", "path"],
+          "properties": {
+            "identity": { "$ref": "#/definitions/filesystem_identity" },
+            "path": { "type": "string", "minLength": 1 }
+          }
+        }
+      }
+    },
+    "runtime_path_binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["identity", "relative_path"],
+      "properties": {
+        "identity": { "$ref": "#/definitions/filesystem_identity" },
+        "relative_path": { "type": "string", "minLength": 1 }
       }
     },
     "network_isolation": {
