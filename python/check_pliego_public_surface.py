@@ -29,6 +29,7 @@ PUBLIC_MARKDOWN = (
     ROOT / "docs" / "funding" / "2026.md",
     ROOT / "docs" / "benchmarks" / "README.md",
     ROOT / "sdk" / "laravel" / "README.md",
+    ROOT / "sdk" / "php" / "README.md",
 )
 LINK = re.compile(r"!?\[[^\]]*\]\(([^)]+)\)")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -55,6 +56,7 @@ def verify_current_copy() -> None:
     support = read(ROOT / "docs" / "pliego" / "support-profile.md")
     threat_model = read(ROOT / "docs" / "security" / "threat-model.md")
     laravel = read(ROOT / "sdk" / "laravel" / "README.md")
+    php = read(ROOT / "sdk" / "php" / "README.md")
 
     for path, content in (
         (ROOT / "README.md", readme),
@@ -92,6 +94,10 @@ def verify_current_copy() -> None:
     require("collapsed-table-borders" in support, "collapsed-table API 2 limitation is not public")
     require("Chart.js is not advertised" in laravel, "Laravel guide overstates current Chart.js support")
     require("collapsed-table-borders" in laravel, "Laravel guide omits the collapsed-table API 2 limit")
+    require("current stable package is 0.3.2" in php, "PHP guide omits the current stable package")
+    require("pass their paths through `InputAsset`" in php, "PHP guide misstates the API 2 asset input")
+    require("makes no comparative performance claim" in php, "PHP guide omits the benchmark boundary")
+    require("supply their bytes through `assets`" not in php, "PHP guide retains stale API 2 asset guidance")
     require(
         "v0.3.2 API 2 does not advertise link annotations" in threat_model,
         "threat model overstates API 2 link support",
