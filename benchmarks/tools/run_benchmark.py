@@ -708,6 +708,7 @@ def benchmark_tree_is_clean() -> bool:
             "--",
             "benchmarks",
             ".github/workflows/pliego-benchmark.yml",
+            ".github/workflows/pliego-performance.yml",
             ":(exclude)benchmarks/baselines",
         ],
         ROOT,

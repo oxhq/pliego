@@ -28,6 +28,8 @@ benchmarks/
 │   └── browsershot/           Browsershot 5.4.0 / Composer + Puppeteer locks
 ├── schema/
 │   ├── benchmark-interleaved-run.v1.json
+│   ├── benchmark-hosted-comparison.v1.json
+│   ├── benchmark-hosted-series.v1.json
 │   ├── benchmark-report-data.v1.json
 │   └── benchmark-result.v1.json
 ├── fixtures/                  Seven frozen fixtures
@@ -45,7 +47,10 @@ benchmarks/
 │   ├── process_tree_sampler.py Linux cgroup-v2 containment and accounting
 │   ├── pdf_oracle.py           Shared untimed PDF correctness checks
 │   ├── report_data.py         Canonical latency cells + provenance-bound Markdown
+│   ├── comparison_metrics.py Full metric aggregation for hosted comparisons
 │   ├── run_benchmark.py       Orchestrator: manifest → runner → aggregates → result file
+│   ├── run_comparison.py      GitHub-hosted three-target snapshot coordinator
+│   ├── summarize_comparisons.py Sealed three-repeat spread report
 │   ├── test_process_tree_sampler.py Fixture, live cgroup, bridge, and overhead proof
 │   ├── validate_interleaved_run.py Cross-target schedule/raw-sample validator
 │   └── validate_result.py     Stdlib-only JSON Schema check for result files
@@ -55,10 +60,12 @@ benchmarks/
 
 ## Prerequisites
 
-* Dedicated or self-hosted **Linux x86_64, kernel 6.1 or newer**, with unified
-  cgroup v2. GitHub-hosted Actions are for smoke checks only, never for
-  publishable numbers. Linux 6.1 is required because the retained accounting
-  contract requires both `memory.peak` and `pids.peak`.
+* Authoritative baselines require dedicated or self-hosted **Linux x86_64,
+  kernel 6.1 or newer**, with unified cgroup v2. GitHub-hosted Actions may
+  produce explicitly labeled `github-hosted-exploratory` snapshots, but those
+  snapshots cannot validate as dedicated evidence or support general production
+  rankings. Linux 6.1 is required because the retained accounting contract
+  requires both `memory.peak` and `pids.peak`.
 * The **published bundle** (`checked-release` profile) resolved by the pinned
   release verifier. Never `cargo run`.
 * `php-cli` ≥ 8.3 with `dom`, `mbstring`, `fileinfo`, and `json`
@@ -184,6 +191,43 @@ also emits explicit
 `not-applicable` records and reasons for every unverified fixture. It does not
 manufacture zero measurements for exclusions.
 
+## Running the GitHub-hosted comparison snapshot
+
+`.github/workflows/pliego-performance.yml` is a manual, three-repeat measurement
+lane. Each repeat uses one fresh `ubuntu-24.04` VM and runs all three targets in
+the same job. It executes one correctness preflight, 10 discarded warmups, and
+100 timed cold-process samples per target through the seeded global interleaving
+schedule. One hundred samples are required so nearest-rank p99 is not merely the
+maximum of the old 50-sample short-document population.
+
+Every target, including Pliego and dompdf, runs in a fresh private network
+namespace containing only loopback. The workflow provisions the existing root
+cgroup-v2 broker and retains exact descendant CPU, `memory.peak`, I/O, sampled
+RSS/PSS lower bounds, engine wall time, full one-shot wall time, output size,
+correctness, and PDF-hash variation. It also records the GitHub run and runner
+image, host and pressure snapshots, verified Pliego release metadata, Poppler
+paths/versions/hashes, adapter/runtime paths/versions/hashes, the complete raw
+schedule, and every sample ID.
+
+Each repeat directory contains `interleaved-run.v1.json`,
+`hosted-comparison.v1.json`, `all-metrics.md`, `verified-release.json`, and
+`SHA256SUMS`. `run_comparison.py --validate DIRECTORY` requires that exact file
+set, verifies the release metadata, checksums, and deterministic Markdown, then
+recomputes the schedule, sample hashes, comparison digest, and every aggregate
+from the raw samples. It rejects fewer than 100 samples, correctness failures,
+partial-null metrics, host-network access, cgroup counter inconsistencies,
+renderer identity changes, non-cgroup accounting, or any attempt to mark the
+host as dedicated.
+
+After all three jobs finish, `summarize_comparisons.py` requires repeats 1, 2,
+and 3 from the same workflow run, revision, runner image, fixture, protocol,
+oracle, and target identities. It retains every repeat rather than selecting the
+best one, and emits `hosted-series.v1.json`, `all-repeats.md`, and `SHA256SUMS`
+with per-metric p50 ranges and relative spread. Selected renderer runtimes,
+dependency-tree hashes, and the GitHub runner image identity are captured, but
+the runner is not a manifest-pinned OCI environment. That is one reason this
+evidence remains directional rather than an authoritative baseline.
+
 Subset with `--fixture invoice-showcase` or select PHP with
 `--php /usr/bin/php`. `--samples` and `--warmup` are accepted only when they
 equal the canonical manifest values; overrides cannot produce a result file.
@@ -306,13 +350,17 @@ protocol's `nearest-rank-v1` percentiles and requires p95 wall overhead below
 
 * One untimed correctness preflight, 10 warm-up iterations, then 50 timed
   samples for short documents or 20 for long ones.
+  The separate hosted-comparison profile uses 100 timed `minimal-static`
+  samples per target to support a distinct nearest-rank p99 observation.
 * Every sample is a cold, one-shot process. The committed seed randomizes
   fixture traversal within a target, preserving the existing `sample_order =
   "random"` protocol. The deterministic cross-target schedule and phase-aware
-  execution primitive now produces a versioned, self-digesting schedule and
-  raw-sample envelope. No public multi-target coordinator persists real target
-  executions yet; current result files remain single-target.
-* Same host, same binary, same fonts/assets. Network disabled.
+  execution primitive produces a versioned, self-digesting schedule and
+  raw-sample envelope. The hosted coordinator retains real three-target
+  executions; the authoritative CLI remains single-target until its stricter
+  identity gates are satisfied.
+* Same host, same binary, same fonts/assets. Authoritative runs disable network;
+  hosted comparison samples use an isolated namespace containing loopback only.
 * Results record host info, the exact clean harness commit, the oracle script,
   and all Poppler executable identities; validation requires the matching
   checkout. A baseline is signed by commit/tag.
@@ -354,17 +402,17 @@ declared v0.3.2 API 2 correctness gate before it can contribute a sample.
 * dompdf and Browsershot have direct Ubuntu render + real Poppler smoke for
   `minimal-static`, but publishable measurements remain N/A until immutable
   image digests are pinned; all other fixtures are explicit exclusions.
-* The cross-target executor now emits a validated retention contract with stable
-  raw-sample IDs, a narrow latency-cell generator preserves exact provenance, and
-  a deterministic Markdown table consumes only those validated cells. None is
-  wired to attested target contexts, and no genuine multi-target run artifact has
-  been retained. This slice publishes no comparative numbers.
-* Dedicated-Linux acceptance still needs the public multi-target coordinator, a
-  genuine retained run under all existing gates, and retention of its validated
-  cells and generated table as one evidence bundle. The implemented single-target
-  throughput includes sampler startup, descendant drain, accounting settlement,
-  and sampler exit, but remains a serial per-target diagnostic rather than a
-  publishable cross-engine throughput claim.
+* The cross-target executor now has a GitHub-hosted coordinator that binds real
+  target identities, exact raw samples, full metrics, and a deterministic report.
+  It is deliberately limited to the `github-hosted-exploratory` evidence class;
+  no authoritative multi-target baseline has been retained.
+* Dedicated-Linux acceptance still needs immutable competitor images, canonical
+  Poppler pins, a genuine retained run under all authoritative gates, and its
+  validated raw samples and report as one durable evidence bundle. The hosted
+  series cannot substitute for that missing evidence. Its throughput includes
+  sampler startup, descendant drain, accounting settlement, and sampler exit,
+  and remains a serial per-target diagnostic rather than a concurrent-capacity
+  claim.
 * The Ubuntu Pliego/API 2, adapter, and Poppler lane now passes as hosted
   `minimal-static` correctness proof. It is not performance evidence.
 * Core (Criterion) and Laravel e2e levels live outside this directory.

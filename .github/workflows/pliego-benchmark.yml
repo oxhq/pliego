@@ -5,12 +5,14 @@ on:
     branches: ["main"]
     paths:
       - ".github/workflows/pliego-benchmark.yml"
+      - ".github/workflows/pliego-performance.yml"
       - "benchmarks/**"
       - "python/check_pliego_release_archive.py"
       - "python/check_pliego_version.py"
   pull_request:
     paths:
       - ".github/workflows/pliego-benchmark.yml"
+      - ".github/workflows/pliego-performance.yml"
       - "benchmarks/**"
       - "python/check_pliego_release_archive.py"
       - "python/check_pliego_version.py"
@@ -39,6 +41,9 @@ jobs:
           python -m compileall -q benchmarks/tools
           python benchmarks/tools/test_validate_result.py
           python benchmarks/tools/test_run_benchmark.py
+          python benchmarks/tools/test_comparison_metrics.py
+          python benchmarks/tools/test_run_comparison.py
+          python benchmarks/tools/test_summarize_comparisons.py
           python benchmarks/tools/test_resolve_release.py
           python benchmarks/tools/test_compare_parity.py
           python python/check_pliego_release_archive.py --self-test

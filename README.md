@@ -149,11 +149,12 @@ with Puppeteer 25.8.0. Their shared
 text, the embedded font, and raster output through the same Poppler oracle.
 
 This is comparison infrastructure and correctness evidence, not a speed claim.
-There are no committed publishable performance numbers. Timing and resource tables
-remain N/A until all targets run interleaved on the same dedicated Linux host with
-immutable runtime and Poppler identities, full descendant accounting, raw samples,
-and retained host attestation. Read the exact boundary and reproduction commands in
-the [benchmark methodology](docs/benchmarks/README.md).
+There is no committed performance snapshot yet. A manual lane can now produce
+directional `github-hosted-exploratory` timing/resource evidence with three
+no-selection repeats, exact descendant accounting, and raw samples. Authoritative
+tables and production rankings remain N/A until the stricter dedicated-host,
+immutable-runtime, and canonical-oracle gates pass. Read the exact boundary and
+reproduction commands in the [benchmark methodology](docs/benchmarks/README.md).
 
 ## Release evidence and limits
 
