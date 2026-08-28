@@ -9,8 +9,10 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import contextlib
 import errno
+import hashlib
 import io
 import json
 import os
@@ -133,9 +135,83 @@ def fixture_proofs() -> None:
         lambda name: SimpleNamespace(pw_name=name, pw_uid=1234, pw_gid=1234, pw_dir="/nonexistent")
     )
     assert fixture_account.name == process_tree_sampler.ENGINE_ACCOUNT
-    with mock.patch.dict(os.environ, {"GITHUB_TOKEN": "must-not-leak", "LANG": "C"}, clear=True):
+    with mock.patch.dict(
+        os.environ,
+        {
+            "BROWSERSHOT_CHROME_PATH": "/opt/chrome",
+            "BROWSERSHOT_NODE_BINARY": "/usr/bin/node",
+            "GITHUB_TOKEN": "must-not-leak",
+            "LANG": "C",
+        },
+        clear=True,
+    ):
         child_environment = process_tree_sampler.engine_environment(fixture_account)
     assert "GITHUB_TOKEN" not in child_environment and child_environment["LANG"] == "C"
+    assert child_environment["BROWSERSHOT_CHROME_PATH"] == "/opt/chrome"
+    assert child_environment["BROWSERSHOT_NODE_BINARY"] == "/usr/bin/node"
+
+    with tempfile.TemporaryDirectory() as raw:
+        cgroup_root = Path(raw).resolve()
+        staging_path = cgroup_root / "staging"
+        staging_path.mkdir()
+        staging = process_tree_sampler.BoundDirectory(staging_path, -1, 1, 2)
+        pid = 123
+        stopped = (process_tree_sampler.signal.SIGSTOP << 8) | 0x7F
+        network = {
+            "mode": "linux-private-network-namespace-v1",
+            "host_namespace": "net:[1]",
+            "engine_namespace": "net:[2]",
+            "interfaces": ["lo"],
+        }
+        handshake = {
+            "ok": True,
+            "executable_accessible": True,
+            "executable_writable": False,
+            "cwd_accessible": True,
+            "migration_write_probes": {
+                name: {"cgroup.procs": "EACCES", "cgroup.threads": "EPERM"}
+                for name in ("parent", "harness", "staging", "measurement")
+            },
+            "network_isolation": network,
+        }
+        security = {
+            "uid": [fixture_account.uid] * 4,
+            "gid": [fixture_account.gid] * 4,
+            "supplementary_groups": [],
+            "cap_inheritable_hex": "0",
+            "cap_permitted_hex": "0",
+            "cap_effective_hex": "0",
+            "cap_bounding_hex": "0",
+            "cap_ambient_hex": "0",
+            "no_new_privs": 1,
+        }
+
+        def namespace(path: Path) -> str:
+            return (
+                network["host_namespace"] if path.parts[-3:] == ("self", "ns", "net") else network["engine_namespace"]
+            )
+
+        with (
+            mock.patch.object(process_tree_sampler.os, "kill"),
+            mock.patch.object(process_tree_sampler.os, "waitpid", return_value=(pid, stopped)),
+            mock.patch.object(process_tree_sampler.os, "read", return_value=json.dumps(handshake).encode()),
+            mock.patch.object(process_tree_sampler.os, "close"),
+            mock.patch.object(process_tree_sampler.os, "readlink", side_effect=namespace),
+            mock.patch.object(process_tree_sampler, "read_stat", return_value={"start_ticks": 77}),
+            mock.patch.object(process_tree_sampler, "cgroup_relative", return_value="/staging"),
+            mock.patch.object(process_tree_sampler, "cgroup_pids", return_value=[pid]),
+            mock.patch.object(process_tree_sampler, "read_process_security", return_value=security),
+        ):
+            retained = process_tree_sampler.finish_authority_handshake(
+                pid,
+                42,
+                fixture_account,
+                staging,
+                cgroup_root,
+                (pid, 77),
+                cgroup_root,
+            )
+        assert retained["network_isolation"] == network
 
     with tempfile.TemporaryDirectory() as raw:
         executable = Path(raw) / "true"
@@ -144,6 +220,23 @@ def fixture_proofs() -> None:
         must_be_incomplete(
             "ENGINE_COMMAND_INVALID",
             lambda: process_tree_sampler.command_identity([str(executable.resolve())], fixture_account),
+        )
+        argv, _ = process_tree_sampler.command_identity(
+            [str(executable.resolve()), "render-api2"],
+            fixture_account,
+        )
+        assert argv == (str(executable.resolve()), "render-api2")
+        adapter_argv, _ = process_tree_sampler.command_identity(
+            [str(executable.resolve()), "render", "input.html"],
+            fixture_account,
+        )
+        assert adapter_argv == (str(executable.resolve()), "render", "input.html")
+        must_be_incomplete(
+            "ENGINE_COMMAND_INVALID",
+            lambda: process_tree_sampler.command_identity(
+                [str(executable.resolve()), "render-api2", "--unexpected"],
+                fixture_account,
+            ),
         )
         with (
             mock.patch.object(process_tree_sampler, "require_broker_root"),
@@ -165,6 +258,22 @@ def fixture_proofs() -> None:
                 ),
             )
             delegated.assert_not_called()
+
+    if sys.platform == "linux" and os.geteuid() == 0:
+        with tempfile.TemporaryDirectory() as raw:
+            stdin_path = (Path(raw) / "request.json").resolve()
+            stdin_path.write_bytes(b"{}\n")
+            stdin_path.chmod(0o400)
+            descriptor = process_tree_sampler.open_stdin_descriptor(str(stdin_path))
+            try:
+                assert os.read(descriptor, 3) == b"{}\n"
+            finally:
+                os.close(descriptor)
+            stdin_path.chmod(0o600)
+            must_be_incomplete(
+                "ENGINE_STDIN_MUTABLE",
+                lambda: process_tree_sampler.open_stdin_descriptor(str(stdin_path)),
+            )
 
     with tempfile.TemporaryDirectory() as raw:
         directory = Path(raw)
@@ -359,7 +468,8 @@ def migration_attack(parent: str) -> int:
 
 
 @contextlib.contextmanager
-def workload_engine() -> Iterator[str]:
+def workload_engine(arguments: list[str] | None = None) -> Iterator[str]:
+    arguments = arguments or ["--workload-parent", "32", "0.8"]
     with tempfile.TemporaryDirectory() as raw:
         directory = Path(raw)
         directory.chmod(0o755)
@@ -368,15 +478,16 @@ def workload_engine() -> Iterator[str]:
             "#!/usr/bin/env python3\n"
             "import os, sys\n"
             f"os.execv({str(Path(sys.executable).resolve())!r}, "
-            f"[{str(Path(sys.executable).resolve())!r}, {str(Path(__file__).resolve())!r}, *sys.argv[3:]])\n",
+            f"[{str(Path(sys.executable).resolve())!r}, {str(Path(__file__).resolve())!r}, "
+            f"*{arguments!r}])\n",
             encoding="utf-8",
         )
         engine.chmod(0o555)
         yield str(engine.resolve())
 
 
-def workload_command(engine: str, mebibytes: int = 32, duration: float = 0.8) -> list[str]:
-    return [engine, "render", "fixture.html", "--workload-parent", str(mebibytes), str(duration)]
+def workload_command(engine: str) -> list[str]:
+    return [engine, "render-api2"]
 
 
 def sampled(command: list[str], descendant_grace_ms: float = 1000.0) -> dict:
@@ -452,8 +563,9 @@ def live_cgroup_proofs() -> dict:
     account = process_tree_sampler.resolve_engine_account()
     with workload_engine() as engine:
         proof = sampled(workload_command(engine))
-        parent = os.environ["PLIEGO_BENCHMARK_CGROUP_PARENT"]
-        attacked = sampled([engine, "render", "fixture.html", "--workload-migration-attack", parent])
+    parent = os.environ["PLIEGO_BENCHMARK_CGROUP_PARENT"]
+    with workload_engine(["--workload-migration-attack", parent]) as engine:
+        attacked = sampled(workload_command(engine))
         assert attacked["exit_code"] == 0
         assert attacked["counters"]["final"]["pids_peak"] >= 3
         assert set(attacked["launch_security"]["migration_write_probes"]["parent"].values()) <= {
@@ -496,9 +608,9 @@ def live_cgroup_proofs() -> dict:
         os.chown(directory, account.uid, account.gid)
         directory.chmod(0o700)
         pid_path = directory / "leaked.pid"
-        with workload_engine() as engine:
+        with workload_engine(["--workload-leak", str(pid_path)]) as engine:
             cleaned = sampled(
-                [engine, "render", "fixture.html", "--workload-leak", str(pid_path)],
+                workload_command(engine),
                 descendant_grace_ms=50,
             )
         leaked_pid = int(pid_path.read_text(encoding="ascii"))
@@ -527,23 +639,92 @@ def php_integration_proof() -> None:
         output_path = directory / "output.pdf"
         artifacts_path = directory / "ignored-artifacts"
         engine = directory / "fake-engine.py"
-        input_path.write_text("<p>fixture</p>", encoding="utf-8")
+        input_bytes = b"<p>fixture</p>"
+        input_path.write_bytes(input_bytes)
+        input_sha256 = hashlib.sha256(input_bytes).hexdigest()
+        bundle = hashlib.sha256()
+        bundle.update(b"input.html\0" + bytes.fromhex(input_sha256))
+        delivery_fixture = Path(__file__).resolve().parents[2] / "contracts" / "api2" / "fixtures" / "delivery"
+        pdf_base64 = base64.b64encode((delivery_fixture / "document.pdf").read_bytes()).decode("ascii")
+        scene_base64 = base64.b64encode((delivery_fixture / "scene.json").read_bytes()).decode("ascii")
+        bundle_base64 = base64.b64encode((delivery_fixture / "bundle.json").read_bytes()).decode("ascii")
         engine.write_text(
-            """#!/usr/bin/env python3
-import json, os, pathlib, sys
-args = sys.argv[1:]
-output = pathlib.Path(args[args.index('--output') + 1])
-artifacts = pathlib.Path(args[args.index('--artifacts') + 1])
-artifacts.mkdir(parents=True, exist_ok=True)
-with output.open('wb') as stream:
-    stream.write(b'%PDF-1.4\\n%%EOF\\n')
-    stream.flush()
-    os.fsync(stream.fileno())
-with (artifacts / 'scene-report.json').open('w') as stream:
-    json.dump({'capture': {'status': 'complete'}, 'preview': {'page_count': 1}}, stream)
-    stream.flush()
-    os.fsync(stream.fileno())
-print(json.dumps({'phase_timings_ms': {'capture': 1.0}}))
+            f"""#!/usr/bin/env python3
+import base64, hashlib, json, os, pathlib, sys
+assert sys.argv[1:] == ['render-api2']
+request_bytes = sys.stdin.buffer.read()
+request = json.loads(request_bytes)
+assert request_bytes == (json.dumps(request, separators=(',', ':')) + '\\n').encode()
+assert request['api'] == 2
+root = pathlib.Path.cwd()
+assert sorted(path.name for path in root.iterdir()) == ['input', 'input-manifest.json']
+manifest_bytes = (root / 'input-manifest.json').read_bytes()
+manifest_descriptor = request['input']['manifest']
+assert manifest_descriptor['bytes'] == len(manifest_bytes)
+assert manifest_descriptor['sha256'] == 'sha256:' + hashlib.sha256(manifest_bytes).hexdigest()
+manifest = json.loads(manifest_bytes)
+assert manifest['entries'][0]['path'] == 'input.html'
+assert manifest['entries'][0]['sha256'] == 'sha256:' + hashlib.sha256((root / 'input/input.html').read_bytes()).hexdigest()
+delivery = root / 'delivery'
+delivery.mkdir()
+diagnostics = pathlib.Path.cwd() / 'diagnostics'
+diagnostics.mkdir()
+pdf = base64.b64decode({pdf_base64!r})
+scene = base64.b64decode({scene_base64!r})
+bundle = base64.b64decode({bundle_base64!r})
+environment = b'{{"fixture":true}}\\n'
+(delivery / 'document.pdf').write_bytes(pdf)
+(delivery / 'scene.json').write_bytes(scene)
+(delivery / 'bundle.json').write_bytes(bundle)
+(diagnostics / 'environment.json').write_bytes(environment)
+result = {{
+    'schema': 'pliego.render-result',
+    'version': 1,
+    'api': 2,
+    'status': 'success',
+    'request': request,
+    'engine': {{
+        'name': 'pliego',
+        'version': '0.0.0-test',
+        'api': 2,
+        'source_commit': '0' * 40,
+        'runtime': {{
+            'mode': 'one-shot',
+            'target': 'x86_64-unknown-linux-gnu',
+            'binary_sha256': 'sha256:' + hashlib.sha256(pathlib.Path(sys.argv[0]).read_bytes()).hexdigest(),
+            'servo_base': '1' * 40,
+        }},
+    }},
+    'delivery': {{
+        'pdf': {{
+            'path': 'document.pdf',
+            'media_type': 'application/pdf',
+            'sha256': 'sha256:' + hashlib.sha256(pdf).hexdigest(),
+            'bytes': len(pdf),
+        }},
+        'scene': {{
+            'path': 'scene.json',
+            'media_type': 'application/vnd.pliego.document-scene+json',
+            'sha256': 'sha256:' + hashlib.sha256(scene).hexdigest(),
+            'bytes': len(scene),
+        }},
+        'bundle': {{
+            'path': 'bundle.json',
+            'media_type': 'application/vnd.pliego.bundle-manifest+json',
+            'sha256': 'sha256:' + hashlib.sha256(bundle).hexdigest(),
+            'bytes': len(bundle),
+        }},
+    }},
+    'conformance': {{'requested': None, 'status': 'not-requested', 'evidence': None}},
+    'diagnostics': {{'retained': True, 'artifacts': [{{
+        'path': 'diagnostics/environment.json',
+        'media_type': 'application/json',
+        'sha256': 'sha256:' + hashlib.sha256(environment).hexdigest(),
+        'bytes': len(environment),
+    }}]}},
+    'error': None,
+}}
+print(json.dumps(result, separators=(',', ':')))
 sys.stdout.flush()
 os.fsync(sys.stdout.fileno())
 """,
@@ -556,6 +737,7 @@ os.fsync(sys.stdout.fileno())
                 str(PHP_RUNNER),
                 "--binary",
                 str(engine),
+                "--native-api2",
                 "--input",
                 input_path.name,
                 "--output",
@@ -568,6 +750,10 @@ os.fsync(sys.stdout.fileno())
                 "0",
                 "--cwd",
                 str(directory),
+                "--fixture-input-sha256",
+                input_sha256,
+                "--fixture-bundle-sha256",
+                bundle.hexdigest(),
             ],
             capture_output=True,
             text=True,
@@ -575,9 +761,18 @@ os.fsync(sys.stdout.fileno())
         )
         assert run.returncode == 0, run.stderr
         sample = json.loads(run.stdout)
+        assert sample["ok"] is True
+        assert sample["correctness"]["pass"] is True
+        checks = {check["name"]: check["status"] for check in sample["correctness"]["checks"]}
+        assert checks["api2_request_echo"] == "pass"
+        assert checks["api2_pdf_descriptor"] == "pass"
+        assert checks["api2_scene_descriptor"] == "pass"
+        assert checks["api2_bundle_descriptor"] == "pass"
+        assert checks["api2_diagnostics_bound"] == "pass"
         assert sample["measurement_method"] == "linux-cgroup-v2-v1"
         assert sample["resource_usage"]["root_start_ticks"] > 0
         assert sample["resource_usage"]["cgroup_drained"] is True
+        assert sample["resource_usage"]["launch_security"]["argv"] == [str(engine.resolve()), "render-api2"]
         assert sample["memory_peak_bytes"] == sample["resource_usage"]["memory_peak_bytes"]
         violations: list[validate_result.Violation] = []
         validate_result.validate_resource_usage(sample, "$.sample", violations)
@@ -589,8 +784,8 @@ def acceptance_overhead_proof() -> tuple[dict, dict]:
     seed = 20260808
     rng = random.Random(seed)
     pairs: list[dict] = []
-    with workload_engine() as engine:
-        command = workload_command(engine, duration=1.5)
+    with workload_engine(["--workload-parent", "32", "1.5"]) as engine:
+        command = workload_command(engine)
         direct_wall_ms(command)
         sampled(command)
         for index in range(pair_count):

@@ -1,0 +1,105 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://pliego.dev/schema/benchmark-interleaved-run.v1.json",
+  "title": "Pliego interleaved benchmark execution artifact",
+  "description": "A non-publishable execution-evidence envelope binding one canonical cross-target schedule to its raw timed samples.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "version",
+    "publication_status",
+    "artifact_sha256",
+    "sample_contract",
+    "sample_id_contract",
+    "schedule",
+    "raw_samples"
+  ],
+  "properties": {
+    "schema": { "const": "pliego.benchmark-interleaved-run" },
+    "version": { "const": 1 },
+    "publication_status": { "const": "prerequisite-only" },
+    "artifact_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "sample_contract": { "const": "pliego.benchmark-result.v1#/definitions/sample" },
+    "sample_id_contract": { "const": "pliego.benchmark-raw-sample-id.v1" },
+    "schedule": { "$ref": "#/definitions/schedule" },
+    "raw_samples": {
+      "type": "array",
+      "minItems": 2,
+      "items": { "$ref": "#/definitions/raw_sample" }
+    }
+  },
+  "definitions": {
+    "schedule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract",
+        "seed",
+        "fixture_id",
+        "targets",
+        "warmup_iterations",
+        "sample_count",
+        "preflight",
+        "warmup",
+        "timed"
+      ],
+      "properties": {
+        "contract": { "const": "pliego.cross-target-schedule.v1" },
+        "seed": { "type": "integer" },
+        "fixture_id": { "type": "string", "minLength": 1 },
+        "targets": {
+          "type": "array",
+          "minItems": 2,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "warmup_iterations": { "type": "integer", "minimum": 0 },
+        "sample_count": { "type": "integer", "minimum": 1 },
+        "preflight": {
+          "type": "array",
+          "minItems": 2,
+          "items": { "$ref": "#/definitions/schedule_entry" }
+        },
+        "warmup": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/schedule_entry" }
+        },
+        "timed": {
+          "type": "array",
+          "minItems": 2,
+          "items": { "$ref": "#/definitions/schedule_entry" }
+        }
+      }
+    },
+    "schedule_entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["position", "iteration", "target_id"],
+      "properties": {
+        "position": { "type": "integer", "minimum": 0 },
+        "iteration": { "type": "integer", "minimum": 0 },
+        "target_id": { "type": "string", "minLength": 1 }
+      }
+    },
+    "raw_sample": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sample_id",
+        "sample_sha256",
+        "schedule_position",
+        "iteration",
+        "target_id",
+        "sample"
+      ],
+      "properties": {
+        "sample_id": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "sample_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "schedule_position": { "type": "integer", "minimum": 0 },
+        "iteration": { "type": "integer", "minimum": 0 },
+        "target_id": { "type": "string", "minLength": 1 },
+        "sample": { "type": "object" }
+      }
+    }
+  }
+}

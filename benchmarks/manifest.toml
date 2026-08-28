@@ -13,23 +13,87 @@ samples_long = 20
 sample_order = "random"
 seed = 1
 
-[targets."pliego-0.1.1"]
-label = "Pliego 0.1.1 (published bundle)"
-version = "0.1.1"
+[oracle]
+contract = "pliego.pdf-oracle.v1"
+# Publishable results require canonical path, SHA-256, and version pins for
+# pdfinfo, pdftotext, pdffonts, and pdftoppm. They are deliberately absent until
+# the dedicated Linux oracle runtime is frozen; current numeric results are N/A.
+
+[targets."pliego-0.3.2"]
+label = "Pliego 0.3.2 (published API 2 bundle)"
+version = "0.3.2"
+api = 2
 enabled = true
+kind = "pliego"
 repository = "https://github.com/oxhq/pliego"
-release_tag = "v0.1.1"
-commit = "6f5018839738490c4965e1425fba1f9503822a4d"
-servo_build = "0.4.0-6f5018839"
+release_tag = "v0.3.2"
+commit = "1c237ed7e1f8247254facfe2284d88acf270185a"
+servo_build = "0.4.0-1c237ed7e"
 servo_base = "313b6d5ecc113b08010ce434140db3ca5abcc71c"
+runtime_manifest = "benchmarks/releases/v0.3.2/runtimes.json"
+runtime_manifest_bytes = 3290
+runtime_manifest_sha256 = "6d48a02bf8b60c3e947a8fd3784593f8a841e79694ba82eb36835532588ab2d9"
 platform = "linux-x86_64"
 profile = "checked-release"
-archive = "pliego-0.1.1-linux-x86_64.tar.gz"
-archive_bytes = 68725127
-archive_sha256 = "c74f4e3608006451635cd3c8dd70c006f930dcbbeb211ce8c939598cf5398282"
+archive = "pliego-0.3.2-linux-x86_64.tar.gz"
+archive_bytes = 63026660
+archive_sha256 = "9fe4c23a4ebd38edf520a53198bcc6633999e0211750c55d62e7a1203152fea0"
 binary = "pliego"
-binary_bytes = 215470920
-binary_sha256 = "632ab7ca4ccd931b392593a9f0f5673cce543891d758fa7737bb859c8244ad27"
+binary_bytes = 197927600
+binary_sha256 = "0b9374ed36174f3cdc0333b31745ca79032d273d46d6effb06594408befbce48"
+
+[targets."dompdf-3.1.6"]
+label = "dompdf 3.1.6 (cold Composer adapter)"
+version = "3.1.6"
+enabled = true
+kind = "adapter"
+package = "dompdf/dompdf"
+adapter = "benchmarks/adapters/dompdf/adapter.php"
+profile = "composer-lock-cold-one-shot"
+lockfiles = ["benchmarks/adapters/dompdf/composer.lock"]
+identity_keys = ["composer_vendor_sha256"]
+# Publishable adapter numbers stay N/A until this target pins an immutable OCI
+# image digest plus canonical dependency/runtime hashes and paths. A lock file
+# plus a mutable vendor tree is not image identity.
+runtime_identity_contract = "pliego.benchmark-runtime-image.v1"
+runtime_attestation = "unavailable"
+supported_fixtures = ["minimal-static"]
+unsupported_reason = "adapter contract v1 has no verified correctness mapping for this fixture"
+
+[targets."dompdf-3.1.6".not_applicable]
+chartjs-showcase = "dynamic Canvas fixture is outside the verified static adapter slice"
+invoice-showcase = "invoice pagination has not passed the shared cross-target oracle"
+ledger-20-pages = "scale pagination has not passed the shared cross-target oracle"
+statement-100-pages = "scale pagination has not passed the shared cross-target oracle"
+font-image-heavy = "resource-heavy rendering has not passed the shared cross-target oracle"
+unsupported-paint = "Pliego-specific typed fail-closed paint behavior is not a comparable dompdf outcome"
+
+[targets."browsershot-5.4.0-puppeteer-25.8.0"]
+label = "Browsershot 5.4.0 + Puppeteer 25.8.0 (cold Chromium adapter)"
+version = "5.4.0"
+enabled = true
+kind = "adapter"
+package = "spatie/browsershot"
+adapter = "benchmarks/adapters/browsershot/adapter.php"
+profile = "composer-npm-lock-cold-one-shot"
+lockfiles = [
+    "benchmarks/adapters/browsershot/composer.lock",
+    "benchmarks/adapters/browsershot/package-lock.json",
+]
+identity_keys = ["composer_vendor_sha256", "node_modules_sha256"]
+runtime_identity_contract = "pliego.benchmark-runtime-image.v1"
+runtime_attestation = "unavailable"
+requires_network_isolation = true
+supported_fixtures = ["minimal-static"]
+unsupported_reason = "adapter contract v1 has no verified correctness mapping for this fixture"
+
+[targets."browsershot-5.4.0-puppeteer-25.8.0".not_applicable]
+chartjs-showcase = "dynamic Canvas fixture is outside the verified static adapter slice"
+invoice-showcase = "invoice pagination has not passed the shared cross-target oracle"
+ledger-20-pages = "scale pagination has not passed the shared cross-target oracle"
+statement-100-pages = "scale pagination has not passed the shared cross-target oracle"
+font-image-heavy = "resource-heavy rendering has not passed the shared cross-target oracle"
+unsupported-paint = "Pliego-specific typed fail-closed paint behavior is not a comparable Browsershot outcome"
 
 [targets."pliego-1.0.0-rc.1"]
 label = "Pliego 1.0.0-rc.1 (document runtime)"
@@ -40,13 +104,22 @@ enabled = false
 purpose = "pure startup: one small page, one bundled font, no scripts or images"
 category = "static"
 samples = 50
-input = "benchmarks/fixtures/minimal-static/input.html"
+input = "benchmarks/fixtures/minimal-static/comparator.html"
 assets = ["Ahem.ttf"]
+page_size = "793.7008x1122.52"
+page_margins = "0,0,0,0"
 
 [fixtures.minimal-static.correctness]
 page_count = 1
+page_width_points = 595.276
+page_height_points = 841.89
+# Chromium quantizes custom paper sizes to its print grid. Keep one A4 oracle
+# for every target while allowing less than 0.27 mm of engine rounding.
+dimension_tolerance_points = 0.75
 text_contains = ["Minimal"]
-link_targets = ["https://pliego.dev/docs"]
+text_equals = "Minimal Hello, Pliego. This fixture measures pure startup: one small page, one bundled font, no scripts or images."
+font_families = ["Ahem"]
+normalized_raster_sha256 = "0f9edcf2b796a110d1a68efed00ce684921fec9ff7b52ccdc68bb718d1b93444"
 
 [fixtures.invoice-showcase]
 purpose = "two-page invoice: Ahem font, paged table, totals, authored page break"
@@ -118,5 +191,5 @@ input = "benchmarks/fixtures/unsupported-paint/input.html"
 expect_failure = true
 
 [fixtures.unsupported-paint.correctness]
-failure_code = "SCENE_CAPTURE_UNSUPPORTED_PAINT_EVENTS"
+failure_code = "SCENE_ENCODING_FAILED"
 pdf_published = false

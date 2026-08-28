@@ -1,0 +1,68 @@
+name: Pliego public surface
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - ".github/workflows/pliego-public-surface.yml"
+      - "README.md"
+      - "ROADMAP.md"
+      - "benchmarks/**"
+      - "docs/benchmarks/**"
+      - "docs/funding/**"
+      - "docs/pliego/**"
+      - "docs/project-overview.md"
+      - "docs/releases/**"
+      - "docs/security/**"
+      - "python/check_pliego_public_surface.py"
+      - "sdk/laravel/README.md"
+      - "sdk/php/README.md"
+      - "sdk/php/resources/HasubiMono-Regular.woff2"
+  pull_request:
+    paths:
+      - ".github/workflows/pliego-public-surface.yml"
+      - "README.md"
+      - "ROADMAP.md"
+      - "benchmarks/**"
+      - "docs/benchmarks/**"
+      - "docs/funding/**"
+      - "docs/pliego/**"
+      - "docs/project-overview.md"
+      - "docs/releases/**"
+      - "docs/security/**"
+      - "python/check_pliego_public_surface.py"
+      - "sdk/laravel/README.md"
+      - "sdk/php/README.md"
+      - "sdk/php/resources/HasubiMono-Regular.woff2"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pliego-public-surface-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+
+      - name: Verify buyer-facing release evidence
+        run: python python/check_pliego_public_surface.py
+
+      - name: Prove showcase symlinks fail closed
+        shell: bash
+        run: |
+          set -euo pipefail
+          showcase="docs/pliego/showcase"
+          mv "$showcase/invoice.pdf" "$showcase/invoice.original.pdf"
+          ln -s invoice.original.pdf "$showcase/invoice.pdf"
+          if python python/check_pliego_public_surface.py; then
+            echo "showcase guard accepted a symlinked artifact" >&2
+            exit 1
+          fi

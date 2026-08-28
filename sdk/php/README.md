@@ -1,6 +1,7 @@
 # oxhq/pliego-php
 
-PHP 8.3+ 64-bit client for deterministic, one-document-per-process Pliego rendering.
+PHP 8.3+ 64-bit client for controlled, one-document-per-process Pliego rendering.
+The current stable package is 0.3.2; new integrations should use `DocumentEngine` and API 2.
 
 ```sh
 composer require oxhq/pliego-php:^0.3.2
@@ -37,9 +38,16 @@ $result = $engine->render(
 file_put_contents('/srv/my-app/storage/invoice.pdf', $result->bytes());
 ```
 
-API 2 always denies live network access and host-font discovery. Fetch remote resources before the
-render and supply their bytes through `assets`. `allowedHttpRoots` remains only for the deprecated
-API 1 compatibility client and is rejected by `DocumentEngine` with a migration message.
+The 0.3.2 client negotiates only Pliego's profile-null API 2 tuple. It requests no semantic or
+accessibility conformance profile and makes no PDF/UA claim. API 2 always denies live network access
+and host-font discovery. Fetch remote resources before the render, stage them as local files, and
+pass their paths through `InputAsset` entries in `assets`. `allowedHttpRoots` remains only for the
+deprecated API 1 compatibility client and is rejected by `DocumentEngine` with a migration message.
+
+The advertised v0.3.2 API 2 surface excludes link annotations, collapsed-table-border capture, and
+the current upstream Chart.js 4.5.1 fixture. Unsupported scene operations fail closed and do not
+deliver a partial PDF. See the support profile below for the exact rendering boundary. This package
+makes no comparative performance claim.
 
 The default page remains the previous 816 by 1056 CSS-pixel Letter surface with 48-pixel margins;
 the SDK converts it to exact 60-app-unit geometry. `pageSize: 'A4'` selects named A4. The canonical
@@ -73,9 +81,10 @@ failures also throw `TransportException`; an unavailable exact tuple throws
 
 ## API 1 compatibility
 
-`CliRenderer` is deprecated in 0.3.0 but remains available explicitly for one migration release. It
-continues to invoke `pliego render` and preserve its existing `RenderResult` and exception behavior.
-New integrations and framework bindings should use `DocumentEngine`; API 1 is not the default.
+`CliRenderer` is deprecated since 0.3.0 and remains available only as an explicit 0.3.x migration
+boundary. It continues to invoke `pliego render` and preserve its existing `RenderResult` and
+exception behavior. New integrations and framework bindings should use `DocumentEngine`; API 1 is
+not the default.
 
 See the project [support profile](https://github.com/oxhq/pliego/blob/main/docs/pliego/support-profile.md)
 for the current rendering and resource boundaries.

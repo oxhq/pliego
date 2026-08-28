@@ -9,6 +9,8 @@ from __future__ import annotations
 from copy import deepcopy
 import json
 from pathlib import Path
+import tomllib
+from unittest.mock import patch
 
 import validate_result
 
@@ -16,6 +18,23 @@ SCHEMA = json.loads(
     (Path(__file__).resolve().parents[1] / "schema" / "benchmark-result.v1.json").read_text(encoding="utf-8")
 )
 HASH = "0" * 64
+TEST_MANIFEST = tomllib.loads(validate_result.MANIFEST.read_text(encoding="utf-8"))
+TEST_MANIFEST["protocol"]["warmup_iterations"] = 1
+TEST_MANIFEST["fixtures"]["minimal-static"]["samples"] = 1
+for tool in validate_result.POPPLER_TOOLS:
+    TEST_MANIFEST["oracle"].update(
+        {
+            f"{tool}_path": f"/usr/bin/{tool}",
+            f"{tool}_sha256": HASH,
+            f"{tool}_version": f"{tool} 1.0",
+        }
+    )
+TARGET = TEST_MANIFEST["targets"]["pliego-0.3.2"]
+FIXTURE = TEST_MANIFEST["fixtures"]["minimal-static"]
+FIXTURE_CORRECTNESS = FIXTURE["correctness"]
+TEXT = FIXTURE_CORRECTNESS["text_equals"]
+RASTER_HASH = FIXTURE_CORRECTNESS["normalized_raster_sha256"]
+INPUT_HASH, BUNDLE_HASH = validate_result.canonical_fixture_hashes(FIXTURE)
 
 
 def pct(value: int | float) -> dict[str, int | float]:
@@ -65,14 +84,14 @@ def resource_usage() -> dict:
             "gid": 991,
             "argv": [
                 "/tmp/pliego",
-                "render",
-                "input.html",
-                "--output",
-                "/tmp/output.pdf",
-                "--artifacts",
-                "/tmp/artifacts",
+                "render-api2",
             ],
-            "executable": {"path": "/tmp/pliego", "sha256": HASH, "device": 1, "inode": 2},
+            "executable": {
+                "path": "/tmp/pliego",
+                "sha256": TARGET["binary_sha256"],
+                "device": 1,
+                "inode": 2,
+            },
             "status": {
                 "uid": [991, 991, 991, 991],
                 "gid": [991, 991, 991, 991],
@@ -170,33 +189,67 @@ def result() -> dict:
         "toolchain": {
             "engine": {
                 "name": "pliego",
-                "version": "0.1.1",
+                "version": TARGET["version"],
                 "binary_path": "/tmp/pliego",
-                "binary_sha256": HASH,
+                "binary_sha256": TARGET["binary_sha256"],
+                "binary_bytes": TARGET["binary_bytes"],
+                "commit": TARGET["commit"],
+                "release_tag": TARGET["release_tag"],
+                "servo_build": TARGET["servo_build"],
+                "servo_base": TARGET["servo_base"],
+                "bundle": TARGET["archive"],
+                "bundle_sha256": TARGET["archive_sha256"],
+                "bundle_bytes": TARGET["archive_bytes"],
+                "profile": TARGET["profile"],
             },
             "python_version": "3.11",
             "php_version": "8.3",
-            "harness_revision": "4f0beb41a4d",
+            "harness_revision": "4" * 40,
+            "competitors": {
+                "oracle.contract": "pliego.pdf-oracle.v1",
+                "oracle.oracle_path": "/workspace/benchmarks/tools/pdf_oracle.py",
+                "oracle.oracle_sha256": validate_result.file_sha256(validate_result.PDF_ORACLE),
+                **{
+                    f"oracle.{tool}_{field}": value
+                    for tool in ("pdfinfo", "pdftotext", "pdffonts", "pdftoppm")
+                    for field, value in (
+                        ("path", f"/usr/bin/{tool}"),
+                        ("sha256", HASH),
+                        ("version", f"{tool} 1.0"),
+                    )
+                },
+            },
         },
         "protocol": {
             "warmup_iterations": 1,
+            "correctness_preflight_iterations": 1,
+            "execution_order": "untimed-correctness-preflight,warmup,timed",
             "sample_count": 1,
-            "sample_order": "sequential",
+            "sample_order": "random",
+            "seed": 1,
             "network": "disabled",
             "binary_profile": "checked-release",
             "measurement_method": "linux-cgroup-v2-v1",
             "percentile_method": "nearest-rank-v1",
         },
-        "target": {"id": "pliego-0.1.1", "label": "Pliego 0.1.1"},
+        "target": {"id": "pliego-0.3.2", "label": TARGET["label"]},
         "fixture": {
             "id": "minimal-static",
-            "purpose": "startup",
-            "category": "static",
-            "input": "input.html",
-            "input_sha256": HASH,
-            "bundle_sha256": HASH,
-            "expected_page_count": 1,
-            "expected_failure_code": None,
+            "purpose": FIXTURE["purpose"],
+            "category": FIXTURE["category"],
+            "input": FIXTURE["input"],
+            "input_sha256": INPUT_HASH,
+            "bundle_sha256": BUNDLE_HASH,
+            "expected_page_count": FIXTURE_CORRECTNESS["page_count"],
+            "expected_page_width_points": FIXTURE_CORRECTNESS["page_width_points"],
+            "expected_page_height_points": FIXTURE_CORRECTNESS["page_height_points"],
+            "dimension_tolerance_points": FIXTURE_CORRECTNESS["dimension_tolerance_points"],
+            "expected_text_contains": FIXTURE_CORRECTNESS["text_contains"],
+            "expected_text": TEXT,
+            "expected_font_families": FIXTURE_CORRECTNESS["font_families"],
+            "expected_normalized_raster_sha256": RASTER_HASH,
+            "expected_link_targets": FIXTURE_CORRECTNESS.get("link_targets", []),
+            "expected_failure_code": FIXTURE_CORRECTNESS.get("failure_code"),
         },
         "samples": [
             {
@@ -204,6 +257,7 @@ def result() -> dict:
                 "ok": True,
                 "exit_code": 0,
                 "wall_ms": 1,
+                "one_shot_wall_ms": 2,
                 "user_ms": 1,
                 "sys_ms": 0,
                 "memory_current_bytes": 0,
@@ -221,11 +275,34 @@ def result() -> dict:
                 "output": {
                     "pdf_bytes": 1,
                     "pdf_sha256": HASH,
-                    "page_count": 1,
+                    "page_count": FIXTURE_CORRECTNESS["page_count"],
+                    "page_dimensions_points": [
+                        [
+                            FIXTURE_CORRECTNESS["page_width_points"],
+                            FIXTURE_CORRECTNESS["page_height_points"],
+                        ]
+                    ],
+                    "normalized_text_sha256": validate_result.hashlib.sha256(TEXT.encode()).hexdigest(),
+                    "font_families": FIXTURE_CORRECTNESS["font_families"],
+                    "normalized_raster_sha256": RASTER_HASH,
                     "artifact_bytes": 0,
                     "published_pdf": True,
                 },
-                "correctness": {"pass": True, "checks": [{"name": "pdf_published", "status": "pass"}]},
+                "correctness": {
+                    "pass": True,
+                    "checks": [
+                        {"name": "pdf_published", "status": "pass"},
+                        {"name": "pdf_envelope", "status": "pass"},
+                        {"name": "pdf_parse", "status": "pass"},
+                        {"name": "page_count", "status": "pass"},
+                        {"name": "page_dimensions", "status": "pass"},
+                        {"name": f"text:{FIXTURE_CORRECTNESS['text_contains'][0]}", "status": "pass"},
+                        {"name": "text_exact", "status": "pass"},
+                        {"name": "fonts_exact", "status": "pass"},
+                        {"name": "raster_normalized", "status": "pass"},
+                        {"name": "raster_parity", "status": "pass"},
+                    ],
+                },
                 "failure": {"code": None, "published_pdf": True},
             }
         ],
@@ -244,7 +321,12 @@ def result() -> dict:
                 "write_operations": pct(1),
             },
             "scaling": {"per_page_wall_ms": 1, "per_page_memory_peak_bytes": 4096},
-            "throughput": {"renders_per_minute": 60000, "concurrency": 1},
+            "throughput": {
+                "renders_per_minute": 30000,
+                "concurrency": 1,
+                "mean_one_shot_wall_ms": 2,
+                "measurement_boundary": "runner-process-open-through-sampler-exit",
+            },
             "output": {"pdf_bytes": pct(1), "page_count": 1},
             "correctness": {"pass_count": 1, "total": 1, "passed": True},
             "determinism": {"identical_pdf_sha256": 1, "total": 1, "pdf_sha256_variants": 1},
@@ -254,7 +336,7 @@ def result() -> dict:
 
 
 def errors(value: object) -> list[validate_result.Violation]:
-    return validate_result.validate_document(value, SCHEMA)
+    return validate_result.validate_document(value, SCHEMA, TEST_MANIFEST, "4" * 40)
 
 
 def must_fail(value: object, expected: str) -> None:
@@ -274,19 +356,77 @@ def main() -> None:
     assert validate_result.percentile([1, 3], 50) == 1
     assert validate_result.PERCENTILE_METHOD == "nearest-rank-v1"
 
+    with patch.object(validate_result.subprocess, "run", side_effect=OSError("git unavailable")):
+        assert validate_result.clean_harness_revision() is None
+    successful_status = validate_result.subprocess.CompletedProcess(
+        args=["git", "status"],
+        returncode=0,
+        stdout="",
+        stderr="",
+    )
+    with patch.object(
+        validate_result.subprocess,
+        "run",
+        side_effect=[
+            successful_status,
+            validate_result.subprocess.TimeoutExpired(cmd="git", timeout=30),
+        ],
+    ):
+        assert validate_result.clean_harness_revision() is None
+
+    schema_violations: list[validate_result.Violation] = []
+    validate_result.validate({}, {"type": "object", "minProperties": 1}, "$", schema_violations)
+    assert schema_violations and "expected >= 1 properties" in str(schema_violations[0])
+    schema_violations = []
+    validate_result.validate(0, {"type": "number", "exclusiveMinimum": 0}, "$", schema_violations)
+    assert schema_violations and "exclusive minimum 0" in str(schema_violations[0])
+    changed(valid, lambda value: value["toolchain"]["competitors"].clear(), "expected >= 1 properties")
+    changed(
+        valid,
+        lambda value: value["aggregates"]["throughput"].update(mean_one_shot_wall_ms=0),
+        "exclusive minimum 0",
+    )
+
     not_applicable = {
         key: deepcopy(valid[key])
         for key in ("schema", "version", "generated_at", "host", "toolchain", "target", "fixture")
     }
+    na_target = TEST_MANIFEST["targets"]["dompdf-3.1.6"]
+    na_fixture = TEST_MANIFEST["fixtures"]["chartjs-showcase"]
+    na_correctness = na_fixture["correctness"]
+    not_applicable["target"] = {"id": "dompdf-3.1.6", "label": na_target["label"]}
+    not_applicable["toolchain"]["engine"] = {
+        "name": "dompdf",
+        "version": na_target["version"],
+        "package": na_target["package"],
+        "profile": na_target["profile"],
+    }
+    not_applicable["fixture"] = {
+        "id": "chartjs-showcase",
+        "purpose": na_fixture["purpose"],
+        "category": na_fixture["category"],
+        "input": na_fixture["input"],
+        "expected_page_count": na_correctness.get("page_count"),
+        "expected_page_width_points": na_correctness.get("page_width_points"),
+        "expected_page_height_points": na_correctness.get("page_height_points"),
+        "dimension_tolerance_points": na_correctness.get("dimension_tolerance_points"),
+        "expected_text_contains": na_correctness.get("text_contains", []),
+        "expected_text": na_correctness.get("text_equals"),
+        "expected_font_families": na_correctness.get("font_families", []),
+        "expected_normalized_raster_sha256": na_correctness.get("normalized_raster_sha256"),
+        "expected_link_targets": na_correctness.get("link_targets", []),
+        "expected_failure_code": na_correctness.get("failure_code"),
+    }
     not_applicable.update(
         status="not-applicable",
-        reason="fixture requires JavaScript",
+        reason=na_target["not_applicable"]["chartjs-showcase"],
         protocol={
             "warmup_iterations": 0,
             "sample_count": 0,
-            "sample_order": "sequential",
+            "sample_order": "random",
+            "seed": 1,
             "network": "disabled",
-            "binary_profile": "package",
+            "binary_profile": na_target["profile"],
             "measurement_method": "unavailable",
             "percentile_method": "nearest-rank-v1",
         },
@@ -334,15 +474,30 @@ def main() -> None:
     assert not errors(timed)
 
     changed(valid, lambda value: value["samples"][0].update(resource_usage=None), "resource_usage")
+    changed(
+        valid,
+        lambda value: value["samples"][0].update(one_shot_wall_ms=0),
+        "must cover engine wall, descendant drain, and accounting settle",
+    )
     changed(valid, lambda value: value["samples"][0].update(user_ms=99), "samples[0].user_ms")
     changed(valid, lambda value: value["samples"][0].update(memory_peak_bytes=99), "memory_peak_bytes")
     changed(valid, lambda value: value["samples"][0].update(write_bytes=99), "write_bytes")
     changed(
         valid,
         lambda value: value["samples"][0]["resource_usage"]["launch_security"].update(
-            argv=["/usr/bin/true", "render", "input.html", "--output", "/tmp/o", "--artifacts", "/tmp/a"]
+            argv=["/usr/bin/true", "render-api2"]
         ),
         "launch_security.argv[0]",
+    )
+    changed(
+        valid,
+        lambda value: value["samples"][0]["resource_usage"]["launch_security"]["argv"].__setitem__(1, "render"),
+        "launch_security.argv",
+    )
+    changed(
+        valid,
+        lambda value: value["samples"][0]["resource_usage"]["launch_security"]["argv"].append("unexpected"),
+        "launch_security.argv",
     )
     changed(
         valid,
@@ -451,6 +606,57 @@ def main() -> None:
         "sampler_cpu_percent_of_wall",
     )
     changed(valid, lambda value: value["protocol"].update(percentile_method="linear"), "percentile_method")
+    changed(valid, lambda value: value.pop("status"), "missing required property 'status'")
+    changed(valid, lambda value: value["host"].update(dedicated=False), "host.dedicated")
+    changed(valid, lambda value: value["toolchain"].update(harness_revision="d" * 40), "harness_revision")
+    changed(valid, lambda value: value["toolchain"].pop("competitors"), "missing required property 'competitors'")
+    changed(
+        valid,
+        lambda value: value["toolchain"]["competitors"].pop("oracle.pdftoppm_sha256"),
+        "oracle.pdftoppm_sha256",
+    )
+    changed(
+        valid,
+        lambda value: value["toolchain"]["competitors"].update(
+            {
+                "oracle.pdftoppm_path": "/definitely/missing/pdftoppm",
+                "oracle.pdftoppm_sha256": "f" * 64,
+                "oracle.pdftoppm_version": "forged",
+            }
+        ),
+        "oracle.pdftoppm_path",
+    )
+    changed(
+        valid,
+        lambda value: value["toolchain"]["competitors"].update({"oracle.oracle_sha256": "f" * 64}),
+        "oracle.oracle_sha256",
+    )
+    changed(valid, lambda value: value["target"].update(label="invented"), "target.label")
+    changed(valid, lambda value: value["target"].update(id="invented"), "canonical manifest target")
+    changed(
+        valid,
+        lambda value: value["target"].update(
+            id="dompdf-3.1.6",
+            label=TEST_MANIFEST["targets"]["dompdf-3.1.6"]["label"],
+        ),
+        "adapter target must be N/A",
+    )
+    changed(
+        valid,
+        lambda value: (
+            value["target"].update(id="dompdf-3.1.6", label=TEST_MANIFEST["targets"]["dompdf-3.1.6"]["label"]),
+            value["fixture"].update(id="chartjs-showcase"),
+        ),
+        "is not supported by the canonical adapter target",
+    )
+    changed(valid, lambda value: value["fixture"].update(purpose="invented"), "fixture.purpose")
+    changed(valid, lambda value: value["fixture"].update(expected_text="short"), "fixture.expected_text")
+    changed(
+        valid,
+        lambda value: value["samples"][0]["output"].update(normalized_raster_sha256="2" * 64),
+        "normalized_raster_sha256",
+    )
+    changed(not_applicable, lambda value: value.update(reason="invented"), "reason")
     changed(
         valid,
         lambda value: value["aggregates"]["io"]["write_operations"].update(max=99),
@@ -461,10 +667,44 @@ def main() -> None:
         lambda value: value["aggregates"]["memory"]["cgroup_peak_bytes"].update(max=99),
         "aggregates.memory.cgroup_peak_bytes",
     )
+    changed(
+        valid,
+        lambda value: value["aggregates"]["throughput"].update(renders_per_minute=60000),
+        "drain-inclusive serial passing-sample throughput",
+    )
+    changed(
+        valid,
+        lambda value: value["aggregates"].pop("throughput"),
+        "is required when correctness-passing timed samples exist",
+    )
     changed(valid, lambda value: value["protocol"].update(sample_count=2), "protocol.sample_count")
+    changed(
+        valid,
+        lambda value: value["protocol"].update(correctness_preflight_iterations=0),
+        "correctness_preflight_iterations",
+    )
+    changed(
+        valid,
+        lambda value: value["protocol"].pop("execution_order"),
+        "missing required property 'execution_order'",
+    )
     changed(valid, lambda value: value["samples"][0]["correctness"].update({"pass": False}), "correctness.pass")
     changed(valid, lambda value: value["samples"][0]["failure"].update(published_pdf=False), "failure.published_pdf")
-    changed(valid, lambda value: value["samples"][0]["output"].update(page_count=2), "expected page count 1")
+    changed(
+        valid,
+        lambda value: value["samples"][0]["output"].update(page_count=FIXTURE_CORRECTNESS["page_count"] + 1),
+        f"expected page count {FIXTURE_CORRECTNESS['page_count']}",
+    )
+    changed(
+        valid,
+        lambda value: value["samples"][0]["output"].update(page_dimensions_points=[[600, 842]]),
+        "dimension tolerance",
+    )
+    changed(
+        valid,
+        lambda value: value["samples"][0]["correctness"]["checks"].pop(),
+        "shared PDF oracle check exactly once",
+    )
     changed(
         timed, lambda value: value["samples"][0]["bridge_timings"].update(bridge_overhead_ms=99), "bridge_overhead_ms"
     )

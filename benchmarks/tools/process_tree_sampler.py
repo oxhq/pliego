@@ -4,7 +4,7 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-"""Run the fixed render command as an unprivileged account in a root-owned cgroup."""
+"""Run one fixed benchmark render command as an unprivileged account in a root-owned cgroup."""
 
 from __future__ import annotations
 
@@ -19,7 +19,9 @@ import os
 import secrets
 import select
 import signal
+import socket
 import stat
+import struct
 import sys
 import time
 from dataclasses import dataclass
@@ -45,6 +47,11 @@ PR_SET_NO_NEW_PRIVS = 38
 PR_CAP_AMBIENT = 47
 PR_CAP_AMBIENT_CLEAR_ALL = 4
 CAP_SETPCAP = 8
+CLONE_NEWNET = 0x40000000
+SIOCGIFFLAGS = 0x8913
+SIOCSIFFLAGS = 0x8914
+IFF_UP = 0x1
+API2_REQUEST_MAX_BYTES = 1024 * 1024
 
 
 class MeasurementIncomplete(RuntimeError):
@@ -55,6 +62,79 @@ class MeasurementIncomplete(RuntimeError):
 
 def incomplete(code: str, message: str) -> MeasurementIncomplete:
     return MeasurementIncomplete(code, message)
+
+
+def enable_loopback() -> None:
+    if fcntl is None:
+        raise incomplete("NETWORK_ISOLATION_UNAVAILABLE", "loopback control requires Linux fcntl")
+    request = struct.pack("16sH22x", b"lo", 0)
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as control:
+            response = fcntl.ioctl(control.fileno(), SIOCGIFFLAGS, request)
+            flags = struct.unpack_from("H", response, 16)[0]
+            if flags & IFF_UP == 0:
+                fcntl.ioctl(control.fileno(), SIOCSIFFLAGS, struct.pack("16sH22x", b"lo", flags | IFF_UP))
+                response = fcntl.ioctl(control.fileno(), SIOCGIFFLAGS, request)
+                flags = struct.unpack_from("H", response, 16)[0]
+    except OSError as error:
+        raise incomplete("NETWORK_ISOLATION_UNAVAILABLE", f"cannot enable private loopback: {error}") from error
+    if flags & IFF_UP == 0:
+        raise incomplete("NETWORK_ISOLATION_INVALID", "private loopback remained down")
+
+
+def enter_empty_network_namespace(host_namespace: str) -> dict[str, Any]:
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.unshare(CLONE_NEWNET) != 0:
+        error = ctypes.get_errno()
+        raise incomplete("NETWORK_ISOLATION_UNAVAILABLE", f"unshare(CLONE_NEWNET): {os.strerror(error)}")
+    enable_loopback()
+    engine_namespace = os.readlink("/proc/self/ns/net")
+    # A sysfs mount can remain bound to the parent network namespace after
+    # unshare(CLONE_NEWNET). Query the current namespace through the socket API
+    # instead of accepting that stale mount as isolation evidence.
+    interfaces = sorted(name for _, name in socket.if_nameindex())
+    if engine_namespace == host_namespace or interfaces != ["lo"]:
+        raise incomplete(
+            "NETWORK_ISOLATION_INVALID",
+            f"private namespace retained external interfaces: host={host_namespace} engine={engine_namespace} interfaces={interfaces}",
+        )
+    return {
+        "mode": "linux-private-network-namespace-v1",
+        "host_namespace": host_namespace,
+        "engine_namespace": engine_namespace,
+        "interfaces": interfaces,
+    }
+
+
+def probe_network_isolation() -> dict[str, Any]:
+    host_namespace = os.readlink("/proc/self/ns/net")
+    read_fd, write_fd = os.pipe2(os.O_CLOEXEC)
+    pid = os.fork()
+    if pid == 0:
+        try:
+            os.close(read_fd)
+            payload = {"ok": True, "proof": enter_empty_network_namespace(host_namespace)}
+            os.write(write_fd, json.dumps(payload, separators=(",", ":")).encode("ascii"))
+            os._exit(0)
+        except BaseException as error:
+            with contextlib.suppress(BaseException):
+                code = error.code if isinstance(error, MeasurementIncomplete) else "NETWORK_ISOLATION_UNAVAILABLE"
+                os.write(
+                    write_fd,
+                    json.dumps({"ok": False, "code": code, "error": str(error)}, separators=(",", ":")).encode(),
+                )
+            os._exit(2)
+    os.close(write_fd)
+    payload = os.read(read_fd, 65536)
+    os.close(read_fd)
+    _, status_value = os.waitpid(pid, 0)
+    try:
+        decoded = json.loads(payload)
+    except json.JSONDecodeError as error:
+        raise incomplete("NETWORK_ISOLATION_UNAVAILABLE", f"invalid isolation probe: {error}") from error
+    if not os.WIFEXITED(status_value) or os.WEXITSTATUS(status_value) != 0 or decoded.get("ok") is not True:
+        raise incomplete(decoded.get("code", "NETWORK_ISOLATION_UNAVAILABLE"), decoded.get("error", "probe failed"))
+    return decoded["proof"]
 
 
 def require_linux(parser: argparse.ArgumentParser, platform: str) -> None:
@@ -139,8 +219,13 @@ def child_replaceable(parent: os.stat_result, child: os.stat_result, uid: int, g
 def command_identity(command: list[str], account: EngineAccount) -> tuple[tuple[str, ...], ExecutableIdentity]:
     if not command or any(not isinstance(arg, str) or not arg or "\0" in arg for arg in command):
         raise incomplete("ENGINE_COMMAND_INVALID", "engine argv must contain nonempty NUL-free strings")
-    if len(command) < 3 or command[1] != "render":
-        raise incomplete("ENGINE_COMMAND_INVALID", "sampler accepts only the fixed engine 'render <input>' argv")
+    api2 = len(command) == 2 and command[1] == "render-api2"
+    adapter = len(command) >= 3 and command[1] == "render"
+    if not api2 and not adapter:
+        raise incomplete(
+            "ENGINE_COMMAND_INVALID",
+            "sampler accepts only fixed 'render-api2' or benchmark-adapter 'render <input>' argv",
+        )
     requested = Path(command[0])
     if not requested.is_absolute():
         raise incomplete("ENGINE_COMMAND_INVALID", "engine executable path must be absolute")
@@ -174,6 +259,51 @@ def command_identity(command: list[str], account: EngineAccount) -> tuple[tuple[
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return tuple(command), ExecutableIdentity(executable, digest.hexdigest(), metadata.st_dev, metadata.st_ino)
+
+
+def open_stdin_descriptor(stdin_path: str | None) -> int:
+    if stdin_path is None:
+        return os.open(os.devnull, os.O_RDONLY | os.O_CLOEXEC)
+
+    requested = Path(stdin_path)
+    if not requested.is_absolute():
+        raise incomplete("ENGINE_STDIN_INVALID", "engine stdin path must be absolute")
+    try:
+        resolved = requested.resolve(strict=True)
+    except OSError as error:
+        raise incomplete("ENGINE_STDIN_UNAVAILABLE", f"cannot resolve engine stdin: {error}") from error
+    if requested != resolved:
+        raise incomplete("ENGINE_STDIN_INVALID", f"engine stdin path must be canonical, got {requested}")
+
+    flags = os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(resolved, flags)
+    except OSError as error:
+        raise incomplete("ENGINE_STDIN_UNAVAILABLE", f"cannot open engine stdin: {error}") from error
+    try:
+        metadata = os.fstat(descriptor)
+        path_metadata = os.stat(resolved, follow_symlinks=False)
+        if not stat.S_ISREG(metadata.st_mode) or (metadata.st_dev, metadata.st_ino) != (
+            path_metadata.st_dev,
+            path_metadata.st_ino,
+        ):
+            raise incomplete("ENGINE_STDIN_UNSAFE", "engine stdin is not one identity-bound regular file")
+        if metadata.st_nlink != 1:
+            raise incomplete("ENGINE_STDIN_UNSAFE", "engine stdin must have exactly one hard link")
+        if metadata.st_uid != 0 or stat.S_IMODE(metadata.st_mode) & 0o222:
+            raise incomplete(
+                "ENGINE_STDIN_MUTABLE",
+                "engine stdin must be root-owned and have no writable permission bits",
+            )
+        if metadata.st_size < 1 or metadata.st_size > API2_REQUEST_MAX_BYTES:
+            raise incomplete(
+                "ENGINE_STDIN_INVALID",
+                f"engine stdin must contain 1..{API2_REQUEST_MAX_BYTES} bytes",
+            )
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
 
 
 def verify_executable(identity: ExecutableIdentity) -> None:
@@ -686,7 +816,16 @@ def migration_write_probes(paths: dict[str, Path]) -> dict[str, dict[str, str]]:
 
 
 def engine_environment(account: EngineAccount) -> dict[str, str]:
-    allowed = {"LANG", "LC_ALL", "LC_CTYPE", "LD_LIBRARY_PATH", "PATH", "TZ"}
+    allowed = {
+        "BROWSERSHOT_CHROME_PATH",
+        "BROWSERSHOT_NODE_BINARY",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "LD_LIBRARY_PATH",
+        "PATH",
+        "TZ",
+    }
     environment = {
         name: value for name, value in os.environ.items() if name in allowed or name.startswith("FONTCONFIG_")
     }
@@ -705,16 +844,23 @@ def engine_environment(account: EngineAccount) -> dict[str, str]:
 def fork_stopped(
     command: tuple[str, ...],
     cwd: str,
+    stdin_path: str | None,
     stdout_path: str,
     stderr_path: str,
     account: EngineAccount,
     probe_paths: dict[str, Path],
+    isolate_network: bool,
+    host_network_namespace: str,
 ) -> tuple[int, int]:
-    descriptors = [
-        os.open(os.devnull, os.O_RDONLY | os.O_CLOEXEC),
-        os.open(stdout_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_CLOEXEC, 0o600),
-        os.open(stderr_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_CLOEXEC, 0o600),
-    ]
+    descriptors = [open_stdin_descriptor(stdin_path)]
+    try:
+        descriptors.append(os.open(stdout_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_CLOEXEC, 0o600))
+        descriptors.append(os.open(stderr_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_CLOEXEC, 0o600))
+    except BaseException:
+        for descriptor in descriptors:
+            with contextlib.suppress(OSError):
+                os.close(descriptor)
+        raise
     handshake_read, handshake_write = os.pipe2(os.O_CLOEXEC)
     try:
         pid = os.fork()
@@ -729,6 +875,7 @@ def fork_stopped(
                     if descriptor > 2:
                         os.close(descriptor)
                 os.kill(os.getpid(), signal.SIGSTOP)
+                network_isolation = enter_empty_network_namespace(host_network_namespace) if isolate_network else None
                 drop_engine_authority(account)
                 payload = {
                     "ok": True,
@@ -737,6 +884,8 @@ def fork_stopped(
                     "cwd_accessible": os.access(cwd, os.R_OK | os.X_OK),
                     "migration_write_probes": migration_write_probes(probe_paths),
                 }
+                if network_isolation is not None:
+                    payload["network_isolation"] = network_isolation
                 os.write(handshake_write, json.dumps(payload, separators=(",", ":")).encode("ascii"))
                 os.kill(os.getpid(), signal.SIGSTOP)
                 os.execve(command[0], command, engine_environment(account))
@@ -850,13 +999,28 @@ def finish_authority_handshake(
             or any(result not in {"EACCES", "EPERM"} for result in results.values())
         ):
             raise incomplete("ENGINE_CGROUP_WRITABLE", f"engine account can access a migration interface: {probes}")
-    return {
+    result = {
         "account": account.name,
         "uid": account.uid,
         "gid": account.gid,
         "status": security,
         "migration_write_probes": probes,
     }
+    network = handshake.get("network_isolation")
+    if network is not None:
+        if (
+            not isinstance(network, dict)
+            or network.get("mode") != "linux-private-network-namespace-v1"
+            or network.get("interfaces") != ["lo"]
+            or network.get("host_namespace") == network.get("engine_namespace")
+        ):
+            raise incomplete("NETWORK_ISOLATION_INVALID", f"invalid launcher network proof: {network!r}")
+        actual_host = os.readlink(proc_root / "self" / "ns" / "net")
+        actual_engine = os.readlink(proc_root / str(pid) / "ns" / "net")
+        if network.get("host_namespace") != actual_host or network.get("engine_namespace") != actual_engine:
+            raise incomplete("NETWORK_ISOLATION_INVALID", f"launcher network proof changed: {network!r}")
+        result["network_isolation"] = network
+    return result
 
 
 def move_stopped_child(
@@ -999,6 +1163,8 @@ def sample_command(
     cgroup_root: Path = CGROUP_ROOT,
     proc_root: Path = PROC,
     lock_root: Path | None = None,
+    isolate_network: bool = False,
+    stdin_path: str | None = None,
 ) -> dict[str, Any]:
     if resource is None:
         raise incomplete("CGROUP_V2_REQUIRED", "Linux resource accounting is unavailable")
@@ -1006,6 +1172,7 @@ def sample_command(
         raise incomplete("PIDFD_REQUIRED", "os.pidfd_open is unavailable")
     require_broker_root()
     account = resolve_engine_account()
+    host_network_namespace = os.readlink(proc_root / "self" / "ns" / "net")
     argv, executable = command_identity(command, account)
     parent = require_delegated_parent(cgroup_parent, cgroup_root, proc_root)
     child: BoundDirectory | None = None
@@ -1034,10 +1201,13 @@ def sample_command(
             root_pid, handshake_read = fork_stopped(
                 argv,
                 cwd,
+                stdin_path,
                 stdout_path,
                 stderr_path,
                 account,
                 probe_paths,
+                isolate_network,
+                host_network_namespace,
             )
             root_identity = move_stopped_child(root_pid, staging, cgroup_root, proc_root)
             launch_security = finish_authority_handshake(
@@ -1263,16 +1433,27 @@ def sample_command(
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cwd", default=os.getcwd())
+    parser.add_argument("--stdin", help="canonical root-owned, read-only API 2 request file")
     parser.add_argument("--stdout", default=os.devnull, help="command stdout file")
     parser.add_argument("--stderr", default=os.devnull, help="command stderr file")
     parser.add_argument("--interval-ms", type=float, default=75.0)
     parser.add_argument("--pss-interval-ms", type=float, default=250.0)
     parser.add_argument("--descendant-grace-ms", type=float, default=1000.0)
     parser.add_argument("--settle-timeout-ms", type=float, default=10000.0)
+    parser.add_argument("--isolate-network", action="store_true")
+    parser.add_argument("--probe-network-isolation", action="store_true")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
     require_linux(parser, sys.platform)
+    if args.probe_network_isolation:
+        try:
+            print(json.dumps(probe_network_isolation(), separators=(",", ":")))
+            return 0
+        except (MeasurementIncomplete, OSError) as error:
+            code = error.code if isinstance(error, MeasurementIncomplete) else "NETWORK_ISOLATION_UNAVAILABLE"
+            print(f"process_tree_sampler: measurement-incomplete[{code}]: {error}", file=sys.stderr)
+            return 2
     if not command:
         parser.error("a command is required after --")
     if (
@@ -1298,6 +1479,8 @@ def main() -> int:
             args.descendant_grace_ms,
             args.settle_timeout_ms,
             Path(configured_parent),
+            isolate_network=args.isolate_network,
+            stdin_path=args.stdin,
         )
     except (MeasurementIncomplete, OSError) as error:
         code = error.code if isinstance(error, MeasurementIncomplete) else "CGROUP_IO_ERROR"

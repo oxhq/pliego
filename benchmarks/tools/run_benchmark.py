@@ -6,21 +6,22 @@
 
 """Pliego benchmark orchestrator.
 
-Reads `benchmarks/manifest.toml`, drives `benchmarks/runners/pliego.php` for
-each enabled fixture against a published Pliego binary, aggregates raw samples
-into a result document, and validates it against
+Reads `benchmarks/manifest.toml`, drives the target-neutral single-sample runner
+for each enabled fixture, aggregates raw samples into a result document, and
+validates it against
 `schema/benchmark-result.v1.json` before writing it.
 
 Usage:
     python3 benchmarks/tools/run_benchmark.py \
-        --binary /path/to/pliego \
-        [--out benchmarks/baselines/pliego-0.1.1-linux-x86_64.json] \
+        [--binary /path/to/pliego] \
+        [--target pliego-0.3.2|dompdf-3.1.6|browsershot-...] \
+        [--out benchmarks/baselines/pliego-0.3.2-linux-x86_64.json] \
         [--fixture invoice-showcase] [--samples N] [--warmup N] \
         [--php /usr/bin/php] [--dedicated]
 
 Design notes:
-* The PHP runner owns each engine launch and delegates Linux execution to the
-  cgroup-v2 sampler; this script only reads the binary version.
+* The PHP runner owns each target launch and delegates Linux execution to the
+  cgroup-v2 sampler; this script verifies target and oracle identity.
 * Results are validated against the schema before being written; a result
   that fails validation is not saved.
 * Throughput is serial renders/minute (concurrency 1); concurrent 2/4/8
@@ -35,18 +36,30 @@ import json
 import os
 import platform
 import random
+import re
 import statistics
 import subprocess
 import sys
 import tomllib
 from datetime import datetime, timezone
-from pathlib import Path
-from typing import Any, NoReturn
+from pathlib import Path, PurePosixPath
+from typing import Any, Callable, NoReturn
 
 ROOT = Path(__file__).resolve().parents[2]
 MANIFEST = ROOT / "benchmarks" / "manifest.toml"
 RUNNER = ROOT / "benchmarks" / "runners" / "pliego.php"
+PDF_ORACLE = ROOT / "benchmarks" / "tools" / "pdf_oracle.py"
+SAMPLER = ROOT / "benchmarks" / "tools" / "process_tree_sampler.py"
 DEFAULT_SCHEMA = ROOT / "benchmarks" / "schema" / "benchmark-result.v1.json"
+DEFAULT_INTERLEAVED_SCHEMA = ROOT / "benchmarks" / "schema" / "benchmark-interleaved-run.v1.json"
+POPPLER_TOOLS = ("pdfinfo", "pdftotext", "pdffonts", "pdftoppm")
+ORACLE_IDENTITY_REASON = "manifest does not pin canonical Poppler tool identities"
+ADAPTER_ATTESTATION_REASON = "out-of-process OCI image attestation is unavailable"
+CROSS_TARGET_SCHEDULE = "pliego.cross-target-schedule.v1"
+INTERLEAVED_RUN_SCHEMA = "pliego.benchmark-interleaved-run"
+INTERLEAVED_RUN_VERSION = 1
+RAW_SAMPLE_ID_CONTRACT = "pliego.benchmark-raw-sample-id.v1"
+BENCHMARK_SAMPLE_CONTRACT = "pliego.benchmark-result.v1#/definitions/sample"
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import validate_result  # noqa: E402
@@ -55,6 +68,306 @@ import validate_result  # noqa: E402
 def fail(message: str) -> NoReturn:
     print(f"run_benchmark: {message}", file=sys.stderr)
     raise SystemExit(1)
+
+
+def cross_target_phase_schedule(
+    target_ids: list[str],
+    fixture_id: str,
+    iterations: int,
+    seed: int,
+    phase: str,
+) -> list[dict[str, Any]]:
+    """Return one seeded, target-complete order for every phase iteration.
+
+    Ranking uses SHA-256 over a compact JSON tuple instead of Python's random
+    implementation, making the schedule reproducible in other languages and
+    across Python versions. Every target appears exactly once per iteration.
+    """
+
+    if len(target_ids) < 2:
+        raise ValueError("cross-target scheduling requires at least two targets")
+    if any(not isinstance(target_id, str) or not target_id for target_id in target_ids):
+        raise ValueError("cross-target scheduling requires unique nonempty target ids")
+    if len(set(target_ids)) != len(target_ids):
+        raise ValueError("cross-target scheduling requires unique nonempty target ids")
+    if not isinstance(fixture_id, str) or not fixture_id:
+        raise ValueError("cross-target scheduling requires a fixture id")
+    try:
+        fixture_id.encode("utf-8")
+        for target_id in target_ids:
+            target_id.encode("utf-8")
+    except UnicodeEncodeError as error:
+        raise ValueError("cross-target scheduling requires valid Unicode ids") from error
+    if not isinstance(iterations, int) or isinstance(iterations, bool) or iterations < 1:
+        raise ValueError("cross-target scheduling requires at least one iteration")
+    if not isinstance(seed, int) or isinstance(seed, bool):
+        raise ValueError("cross-target scheduling requires an integer seed")
+    if phase not in {"preflight", "warmup", "timed"}:
+        raise ValueError("cross-target scheduling phase must be preflight, warmup, or timed")
+
+    canonical_targets = sorted(target_ids, key=lambda target_id: target_id.encode("utf-8"))
+    schedule: list[dict[str, Any]] = []
+    for iteration in range(iterations):
+        ranked: list[tuple[bytes, bytes, str]] = []
+        for target_id in canonical_targets:
+            rank_input = json.dumps(
+                [CROSS_TARGET_SCHEDULE, seed, fixture_id, phase, iteration, target_id],
+                ensure_ascii=True,
+                separators=(",", ":"),
+            ).encode("ascii")
+            ranked.append((hashlib.sha256(rank_input).digest(), target_id.encode("utf-8"), target_id))
+        for _, _, target_id in sorted(ranked):
+            schedule.append(
+                {
+                    "position": len(schedule),
+                    "iteration": iteration,
+                    "target_id": target_id,
+                }
+            )
+    return schedule
+
+
+def canonical_json_bytes(value: Any) -> bytes:
+    """Serialize one identity payload using the v1 benchmark hash encoding."""
+
+    return json.dumps(
+        value,
+        ensure_ascii=True,
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("ascii")
+
+
+def canonical_json_sha256(value: Any) -> str:
+    return hashlib.sha256(canonical_json_bytes(value)).hexdigest()
+
+
+def raw_sample_record(
+    fixture_id: str,
+    schedule_entry: dict[str, Any],
+    sample: dict[str, Any],
+) -> dict[str, Any]:
+    sample_sha256 = canonical_json_sha256(sample)
+    identity = [
+        RAW_SAMPLE_ID_CONTRACT,
+        fixture_id,
+        schedule_entry["target_id"],
+        schedule_entry["iteration"],
+        schedule_entry["position"],
+        sample_sha256,
+    ]
+    return {
+        "sample_id": canonical_json_sha256(identity),
+        "sample_sha256": sample_sha256,
+        "schedule_position": schedule_entry["position"],
+        "iteration": schedule_entry["iteration"],
+        "target_id": schedule_entry["target_id"],
+        "sample": sample,
+    }
+
+
+def interleaved_artifact_sha256(artifact: dict[str, Any]) -> str:
+    """Hash the canonical artifact payload with its digest field omitted."""
+
+    return canonical_json_sha256({key: value for key, value in artifact.items() if key != "artifact_sha256"})
+
+
+def validate_interleaved_artifact(
+    data: Any,
+    artifact_schema: dict[str, Any] | None = None,
+    result_schema: dict[str, Any] | None = None,
+) -> list[validate_result.Violation]:
+    """Validate the envelope, schedule, sample bindings, and identity hashes."""
+
+    artifact_schema = artifact_schema or json.loads(DEFAULT_INTERLEAVED_SCHEMA.read_text(encoding="utf-8"))
+    result_schema = result_schema or json.loads(DEFAULT_SCHEMA.read_text(encoding="utf-8"))
+    violations: list[validate_result.Violation] = []
+    validate_result.validate(data, artifact_schema, "$", violations)
+    if violations:
+        return violations
+
+    assert isinstance(data, dict)
+    schedule = data["schedule"]
+    target_ids = schedule["targets"]
+    try:
+        canonical_targets = sorted(target_ids, key=lambda target_id: target_id.encode("utf-8"))
+    except UnicodeEncodeError as error:
+        violations.append(validate_result.Violation("$.schedule.targets", f"must be valid Unicode: {error}"))
+        return violations
+    if target_ids != canonical_targets or len(set(target_ids)) != len(target_ids):
+        violations.append(
+            validate_result.Violation("$.schedule.targets", "must contain unique target ids in UTF-8 byte order")
+        )
+
+    expected_phases: dict[str, list[dict[str, Any]]] = {}
+    try:
+        for phase, iterations in (
+            ("preflight", 1),
+            ("warmup", schedule["warmup_iterations"]),
+            ("timed", schedule["sample_count"]),
+        ):
+            expected_phases[phase] = (
+                cross_target_phase_schedule(
+                    target_ids,
+                    schedule["fixture_id"],
+                    iterations,
+                    schedule["seed"],
+                    phase,
+                )
+                if iterations > 0
+                else []
+            )
+            if schedule[phase] != expected_phases[phase]:
+                violations.append(
+                    validate_result.Violation(
+                        f"$.schedule.{phase}",
+                        f"must equal the canonical {CROSS_TARGET_SCHEDULE} order",
+                    )
+                )
+    except (TypeError, ValueError, UnicodeError) as error:
+        violations.append(validate_result.Violation("$.schedule", f"cannot reproduce canonical schedule: {error}"))
+        return violations
+
+    timed = expected_phases["timed"]
+    raw_samples = data["raw_samples"]
+    if len(raw_samples) != len(timed):
+        violations.append(
+            validate_result.Violation(
+                "$.raw_samples",
+                f"must retain exactly one sample for each of the {len(timed)} timed schedule entries",
+            )
+        )
+
+    sample_ids: list[str] = []
+    sample_definition = result_schema["definitions"]["sample"]
+    for index, record in enumerate(raw_samples):
+        path = f"$.raw_samples[{index}]"
+        validate_result.validate(record["sample"], sample_definition, f"{path}.sample", violations, result_schema)
+        if index >= len(timed):
+            continue
+        entry = timed[index]
+        for field, expected in (
+            ("schedule_position", entry["position"]),
+            ("iteration", entry["iteration"]),
+            ("target_id", entry["target_id"]),
+        ):
+            validate_result.require_equal(f"{path}.{field}", record[field], expected, violations)
+        validate_result.require_equal(
+            f"{path}.sample.index",
+            record["sample"].get("index"),
+            entry["iteration"],
+            violations,
+        )
+        try:
+            expected_record = raw_sample_record(schedule["fixture_id"], entry, record["sample"])
+        except (TypeError, ValueError) as error:
+            violations.append(validate_result.Violation(f"{path}.sample", f"cannot hash canonical sample: {error}"))
+            continue
+        validate_result.require_equal(
+            f"{path}.sample_sha256",
+            record["sample_sha256"],
+            expected_record["sample_sha256"],
+            violations,
+        )
+        validate_result.require_equal(
+            f"{path}.sample_id",
+            record["sample_id"],
+            expected_record["sample_id"],
+            violations,
+        )
+        sample_ids.append(record["sample_id"])
+
+    if len(sample_ids) != len(set(sample_ids)):
+        violations.append(validate_result.Violation("$.raw_samples", "sample ids must be unique"))
+    try:
+        expected_artifact_sha256 = interleaved_artifact_sha256(data)
+    except (TypeError, ValueError) as error:
+        violations.append(validate_result.Violation("$", f"cannot hash canonical artifact: {error}"))
+    else:
+        validate_result.require_equal(
+            "$.artifact_sha256",
+            data["artifact_sha256"],
+            expected_artifact_sha256,
+            violations,
+        )
+    return violations
+
+
+def execute_interleaved_run(
+    target_ids: list[str],
+    fixture_id: str,
+    warmup_iterations: int,
+    sample_count: int,
+    seed: int,
+    run_preflight: Callable[[str], None],
+    run_warmup: Callable[[str, int], None],
+    run_timed: Callable[[str, int], dict[str, Any]],
+) -> dict[str, Any]:
+    """Execute callbacks in the canonical cross-target phase schedules.
+
+    This is deliberately not wired into the public single-target CLI yet. A
+    future comparison coordinator must first construct fully attested target
+    contexts, then use this primitive and persist its validated artifact.
+    """
+
+    if not isinstance(warmup_iterations, int) or isinstance(warmup_iterations, bool) or warmup_iterations < 0:
+        raise ValueError("interleaved execution requires a nonnegative integer warmup count")
+    if not isinstance(sample_count, int) or isinstance(sample_count, bool) or sample_count < 1:
+        raise ValueError("interleaved execution requires a positive integer sample count")
+
+    preflight = cross_target_phase_schedule(target_ids, fixture_id, 1, seed, "preflight")
+    warmup = (
+        cross_target_phase_schedule(target_ids, fixture_id, warmup_iterations, seed, "warmup")
+        if warmup_iterations > 0
+        else []
+    )
+    timed = cross_target_phase_schedule(target_ids, fixture_id, sample_count, seed, "timed")
+    raw_samples: list[dict[str, Any]] = []
+
+    for entry in preflight:
+        run_preflight(entry["target_id"])
+    for entry in warmup:
+        run_warmup(entry["target_id"], entry["iteration"])
+    for entry in timed:
+        sample = run_timed(entry["target_id"], entry["iteration"])
+        sample_index = sample.get("index") if isinstance(sample, dict) else None
+        if not isinstance(sample_index, int) or isinstance(sample_index, bool) or sample_index != entry["iteration"]:
+            fail(
+                "interleaved runner returned a sample whose index does not match "
+                f"the schedule for {entry['target_id']!r}"
+            )
+        try:
+            raw_samples.append(raw_sample_record(fixture_id, entry, sample))
+        except (TypeError, ValueError) as error:
+            fail(f"interleaved runner returned a sample that cannot be retained canonically: {error}")
+
+    schedule = {
+        "contract": CROSS_TARGET_SCHEDULE,
+        "seed": seed,
+        "fixture_id": fixture_id,
+        "targets": sorted(target_ids, key=lambda value: value.encode("utf-8")),
+        "warmup_iterations": warmup_iterations,
+        "sample_count": sample_count,
+        "preflight": preflight,
+        "warmup": warmup,
+        "timed": timed,
+    }
+    artifact = {
+        "schema": INTERLEAVED_RUN_SCHEMA,
+        "version": INTERLEAVED_RUN_VERSION,
+        "publication_status": "prerequisite-only",
+        "artifact_sha256": "",
+        "sample_contract": BENCHMARK_SAMPLE_CONTRACT,
+        "sample_id_contract": RAW_SAMPLE_ID_CONTRACT,
+        "schedule": schedule,
+        "raw_samples": raw_samples,
+    }
+    artifact["artifact_sha256"] = interleaved_artifact_sha256(artifact)
+    violations = validate_interleaved_artifact(artifact)
+    if violations:
+        fail(f"interleaved artifact failed validation: {violations[0]}")
+    return artifact
 
 
 def windows_ram_bytes() -> int:
@@ -131,9 +444,13 @@ def engine_version(binary: Path) -> str:
 
 
 def engine_identity(binary: Path, target: dict[str, Any]) -> dict[str, Any]:
+    reported_version = engine_version(binary)
+    expected_version = f"pliego {target['version']}"
+    if reported_version != expected_version:
+        fail(f"binary reports {reported_version!r}, expected {expected_version!r}")
     identity: dict[str, Any] = {
         "name": "pliego",
-        "version": engine_version(binary),
+        "version": target["version"],
         "binary_path": str(binary.resolve()),
     }
     digest = hashlib.sha256()
@@ -161,6 +478,213 @@ def engine_identity(binary: Path, target: dict[str, Any]) -> dict[str, Any]:
     return identity
 
 
+def json_command(command: list[str], label: str) -> dict[str, str]:
+    result = run(command)
+    try:
+        value = json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        fail(f"{label} returned invalid JSON: {error}")
+    if (
+        result.returncode != 0
+        or not isinstance(value, dict)
+        or not all(isinstance(key, str) and isinstance(item, str) for key, item in value.items())
+    ):
+        fail(f"{label} identity failed: {(result.stderr or result.stdout)[-2000:]}")
+    return value
+
+
+def adapter_identity(adapter: Path, target_id: str, target: dict[str, Any]) -> tuple[dict[str, Any], dict[str, str]]:
+    resolved = adapter.resolve(strict=True)
+    digest = file_sha256(resolved)
+    identity = json_command([str(resolved), "identity"], f"adapter {target_id!r}")
+    expected = {
+        "contract": "pliego.benchmark-adapter.v1",
+        "target": target_id,
+        "package": target["package"],
+        "package_version": target["version"],
+        "adapter_path": str(resolved),
+        "adapter_sha256": digest,
+    }
+    for key, value in expected.items():
+        if identity.get(key) != value:
+            fail(f"adapter {target_id!r} identity {key!r} must be {value!r}, got {identity.get(key)!r}")
+    for lock_name in target.get("lockfiles", []):
+        lock = (ROOT / lock_name).resolve(strict=True)
+        key = f"{lock.name.removesuffix('.json').replace('-', '_').replace('.', '_')}_sha256"
+        expected_hash = file_sha256(lock)
+        if identity.get(key) != expected_hash:
+            fail(f"adapter {target_id!r} did not identify exact lock file {lock_name!r}")
+    for key in target.get("identity_keys", []):
+        value = identity.get(key)
+        if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+            fail(f"adapter {target_id!r} omitted dependency tree snapshot {key!r}")
+        path_key = key.removesuffix("_sha256") + "_path"
+        dependency_path = identity.get(path_key)
+        if (
+            not isinstance(dependency_path, str)
+            or not Path(dependency_path).is_absolute()
+            or Path(dependency_path).resolve(strict=True) != Path(dependency_path)
+        ):
+            fail(f"adapter {target_id!r} omitted canonical dependency path {path_key!r}")
+    runtime_names = ["php", *(["node", "chrome"] if target.get("requires_network_isolation") else [])]
+    for runtime in runtime_names:
+        path = identity.get(f"{runtime}_path")
+        runtime_digest = identity.get(f"{runtime}_sha256")
+        version = identity.get(f"{runtime}_version")
+        if not isinstance(path, str) or not Path(path).is_absolute() or not version:
+            fail(f"adapter {target_id!r} omitted canonical {runtime} runtime identity")
+        if not isinstance(runtime_digest, str) or re.fullmatch(r"[0-9a-f]{64}", runtime_digest) is None:
+            fail(f"adapter {target_id!r} omitted {runtime} runtime SHA-256")
+        if Path(path).resolve(strict=True) != Path(path):
+            fail(f"adapter {target_id!r} {runtime} runtime path is not canonical")
+    for key, expected in target.get("identity_sha256", {}).items():
+        if identity.get(key) != expected:
+            fail(f"adapter {target_id!r} identity {key!r} does not match the immutable image contract")
+    for key, expected in target.get("identity_paths", {}).items():
+        if identity.get(key) != expected:
+            fail(f"adapter {target_id!r} path {key!r} does not match the immutable image contract")
+    engine = {
+        "name": target["package"].split("/")[-1],
+        "version": target["version"],
+        "package": target["package"],
+        "binary_path": str(resolved),
+        "binary_sha256": digest,
+        "binary_bytes": resolved.stat().st_size,
+        "profile": target["profile"],
+    }
+    return engine, identity
+
+
+def mountinfo_path_is_read_only(path: PurePosixPath, mountinfo: str) -> bool:
+    match: tuple[int, bool] | None = None
+    for line in mountinfo.splitlines():
+        before, _, _ = line.partition(" - ")
+        fields = before.split()
+        if len(fields) < 6:
+            continue
+        decoded = re.sub(r"\\([0-7]{3})", lambda value: chr(int(value.group(1), 8)), fields[4])
+        mount = PurePosixPath(decoded)
+        if path == mount or mount in path.parents:
+            candidate = (len(mount.parts), "ro" in fields[5].split(","))
+            if match is None or candidate[0] >= match[0]:
+                match = candidate
+    return match[1] if match is not None else False
+
+
+def path_mount_is_read_only(path: Path) -> bool:
+    try:
+        resolved = PurePosixPath(path.resolve(strict=True).as_posix())
+        mountinfo = Path("/proc/self/mountinfo").read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return mountinfo_path_is_read_only(resolved, mountinfo)
+
+
+def adapter_environment_identity(target: dict[str, Any]) -> tuple[dict[str, str], str | None]:
+    contract = target.get("runtime_identity_contract")
+    expected_image = target.get("image_digest")
+    actual_image = os.environ.get("PLIEGO_BENCHMARK_IMAGE_DIGEST")
+    root_read_only = path_mount_is_read_only(Path("/"))
+    identity = {
+        "contract": str(contract or "unavailable"),
+        "image_digest": actual_image or "unavailable",
+        "image_attestation": "unavailable",
+        "rootfs_read_only": "true" if root_read_only else "false",
+    }
+    reasons: list[str] = [ADAPTER_ATTESTATION_REASON]
+    if contract != "pliego.benchmark-runtime-image.v1":
+        reasons.append("target omits the immutable runtime image contract")
+    if not isinstance(expected_image, str) or re.fullmatch(r"sha256:[0-9a-f]{64}", expected_image) is None:
+        reasons.append("manifest does not pin an immutable OCI image digest")
+    elif actual_image != expected_image:
+        reasons.append("running OCI image digest does not match the manifest")
+    runtime_names = ["php", *(["node", "chrome"] if target.get("requires_network_isolation") else [])]
+    required_hashes = [*target.get("identity_keys", []), *(f"{name}_sha256" for name in runtime_names)]
+    required_paths = [
+        "adapter_path",
+        *(key.removesuffix("_sha256") + "_path" for key in target.get("identity_keys", [])),
+        *(f"{name}_path" for name in runtime_names),
+    ]
+    hash_pins = target.get("identity_sha256", {})
+    path_pins = target.get("identity_paths", {})
+    if any(
+        not isinstance(hash_pins.get(key), str) or re.fullmatch(r"[0-9a-f]{64}", hash_pins[key]) is None
+        for key in required_hashes
+    ):
+        reasons.append("manifest does not pin canonical dependency and runtime SHA-256 values")
+    if any(not isinstance(path_pins.get(key), str) or not path_pins[key].startswith("/") for key in required_paths):
+        reasons.append("manifest does not pin canonical dependency and runtime paths")
+    if not root_read_only:
+        reasons.append("runtime root filesystem is not read-only")
+    if target.get("requires_network_isolation"):
+        probe = run([sys.executable, "-I", str(SAMPLER), "--probe-network-isolation"])
+        if probe.returncode != 0:
+            reasons.append("private network namespace is unavailable")
+        else:
+            try:
+                proof = json.loads(probe.stdout)
+            except json.JSONDecodeError:
+                reasons.append("private network namespace probe returned invalid evidence")
+            else:
+                if proof.get("mode") != "linux-private-network-namespace-v1" or proof.get("interfaces") != ["lo"]:
+                    reasons.append("private network namespace probe retained an external interface")
+                else:
+                    identity["network_isolation"] = proof["mode"]
+    return identity, "; ".join(reasons) or None
+
+
+def mutable_adapter_identity_paths(identity: dict[str, str], target: dict[str, Any]) -> list[str]:
+    keys = ["adapter_path"]
+    keys.extend(key.removesuffix("_sha256") + "_path" for key in target.get("identity_keys", []))
+    keys.append("php_path")
+    if target.get("requires_network_isolation"):
+        keys.extend(("node_path", "chrome_path"))
+    return [key for key in keys if not path_mount_is_read_only(Path(identity[key]))]
+
+
+def pdf_oracle_identity() -> dict[str, str]:
+    return json_command([sys.executable, "-I", str(PDF_ORACLE), "--identity"], "PDF oracle")
+
+
+def pdf_oracle_manifest_pins_complete(manifest: dict[str, Any]) -> bool:
+    expected = manifest.get("oracle", {})
+    if expected.get("contract") != "pliego.pdf-oracle.v1":
+        return False
+    for tool in POPPLER_TOOLS:
+        path = expected.get(f"{tool}_path")
+        digest = expected.get(f"{tool}_sha256")
+        version = expected.get(f"{tool}_version")
+        if (
+            not isinstance(path, str)
+            or not PurePosixPath(path).is_absolute()
+            or ".." in PurePosixPath(path).parts
+            or str(PurePosixPath(path)) != path
+            or not isinstance(digest, str)
+            or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+            or not isinstance(version, str)
+            or not version.strip()
+        ):
+            return False
+    return True
+
+
+def pdf_oracle_identity_reason(identity: dict[str, str], manifest: dict[str, Any]) -> str | None:
+    if not pdf_oracle_manifest_pins_complete(manifest):
+        return ORACLE_IDENTITY_REASON
+    expected = manifest["oracle"]
+    required = [
+        "contract",
+        *(f"{tool}_{field}" for tool in POPPLER_TOOLS for field in ("path", "sha256", "version")),
+    ]
+    if any(identity.get(key) != expected[key] for key in required):
+        return "running Poppler identity does not match the canonical manifest pins"
+    return None
+
+
+def append_reason(current: str | None, added: str | None) -> str | None:
+    return "; ".join(reason for reason in (current, added) if reason) or None
+
+
 def file_sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -172,11 +696,22 @@ def file_sha256(path: Path) -> str:
 def harness_revision() -> str | None:
     result = run(["git", "rev-parse", "HEAD"], ROOT)
     revision = result.stdout.strip()
-    return revision if result.returncode == 0 and 7 <= len(revision) <= 64 else None
+    return revision if result.returncode == 0 and re.fullmatch(r"[0-9a-f]{40}", revision) else None
 
 
 def benchmark_tree_is_clean() -> bool:
-    result = run(["git", "status", "--porcelain", "--", "benchmarks"], ROOT)
+    result = run(
+        [
+            "git",
+            "status",
+            "--porcelain",
+            "--",
+            "benchmarks",
+            ".github/workflows/pliego-benchmark.yml",
+            ":(exclude)benchmarks/baselines",
+        ],
+        ROOT,
+    )
     return result.returncode == 0 and not result.stdout.strip()
 
 
@@ -209,12 +744,41 @@ def check_prep(fixture_id: str, fixture: dict[str, Any]) -> None:
 
 
 def build_command(
-    php: Path, fixture_id: str, fixture: dict[str, Any], binary: Path, samples: int, warmup: int
+    php: Path,
+    fixture_id: str,
+    fixture: dict[str, Any],
+    binary: Path,
+    samples: int | None,
+    warmup: int | None,
+    require_scene_report: bool = True,
+    expected_fixture_identity: tuple[str, str] | None = None,
+    isolate_network: bool = False,
+    runner_phase: str = "full",
+    sample_index: int | None = None,
+    native_api2: bool = False,
 ) -> list[str]:
     # The engine resolves the input relative to the process cwd and rejects
     # absolute or parent-traversing paths (mirroring the PHP SDK). Run with
     # cwd = the input's own directory and pass the bare file name.
     input_path = (ROOT / fixture["input"]).resolve()
+    input_sha256, bundle_sha256 = expected_fixture_identity or fixture_identity(fixture)
+    if runner_phase not in {"full", "preflight", "warmup", "timed"}:
+        raise ValueError(f"unsupported runner phase {runner_phase!r}")
+    if runner_phase == "full":
+        if samples is None or warmup is None or sample_index is not None:
+            raise ValueError("full runner phase requires sample and warmup counts and no sample index")
+        if not isinstance(samples, int) or isinstance(samples, bool) or samples < 1:
+            raise ValueError("full runner phase requires a positive integer sample count")
+        if not isinstance(warmup, int) or isinstance(warmup, bool) or warmup < 0:
+            raise ValueError("full runner phase requires a nonnegative integer warmup count")
+    elif samples is not None or warmup is not None:
+        raise ValueError(f"{runner_phase} runner phase does not accept sample or warmup counts")
+    if runner_phase in {"warmup", "timed"}:
+        if not isinstance(sample_index, int) or isinstance(sample_index, bool) or sample_index < 0:
+            raise ValueError(f"{runner_phase} runner phase requires a nonnegative sample index")
+    elif sample_index is not None:
+        raise ValueError(f"{runner_phase} runner phase does not accept a sample index")
+
     command = [
         str(php),
         str(RUNNER),
@@ -226,19 +790,56 @@ def build_command(
         "document.pdf",
         "--artifacts",
         "artifacts",
-        "--samples",
-        str(samples),
-        "--warmup",
-        str(warmup),
         "--cwd",
         str(input_path.parent),
+        "--fixture-input-sha256",
+        input_sha256,
+        "--fixture-bundle-sha256",
+        bundle_sha256,
     ]
+    if native_api2:
+        command.append("--native-api2")
+    if samples is not None:
+        command += ["--samples", str(samples)]
+    if warmup is not None:
+        command += ["--warmup", str(warmup)]
+    if runner_phase != "full":
+        command += ["--runner-phase", runner_phase]
+    if sample_index is not None:
+        command += ["--sample-index", str(sample_index)]
+    for asset in fixture.get("assets", []):
+        command += ["--fixture-asset", asset]
+    if isolate_network:
+        command.append("--isolate-network")
     correctness = fixture.get("correctness", {})
+    if require_scene_report:
+        command.append("--require-scene-report")
+    if "page_size" in fixture:
+        command += ["--page-size", fixture["page_size"]]
+    if "page_margins" in fixture:
+        command += ["--page-margins", fixture["page_margins"]]
     if "page_count" in correctness:
         command += ["--page-count", str(correctness["page_count"])]
     if "text_contains" in correctness:
         for fragment in correctness["text_contains"]:
             command += ["--text-contains", fragment]
+    if "text_equals" in correctness:
+        command += ["--text-equals", correctness["text_equals"]]
+    for family in correctness.get("font_families", []):
+        command += ["--font-family", family]
+    if "normalized_raster_sha256" in correctness:
+        command += ["--raster-sha256", correctness["normalized_raster_sha256"]]
+    for target in correctness.get("link_targets", []):
+        command += ["--link-target", target]
+    if "page_width_points" in correctness and "page_height_points" in correctness:
+        command += [
+            "--page-width-points",
+            str(correctness["page_width_points"]),
+            "--page-height-points",
+            str(correctness["page_height_points"]),
+            "--dimension-tolerance-points",
+            str(correctness.get("dimension_tolerance_points", 0.5)),
+        ]
     if fixture.get("expect_failure"):
         command.append("--expect-failure")
         if "failure_code" in correctness:
@@ -246,31 +847,115 @@ def build_command(
     return command
 
 
-def collect_samples(
-    php: Path, fixture_id: str, fixture: dict[str, Any], binary: Path, samples: int, warmup: int
+def invoke_runner(
+    command: list[str],
+    fixture_id: str,
+    fixture: dict[str, Any],
+    original_identity: tuple[str, str],
+    expected_indices: list[int],
+    timeout: int,
 ) -> list[dict[str, Any]]:
-    command = build_command(php, fixture_id, fixture, binary, samples, warmup)
-    result = subprocess.run(command, capture_output=True, text=True, timeout=max(600, samples * 60))
-    lines = [line for line in result.stdout.splitlines() if line.strip()]
+    result = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
+    if result.returncode != 0:
+        fail(f"runner failed for {fixture_id!r}: {result.stderr[-2000:]}")
+
     samples_out: list[dict[str, Any]] = []
-    for line in lines:
+    for line in (line for line in result.stdout.splitlines() if line.strip()):
         try:
             parsed = json.loads(line)
         except json.JSONDecodeError:
-            print(f"runner emitted a non-JSON line: {line[:200]}", file=sys.stderr)
-            continue
-        if isinstance(parsed, dict) and "wall_ms" in parsed:
-            samples_out.append(parsed)
-    if result.returncode != 0:
-        fail(f"runner failed for {fixture_id!r}: {result.stderr[-2000:]}")
-    if len(samples_out) != samples:
-        fail(f"runner produced {len(samples_out)} of {samples} samples for {fixture_id!r}: {result.stderr[-2000:]}")
+            fail(f"runner emitted a non-JSON stdout line for {fixture_id!r}: {line[:200]}")
+        if not isinstance(parsed, dict) or "wall_ms" not in parsed:
+            fail(f"runner emitted a non-sample stdout value for {fixture_id!r}")
+        samples_out.append(parsed)
+
+    actual_indices = [sample.get("index") for sample in samples_out]
+    indices_are_integers = all(isinstance(index, int) and not isinstance(index, bool) for index in actual_indices)
+    if not indices_are_integers or actual_indices != expected_indices:
+        fail(
+            f"runner produced sample indices {actual_indices!r}, expected {expected_indices!r} "
+            f"for {fixture_id!r}: {result.stderr[-2000:]}"
+        )
+    if fixture_identity(fixture) != original_identity:
+        fail(f"fixture {fixture_id!r} changed during rendering")
     return samples_out
+
+
+def collect_samples(
+    php: Path,
+    fixture_id: str,
+    fixture: dict[str, Any],
+    binary: Path,
+    samples: int,
+    warmup: int,
+    require_scene_report: bool = True,
+    expected_fixture_identity: tuple[str, str] | None = None,
+    isolate_network: bool = False,
+    native_api2: bool = False,
+) -> list[dict[str, Any]]:
+    original_identity = expected_fixture_identity or fixture_identity(fixture)
+    command = build_command(
+        php,
+        fixture_id,
+        fixture,
+        binary,
+        samples,
+        warmup,
+        require_scene_report,
+        original_identity,
+        isolate_network,
+        native_api2=native_api2,
+    )
+    return invoke_runner(
+        command,
+        fixture_id,
+        fixture,
+        original_identity,
+        list(range(samples)),
+        max(600, samples * 60),
+    )
+
+
+def run_runner_phase(
+    php: Path,
+    fixture_id: str,
+    fixture: dict[str, Any],
+    binary: Path,
+    runner_phase: str,
+    sample_index: int | None = None,
+    require_scene_report: bool = True,
+    expected_fixture_identity: tuple[str, str] | None = None,
+    isolate_network: bool = False,
+    native_api2: bool = False,
+) -> dict[str, Any] | None:
+    """Run exactly one internal preflight, warmup, or timed phase."""
+
+    if runner_phase not in {"preflight", "warmup", "timed"}:
+        raise ValueError("run_runner_phase accepts only preflight, warmup, or timed")
+    original_identity = expected_fixture_identity or fixture_identity(fixture)
+    command = build_command(
+        php,
+        fixture_id,
+        fixture,
+        binary,
+        None,
+        None,
+        require_scene_report,
+        original_identity,
+        isolate_network,
+        runner_phase,
+        sample_index,
+        native_api2,
+    )
+    expected_indices = [sample_index] if runner_phase == "timed" and sample_index is not None else []
+    samples = invoke_runner(command, fixture_id, fixture, original_identity, expected_indices, 600)
+    return samples[0] if samples else None
 
 
 def aggregates(samples: list[dict[str, Any]], page_count: int | None) -> dict[str, Any]:
     valid = [s for s in samples if s.get("ok") and (s.get("correctness") or {}).get("pass")]
     walls = [s["wall_ms"] for s in valid]
+    one_shot_walls = [s["one_shot_wall_ms"] for s in valid]
     users = [value for s in valid if (value := s.get("user_ms")) is not None]
     syss = [value for s in valid if (value := s.get("sys_ms")) is not None]
     memory_peaks = [value for s in valid if (value := s.get("memory_peak_bytes")) is not None]
@@ -295,6 +980,7 @@ def aggregates(samples: list[dict[str, Any]], page_count: int | None) -> dict[st
     passed = sum(1 for s in samples if (s.get("correctness") or {}).get("pass"))
     variants = len(set(pdf_hashes))
     mean_wall = statistics.fmean(walls) if walls else 0.0
+    mean_one_shot_wall = statistics.fmean(one_shot_walls) if one_shot_walls else 0.0
     agg: dict[str, Any] = {
         "latency": validate_result.percentiles(walls),
         "cpu": {
@@ -337,20 +1023,94 @@ def aggregates(samples: list[dict[str, Any]], page_count: int | None) -> dict[st
                 round(validate_result.percentiles(memory_peaks)["mean"] / page_count, 1) if memory_peaks else 0.0
             ),
         }
-    if mean_wall > 0:
-        agg["throughput"] = {"renders_per_minute": round(60_000 / mean_wall, 2), "concurrency": 1}
+    if mean_one_shot_wall > 0:
+        agg["throughput"] = {
+            "renders_per_minute": round(60_000 / mean_one_shot_wall, 2),
+            "concurrency": 1,
+            "mean_one_shot_wall_ms": round(mean_one_shot_wall, 3),
+            "measurement_boundary": "runner-process-open-through-sampler-exit",
+        }
     return agg
+
+
+def fixture_record(
+    fixture_id: str,
+    fixture: dict[str, Any],
+    include_hashes: bool,
+    identity: tuple[str, str] | None = None,
+) -> dict[str, Any]:
+    correctness = fixture.get("correctness", {})
+    record: dict[str, Any] = {
+        "id": fixture_id,
+        "purpose": fixture["purpose"],
+        "category": fixture["category"],
+        "input": fixture["input"],
+        "expected_page_count": correctness.get("page_count"),
+        "expected_page_width_points": correctness.get("page_width_points"),
+        "expected_page_height_points": correctness.get("page_height_points"),
+        "dimension_tolerance_points": correctness.get("dimension_tolerance_points"),
+        "expected_text_contains": correctness.get("text_contains", []),
+        "expected_text": correctness.get("text_equals"),
+        "expected_font_families": correctness.get("font_families", []),
+        "expected_normalized_raster_sha256": correctness.get("normalized_raster_sha256"),
+        "expected_link_targets": correctness.get("link_targets", []),
+        "expected_failure_code": correctness.get("failure_code"),
+    }
+    if include_hashes:
+        input_sha256, bundle_sha256 = identity or fixture_identity(fixture)
+        record["input_sha256"] = input_sha256
+        record["bundle_sha256"] = bundle_sha256
+    return record
+
+
+def not_applicable_result(
+    *,
+    generated_at: str,
+    host: dict[str, Any],
+    toolchain: dict[str, Any],
+    protocol: dict[str, Any],
+    target_id: str,
+    target: dict[str, Any],
+    fixture_id: str,
+    fixture: dict[str, Any],
+    reason: str | None = None,
+) -> dict[str, Any]:
+    reasons = target.get("not_applicable", {})
+    reason = reason or reasons.get(fixture_id, target.get("unsupported_reason"))
+    if not isinstance(reason, str) or not reason.strip():
+        fail(f"target {target_id!r} must declare a reason for unsupported fixture {fixture_id!r}")
+    return {
+        "schema": "pliego.benchmark-result",
+        "version": 1,
+        "status": "not-applicable",
+        "reason": reason,
+        "generated_at": generated_at,
+        "host": host,
+        "toolchain": toolchain,
+        "protocol": {
+            "warmup_iterations": 0,
+            "sample_count": 0,
+            "sample_order": protocol["sample_order"],
+            "seed": protocol.get("seed"),
+            "network": protocol["network"],
+            "binary_profile": target.get("profile", protocol["binary_profile"]),
+            "measurement_method": "unavailable",
+            "percentile_method": validate_result.PERCENTILE_METHOD,
+        },
+        "target": {"id": target_id, "label": target["label"]},
+        "fixture": fixture_record(fixture_id, fixture, include_hashes=False),
+    }
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Pliego benchmark orchestrator")
-    parser.add_argument("--binary", required=True, help="path to the published pliego binary")
+    parser.add_argument("--binary", help="path to the published Pliego binary (Pliego targets only)")
     parser.add_argument("--out", help="result file path (default: baselines/pliego-<target>-<host>.json)")
     parser.add_argument("--fixture", action="append", help="restrict to these fixture ids (repeatable)")
     parser.add_argument("--samples", type=int, help="override samples per fixture")
     parser.add_argument("--warmup", type=int, help="override warmup iterations")
     parser.add_argument("--php", default="php", help="php-cli binary (default: php)")
-    parser.add_argument("--target", default="pliego-0.1.1", help="manifest target id")
+    parser.add_argument("--target", default="pliego-0.3.2", help="manifest target id")
     parser.add_argument("--dedicated", action="store_true", help="host is dedicated to the run")
     parser.add_argument("--schema", default=str(DEFAULT_SCHEMA), help="result schema path")
     args = parser.parse_args()
@@ -360,22 +1120,18 @@ def main() -> int:
     if args.warmup is not None and args.warmup < 0:
         fail("--warmup cannot be negative")
     benchmark_clean = benchmark_tree_is_clean()
+    original_harness_revision = harness_revision() if benchmark_clean else None
     if args.dedicated and not benchmark_clean:
         fail(
             "--dedicated requires a clean benchmarks tree so the recorded revision identifies the harness and fixtures"
         )
-
-    binary = Path(args.binary)
-    if not binary.is_file():
-        fail(f"binary not found: {binary}")
+    if args.dedicated and original_harness_revision is None:
+        fail("--dedicated requires an exact 40-character harness commit")
 
     manifest = tomllib.loads(MANIFEST.read_text(encoding="utf-8"))
     target = manifest["targets"].get(args.target)
     if not target or not target.get("enabled", False):
         fail(f"target {args.target!r} is not enabled in {MANIFEST}")
-    actual_version = engine_version(binary)
-    if actual_version != f"pliego {target['version']}":
-        fail(f"target {args.target!r} requires pliego {target['version']}, got {actual_version!r}")
 
     protocol = manifest["protocol"]
     php = Path(args.php)
@@ -384,31 +1140,137 @@ def main() -> int:
     if args.fixture is None and protocol.get("seed") is not None:
         random.Random(protocol["seed"]).shuffle(fixture_ids)
 
+    target_kind = target.get("kind", "pliego")
+    identity_details: dict[str, str] = {}
+    unavailable_reason: str | None = None
+    adapter_identity_snapshot: dict[str, str] | None = None
+    if target_kind == "pliego":
+        if args.binary is None:
+            fail(f"target {args.target!r} requires --binary")
+        binary = Path(args.binary)
+        if not binary.is_file():
+            fail(f"binary not found: {binary}")
+        engine = engine_identity(binary, target)
+        mapped_supported_fixtures = set(manifest["fixtures"])
+        supported_fixtures = set(mapped_supported_fixtures)
+        require_scene_report = True
+    elif target_kind == "adapter":
+        if args.binary is not None:
+            fail(f"target {args.target!r} uses its committed adapter; --binary is not accepted")
+        binary = (ROOT / target["adapter"]).resolve()
+        if not binary.is_file():
+            fail(f"adapter not found: {binary}")
+        environment, unavailable_reason = adapter_environment_identity(target)
+        identity_details.update({f"environment.{key}": value for key, value in environment.items()})
+        if unavailable_reason is None:
+            engine, adapter_details = adapter_identity(binary, args.target, target)
+            adapter_identity_snapshot = adapter_details
+            identity_details.update({f"adapter.{key}": value for key, value in adapter_details.items()})
+            mutable_paths = mutable_adapter_identity_paths(adapter_details, target)
+            protected_keys = ["adapter_path"]
+            protected_keys.extend(key.removesuffix("_sha256") + "_path" for key in target.get("identity_keys", []))
+            protected_keys.append("php_path")
+            if target.get("requires_network_isolation"):
+                protected_keys.extend(("node_path", "chrome_path"))
+            for key in protected_keys:
+                identity_details[f"environment.read_only.{key}"] = (
+                    "true" if path_mount_is_read_only(Path(adapter_details[key])) else "false"
+                )
+            if mutable_paths:
+                unavailable_reason = "adapter identity paths are not read-only: " + ", ".join(mutable_paths)
+        else:
+            engine = {
+                "name": target["package"].split("/")[-1],
+                "version": target["version"],
+                "package": target["package"],
+                "profile": target["profile"],
+            }
+        mapped_supported_fixtures = set(target.get("supported_fixtures", []))
+        supported_fixtures = set(mapped_supported_fixtures) if unavailable_reason is None else set()
+        require_scene_report = False
+    else:
+        fail(f"target {args.target!r} has unsupported kind {target_kind!r}")
+    actual_version = f"{engine['name']} {engine['version']}"
+
+    oracle_identity_snapshot: dict[str, str] | None = None
+    if any(fixture_id in mapped_supported_fixtures for fixture_id in fixture_ids):
+        oracle_details: dict[str, str] | None = None
+        if pdf_oracle_manifest_pins_complete(manifest):
+            oracle_details = pdf_oracle_identity()
+            identity_details.update({f"oracle.{key}": value for key, value in oracle_details.items()})
+        oracle_reason = pdf_oracle_identity_reason(oracle_details or {}, manifest)
+        unavailable_reason = append_reason(unavailable_reason, oracle_reason)
+        if unavailable_reason is None:
+            assert oracle_details is not None
+            oracle_identity_snapshot = oracle_details
+        else:
+            supported_fixtures.clear()
+
     generated_at = datetime.now(timezone.utc).isoformat()
     host = host_info(args.dedicated)
-    engine = engine_identity(binary, target)
-    revision = harness_revision() if benchmark_clean else None
+    revision = original_harness_revision
     toolchain = {
         "engine": engine,
         "python_version": platform.python_version(),
         "php_version": tool_version([str(php), "--version"]),
     }
+    if identity_details:
+        toolchain["competitors"] = identity_details
     if revision:
         toolchain["harness_revision"] = revision
 
     print(f"host: {platform.system()} {platform.machine()} ({os_cpu_count()} cores)")
-    print(f"engine: {actual_version}")
+    print(f"target: {actual_version}")
 
     results: list[dict[str, Any]] = []
     for fixture_id in fixture_ids:
         fixture = manifest["fixtures"].get(fixture_id)
         if fixture is None:
             fail(f"unknown fixture {fixture_id!r}")
+        if fixture_id not in supported_fixtures:
+            reason = unavailable_reason if fixture_id in mapped_supported_fixtures else None
+            result = not_applicable_result(
+                generated_at=generated_at,
+                host=host,
+                toolchain=toolchain,
+                protocol=protocol,
+                target_id=args.target,
+                target=target,
+                fixture_id=fixture_id,
+                fixture=fixture,
+                reason=reason,
+            )
+            results.append(result)
+            print(f"[{fixture_id}] not applicable: {result['reason']}")
+            continue
         check_prep(fixture_id, fixture)
-        samples_n = args.samples if args.samples else fixture.get("samples", protocol["samples_short"])
-        warmup_n = args.warmup if args.warmup is not None else protocol["warmup_iterations"]
-        print(f"[{fixture_id}] {fixture['purpose']} ({samples_n} samples, {warmup_n} warmup)")
-        samples = collect_samples(php, fixture_id, fixture, binary, samples_n, warmup_n)
+        if not args.dedicated or not benchmark_clean or platform.system() != "Linux" or platform.machine() != "x86_64":
+            fail("supported benchmark results require --dedicated on clean Linux x86_64")
+        original_fixture_identity = fixture_identity(fixture)
+        samples_n = fixture.get("samples", protocol["samples_short"])
+        warmup_n = protocol["warmup_iterations"]
+        if args.samples not in (None, samples_n) or args.warmup not in (None, warmup_n):
+            fail("sample and warmup overrides cannot produce canonical benchmark results")
+        print(
+            f"[{fixture_id}] {fixture['purpose']} "
+            f"(1 untimed correctness preflight, {warmup_n} warmup, {samples_n} timed samples)"
+        )
+        samples = collect_samples(
+            php,
+            fixture_id,
+            fixture,
+            binary,
+            samples_n,
+            warmup_n,
+            require_scene_report,
+            original_fixture_identity,
+            bool(target.get("requires_network_isolation")),
+            target_kind == "pliego",
+        )
+        if adapter_identity_snapshot is not None:
+            _, after_identity = adapter_identity(binary, args.target, target)
+            if after_identity != adapter_identity_snapshot:
+                fail(f"adapter {args.target!r} runtime or dependency identity changed during rendering")
         correctness = fixture.get("correctness", {})
         page_count = correctness.get("page_count")
         measured_pages = [
@@ -419,7 +1281,6 @@ def main() -> int:
         if page_count is None and measured_pages:
             page_count = int(statistics.median(measured_pages))
         aggregate = aggregates(samples, page_count)
-        input_sha256, bundle_sha256 = fixture_identity(fixture)
         result: dict[str, Any] = {
             "schema": "pliego.benchmark-result",
             "version": 1,
@@ -429,25 +1290,23 @@ def main() -> int:
             "toolchain": toolchain,
             "protocol": {
                 "warmup_iterations": warmup_n,
+                "correctness_preflight_iterations": 1,
+                "execution_order": "untimed-correctness-preflight,warmup,timed",
                 "sample_count": len(samples),
                 "sample_order": protocol["sample_order"],
                 "seed": protocol.get("seed"),
                 "network": protocol["network"],
-                "binary_profile": protocol["binary_profile"],
+                "binary_profile": target.get("profile", protocol["binary_profile"]),
                 "measurement_method": samples[0].get("measurement_method", "unavailable"),
                 "percentile_method": validate_result.PERCENTILE_METHOD,
             },
             "target": {"id": args.target, "label": target["label"]},
-            "fixture": {
-                "id": fixture_id,
-                "purpose": fixture["purpose"],
-                "category": fixture["category"],
-                "input": fixture["input"],
-                "input_sha256": input_sha256,
-                "bundle_sha256": bundle_sha256,
-                "expected_page_count": page_count,
-                "expected_failure_code": correctness.get("failure_code"),
-            },
+            "fixture": fixture_record(
+                fixture_id,
+                fixture,
+                include_hashes=True,
+                identity=original_fixture_identity,
+            ),
             "samples": samples,
             "aggregates": aggregate,
         }
@@ -457,6 +1316,12 @@ def main() -> int:
             f"p95 {result['aggregates']['latency']['p95']:.1f} ms, "
             f"correctness {result['aggregates']['correctness']['pass_count']}/{result['aggregates']['correctness']['total']}"
         )
+
+    if oracle_identity_snapshot is not None:
+        if not benchmark_tree_is_clean() or harness_revision() != original_harness_revision:
+            fail("benchmark harness changed during execution")
+        if pdf_oracle_identity() != oracle_identity_snapshot:
+            fail("PDF oracle identity changed during execution")
 
     if args.out:
         out = Path(args.out)
@@ -479,7 +1344,12 @@ def main() -> int:
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     print(f"wrote {out}")
-    failed = [result["fixture"]["id"] for result in results if not result["aggregates"]["correctness"]["passed"]]
+    failed = [
+        result["fixture"]["id"]
+        for result in results
+        if result.get("status") == "failed"
+        or (result.get("status") == "supported" and not result["aggregates"]["correctness"]["passed"])
+    ]
     if failed:
         print(f"correctness gate failed: {', '.join(failed)}", file=sys.stderr)
         return 1
