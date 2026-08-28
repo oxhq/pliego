@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Pliego operating report showcase</title>
+  <style>
+    @font-face {
+      font-family: "Pliego Mono";
+      src: url("pliego-input:///sdk/php/resources/HasubiMono-Regular.woff2") format("woff2");
+      font-style: normal;
+      font-weight: 400;
+    }
+    html, body { margin: 0; padding: 0; }
+    body { color: #172033; font: 12px/18px "Pliego Mono"; }
+    .page { width: 696px; margin: 48px; }
+    h1 { margin: 0; font-size: 30px; line-height: 38px; font-weight: 400; }
+    h2 { margin: 24px 0 8px; font-size: 17px; line-height: 24px; font-weight: 400; }
+    p { margin: 0 0 8px; }
+    .muted { color: #5f6b7c; }
+    .rule { height: 16px; }
+    .thin-rule { height: 12px; }
+    table { width: 696px; border-collapse: separate; border-spacing: 0; table-layout: fixed; }
+    td, th { padding: 7px 6px; text-align: left; }
+    th { font-weight: 400; }
+    .right { text-align: right; }
+    .metric { font-size: 21px; line-height: 28px; }
+    .bar { color: #315ea8; margin: 5px 0 11px; }
+    .bar.alt { color: #c47a26; }
+    .bar.dark { color: #526171; }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <h1>NORTHSTAR OPERATIONS</h1>
+    <p class="muted">Document delivery report / Q2 2026 / generated 27 August 2026</p>
+    <div class="rule"></div>
+
+    <table>
+      <col style="width: 232px"><col style="width: 232px"><col style="width: 232px">
+      <tr><td><span class="muted">DOCUMENTS</span><br><span class="metric">12,480</span></td><td><span class="muted">DELIVERED</span><br><span class="metric">99.8%</span></td><td><span class="muted">REVIEW QUEUE</span><br><span class="metric">24</span></td></tr>
+    </table>
+
+    <h2>Account contribution</h2>
+    <p>Enterprise statements / 6,240</p><div class="bar">##################################################</div>
+    <p>Partner invoices / 3,840</p><div class="bar alt">###############################</div>
+    <p>Operational notices / 2,400</p><div class="bar dark">###################</div>
+
+    <h2>Delivery detail</h2>
+    <table>
+      <col style="width: 320px"><col style="width: 120px"><col style="width: 128px"><col style="width: 128px">
+      <thead><tr><th>DOCUMENT FAMILY</th><th class="right">VOLUME</th><th class="right">DELIVERED</th><th class="right">REVIEW</th></tr></thead>
+      <tbody>
+        <tr><td>Enterprise statements</td><td class="right">6,240</td><td class="right">6,228</td><td class="right">12</td></tr>
+        <tr><td>Partner invoices</td><td class="right">3,840</td><td class="right">3,834</td><td class="right">6</td></tr>
+        <tr><td>Operational notices</td><td class="right">2,400</td><td class="right">2,394</td><td class="right">6</td></tr>
+      </tbody>
+    </table>
+
+    <h2>Evidence boundary</h2>
+    <p>This showcase is a verified v0.3.2 API 2 artifact. It demonstrates this exact document, not browser-wide compatibility or comparative performance.</p>
+    <div class="thin-rule"></div>
+    <p class="muted">Offline inputs / embedded font / selectable text / retained SHA-256 identity</p>
+  </main>
+</body>
+</html>

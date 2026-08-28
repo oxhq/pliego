@@ -22,8 +22,10 @@ from resolve_release import ReleaseError, install_archive, load_release, sha256_
 
 def assert_committed_manifest_binding() -> None:
     published_target, published_runtime = load_release(resolve_release.DEFAULT_TARGET)
+    assert published_target["version"] == "0.3.2"
+    assert published_target["api"] == 2
     assert published_target["runtime_manifest_sha256"] == (
-        "47d2fe59efe4439fefd1d30e2c8604c776829170bd8cb44d0e5764ed70b9e32d"
+        "6d48a02bf8b60c3e947a8fd3784593f8a841e79694ba82eb36835532588ab2d9"
     )
     assert published_runtime["sha256"] == published_target["archive_sha256"]
 

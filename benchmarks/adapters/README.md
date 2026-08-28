@@ -35,9 +35,9 @@ sampler. The adapter and all children—PHP, Node, Chromium, and their
 descendants—therefore share one retained accounting subtree. After the subtree
 drains, the shared untimed Poppler oracle checks the envelope, parser
 acceptance, page count, page dimensions, exact normalized text, exact embedded
-font family, normalized raster signature, and link target. One oracle-passing
-preflight is discarded before warmups; every timed sample must pass the same
-oracle before it can enter aggregates.
+font family, normalized raster signature, and any link targets declared by the
+fixture. One oracle-passing preflight is discarded before warmups; every timed
+sample must pass the same oracle before it can enter aggregates.
 
 The committed competitor slice is deliberately small:
 

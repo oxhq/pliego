@@ -26,7 +26,7 @@ from typing import Any, IO
 
 ROOT = Path(__file__).resolve().parents[2]
 MANIFEST = ROOT / "benchmarks" / "manifest.toml"
-DEFAULT_TARGET = "pliego-0.2.0"
+DEFAULT_TARGET = "pliego-0.3.2"
 
 sys.path.insert(0, str(ROOT / "python"))
 from check_pliego_release_archive import check_archive  # noqa: E402
@@ -58,6 +58,7 @@ def load_release(target_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
 
     required = {
         "version",
+        "api",
         "repository",
         "release_tag",
         "commit",
@@ -119,7 +120,7 @@ def load_release(target_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
     if (
         runtimes.get("schema") != 1
         or runtimes.get("version") != target["version"]
-        or runtimes.get("api") != 1
+        or runtimes.get("api") != target["api"]
         or runtimes.get("release_ready") is not True
     ):
         raise ReleaseError("promoted runtime manifest contract differs from benchmark target")

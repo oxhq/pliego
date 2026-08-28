@@ -39,10 +39,10 @@ binary="$(python3 benchmarks/tools/resolve_release.py \
 python3 benchmarks/tools/run_benchmark.py \
   --binary "$binary" \
   --dedicated \
-  --out benchmarks/baselines/pliego-0.2.0-linux-x86_64.json
+  --out benchmarks/baselines/pliego-0.3.2-linux-x86_64.json
 
 python3 benchmarks/tools/validate_result.py \
-  benchmarks/baselines/pliego-0.2.0-linux-x86_64.json
+  benchmarks/baselines/pliego-0.3.2-linux-x86_64.json
 ```
 
 `resolve_release.py` verifies the release archive and binary against the hashes in
@@ -103,8 +103,8 @@ warmups, then cold one-shot timed samples. The adapter root and every descendant
 (including PHP, Node, and Chromium) remain in the existing retained cgroup-v2
 accounting subtree. After timing, every output passes the same Poppler-based oracle:
 PDF envelope/parser acceptance, A4 dimensions, one page, complete normalized
-text, one embedded Ahem family, a shared normalized raster signature, and the
-authored link target. A target is never marked supported unless every timed sample
+text, one embedded Ahem family, and a shared normalized raster signature. A target
+is never marked supported unless every timed sample
 passes that oracle. The common A4 expectation allows at most 0.75 points of
 print-grid quantization for all targets.
 
@@ -153,7 +153,7 @@ publish comparative claims.
 
 | Target | Runner status | Eligible public claim today |
 | --- | --- | --- |
-| Pliego v0.2.0 | Implemented and pinned | Harness can be reproduced; no committed result |
+| Pliego v0.3.2 API 2 | Implemented and pinned | Published bundle and correctness harness can be reproduced; no committed performance result |
 | Pliego candidate | Stable-outcome parity comparator only; arbitrary candidate performance runs are not implemented | Parity can be checked locally; no candidate performance claim |
 | dompdf 3.1.6 | Locked one-shot adapter; configured Ubuntu/Poppler smoke | Timing N/A pending image attestation and oracle pins |
 | Browsershot 5.4.0 + Puppeteer 25.8.0 | Locked one-shot adapter; configured network-isolated Ubuntu/Poppler smoke | Timing N/A pending image attestation and oracle pins |

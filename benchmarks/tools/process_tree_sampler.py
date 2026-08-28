@@ -4,7 +4,7 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-"""Run the fixed render command as an unprivileged account in a root-owned cgroup."""
+"""Run one fixed benchmark render command as an unprivileged account in a root-owned cgroup."""
 
 from __future__ import annotations
 
@@ -46,6 +46,7 @@ PR_CAP_AMBIENT = 47
 PR_CAP_AMBIENT_CLEAR_ALL = 4
 CAP_SETPCAP = 8
 CLONE_NEWNET = 0x40000000
+API2_REQUEST_MAX_BYTES = 1024 * 1024
 
 
 class MeasurementIncomplete(RuntimeError):
@@ -191,8 +192,13 @@ def child_replaceable(parent: os.stat_result, child: os.stat_result, uid: int, g
 def command_identity(command: list[str], account: EngineAccount) -> tuple[tuple[str, ...], ExecutableIdentity]:
     if not command or any(not isinstance(arg, str) or not arg or "\0" in arg for arg in command):
         raise incomplete("ENGINE_COMMAND_INVALID", "engine argv must contain nonempty NUL-free strings")
-    if len(command) < 3 or command[1] != "render":
-        raise incomplete("ENGINE_COMMAND_INVALID", "sampler accepts only the fixed engine 'render <input>' argv")
+    api2 = len(command) == 2 and command[1] == "render-api2"
+    adapter = len(command) >= 3 and command[1] == "render"
+    if not api2 and not adapter:
+        raise incomplete(
+            "ENGINE_COMMAND_INVALID",
+            "sampler accepts only fixed 'render-api2' or benchmark-adapter 'render <input>' argv",
+        )
     requested = Path(command[0])
     if not requested.is_absolute():
         raise incomplete("ENGINE_COMMAND_INVALID", "engine executable path must be absolute")
@@ -226,6 +232,51 @@ def command_identity(command: list[str], account: EngineAccount) -> tuple[tuple[
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return tuple(command), ExecutableIdentity(executable, digest.hexdigest(), metadata.st_dev, metadata.st_ino)
+
+
+def open_stdin_descriptor(stdin_path: str | None) -> int:
+    if stdin_path is None:
+        return os.open(os.devnull, os.O_RDONLY | os.O_CLOEXEC)
+
+    requested = Path(stdin_path)
+    if not requested.is_absolute():
+        raise incomplete("ENGINE_STDIN_INVALID", "engine stdin path must be absolute")
+    try:
+        resolved = requested.resolve(strict=True)
+    except OSError as error:
+        raise incomplete("ENGINE_STDIN_UNAVAILABLE", f"cannot resolve engine stdin: {error}") from error
+    if requested != resolved:
+        raise incomplete("ENGINE_STDIN_INVALID", f"engine stdin path must be canonical, got {requested}")
+
+    flags = os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(resolved, flags)
+    except OSError as error:
+        raise incomplete("ENGINE_STDIN_UNAVAILABLE", f"cannot open engine stdin: {error}") from error
+    try:
+        metadata = os.fstat(descriptor)
+        path_metadata = os.stat(resolved, follow_symlinks=False)
+        if not stat.S_ISREG(metadata.st_mode) or (metadata.st_dev, metadata.st_ino) != (
+            path_metadata.st_dev,
+            path_metadata.st_ino,
+        ):
+            raise incomplete("ENGINE_STDIN_UNSAFE", "engine stdin is not one identity-bound regular file")
+        if metadata.st_nlink != 1:
+            raise incomplete("ENGINE_STDIN_UNSAFE", "engine stdin must have exactly one hard link")
+        if metadata.st_uid != 0 or stat.S_IMODE(metadata.st_mode) & 0o222:
+            raise incomplete(
+                "ENGINE_STDIN_MUTABLE",
+                "engine stdin must be root-owned and have no writable permission bits",
+            )
+        if metadata.st_size < 1 or metadata.st_size > API2_REQUEST_MAX_BYTES:
+            raise incomplete(
+                "ENGINE_STDIN_INVALID",
+                f"engine stdin must contain 1..{API2_REQUEST_MAX_BYTES} bytes",
+            )
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
 
 
 def verify_executable(identity: ExecutableIdentity) -> None:
@@ -766,6 +817,7 @@ def engine_environment(account: EngineAccount) -> dict[str, str]:
 def fork_stopped(
     command: tuple[str, ...],
     cwd: str,
+    stdin_path: str | None,
     stdout_path: str,
     stderr_path: str,
     account: EngineAccount,
@@ -773,11 +825,19 @@ def fork_stopped(
     isolate_network: bool,
     host_network_namespace: str,
 ) -> tuple[int, int]:
-    descriptors = [
-        os.open(os.devnull, os.O_RDONLY | os.O_CLOEXEC),
-        os.open(stdout_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_CLOEXEC, 0o600),
-        os.open(stderr_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_CLOEXEC, 0o600),
-    ]
+    descriptors = [open_stdin_descriptor(stdin_path)]
+    try:
+        descriptors.append(
+            os.open(stdout_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_CLOEXEC, 0o600)
+        )
+        descriptors.append(
+            os.open(stderr_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_CLOEXEC, 0o600)
+        )
+    except BaseException:
+        for descriptor in descriptors:
+            with contextlib.suppress(OSError):
+                os.close(descriptor)
+        raise
     handshake_read, handshake_write = os.pipe2(os.O_CLOEXEC)
     try:
         pid = os.fork()
@@ -1081,6 +1141,7 @@ def sample_command(
     proc_root: Path = PROC,
     lock_root: Path | None = None,
     isolate_network: bool = False,
+    stdin_path: str | None = None,
 ) -> dict[str, Any]:
     if resource is None:
         raise incomplete("CGROUP_V2_REQUIRED", "Linux resource accounting is unavailable")
@@ -1117,6 +1178,7 @@ def sample_command(
             root_pid, handshake_read = fork_stopped(
                 argv,
                 cwd,
+                stdin_path,
                 stdout_path,
                 stderr_path,
                 account,
@@ -1348,6 +1410,7 @@ def sample_command(
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cwd", default=os.getcwd())
+    parser.add_argument("--stdin", help="canonical root-owned, read-only API 2 request file")
     parser.add_argument("--stdout", default=os.devnull, help="command stdout file")
     parser.add_argument("--stderr", default=os.devnull, help="command stderr file")
     parser.add_argument("--interval-ms", type=float, default=75.0)
@@ -1394,6 +1457,7 @@ def main() -> int:
             args.settle_timeout_ms,
             Path(configured_parent),
             isolate_network=args.isolate_network,
+            stdin_path=args.stdin,
         )
     except (MeasurementIncomplete, OSError) as error:
         code = error.code if isinstance(error, MeasurementIncomplete) else "CGROUP_IO_ERROR"

@@ -32,7 +32,7 @@ for tool in validate_result.POPPLER_TOOLS:
             f"{tool}_version": f"{tool} 1.0",
         }
     )
-TARGET = TEST_MANIFEST["targets"]["pliego-0.2.0"]
+TARGET = TEST_MANIFEST["targets"]["pliego-0.3.2"]
 FIXTURE = TEST_MANIFEST["fixtures"]["minimal-static"]
 INPUT_HASH, BUNDLE_HASH = validate_result.canonical_fixture_hashes(FIXTURE)
 
@@ -84,12 +84,7 @@ def resource_usage() -> dict:
             "gid": 991,
             "argv": [
                 "/tmp/pliego",
-                "render",
-                "input.html",
-                "--output",
-                "/tmp/output.pdf",
-                "--artifacts",
-                "/tmp/artifacts",
+                "render-api2",
             ],
             "executable": {
                 "path": "/tmp/pliego",
@@ -237,7 +232,7 @@ def result() -> dict:
             "measurement_method": "linux-cgroup-v2-v1",
             "percentile_method": "nearest-rank-v1",
         },
-        "target": {"id": "pliego-0.2.0", "label": TARGET["label"]},
+        "target": {"id": "pliego-0.3.2", "label": TARGET["label"]},
         "fixture": {
             "id": "minimal-static",
             "purpose": FIXTURE["purpose"],
@@ -253,7 +248,7 @@ def result() -> dict:
             "expected_text": TEXT,
             "expected_font_families": ["Ahem"],
             "expected_normalized_raster_sha256": RASTER_HASH,
-            "expected_link_targets": ["https://pliego.dev/docs"],
+            "expected_link_targets": [],
             "expected_failure_code": None,
         },
         "samples": [
@@ -301,7 +296,6 @@ def result() -> dict:
                         {"name": "fonts_exact", "status": "pass"},
                         {"name": "raster_normalized", "status": "pass"},
                         {"name": "raster_parity", "status": "pass"},
-                        {"name": "link:https://pliego.dev/docs", "status": "pass"},
                     ],
                 },
                 "failure": {"code": None, "published_pdf": True},
@@ -455,14 +449,19 @@ def main() -> None:
     changed(
         valid,
         lambda value: value["samples"][0]["resource_usage"]["launch_security"].update(
-            argv=["/usr/bin/true", "render", "input.html", "--output", "/tmp/o", "--artifacts", "/tmp/a"]
+            argv=["/usr/bin/true", "render-api2"]
         ),
         "launch_security.argv[0]",
     )
     changed(
         valid,
-        lambda value: value["samples"][0]["resource_usage"]["launch_security"]["argv"].__setitem__(2, "other.html"),
-        "launch_security.argv[2]",
+        lambda value: value["samples"][0]["resource_usage"]["launch_security"]["argv"].__setitem__(1, "render"),
+        "launch_security.argv",
+    )
+    changed(
+        valid,
+        lambda value: value["samples"][0]["resource_usage"]["launch_security"]["argv"].append("unexpected"),
+        "launch_security.argv",
     )
     changed(
         valid,

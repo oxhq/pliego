@@ -94,21 +94,21 @@ def passing_sample(index: int, wall_ms: float) -> dict[str, object]:
 
 def main() -> None:
     target_ids = [
-        "pliego-0.2.0",
+        "pliego-0.3.2",
         "dompdf-3.1.6",
         "browsershot-5.4.0-puppeteer-25.8.0",
     ]
     timed_schedule = benchmark.cross_target_phase_schedule(target_ids, "minimal-static", 3, 1, "timed")
     assert [entry["target_id"] for entry in timed_schedule] == [
-        "dompdf-3.1.6",
-        "pliego-0.2.0",
-        "browsershot-5.4.0-puppeteer-25.8.0",
-        "pliego-0.2.0",
+        "pliego-0.3.2",
         "dompdf-3.1.6",
         "browsershot-5.4.0-puppeteer-25.8.0",
+        "pliego-0.3.2",
         "dompdf-3.1.6",
         "browsershot-5.4.0-puppeteer-25.8.0",
-        "pliego-0.2.0",
+        "dompdf-3.1.6",
+        "pliego-0.3.2",
+        "browsershot-5.4.0-puppeteer-25.8.0",
     ]
     assert timed_schedule == benchmark.cross_target_phase_schedule(
         list(reversed(target_ids)), "minimal-static", 3, 1, "timed"
@@ -175,12 +175,12 @@ def main() -> None:
         entry["target_id"] for entry in transcript["timed"]
     ]
     assert len({record["sample_id"] for record in artifact["raw_samples"]}) == 9
-    assert artifact["artifact_sha256"] == "35cbb1e012072e54e9cef490c4bd21c74d4538e1f603db9994acbd70d3d645eb"
+    assert artifact["artifact_sha256"] == "0615726f7adda0b3ee1ea51c0e83da4574093ee39b2cff0f00f52ba5315c0f78"
     assert artifact["raw_samples"][0]["sample_sha256"] == (
         "c8f3ae5f1cdbfa83db37a5d97283a3e8f7ad9a95d4b09b1fa31dbab978a698fd"
     )
     assert artifact["raw_samples"][0]["sample_id"] == (
-        "ff69974c11d51cfad63707c51fbd5eb85360734e0c0f0f9335ce7aded35081bf"
+        "6da1fc01dc991438b2b2d3e675eca54e8426b0516d4b39a8e66fa4ed96331efc"
     )
     assert not benchmark.validate_interleaved_artifact(artifact)
 
@@ -190,7 +190,7 @@ def main() -> None:
     assert "sample_sha256" in changed_errors and "artifact_sha256" in changed_errors
 
     changed_schedule = deepcopy(artifact)
-    changed_schedule["schedule"]["timed"][0]["target_id"] = "pliego-0.2.0"
+    changed_schedule["schedule"]["timed"][0]["target_id"] = "dompdf-3.1.6"
     schedule_errors = "\n".join(map(str, benchmark.validate_interleaved_artifact(changed_schedule)))
     assert "must equal the canonical pliego.cross-target-schedule.v1 order" in schedule_errors
 
@@ -539,6 +539,18 @@ def main() -> None:
     assert neutral[neutral.index("--page-size") + 1] == "793.7008x1122.52"
     assert "--text-equals" not in neutral
     assert "--fixture-input-sha256" in neutral and "--fixture-bundle-sha256" in neutral
+
+    native = benchmark.build_command(
+        Path("php"),
+        "minimal-static",
+        {"input": "benchmarks/fixtures/minimal-static/input.html"},
+        Path("pliego"),
+        1,
+        0,
+        native_api2=True,
+    )
+    assert "--native-api2" in native
+    assert "--native-api2" not in neutral
 
     timed = benchmark.build_command(
         Path("php"),

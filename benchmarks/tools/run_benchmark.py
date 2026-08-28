@@ -14,8 +14,8 @@ validates it against
 Usage:
     python3 benchmarks/tools/run_benchmark.py \
         [--binary /path/to/pliego] \
-        [--target pliego-0.2.0|dompdf-3.1.6|browsershot-...] \
-        [--out benchmarks/baselines/pliego-0.2.0-linux-x86_64.json] \
+        [--target pliego-0.3.2|dompdf-3.1.6|browsershot-...] \
+        [--out benchmarks/baselines/pliego-0.3.2-linux-x86_64.json] \
         [--fixture invoice-showcase] [--samples N] [--warmup N] \
         [--php /usr/bin/php] [--dedicated]
 
@@ -755,6 +755,7 @@ def build_command(
     isolate_network: bool = False,
     runner_phase: str = "full",
     sample_index: int | None = None,
+    native_api2: bool = False,
 ) -> list[str]:
     # The engine resolves the input relative to the process cwd and rejects
     # absolute or parent-traversing paths (mirroring the PHP SDK). Run with
@@ -796,6 +797,8 @@ def build_command(
         "--fixture-bundle-sha256",
         bundle_sha256,
     ]
+    if native_api2:
+        command.append("--native-api2")
     if samples is not None:
         command += ["--samples", str(samples)]
     if warmup is not None:
@@ -888,6 +891,7 @@ def collect_samples(
     require_scene_report: bool = True,
     expected_fixture_identity: tuple[str, str] | None = None,
     isolate_network: bool = False,
+    native_api2: bool = False,
 ) -> list[dict[str, Any]]:
     original_identity = expected_fixture_identity or fixture_identity(fixture)
     command = build_command(
@@ -900,6 +904,7 @@ def collect_samples(
         require_scene_report,
         original_identity,
         isolate_network,
+        native_api2=native_api2,
     )
     return invoke_runner(
         command,
@@ -921,6 +926,7 @@ def run_runner_phase(
     require_scene_report: bool = True,
     expected_fixture_identity: tuple[str, str] | None = None,
     isolate_network: bool = False,
+    native_api2: bool = False,
 ) -> dict[str, Any] | None:
     """Run exactly one internal preflight, warmup, or timed phase."""
 
@@ -939,6 +945,7 @@ def run_runner_phase(
         isolate_network,
         runner_phase,
         sample_index,
+        native_api2,
     )
     expected_indices = [sample_index] if runner_phase == "timed" and sample_index is not None else []
     samples = invoke_runner(command, fixture_id, fixture, original_identity, expected_indices, 600)
@@ -1103,7 +1110,7 @@ def main() -> int:
     parser.add_argument("--samples", type=int, help="override samples per fixture")
     parser.add_argument("--warmup", type=int, help="override warmup iterations")
     parser.add_argument("--php", default="php", help="php-cli binary (default: php)")
-    parser.add_argument("--target", default="pliego-0.2.0", help="manifest target id")
+    parser.add_argument("--target", default="pliego-0.3.2", help="manifest target id")
     parser.add_argument("--dedicated", action="store_true", help="host is dedicated to the run")
     parser.add_argument("--schema", default=str(DEFAULT_SCHEMA), help="result schema path")
     args = parser.parse_args()
@@ -1258,6 +1265,7 @@ def main() -> int:
             require_scene_report,
             original_fixture_identity,
             bool(target.get("requires_network_isolation")),
+            target_kind == "pliego",
         )
         if adapter_identity_snapshot is not None:
             _, after_identity = adapter_identity(binary, args.target, target)

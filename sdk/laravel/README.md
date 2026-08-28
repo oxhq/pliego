@@ -72,6 +72,17 @@ filesystem disk. Omitting `disk` uses the application's configured default disk.
 The render job is retained under the normal success/failure retention policy; it
 is not deleted after the durable write.
 
+Retrieve or download the document through the same Laravel disk:
+
+```php
+use Illuminate\Support\Facades\Storage;
+
+return Storage::disk($stored->disk)->download(
+    $stored->path,
+    'invoice.pdf',
+);
+```
+
 The API 2 engine owns its private job, input, diagnostics, and delivery paths.
 Laravel uses the requested filename only for the HTTP download name; the retained
 delivery is always `delivery/document.pdf`.
@@ -121,18 +132,19 @@ loadReportData()
 </script>
 ```
 
-Chart.js 4.5.1 is covered for a fixed, non-animated chart that performs a
-synchronous full-canvas `getImageData(0, 0, canvas.width, canvas.height)` readback
-after its final draw and before `ready()`. The retained pixels become the
-authoritative canvas result; other versions, modes, plugins, and Canvas APIs are not
-implied.
+The broader controlled-capture regression corpus contains a fixed, non-animated
+Chart.js 4.5.1 fixture with a synchronous full-canvas readback. That fixture has not
+passed the narrower v0.3.2 API 2 scene-encoding gate, so Chart.js is not advertised
+as a current API 2 package capability.
 
 `render()` and `download()` reject partial scene capture instead of returning a PDF
 with unsupported paint omitted. Retained artifacts remain available on the typed
 exception.
 
-PDF paint retains resolved sRGB text colors, solid backgrounds, uniform-color sharp
-axis-aligned solid borders, and uniform solid collapsed-table borders. CSS
+PDF paint retains resolved sRGB text colors, solid backgrounds, and uniform-color
+sharp axis-aligned solid borders. In v0.3.2 API 2, an unsupported
+`collapsed-table-borders` capture event fails closed; use separated table borders.
+Link annotations are also outside the advertised v0.3.2 API 2 profile. CSS
 gradients and background-image layers, box and text shadows, text decorations,
 rounded or mixed-color borders, clips, non-solid and image borders, transforms,
 opacity, filters, and blend modes are explicitly unsupported and reported rather

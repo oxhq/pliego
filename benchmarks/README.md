@@ -147,7 +147,7 @@ binary="$(python3 benchmarks/tools/resolve_release.py \
   --cache "$cache" --metadata-out "$cache/verified-release.json")"
 python3 benchmarks/tools/run_benchmark.py \
   --binary "$binary" \
-  --out benchmarks/baselines/pliego-0.2.0-linux-x86_64.json
+  --out benchmarks/baselines/pliego-0.3.2-linux-x86_64.json
 ```
 
 The resolver accepts only the committed Linux x86_64 release name, size,
@@ -333,11 +333,14 @@ checks remain separate audited increments before a signed baseline is published.
 Each fixture declares expected correctness in `manifest.toml`. A sample counts
 toward performance only when its checks pass; a wrong result is not "faster".
 Generated-fixture `page_count` targets were originally pinned on Linux v0.1.1
-and were revalidated unchanged against the published Linux v0.2.0 renderer.
+and revalidated unchanged through the published Linux v0.2.0 renderer. For the
+v0.3.2 API 2 comparator, only `minimal-static` has passed the exact native API 2
+and shared-oracle smoke so far. Every other fixture must independently pass its
+declared v0.3.2 API 2 correctness gate before it can contribute a sample.
 
 | Fixture | Category | Purpose | Expected |
 | --- | --- | --- | --- |
-| `minimal-static` | startup | pure startup, one local font, no scripts/images | A4, 1 page, text, link |
+| `minimal-static` | startup | pure startup, one local font, no scripts/images | A4, 1 page, exact text/font/raster |
 | `invoice-showcase` | static | fonts, paged table, totals, authored break | 2 pages, `5280.00` |
 | `chartjs-showcase` | scripted | Chart.js 4.5.1 canvas + readiness | 1 page, report text |
 | `ledger-20-pages` | scale | fragmentation, repeated headers | ~20 pages |

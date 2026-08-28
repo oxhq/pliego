@@ -362,7 +362,6 @@ def validate_resource_usage(sample: dict[str, Any], path: str, violations: list[
             Violation(f"{path}.resource_usage.launch_security.executable.path", "must be an absolute canonical path")
         )
     require_equal(f"{path}.resource_usage.launch_security.argv[0]", launch["argv"][0], executable["path"], violations)
-    require_equal(f"{path}.resource_usage.launch_security.argv[1]", launch["argv"][1], "render", violations)
 
     counters = usage["counters"]
     empty = counters["empty"]
@@ -1026,20 +1025,50 @@ def validate_semantics(
                     violations,
                 )
             argv = launch["argv"]
-            require_equal(
-                f"{sample_path}.resource_usage.launch_security.argv[2]",
-                argv[2],
-                PurePosixPath(data["fixture"]["input"]).name,
-                violations,
-            )
-            for flag in ("--output", "--artifacts"):
-                if argv.count(flag) != 1:
+            target_kind = target_manifest.get("kind")
+            if target_kind == "pliego":
+                require_equal(
+                    f"{sample_path}.resource_usage.launch_security.argv",
+                    argv,
+                    [executable["path"], "render-api2"],
+                    violations,
+                )
+            elif target_kind == "adapter":
+                require_equal(
+                    f"{sample_path}.resource_usage.launch_security.argv[1]",
+                    argv[1],
+                    "render",
+                    violations,
+                )
+                if len(argv) < 3:
                     violations.append(
                         Violation(
                             f"{sample_path}.resource_usage.launch_security.argv",
-                            f"must contain exactly one {flag!r}",
+                            "adapter launch must include the bare fixture input as argv[2]",
                         )
                     )
+                else:
+                    require_equal(
+                        f"{sample_path}.resource_usage.launch_security.argv[2]",
+                        argv[2],
+                        PurePosixPath(data["fixture"]["input"]).name,
+                        violations,
+                    )
+                for flag in ("--output", "--artifacts"):
+                    if argv.count(flag) != 1:
+                        violations.append(
+                            Violation(
+                                f"{sample_path}.resource_usage.launch_security.argv",
+                                f"must contain exactly one {flag!r}",
+                            )
+                        )
+            else:
+                violations.append(
+                    Violation(
+                        f"{sample_path}.resource_usage.launch_security.argv",
+                        f"cannot validate command shape for target kind {target_kind!r}",
+                    )
+                )
         correctness = sample["correctness"]
         output = sample["output"]
         failure = sample["failure"]

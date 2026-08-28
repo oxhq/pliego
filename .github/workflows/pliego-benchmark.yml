@@ -44,6 +44,7 @@ jobs:
           python python/check_pliego_release_archive.py --self-test
           python benchmarks/tools/test_process_tree_sampler.py
           python benchmarks/tools/generate_fixtures.py --check
+          python benchmarks/tools/render_api2_fixture.py --self-test
           php -l benchmarks/runners/pliego.php
           php benchmarks/runners/pliego.php --self-test \
             --text-contains "Revenue, net" --text-contains " Total " --text-contains 0
@@ -53,12 +54,17 @@ jobs:
           PUPPETEER_SKIP_DOWNLOAD: "1"
         run: |
           sudo apt-get update
-          sudo apt-get install --yes php-xml php-mbstring poppler-utils
+          sudo apt-get install --yes \
+            ca-certificates libegl1 libfontconfig1 libgl1-mesa-dri \
+            php-xml php-mbstring poppler-utils
           composer install --working-dir=benchmarks/adapters/dompdf \
             --no-dev --no-interaction --prefer-dist --classmap-authoritative
           composer install --working-dir=benchmarks/adapters/browsershot \
             --no-dev --no-interaction --prefer-dist --classmap-authoritative
           npm ci --prefix benchmarks/adapters/browsershot --omit=dev
+
+      - name: Check shared PDF oracle
+        run: python benchmarks/tools/test_pdf_oracle.py
 
       - name: Render each adapter through Poppler oracle
         shell: bash
@@ -66,10 +72,25 @@ jobs:
           set -euo pipefail
           work="$(mktemp -d)"
           trap 'rm -rf "$work"' EXIT
-          mkdir "$work/dom-artifacts" "$work/browser-artifacts"
+          mkdir "$work/dom-artifacts" "$work/browser-artifacts" "$work/xdg"
+          chmod 700 "$work/xdg"
           fixture="$GITHUB_WORKSPACE/benchmarks/fixtures/minimal-static"
           expected_text='Minimal Hello, Pliego. This fixture measures pure startup: one small page, one bundled font, no scripts or images.'
           raster='0f9edcf2b796a110d1a68efed00ce684921fec9ff7b52ccdc68bb718d1b93444'
+
+          binary="$(python benchmarks/tools/resolve_release.py \
+            --cache "$work/release-cache" \
+            --metadata-out "$work/verified-release.json")"
+          XDG_RUNTIME_DIR="$work/xdg" \
+            python benchmarks/tools/render_api2_fixture.py \
+              --binary "$binary" \
+              --fixture "$fixture" \
+              --entrypoint input.html \
+              --asset Ahem.ttf \
+              --output "$work/pliego.pdf" \
+              --expected-version 0.3.2 \
+              --expected-commit 1c237ed7e1f8247254facfe2284d88acf270185a \
+              > "$work/pliego-api2-smoke.json"
 
           (
             cd "$fixture"
@@ -128,7 +149,7 @@ jobs:
               ' _ "$node" "$chrome" "$adapter" "$work/browsershot.pdf" "$work/browser-artifacts"
           )
 
-          for target in dompdf browsershot; do
+          for target in pliego dompdf browsershot; do
             python benchmarks/tools/pdf_oracle.py \
               --pdf "$work/$target.pdf" \
               --page-count 1 \
@@ -139,11 +160,10 @@ jobs:
               --text-equals "$expected_text" \
               --font-family Ahem \
               --raster-sha256 "$raster" \
-              --link-target https://pliego.dev/docs \
               > "$work/$target-oracle.json"
           done
 
-          python - "$work/dompdf-oracle.json" "$work/browsershot-oracle.json" <<'PY'
+          python - "$work/pliego-oracle.json" "$work/dompdf-oracle.json" "$work/browsershot-oracle.json" <<'PY'
           import json
           import sys
 
@@ -151,5 +171,7 @@ jobs:
           assert all(result["pass"] for result in results), results
           for field in ("normalized_text", "normalized_raster_sha256"):
               assert results[0][field] == results[1][field], (field, results)
-          assert [[font["name"] for font in result["fonts"]] for result in results] == [["Ahem"], ["Ahem"]]
+          assert [[font["name"] for font in result["fonts"]] for result in results] == [
+              ["Ahem"], ["Ahem"], ["Ahem"]
+          ]
           PY
