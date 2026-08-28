@@ -987,8 +987,7 @@ def finish_authority_handshake(
             "ENGINE_PATH_INACCESSIBLE",
             "engine account path access failed: "
             f"executable_accessible={handshake.get('executable_accessible')!r} "
-            f"cwd_accessible={handshake.get('cwd_accessible')!r} "
-            f"executable={command[0]!r} cwd={cwd!r}",
+            f"cwd_accessible={handshake.get('cwd_accessible')!r}",
         )
     if handshake.get("executable_writable") is not False:
         raise incomplete("ENGINE_EXECUTABLE_MUTABLE", "engine account can write its executable")
