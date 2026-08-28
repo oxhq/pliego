@@ -52,6 +52,8 @@ SIOCGIFFLAGS = 0x8913
 SIOCSIFFLAGS = 0x8914
 IFF_UP = 0x1
 API2_REQUEST_MAX_BYTES = 1024 * 1024
+DURABLE_WRITE_FLAG = getattr(os, "O_DSYNC", getattr(os, "O_SYNC", 0))
+ENGINE_OUTPUT_OPEN_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_CLOEXEC | DURABLE_WRITE_FLAG
 
 
 class MeasurementIncomplete(RuntimeError):
@@ -867,9 +869,11 @@ def fork_stopped(
     host_network_namespace: str,
 ) -> tuple[int, int]:
     descriptors = [open_stdin_descriptor(stdin_path)]
+    if DURABLE_WRITE_FLAG == 0:
+        raise incomplete("DURABLE_ENGINE_OUTPUT_UNAVAILABLE", "the host exposes neither O_DSYNC nor O_SYNC")
     try:
-        descriptors.append(os.open(stdout_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_CLOEXEC, 0o600))
-        descriptors.append(os.open(stderr_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_CLOEXEC, 0o600))
+        descriptors.append(os.open(stdout_path, ENGINE_OUTPUT_OPEN_FLAGS, 0o600))
+        descriptors.append(os.open(stderr_path, ENGINE_OUTPUT_OPEN_FLAGS, 0o600))
     except BaseException:
         for descriptor in descriptors:
             with contextlib.suppress(OSError):
