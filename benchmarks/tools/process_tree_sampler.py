@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from benchmark_runtime import BROWSERSHOT_TARGET, runtime_contract, runtime_target
 
 fcntl = None
