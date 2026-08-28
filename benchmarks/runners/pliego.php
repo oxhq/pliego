@@ -33,6 +33,10 @@ declare(strict_types=1);
 const ENGINE_ACCOUNT = 'pliego-benchmark-engine';
 const SAMPLER_PYTHON = '/usr/bin/python3';
 const ENGINE_TEMP_ROOT_ENV = 'PLIEGO_BENCHMARK_ENGINE_TEMP_ROOT';
+const LINUX_UNIX_SOCKET_PATH_MAX_BYTES = 107;
+const GOOGLE_CHROME_RUNTIME_SOCKET_SUFFIX = '/com.google.Chrome.XXXXXX/SingletonSocket';
+const CHROMIUM_RUNTIME_SOCKET_SUFFIX = '/org.chromium.Chromium.XXXXXX/SingletonSocket';
+const BROWSER_RUNTIME_TEMP_MAX_BYTES = 62;
 
 const USAGE = <<<EOT
 Usage: php pliego.php --binary <path> --input <file.html> --output <file.pdf> --artifacts <dir>
@@ -177,7 +181,15 @@ if (array_key_exists('self-test', $options)) {
         || is_bare_input_name('..\\input.html') || is_bare_input_name('/input.html')
         || is_bare_input_name('C:\\input.html')
         || !is_windows_absolute_path('C:\\Windows') || !is_windows_absolute_path('D:/tools')
-        || is_windows_absolute_path('/tmp')) {
+        || is_windows_absolute_path('/tmp')
+        || !is_browsershot_adapter_path('/repo/benchmarks/adapters/browsershot/adapter.php')
+        || is_browsershot_adapter_path('/repo/benchmarks/adapters/dompdf/adapter.php')
+        || !browser_runtime_path_within_budget(str_repeat('x', BROWSER_RUNTIME_TEMP_MAX_BYTES))
+        || browser_runtime_path_within_budget(str_repeat('x', BROWSER_RUNTIME_TEMP_MAX_BYTES + 1))
+        || BROWSER_RUNTIME_TEMP_MAX_BYTES + strlen(CHROMIUM_RUNTIME_SOCKET_SUFFIX)
+            !== LINUX_UNIX_SOCKET_PATH_MAX_BYTES
+        || BROWSER_RUNTIME_TEMP_MAX_BYTES + strlen(GOOGLE_CHROME_RUNTIME_SOCKET_SUFFIX)
+            > LINUX_UNIX_SOCKET_PATH_MAX_BYTES) {
         fail('bare input self-test failed', 1);
     }
     $summary = parse_api2_result(
@@ -1257,6 +1269,26 @@ function benchmark_engine_temporary_path(string $prefix): string
     return $root . DIRECTORY_SEPARATOR . $prefix . bin2hex(random_bytes(8));
 }
 
+function is_browsershot_adapter_path(string $path): bool
+{
+    $normalized = str_replace('\\', '/', $path);
+    return str_ends_with($normalized, '/benchmarks/adapters/browsershot/adapter.php');
+}
+
+function browser_runtime_path_within_budget(string $path): bool
+{
+    return strlen($path) <= BROWSER_RUNTIME_TEMP_MAX_BYTES;
+}
+
+function benchmark_adapter_temporary_path(string $binary): string
+{
+    $path = benchmark_engine_temporary_path('r-');
+    if (is_browsershot_adapter_path($binary) && !browser_runtime_path_within_budget($path)) {
+        fail(ENGINE_TEMP_ROOT_ENV . ' is too long for Chromium runtime sockets');
+    }
+    return $path;
+}
+
 /** @return array{index: int, ok: bool, exit_code: int, wall_ms: float, one_shot_wall_ms: float,
  *     user_ms: float|null, sys_ms: float|null, memory_current_bytes: int|null,
  *     memory_peak_bytes: int|null, read_bytes: int|null, write_bytes: int|null,
@@ -1270,7 +1302,9 @@ function run_adapter_sample(array $state, int $index): array
     assert_fixture_identity($state);
     $artifactsDir = benchmark_engine_temporary_path('pliego-bench-');
     $temporaryDir = PHP_OS_FAMILY === 'Linux'
-        ? benchmark_engine_temporary_path('pliego-bench-runtime-')
+        // Chromium appends its branded temp directory and SingletonSocket to
+        // TMPDIR; keep both Chrome and Chromium below Linux's 108-byte ceiling.
+        ? benchmark_adapter_temporary_path($state['binary'])
         : null;
     $outDir = sys_get_temp_dir() . '/pliego-bench-out-' . bin2hex(random_bytes(8));
     if (PHP_OS_FAMILY === 'Linux') {

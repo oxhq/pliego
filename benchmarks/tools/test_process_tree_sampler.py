@@ -229,19 +229,22 @@ def fixture_proofs() -> None:
     assert "home/older.bin" not in diagnostics
     assert "browser-runtime-file-count=2" in diagnostics
     with tempfile.TemporaryDirectory() as raw:
-        diagnostic_root = Path(raw).resolve()
-        diagnostic_file = diagnostic_root / "payload.bin"
-        diagnostic_file.write_bytes(b"dirty")
-        dirty = {"memory_file_dirty_bytes": 4096, "memory_file_writeback_bytes": 0}
-        clean = {"memory_file_dirty_bytes": 0, "memory_file_writeback_bytes": 0}
-        with mock.patch.object(process_tree_sampler, "counter_snapshot", side_effect=[dirty, dirty, clean]):
-            attribution = process_tree_sampler.accounting_failure_diagnostics(
-                mock.sentinel.cgroup,
-                {"fixture": diagnostic_root},
-                {},
-            )
-    assert "initial=4096/0" in attribution
-    assert "cleared_by=fixture:file:payload.bin" in attribution
+        exact_root = Path(raw).resolve()
+        for index in range(3):
+            (exact_root / f"exact-{index}").write_text("fixture", encoding="ascii")
+        exact_inventory = process_tree_sampler.runtime_directory_diagnostics(exact_root, scan_limit=3)
+        (exact_root / "overflow").write_text("fixture", encoding="ascii")
+        truncated_inventory = process_tree_sampler.runtime_directory_diagnostics(exact_root, scan_limit=3)
+    assert "browser-runtime-entries-examined=3" in exact_inventory
+    assert "browser-runtime-scan-truncated=false" in exact_inventory
+    assert "browser-runtime-scan-truncated=true" in truncated_inventory
+
+    with mock.patch.object(
+        process_tree_sampler, "runtime_directory_diagnostics", side_effect=RuntimeError("must not escape")
+    ):
+        unavailable = process_tree_sampler.browser_failure_diagnostics(Path("/fixture"))
+    assert unavailable == "browser-runtime-inventory-unavailable=RuntimeError:unknown"
+    assert "must not escape" not in unavailable
     if sys.platform == "linux":
         with tempfile.TemporaryDirectory(prefix="pliego mount ") as raw:
             root = Path(raw).resolve()
