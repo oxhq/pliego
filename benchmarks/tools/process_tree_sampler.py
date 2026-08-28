@@ -1229,6 +1229,21 @@ def browser_failure_diagnostics(root: Path) -> str:
         return f"browser-runtime-inventory-unavailable={type(error).__name__}:{suffix}"
 
 
+def bounded_output_tail(path: Path, limit: int = 2048) -> str:
+    """Retain a bounded escaped engine diagnostic without changing the failure."""
+
+    try:
+        with path.open("rb") as stream:
+            stream.seek(0, os.SEEK_END)
+            size = stream.tell()
+            stream.seek(max(0, size - limit))
+            payload = stream.read(limit)
+    except OSError as error:
+        return f"unavailable:{type(error).__name__}:{error.errno}"
+    text = payload.decode("utf-8", "replace")
+    return json.dumps(text, ensure_ascii=True)
+
+
 def runtime_directory_bindings(
     root: Path,
     root_identity: tuple[int, int],
@@ -1726,6 +1741,7 @@ def sample_command(
     handshake_read: int | None = None
     root_in_measurement = False
     root_reaped = False
+    browser_root_exit: dict[str, Any] | None = None
     usage_start = resource.getrusage(resource.RUSAGE_SELF)
 
     try:
@@ -1868,6 +1884,25 @@ def sample_command(
                             raise incomplete("ROOT_WAIT_INVALID", f"waited for unexpected PID {waited}")
                         root_reaped = True
                         root_ended = now
+                        if private_browser_runtime:
+                            root_exit_counters = counter_snapshot(child)
+                            root_exit_members = scan_cgroup(child, False, root_identity, proc_root)
+                            browser_root_exit = {
+                                "dirty": root_exit_counters["memory_file_dirty_bytes"],
+                                "writeback": root_exit_counters["memory_file_writeback_bytes"],
+                                "populated": root_exit_counters["cgroup_events"]["populated"],
+                                "member_count": len(root_exit_members),
+                                "members": [
+                                    {
+                                        "pid": int(member["pid"]),
+                                        "ppid": int(member["ppid"]),
+                                        "process_group": int(member["process_group"]),
+                                        "session": int(member["session"]),
+                                        "start_ticks": int(member["start_ticks"]),
+                                    }
+                                    for member in root_exit_members[:32]
+                                ],
+                            }
                     if now >= next_sample or ready:
                         take_sample(started, now)
                         while next_sample <= now:
@@ -1903,7 +1938,22 @@ def sample_command(
             except MeasurementIncomplete as error:
                 if error.code == "CGROUP_ACCOUNTING_NOT_QUIESCENT" and private_browser_runtime:
                     diagnostics = browser_failure_diagnostics(Path(engine_tmpdir))
-                    raise incomplete(error.code, f"{error}; {diagnostics}") from error
+                    exit_code, child_signal = exit_fields(status_value)
+                    lifecycle = {
+                        "root_exit": browser_root_exit,
+                        "root_exit_code": exit_code,
+                        "root_signal": child_signal,
+                        "engine_wall_ms": round((root_ended - started) * 1000.0, 3),
+                        "descendant_drain_ms": round((drained_at - root_ended) * 1000.0, 3),
+                        "kill_used": kill_used,
+                        "lingering_before_kill": lingering_before_kill[:32],
+                    }
+                    stderr_tail = bounded_output_tail(Path(stderr_path))
+                    raise incomplete(
+                        error.code,
+                        f"{error}; browser-lifecycle={json.dumps(lifecycle, sort_keys=True, separators=(',', ':'))}; "
+                        f"engine-stderr-tail={stderr_tail}; {diagnostics}",
+                    ) from error
                 raise
             if final["cgroup_events"]["populated"] != 0:
                 raise incomplete("CGROUP_CLEANUP_FAILED", "render cgroup repopulated during accounting settle")

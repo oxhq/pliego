@@ -245,6 +245,12 @@ def fixture_proofs() -> None:
         unavailable = process_tree_sampler.browser_failure_diagnostics(Path("/fixture"))
     assert unavailable == "browser-runtime-inventory-unavailable=RuntimeError:unknown"
     assert "must not escape" not in unavailable
+    with tempfile.TemporaryDirectory() as raw:
+        output = Path(raw) / "engine.stderr"
+        output.write_bytes(b"prefix\n" + b"x" * 32)
+        assert process_tree_sampler.bounded_output_tail(output, limit=8) == json.dumps("x" * 8)
+        missing = process_tree_sampler.bounded_output_tail(Path(raw) / "missing")
+        assert missing.startswith("unavailable:FileNotFoundError:")
     if sys.platform == "linux":
         with tempfile.TemporaryDirectory(prefix="pliego mount ") as raw:
             root = Path(raw).resolve()
