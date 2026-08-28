@@ -110,7 +110,7 @@ def verify_current_copy() -> None:
 
 
 def verified_manifest_path(relative: str) -> Path:
-    require(isinstance(relative, str) and relative, "showcase file path must be a non-empty string")
+    require(isinstance(relative, str) and len(relative) > 0, "showcase file path must be a non-empty string")
     relative_path = Path(relative)
     require(not relative_path.is_absolute(), f"showcase path must be relative: {relative!r}")
     lexical_candidate = Path(os.path.abspath(SHOWCASE / relative_path))
@@ -141,7 +141,7 @@ def verify_showcase() -> None:
     )
 
     files = data.get("files")
-    require(isinstance(files, list) and files, "showcase manifest has no files")
+    require(isinstance(files, list) and len(files) > 0, "showcase manifest has no files")
     indexed: dict[str, dict[str, object]] = {}
     for descriptor in files:
         require(isinstance(descriptor, dict), "showcase file descriptor is not an object")
@@ -150,7 +150,7 @@ def verify_showcase() -> None:
         require(isinstance(relative, str) and relative not in indexed, "showcase file path is invalid or duplicated")
         require(isinstance(descriptor["bytes"], int) and descriptor["bytes"] >= 0, "showcase byte count is invalid")
         require(
-            isinstance(descriptor["sha256"], str) and SHA256.fullmatch(descriptor["sha256"]),
+            isinstance(descriptor["sha256"], str) and SHA256.fullmatch(descriptor["sha256"]) is not None,
             "showcase SHA-256 is invalid",
         )
         path = verified_manifest_path(relative)
@@ -174,7 +174,7 @@ def verify_showcase() -> None:
         require(document.get("all_pages_visually_reviewed") is True, "showcase visual review is absent")
         for field in ("input_manifest_sha256", "request_sha256"):
             require(
-                isinstance(document.get(field), str) and SHA256.fullmatch(document[field]),
+                isinstance(document.get(field), str) and SHA256.fullmatch(document[field]) is not None,
                 f"showcase {field} is invalid",
             )
 

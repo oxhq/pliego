@@ -254,9 +254,7 @@ def render_markdown(data: Any, artifact: Any) -> str:
         lines.append("")
         target_cells = [cells[(target_id, statistic)] for statistic in statistics]
         for cell in target_cells:
-            lines.append(
-                f"- <a id=\"cell-{cell['cell_id']}\"></a>`{cell['statistic']}` cell: `{cell['cell_id']}`"
-            )
+            lines.append(f'- <a id="cell-{cell["cell_id"]}"></a>`{cell["statistic"]}` cell: `{cell["cell_id"]}`')
         lines.append(
             "- Timed sample IDs, in schedule order: "
             + ", ".join(f"`{sample_id}`" for sample_id in target_cells[0]["sample_ids"])

@@ -854,12 +854,8 @@ def fork_stopped(
 ) -> tuple[int, int]:
     descriptors = [open_stdin_descriptor(stdin_path)]
     try:
-        descriptors.append(
-            os.open(stdout_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_CLOEXEC, 0o600)
-        )
-        descriptors.append(
-            os.open(stderr_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_CLOEXEC, 0o600)
-        )
+        descriptors.append(os.open(stdout_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_CLOEXEC, 0o600))
+        descriptors.append(os.open(stderr_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_CLOEXEC, 0o600))
     except BaseException:
         for descriptor in descriptors:
             with contextlib.suppress(OSError):
