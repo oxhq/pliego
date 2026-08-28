@@ -128,7 +128,7 @@ def must_be_incomplete(code: str, operation: object) -> None:
 
 def fixture_proofs() -> None:
     if sys.platform == "linux":
-        assert process_tree_sampler.DURABLE_WRITE_FLAG != 0
+        assert process_tree_sampler.DURABLE_WRITE_FLAG == os.O_SYNC
         assert process_tree_sampler.ENGINE_OUTPUT_OPEN_FLAGS & process_tree_sampler.DURABLE_WRITE_FLAG
     empty_io = process_tree_sampler.parse_io_stat("8:0 \n", "hosted-zero-io")
     assert empty_io == {"8:0": {"rbytes": 0, "wbytes": 0, "rios": 0, "wios": 0}}

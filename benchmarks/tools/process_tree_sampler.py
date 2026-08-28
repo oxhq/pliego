@@ -56,7 +56,9 @@ SIOCGIFFLAGS = 0x8913
 SIOCSIFFLAGS = 0x8914
 IFF_UP = 0x1
 API2_REQUEST_MAX_BYTES = 1024 * 1024
-DURABLE_WRITE_FLAG = getattr(os, "O_DSYNC", getattr(os, "O_SYNC", 0))
+# Keep redirected engine output quiescent at root exit. O_DSYNC is insufficient
+# for the zero-dirty contract; O_SYNC keeps the synchronous cost in the sample.
+DURABLE_WRITE_FLAG = getattr(os, "O_SYNC", 0)
 ENGINE_OUTPUT_OPEN_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_CLOEXEC | DURABLE_WRITE_FLAG
 FS_IOC_GETFLAGS = 0x80086601
 FS_SYNC_FL = 0x00000008
@@ -1356,7 +1358,7 @@ def fork_stopped(
 ) -> tuple[int, int]:
     descriptors = [open_stdin_descriptor(stdin_path)]
     if DURABLE_WRITE_FLAG == 0:
-        raise incomplete("DURABLE_ENGINE_OUTPUT_UNAVAILABLE", "the host exposes neither O_DSYNC nor O_SYNC")
+        raise incomplete("DURABLE_ENGINE_OUTPUT_UNAVAILABLE", "the host exposes no O_SYNC")
     try:
         descriptors.append(os.open(stdout_path, ENGINE_OUTPUT_OPEN_FLAGS, 0o600))
         descriptors.append(os.open(stderr_path, ENGINE_OUTPUT_OPEN_FLAGS, 0o600))
