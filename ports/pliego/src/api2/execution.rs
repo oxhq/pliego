@@ -294,18 +294,18 @@ fn publish_delivery(
     write_new(&staging.staged.join("document.pdf"), &pdf)?;
     write_new(&staging.staged.join("scene.json"), &scene.bytes)?;
     if !scene.resources.is_empty() {
-        fs::create_dir(staging.staged.join("resources"))?;
+        let resources = staging.staged.join("resources");
+        create_private_directory(&resources)?;
         for (address, resource) in scene.resources {
             let digest = address
                 .strip_prefix("sha256:")
                 .expect("validated scene resource address");
-            write_new(
-                &staging.staged.join("resources").join(digest),
-                &resource.bytes,
-            )?;
+            write_new(&resources.join(digest), &resource.bytes)?;
         }
+        sync_directory(&resources)?;
     }
     write_new(&staging.staged.join("bundle.json"), &bundle_bytes)?;
+    sync_directory(&staging.staged)?;
     staging.promote(job_root)?;
 
     Ok(Delivery {
@@ -322,6 +322,7 @@ fn publish_diagnostics(
 ) -> Result<DiagnosticInventory, PublicationError> {
     let staging = PublicationStaging::new(job_root, "diagnostics")?;
     write_new(&staging.staged.join(name), bytes)?;
+    sync_directory(&staging.staged)?;
     staging.promote(job_root)?;
     Ok(DiagnosticInventory {
         retained: true,
@@ -407,6 +408,11 @@ fn write_new(path: &Path, bytes: &[u8]) -> Result<(), PublicationError> {
     let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
     file.write_all(bytes)?;
     file.sync_all()?;
+    Ok(())
+}
+
+fn sync_directory(path: &Path) -> Result<(), PublicationError> {
+    BoundDirectory::open_private(path.to_owned())?.sync_all()?;
     Ok(())
 }
 
