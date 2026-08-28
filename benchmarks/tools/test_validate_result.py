@@ -109,6 +109,7 @@ def resource_usage() -> dict:
             },
             "temporary_storage": {
                 "directory_sync": "FS_DIRSYNC_FL",
+                "file_sync": "FS_SYNC_FL",
                 "filesystem": "ext4",
                 "scope": "per-invocation-private",
             },
@@ -534,6 +535,13 @@ def main() -> None:
         valid,
         lambda value: value["samples"][0]["resource_usage"]["launch_security"]["temporary_storage"].update(
             filesystem="tmpfs"
+        ),
+        "launch_security.temporary_storage",
+    )
+    changed(
+        valid,
+        lambda value: value["samples"][0]["resource_usage"]["launch_security"]["temporary_storage"].update(
+            file_sync="none"
         ),
         "launch_security.temporary_storage",
     )

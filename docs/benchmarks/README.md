@@ -106,13 +106,13 @@ repeat-to-repeat spread are retained, so the published report cannot silently
 choose the most favorable VM.
 
 Each target gets a fresh private on-disk `TMPDIR` below the same ext4 scratch
-root. The workflow sets and verifies inherited Linux `FS_DIRSYNC_FL`, so
-transient SQLite unlink/rmdir metadata is synchronous without moving scratch to
-tmpfs or excluding its block I/O from the retained cgroup totals. The sampler
-binds the scratch inode, revalidates the storage contract after descendant
-drain, and records it in every sample. `DIRSYNC` is a deliberate non-default
-benchmark condition; its synchronous metadata cost is included in wall and I/O
-measurements.
+root. The workflow sets and verifies inherited Linux `FS_SYNC_FL` and
+`FS_DIRSYNC_FL`, so transient file data and unlink/rmdir metadata are
+synchronous without moving scratch to tmpfs or excluding its block I/O from the
+retained cgroup totals. The sampler binds the scratch inode, revalidates the
+storage contract after descendant drain, and records it in every sample. These
+are deliberate non-default benchmark conditions; their synchronous-write cost
+is included in wall and I/O measurements.
 
 After immutable images are pinned, each target uses the same order: one discarded correctness preflight, discarded
 warmups, then cold one-shot timed samples. The adapter root and every descendant

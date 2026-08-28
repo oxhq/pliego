@@ -55,6 +55,7 @@ API2_REQUEST_MAX_BYTES = 1024 * 1024
 DURABLE_WRITE_FLAG = getattr(os, "O_DSYNC", getattr(os, "O_SYNC", 0))
 ENGINE_OUTPUT_OPEN_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_CLOEXEC | DURABLE_WRITE_FLAG
 FS_IOC_GETFLAGS = 0x80086601
+FS_SYNC_FL = 0x00000008
 FS_DIRSYNC_FL = 0x00010000
 
 
@@ -856,10 +857,16 @@ def validate_engine_temporary_directory(requested: Path, account: EngineAccount)
             "ENGINE_TEMPORARY_BACKING_UNSAFE",
             "engine temporary path must be backed by ext4",
         )
-    if not directory_has_dirsync(resolved):
+    flags = directory_inode_flags(resolved)
+    if flags & FS_DIRSYNC_FL == 0:
         raise incomplete(
             "ENGINE_TEMPORARY_DIRECTORY_UNSAFE",
             "engine temporary path must carry the inherited FS_DIRSYNC_FL flag",
+        )
+    if flags & FS_SYNC_FL == 0:
+        raise incomplete(
+            "ENGINE_TEMPORARY_DIRECTORY_UNSAFE",
+            "engine temporary path must carry the inherited FS_SYNC_FL flag",
         )
     return str(resolved)
 
@@ -887,7 +894,7 @@ def mountinfo_filesystem_type(path: Path, mountinfo: str | None = None) -> str |
     return selected[1] if selected is not None else None
 
 
-def directory_has_dirsync(path: Path) -> bool:
+def directory_inode_flags(path: Path) -> int:
     descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0))
     try:
         flags = ctypes.c_ulong()
@@ -898,7 +905,7 @@ def directory_has_dirsync(path: Path) -> bool:
                 "ENGINE_TEMPORARY_DIRECTORY_UNSAFE",
                 f"cannot read engine temporary inode flags: {os.strerror(error)}",
             )
-        return bool(flags.value & FS_DIRSYNC_FL)
+        return int(flags.value)
     finally:
         os.close(descriptor)
 
@@ -1511,6 +1518,7 @@ def sample_command(
             revalidate_engine_temporary_directory(Path(engine_tmpdir), account, engine_tmpdir_identity)
             launch_security["temporary_storage"] = {
                 "directory_sync": "FS_DIRSYNC_FL",
+                "file_sync": "FS_SYNC_FL",
                 "filesystem": "ext4",
                 "scope": "per-invocation-private",
             }

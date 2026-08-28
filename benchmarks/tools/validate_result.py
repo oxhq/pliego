@@ -334,6 +334,7 @@ def validate_resource_usage(sample: dict[str, Any], path: str, violations: list[
         launch["temporary_storage"],
         {
             "directory_sync": "FS_DIRSYNC_FL",
+            "file_sync": "FS_SYNC_FL",
             "filesystem": "ext4",
             "scope": "per-invocation-private",
         },

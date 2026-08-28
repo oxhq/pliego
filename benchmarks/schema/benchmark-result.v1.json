@@ -534,9 +534,10 @@
         "temporary_storage": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["directory_sync", "filesystem", "scope"],
+          "required": ["directory_sync", "file_sync", "filesystem", "scope"],
           "properties": {
             "directory_sync": { "const": "FS_DIRSYNC_FL" },
+            "file_sync": { "const": "FS_SYNC_FL" },
             "filesystem": { "const": "ext4" },
             "scope": { "const": "per-invocation-private" }
           }

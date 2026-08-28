@@ -199,7 +199,11 @@ def fixture_proofs() -> None:
         with (
             tempfile.TemporaryDirectory() as raw,
             mock.patch.object(process_tree_sampler, "mountinfo_filesystem_type", return_value="ext4"),
-            mock.patch.object(process_tree_sampler, "directory_has_dirsync", return_value=True),
+            mock.patch.object(
+                process_tree_sampler,
+                "directory_inode_flags",
+                return_value=process_tree_sampler.FS_DIRSYNC_FL | process_tree_sampler.FS_SYNC_FL,
+            ),
         ):
             artifacts = Path(raw).resolve()
             artifacts.chmod(0o700)
@@ -241,7 +245,20 @@ def fixture_proofs() -> None:
                     "ENGINE_TEMPORARY_BACKING_UNSAFE",
                     lambda: process_tree_sampler.validate_engine_temporary_directory(artifacts, current_account),
                 )
-            with mock.patch.object(process_tree_sampler, "directory_has_dirsync", return_value=False):
+            with mock.patch.object(
+                process_tree_sampler,
+                "directory_inode_flags",
+                return_value=process_tree_sampler.FS_SYNC_FL,
+            ):
+                must_be_incomplete(
+                    "ENGINE_TEMPORARY_DIRECTORY_UNSAFE",
+                    lambda: process_tree_sampler.validate_engine_temporary_directory(artifacts, current_account),
+                )
+            with mock.patch.object(
+                process_tree_sampler,
+                "directory_inode_flags",
+                return_value=process_tree_sampler.FS_DIRSYNC_FL,
+            ):
                 must_be_incomplete(
                     "ENGINE_TEMPORARY_DIRECTORY_UNSAFE",
                     lambda: process_tree_sampler.validate_engine_temporary_directory(artifacts, current_account),
