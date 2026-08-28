@@ -893,6 +893,15 @@ def fork_stopped(
                 drop_engine_authority(account)
                 payload = {
                     "ok": True,
+                    "executable": command[0],
+                    "cwd": cwd,
+                    "identity": {
+                        "uid": os.getuid(),
+                        "euid": os.geteuid(),
+                        "gid": os.getgid(),
+                        "egid": os.getegid(),
+                        "groups": os.getgroups(),
+                    },
                     "executable_accessible": os.access(command[0], os.X_OK),
                     "executable_writable": os.access(command[0], os.W_OK),
                     "cwd_accessible": os.access(cwd, os.R_OK | os.X_OK),
@@ -1003,6 +1012,9 @@ def finish_authority_handshake(
         raise incomplete(
             "ENGINE_PATH_INACCESSIBLE",
             "engine account path access failed: "
+            f"executable={handshake.get('executable')!r} "
+            f"cwd={handshake.get('cwd')!r} "
+            f"identity={handshake.get('identity')!r} "
             f"executable_accessible={handshake.get('executable_accessible')!r} "
             f"cwd_accessible={handshake.get('cwd_accessible')!r}",
         )

@@ -60,8 +60,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes \
-            ca-certificates libegl1 libfontconfig1 libgl1-mesa-dri \
-            php-xml php-mbstring poppler-utils
+            acl ca-certificates libegl1 libfontconfig1 libgl1-mesa-dri \
+            php-xml php-mbstring poppler-utils util-linux
           composer install --working-dir=benchmarks/adapters/dompdf \
             --no-dev --no-interaction --prefer-dist --classmap-authoritative
           composer install --working-dir=benchmarks/adapters/browsershot \
@@ -78,8 +78,34 @@ jobs:
           fi
           test "$(id -u pliego-benchmark-engine)" -gt 0
           test "$(id -g pliego-benchmark-engine)" -gt 0
-          sudo -u pliego-benchmark-engine test -r benchmarks/fixtures/minimal-static
-          sudo -u pliego-benchmark-engine test -x benchmarks/fixtures/minimal-static
+          engine_uid="$(id -u pliego-benchmark-engine)"
+          engine_gid="$(id -g pliego-benchmark-engine)"
+          engine_test=(sudo setpriv --reuid="$engine_uid" --regid="$engine_gid" --clear-groups \
+            --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs /usr/bin/test)
+          ancestors=()
+          ancestor="$GITHUB_WORKSPACE"
+          while [[ "$ancestor" != / ]]; do
+            ancestors+=("$ancestor")
+            ancestor="$(dirname "$ancestor")"
+          done
+          for ((index=${#ancestors[@]} - 1; index >= 0; index--)); do
+            ancestor="${ancestors[$index]}"
+            if ! (cd / && "${engine_test[@]}" -x "$ancestor"); then
+              sudo setfacl -m u:pliego-benchmark-engine:--x "$ancestor"
+            fi
+          done
+          (cd / && "${engine_test[@]}" -r "$GITHUB_WORKSPACE/benchmarks/fixtures/minimal-static/comparator.html")
+          (cd / && "${engine_test[@]}" ! -w "$GITHUB_WORKSPACE/benchmarks/fixtures/minimal-static/comparator.html")
+          (cd / && "${engine_test[@]}" -r "$GITHUB_WORKSPACE/benchmarks/fixtures/minimal-static/Ahem.ttf")
+          (cd / && "${engine_test[@]}" ! -w "$GITHUB_WORKSPACE/benchmarks/fixtures/minimal-static/Ahem.ttf")
+          (cd / && "${engine_test[@]}" -x "$GITHUB_WORKSPACE/benchmarks/fixtures/minimal-static")
+          (cd / && "${engine_test[@]}" ! -w "$GITHUB_WORKSPACE/benchmarks/fixtures/minimal-static")
+          (cd / && "${engine_test[@]}" -x "$GITHUB_WORKSPACE/benchmarks/adapters/dompdf/adapter.php")
+          (cd / && "${engine_test[@]}" ! -w "$GITHUB_WORKSPACE/benchmarks/adapters/dompdf/adapter.php")
+          (cd / && "${engine_test[@]}" -r "$GITHUB_WORKSPACE/benchmarks/adapters/dompdf/vendor/autoload.php")
+          (cd / && "${engine_test[@]}" ! -w "$GITHUB_WORKSPACE/benchmarks/adapters/dompdf/vendor/autoload.php")
+          namei -l "$GITHUB_WORKSPACE/benchmarks/adapters/dompdf/adapter.php"
+          namei -l "$GITHUB_WORKSPACE/benchmarks/fixtures/minimal-static"
           sudo systemd-run --quiet --wait --pipe --collect --expand-environment=no \
             -p Type=exec \
             -p Delegate=yes \
@@ -100,8 +126,27 @@ jobs:
               parent="/sys/fs/cgroup${relative%/harness}"
               printf "+cpu +io +memory +pids" > "$parent/cgroup.subtree_control"
               export PLIEGO_BENCHMARK_CGROUP_PARENT="$parent"
+              export GIT_OPTIONAL_LOCKS=0
               /usr/bin/python3 -E -s benchmarks/tools/test_process_tree_sampler.py --live --php-integration
               /usr/bin/python3 -E -s benchmarks/tools/process_tree_sampler.py --probe-network-isolation >/dev/null
+              smoke="$(mktemp -d /tmp/pliego-benchmark-adapter-smoke.XXXXXX)"
+              trap '\''rm -rf "$smoke"'\'' EXIT
+              chmod 0711 "$smoke"
+              install -d -o pliego-benchmark-engine -g pliego-benchmark-engine -m 0700 \
+                "$smoke/output" "$smoke/artifacts"
+              /usr/bin/python3 -E -s benchmarks/tools/process_tree_sampler.py \
+                --cwd "$PWD/benchmarks/fixtures/minimal-static" \
+                --stdout "$smoke/stdout" \
+                --stderr "$smoke/stderr" \
+                --isolate-network \
+                -- \
+                "$PWD/benchmarks/adapters/dompdf/adapter.php" render comparator.html \
+                --output "$smoke/output/document.pdf" \
+                --artifacts "$smoke/artifacts" \
+                --page-size 793.7008x1122.52 \
+                --page-margins 0,0,0,0 \
+                >/dev/null
+              test -s "$smoke/output/document.pdf"
             '
 
       - name: Check shared PDF oracle

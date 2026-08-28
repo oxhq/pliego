@@ -39,7 +39,7 @@ jobs:
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install --yes \
-            ca-certificates iproute2 libegl1 libfontconfig1 libgl1-mesa-dri \
+            acl ca-certificates iproute2 libegl1 libfontconfig1 libgl1-mesa-dri \
             php-xml php-mbstring poppler-utils util-linux
           composer install --working-dir=benchmarks/adapters/dompdf \
             --no-dev --no-interaction --prefer-dist --classmap-authoritative
@@ -72,22 +72,49 @@ jobs:
           fi
           test "$(id -u pliego-benchmark-engine)" -gt 0
           test "$(id -g pliego-benchmark-engine)" -gt 0
-          sudo -u pliego-benchmark-engine test -x "${{ steps.runtime.outputs.binary }}"
-          sudo -u pliego-benchmark-engine test -x "${{ steps.runtime.outputs.node }}"
-          sudo -u pliego-benchmark-engine test -x "${{ steps.runtime.outputs.chrome }}"
-          sudo -u pliego-benchmark-engine test -r benchmarks/fixtures/minimal-static
-          sudo -u pliego-benchmark-engine test -x benchmarks/fixtures/minimal-static
-          sudo -u pliego-benchmark-engine test -r benchmarks/fixtures/minimal-static/comparator.html
-          sudo -u pliego-benchmark-engine test -x benchmarks/adapters/dompdf/adapter.php
-          sudo -u pliego-benchmark-engine test -x benchmarks/adapters/browsershot/adapter.php
-          sudo -u pliego-benchmark-engine test -r benchmarks/adapters/dompdf/composer.lock
-          sudo -u pliego-benchmark-engine test -r benchmarks/adapters/dompdf/vendor/autoload.php
-          sudo -u pliego-benchmark-engine test -r benchmarks/adapters/browsershot/composer.lock
-          sudo -u pliego-benchmark-engine test -r benchmarks/adapters/browsershot/vendor/autoload.php
-          sudo -u pliego-benchmark-engine test -r benchmarks/adapters/browsershot/package-lock.json
-          sudo -u pliego-benchmark-engine test -r benchmarks/adapters/browsershot/node_modules/puppeteer/package.json
-          sudo -u pliego-benchmark-engine /bin/bash -c \
-            'test ! -w "$1"' _ benchmarks/adapters/dompdf/adapter.php
+          engine_uid="$(id -u pliego-benchmark-engine)"
+          engine_gid="$(id -g pliego-benchmark-engine)"
+          engine_test=(sudo setpriv --reuid="$engine_uid" --regid="$engine_gid" --clear-groups \
+            --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs /usr/bin/test)
+          ancestors=()
+          ancestor="$GITHUB_WORKSPACE"
+          while [[ "$ancestor" != / ]]; do
+            ancestors+=("$ancestor")
+            ancestor="$(dirname "$ancestor")"
+          done
+          for ((index=${#ancestors[@]} - 1; index >= 0; index--)); do
+            ancestor="${ancestors[$index]}"
+            if ! (cd / && "${engine_test[@]}" -x "$ancestor"); then
+              sudo setfacl -m u:pliego-benchmark-engine:--x "$ancestor"
+            fi
+          done
+          "${engine_test[@]}" -x "${{ steps.runtime.outputs.binary }}"
+          "${engine_test[@]}" ! -w "${{ steps.runtime.outputs.binary }}"
+          "${engine_test[@]}" -x "${{ steps.runtime.outputs.node }}"
+          "${engine_test[@]}" ! -w "${{ steps.runtime.outputs.node }}"
+          "${engine_test[@]}" -x "${{ steps.runtime.outputs.chrome }}"
+          "${engine_test[@]}" ! -w "${{ steps.runtime.outputs.chrome }}"
+          (cd / && "${engine_test[@]}" -r "$GITHUB_WORKSPACE/benchmarks/fixtures/minimal-static/comparator.html")
+          (cd / && "${engine_test[@]}" ! -w "$GITHUB_WORKSPACE/benchmarks/fixtures/minimal-static/comparator.html")
+          (cd / && "${engine_test[@]}" -r "$GITHUB_WORKSPACE/benchmarks/fixtures/minimal-static/Ahem.ttf")
+          (cd / && "${engine_test[@]}" ! -w "$GITHUB_WORKSPACE/benchmarks/fixtures/minimal-static/Ahem.ttf")
+          (cd / && "${engine_test[@]}" -x "$GITHUB_WORKSPACE/benchmarks/fixtures/minimal-static")
+          (cd / && "${engine_test[@]}" ! -w "$GITHUB_WORKSPACE/benchmarks/fixtures/minimal-static")
+          (cd / && "${engine_test[@]}" -x "$GITHUB_WORKSPACE/benchmarks/adapters/dompdf/adapter.php")
+          (cd / && "${engine_test[@]}" ! -w "$GITHUB_WORKSPACE/benchmarks/adapters/dompdf/adapter.php")
+          (cd / && "${engine_test[@]}" -x "$GITHUB_WORKSPACE/benchmarks/adapters/browsershot/adapter.php")
+          (cd / && "${engine_test[@]}" ! -w "$GITHUB_WORKSPACE/benchmarks/adapters/browsershot/adapter.php")
+          (cd / && "${engine_test[@]}" -r "$GITHUB_WORKSPACE/benchmarks/adapters/dompdf/composer.lock")
+          (cd / && "${engine_test[@]}" -r "$GITHUB_WORKSPACE/benchmarks/adapters/dompdf/vendor/autoload.php")
+          (cd / && "${engine_test[@]}" ! -w "$GITHUB_WORKSPACE/benchmarks/adapters/dompdf/vendor/autoload.php")
+          (cd / && "${engine_test[@]}" -r "$GITHUB_WORKSPACE/benchmarks/adapters/browsershot/composer.lock")
+          (cd / && "${engine_test[@]}" -r "$GITHUB_WORKSPACE/benchmarks/adapters/browsershot/vendor/autoload.php")
+          (cd / && "${engine_test[@]}" ! -w "$GITHUB_WORKSPACE/benchmarks/adapters/browsershot/vendor/autoload.php")
+          (cd / && "${engine_test[@]}" -r "$GITHUB_WORKSPACE/benchmarks/adapters/browsershot/package-lock.json")
+          (cd / && "${engine_test[@]}" -r "$GITHUB_WORKSPACE/benchmarks/adapters/browsershot/node_modules/puppeteer/package.json")
+          (cd / && "${engine_test[@]}" ! -w "$GITHUB_WORKSPACE/benchmarks/adapters/browsershot/node_modules/puppeteer/package.json")
+          namei -l "$GITHUB_WORKSPACE/benchmarks/adapters/dompdf/adapter.php"
+          namei -l "$GITHUB_WORKSPACE/benchmarks/fixtures/minimal-static"
 
       - name: Capture GitHub runner environment for the delegated service
         id: evidence
@@ -152,6 +179,7 @@ jobs:
               printf "+cpu +io +memory +pids" > "$parent/cgroup.subtree_control"
               . "$1"
               export PLIEGO_BENCHMARK_CGROUP_PARENT="$parent"
+              export GIT_OPTIONAL_LOCKS=0
               /usr/bin/python3 -E -s benchmarks/tools/test_process_tree_sampler.py --live --php-integration >/dev/null
               /usr/bin/python3 -E -s benchmarks/tools/process_tree_sampler.py --probe-network-isolation >/dev/null
               exec env \

@@ -760,18 +760,23 @@ def run_comparison(binary: Path, output: Path) -> dict[str, Any]:
 
     def run_phase(target_id: str, phase: str, index: int | None = None) -> dict[str, Any] | None:
         context = contexts[target_id]
-        return run_benchmark.run_runner_phase(
-            Path("/usr/bin/php"),
-            FIXTURE_ID,
-            fixture,
-            context["binary"],
-            phase,
-            index,
-            context["require_scene_report"],
-            fixture_identity,
-            True,
-            context["native_api2"],
-        )
+        try:
+            return run_benchmark.run_runner_phase(
+                Path("/usr/bin/php"),
+                FIXTURE_ID,
+                fixture,
+                context["binary"],
+                phase,
+                index,
+                context["require_scene_report"],
+                fixture_identity,
+                True,
+                context["native_api2"],
+            )
+        except SystemExit:
+            sample = "" if index is None else f" sample={index}"
+            print(f"run_comparison: target={target_id} phase={phase}{sample} failed", file=sys.stderr)
+            raise
 
     artifact = run_benchmark.execute_interleaved_run(
         list(TARGET_IDS),
