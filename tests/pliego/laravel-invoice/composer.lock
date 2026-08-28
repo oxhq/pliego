@@ -4,7 +4,7 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "743d6dce074cc01de5d5eb2abc587ebb",
+    "content-hash": "47cc3e6b29dc15aae157b31bf1ba9812",
     "packages": [
         {
             "name": "brick/math",
@@ -2418,11 +2418,11 @@
         },
         {
             "name": "oxhq/pliego-laravel",
-            "version": "0.3.2",
+            "version": "0.3.3",
             "dist": {
                 "type": "path",
                 "url": "../../../sdk/laravel",
-                "reference": "6634e5d56008ba654846671c97bcff5fe3727f34"
+                "reference": "7acc21ecacdc0c5044653233c93c1286c577bc2e"
             },
             "require": {
                 "illuminate/console": "^13.0",
@@ -2431,7 +2431,7 @@
                 "illuminate/support": "^13.0",
                 "illuminate/view": "^13.0",
                 "league/flysystem": "^3.25.1",
-                "oxhq/pliego-php": "0.3.2",
+                "oxhq/pliego-php": "0.3.3",
                 "php": "^8.3",
                 "symfony/http-foundation": "^7.4 || ^8.0"
             },
@@ -2485,11 +2485,11 @@
         },
         {
             "name": "oxhq/pliego-php",
-            "version": "0.3.2",
+            "version": "0.3.3",
             "dist": {
                 "type": "path",
                 "url": "../../../sdk/php",
-                "reference": "ac69e332b8c52b69fae1bc317d26cf3a9bc2e1fb"
+                "reference": "fe830c716da4d2cd2a820c85377a37edb6c5a577"
             },
             "require": {
                 "php": "^8.3",

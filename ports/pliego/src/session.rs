@@ -263,6 +263,11 @@ impl BoundDirectory {
         Ok(directory)
     }
 
+    pub(crate) fn sync_all(&self) -> io::Result<()> {
+        self.require_current()?;
+        self.handle.as_file().sync_all()
+    }
+
     pub(crate) fn current_path(&self) -> io::Result<PathBuf> {
         self.require_current()?;
         Ok(self.requested_path.clone())
