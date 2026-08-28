@@ -340,6 +340,39 @@ drift, and any nested bundle failure. It also rebuilds the canonical USTAR +
 gzip stream and requires byte equality. Packaging is checksum-bound evidence;
 it does not publish a GitHub release or make mutable hosting immutable.
 
+### Public snapshot gate
+
+The temporary Actions artifact is not the public source. After the three-repeat
+tree passes its validators, `package_hosted_evidence.py` packages the complete
+series and all three raw repeat bundles into the canonical archive named by its
+evidence manifest. The release uses:
+
+```text
+benchmark-v0.3.3-minimal-static-gh-<run-id>-a<attempt>
+```
+
+and contains only the canonical `.tar.gz` asset and its `.sha256` companion.
+Because repository release immutability is not enabled, this is checksum-bound,
+append-only-by-policy evidence; it is not described as cryptographically
+immutable release evidence.
+
+Only after those exact assets exist may the buyer-facing snapshot be staged:
+
+```sh
+python3 benchmarks/tools/public_hosted_benchmark.py stage \
+  path/to/pliego-benchmark-v0.3.3-minimal-static-gh-run-<run-id>-attempt-<attempt>.tar.gz \
+  --checksum path/to/pliego-benchmark-v0.3.3-minimal-static-gh-run-<run-id>-attempt-<attempt>.tar.gz.sha256
+```
+
+The staging command does not accept numbers or prose. It first runs the archive
+validator, copies the archive's evidence manifest, sealed series, deterministic
+report, and exact checksum into `docs/benchmarks/results/`, then derives the
+compact README table from the sealed series. The public-surface check recomputes
+that table and report. Hosted CI also downloads the named release assets and
+requires byte-for-byte equality with the committed evidence view. Until that
+gate passes, the README must continue to say that no performance snapshot is
+committed.
+
 Subset with `--fixture invoice-showcase` or select PHP with
 `--php /usr/bin/php`. `--samples` and `--warmup` are accepted only when they
 equal the canonical manifest values; overrides cannot produce a result file.

@@ -45,15 +45,43 @@ concurrency:
 jobs:
   verify:
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 10
 
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           persist-credentials: false
 
+      - name: Verify hosted benchmark publication machinery
+        run: python3 -E -s benchmarks/tools/test_public_hosted_benchmark.py
+
       - name: Verify buyer-facing release evidence
         run: python python/check_pliego_public_surface.py
+
+      - name: Resolve published benchmark evidence
+        id: benchmark
+        run: python3 -E -s benchmarks/tools/public_hosted_benchmark.py release-assets --github-output "$GITHUB_OUTPUT"
+
+      - name: Verify the exact released benchmark archive
+        if: steps.benchmark.outputs.published == 'true'
+        env:
+          ARCHIVE_NAME: ${{ steps.benchmark.outputs.archive_name }}
+          ARCHIVE_URL: ${{ steps.benchmark.outputs.archive_url }}
+          CHECKSUM_NAME: ${{ steps.benchmark.outputs.checksum_name }}
+          CHECKSUM_URL: ${{ steps.benchmark.outputs.checksum_url }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/pliego-public-benchmark"
+          mkdir "$evidence"
+          archive="$evidence/$ARCHIVE_NAME"
+          checksum="$evidence/$CHECKSUM_NAME"
+          curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
+            --output "$archive" "$ARCHIVE_URL"
+          curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
+            --output "$checksum" "$CHECKSUM_URL"
+          python3 -E -s benchmarks/tools/public_hosted_benchmark.py verify-archive \
+            "$archive" --checksum "$checksum"
 
       - name: Prove showcase symlinks fail closed
         shell: bash

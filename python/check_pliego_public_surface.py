@@ -12,12 +12,14 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 from urllib.parse import unquote
 
 
 ROOT = Path(__file__).resolve().parents[1]
+BENCHMARK_TOOLS = ROOT / "benchmarks" / "tools"
 SHOWCASE = ROOT / "docs" / "pliego" / "showcase"
 MANIFEST = SHOWCASE / "manifest.json"
 PUBLIC_MARKDOWN = (
@@ -50,7 +52,23 @@ def read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
-def verify_current_copy() -> None:
+def verify_benchmark_publication() -> bool:
+    process = subprocess.run(
+        [sys.executable, str(BENCHMARK_TOOLS / "public_hosted_benchmark.py"), "verify"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    require(process.returncode == 0, f"hosted benchmark publication failed verification: {process.stderr.strip()}")
+    status = process.stdout.strip()
+    require(
+        status in {"public hosted benchmark publication verified", "public hosted benchmark remains unpublished"},
+        f"hosted benchmark verifier returned an unknown status: {status!r}",
+    )
+    return status == "public hosted benchmark publication verified"
+
+
+def verify_current_copy(published_benchmark: bool) -> None:
     readme = read(ROOT / "README.md")
     overview = read(ROOT / "docs" / "project-overview.md")
     launch = read(ROOT / "docs" / "releases" / "v0.3.md")
@@ -71,9 +89,6 @@ def verify_current_copy() -> None:
         "->store(",
         "Storage::disk($stored->disk)->download(",
         "pliego --contract-probe",
-        "There is no committed performance snapshot yet.",
-        "directional `github-hosted-exploratory` timing/resource evidence",
-        "Authoritative\ntables and production rankings remain N/A",
         "Link annotations are also outside the advertised v0.3.2 API 2 profile.",
         "passes it to Laravel Storage",
         "version-locked adapter dependency graphs",
@@ -81,6 +96,13 @@ def verify_current_copy() -> None:
     )
     for needle in required_readme:
         require(needle in readme, f"README omitted required evidence boundary: {needle!r}")
+    if not published_benchmark:
+        for needle in (
+            "There is no committed performance snapshot yet.",
+            "directional `github-hosted-exploratory` timing/resource evidence",
+            "Authoritative\ntables and production rankings remain N/A",
+        ):
+            require(needle in readme, f"README omitted unpublished benchmark boundary: {needle!r}")
 
     forbidden = (
         "Network access remains opt-in",
@@ -208,13 +230,20 @@ def verify_local_links() -> None:
 
 def main() -> int:
     try:
-        verify_current_copy()
+        published_benchmark = verify_benchmark_publication()
+        verify_current_copy(published_benchmark)
         verify_showcase()
         verify_local_links()
-    except (SurfaceError, OSError, UnicodeError, json.JSONDecodeError) as error:
+    except (
+        SurfaceError,
+        OSError,
+        UnicodeError,
+        json.JSONDecodeError,
+    ) as error:
         print(f"check_pliego_public_surface: {error}", file=sys.stderr)
         return 1
-    print("Pliego public surface matches retained v0.3.2 evidence")
+    suffix = " and the checksum-bound hosted benchmark" if published_benchmark else ""
+    print(f"Pliego public surface matches retained v0.3.2 evidence{suffix}")
     return 0
 
 

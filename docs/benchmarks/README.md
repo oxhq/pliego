@@ -126,6 +126,15 @@ byte-identical canonical rebuild. This packages evidence; it does not by itself
 publish a release or upgrade GitHub-hosted measurements into dedicated-host
 evidence.
 
+The public README cannot be filled from a copied Actions summary or by typing
+values into Markdown. A hosted series becomes public only after the complete
+three-repeat tree is packaged, validated, and attached to its canonical
+checksum-bound benchmark release. The publication tool copies the exact sealed
+report from that archive and derives the compact README table from the same
+series; the public-surface workflow downloads the release asset again and checks
+byte-for-byte equality. See the [source benchmark protocol](../../benchmarks/README.md#public-snapshot-gate)
+for the exact gate and command.
+
 Each target's measured engine or PHP adapter gets a fresh private on-disk
 `TMPDIR` below the same ext4 scratch root. The workflow sets and verifies
 inherited Linux `FS_NOATIME_FL`,

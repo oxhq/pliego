@@ -142,6 +142,7 @@ produce a link operation without exact fixed-point authority fail closed with
 
 ## Benchmark evidence
 
+<!-- pliego-hosted-benchmark:start -->
 The hosted comparator lane now renders the published Pliego v0.3.2 bundle and
 version-locked adapter dependency graphs for dompdf 3.1.6 and Browsershot 5.4.0
 with Puppeteer 25.8.0. Their shared
@@ -155,6 +156,7 @@ no-selection repeats, exact descendant accounting, and raw samples. Authoritativ
 tables and production rankings remain N/A until the stricter dedicated-host,
 immutable-runtime, and canonical-oracle gates pass. Read the exact boundary and
 reproduction commands in the [benchmark methodology](docs/benchmarks/README.md).
+<!-- pliego-hosted-benchmark:end -->
 
 ## Release evidence and limits
 
