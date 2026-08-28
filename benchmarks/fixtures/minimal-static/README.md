@@ -11,3 +11,7 @@ one embedded Ahem font, and a retained normalized raster signature. Link
 annotations are deliberately absent because they are outside the advertised
 v0.3.2 API 2 profile. Every heading and paragraph uses normal-weight Ahem so a
 target cannot pass by substituting its default bold heading face.
+
+The comparator uses `comparator.html`. The pre-existing `input.html` remains the
+engine regression fixture, including its link operation and retained scene oracle;
+benchmark work must not rewrite that independent proof.

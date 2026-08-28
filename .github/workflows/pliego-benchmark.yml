@@ -85,7 +85,7 @@ jobs:
             python benchmarks/tools/render_api2_fixture.py \
               --binary "$binary" \
               --fixture "$fixture" \
-              --entrypoint input.html \
+              --entrypoint comparator.html \
               --asset Ahem.ttf \
               --output "$work/pliego.pdf" \
               --expected-version 0.3.2 \
@@ -94,7 +94,7 @@ jobs:
 
           (
             cd "$fixture"
-            "$GITHUB_WORKSPACE/benchmarks/adapters/dompdf/adapter.php" render input.html \
+            "$GITHUB_WORKSPACE/benchmarks/adapters/dompdf/adapter.php" render comparator.html \
               --output "$work/dompdf.pdf" --artifacts "$work/dom-artifacts" \
               --page-size 793.7008x1122.52 --page-margins 0,0,0,0
           )
@@ -149,7 +149,7 @@ jobs:
                 exec setpriv --reuid="$uid" --regid="$gid" --init-groups "$@"
               ' _ "$(id -u)" "$(id -g)" \
                 env BROWSERSHOT_NODE_BINARY="$node" BROWSERSHOT_CHROME_PATH="$chrome" \
-                "$adapter" render input.html \
+                "$adapter" render comparator.html \
                   --output "$work/browsershot.pdf" --artifacts "$work/browser-artifacts" \
                   --page-size 793.7008x1122.52 --page-margins 0,0,0,0
           )

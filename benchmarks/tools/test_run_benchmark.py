@@ -480,7 +480,7 @@ def main() -> None:
             benchmark.collect_samples(
                 Path("php"),
                 "minimal-static",
-                {"input": "benchmarks/fixtures/minimal-static/input.html"},
+                {"input": "benchmarks/fixtures/minimal-static/comparator.html"},
                 Path("pliego"),
                 2,
                 0,
@@ -501,7 +501,7 @@ def main() -> None:
         Path("php"),
         "comma-text",
         {
-            "input": "benchmarks/fixtures/minimal-static/input.html",
+            "input": "benchmarks/fixtures/minimal-static/comparator.html",
             "correctness": {"text_contains": ["Revenue, net", "Total"]},
         },
         Path("pliego"),
@@ -515,7 +515,7 @@ def main() -> None:
         Path("php"),
         "minimal-static",
         {
-            "input": "benchmarks/fixtures/minimal-static/input.html",
+            "input": "benchmarks/fixtures/minimal-static/comparator.html",
             "page_size": "793.7008x1122.52",
             "page_margins": "0,0,0,0",
             "correctness": {
@@ -532,7 +532,7 @@ def main() -> None:
         0,
         require_scene_report=False,
     )
-    assert neutral[neutral.index("--input") + 1] == "input.html"
+    assert neutral[neutral.index("--input") + 1] == "comparator.html"
     assert Path(neutral[neutral.index("--cwd") + 1]).name == "minimal-static"
     assert "--require-scene-report" not in neutral
     assert neutral[neutral.index("--link-target") + 1] == "https://pliego.dev/docs"
@@ -543,7 +543,7 @@ def main() -> None:
     native = benchmark.build_command(
         Path("php"),
         "minimal-static",
-        {"input": "benchmarks/fixtures/minimal-static/input.html"},
+        {"input": "benchmarks/fixtures/minimal-static/comparator.html"},
         Path("pliego"),
         1,
         0,
@@ -555,7 +555,7 @@ def main() -> None:
     timed = benchmark.build_command(
         Path("php"),
         "minimal-static",
-        {"input": "benchmarks/fixtures/minimal-static/input.html"},
+        {"input": "benchmarks/fixtures/minimal-static/comparator.html"},
         Path("adapter"),
         None,
         None,
@@ -569,7 +569,7 @@ def main() -> None:
         benchmark.build_command(
             Path("php"),
             "minimal-static",
-            {"input": "benchmarks/fixtures/minimal-static/input.html"},
+            {"input": "benchmarks/fixtures/minimal-static/comparator.html"},
             Path("adapter"),
             1,
             0,
@@ -584,7 +584,7 @@ def main() -> None:
         benchmark.build_command(
             Path("php"),
             "minimal-static",
-            {"input": "benchmarks/fixtures/minimal-static/input.html"},
+            {"input": "benchmarks/fixtures/minimal-static/comparator.html"},
             Path("adapter"),
             None,
             None,
@@ -596,7 +596,7 @@ def main() -> None:
     else:
         raise AssertionError("phase-specific runner command accepted a boolean sample index")
 
-    phase_fixture = {"input": "benchmarks/fixtures/minimal-static/input.html"}
+    phase_fixture = {"input": "benchmarks/fixtures/minimal-static/comparator.html"}
     with patch.object(
         benchmark.subprocess,
         "run",

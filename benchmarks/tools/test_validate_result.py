@@ -237,7 +237,7 @@ def result() -> dict:
             "id": "minimal-static",
             "purpose": FIXTURE["purpose"],
             "category": "static",
-            "input": "benchmarks/fixtures/minimal-static/input.html",
+            "input": "benchmarks/fixtures/minimal-static/comparator.html",
             "input_sha256": INPUT_HASH,
             "bundle_sha256": BUNDLE_HASH,
             "expected_page_count": 1,
