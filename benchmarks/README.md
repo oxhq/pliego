@@ -365,8 +365,8 @@ declared v0.3.2 API 2 correctness gate before it can contribute a sample.
   throughput includes sampler startup, descendant drain, accounting settlement,
   and sampler exit, but remains a serial per-target diagnostic rather than a
   publishable cross-engine throughput claim.
-* The Ubuntu adapter/Poppler smoke is configured in CI; it is not hosted proof
-  until that workflow passes at the exact commit containing this change.
+* The Ubuntu Pliego/API 2, adapter, and Poppler lane now passes as hosted
+  `minimal-static` correctness proof. It is not performance evidence.
 * Core (Criterion) and Laravel e2e levels live outside this directory.
 * Page-count expectations for generated fixtures are pinned by the first signed baseline.
 * A multi-fixture `--out` file bundles one validated result object per fixture

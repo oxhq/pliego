@@ -141,9 +141,9 @@ produce a link operation without exact fixed-point authority fail closed with
 
 ## Benchmark evidence
 
-The repository now contains pinned one-shot adapters for Pliego v0.3.2, dompdf
-3.1.6, and Browsershot 5.4.0 with Puppeteer 25.8.0. Their shared
-`minimal-static` correctness slice checks PDF parsing, page geometry, normalized
+The hosted comparator lane now renders pinned one-shot paths for Pliego v0.3.2,
+dompdf 3.1.6, and Browsershot 5.4.0 with Puppeteer 25.8.0. Their shared
+`minimal-static` correctness slice passes PDF parsing, page geometry, normalized
 text, the embedded font, and raster output through the same Poppler oracle.
 
 This is comparison infrastructure and correctness evidence, not a speed claim.

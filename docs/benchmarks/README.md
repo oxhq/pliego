@@ -92,11 +92,10 @@ python3 benchmarks/tools/run_benchmark.py \
 The current commands deliberately return `not-applicable` for competitor timing:
 the manifest does not yet pin immutable OCI image digests, canonical
 dependency/runtime hashes and paths, or canonical Poppler identities, and no
-out-of-process image attestation path exists. The hosted benchmark workflow is configured
-to install both locked graphs and directly render
-`minimal-static` through each adapter, then runs real Poppler checks. That is a
-correctness smoke, not measurement evidence; hosted execution of the new smoke
-must still pass at the exact commit before it counts as hosted proof.
+out-of-process image attestation path exists. The hosted benchmark workflow installs
+both locked graphs and directly renders `minimal-static` through Pliego API 2 and
+each adapter, then runs real Poppler checks. That lane now passes as hosted
+one-fixture correctness proof. It remains a smoke, not measurement evidence.
 
 After immutable images are pinned, each target uses the same order: one discarded correctness preflight, discarded
 warmups, then cold one-shot timed samples. The adapter root and every descendant
