@@ -152,30 +152,58 @@ function artifact_sync_plan(string $path): array
 function sync_path(string $path, bool $directory): void
 {
     if (!function_exists('fsync')) {
-        abort_adapter('PHP fsync support is required for benchmark durability', 1);
+        throw new RuntimeException('PHP fsync support is required for benchmark durability');
     }
     $stream = @fopen($path, $directory ? 'rb' : 'r+b');
     if ($stream === false || !fsync($stream)) {
         if (is_resource($stream)) {
             fclose($stream);
         }
-        abort_adapter("cannot durably flush benchmark path: {$path}", 1);
+        throw new RuntimeException("cannot durably flush benchmark path: {$path}");
     }
     fclose($stream);
 }
 
 function sync_artifact_tree(string $path): void
 {
-    try {
-        $plan = artifact_sync_plan($path);
-    } catch (RuntimeException $error) {
-        abort_adapter($error->getMessage(), 1);
-    }
+    $plan = artifact_sync_plan($path);
     foreach ($plan['files'] as $file) {
         sync_path($file, false);
     }
     foreach ($plan['directories'] as $directory) {
         sync_path($directory, true);
+    }
+}
+
+function commit_pdf_output(string $temporary, string $output, ?callable $sync = null): void
+{
+    $parent = realpath(dirname($output));
+    if ($parent === false || !is_dir($parent)) {
+        throw new RuntimeException('output parent is unavailable during publication');
+    }
+    if (!rename($temporary, $output)) {
+        throw new RuntimeException('cannot atomically publish PDF output');
+    }
+    $sync ??= static function (string $path, bool $directory): void {
+        sync_path($path, $directory);
+    };
+    try {
+        $sync($parent, true);
+    } catch (Throwable $error) {
+        $removed = @unlink($output);
+        try {
+            $sync($parent, true);
+        } catch (Throwable) {
+            // The requested output is already absent; retain the original durability failure.
+        }
+        if (!$removed) {
+            throw new RuntimeException(
+                "cannot durably publish or roll back requested PDF output: {$output}",
+                0,
+                $error
+            );
+        }
+        throw new RuntimeException("cannot durably publish requested PDF output: {$output}", 0, $error);
     }
 }
 
@@ -329,11 +357,8 @@ function render(array $arguments): void
         abort_adapter('cannot flush Chromium PDF output');
     }
     fclose($stream);
-    if (!rename($temporary, $output)) {
-        abort_adapter('cannot atomically publish PDF output');
-    }
-    sync_path($parent, true);
     sync_artifact_tree($artifacts);
+    commit_pdf_output($temporary, $output);
 }
 
 $mode = $argv[1] ?? '';
@@ -365,6 +390,29 @@ if ($mode === 'self-test') {
             || $plan['directories'] !== [$syncNested, $syncRoot]) {
             abort_adapter('artifact sync-plan ordering self-test failed', 1);
         }
+        if (PHP_OS_FAMILY !== 'Windows') {
+            sync_artifact_tree($syncRoot);
+        }
+        $temporaryOutput = $syncRoot . DIRECTORY_SEPARATOR . 'temporary.pdf';
+        $requestedOutput = $syncRoot . DIRECTORY_SEPARATOR . 'requested.pdf';
+        if (file_put_contents($temporaryOutput, '%PDF-self-test') === false) {
+            abort_adapter('publication rollback self-test setup failed', 1);
+        }
+        try {
+            commit_pdf_output(
+                $temporaryOutput,
+                $requestedOutput,
+                static function (string $_path, bool $_directory): void {
+                    throw new RuntimeException('injected directory fsync failure');
+                }
+            );
+            abort_adapter('publication rollback self-test accepted a durability failure', 1);
+        } catch (RuntimeException $error) {
+            if (!str_contains($error->getMessage(), 'cannot durably publish requested PDF output')
+                || file_exists($requestedOutput)) {
+                abort_adapter('publication rollback self-test left requested output behind', 1);
+            }
+        }
         if (PHP_OS_FAMILY !== 'Windows' && function_exists('symlink')) {
             $link = $syncRoot . DIRECTORY_SEPARATOR . 'unsafe-link';
             if (!symlink($syncNested . DIRECTORY_SEPARATOR . 'cache.bin', $link)) {
@@ -380,6 +428,8 @@ if ($mode === 'self-test') {
         }
     } finally {
         @unlink($syncNested . DIRECTORY_SEPARATOR . 'cache.bin');
+        @unlink($syncRoot . DIRECTORY_SEPARATOR . 'temporary.pdf');
+        @unlink($syncRoot . DIRECTORY_SEPARATOR . 'requested.pdf');
         @rmdir($syncNested);
         @rmdir($syncRoot);
     }
@@ -389,4 +439,8 @@ if ($mode === 'self-test') {
 if ($mode !== 'render') {
     abort_adapter('expected identity, render, or self-test');
 }
-render(array_slice($argv, 2));
+try {
+    render(array_slice($argv, 2));
+} catch (RuntimeException $error) {
+    abort_adapter($error->getMessage(), 1);
+}

@@ -67,6 +67,8 @@ jobs:
           composer install --working-dir=benchmarks/adapters/browsershot \
             --no-dev --no-interaction --prefer-dist --classmap-authoritative
           npm ci --prefix benchmarks/adapters/browsershot --omit=dev
+          php benchmarks/adapters/dompdf/adapter.php self-test
+          php benchmarks/adapters/browsershot/adapter.php self-test
 
       - name: Resolve immutable v0.3.2 release and runtimes
         id: runtime
@@ -80,8 +82,9 @@ jobs:
           chrome="$(readlink -f "$chrome")"
           sudo install -d -o root -g root -m 0555 /opt/pliego-benchmark
           sudo install -o root -g root -m 0555 "$binary" /opt/pliego-benchmark/pliego
+          sudo install -o root -g root -m 0555 "$node" /opt/pliego-benchmark/node
           printf 'binary=%s\nnode=%s\nchrome=%s\n' \
-            /opt/pliego-benchmark/pliego "$node" "$chrome" >> "$GITHUB_OUTPUT"
+            /opt/pliego-benchmark/pliego /opt/pliego-benchmark/node "$chrome" >> "$GITHUB_OUTPUT"
 
       - name: Check hosted delegated-cgroup preflight
         env:
@@ -101,6 +104,45 @@ jobs:
           engine_gid="$(id -g pliego-benchmark-engine)"
           engine_test=(sudo setpriv --reuid="$engine_uid" --regid="$engine_gid" --clear-groups \
             --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs /usr/bin/test)
+          diagnose_engine_path() {
+            local reason="$1"
+            local path="$2"
+            printf 'fixed-account access check failed: %s: %s\n' "$reason" "$path" >&2
+            namei -l "$path" >&2 || true
+          }
+          require_engine_readonly_file() {
+            local path="$1"
+            if ! (cd / && "${engine_test[@]}" -r "$path"); then
+              diagnose_engine_path 'not readable' "$path"
+              return 1
+            fi
+            if (cd / && "${engine_test[@]}" -w "$path"); then
+              diagnose_engine_path 'unexpectedly writable' "$path"
+              return 1
+            fi
+          }
+          require_engine_readonly_executable() {
+            local path="$1"
+            if ! (cd / && "${engine_test[@]}" -x "$path"); then
+              diagnose_engine_path 'not executable' "$path"
+              return 1
+            fi
+            if (cd / && "${engine_test[@]}" -w "$path"); then
+              diagnose_engine_path 'unexpectedly writable' "$path"
+              return 1
+            fi
+          }
+          require_engine_readonly_directory() {
+            local path="$1"
+            if ! (cd / && "${engine_test[@]}" -x "$path"); then
+              diagnose_engine_path 'not traversable' "$path"
+              return 1
+            fi
+            if (cd / && "${engine_test[@]}" -w "$path"); then
+              diagnose_engine_path 'unexpectedly writable' "$path"
+              return 1
+            fi
+          }
           ancestors=()
           ancestor="$GITHUB_WORKSPACE"
           while [[ "$ancestor" != / ]]; do
@@ -113,28 +155,17 @@ jobs:
               sudo setfacl -m u:pliego-benchmark-engine:--x "$ancestor"
             fi
           done
-          (cd / && "${engine_test[@]}" -r "$GITHUB_WORKSPACE/benchmarks/fixtures/minimal-static/comparator.html")
-          (cd / && "${engine_test[@]}" ! -w "$GITHUB_WORKSPACE/benchmarks/fixtures/minimal-static/comparator.html")
-          (cd / && "${engine_test[@]}" -r "$GITHUB_WORKSPACE/benchmarks/fixtures/minimal-static/Ahem.ttf")
-          (cd / && "${engine_test[@]}" ! -w "$GITHUB_WORKSPACE/benchmarks/fixtures/minimal-static/Ahem.ttf")
-          (cd / && "${engine_test[@]}" -x "$GITHUB_WORKSPACE/benchmarks/fixtures/minimal-static")
-          (cd / && "${engine_test[@]}" ! -w "$GITHUB_WORKSPACE/benchmarks/fixtures/minimal-static")
-          (cd / && "${engine_test[@]}" -x "$GITHUB_WORKSPACE/benchmarks/adapters/dompdf/adapter.php")
-          (cd / && "${engine_test[@]}" ! -w "$GITHUB_WORKSPACE/benchmarks/adapters/dompdf/adapter.php")
-          (cd / && "${engine_test[@]}" -r "$GITHUB_WORKSPACE/benchmarks/adapters/dompdf/vendor/autoload.php")
-          (cd / && "${engine_test[@]}" ! -w "$GITHUB_WORKSPACE/benchmarks/adapters/dompdf/vendor/autoload.php")
-          (cd / && "${engine_test[@]}" -x "$GITHUB_WORKSPACE/benchmarks/adapters/browsershot/adapter.php")
-          (cd / && "${engine_test[@]}" ! -w "$GITHUB_WORKSPACE/benchmarks/adapters/browsershot/adapter.php")
-          (cd / && "${engine_test[@]}" -r "$GITHUB_WORKSPACE/benchmarks/adapters/browsershot/vendor/autoload.php")
-          (cd / && "${engine_test[@]}" ! -w "$GITHUB_WORKSPACE/benchmarks/adapters/browsershot/vendor/autoload.php")
-          (cd / && "${engine_test[@]}" -r "$GITHUB_WORKSPACE/benchmarks/adapters/browsershot/node_modules/puppeteer/package.json")
-          (cd / && "${engine_test[@]}" ! -w "$GITHUB_WORKSPACE/benchmarks/adapters/browsershot/node_modules/puppeteer/package.json")
-          "${engine_test[@]}" -x "$BINARY"
-          "${engine_test[@]}" ! -w "$BINARY"
-          "${engine_test[@]}" -x "$NODE"
-          "${engine_test[@]}" ! -w "$NODE"
-          "${engine_test[@]}" -x "$CHROME"
-          "${engine_test[@]}" ! -w "$CHROME"
+          require_engine_readonly_file "$GITHUB_WORKSPACE/benchmarks/fixtures/minimal-static/comparator.html"
+          require_engine_readonly_file "$GITHUB_WORKSPACE/benchmarks/fixtures/minimal-static/Ahem.ttf"
+          require_engine_readonly_directory "$GITHUB_WORKSPACE/benchmarks/fixtures/minimal-static"
+          require_engine_readonly_executable "$GITHUB_WORKSPACE/benchmarks/adapters/dompdf/adapter.php"
+          require_engine_readonly_file "$GITHUB_WORKSPACE/benchmarks/adapters/dompdf/vendor/autoload.php"
+          require_engine_readonly_executable "$GITHUB_WORKSPACE/benchmarks/adapters/browsershot/adapter.php"
+          require_engine_readonly_file "$GITHUB_WORKSPACE/benchmarks/adapters/browsershot/vendor/autoload.php"
+          require_engine_readonly_file "$GITHUB_WORKSPACE/benchmarks/adapters/browsershot/node_modules/puppeteer/package.json"
+          require_engine_readonly_executable "$BINARY"
+          require_engine_readonly_executable "$NODE"
+          require_engine_readonly_executable "$CHROME"
           namei -l "$GITHUB_WORKSPACE/benchmarks/adapters/dompdf/adapter.php"
           namei -l "$GITHUB_WORKSPACE/benchmarks/fixtures/minimal-static"
           sudo systemd-run --quiet --wait --pipe --collect --expand-environment=no \

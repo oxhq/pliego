@@ -59,8 +59,9 @@ jobs:
           chrome="$(readlink -f "$chrome")"
           sudo install -d -o root -g root -m 0555 /opt/pliego-benchmark
           sudo install -o root -g root -m 0555 "$binary" /opt/pliego-benchmark/pliego
+          sudo install -o root -g root -m 0555 "$node" /opt/pliego-benchmark/node
           printf 'binary=%s\nnode=%s\nchrome=%s\n' \
-            /opt/pliego-benchmark/pliego "$node" "$chrome" >> "$GITHUB_OUTPUT"
+            /opt/pliego-benchmark/pliego /opt/pliego-benchmark/node "$chrome" >> "$GITHUB_OUTPUT"
 
       - name: Provision fixed unprivileged engine account
         run: |
