@@ -536,6 +536,8 @@ def sampled(command: list[str], descendant_grace_ms: float = 1000.0) -> dict:
             "250",
             "--descendant-grace-ms",
             str(descendant_grace_ms),
+            "--cwd",
+            str(Path(command[0]).parent),
             "--",
             *command,
         ],

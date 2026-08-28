@@ -983,7 +983,13 @@ def finish_authority_handshake(
     if security["no_new_privs"] != 1:
         raise incomplete("ENGINE_PRIVILEGES_UNSAFE", "launcher did not set no_new_privs")
     if handshake.get("executable_accessible") is not True or handshake.get("cwd_accessible") is not True:
-        raise incomplete("ENGINE_PATH_INACCESSIBLE", "engine account cannot access its executable or cwd")
+        raise incomplete(
+            "ENGINE_PATH_INACCESSIBLE",
+            "engine account path access failed: "
+            f"executable_accessible={handshake.get('executable_accessible')!r} "
+            f"cwd_accessible={handshake.get('cwd_accessible')!r} "
+            f"executable={command[0]!r} cwd={cwd!r}",
+        )
     if handshake.get("executable_writable") is not False:
         raise incomplete("ENGINE_EXECUTABLE_MUTABLE", "engine account can write its executable")
     probes = handshake.get("migration_write_probes")
