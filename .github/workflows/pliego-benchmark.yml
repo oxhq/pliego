@@ -64,6 +64,8 @@ jobs:
           fi
           test "$(id -u pliego-benchmark-engine)" -gt 0
           test "$(id -g pliego-benchmark-engine)" -gt 0
+          sudo -u pliego-benchmark-engine test -r benchmarks/fixtures/minimal-static
+          sudo -u pliego-benchmark-engine test -x benchmarks/fixtures/minimal-static
           sudo systemd-run --quiet --wait --pipe --collect --expand-environment=no \
             -p Type=exec \
             -p Delegate=yes \

@@ -645,11 +645,16 @@ def assert_exact_counters(proof: dict) -> None:
 
 def assert_validator_accepts(proof: dict, ok: bool) -> None:
     diagnostics = proof["sampled_diagnostics"]
+    minimum_one_shot_wall_ms = round(
+        proof["wall_ms"] + proof["drain_ms"] + proof["accounting_settle"]["duration_ms"],
+        3,
+    )
     sample = {
         "ok": ok,
         "exit_code": proof["exit_code"],
         "signal": proof["signal"],
         "wall_ms": proof["wall_ms"],
+        "one_shot_wall_ms": minimum_one_shot_wall_ms,
         "user_ms": proof["cpu_user_ms"],
         "sys_ms": proof["cpu_sys_ms"],
         "memory_current_bytes": proof["memory_current_bytes"],

@@ -75,6 +75,8 @@ jobs:
           sudo -u pliego-benchmark-engine test -x "${{ steps.runtime.outputs.binary }}"
           sudo -u pliego-benchmark-engine test -x "${{ steps.runtime.outputs.node }}"
           sudo -u pliego-benchmark-engine test -x "${{ steps.runtime.outputs.chrome }}"
+          sudo -u pliego-benchmark-engine test -r benchmarks/fixtures/minimal-static
+          sudo -u pliego-benchmark-engine test -x benchmarks/fixtures/minimal-static
           sudo -u pliego-benchmark-engine test -r benchmarks/fixtures/minimal-static/comparator.html
           sudo -u pliego-benchmark-engine test -x benchmarks/adapters/dompdf/adapter.php
           sudo -u pliego-benchmark-engine test -x benchmarks/adapters/browsershot/adapter.php
