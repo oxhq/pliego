@@ -1231,6 +1231,13 @@ function run_adapter_sample(array $state, int $index): array
         $failureCode = $summary['error']['code'] ?? null;
         $failureMessage = $summary['error']['message'] ?? null;
     }
+    if ($exec['exit_code'] !== 0 && $failureMessage === null) {
+        $stderr = trim($exec['stderr']);
+        if ($stderr !== '') {
+            $failureCode ??= 'engine_stderr';
+            $failureMessage = substr($stderr, -4096);
+        }
+    }
 
     $artifactBytes = 0;
     if (is_dir($artifactsDir)) {
@@ -1783,6 +1790,17 @@ function failed_correctness_checks(array $sample): string
             $failure['detail'] = (string) $check['detail'];
         }
         $failures[] = $failure;
+    }
+    $engineFailure = $sample['failure'] ?? null;
+    if (is_array($engineFailure)
+        && (($engineFailure['code'] ?? null) !== null || ($engineFailure['message'] ?? null) !== null)) {
+        $failures[] = [
+            'name' => 'engine_failure',
+            'detail' => json_encode([
+                'code' => $engineFailure['code'] ?? null,
+                'message' => $engineFailure['message'] ?? null,
+            ], JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE),
+        ];
     }
     $encoded = json_encode($failures, JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE);
     return is_string($encoded) ? $encoded : '[{"name":"(encoding-failed)"}]';
