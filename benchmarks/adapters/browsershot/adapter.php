@@ -11,6 +11,14 @@ const PACKAGE = 'spatie/browsershot';
 const PACKAGE_VERSION = '5.4.0';
 const PUPPETEER_VERSION = '25.8.0';
 const BLOCKED_NETWORK_URL_SUBSTRINGS = ['http://', 'https://'];
+const PRIVATE_RUNTIME_DIRECTORIES = [
+    'HOME' => 'home',
+    'XDG_CACHE_HOME' => 'xdg-cache',
+    'XDG_CONFIG_HOME' => 'xdg-config',
+    'XDG_DATA_HOME' => 'xdg-data',
+    'XDG_RUNTIME_DIR' => 'xdg-runtime',
+    'XDG_STATE_HOME' => 'xdg-state',
+];
 
 function abort_adapter(string $message, int $code = 2): never
 {
@@ -116,11 +124,11 @@ function page_margins(string $value): array
 }
 
 /** @return array{files: list<string>, directories: list<string>} */
-function artifact_sync_plan(string $path): array
+function durability_sync_plan(string $path): array
 {
     $root = realpath($path);
     if ($root === false || !is_dir($root) || is_link($path)) {
-        throw new RuntimeException("artifact root is unavailable or unsafe: {$path}");
+        throw new RuntimeException("durability root is unavailable or unsafe: {$path}");
     }
     $files = [];
     $directories = [$root];
@@ -131,14 +139,14 @@ function artifact_sync_plan(string $path): array
     foreach ($iterator as $entry) {
         $entryPath = $entry->getPathname();
         if ($entry->isLink()) {
-            throw new RuntimeException("artifact tree contains a symbolic link: {$entryPath}");
+            throw new RuntimeException("durability tree contains a symbolic link: {$entryPath}");
         }
         if ($entry->isFile()) {
             $files[] = $entryPath;
         } elseif ($entry->isDir()) {
             $directories[] = $entryPath;
         } else {
-            throw new RuntimeException("artifact tree contains a special file: {$entryPath}");
+            throw new RuntimeException("durability tree contains a special file: {$entryPath}");
         }
     }
     sort($files, SORT_STRING);
@@ -164,15 +172,62 @@ function sync_path(string $path, bool $directory): void
     fclose($stream);
 }
 
-function sync_artifact_tree(string $path): void
+function sync_tree(string $path, ?callable $sync = null): void
 {
-    $plan = artifact_sync_plan($path);
+    $plan = durability_sync_plan($path);
+    $sync ??= static function (string $entry, bool $directory): void {
+        sync_path($entry, $directory);
+    };
     foreach ($plan['files'] as $file) {
-        sync_path($file, false);
+        $sync($file, false);
     }
     foreach ($plan['directories'] as $directory) {
-        sync_path($directory, true);
+        $sync($directory, true);
     }
+}
+
+/** @param null|callable(string): mixed $environment */
+function private_runtime_root(?callable $environment = null): ?string
+{
+    $environment ??= static fn (string $name): string|false => getenv($name);
+    $values = ['TMPDIR' => $environment('TMPDIR')];
+    $configuredXdg = 0;
+    foreach (PRIVATE_RUNTIME_DIRECTORIES as $variable => $_relative) {
+        $value = $environment($variable);
+        $values[$variable] = $value;
+        if (str_starts_with($variable, 'XDG_') && is_string($value) && $value !== '') {
+            $configuredXdg++;
+        }
+    }
+    if ($configuredXdg === 0) {
+        // Unmeasured smoke invocations do not receive the sampler's private
+        // runtime map. Publishable measurement always configures every entry.
+        return null;
+    }
+    $requiredXdg = count(PRIVATE_RUNTIME_DIRECTORIES) - 1;
+    if ($configuredXdg !== $requiredXdg) {
+        throw new RuntimeException('controlled browser runtime requires the complete XDG directory map');
+    }
+    foreach ($values as $variable => $value) {
+        if (!is_string($value) || $value === '') {
+            throw new RuntimeException("controlled browser runtime omitted {$variable}");
+        }
+    }
+    $rootValue = $values['TMPDIR'];
+    $root = realpath($rootValue);
+    if ($root === false || $root !== $rootValue || !is_dir($root) || is_link($rootValue)) {
+        throw new RuntimeException('TMPDIR must identify the canonical private browser runtime root');
+    }
+    foreach (PRIVATE_RUNTIME_DIRECTORIES as $variable => $relative) {
+        $value = $values[$variable];
+        $resolved = realpath($value);
+        $expected = $root . DIRECTORY_SEPARATOR . $relative;
+        if ($resolved === false || $resolved !== $value || $resolved !== $expected
+            || !is_dir($resolved) || is_link($value)) {
+            throw new RuntimeException("{$variable} escaped the private browser runtime root");
+        }
+    }
+    return $root;
 }
 
 function commit_pdf_output(string $temporary, string $output, ?callable $sync = null): void
@@ -322,6 +377,7 @@ function render(array $arguments): void
     [$width, $height] = page_size($options['--page-size']);
     [$top, $right, $bottom, $left] = page_margins($options['--page-margins']);
     $runtime = load_dependencies();
+    $privateRuntimeRoot = private_runtime_root();
     $temporary = $parent . DIRECTORY_SEPARATOR . '.' . basename($output) . '.tmp-' . bin2hex(random_bytes(8));
 
     $shot = Spatie\Browsershot\Browsershot::htmlFromFilePath($inputPath)
@@ -352,6 +408,11 @@ function render(array $arguments): void
             'no-first-run',
         ]);
     $shot->savePdf($temporary);
+    if ($privateRuntimeRoot !== null) {
+        // savePdf waits for Node and Chrome to exit. Flush their retained
+        // runtime state here, inside the measured cgroup, before PHP exits.
+        sync_tree($privateRuntimeRoot);
+    }
     $pdf = (string) file_get_contents($temporary);
     if (!str_starts_with($pdf, '%PDF-') || !str_contains(substr($pdf, -4096), '%%EOF')) {
         abort_adapter('Chromium returned an invalid PDF envelope', 1);
@@ -364,7 +425,7 @@ function render(array $arguments): void
         abort_adapter('cannot flush Chromium PDF output');
     }
     fclose($stream);
-    sync_artifact_tree($artifacts);
+    sync_tree($artifacts);
     commit_pdf_output($temporary, $output);
 }
 
@@ -391,14 +452,81 @@ if ($mode === 'self-test') {
     if (!mkdir($syncNested, 0700, true) || file_put_contents($syncNested . DIRECTORY_SEPARATOR . 'cache.bin', 'cache') === false) {
         abort_adapter('artifact sync-plan self-test setup failed', 1);
     }
+    $runtimeRoot = $syncRoot . DIRECTORY_SEPARATOR . 'runtime';
+    $runtimeEnvironment = [];
+    $runtimeCache = null;
     try {
-        $plan = artifact_sync_plan($syncRoot);
+        $plan = durability_sync_plan($syncRoot);
         if ($plan['files'] !== [$syncNested . DIRECTORY_SEPARATOR . 'cache.bin']
             || $plan['directories'] !== [$syncNested, $syncRoot]) {
             abort_adapter('artifact sync-plan ordering self-test failed', 1);
         }
         if (PHP_OS_FAMILY !== 'Windows') {
-            sync_artifact_tree($syncRoot);
+            sync_tree($syncRoot);
+        }
+        if (!mkdir($runtimeRoot, 0700)) {
+            abort_adapter('private runtime self-test setup failed', 1);
+        }
+        $runtimeEnvironment = ['TMPDIR' => $runtimeRoot];
+        foreach (PRIVATE_RUNTIME_DIRECTORIES as $variable => $relative) {
+            $path = $runtimeRoot . DIRECTORY_SEPARATOR . $relative;
+            if (!mkdir($path, 0700)) {
+                abort_adapter("private runtime {$variable} self-test setup failed", 1);
+            }
+            $runtimeEnvironment[$variable] = $path;
+        }
+        $runtimeCache = $runtimeEnvironment['XDG_CACHE_HOME'] . DIRECTORY_SEPARATOR . 'cache.bin';
+        if (file_put_contents($runtimeCache, 'runtime-cache') === false) {
+            abort_adapter('private runtime cache self-test setup failed', 1);
+        }
+        $runtimeGetter = static fn (string $name): string|false => $runtimeEnvironment[$name] ?? false;
+        if (private_runtime_root($runtimeGetter) !== $runtimeRoot
+            || private_runtime_root(static fn (string $_name): false => false) !== null) {
+            abort_adapter('private runtime binding self-test failed', 1);
+        }
+        $partialEnvironment = ['XDG_CACHE_HOME' => $runtimeEnvironment['XDG_CACHE_HOME']];
+        try {
+            private_runtime_root(
+                static fn (string $name): string|false => $partialEnvironment[$name] ?? false
+            );
+            abort_adapter('private runtime binding accepted a partial XDG map', 1);
+        } catch (RuntimeException $error) {
+            if ($error->getMessage() !== 'controlled browser runtime requires the complete XDG directory map') {
+                abort_adapter('private runtime partial-map failure was not typed', 1);
+            }
+        }
+        $escapedEnvironment = $runtimeEnvironment;
+        $escapedEnvironment['XDG_CACHE_HOME'] = $runtimeEnvironment['XDG_DATA_HOME'];
+        try {
+            private_runtime_root(
+                static fn (string $name): string|false => $escapedEnvironment[$name] ?? false
+            );
+            abort_adapter('private runtime binding accepted an escaped XDG path', 1);
+        } catch (RuntimeException $error) {
+            if ($error->getMessage() !== 'XDG_CACHE_HOME escaped the private browser runtime root') {
+                abort_adapter('private runtime escape failure was not typed', 1);
+            }
+        }
+        $syncEvents = [];
+        sync_tree(
+            $runtimeRoot,
+            static function (string $path, bool $directory) use (&$syncEvents): void {
+                $syncEvents[] = [$path, $directory];
+            }
+        );
+        $directorySeen = false;
+        foreach ($syncEvents as [$path, $directory]) {
+            if (!$directory && $directorySeen) {
+                abort_adapter("private runtime file was synced after a directory: {$path}", 1);
+            }
+            $directorySeen = $directorySeen || $directory;
+        }
+        if ($syncEvents === [] || $syncEvents[0] !== [$runtimeCache, false]
+            || $syncEvents[count($syncEvents) - 1] !== [$runtimeRoot, true]) {
+            abort_adapter('private runtime sync ordering self-test failed', 1);
+        }
+        if (PHP_OS_FAMILY !== 'Windows') {
+            sync_tree($runtimeRoot);
         }
         $temporaryOutput = $syncRoot . DIRECTORY_SEPARATOR . 'temporary.pdf';
         $requestedOutput = $syncRoot . DIRECTORY_SEPARATOR . 'requested.pdf';
@@ -426,7 +554,7 @@ if ($mode === 'self-test') {
                 abort_adapter('artifact sync-plan symlink self-test setup failed', 1);
             }
             try {
-                artifact_sync_plan($syncRoot);
+                durability_sync_plan($syncRoot);
                 abort_adapter('artifact sync-plan followed a symbolic link', 1);
             } catch (RuntimeException) {
                 // Expected: benchmark artifact durability never follows links.
@@ -434,6 +562,15 @@ if ($mode === 'self-test') {
             unlink($link);
         }
     } finally {
+        if (is_string($runtimeCache)) {
+            @unlink($runtimeCache);
+        }
+        foreach (array_reverse(PRIVATE_RUNTIME_DIRECTORIES) as $variable => $_relative) {
+            if (isset($runtimeEnvironment[$variable])) {
+                @rmdir($runtimeEnvironment[$variable]);
+            }
+        }
+        @rmdir($runtimeRoot);
         @unlink($syncNested . DIRECTORY_SEPARATOR . 'cache.bin');
         @unlink($syncRoot . DIRECTORY_SEPARATOR . 'temporary.pdf');
         @unlink($syncRoot . DIRECTORY_SEPARATOR . 'requested.pdf');
