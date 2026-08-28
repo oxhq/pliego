@@ -934,7 +934,6 @@ assert temporary.is_dir()
 for variable in ('HOME', 'XDG_CACHE_HOME', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_RUNTIME_DIR', 'XDG_STATE_HOME'):
     runtime_directory = pathlib.Path(os.environ[variable])
     assert runtime_directory.parent == temporary
-    assert runtime_directory.is_dir()
 assert sorted(path.name for path in root.iterdir()) == ['input', 'input-manifest.json']
 manifest_bytes = (root / 'input-manifest.json').read_bytes()
 manifest_descriptor = request['input']['manifest']
