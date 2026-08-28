@@ -355,6 +355,20 @@ def validate_resource_usage(sample: dict[str, Any], path: str, violations: list[
             violations,
         )
     launch_argv = launch["argv"]
+    launch_context = launch["launch_context"]
+    for name in ("cwd", "tmpdir"):
+        candidate = PurePosixPath(launch_context[name])
+        if (
+            not candidate.is_absolute()
+            or ".." in candidate.parts
+            or str(candidate) != launch_context[name]
+        ):
+            violations.append(
+                Violation(
+                    f"{path}.resource_usage.launch_security.launch_context.{name}",
+                    "must be an absolute canonical path",
+                )
+            )
     target_classification = runtime_target(launch_argv)
     require_equal(
         f"{path}.resource_usage.launch_security.temporary_storage.runtime_environment",
@@ -375,6 +389,98 @@ def validate_resource_usage(sample: dict[str, Any], path: str, violations: list[
         ENGINE_ACCOUNT_HOME,
         violations,
     )
+    native_bindings_proof = temporary_storage["native_api2_path_bindings"]
+    native_api2 = len(launch_argv) >= 2 and launch_argv[1] == "render-api2"
+    if native_api2:
+        if not isinstance(native_bindings_proof, dict):
+            violations.append(
+                Violation(
+                    f"{path}.resource_usage.launch_security.temporary_storage.native_api2_path_bindings",
+                    "native API 2 must retain job and temporary storage identities",
+                )
+            )
+        else:
+            pre = native_bindings_proof["pre"]
+            post = native_bindings_proof["post"]
+            require_equal(
+                f"{path}.resource_usage.launch_security.temporary_storage.native_api2_path_bindings.post",
+                post,
+                pre,
+                violations,
+            )
+            pre_bindings = pre["bindings"]
+            resolved: dict[str, PurePosixPath] = {}
+            identities: set[tuple[int, int]] = set()
+            devices: set[int] = set()
+            for name in ("controlled_root", "sandbox", "job", "temporary"):
+                binding = pre_bindings[name]
+                candidate = PurePosixPath(binding["path"])
+                if (
+                    not candidate.is_absolute()
+                    or ".." in candidate.parts
+                    or str(candidate) != binding["path"]
+                ):
+                    violations.append(
+                        Violation(
+                            f"{path}.resource_usage.launch_security.temporary_storage."
+                            f"native_api2_path_bindings.pre.bindings.{name}.path",
+                            "must be an absolute canonical path",
+                        )
+                    )
+                resolved[name] = candidate
+                identity = binding["identity"]
+                devices.add(identity["device"])
+                identities.add((identity["device"], identity["inode"]))
+            if (
+                resolved["job"].name != "job"
+                or resolved["temporary"].name != "temporary"
+                or resolved["job"].parent != resolved["sandbox"]
+                or resolved["temporary"].parent != resolved["sandbox"]
+                or resolved["sandbox"].parent != resolved["controlled_root"]
+            ):
+                violations.append(
+                    Violation(
+                        f"{path}.resource_usage.launch_security.temporary_storage.native_api2_path_bindings.pre",
+                        "must bind job/temporary siblings under a sandbox below the controlled root",
+                    )
+                )
+            require_equal(
+                f"{path}.resource_usage.launch_security.temporary_storage."
+                "native_api2_path_bindings.pre.bindings.job.path",
+                str(resolved["job"]),
+                launch_context["cwd"],
+                violations,
+            )
+            require_equal(
+                f"{path}.resource_usage.launch_security.temporary_storage."
+                "native_api2_path_bindings.pre.bindings.temporary.path",
+                str(resolved["temporary"]),
+                launch_context["tmpdir"],
+                violations,
+            )
+            if len(identities) != 4:
+                violations.append(
+                    Violation(
+                        f"{path}.resource_usage.launch_security.temporary_storage."
+                        "native_api2_path_bindings.pre.bindings",
+                        "must bind four distinct directory identities",
+                    )
+                )
+            if len(devices) != 1:
+                violations.append(
+                    Violation(
+                        f"{path}.resource_usage.launch_security.temporary_storage."
+                        "native_api2_path_bindings.pre.bindings",
+                        "must bind the controlled root, sandbox, job, and temporary directory on one device",
+                    )
+                )
+    elif native_bindings_proof is not None:
+        violations.append(
+            Violation(
+                f"{path}.resource_usage.launch_security.temporary_storage.native_api2_path_bindings",
+                "non-native targets must not claim native API 2 storage identities",
+            )
+        )
     bindings_proof = temporary_storage["runtime_path_bindings"]
     if target_classification == BROWSERSHOT_TARGET:
         if not isinstance(bindings_proof, dict):

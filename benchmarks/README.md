@@ -58,6 +58,10 @@ benchmarks/
 └── reports/                   Comparison reports land here
 ```
 
+These `v1` evidence schemas remain pre-publication contracts until the first
+immutable hosted campaign is released. No earlier public evidence bundle is
+accepted as a compatibility baseline for this required storage-binding field.
+
 ## Prerequisites
 
 * Authoritative baselines require dedicated or self-hosted **Linux x86_64,
@@ -94,6 +98,13 @@ benchmarks/
   fresh mode-0700 child as `TMPDIR`; temporary database writes remain
   block-I/O-accounted while inherited no-atime and synchronous file/directory
   updates prevent scratch access or deletion from escaping the zero-dirty gate.
+  Every target publishes its PDF below the same inherited-flags storage root,
+  so synchronous publication cost is part of each measured target. Native API
+  2 additionally keeps its job input and publication tree beside `TMPDIR` under
+  one fresh inherited-flags sandbox; the sampler retains and validates those
+  pre/post path identities in each sample. This binding assumes the exact
+  hash-pinned renderer is trusted; it detects path replacement but is not a
+  sandbox against a renderer deliberately attempting inode-reuse attacks.
   Browsershot additionally receives fresh private `HOME` and XDG roots below
   that same measured scratch directory. Pliego and dompdf retain the exact
   `/nonexistent/pliego-benchmark-engine` account home and receive no XDG roots.

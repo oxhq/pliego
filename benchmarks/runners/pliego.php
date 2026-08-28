@@ -925,11 +925,11 @@ function seal_benchmark_tree(string $path): void
 /** @return array{sandbox: string, root: string, temporary: string, request: string, pdf: string, scene: string, bundle: string} */
 function stage_api2_job(array $state): array
 {
-    $sandboxRoot = sys_get_temp_dir() . '/pliego-bench-api2-' . bin2hex(random_bytes(8));
+    $sandboxRoot = PHP_OS_FAMILY === 'Linux'
+        ? benchmark_engine_temporary_path('pliego-bench-api2-')
+        : sys_get_temp_dir() . '/pliego-bench-api2-' . bin2hex(random_bytes(8));
     $jobRoot = $sandboxRoot . DIRECTORY_SEPARATOR . 'job';
-    $temporaryRoot = PHP_OS_FAMILY === 'Linux'
-        ? benchmark_engine_temporary_path('pliego-bench-api2-temp-')
-        : $sandboxRoot . DIRECTORY_SEPARATOR . 'temporary';
+    $temporaryRoot = $sandboxRoot . DIRECTORY_SEPARATOR . 'temporary';
     if (PHP_OS_FAMILY === 'Linux') {
         prepare_engine_directory($sandboxRoot, $state['engineUid'], $state['engineGid']);
     } elseif (!mkdir($sandboxRoot, 0700) || !chmod($sandboxRoot, 0700)) {
@@ -1306,7 +1306,9 @@ function run_adapter_sample(array $state, int $index): array
         // TMPDIR; keep both Chrome and Chromium below Linux's 108-byte ceiling.
         ? benchmark_adapter_temporary_path($state['binary'])
         : null;
-    $outDir = sys_get_temp_dir() . '/pliego-bench-out-' . bin2hex(random_bytes(8));
+    $outDir = PHP_OS_FAMILY === 'Linux'
+        ? benchmark_engine_temporary_path('pliego-bench-out-')
+        : sys_get_temp_dir() . '/pliego-bench-out-' . bin2hex(random_bytes(8));
     if (PHP_OS_FAMILY === 'Linux') {
         prepare_engine_directory($outDir, $state['engineUid'], $state['engineGid']);
         prepare_engine_directory($temporaryDir, $state['engineUid'], $state['engineGid']);

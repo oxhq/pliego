@@ -92,6 +92,10 @@ def resource_usage() -> dict:
                 "device": 1,
                 "inode": 2,
             },
+            "launch_context": {
+                "cwd": "/var/lib/pliego-benchmark-engine-temp/pliego-bench-api2-fixture/job",
+                "tmpdir": "/var/lib/pliego-benchmark-engine-temp/pliego-bench-api2-fixture/temporary",
+            },
             "status": {
                 "uid": [991, 991, 991, 991],
                 "gid": [991, 991, 991, 991],
@@ -116,6 +120,30 @@ def resource_usage() -> dict:
                 "directory_sync": "FS_DIRSYNC_FL",
                 "file_sync": "FS_SYNC_FL",
                 "filesystem": "ext4",
+                "native_api2_path_bindings": {
+                    phase: {
+                        "contract": "native-api2-storage-bindings-v1",
+                        "bindings": {
+                            "controlled_root": {
+                                "path": "/var/lib/pliego-benchmark-engine-temp",
+                                "identity": {"device": 1, "inode": 19},
+                            },
+                            "sandbox": {
+                                "path": "/var/lib/pliego-benchmark-engine-temp/pliego-bench-api2-fixture",
+                                "identity": {"device": 1, "inode": 20},
+                            },
+                            "job": {
+                                "path": "/var/lib/pliego-benchmark-engine-temp/pliego-bench-api2-fixture/job",
+                                "identity": {"device": 1, "inode": 21},
+                            },
+                            "temporary": {
+                                "path": "/var/lib/pliego-benchmark-engine-temp/pliego-bench-api2-fixture/temporary",
+                                "identity": {"device": 1, "inode": 22},
+                            },
+                        },
+                    }
+                    for phase in ("pre", "post")
+                },
                 "runtime_environment": "fixed-account-home-v1",
                 "runtime_path_bindings": None,
                 "runtime_target": "generic-benchmark-engine-v1",
@@ -373,6 +401,7 @@ def main() -> None:
     browser_launch["argv"] = [browser_path, "render"]
     browser_launch["executable"]["path"] = browser_path
     browser_launch["temporary_storage"]["runtime_environment"] = "fresh-private-home-xdg-v1"
+    browser_launch["temporary_storage"]["native_api2_path_bindings"] = None
     browser_launch["temporary_storage"]["runtime_target"] = "browsershot-adapter-v1"
     runtime_bindings = {
         "contract": "runtime-path-bindings-v1",
@@ -404,6 +433,17 @@ def main() -> None:
     browser_violations: list[validate_result.Violation] = []
     validate_result.validate_resource_usage(browser_sample, "$.sample", browser_violations)
     assert not browser_violations, browser_violations
+    false_native_browser = deepcopy(browser_sample)
+    false_native_browser["resource_usage"]["launch_security"]["temporary_storage"][
+        "native_api2_path_bindings"
+    ] = deepcopy(
+        valid["samples"][0]["resource_usage"]["launch_security"]["temporary_storage"][
+            "native_api2_path_bindings"
+        ]
+    )
+    false_native_browser_violations: list[validate_result.Violation] = []
+    validate_result.validate_resource_usage(false_native_browser, "$.sample", false_native_browser_violations)
+    assert any("non-native targets" in str(item) for item in false_native_browser_violations)
     tampered_browser = deepcopy(browser_sample)
     tampered_browser["resource_usage"]["launch_security"]["temporary_storage"]["runtime_path_bindings"]["post"][
         "bindings"
@@ -624,6 +664,48 @@ def main() -> None:
             access_time="relatime"
         ),
         "launch_security.temporary_storage",
+    )
+    changed(
+        valid,
+        lambda value: value["samples"][0]["resource_usage"]["launch_security"]["temporary_storage"].update(
+            native_api2_path_bindings=None
+        ),
+        "native API 2 must retain",
+    )
+    changed(
+        valid,
+        lambda value: value["samples"][0]["resource_usage"]["launch_security"]["temporary_storage"][
+            "native_api2_path_bindings"
+        ]["post"]["bindings"]["job"]["identity"].update(inode=99),
+        "native_api2_path_bindings.post",
+    )
+    changed(
+        valid,
+        lambda value: value["samples"][0]["resource_usage"]["launch_security"]["launch_context"].update(
+            cwd="/var/lib/pliego-benchmark-engine-temp/other/job"
+        ),
+        "bindings.job.path",
+    )
+    changed(
+        valid,
+        lambda value: value["samples"][0]["resource_usage"]["launch_security"]["temporary_storage"][
+            "native_api2_path_bindings"
+        ]["pre"]["bindings"]["job"].update(path="/var/lib/pliego-benchmark-engine-temp/wrong"),
+        "job/temporary siblings",
+    )
+    changed(
+        valid,
+        lambda value: value["samples"][0]["resource_usage"]["launch_security"]["temporary_storage"][
+            "native_api2_path_bindings"
+        ]["pre"]["bindings"]["job"]["identity"].update(inode=20),
+        "four distinct directory identities",
+    )
+    changed(
+        valid,
+        lambda value: value["samples"][0]["resource_usage"]["launch_security"]["temporary_storage"][
+            "native_api2_path_bindings"
+        ]["pre"]["bindings"]["temporary"]["identity"].update(device=2),
+        "on one device",
     )
     changed(
         valid,

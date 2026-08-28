@@ -995,6 +995,39 @@ def engine_temporary_directory_identity(path: Path) -> tuple[int, int]:
     return metadata.st_dev, metadata.st_ino
 
 
+def controlled_storage_root_identity(path: Path) -> tuple[int, int]:
+    """Bind the canonical root that carries the inherited storage flags."""
+
+    try:
+        resolved = path.resolve(strict=True)
+        metadata = os.stat(path, follow_symlinks=False)
+    except OSError as error:
+        raise incomplete(
+            "ENGINE_TEMPORARY_ROOT_UNSAFE",
+            f"cannot bind controlled storage root: {error}",
+        ) from error
+    if path != resolved or not stat.S_ISDIR(metadata.st_mode):
+        raise incomplete(
+            "ENGINE_TEMPORARY_ROOT_UNSAFE",
+            "controlled storage root must be a canonical directory",
+        )
+    if metadata.st_uid != 0 or metadata.st_gid != 0 or stat.S_IMODE(metadata.st_mode) != 0o711:
+        raise incomplete(
+            "ENGINE_TEMPORARY_ROOT_UNSAFE",
+            "controlled storage root must be root-owned with mode 0711",
+        )
+    if mountinfo_filesystem_type(path) != "ext4":
+        raise incomplete("ENGINE_TEMPORARY_BACKING_UNSAFE", "controlled storage root must use ext4")
+    flags = directory_inode_flags(path)
+    required = FS_DIRSYNC_FL | FS_SYNC_FL | FS_NOATIME_FL
+    if flags & required != required:
+        raise incomplete(
+            "ENGINE_TEMPORARY_ROOT_UNSAFE",
+            "controlled storage root must carry FS_NOATIME_FL, FS_SYNC_FL, and FS_DIRSYNC_FL",
+        )
+    return metadata.st_dev, metadata.st_ino
+
+
 def revalidate_engine_temporary_directory(
     path: Path, account: EngineAccount, expected_identity: tuple[int, int]
 ) -> None:
@@ -1004,6 +1037,113 @@ def revalidate_engine_temporary_directory(
             "ENGINE_TEMPORARY_DIRECTORY_REPLACED",
             "engine temporary directory identity changed during execution",
         )
+
+
+def bind_native_api2_storage(
+    cwd: Path,
+    temporary: Path,
+    account: EngineAccount,
+    expected: dict[str, tuple[int, int]] | None = None,
+    require_pristine_job: bool = False,
+) -> dict[str, tuple[int, int]]:
+    """Bind the native job and scratch siblings inside one controlled sandbox."""
+
+    job = Path(validate_engine_temporary_directory(cwd, account))
+    scratch = Path(validate_engine_temporary_directory(temporary, account))
+    if job.name != "job" or scratch.name != "temporary" or job.parent != scratch.parent:
+        raise incomplete(
+            "NATIVE_API2_STORAGE_UNSAFE",
+            "native API 2 cwd and TMPDIR must be job/temporary siblings",
+        )
+    sandbox = Path(validate_engine_temporary_directory(job.parent, account))
+    controlled_root = sandbox.parent
+    bindings = {
+        "controlled_root": controlled_storage_root_identity(controlled_root),
+        "sandbox": engine_temporary_directory_identity(sandbox),
+        "job": engine_temporary_directory_identity(job),
+        "temporary": engine_temporary_directory_identity(scratch),
+    }
+    if len(set(bindings.values())) != len(bindings):
+        raise incomplete(
+            "NATIVE_API2_STORAGE_UNSAFE",
+            "native API 2 storage directories must have distinct identities",
+        )
+    if require_pristine_job:
+        try:
+            with os.scandir(job) as entries:
+                job_entries = {entry.name: entry for entry in entries}
+            with os.scandir(scratch) as entries:
+                scratch_entries = list(entries)
+        except OSError as error:
+            raise incomplete(
+                "NATIVE_API2_STORAGE_UNSAFE",
+                f"cannot inspect native API 2 storage: {error}",
+            ) from error
+        if sorted(job_entries) != ["input", "input-manifest.json"] or scratch_entries:
+            raise incomplete(
+                "NATIVE_API2_STORAGE_UNSAFE",
+                "native API 2 storage was not pristine before measurement",
+            )
+        input_entry = job_entries["input"]
+        manifest_entry = job_entries["input-manifest.json"]
+        try:
+            input_metadata = input_entry.stat(follow_symlinks=False)
+            manifest_metadata = manifest_entry.stat(follow_symlinks=False)
+        except OSError as error:
+            raise incomplete(
+                "NATIVE_API2_STORAGE_UNSAFE",
+                f"cannot inspect native API 2 input types: {error}",
+            ) from error
+        if (
+            not input_entry.is_dir(follow_symlinks=False)
+            or not manifest_entry.is_file(follow_symlinks=False)
+            or input_metadata.st_uid != account.uid
+            or input_metadata.st_gid != account.gid
+            or stat.S_IMODE(input_metadata.st_mode) != 0o700
+            or manifest_metadata.st_uid != account.uid
+            or manifest_metadata.st_gid != account.gid
+            or stat.S_IMODE(manifest_metadata.st_mode) != 0o600
+        ):
+            raise incomplete(
+                "NATIVE_API2_STORAGE_UNSAFE",
+                "native API 2 input must be an owned mode-0700 directory and manifest an owned mode-0600 file",
+            )
+    if len({device for device, _ in bindings.values()}) != 1:
+        raise incomplete(
+            "NATIVE_API2_STORAGE_UNSAFE",
+            "native API 2 storage bindings must share one filesystem device",
+        )
+    if expected is not None and bindings != expected:
+        raise incomplete(
+            "NATIVE_API2_STORAGE_REPLACED",
+            "native API 2 storage identity changed during execution",
+        )
+    return bindings
+
+
+def native_api2_storage_snapshot(
+    cwd: Path,
+    temporary: Path,
+    bindings: dict[str, tuple[int, int]],
+) -> dict[str, Any]:
+    """Serialize the bound native API 2 storage topology for retained evidence."""
+
+    paths = {
+        "controlled_root": cwd.parent.parent,
+        "sandbox": cwd.parent,
+        "job": cwd,
+        "temporary": temporary,
+    }
+    return {
+        "contract": "native-api2-storage-bindings-v1",
+        "bindings": {
+            name: {
+                "path": str(paths[name]),
+                "identity": {"device": identity[0], "inode": identity[1]},
+            }
+            for name, identity in bindings.items()
+        },
+    }
 
 
 def prepare_runtime_directories(root: Path, account: EngineAccount) -> dict[str, str]:
@@ -1210,6 +1350,7 @@ def fork_stopped(
             with contextlib.suppress(OSError):
                 os.close(descriptor)
         raise
+    launch_environment = engine_environment(account, temporary_directory, runtime_directories)
     handshake_read, handshake_write = os.pipe2(os.O_CLOEXEC)
     try:
         pid = os.fork()
@@ -1229,7 +1370,8 @@ def fork_stopped(
                 payload = {
                     "ok": True,
                     "executable": command[0],
-                    "cwd": cwd,
+                    "cwd": os.getcwd(),
+                    "tmpdir": launch_environment["TMPDIR"],
                     "identity": {
                         "uid": os.getuid(),
                         "euid": os.geteuid(),
@@ -1249,7 +1391,7 @@ def fork_stopped(
                 os.execve(
                     command[0],
                     command,
-                    engine_environment(account, temporary_directory, runtime_directories),
+                    launch_environment,
                 )
             except BaseException as error:
                 with contextlib.suppress(BaseException):
@@ -1359,6 +1501,16 @@ def finish_authority_handshake(
         )
     if handshake.get("executable_writable") is not False:
         raise incomplete("ENGINE_EXECUTABLE_MUTABLE", "engine account can write its executable")
+    launch_context: dict[str, str] = {}
+    for name in ("cwd", "tmpdir"):
+        value = handshake.get(name)
+        candidate = Path(value) if isinstance(value, str) else None
+        if candidate is None or not candidate.is_absolute() or ".." in candidate.parts or str(candidate) != value:
+            raise incomplete(
+                "ENGINE_LAUNCH_CONTEXT_INVALID",
+                f"launcher reported a non-canonical {name}: {value!r}",
+            )
+        launch_context[name] = value
     probes = handshake.get("migration_write_probes")
     if not isinstance(probes, dict) or set(probes) != {"parent", "harness", "staging", "measurement"}:
         raise incomplete("ENGINE_MIGRATION_PROBE_INVALID", "launcher omitted cgroup migration write probes")
@@ -1373,6 +1525,7 @@ def finish_authority_handshake(
         "account": account.name,
         "uid": account.uid,
         "gid": account.gid,
+        "launch_context": launch_context,
         "status": security,
         "migration_write_probes": probes,
     }
@@ -1548,6 +1701,16 @@ def sample_command(
     engine_tmpdir = engine_temporary_directory(tuple(command), account, temporary_directory)
     engine_tmpdir_identity = engine_temporary_directory_identity(Path(engine_tmpdir))
     target_classification = runtime_target(argv)
+    native_api2_storage = (
+        bind_native_api2_storage(
+            Path(cwd),
+            Path(engine_tmpdir),
+            account,
+            require_pristine_job=True,
+        )
+        if len(argv) >= 2 and argv[1] == "render-api2"
+        else None
+    )
     private_browser_runtime = target_classification == BROWSERSHOT_TARGET
     runtime_directories = prepare_runtime_directories(Path(engine_tmpdir), account) if private_browser_runtime else None
     runtime_bindings_before = (
@@ -1604,6 +1767,12 @@ def sample_command(
                 proc_root,
             )
             handshake_read = None
+            expected_launch_context = {"cwd": str(Path(cwd)), "tmpdir": engine_tmpdir}
+            if launch_security["launch_context"] != expected_launch_context:
+                raise incomplete(
+                    "ENGINE_LAUNCH_CONTEXT_INVALID",
+                    "launcher cwd or TMPDIR differs from the bound sampler request",
+                )
             launch_security.update(
                 {
                     "argv": list(argv),
@@ -1739,6 +1908,22 @@ def sample_command(
             if final["cgroup_events"]["populated"] != 0:
                 raise incomplete("CGROUP_CLEANUP_FAILED", "render cgroup repopulated during accounting settle")
             revalidate_engine_temporary_directory(Path(engine_tmpdir), account, engine_tmpdir_identity)
+            native_api2_path_bindings = None
+            if native_api2_storage is not None:
+                native_api2_storage_after = bind_native_api2_storage(
+                    Path(cwd),
+                    Path(engine_tmpdir),
+                    account,
+                    expected=native_api2_storage,
+                )
+                native_api2_path_bindings = {
+                    "pre": native_api2_storage_snapshot(
+                        Path(cwd), Path(engine_tmpdir), native_api2_storage
+                    ),
+                    "post": native_api2_storage_snapshot(
+                        Path(cwd), Path(engine_tmpdir), native_api2_storage_after
+                    ),
+                }
             account_home_after = validate_engine_account_home(account)
             if account_home_after != account_home_before:
                 raise incomplete("ENGINE_ACCOUNT_HOME_REPLACED", "engine account home state changed during execution")
@@ -1764,6 +1949,7 @@ def sample_command(
                 "file_sync": "FS_SYNC_FL",
                 "filesystem": "ext4",
                 "runtime_environment": runtime_contract(target_classification),
+                "native_api2_path_bindings": native_api2_path_bindings,
                 "runtime_target": target_classification,
                 "account_home": account_home_after,
                 "runtime_path_bindings": runtime_path_bindings,

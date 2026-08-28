@@ -273,6 +273,11 @@ def fixture_proofs() -> None:
                     | process_tree_sampler.FS_NOATIME_FL
                 ),
             ),
+            mock.patch.object(
+                process_tree_sampler,
+                "controlled_storage_root_identity",
+                side_effect=process_tree_sampler.engine_temporary_directory_identity,
+            ),
         ):
             root = Path(raw).resolve()
             artifacts = root / "artifacts"
@@ -285,6 +290,140 @@ def fixture_proofs() -> None:
                 os.getgid(),
                 process_tree_sampler.ENGINE_ACCOUNT_HOME,
             )
+            native_sandbox = root / "native-sandbox"
+            native_job = native_sandbox / "job"
+            native_temporary = native_sandbox / "temporary"
+            native_sandbox.mkdir(mode=0o700)
+            native_job.mkdir(mode=0o700)
+            native_temporary.mkdir(mode=0o700)
+            (native_job / "input").mkdir(mode=0o700)
+            (native_job / "input-manifest.json").write_bytes(b"{}\n")
+            (native_job / "input-manifest.json").chmod(0o600)
+            native_bindings = process_tree_sampler.bind_native_api2_storage(
+                native_job,
+                native_temporary,
+                current_account,
+                require_pristine_job=True,
+            )
+            assert native_bindings == {
+                "controlled_root": process_tree_sampler.engine_temporary_directory_identity(root),
+                "sandbox": process_tree_sampler.engine_temporary_directory_identity(native_sandbox),
+                "job": process_tree_sampler.engine_temporary_directory_identity(native_job),
+                "temporary": process_tree_sampler.engine_temporary_directory_identity(native_temporary),
+            }
+
+            wrong_job = native_sandbox / "work"
+            wrong_job.mkdir(mode=0o700)
+            must_be_incomplete(
+                "NATIVE_API2_STORAGE_UNSAFE",
+                lambda: process_tree_sampler.bind_native_api2_storage(
+                    wrong_job, native_temporary, current_account
+                ),
+            )
+            wrong_temporary = native_sandbox / "scratch"
+            wrong_temporary.mkdir(mode=0o700)
+            must_be_incomplete(
+                "NATIVE_API2_STORAGE_UNSAFE",
+                lambda: process_tree_sampler.bind_native_api2_storage(
+                    native_job, wrong_temporary, current_account
+                ),
+            )
+            other_sandbox = root / "other-native-sandbox"
+            other_temporary = other_sandbox / "temporary"
+            other_sandbox.mkdir(mode=0o700)
+            other_temporary.mkdir(mode=0o700)
+            must_be_incomplete(
+                "NATIVE_API2_STORAGE_UNSAFE",
+                lambda: process_tree_sampler.bind_native_api2_storage(
+                    native_job, other_temporary, current_account
+                ),
+            )
+
+            unexpected_job_entry = native_job / "unexpected"
+            unexpected_job_entry.write_bytes(b"unexpected")
+            must_be_incomplete(
+                "NATIVE_API2_STORAGE_UNSAFE",
+                lambda: process_tree_sampler.bind_native_api2_storage(
+                    native_job,
+                    native_temporary,
+                    current_account,
+                    require_pristine_job=True,
+                ),
+            )
+            unexpected_job_entry.unlink()
+            unexpected_scratch_entry = native_temporary / "unexpected"
+            unexpected_scratch_entry.write_bytes(b"unexpected")
+            must_be_incomplete(
+                "NATIVE_API2_STORAGE_UNSAFE",
+                lambda: process_tree_sampler.bind_native_api2_storage(
+                    native_job,
+                    native_temporary,
+                    current_account,
+                    require_pristine_job=True,
+                ),
+            )
+            unexpected_scratch_entry.unlink()
+
+            original_input = native_job / "real-input"
+            (native_job / "input").rename(original_input)
+            (native_job / "input").symlink_to(original_input, target_is_directory=True)
+            must_be_incomplete(
+                "NATIVE_API2_STORAGE_UNSAFE",
+                lambda: process_tree_sampler.bind_native_api2_storage(
+                    native_job,
+                    native_temporary,
+                    current_account,
+                    require_pristine_job=True,
+                ),
+            )
+            (native_job / "input").unlink()
+            original_input.rename(native_job / "input")
+
+            with mock.patch.object(process_tree_sampler, "mountinfo_filesystem_type", return_value="tmpfs"):
+                must_be_incomplete(
+                    "ENGINE_TEMPORARY_BACKING_UNSAFE",
+                    lambda: process_tree_sampler.bind_native_api2_storage(
+                        native_job, native_temporary, current_account
+                    ),
+                )
+            required_flags = (
+                process_tree_sampler.FS_DIRSYNC_FL
+                | process_tree_sampler.FS_SYNC_FL
+                | process_tree_sampler.FS_NOATIME_FL
+            )
+            for missing_flag in (
+                process_tree_sampler.FS_DIRSYNC_FL,
+                process_tree_sampler.FS_SYNC_FL,
+                process_tree_sampler.FS_NOATIME_FL,
+            ):
+                with mock.patch.object(
+                    process_tree_sampler,
+                    "directory_inode_flags",
+                    return_value=required_flags & ~missing_flag,
+                ):
+                    must_be_incomplete(
+                        "ENGINE_TEMPORARY_DIRECTORY_UNSAFE",
+                        lambda: process_tree_sampler.bind_native_api2_storage(
+                            native_job, native_temporary, current_account
+                        ),
+                    )
+
+            replaced_job = native_sandbox / "replaced-job"
+            native_job.rename(replaced_job)
+            native_job.mkdir(mode=0o700)
+            (native_job / "input").mkdir(mode=0o700)
+            (native_job / "input-manifest.json").write_bytes(b"{}\n")
+            (native_job / "input-manifest.json").chmod(0o600)
+            must_be_incomplete(
+                "NATIVE_API2_STORAGE_REPLACED",
+                lambda: process_tree_sampler.bind_native_api2_storage(
+                    native_job,
+                    native_temporary,
+                    current_account,
+                    expected=native_bindings,
+                ),
+            )
+
             runtime_environment = process_tree_sampler.prepare_runtime_directories(temporary, current_account)
             assert runtime_environment == {
                 variable: str(temporary / name)
@@ -404,6 +543,8 @@ def fixture_proofs() -> None:
         }
         handshake = {
             "ok": True,
+            "cwd": "/fixture/job",
+            "tmpdir": "/fixture/temporary",
             "executable_accessible": True,
             "executable_writable": False,
             "cwd_accessible": True,
@@ -451,6 +592,10 @@ def fixture_proofs() -> None:
                 cgroup_root,
             )
         assert retained["network_isolation"] == network
+        assert retained["launch_context"] == {
+            "cwd": "/fixture/job",
+            "tmpdir": "/fixture/temporary",
+        }
 
     with tempfile.TemporaryDirectory() as raw:
         executable = Path(raw) / "true"
@@ -825,9 +970,18 @@ def sampled(command: list[str], descendant_grace_ms: float = 1000.0) -> dict:
     temporary_root = os.environ.get("PLIEGO_BENCHMARK_ENGINE_TEMP_ROOT")
     assert temporary_root, "live sampler proof requires PLIEGO_BENCHMARK_ENGINE_TEMP_ROOT"
     with tempfile.TemporaryDirectory(dir=temporary_root) as raw:
-        temporary = Path(raw).resolve()
-        os.chown(temporary, account.uid, account.gid)
-        temporary.chmod(0o700)
+        sandbox = Path(raw).resolve()
+        os.chown(sandbox, account.uid, account.gid)
+        sandbox.chmod(0o700)
+        job = sandbox / "job"
+        temporary = sandbox / "temporary"
+        job.mkdir(mode=0o700)
+        temporary.mkdir(mode=0o700)
+        (job / "input").mkdir(mode=0o700)
+        (job / "input-manifest.json").write_bytes(b"{}\n")
+        for path in (job, temporary, job / "input", job / "input-manifest.json"):
+            os.chown(path, account.uid, account.gid)
+            path.chmod(0o700 if path.is_dir() else 0o600)
         result = subprocess.run(
             [
                 sys.executable,
@@ -839,7 +993,7 @@ def sampled(command: list[str], descendant_grace_ms: float = 1000.0) -> dict:
                 "--descendant-grace-ms",
                 str(descendant_grace_ms),
                 "--cwd",
-                str(Path(command[0]).parent),
+                str(job),
                 "--temporary-directory",
                 str(temporary),
                 "--",
@@ -1023,6 +1177,9 @@ assert request['api'] == 2
 root = pathlib.Path.cwd()
 temporary = pathlib.Path(os.environ['TMPDIR'])
 assert temporary.is_dir()
+assert root.name == 'job'
+assert temporary.name == 'temporary'
+assert root.parent == temporary.parent
 assert sorted(path.name for path in root.iterdir()) == ['input', 'input-manifest.json']
 manifest_bytes = (root / 'input-manifest.json').read_bytes()
 manifest_descriptor = request['input']['manifest']
@@ -1142,6 +1299,20 @@ os.fsync(sys.stdout.fileno())
         assert sample["resource_usage"]["root_start_ticks"] > 0
         assert sample["resource_usage"]["cgroup_drained"] is True
         assert sample["resource_usage"]["launch_security"]["argv"] == [str(engine.resolve()), "render-api2"]
+        native_storage = sample["resource_usage"]["launch_security"]["temporary_storage"][
+            "native_api2_path_bindings"
+        ]
+        assert native_storage["pre"] == native_storage["post"]
+        bindings = native_storage["pre"]["bindings"]
+        sandbox = Path(bindings["sandbox"]["path"])
+        assert Path(bindings["job"]["path"]) == sandbox / "job"
+        assert Path(bindings["temporary"]["path"]) == sandbox / "temporary"
+        assert len(
+            {
+                (binding["identity"]["device"], binding["identity"]["inode"])
+                for binding in bindings.values()
+            }
+        ) == 4
         assert sample["memory_peak_bytes"] == sample["resource_usage"]["memory_peak_bytes"]
         violations: list[validate_result.Violation] = []
         validate_result.validate_resource_usage(sample, "$.sample", violations)

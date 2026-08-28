@@ -473,7 +473,7 @@
     "launch_security": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["account", "uid", "gid", "argv", "executable", "status", "migration_write_probes", "temporary_storage"],
+      "required": ["account", "uid", "gid", "argv", "executable", "launch_context", "status", "migration_write_probes", "temporary_storage"],
       "properties": {
         "account": { "const": "pliego-benchmark-engine" },
         "uid": { "type": "integer", "minimum": 1 },
@@ -492,6 +492,15 @@
             "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
             "device": { "type": "integer", "minimum": 0 },
             "inode": { "type": "integer", "minimum": 1 }
+          }
+        },
+        "launch_context": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["cwd", "tmpdir"],
+          "properties": {
+            "cwd": { "type": "string", "minLength": 1 },
+            "tmpdir": { "type": "string", "minLength": 1 }
           }
         },
         "status": {
@@ -534,13 +543,22 @@
         "temporary_storage": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["access_time", "account_home", "directory_sync", "file_sync", "filesystem", "runtime_environment", "runtime_path_bindings", "runtime_target", "scope"],
+          "required": ["access_time", "account_home", "directory_sync", "file_sync", "filesystem", "native_api2_path_bindings", "runtime_environment", "runtime_path_bindings", "runtime_target", "scope"],
           "properties": {
             "access_time": { "const": "FS_NOATIME_FL" },
             "account_home": { "$ref": "#/definitions/account_home_proof" },
             "directory_sync": { "const": "FS_DIRSYNC_FL" },
             "file_sync": { "const": "FS_SYNC_FL" },
             "filesystem": { "const": "ext4" },
+            "native_api2_path_bindings": {
+              "type": ["object", "null"],
+              "additionalProperties": false,
+              "required": ["pre", "post"],
+              "properties": {
+                "pre": { "$ref": "#/definitions/native_api2_storage_snapshot" },
+                "post": { "$ref": "#/definitions/native_api2_storage_snapshot" }
+              }
+            },
             "runtime_environment": {
               "enum": ["fixed-account-home-v1", "fresh-private-home-xdg-v1"]
             },
@@ -594,6 +612,34 @@
       "properties": {
         "device": { "type": "integer", "minimum": 0 },
         "inode": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "native_api2_storage_snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bindings", "contract"],
+      "properties": {
+        "bindings": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["controlled_root", "sandbox", "job", "temporary"],
+          "properties": {
+            "controlled_root": { "$ref": "#/definitions/storage_path_binding" },
+            "sandbox": { "$ref": "#/definitions/storage_path_binding" },
+            "job": { "$ref": "#/definitions/storage_path_binding" },
+            "temporary": { "$ref": "#/definitions/storage_path_binding" }
+          }
+        },
+        "contract": { "const": "native-api2-storage-bindings-v1" }
+      }
+    },
+    "storage_path_binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["identity", "path"],
+      "properties": {
+        "identity": { "$ref": "#/definitions/filesystem_identity" },
+        "path": { "type": "string", "minLength": 1 }
       }
     },
     "runtime_path_snapshot": {

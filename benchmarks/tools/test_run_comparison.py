@@ -120,6 +120,8 @@ def measured_sample(target_id: str, index: int) -> dict[str, Any]:
     usage["launch_security"]["executable"]["path"] = identity["engine"]["binary_path"]
     usage["launch_security"]["executable"]["sha256"] = identity["engine"]["binary_sha256"]
     temporary_storage = usage["launch_security"]["temporary_storage"]
+    if target_id != "pliego-0.3.3":
+        temporary_storage["native_api2_path_bindings"] = None
     if target_id == "browsershot-5.4.0-puppeteer-25.8.0":
         temporary_storage["runtime_environment"] = "fresh-private-home-xdg-v1"
         temporary_storage["runtime_target"] = "browsershot-adapter-v1"
