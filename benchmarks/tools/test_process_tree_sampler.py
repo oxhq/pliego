@@ -842,6 +842,7 @@ def sync_directory(path):
 
 assert sys.argv[1:] == ['render-api2']
 request_bytes = sys.stdin.buffer.read()
+os.fsync(sys.stdin.fileno())
 request = json.loads(request_bytes)
 assert request_bytes == (json.dumps(request, separators=(',', ':')) + '\\n').encode()
 assert request['api'] == 2
