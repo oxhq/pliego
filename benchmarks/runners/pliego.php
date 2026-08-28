@@ -851,6 +851,14 @@ function sync_benchmark_path(string $path, bool $directory): void
     fclose($stream);
 }
 
+function verify_staged_bytes(string $path, string $expected, string $label): void
+{
+    $actual = file_get_contents($path);
+    if (!is_string($actual) || $actual !== $expected) {
+        fail("staged benchmark {$label} differs from its canonical bytes");
+    }
+}
+
 function seal_benchmark_tree(string $path): void
 {
     $root = realpath($path);
@@ -977,6 +985,9 @@ function stage_api2_job(array $state): array
         || !chmod($manifestPath, 0600)) {
         fail('cannot write canonical API 2 input manifest');
     }
+    // Charge the first read and any relatime metadata to staging, then flush it
+    // with the tree below instead of contaminating the measured engine cgroup.
+    verify_staged_bytes($manifestPath, $manifest, 'input manifest');
 
     if (PHP_OS_FAMILY !== 'Windows') {
         $iterator = new RecursiveIteratorIterator(
@@ -1084,6 +1095,7 @@ function api2_request_file(string $request): string
         rrmdir($root);
         fail('cannot create immutable API 2 stdin request');
     }
+    verify_staged_bytes($path, $request, 'stdin request');
     if (PHP_OS_FAMILY === 'Linux') {
         seal_benchmark_tree($root);
     }
