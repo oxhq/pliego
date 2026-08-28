@@ -505,16 +505,89 @@ def migration_attack(parent: str) -> int:
 @contextlib.contextmanager
 def workload_engine(arguments: list[str] | None = None) -> Iterator[str]:
     arguments = arguments or ["--workload-parent", "32", "0.8"]
+    embedded_child = """import sys
+import time
+
+mebibytes = int(sys.argv[1])
+duration = float(sys.argv[2])
+allocation = bytearray(mebibytes * 1024 * 1024)
+for offset in range(0, len(allocation), 4096):
+    allocation[offset] = (offset // 4096) % 251
+time.sleep(duration)
+raise SystemExit(allocation[0])
+"""
     with tempfile.TemporaryDirectory() as raw:
         directory = Path(raw)
         directory.chmod(0o755)
         engine = directory / "fixture-engine.py"
         engine.write_text(
-            "#!/usr/bin/env python3\n"
-            "import os, sys\n"
-            f"os.execv({str(Path(sys.executable).resolve())!r}, "
-            f"[{str(Path(sys.executable).resolve())!r}, {str(Path(__file__).resolve())!r}, "
-            f"*{arguments!r}])\n",
+            f"""#!/usr/bin/env python3
+import errno
+import os
+from pathlib import Path
+import subprocess
+import sys
+import time
+
+ARGUMENTS = {arguments!r}
+
+
+def parent_workload(mebibytes, duration):
+    child_program = {embedded_child!r}
+    children = [
+        subprocess.Popen(
+            [sys.executable, "-c", child_program, str(mebibytes), str(duration)],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=index == 1,
+        )
+        for index in range(2)
+    ]
+    return max(child.wait() for child in children)
+
+
+def leaking_parent(pid_path):
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    with open(pid_path, "w", encoding="ascii") as output:
+        output.write(str(child.pid))
+        output.flush()
+        os.fsync(output.fileno())
+    return 0
+
+
+def migration_attack(parent):
+    for interface in ("cgroup.procs", "cgroup.threads"):
+        try:
+            with open(Path(parent) / interface, "w", encoding="ascii") as output:
+                output.write(f"{{os.getpid()}}\\n")
+        except PermissionError as error:
+            if error.errno not in {{errno.EACCES, errno.EPERM}}:
+                return 91
+        else:
+            return 90
+    return parent_workload(4, 0.3)
+
+
+def main():
+    if ARGUMENTS[0] == "--workload-parent":
+        return parent_workload(int(ARGUMENTS[1]), float(ARGUMENTS[2]))
+    if ARGUMENTS[0] == "--workload-leak":
+        return leaking_parent(ARGUMENTS[1])
+    if ARGUMENTS[0] == "--workload-migration-attack":
+        return migration_attack(ARGUMENTS[1])
+    raise ValueError(f"unsupported fixture workload: {{ARGUMENTS!r}}")
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+""",
             encoding="utf-8",
         )
         engine.chmod(0o555)
@@ -603,7 +676,7 @@ def live_cgroup_proofs() -> dict:
     parent = os.environ["PLIEGO_BENCHMARK_CGROUP_PARENT"]
     with workload_engine(["--workload-migration-attack", parent]) as engine:
         attacked = sampled(workload_command(engine))
-        assert attacked["exit_code"] == 0
+        assert attacked["exit_code"] == 0, attacked
         assert attacked["counters"]["final"]["pids_peak"] >= 3
         assert set(attacked["launch_security"]["migration_write_probes"]["parent"].values()) <= {
             "EACCES",
