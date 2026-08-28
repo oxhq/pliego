@@ -824,6 +824,15 @@ def write_synced(path, payload):
         os.fsync(output.fileno())
 
 
+def sync_directory(path):
+    flags = os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0) | getattr(os, 'O_CLOEXEC', 0)
+    descriptor = os.open(path, flags)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 assert sys.argv[1:] == ['render-api2']
 request_bytes = sys.stdin.buffer.read()
 request = json.loads(request_bytes)
@@ -853,6 +862,9 @@ write_synced(delivery / 'document.pdf', pdf)
 write_synced(delivery / 'scene.json', scene)
 write_synced(delivery / 'bundle.json', bundle)
 write_synced(diagnostics / 'environment.json', environment)
+sync_directory(delivery)
+sync_directory(diagnostics)
+sync_directory(root)
 result = {{
     'schema': 'pliego.render-result',
     'version': 1,
