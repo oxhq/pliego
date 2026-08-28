@@ -548,14 +548,11 @@ def require_delegated_parent(
         raise incomplete("CGROUP_V2_REQUIRED", f"{root} is not a cgroup-v2 mount")
     bound = open_bound_directory(parent, root)
     try:
-        require_bound_security(
-            bound,
-            frozenset(
-                {"cgroup.controllers", "cgroup.procs", "cgroup.subtree_control", "cgroup.threads", "cgroup.type"}
-            ),
-            owner_uid,
-            owner_gid,
-        )
+        namespace_root = bound.path == root
+        parent_interfaces = {"cgroup.controllers", "cgroup.procs", "cgroup.subtree_control", "cgroup.threads"}
+        if not namespace_root:
+            parent_interfaces.add("cgroup.type")
+        require_bound_security(bound, frozenset(parent_interfaces), owner_uid, owner_gid)
         if os.fstat(bound.fd).st_dev != os.stat(root, follow_symlinks=False).st_dev:
             raise incomplete("CGROUP_PARENT_OUTSIDE_V2", "delegated parent is not on the cgroup-v2 mount")
         relative = cgroup_relative("self", proc_root).lstrip("/")
@@ -579,7 +576,7 @@ def require_delegated_parent(
             )
         finally:
             harness.close()
-        if read_bound(bound, "cgroup.type").strip() != "domain":
+        if not namespace_root and read_bound(bound, "cgroup.type").strip() != "domain":
             raise incomplete("CGROUP_DOMAIN_REQUIRED", f"{bound.path} is not a domain cgroup")
 
         controllers = set(read_bound(bound, "cgroup.controllers").split())

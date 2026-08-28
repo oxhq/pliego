@@ -64,7 +64,7 @@ jobs:
           fi
           test "$(id -u pliego-benchmark-engine)" -gt 0
           test "$(id -g pliego-benchmark-engine)" -gt 0
-          sudo systemd-run --quiet --wait --pipe --collect \
+          sudo systemd-run --quiet --wait --pipe --collect --expand-environment=no \
             -p Type=exec \
             -p Delegate=yes \
             -p DelegateSubgroup=harness \
@@ -81,13 +81,8 @@ jobs:
                 */harness) ;;
                 *) echo "unexpected delegated cgroup: $relative" >&2; exit 1 ;;
               esac
-              delegated="/sys/fs/cgroup$relative"
-              namespace_root="/sys/fs/cgroup${relative%/harness}"
-              printf "+cpu +io +memory +pids" > "$namespace_root/cgroup.subtree_control"
-              mkdir "$delegated/harness"
-              printf "%s\n" "$$" > "$delegated/harness/cgroup.procs"
-              printf "+cpu +io +memory +pids" > "$delegated/cgroup.subtree_control"
-              parent="$delegated"
+              parent="/sys/fs/cgroup${relative%/harness}"
+              printf "+cpu +io +memory +pids" > "$parent/cgroup.subtree_control"
               export PLIEGO_BENCHMARK_CGROUP_PARENT="$parent"
               /usr/bin/python3 -E -s benchmarks/tools/test_process_tree_sampler.py --live --php-integration
               /usr/bin/python3 -E -s benchmarks/tools/process_tree_sampler.py --probe-network-isolation >/dev/null

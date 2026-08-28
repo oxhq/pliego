@@ -84,6 +84,23 @@ def delegated_fixture(directory: Path) -> tuple[Path, Path, Path]:
     return root, parent, proc
 
 
+def delegated_namespace_root_fixture(directory: Path) -> tuple[Path, Path]:
+    root = directory / "root"
+    harness = root / "harness"
+    proc = directory / "proc"
+    harness.mkdir(parents=True)
+    (proc / "self").mkdir(parents=True)
+    (root / "cgroup.controllers").write_text("cpu io memory pids\n", encoding="ascii")
+    (root / "cgroup.subtree_control").write_text("cpu io memory pids\n", encoding="ascii")
+    (root / "cgroup.procs").write_text("", encoding="ascii")
+    (root / "cgroup.threads").write_text("", encoding="ascii")
+    (harness / "cgroup.procs").write_text(f"{os.getpid()}\n", encoding="ascii")
+    (harness / "cgroup.threads").write_text(f"{os.getpid()}\n", encoding="ascii")
+    (harness / "cgroup.type").write_text("domain\n", encoding="ascii")
+    (proc / "self" / "cgroup").write_text("0::/harness\n", encoding="ascii")
+    return root, proc
+
+
 def require_fixture_parent(parent: Path, root: Path, proc: Path) -> process_tree_sampler.BoundDirectory:
     return process_tree_sampler.require_delegated_parent(parent, root, proc, os.getuid(), os.getgid())
 
@@ -283,6 +300,10 @@ def fixture_proofs() -> None:
         assert delegation.path == parent
         delegation.close()
 
+        (parent / "cgroup.type").unlink()
+        must_be_incomplete("CGROUP_INTERFACES_MISSING", lambda: require_fixture_parent(parent, root, proc))
+        (parent / "cgroup.type").write_text("domain\n", encoding="ascii")
+
         (parent / "cgroup.procs").chmod(0o666)
         must_be_incomplete("CGROUP_PERMISSIONS_UNSAFE", lambda: require_fixture_parent(parent, root, proc))
         (parent / "cgroup.procs").chmod(0o644)
@@ -322,6 +343,20 @@ def fixture_proofs() -> None:
             "CGROUP_NOT_EXCLUSIVE",
             lambda: require_fixture_parent(parent, root, proc),
         )
+
+    with tempfile.TemporaryDirectory() as raw:
+        directory = Path(raw)
+        directory.chmod(0o755)
+        root, proc = delegated_namespace_root_fixture(directory)
+        delegation = process_tree_sampler.require_delegated_parent(
+            root,
+            root,
+            proc,
+            os.getuid(),
+            os.getgid(),
+        )
+        assert delegation.path == root
+        delegation.close()
 
     with tempfile.TemporaryDirectory() as raw:
         directory = Path(raw)
