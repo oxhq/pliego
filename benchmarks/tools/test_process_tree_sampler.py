@@ -126,6 +126,16 @@ def must_be_incomplete(code: str, operation: object) -> None:
 
 
 def fixture_proofs() -> None:
+    empty_io = process_tree_sampler.parse_io_stat("8:0 \n", "hosted-zero-io")
+    assert empty_io == {"8:0": {"rbytes": 0, "wbytes": 0, "rios": 0, "wios": 0}}
+    must_be_incomplete(
+        "CGROUP_COUNTER_MISSING",
+        lambda: process_tree_sampler.parse_io_stat("8:0 rbytes=1\n", "partial-io"),
+    )
+    must_be_incomplete(
+        "CGROUP_COUNTER_INVALID",
+        lambda: process_tree_sampler.parse_io_stat("not-a-device \n", "invalid-device"),
+    )
     parser = argparse.ArgumentParser(prog="process_tree_sampler")
     error = io.StringIO()
     with contextlib.redirect_stderr(error):
