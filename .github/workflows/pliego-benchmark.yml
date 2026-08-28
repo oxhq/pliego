@@ -57,6 +57,13 @@ jobs:
       - name: Check hosted delegated-cgroup preflight
         run: |
           set -euo pipefail
+          if ! getent passwd pliego-benchmark-engine >/dev/null; then
+            sudo useradd --system --no-create-home \
+              --home-dir /nonexistent/pliego-benchmark-engine \
+              --shell /usr/sbin/nologin pliego-benchmark-engine
+          fi
+          test "$(id -u pliego-benchmark-engine)" -gt 0
+          test "$(id -g pliego-benchmark-engine)" -gt 0
           sudo systemd-run --quiet --wait --pipe --collect \
             -p Type=exec \
             -p Delegate=yes \
