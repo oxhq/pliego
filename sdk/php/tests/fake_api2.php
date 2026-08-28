@@ -212,7 +212,7 @@ if (!$failed) {
 
 $engine = fakeApi2Engine();
 if ($mode === 'engine-mismatch') {
-    $engine['version'] = '0.3.3';
+    $engine['version'] = '0.3.2';
 }
 $result = [
     'schema' => 'pliego.render-result',
