@@ -355,7 +355,7 @@ def render_markdown(data: dict[str, Any]) -> str:
 
     labels = {target["id"]: target["label"] for target in data["targets"]}
     lines = [
-        "# Pliego v0.3.2 hosted benchmark series",
+        "# Pliego v0.3.3 hosted benchmark series",
         "",
         "> Evidence class: `github-hosted-exploratory`; publication status: `hosted-series`.",
         "> All three repeats are retained. No best or canonical repeat is selected.",

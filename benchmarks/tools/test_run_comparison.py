@@ -253,22 +253,22 @@ def reseal(source: dict[str, Any]) -> None:
 
 
 def verified_release(data: dict[str, Any]) -> dict[str, Any]:
-    engine = next(target for target in data["targets"] if target["id"] == "pliego-0.3.2")["engine"]
+    engine = next(target for target in data["targets"] if target["id"] == "pliego-0.3.3")["engine"]
     return {
         "schema": "pliego.verified-release",
         "version": 1,
-        "target": "pliego-0.3.2",
+        "target": "pliego-0.3.3",
         "release_tag": engine["release_tag"],
         "commit": engine["commit"],
         "servo_build": engine["servo_build"],
         "servo_base": engine["servo_base"],
         "platform": "linux-x86_64",
         "profile": engine["profile"],
-        "runtime_manifest": "benchmarks/releases/v0.3.2/runtimes.json",
+        "runtime_manifest": "benchmarks/releases/v0.3.3/runtimes.json",
         "runtime_manifest_bytes": 3290,
-        "runtime_manifest_sha256": "6d48a02bf8b60c3e947a8fd3784593f8a841e79694ba82eb36835532588ab2d9",
-        "archive": "/cache/pliego-0.3.2-linux-x86_64.tar.gz",
-        "binary": "/cache/pliego-0.3.2-linux-x86_64/pliego",
+        "runtime_manifest_sha256": "e4dc42db44d534d857cfb0a2e1c5f442a47ed913b6fcb999accaf50a4335412b",
+        "archive": "/cache/pliego-0.3.3-linux-x86_64.tar.gz",
+        "binary": "/cache/pliego-0.3.3-linux-x86_64/pliego",
         "archive_sha256": engine["bundle_sha256"],
         "archive_bytes": engine["bundle_bytes"],
         "binary_sha256": engine["binary_sha256"],

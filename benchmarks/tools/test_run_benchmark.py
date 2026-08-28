@@ -94,21 +94,21 @@ def passing_sample(index: int, wall_ms: float) -> dict[str, object]:
 
 def main() -> None:
     target_ids = [
-        "pliego-0.3.2",
+        "pliego-0.3.3",
         "dompdf-3.1.6",
         "browsershot-5.4.0-puppeteer-25.8.0",
     ]
     timed_schedule = benchmark.cross_target_phase_schedule(target_ids, "minimal-static", 3, 1, "timed")
     assert [entry["target_id"] for entry in timed_schedule] == [
-        "pliego-0.3.2",
+        "pliego-0.3.3",
         "dompdf-3.1.6",
         "browsershot-5.4.0-puppeteer-25.8.0",
-        "pliego-0.3.2",
+        "pliego-0.3.3",
         "dompdf-3.1.6",
         "browsershot-5.4.0-puppeteer-25.8.0",
         "dompdf-3.1.6",
-        "pliego-0.3.2",
         "browsershot-5.4.0-puppeteer-25.8.0",
+        "pliego-0.3.3",
     ]
     assert timed_schedule == benchmark.cross_target_phase_schedule(
         list(reversed(target_ids)), "minimal-static", 3, 1, "timed"
@@ -175,12 +175,12 @@ def main() -> None:
         entry["target_id"] for entry in transcript["timed"]
     ]
     assert len({record["sample_id"] for record in artifact["raw_samples"]}) == 9
-    assert artifact["artifact_sha256"] == "0615726f7adda0b3ee1ea51c0e83da4574093ee39b2cff0f00f52ba5315c0f78"
+    assert artifact["artifact_sha256"] == "ebc57db1234cbd5c82dfe778b6935e91dd695bced8e9a951da52053567f3bcfe"
     assert artifact["raw_samples"][0]["sample_sha256"] == (
         "c8f3ae5f1cdbfa83db37a5d97283a3e8f7ad9a95d4b09b1fa31dbab978a698fd"
     )
     assert artifact["raw_samples"][0]["sample_id"] == (
-        "6da1fc01dc991438b2b2d3e675eca54e8426b0516d4b39a8e66fa4ed96331efc"
+        "096185f80135ba331c308472e53a6004afcfff2ce3610afb176e84e98ea69087"
     )
     assert not benchmark.validate_interleaved_artifact(artifact)
 

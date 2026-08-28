@@ -47,7 +47,7 @@ jobs:
             --no-dev --no-interaction --prefer-dist --classmap-authoritative
           npm ci --prefix benchmarks/adapters/browsershot --omit=dev
 
-      - name: Resolve immutable v0.3.2 release and runtimes
+      - name: Resolve immutable v0.3.3 release and runtimes
         id: runtime
         run: |
           set -euo pipefail

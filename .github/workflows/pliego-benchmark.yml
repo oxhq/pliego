@@ -70,7 +70,7 @@ jobs:
           php benchmarks/adapters/dompdf/adapter.php self-test
           php benchmarks/adapters/browsershot/adapter.php self-test
 
-      - name: Resolve immutable v0.3.2 release and runtimes
+      - name: Resolve immutable v0.3.3 release and runtimes
         id: runtime
         run: |
           set -euo pipefail
@@ -254,8 +254,8 @@ jobs:
               --entrypoint comparator.html \
               --asset Ahem.ttf \
               --output "$work/pliego.pdf" \
-              --expected-version 0.3.2 \
-              --expected-commit 1c237ed7e1f8247254facfe2284d88acf270185a \
+              --expected-version 0.3.3 \
+              --expected-commit 41c6cf0e9cf1c73f4f70eba9d413fa97063a3154 \
               > "$work/pliego-api2-smoke.json"
 
           (

@@ -29,7 +29,7 @@ for tool in validate_result.POPPLER_TOOLS:
             f"{tool}_version": f"{tool} 1.0",
         }
     )
-TARGET = TEST_MANIFEST["targets"]["pliego-0.3.2"]
+TARGET = TEST_MANIFEST["targets"]["pliego-0.3.3"]
 FIXTURE = TEST_MANIFEST["fixtures"]["minimal-static"]
 FIXTURE_CORRECTNESS = FIXTURE["correctness"]
 TEXT = FIXTURE_CORRECTNESS["text_equals"]
@@ -232,7 +232,7 @@ def result() -> dict:
             "measurement_method": "linux-cgroup-v2-v1",
             "percentile_method": "nearest-rank-v1",
         },
-        "target": {"id": "pliego-0.3.2", "label": TARGET["label"]},
+        "target": {"id": "pliego-0.3.3", "label": TARGET["label"]},
         "fixture": {
             "id": "minimal-static",
             "purpose": FIXTURE["purpose"],

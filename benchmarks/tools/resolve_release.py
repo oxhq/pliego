@@ -26,7 +26,7 @@ from typing import Any, IO
 
 ROOT = Path(__file__).resolve().parents[2]
 MANIFEST = ROOT / "benchmarks" / "manifest.toml"
-DEFAULT_TARGET = "pliego-0.3.2"
+DEFAULT_TARGET = "pliego-0.3.3"
 
 sys.path.insert(0, str(ROOT / "python"))
 from check_pliego_release_archive import check_archive  # noqa: E402

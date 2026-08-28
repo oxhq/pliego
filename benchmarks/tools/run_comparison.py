@@ -31,7 +31,7 @@ TOOLS = Path(__file__).resolve().parent
 MANIFEST = ROOT / "benchmarks" / "manifest.toml"
 SCHEMA = ROOT / "benchmarks" / "schema" / "benchmark-hosted-comparison.v1.json"
 TARGET_IDS = (
-    "pliego-0.3.2",
+    "pliego-0.3.3",
     "dompdf-3.1.6",
     "browsershot-5.4.0-puppeteer-25.8.0",
 )
@@ -564,21 +564,21 @@ def validate_verified_release(value: Any, data: dict[str, Any]) -> list[validate
     violations: list[validate_result.Violation] = []
     if not isinstance(value, dict):
         return [validate_result.Violation("$.verified_release", "must be a JSON object")]
-    pliego = next(target for target in data["targets"] if target["id"] == "pliego-0.3.2")
+    pliego = next(target for target in data["targets"] if target["id"] == "pliego-0.3.3")
     engine = pliego["engine"]
     expected = {
         "schema": "pliego.verified-release",
         "version": 1,
-        "target": "pliego-0.3.2",
+        "target": "pliego-0.3.3",
         "release_tag": engine["release_tag"],
         "commit": engine["commit"],
         "servo_build": engine["servo_build"],
         "servo_base": engine["servo_base"],
         "platform": "linux-x86_64",
         "profile": engine["profile"],
-        "runtime_manifest": "benchmarks/releases/v0.3.2/runtimes.json",
+        "runtime_manifest": "benchmarks/releases/v0.3.3/runtimes.json",
         "runtime_manifest_bytes": 3290,
-        "runtime_manifest_sha256": "6d48a02bf8b60c3e947a8fd3784593f8a841e79694ba82eb36835532588ab2d9",
+        "runtime_manifest_sha256": "e4dc42db44d534d857cfb0a2e1c5f442a47ed913b6fcb999accaf50a4335412b",
         "archive_sha256": engine["bundle_sha256"],
         "archive_bytes": engine["bundle_bytes"],
         "binary_sha256": engine["binary_sha256"],
@@ -652,7 +652,7 @@ def finalize_bundle(directory: Path, release_path: Path) -> None:
 def render_markdown(data: dict[str, Any]) -> str:
     metrics = {target["target_id"]: target for target in data["aggregates"]["targets"]}
     lines = [
-        "# Pliego v0.3.2 hosted comparative benchmark",
+        "# Pliego v0.3.3 hosted comparative benchmark",
         "",
         "> Evidence class: `github-hosted-exploratory`. These are measured, correctness-gated",
         "> results from one GitHub-hosted VM, not dedicated-host production claims.",
@@ -916,7 +916,7 @@ def run_preflight_all(binary: Path) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--binary", type=Path, help="verified published Pliego v0.3.2 binary")
+    parser.add_argument("--binary", type=Path, help="verified published Pliego v0.3.3 binary")
     parser.add_argument("--out", type=Path, help="new output directory")
     parser.add_argument("--validate", type=Path, help="validate an existing hosted comparison directory")
     parser.add_argument("--finalize", type=Path, help="comparison directory to finalize and validate")

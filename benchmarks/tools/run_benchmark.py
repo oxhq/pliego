@@ -14,8 +14,8 @@ validates it against
 Usage:
     python3 benchmarks/tools/run_benchmark.py \
         [--binary /path/to/pliego] \
-        [--target pliego-0.3.2|dompdf-3.1.6|browsershot-...] \
-        [--out benchmarks/baselines/pliego-0.3.2-linux-x86_64.json] \
+        [--target pliego-0.3.3|dompdf-3.1.6|browsershot-...] \
+        [--out benchmarks/baselines/pliego-0.3.3-linux-x86_64.json] \
         [--fixture invoice-showcase] [--samples N] [--warmup N] \
         [--php /usr/bin/php] [--dedicated]
 
@@ -1111,7 +1111,7 @@ def main() -> int:
     parser.add_argument("--samples", type=int, help="override samples per fixture")
     parser.add_argument("--warmup", type=int, help="override warmup iterations")
     parser.add_argument("--php", default="php", help="php-cli binary (default: php)")
-    parser.add_argument("--target", default="pliego-0.3.2", help="manifest target id")
+    parser.add_argument("--target", default="pliego-0.3.3", help="manifest target id")
     parser.add_argument("--dedicated", action="store_true", help="host is dedicated to the run")
     parser.add_argument("--schema", default=str(DEFAULT_SCHEMA), help="result schema path")
     args = parser.parse_args()

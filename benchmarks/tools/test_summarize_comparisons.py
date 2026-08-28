@@ -113,7 +113,7 @@ def main() -> None:
             assert retained["ambient"] == source_run.comparison["ambient"]
         assert series["selection_policy"] == "all-repeats-no-selection"
 
-        pliego = next(target for target in series["summary"]["targets"] if target["target_id"] == "pliego-0.3.2")
+        pliego = next(target for target in series["summary"]["targets"] if target["target_id"] == "pliego-0.3.3")
         one_shot = pliego["metrics"]["one_shot_wall_ms"]
         assert [entry["p50"] for entry in one_shot["per_repeat"]] == [2100.0, 2110.0, 2120.0]
         assert one_shot["min"] == 2100.0 and one_shot["max"] == 2120.0 and one_shot["mean"] == 2110.0
