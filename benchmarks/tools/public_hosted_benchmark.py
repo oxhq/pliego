@@ -265,7 +265,7 @@ def render_readme_body(series: dict[str, Any], manifest: dict[str, Any]) -> str:
             f"All {total_samples} timed samples passed the shared PDF oracle. " + CLAIM_BOUNDARY,
             "",
             f"[Full report with all retained metrics and spread]({report}) · "
-            f"[Checksum-bound evidence release]({release_url})",
+            f"[Immutable evidence release]({release_url})",
             "",
             "Authoritative tables and production rankings remain N/A until the stricter dedicated-host,",
             "immutable-runtime, and canonical-oracle gates pass. Read the exact boundary and reproduction",
@@ -389,6 +389,7 @@ def release_assets(root: Path = ROOT) -> dict[str, str] | None:
     tag, _, archive, checksum = _release_identity(manifest)
     base = f"https://github.com/oxhq/pliego/releases/download/{tag}"
     return {
+        "release_tag": tag,
         "archive_name": archive,
         "archive_url": f"{base}/{archive}",
         "checksum_name": checksum,
@@ -401,6 +402,33 @@ def release_urls(root: Path = ROOT) -> tuple[str, str] | None:
     if assets is None:
         return None
     return assets["archive_url"], assets["checksum_url"]
+
+
+def verify_github_release(metadata: Path, root: Path = ROOT) -> None:
+    assets = release_assets(root)
+    require(assets is not None, "no committed public benchmark release exists")
+    release = load_json(metadata)
+    require(release.get("tag_name") == assets["release_tag"], "GitHub release tag differs from committed evidence")
+    require(release.get("immutable") is True, "GitHub benchmark release is not immutable")
+    require(release.get("draft") is False, "GitHub benchmark release is still a draft")
+    require(release.get("prerelease") is False, "GitHub benchmark release is marked as a prerelease")
+
+    released_assets = release.get("assets")
+    require(isinstance(released_assets, list), "GitHub benchmark release assets are absent")
+    expected = {
+        assets["archive_name"]: assets["archive_url"],
+        assets["checksum_name"]: assets["checksum_url"],
+    }
+    observed: dict[str, str] = {}
+    for item in released_assets:
+        require(isinstance(item, dict), "GitHub benchmark release contains an invalid asset")
+        name = item.get("name")
+        url = item.get("browser_download_url")
+        require(isinstance(name, str) and isinstance(url, str), "GitHub benchmark release asset identity is invalid")
+        require(item.get("state") == "uploaded", f"GitHub benchmark release asset {name!r} is not uploaded")
+        require(name not in observed, f"GitHub benchmark release repeats asset {name!r}")
+        observed[name] = url
+    require(observed == expected, "GitHub benchmark release does not contain exactly the two committed evidence assets")
 
 
 def _validate_packaged_archive(archive: Path, checksum: Path) -> None:
@@ -522,6 +550,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     archive_verify = commands.add_parser("verify-archive", help="compare committed files with exact release assets")
     archive_verify.add_argument("archive", type=Path)
     archive_verify.add_argument("--checksum", type=Path, required=True)
+    release_verify = commands.add_parser("verify-release", help="verify immutable GitHub release metadata")
+    release_verify.add_argument("metadata", type=Path)
     assets = commands.add_parser("release-assets", help="emit canonical release URLs for CI")
     assets.add_argument("--github-output", type=Path)
     args = parser.parse_args(argv)
@@ -540,6 +570,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.command == "verify-archive":
             verify_against_archive(args.archive, args.checksum)
             print("committed public benchmark matches the exact released evidence archive")
+        elif args.command == "verify-release":
+            verify_github_release(args.metadata)
+            print("committed public benchmark is attached to an immutable GitHub release")
         elif args.command == "release-assets":
             assets = release_assets()
             if args.github_output is not None:

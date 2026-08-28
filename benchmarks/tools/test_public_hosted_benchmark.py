@@ -172,6 +172,7 @@ def main() -> None:
         assert public_hosted_benchmark.verify_publication(root)
         assets = public_hosted_benchmark.release_assets(root)
         assert assets is not None
+        assert assets["release_tag"] == manifest["release"]["tag"]
         assert assets["archive_name"] == manifest["release"]["archive_filename"]
         assert assets["checksum_name"] == manifest["release"]["checksum_filename"]
         urls = public_hosted_benchmark.release_urls(root)
@@ -181,6 +182,45 @@ def main() -> None:
         assert "No best or canonical repeat is selected" not in body
         assert public_hosted_benchmark.CLAIM_BOUNDARY in body
         assert "to" in body and "Full report with all retained metrics and spread" in body
+        assert "Immutable evidence release" in body
+
+        release_metadata = root / "github-release.json"
+        canonical_release = {
+            "tag_name": assets["release_tag"],
+            "immutable": True,
+            "draft": False,
+            "prerelease": False,
+            "assets": [
+                {
+                    "name": assets["archive_name"],
+                    "browser_download_url": assets["archive_url"],
+                    "state": "uploaded",
+                },
+                {
+                    "name": assets["checksum_name"],
+                    "browser_download_url": assets["checksum_url"],
+                    "state": "uploaded",
+                },
+            ],
+        }
+        release_metadata.write_text(json.dumps(canonical_release), encoding="utf-8")
+        public_hosted_benchmark.verify_github_release(release_metadata, root)
+        mutable_release = deepcopy(canonical_release)
+        mutable_release["immutable"] = False
+        release_metadata.write_text(json.dumps(mutable_release), encoding="utf-8")
+        expect_error(
+            lambda: public_hosted_benchmark.verify_github_release(release_metadata, root),
+            "is not immutable",
+        )
+        extra_asset_release = deepcopy(canonical_release)
+        extra_asset_release["assets"].append(
+            {"name": "extra.txt", "browser_download_url": "https://example.invalid/extra.txt", "state": "uploaded"}
+        )
+        release_metadata.write_text(json.dumps(extra_asset_release), encoding="utf-8")
+        expect_error(
+            lambda: public_hosted_benchmark.verify_github_release(release_metadata, root),
+            "exactly the two committed evidence assets",
+        )
 
         report = public_hosted_benchmark.publication_directory(root) / public_hosted_benchmark.REPORT_FILE
         original_report = report.read_bytes()

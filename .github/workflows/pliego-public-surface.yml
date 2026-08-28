@@ -62,6 +62,20 @@ jobs:
         id: benchmark
         run: python3 -E -s benchmarks/tools/public_hosted_benchmark.py release-assets --github-output "$GITHUB_OUTPUT"
 
+      - name: Verify immutable benchmark release
+        if: steps.benchmark.outputs.published == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.benchmark.outputs.release_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          metadata="$RUNNER_TEMP/pliego-benchmark-release.json"
+          gh api \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" > "$metadata"
+          python3 -E -s benchmarks/tools/public_hosted_benchmark.py verify-release "$metadata"
+
       - name: Verify the exact released benchmark archive
         if: steps.benchmark.outputs.published == 'true'
         env:

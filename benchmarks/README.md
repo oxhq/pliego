@@ -338,7 +338,7 @@ Validation rejects links, hardlinks, special files, path traversal, duplicate or
 case-colliding paths, unexpected entries, metadata drift, checksum/name/root
 drift, and any nested bundle failure. It also rebuilds the canonical USTAR +
 gzip stream and requires byte equality. Packaging is checksum-bound evidence;
-it does not publish a GitHub release or make mutable hosting immutable.
+it does not publish a GitHub release or activate repository release immutability.
 
 ### Public snapshot gate
 
@@ -352,9 +352,11 @@ benchmark-v0.3.3-minimal-static-gh-<run-id>-a<attempt>
 ```
 
 and contains only the canonical `.tar.gz` asset and its `.sha256` companion.
-Because repository release immutability is not enabled, this is checksum-bound,
-append-only-by-policy evidence; it is not described as cryptographically
-immutable release evidence.
+Create that release as a draft, upload those two assets, and publish it only
+after both uploads succeed. Repository release immutability is enabled for new
+releases; the public-surface gate requires GitHub to report `immutable: true`,
+requires the release to contain exactly those two uploaded assets, downloads
+both again, and verifies their bytes before the snapshot can be published.
 
 Only after those exact assets exist may the buyer-facing snapshot be staged:
 
