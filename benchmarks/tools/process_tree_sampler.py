@@ -980,6 +980,34 @@ def prepare_runtime_directories(root: Path, account: EngineAccount) -> dict[str,
     return environment
 
 
+def runtime_directory_diagnostics(root: Path, limit: int = 12) -> str:
+    """Describe the newest browser-runtime files after a settle failure."""
+
+    files: list[tuple[int, str]] = []
+    try:
+        for current, directories, names in os.walk(root, topdown=True, followlinks=False):
+            directories.sort()
+            names.sort()
+            for name in names:
+                path = Path(current) / name
+                metadata = os.lstat(path)
+                kind = "file" if stat.S_ISREG(metadata.st_mode) else "other"
+                relative = path.relative_to(root).as_posix()
+                if len(relative) > 120:
+                    relative = "..." + relative[-117:]
+                files.append(
+                    (
+                        metadata.st_mtime_ns,
+                        f"{relative}:{kind}:size={metadata.st_size}:blocks={metadata.st_blocks}",
+                    )
+                )
+    except OSError as error:
+        return f"browser-runtime-inventory-unavailable={type(error).__name__}:{error.errno}"
+    files.sort(key=lambda item: (-item[0], item[1]))
+    retained = [description for _, description in files[:limit]]
+    return f"browser-runtime-files-newest={retained!r}; browser-runtime-file-count={len(files)}"
+
+
 def requires_private_browser_runtime(command: tuple[str, ...]) -> bool:
     if len(command) < 2 or command[1] != "render":
         return False
@@ -1585,7 +1613,13 @@ def sample_command(
 
             drained_at = time.monotonic()
             take_sample(started, drained_at)
-            final, settle = wait_for_accounting_quiescence(child, interval_ms, settle_timeout_ms)
+            try:
+                final, settle = wait_for_accounting_quiescence(child, interval_ms, settle_timeout_ms)
+            except MeasurementIncomplete as error:
+                if error.code == "CGROUP_ACCOUNTING_NOT_QUIESCENT" and private_browser_runtime:
+                    diagnostics = runtime_directory_diagnostics(Path(engine_tmpdir))
+                    raise incomplete(error.code, f"{error}; {diagnostics}") from error
+                raise
             if final["cgroup_events"]["populated"] != 0:
                 raise incomplete("CGROUP_CLEANUP_FAILED", "render cgroup repopulated during accounting settle")
             revalidate_engine_temporary_directory(Path(engine_tmpdir), account, engine_tmpdir_identity)

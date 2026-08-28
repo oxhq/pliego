@@ -197,6 +197,20 @@ def fixture_proofs() -> None:
         ("/repo/benchmarks/adapters/dompdf/adapter.php", "render")
     )
     assert not process_tree_sampler.requires_private_browser_runtime(("/usr/lib/pliego", "render-api2"))
+    with tempfile.TemporaryDirectory() as raw:
+        runtime_root = Path(raw)
+        older = runtime_root / "home" / "older.bin"
+        newer = runtime_root / "xdg-cache" / "newer.bin"
+        older.parent.mkdir()
+        newer.parent.mkdir()
+        older.write_bytes(b"old")
+        newer.write_bytes(b"newest")
+        os.utime(older, ns=(1_000_000_000, 1_000_000_000))
+        os.utime(newer, ns=(2_000_000_000, 2_000_000_000))
+        diagnostics = process_tree_sampler.runtime_directory_diagnostics(runtime_root, limit=1)
+    assert "xdg-cache/newer.bin:file:size=6" in diagnostics
+    assert "home/older.bin" not in diagnostics
+    assert "browser-runtime-file-count=2" in diagnostics
     if sys.platform == "linux":
         with tempfile.TemporaryDirectory(prefix="pliego mount ") as raw:
             root = Path(raw).resolve()
