@@ -80,11 +80,23 @@ jobs:
           node="$(readlink -f "$(command -v node)")"
           chrome="$(command -v google-chrome-stable || command -v google-chrome || command -v chromium)"
           chrome="$(readlink -f "$chrome")"
-          sudo install -d -o root -g root -m 0555 /opt/pliego-benchmark
-          sudo install -o root -g root -m 0555 "$binary" /opt/pliego-benchmark/pliego
-          sudo install -o root -g root -m 0555 "$node" /opt/pliego-benchmark/node
+          chrome_root="$(dirname "$chrome")"
+          case "$chrome_root" in
+            /opt/google/chrome|/usr/lib/chromium|/usr/lib/chromium-browser) ;;
+            *) echo "unsupported hosted Chrome installation root: $chrome_root" >&2; exit 1 ;;
+          esac
+          runtime_root=/usr/lib/pliego-benchmark
+          sudo install -d -o root -g root -m 0555 "$runtime_root"
+          sudo install -o root -g root -m 0555 "$binary" "$runtime_root/pliego"
+          sudo install -o root -g root -m 0555 "$node" "$runtime_root/node"
+          sudo install -d -o root -g root -m 0555 "$runtime_root/chrome"
+          sudo cp -aL "$chrome_root/." "$runtime_root/chrome/"
+          sudo chown -R root:root "$runtime_root/chrome"
+          sudo chmod -R go-w "$runtime_root/chrome"
+          test -z "$(sudo find "$runtime_root/chrome" -type l -print -quit)"
           printf 'binary=%s\nnode=%s\nchrome=%s\n' \
-            /opt/pliego-benchmark/pliego /opt/pliego-benchmark/node "$chrome" >> "$GITHUB_OUTPUT"
+            "$runtime_root/pliego" "$runtime_root/node" \
+            "$runtime_root/chrome/$(basename "$chrome")" >> "$GITHUB_OUTPUT"
 
       - name: Check hosted delegated-cgroup preflight
         env:
@@ -104,6 +116,8 @@ jobs:
           engine_gid="$(id -g pliego-benchmark-engine)"
           engine_test=(sudo setpriv --reuid="$engine_uid" --regid="$engine_gid" --clear-groups \
             --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs /usr/bin/test)
+          engine_find=(sudo setpriv --reuid="$engine_uid" --regid="$engine_gid" --clear-groups \
+            --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs /usr/bin/find)
           diagnose_engine_path() {
             local reason="$1"
             local path="$2"
@@ -143,6 +157,16 @@ jobs:
               return 1
             fi
           }
+          require_engine_readonly_tree() {
+            local path="$1"
+            local writable
+            require_engine_readonly_directory "$path"
+            writable="$(cd / && "${engine_find[@]}" "$path" -writable -print -quit)"
+            if [[ -n "$writable" ]]; then
+              diagnose_engine_path "tree contains writable entry $writable" "$path"
+              return 1
+            fi
+          }
           ancestors=()
           ancestor="$GITHUB_WORKSPACE"
           while [[ "$ancestor" != / ]]; do
@@ -163,9 +187,14 @@ jobs:
           require_engine_readonly_executable "$GITHUB_WORKSPACE/benchmarks/adapters/browsershot/adapter.php"
           require_engine_readonly_file "$GITHUB_WORKSPACE/benchmarks/adapters/browsershot/vendor/autoload.php"
           require_engine_readonly_file "$GITHUB_WORKSPACE/benchmarks/adapters/browsershot/node_modules/puppeteer/package.json"
+          require_engine_readonly_directory /
+          require_engine_readonly_directory /usr
+          require_engine_readonly_directory /usr/lib
+          require_engine_readonly_directory "$(dirname "$BINARY")"
           require_engine_readonly_executable "$BINARY"
           require_engine_readonly_executable "$NODE"
           require_engine_readonly_executable "$CHROME"
+          require_engine_readonly_tree "$(dirname "$CHROME")"
           namei -l "$GITHUB_WORKSPACE/benchmarks/adapters/dompdf/adapter.php"
           namei -l "$GITHUB_WORKSPACE/benchmarks/fixtures/minimal-static"
           sudo systemd-run --quiet --wait --pipe --collect --expand-environment=no \

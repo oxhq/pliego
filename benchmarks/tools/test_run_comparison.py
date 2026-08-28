@@ -32,7 +32,7 @@ def target_identities() -> list[dict[str, Any]]:
             engine = {
                 "name": "pliego",
                 "version": target["version"],
-                "binary_path": "/opt/pliego-benchmark/pliego",
+                "binary_path": "/usr/lib/pliego-benchmark/pliego",
                 "binary_sha256": target["binary_sha256"],
                 "binary_bytes": target["binary_bytes"],
                 "commit": target["commit"],

@@ -175,10 +175,28 @@ def fixture_proofs() -> None:
         },
         clear=True,
     ):
-        child_environment = process_tree_sampler.engine_environment(fixture_account)
+        child_environment = process_tree_sampler.engine_environment(fixture_account, "/engine-owned-artifacts")
     assert "GITHUB_TOKEN" not in child_environment and child_environment["LANG"] == "C"
     assert child_environment["BROWSERSHOT_CHROME_PATH"] == "/opt/chrome"
     assert child_environment["BROWSERSHOT_NODE_BINARY"] == "/usr/bin/node"
+    assert child_environment["TMPDIR"] == "/engine-owned-artifacts"
+    if sys.platform == "linux":
+        with tempfile.TemporaryDirectory() as raw:
+            artifacts = Path(raw).resolve()
+            artifacts.chmod(0o700)
+            current_account = process_tree_sampler.EngineAccount(
+                "fixture-engine",
+                os.getuid(),
+                os.getgid(),
+                "/nonexistent",
+            )
+            adapter_command = ("/adapter", "render", "input.html", "--artifacts", str(artifacts))
+            assert process_tree_sampler.adapter_temporary_directory(adapter_command, current_account) == str(artifacts)
+            artifacts.chmod(0o755)
+            must_be_incomplete(
+                "ENGINE_TEMPORARY_DIRECTORY_UNSAFE",
+                lambda: process_tree_sampler.adapter_temporary_directory(adapter_command, current_account),
+            )
 
     with tempfile.TemporaryDirectory() as raw:
         cgroup_root = Path(raw).resolve()

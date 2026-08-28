@@ -831,7 +831,34 @@ def migration_write_probes(paths: dict[str, Path]) -> dict[str, dict[str, str]]:
     return results
 
 
-def engine_environment(account: EngineAccount) -> dict[str, str]:
+def adapter_temporary_directory(command: tuple[str, ...], account: EngineAccount) -> str:
+    if len(command) < 2 or command[1] != "render":
+        return "/tmp"
+    positions = [index for index, value in enumerate(command) if value == "--artifacts"]
+    if len(positions) != 1 or positions[0] + 1 >= len(command):
+        raise incomplete("ENGINE_COMMAND_INVALID", "benchmark adapter argv must contain one --artifacts path")
+    requested = Path(command[positions[0] + 1])
+    if not requested.is_absolute():
+        raise incomplete("ENGINE_TEMPORARY_DIRECTORY_UNSAFE", "adapter artifact path must be absolute")
+    try:
+        resolved = requested.resolve(strict=True)
+        metadata = os.stat(resolved, follow_symlinks=False)
+    except OSError as error:
+        raise incomplete(
+            "ENGINE_TEMPORARY_DIRECTORY_UNSAFE",
+            f"cannot bind adapter artifact path {requested}: {error}",
+        ) from error
+    if requested != resolved or not stat.S_ISDIR(metadata.st_mode):
+        raise incomplete("ENGINE_TEMPORARY_DIRECTORY_UNSAFE", "adapter artifact path must be a canonical directory")
+    if metadata.st_uid != account.uid or metadata.st_gid != account.gid or stat.S_IMODE(metadata.st_mode) != 0o700:
+        raise incomplete(
+            "ENGINE_TEMPORARY_DIRECTORY_UNSAFE",
+            f"adapter artifact path must be owned by {account.uid}:{account.gid} with mode 0700",
+        )
+    return str(resolved)
+
+
+def engine_environment(account: EngineAccount, temporary_directory: str = "/tmp") -> dict[str, str]:
     allowed = {
         "BROWSERSHOT_CHROME_PATH",
         "BROWSERSHOT_NODE_BINARY",
@@ -850,7 +877,7 @@ def engine_environment(account: EngineAccount) -> dict[str, str]:
             "HOME": account.home,
             "LOGNAME": account.name,
             "PATH": environment.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
-            "TMPDIR": "/tmp",
+            "TMPDIR": temporary_directory,
             "USER": account.name,
         }
     )
@@ -868,6 +895,7 @@ def fork_stopped(
     isolate_network: bool,
     host_network_namespace: str,
 ) -> tuple[int, int]:
+    temporary_directory = adapter_temporary_directory(command, account)
     descriptors = [open_stdin_descriptor(stdin_path)]
     if DURABLE_WRITE_FLAG == 0:
         raise incomplete("DURABLE_ENGINE_OUTPUT_UNAVAILABLE", "the host exposes neither O_DSYNC nor O_SYNC")
@@ -915,7 +943,7 @@ def fork_stopped(
                     payload["network_isolation"] = network_isolation
                 os.write(handshake_write, json.dumps(payload, separators=(",", ":")).encode("ascii"))
                 os.kill(os.getpid(), signal.SIGSTOP)
-                os.execve(command[0], command, engine_environment(account))
+                os.execve(command[0], command, engine_environment(account, temporary_directory))
             except BaseException as error:
                 with contextlib.suppress(BaseException):
                     payload = {"ok": False, "error": f"{type(error).__name__}: {error}"}
