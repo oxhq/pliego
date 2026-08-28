@@ -150,13 +150,13 @@ jobs:
               printf "+cpu +io +memory +pids" > "$parent/cgroup.subtree_control"
               . "$1"
               export PLIEGO_BENCHMARK_CGROUP_PARENT="$parent"
-              /usr/bin/python3 -I benchmarks/tools/test_process_tree_sampler.py --live --php-integration >/dev/null
-              /usr/bin/python3 -I benchmarks/tools/process_tree_sampler.py --probe-network-isolation >/dev/null
+              /usr/bin/python3 -E -s benchmarks/tools/test_process_tree_sampler.py --live --php-integration >/dev/null
+              /usr/bin/python3 -E -s benchmarks/tools/process_tree_sampler.py --probe-network-isolation >/dev/null
               exec env \
                 BROWSERSHOT_NODE_BINARY="$2" \
                 BROWSERSHOT_CHROME_PATH="$3" \
                 PLIEGO_BENCHMARK_CGROUP_PARENT="$parent" \
-                /usr/bin/python3 -I benchmarks/tools/run_comparison.py \
+                /usr/bin/python3 -E -s benchmarks/tools/run_comparison.py \
                   --binary "$4" \
                   --out "$5"
             ' pliego-hosted-comparison \
@@ -168,10 +168,10 @@ jobs:
           OUTPUT: ${{ steps.evidence.outputs.output }}
         run: |
           set -euo pipefail
-          python3 -I benchmarks/tools/run_comparison.py \
+          python3 -E -s benchmarks/tools/run_comparison.py \
             --finalize "$OUTPUT" \
             --verified-release "$RUNNER_TEMP/verified-release.json"
-          python3 -I benchmarks/tools/run_comparison.py --validate "$OUTPUT"
+          python3 -E -s benchmarks/tools/run_comparison.py --validate "$OUTPUT"
           (cd "$OUTPUT" && sha256sum --check SHA256SUMS)
 
       - name: Upload exact raw samples and all metrics
@@ -210,10 +210,10 @@ jobs:
           set -euo pipefail
           mapfile -t comparisons < <(find "$INPUT_ROOT" -mindepth 1 -maxdepth 1 -type d -print | sort)
           test "${#comparisons[@]}" -eq 3
-          python3 -I benchmarks/tools/summarize_comparisons.py \
+          python3 -E -s benchmarks/tools/summarize_comparisons.py \
             "${comparisons[0]}" "${comparisons[1]}" "${comparisons[2]}" \
             --out "$OUTPUT"
-          python3 -I benchmarks/tools/summarize_comparisons.py \
+          python3 -E -s benchmarks/tools/summarize_comparisons.py \
             "${comparisons[0]}" "${comparisons[1]}" "${comparisons[2]}" \
             --validate "$OUTPUT"
           (cd "$OUTPUT" && sha256sum --check SHA256SUMS)
