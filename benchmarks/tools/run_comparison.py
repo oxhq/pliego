@@ -870,6 +870,50 @@ def run_comparison(binary: Path, output: Path) -> dict[str, Any]:
     return data
 
 
+def run_preflight_all(binary: Path) -> None:
+    """Exercise every comparison target through the publishable hosted sampler."""
+
+    if sys.platform != "linux" or platform.machine() != "x86_64":
+        fail("hosted comparison preflight requires Linux x86_64")
+    if os.getuid() != 0 or os.geteuid() != 0:
+        fail("hosted comparison preflight requires the root cgroup broker")
+    revision = run_benchmark.harness_revision()
+    if revision is None or not run_benchmark.benchmark_tree_is_clean():
+        fail("hosted comparison preflight requires a clean exact benchmark revision")
+    manifest = tomllib.loads(MANIFEST.read_text(encoding="utf-8"))
+    fixture = manifest["fixtures"][FIXTURE_ID]
+    run_benchmark.check_prep(FIXTURE_ID, fixture)
+    expected_fixture_identity = run_benchmark.fixture_identity(fixture)
+    expected_oracle_identity = run_benchmark.pdf_oracle_identity()
+    contexts, identities = target_contexts(manifest, binary.resolve(strict=True))
+
+    for target_id in TARGET_IDS:
+        context = contexts[target_id]
+        print(f"hosted comparison preflight: {target_id}", flush=True)
+        result = run_benchmark.run_runner_phase(
+            Path("/usr/bin/php"),
+            FIXTURE_ID,
+            fixture,
+            context["binary"],
+            "preflight",
+            require_scene_report=context["require_scene_report"],
+            expected_fixture_identity=expected_fixture_identity,
+            isolate_network=True,
+            native_api2=context["native_api2"],
+        )
+        if result is not None:
+            fail(f"preflight for {target_id} unexpectedly emitted a timed sample")
+
+    if run_benchmark.fixture_identity(fixture) != expected_fixture_identity:
+        fail("fixture changed during hosted comparison preflight")
+    if run_benchmark.pdf_oracle_identity() != expected_oracle_identity:
+        fail("PDF oracle identity changed during hosted comparison preflight")
+    revalidate_target_contexts(manifest, contexts, identities)
+    if not run_benchmark.benchmark_tree_is_clean() or run_benchmark.harness_revision() != revision:
+        fail("benchmark harness changed during hosted comparison preflight")
+    print("all hosted comparison targets passed the exact sampler and correctness preflight")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", type=Path, help="verified published Pliego v0.3.2 binary")
@@ -877,7 +921,19 @@ def main() -> int:
     parser.add_argument("--validate", type=Path, help="validate an existing hosted comparison directory")
     parser.add_argument("--finalize", type=Path, help="comparison directory to finalize and validate")
     parser.add_argument("--verified-release", type=Path, help="verified release metadata used with --finalize")
+    parser.add_argument(
+        "--preflight-all",
+        action="store_true",
+        help="run one correctness-gated publishable sampler preflight for every comparison target",
+    )
     args = parser.parse_args()
+    if args.preflight_all:
+        if args.binary is None or any(
+            value is not None for value in (args.out, args.validate, args.finalize, args.verified_release)
+        ):
+            parser.error("--preflight-all requires --binary and cannot be combined with other operations")
+        run_preflight_all(args.binary)
+        return 0
     if args.validate is not None:
         if any(value is not None for value in (args.binary, args.out, args.finalize, args.verified_release)):
             parser.error("--validate cannot be combined with generation or finalization arguments")

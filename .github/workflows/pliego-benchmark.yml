@@ -68,7 +68,26 @@ jobs:
             --no-dev --no-interaction --prefer-dist --classmap-authoritative
           npm ci --prefix benchmarks/adapters/browsershot --omit=dev
 
+      - name: Resolve immutable v0.3.2 release and runtimes
+        id: runtime
+        run: |
+          set -euo pipefail
+          binary="$(python3 benchmarks/tools/resolve_release.py \
+            --cache "$RUNNER_TEMP/pliego-release-cache" \
+            --metadata-out "$RUNNER_TEMP/verified-release.json")"
+          node="$(readlink -f "$(command -v node)")"
+          chrome="$(command -v google-chrome-stable || command -v google-chrome || command -v chromium)"
+          chrome="$(readlink -f "$chrome")"
+          sudo install -d -o root -g root -m 0555 /opt/pliego-benchmark
+          sudo install -o root -g root -m 0555 "$binary" /opt/pliego-benchmark/pliego
+          printf 'binary=%s\nnode=%s\nchrome=%s\n' \
+            /opt/pliego-benchmark/pliego "$node" "$chrome" >> "$GITHUB_OUTPUT"
+
       - name: Check hosted delegated-cgroup preflight
+        env:
+          BINARY: ${{ steps.runtime.outputs.binary }}
+          NODE: ${{ steps.runtime.outputs.node }}
+          CHROME: ${{ steps.runtime.outputs.chrome }}
         run: |
           set -euo pipefail
           if ! getent passwd pliego-benchmark-engine >/dev/null; then
@@ -104,6 +123,18 @@ jobs:
           (cd / && "${engine_test[@]}" ! -w "$GITHUB_WORKSPACE/benchmarks/adapters/dompdf/adapter.php")
           (cd / && "${engine_test[@]}" -r "$GITHUB_WORKSPACE/benchmarks/adapters/dompdf/vendor/autoload.php")
           (cd / && "${engine_test[@]}" ! -w "$GITHUB_WORKSPACE/benchmarks/adapters/dompdf/vendor/autoload.php")
+          (cd / && "${engine_test[@]}" -x "$GITHUB_WORKSPACE/benchmarks/adapters/browsershot/adapter.php")
+          (cd / && "${engine_test[@]}" ! -w "$GITHUB_WORKSPACE/benchmarks/adapters/browsershot/adapter.php")
+          (cd / && "${engine_test[@]}" -r "$GITHUB_WORKSPACE/benchmarks/adapters/browsershot/vendor/autoload.php")
+          (cd / && "${engine_test[@]}" ! -w "$GITHUB_WORKSPACE/benchmarks/adapters/browsershot/vendor/autoload.php")
+          (cd / && "${engine_test[@]}" -r "$GITHUB_WORKSPACE/benchmarks/adapters/browsershot/node_modules/puppeteer/package.json")
+          (cd / && "${engine_test[@]}" ! -w "$GITHUB_WORKSPACE/benchmarks/adapters/browsershot/node_modules/puppeteer/package.json")
+          "${engine_test[@]}" -x "$BINARY"
+          "${engine_test[@]}" ! -w "$BINARY"
+          "${engine_test[@]}" -x "$NODE"
+          "${engine_test[@]}" ! -w "$NODE"
+          "${engine_test[@]}" -x "$CHROME"
+          "${engine_test[@]}" ! -w "$CHROME"
           namei -l "$GITHUB_WORKSPACE/benchmarks/adapters/dompdf/adapter.php"
           namei -l "$GITHUB_WORKSPACE/benchmarks/fixtures/minimal-static"
           sudo systemd-run --quiet --wait --pipe --collect --expand-environment=no \
@@ -129,25 +160,14 @@ jobs:
               export GIT_OPTIONAL_LOCKS=0
               /usr/bin/python3 -E -s benchmarks/tools/test_process_tree_sampler.py --live --php-integration
               /usr/bin/python3 -E -s benchmarks/tools/process_tree_sampler.py --probe-network-isolation >/dev/null
-              smoke="$(mktemp -d /tmp/pliego-benchmark-adapter-smoke.XXXXXX)"
-              trap '\''rm -rf "$smoke"'\'' EXIT
-              chmod 0711 "$smoke"
-              install -d -o pliego-benchmark-engine -g pliego-benchmark-engine -m 0700 \
-                "$smoke/output" "$smoke/artifacts"
-              /usr/bin/python3 -E -s benchmarks/tools/process_tree_sampler.py \
-                --cwd "$PWD/benchmarks/fixtures/minimal-static" \
-                --stdout "$smoke/stdout" \
-                --stderr "$smoke/stderr" \
-                --isolate-network \
-                -- \
-                "$PWD/benchmarks/adapters/dompdf/adapter.php" render comparator.html \
-                --output "$smoke/output/document.pdf" \
-                --artifacts "$smoke/artifacts" \
-                --page-size 793.7008x1122.52 \
-                --page-margins 0,0,0,0 \
-                >/dev/null
-              test -s "$smoke/output/document.pdf"
-            '
+              exec env \
+                BROWSERSHOT_NODE_BINARY="$1" \
+                BROWSERSHOT_CHROME_PATH="$2" \
+                PLIEGO_BENCHMARK_CGROUP_PARENT="$parent" \
+                /usr/bin/python3 -E -s benchmarks/tools/run_comparison.py \
+                  --preflight-all \
+                  --binary "$3"
+            ' pliego-hosted-preflight "$NODE" "$CHROME" "$BINARY"
 
       - name: Check shared PDF oracle
         run: python benchmarks/tools/test_pdf_oracle.py

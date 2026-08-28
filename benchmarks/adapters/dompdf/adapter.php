@@ -105,6 +105,70 @@ function page_size(string $value): array
     return [$width * 0.75, $height * 0.75];
 }
 
+/** @return array{files: list<string>, directories: list<string>} */
+function artifact_sync_plan(string $path): array
+{
+    $root = realpath($path);
+    if ($root === false || !is_dir($root) || is_link($path)) {
+        throw new RuntimeException("artifact root is unavailable or unsafe: {$path}");
+    }
+    $files = [];
+    $directories = [$root];
+    $iterator = new RecursiveIteratorIterator(
+        new RecursiveDirectoryIterator($root, FilesystemIterator::SKIP_DOTS),
+        RecursiveIteratorIterator::CHILD_FIRST
+    );
+    foreach ($iterator as $entry) {
+        $entryPath = $entry->getPathname();
+        if ($entry->isLink()) {
+            throw new RuntimeException("artifact tree contains a symbolic link: {$entryPath}");
+        }
+        if ($entry->isFile()) {
+            $files[] = $entryPath;
+        } elseif ($entry->isDir()) {
+            $directories[] = $entryPath;
+        } else {
+            throw new RuntimeException("artifact tree contains a special file: {$entryPath}");
+        }
+    }
+    sort($files, SORT_STRING);
+    usort($directories, static function (string $left, string $right): int {
+        $depth = substr_count($right, DIRECTORY_SEPARATOR) <=> substr_count($left, DIRECTORY_SEPARATOR);
+        return $depth !== 0 ? $depth : strcmp($left, $right);
+    });
+    return ['files' => $files, 'directories' => $directories];
+}
+
+function sync_path(string $path, bool $directory): void
+{
+    if (!function_exists('fsync')) {
+        abort_adapter('PHP fsync support is required for benchmark durability', 1);
+    }
+    $stream = @fopen($path, $directory ? 'rb' : 'r+b');
+    if ($stream === false || !fsync($stream)) {
+        if (is_resource($stream)) {
+            fclose($stream);
+        }
+        abort_adapter("cannot durably flush benchmark path: {$path}", 1);
+    }
+    fclose($stream);
+}
+
+function sync_artifact_tree(string $path): void
+{
+    try {
+        $plan = artifact_sync_plan($path);
+    } catch (RuntimeException $error) {
+        abort_adapter($error->getMessage(), 1);
+    }
+    foreach ($plan['files'] as $file) {
+        sync_path($file, false);
+    }
+    foreach ($plan['directories'] as $directory) {
+        sync_path($directory, true);
+    }
+}
+
 function publish_pdf(string $output, string $pdf): void
 {
     if (!str_starts_with($pdf, '%PDF-') || !str_contains(substr($pdf, -4096), '%%EOF')) {
@@ -142,6 +206,7 @@ function publish_pdf(string $output, string $pdf): void
         @unlink($temporary);
         abort_adapter('cannot atomically publish PDF output');
     }
+    sync_path($parent, true);
 }
 
 function load_dependencies(): void
@@ -217,6 +282,7 @@ function render(array $arguments): void
     $dompdf->setPaper([0.0, 0.0, $widthPoints, $heightPoints]);
     $dompdf->render();
     publish_pdf($options['--output'], $dompdf->output());
+    sync_artifact_tree($artifacts);
 }
 
 $mode = $argv[1] ?? '';
@@ -232,6 +298,35 @@ if ($mode === 'self-test') {
     if (!is_bare_input_name('input.html') || is_bare_input_name('../input.html')
         || is_bare_input_name('..\\input.html') || is_bare_input_name('C:\\input.html')) {
         abort_adapter('bare input self-test failed', 1);
+    }
+    $syncRoot = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'pliego-dompdf-sync-' . bin2hex(random_bytes(8));
+    $syncNested = $syncRoot . DIRECTORY_SEPARATOR . 'nested';
+    if (!mkdir($syncNested, 0700, true) || file_put_contents($syncNested . DIRECTORY_SEPARATOR . 'cache.bin', 'cache') === false) {
+        abort_adapter('artifact sync-plan self-test setup failed', 1);
+    }
+    try {
+        $plan = artifact_sync_plan($syncRoot);
+        if ($plan['files'] !== [$syncNested . DIRECTORY_SEPARATOR . 'cache.bin']
+            || $plan['directories'] !== [$syncNested, $syncRoot]) {
+            abort_adapter('artifact sync-plan ordering self-test failed', 1);
+        }
+        if (PHP_OS_FAMILY !== 'Windows' && function_exists('symlink')) {
+            $link = $syncRoot . DIRECTORY_SEPARATOR . 'unsafe-link';
+            if (!symlink($syncNested . DIRECTORY_SEPARATOR . 'cache.bin', $link)) {
+                abort_adapter('artifact sync-plan symlink self-test setup failed', 1);
+            }
+            try {
+                artifact_sync_plan($syncRoot);
+                abort_adapter('artifact sync-plan followed a symbolic link', 1);
+            } catch (RuntimeException) {
+                // Expected: benchmark artifact durability never follows links.
+            }
+            unlink($link);
+        }
+    } finally {
+        @unlink($syncNested . DIRECTORY_SEPARATOR . 'cache.bin');
+        @rmdir($syncNested);
+        @rmdir($syncRoot);
     }
     echo "dompdf adapter self-test passed\n";
     exit(0);
