@@ -191,11 +191,22 @@ def fixture_proofs() -> None:
                 "/nonexistent",
             )
             adapter_command = ("/adapter", "render", "input.html", "--artifacts", str(artifacts))
-            assert process_tree_sampler.adapter_temporary_directory(adapter_command, current_account) == str(artifacts)
+            assert process_tree_sampler.engine_temporary_directory(
+                adapter_command, current_account, None
+            ) == str(artifacts)
+            assert process_tree_sampler.engine_temporary_directory(
+                ("/pliego", "render-api2"), current_account, str(artifacts)
+            ) == str(artifacts)
+            must_be_incomplete(
+                "ENGINE_TEMPORARY_DIRECTORY_REQUIRED",
+                lambda: process_tree_sampler.engine_temporary_directory(
+                    ("/pliego", "render-api2"), current_account, None
+                ),
+            )
             artifacts.chmod(0o755)
             must_be_incomplete(
                 "ENGINE_TEMPORARY_DIRECTORY_UNSAFE",
-                lambda: process_tree_sampler.adapter_temporary_directory(adapter_command, current_account),
+                lambda: process_tree_sampler.engine_temporary_directory(adapter_command, current_account, None),
             )
 
     with tempfile.TemporaryDirectory() as raw:
@@ -630,25 +641,32 @@ def workload_command(engine: str) -> list[str]:
 
 
 def sampled(command: list[str], descendant_grace_ms: float = 1000.0) -> dict:
-    result = subprocess.run(
-        [
-            sys.executable,
-            str(SAMPLER),
-            "--interval-ms",
-            "75",
-            "--pss-interval-ms",
-            "250",
-            "--descendant-grace-ms",
-            str(descendant_grace_ms),
-            "--cwd",
-            str(Path(command[0]).parent),
-            "--",
-            *command,
-        ],
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
+    account = process_tree_sampler.resolve_engine_account()
+    with tempfile.TemporaryDirectory() as raw:
+        temporary = Path(raw).resolve()
+        os.chown(temporary, account.uid, account.gid)
+        temporary.chmod(0o700)
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(SAMPLER),
+                "--interval-ms",
+                "75",
+                "--pss-interval-ms",
+                "250",
+                "--descendant-grace-ms",
+                str(descendant_grace_ms),
+                "--cwd",
+                str(Path(command[0]).parent),
+                "--temporary-directory",
+                str(temporary),
+                "--",
+                *command,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout)
 
@@ -812,6 +830,9 @@ request = json.loads(request_bytes)
 assert request_bytes == (json.dumps(request, separators=(',', ':')) + '\\n').encode()
 assert request['api'] == 2
 root = pathlib.Path.cwd()
+temporary = pathlib.Path(os.environ['TMPDIR'])
+assert temporary.parent == root.parent and temporary.name == 'temporary'
+assert temporary.is_dir()
 assert sorted(path.name for path in root.iterdir()) == ['input', 'input-manifest.json']
 manifest_bytes = (root / 'input-manifest.json').read_bytes()
 manifest_descriptor = request['input']['manifest']

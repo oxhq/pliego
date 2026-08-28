@@ -831,31 +831,51 @@ def migration_write_probes(paths: dict[str, Path]) -> dict[str, dict[str, str]]:
     return results
 
 
-def adapter_temporary_directory(command: tuple[str, ...], account: EngineAccount) -> str:
-    if len(command) < 2 or command[1] != "render":
-        return "/tmp"
-    positions = [index for index, value in enumerate(command) if value == "--artifacts"]
-    if len(positions) != 1 or positions[0] + 1 >= len(command):
-        raise incomplete("ENGINE_COMMAND_INVALID", "benchmark adapter argv must contain one --artifacts path")
-    requested = Path(command[positions[0] + 1])
+def validate_engine_temporary_directory(requested: Path, account: EngineAccount) -> str:
     if not requested.is_absolute():
-        raise incomplete("ENGINE_TEMPORARY_DIRECTORY_UNSAFE", "adapter artifact path must be absolute")
+        raise incomplete("ENGINE_TEMPORARY_DIRECTORY_UNSAFE", "engine temporary path must be absolute")
     try:
         resolved = requested.resolve(strict=True)
         metadata = os.stat(resolved, follow_symlinks=False)
     except OSError as error:
         raise incomplete(
             "ENGINE_TEMPORARY_DIRECTORY_UNSAFE",
-            f"cannot bind adapter artifact path {requested}: {error}",
+            f"cannot bind engine temporary path {requested}: {error}",
         ) from error
     if requested != resolved or not stat.S_ISDIR(metadata.st_mode):
-        raise incomplete("ENGINE_TEMPORARY_DIRECTORY_UNSAFE", "adapter artifact path must be a canonical directory")
+        raise incomplete("ENGINE_TEMPORARY_DIRECTORY_UNSAFE", "engine temporary path must be a canonical directory")
     if metadata.st_uid != account.uid or metadata.st_gid != account.gid or stat.S_IMODE(metadata.st_mode) != 0o700:
         raise incomplete(
             "ENGINE_TEMPORARY_DIRECTORY_UNSAFE",
-            f"adapter artifact path must be owned by {account.uid}:{account.gid} with mode 0700",
+            f"engine temporary path must be owned by {account.uid}:{account.gid} with mode 0700",
         )
     return str(resolved)
+
+
+def engine_temporary_directory(
+    command: tuple[str, ...], account: EngineAccount, explicit: str | None
+) -> str:
+    if len(command) >= 2 and command[1] == "render":
+        positions = [index for index, value in enumerate(command) if value == "--artifacts"]
+        if len(positions) != 1 or positions[0] + 1 >= len(command):
+            raise incomplete("ENGINE_COMMAND_INVALID", "benchmark adapter argv must contain one --artifacts path")
+        artifacts = validate_engine_temporary_directory(Path(command[positions[0] + 1]), account)
+        if explicit is not None and validate_engine_temporary_directory(Path(explicit), account) != artifacts:
+            raise incomplete(
+                "ENGINE_TEMPORARY_DIRECTORY_UNSAFE",
+                "adapter temporary path must equal its canonical artifact directory",
+            )
+        return artifacts
+    if len(command) >= 2 and command[1] == "render-api2":
+        if explicit is None:
+            raise incomplete(
+                "ENGINE_TEMPORARY_DIRECTORY_REQUIRED",
+                "native API 2 benchmark requires an explicit private temporary directory",
+            )
+        return validate_engine_temporary_directory(Path(explicit), account)
+    if explicit is not None:
+        return validate_engine_temporary_directory(Path(explicit), account)
+    return "/tmp"
 
 
 def engine_environment(account: EngineAccount, temporary_directory: str = "/tmp") -> dict[str, str]:
@@ -894,8 +914,8 @@ def fork_stopped(
     probe_paths: dict[str, Path],
     isolate_network: bool,
     host_network_namespace: str,
+    temporary_directory: str,
 ) -> tuple[int, int]:
-    temporary_directory = adapter_temporary_directory(command, account)
     descriptors = [open_stdin_descriptor(stdin_path)]
     if DURABLE_WRITE_FLAG == 0:
         raise incomplete("DURABLE_ENGINE_OUTPUT_UNAVAILABLE", "the host exposes neither O_DSYNC nor O_SYNC")
@@ -1228,6 +1248,7 @@ def sample_command(
     lock_root: Path | None = None,
     isolate_network: bool = False,
     stdin_path: str | None = None,
+    temporary_directory: str | None = None,
 ) -> dict[str, Any]:
     if resource is None:
         raise incomplete("CGROUP_V2_REQUIRED", "Linux resource accounting is unavailable")
@@ -1235,6 +1256,7 @@ def sample_command(
         raise incomplete("PIDFD_REQUIRED", "os.pidfd_open is unavailable")
     require_broker_root()
     account = resolve_engine_account()
+    engine_tmpdir = engine_temporary_directory(tuple(command), account, temporary_directory)
     host_network_namespace = os.readlink(proc_root / "self" / "ns" / "net")
     argv, executable = command_identity(command, account)
     parent = require_delegated_parent(cgroup_parent, cgroup_root, proc_root)
@@ -1271,6 +1293,7 @@ def sample_command(
                 probe_paths,
                 isolate_network,
                 host_network_namespace,
+                engine_tmpdir,
             )
             root_identity = move_stopped_child(root_pid, staging, cgroup_root, proc_root)
             launch_security = finish_authority_handshake(
@@ -1496,6 +1519,7 @@ def sample_command(
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cwd", default=os.getcwd())
+    parser.add_argument("--temporary-directory", help="private engine-owned temporary directory")
     parser.add_argument("--stdin", help="canonical root-owned, read-only API 2 request file")
     parser.add_argument("--stdout", default=os.devnull, help="command stdout file")
     parser.add_argument("--stderr", default=os.devnull, help="command stderr file")
@@ -1544,6 +1568,7 @@ def main() -> int:
             Path(configured_parent),
             isolate_network=args.isolate_network,
             stdin_path=args.stdin,
+            temporary_directory=args.temporary_directory,
         )
     except (MeasurementIncomplete, OSError) as error:
         code = error.code if isinstance(error, MeasurementIncomplete) else "CGROUP_IO_ERROR"

@@ -342,6 +342,10 @@ function render(array $arguments): void
             'disable-domain-reliability',
             'disable-sync',
             'metrics-recording-only',
+            // The sampler is the benchmark sandbox: fixed UID, no capabilities,
+            // no_new_privs, private network namespace, and a sealed filesystem
+            // closure. Chrome's copied setuid helper cannot elevate inside it.
+            'no-sandbox',
             'no-first-run',
         ]);
     $shot->savePdf($temporary);

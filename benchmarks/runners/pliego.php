@@ -342,7 +342,13 @@ if (PHP_OS_FAMILY === 'Linux') {
  *     signal: int|null, resource_usage: object|null,
  *     exit_code: int, stdout: string, stderr: string}
  */
-function run_engine(array $command, string $cwd, bool $isolateNetwork, ?string $stdinPath): array
+function run_engine(
+    array $command,
+    string $cwd,
+    bool $isolateNetwork,
+    ?string $stdinPath,
+    ?string $temporaryDirectory = null
+): array
 {
     $nullDevice = PHP_OS_FAMILY === 'Windows' ? 'NUL' : '/dev/null';
     $stdoutTmp = tempnam(sys_get_temp_dir(), 'pliego-bench-out-');
@@ -387,6 +393,7 @@ function run_engine(array $command, string $cwd, bool $isolateNetwork, ?string $
         $launchedCommand = [
             $interpreter, '-I', $sampler,
             '--cwd', $cwd,
+            ...($temporaryDirectory !== null ? ['--temporary-directory', $temporaryDirectory] : []),
             '--stdout', $stdoutTmp,
             '--stderr', $stderrTmp,
             ...($stdinPath !== null ? ['--stdin', $stdinPath] : []),
@@ -829,22 +836,78 @@ function harden_windows_job_root(string $path): void
     }
 }
 
-/** @return array{root: string, request: string, pdf: string, scene: string, bundle: string} */
+function sync_benchmark_path(string $path, bool $directory): void
+{
+    if (!function_exists('fsync')) {
+        fail('PHP fsync support is required to seal benchmark staging');
+    }
+    $stream = @fopen($path, $directory ? 'rb' : 'r+b');
+    if ($stream === false || !fsync($stream)) {
+        if (is_resource($stream)) {
+            fclose($stream);
+        }
+        fail("cannot durably seal benchmark staging path: {$path}");
+    }
+    fclose($stream);
+}
+
+function seal_benchmark_tree(string $path): void
+{
+    $root = realpath($path);
+    if ($root === false || !is_dir($root) || is_link($path)) {
+        fail("benchmark staging root is unavailable or unsafe: {$path}");
+    }
+    $files = [];
+    $directories = [$root];
+    $iterator = new RecursiveIteratorIterator(
+        new RecursiveDirectoryIterator($root, FilesystemIterator::SKIP_DOTS),
+        RecursiveIteratorIterator::CHILD_FIRST
+    );
+    foreach ($iterator as $entry) {
+        $entryPath = $entry->getPathname();
+        if ($entry->isLink()) {
+            fail("benchmark staging tree contains a symbolic link: {$entryPath}");
+        }
+        if ($entry->isFile()) {
+            $files[] = $entryPath;
+        } elseif ($entry->isDir()) {
+            $directories[] = $entryPath;
+        } else {
+            fail("benchmark staging tree contains a special file: {$entryPath}");
+        }
+    }
+    sort($files, SORT_STRING);
+    usort($directories, static function (string $left, string $right): int {
+        $depth = substr_count($right, DIRECTORY_SEPARATOR) <=> substr_count($left, DIRECTORY_SEPARATOR);
+        return $depth !== 0 ? $depth : strcmp($left, $right);
+    });
+    foreach ($files as $file) {
+        sync_benchmark_path($file, false);
+    }
+    foreach ($directories as $directory) {
+        sync_benchmark_path($directory, true);
+    }
+}
+
+/** @return array{sandbox: string, root: string, temporary: string, request: string, pdf: string, scene: string, bundle: string} */
 function stage_api2_job(array $state): array
 {
-    $jobRoot = sys_get_temp_dir() . '/pliego-bench-api2-' . bin2hex(random_bytes(8));
+    $sandboxRoot = sys_get_temp_dir() . '/pliego-bench-api2-' . bin2hex(random_bytes(8));
+    $jobRoot = $sandboxRoot . DIRECTORY_SEPARATOR . 'job';
+    $temporaryRoot = $sandboxRoot . DIRECTORY_SEPARATOR . 'temporary';
     if (PHP_OS_FAMILY === 'Linux') {
-        prepare_engine_directory($jobRoot, $state['engineUid'], $state['engineGid']);
-    } elseif (!mkdir($jobRoot, 0700) || !chmod($jobRoot, 0700)) {
-        fail("cannot create private API 2 job root: {$jobRoot}");
+        prepare_engine_directory($sandboxRoot, $state['engineUid'], $state['engineGid']);
+    } elseif (!mkdir($sandboxRoot, 0700) || !chmod($sandboxRoot, 0700)) {
+        fail("cannot create private API 2 sandbox root: {$sandboxRoot}");
     }
     if (PHP_OS_FAMILY === 'Windows') {
-        harden_windows_job_root($jobRoot);
+        harden_windows_job_root($sandboxRoot);
     }
 
     $inputRoot = $jobRoot . DIRECTORY_SEPARATOR . 'input';
-    if (!mkdir($inputRoot, 0700)) {
-        fail("cannot create API 2 input directory: {$inputRoot}");
+    if (!mkdir($jobRoot, 0700) || !mkdir($temporaryRoot, 0700) || !mkdir($inputRoot, 0700)) {
+        rrmdir($sandboxRoot);
+        fail("cannot create private API 2 sandbox directories below: {$sandboxRoot}");
     }
     $paths = [$state['input'], ...$state['fixtureAssets']];
     sort($paths, SORT_STRING);
@@ -917,7 +980,7 @@ function stage_api2_job(array $state): array
 
     if (PHP_OS_FAMILY !== 'Windows') {
         $iterator = new RecursiveIteratorIterator(
-            new RecursiveDirectoryIterator($jobRoot, FilesystemIterator::SKIP_DOTS),
+            new RecursiveDirectoryIterator($sandboxRoot, FilesystemIterator::SKIP_DOTS),
             RecursiveIteratorIterator::SELF_FIRST
         );
         foreach ($iterator as $entry) {
@@ -931,6 +994,7 @@ function stage_api2_job(array $state): array
                 fail("cannot delegate API 2 job node: {$entry->getPathname()}");
             }
         }
+        seal_benchmark_tree($sandboxRoot);
     }
 
     $locale = $state['locale'] ?? 'en-US';
@@ -995,7 +1059,9 @@ function stage_api2_job(array $state): array
     }
 
     return [
+        'sandbox' => $sandboxRoot,
         'root' => $jobRoot,
+        'temporary' => $temporaryRoot,
         'request' => $request,
         'pdf' => $jobRoot . DIRECTORY_SEPARATOR . 'delivery' . DIRECTORY_SEPARATOR . 'document.pdf',
         'scene' => $jobRoot . DIRECTORY_SEPARATOR . 'delivery' . DIRECTORY_SEPARATOR . 'scene.json',
@@ -1005,17 +1071,25 @@ function stage_api2_job(array $state): array
 
 function api2_request_file(string $request): string
 {
-    $path = tempnam(sys_get_temp_dir(), 'pliego-bench-api2-request-');
-    if ($path === false || file_put_contents($path, $request, LOCK_EX) !== strlen($request)
+    $root = sys_get_temp_dir() . '/pliego-bench-api2-request-' . bin2hex(random_bytes(8));
+    if (!mkdir($root, 0700) || !chmod($root, 0700)) {
+        fail('cannot create private API 2 stdin root');
+    }
+    if (PHP_OS_FAMILY === 'Windows') {
+        harden_windows_job_root($root);
+    }
+    $path = $root . DIRECTORY_SEPARATOR . 'request.json';
+    if (file_put_contents($path, $request, LOCK_EX) !== strlen($request)
         || (PHP_OS_FAMILY === 'Linux' && !chmod($path, 0400))) {
-        if (is_string($path)) {
-            @unlink($path);
-        }
+        rrmdir($root);
         fail('cannot create immutable API 2 stdin request');
+    }
+    if (PHP_OS_FAMILY === 'Linux') {
+        seal_benchmark_tree($root);
     }
     $resolved = realpath($path);
     if ($resolved === false || $resolved !== $path) {
-        @unlink($path);
+        rrmdir($root);
         fail('API 2 stdin request path is not canonical');
     }
     return $resolved;
@@ -1400,13 +1474,14 @@ function run_api2_sample(array $state, int $index): array
             [$state['binary'], 'render-api2'],
             $job['root'],
             $state['isolateNetwork'],
-            $requestPath
+            $requestPath,
+            $job['temporary']
         );
     } finally {
-        @unlink($requestPath);
+        rrmdir(dirname($requestPath));
     }
     if (isset($exec['error'])) {
-        rrmdir($job['root']);
+        rrmdir($job['sandbox']);
         fail("engine run failed: {$exec['error']}");
     }
     assert_fixture_identity($state);
@@ -1761,7 +1836,7 @@ function run_api2_sample(array $state, int $index): array
     ];
 
     if ($pass) {
-        rrmdir($job['root']);
+        rrmdir($job['sandbox']);
     } else {
         $sample['retained'] = [
             'artifacts_dir' => $job['root'],
