@@ -1098,6 +1098,9 @@ function run_pdf_oracle(array $state, string $pdfPath): array
     $decoded = json_decode((string) $stdout, true);
     if (!is_array($decoded) || ($decoded['contract'] ?? null) !== 'pliego.pdf-oracle.v1'
         || !is_bool($decoded['pass'] ?? null) || !is_array($decoded['checks'] ?? null)) {
+        $oracleError = is_array($decoded) && is_string($decoded['error'] ?? null)
+            ? $decoded['error']
+            : null;
         return [
             'pass' => false,
             'page_count' => null,
@@ -1108,7 +1111,7 @@ function run_pdf_oracle(array $state, string $pdfPath): array
             'checks' => [[
                 'name' => 'pdf_oracle',
                 'status' => 'fail',
-                'detail' => trim((string) $stderr) ?: "invalid oracle output (exit {$exitCode})",
+                'detail' => $oracleError ?? (trim((string) $stderr) ?: "invalid oracle output (exit {$exitCode})"),
             ]],
         ];
     }
@@ -1768,6 +1771,23 @@ function run_sample(array $state, int $index): array
         : run_adapter_sample($state, $index);
 }
 
+function failed_correctness_checks(array $sample): string
+{
+    $failures = [];
+    foreach ($sample['correctness']['checks'] ?? [] as $check) {
+        if (!is_array($check) || ($check['status'] ?? null) !== 'fail') {
+            continue;
+        }
+        $failure = ['name' => (string) ($check['name'] ?? '(unnamed)')];
+        if (isset($check['detail']) && is_scalar($check['detail'])) {
+            $failure['detail'] = (string) $check['detail'];
+        }
+        $failures[] = $failure;
+    }
+    $encoded = json_encode($failures, JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE);
+    return is_string($encoded) ? $encoded : '[{"name":"(encoding-failed)"}]';
+}
+
 $state = [
     'binary' => $binary,
     'binarySha256' => $binarySha256,
@@ -1803,7 +1823,10 @@ assert_fixture_identity($state);
 $runPreflight = static function () use ($state): void {
     $preflight = run_sample($state, -1000000);
     if (!$preflight['ok']) {
-        fail('untimed correctness preflight failed; evidence retained at ' . $preflight['retained']['artifacts_dir']);
+        fail(
+            'untimed correctness preflight failed: ' . failed_correctness_checks($preflight)
+            . '; evidence retained at ' . $preflight['retained']['artifacts_dir']
+        );
     }
 };
 
@@ -1814,7 +1837,10 @@ if ($runnerPhase === 'preflight') {
 if ($runnerPhase === 'warmup') {
     $sample = run_sample($state, -1 - (int) $sampleIndex);
     if (!$sample['ok']) {
-        fail('warmup failed; evidence retained at ' . $sample['retained']['artifacts_dir']);
+        fail(
+            'warmup failed: ' . failed_correctness_checks($sample)
+            . '; evidence retained at ' . $sample['retained']['artifacts_dir']
+        );
     }
     exit(0);
 }
@@ -1829,7 +1855,10 @@ $runPreflight();
 for ($iteration = 0; $iteration < $warmup; $iteration++) {
     $sample = run_sample($state, -1 - $iteration);
     if (!$sample['ok']) {
-        fail('warmup failed; evidence retained at ' . $sample['retained']['artifacts_dir']);
+        fail(
+            'warmup failed: ' . failed_correctness_checks($sample)
+            . '; evidence retained at ' . $sample['retained']['artifacts_dir']
+        );
     }
 }
 for ($iteration = 0; $iteration < $samples; $iteration++) {

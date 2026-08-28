@@ -84,6 +84,23 @@ def delegated_fixture(directory: Path) -> tuple[Path, Path, Path]:
     return root, parent, proc
 
 
+def delegated_namespace_root_fixture(directory: Path) -> tuple[Path, Path]:
+    root = directory / "root"
+    harness = root / "harness"
+    proc = directory / "proc"
+    harness.mkdir(parents=True)
+    (proc / "self").mkdir(parents=True)
+    (root / "cgroup.controllers").write_text("cpu io memory pids\n", encoding="ascii")
+    (root / "cgroup.subtree_control").write_text("cpu io memory pids\n", encoding="ascii")
+    (root / "cgroup.procs").write_text("", encoding="ascii")
+    (root / "cgroup.threads").write_text("", encoding="ascii")
+    (harness / "cgroup.procs").write_text(f"{os.getpid()}\n", encoding="ascii")
+    (harness / "cgroup.threads").write_text(f"{os.getpid()}\n", encoding="ascii")
+    (harness / "cgroup.type").write_text("domain\n", encoding="ascii")
+    (proc / "self" / "cgroup").write_text("0::/harness\n", encoding="ascii")
+    return root, proc
+
+
 def require_fixture_parent(parent: Path, root: Path, proc: Path) -> process_tree_sampler.BoundDirectory:
     return process_tree_sampler.require_delegated_parent(parent, root, proc, os.getuid(), os.getgid())
 
@@ -109,6 +126,16 @@ def must_be_incomplete(code: str, operation: object) -> None:
 
 
 def fixture_proofs() -> None:
+    empty_io = process_tree_sampler.parse_io_stat("8:0 \n", "hosted-zero-io")
+    assert empty_io == {"8:0": {"rbytes": 0, "wbytes": 0, "rios": 0, "wios": 0}}
+    must_be_incomplete(
+        "CGROUP_COUNTER_MISSING",
+        lambda: process_tree_sampler.parse_io_stat("8:0 rbytes=1\n", "partial-io"),
+    )
+    must_be_incomplete(
+        "CGROUP_COUNTER_INVALID",
+        lambda: process_tree_sampler.parse_io_stat("not-a-device \n", "invalid-device"),
+    )
     parser = argparse.ArgumentParser(prog="process_tree_sampler")
     error = io.StringIO()
     with contextlib.redirect_stderr(error):
@@ -283,6 +310,10 @@ def fixture_proofs() -> None:
         assert delegation.path == parent
         delegation.close()
 
+        (parent / "cgroup.type").unlink()
+        must_be_incomplete("CGROUP_INTERFACES_MISSING", lambda: require_fixture_parent(parent, root, proc))
+        (parent / "cgroup.type").write_text("domain\n", encoding="ascii")
+
         (parent / "cgroup.procs").chmod(0o666)
         must_be_incomplete("CGROUP_PERMISSIONS_UNSAFE", lambda: require_fixture_parent(parent, root, proc))
         (parent / "cgroup.procs").chmod(0o644)
@@ -322,6 +353,20 @@ def fixture_proofs() -> None:
             "CGROUP_NOT_EXCLUSIVE",
             lambda: require_fixture_parent(parent, root, proc),
         )
+
+    with tempfile.TemporaryDirectory() as raw:
+        directory = Path(raw)
+        directory.chmod(0o755)
+        root, proc = delegated_namespace_root_fixture(directory)
+        delegation = process_tree_sampler.require_delegated_parent(
+            root,
+            root,
+            proc,
+            os.getuid(),
+            os.getgid(),
+        )
+        assert delegation.path == root
+        delegation.close()
 
     with tempfile.TemporaryDirectory() as raw:
         directory = Path(raw)
@@ -470,16 +515,89 @@ def migration_attack(parent: str) -> int:
 @contextlib.contextmanager
 def workload_engine(arguments: list[str] | None = None) -> Iterator[str]:
     arguments = arguments or ["--workload-parent", "32", "0.8"]
+    embedded_child = """import sys
+import time
+
+mebibytes = int(sys.argv[1])
+duration = float(sys.argv[2])
+allocation = bytearray(mebibytes * 1024 * 1024)
+for offset in range(0, len(allocation), 4096):
+    allocation[offset] = (offset // 4096) % 251
+time.sleep(duration)
+raise SystemExit(allocation[0])
+"""
     with tempfile.TemporaryDirectory() as raw:
         directory = Path(raw)
         directory.chmod(0o755)
         engine = directory / "fixture-engine.py"
         engine.write_text(
-            "#!/usr/bin/env python3\n"
-            "import os, sys\n"
-            f"os.execv({str(Path(sys.executable).resolve())!r}, "
-            f"[{str(Path(sys.executable).resolve())!r}, {str(Path(__file__).resolve())!r}, "
-            f"*{arguments!r}])\n",
+            f"""#!/usr/bin/env python3
+import errno
+import os
+from pathlib import Path
+import subprocess
+import sys
+import time
+
+ARGUMENTS = {arguments!r}
+
+
+def parent_workload(mebibytes, duration):
+    child_program = {embedded_child!r}
+    children = [
+        subprocess.Popen(
+            [sys.executable, "-c", child_program, str(mebibytes), str(duration)],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=index == 1,
+        )
+        for index in range(2)
+    ]
+    return max(child.wait() for child in children)
+
+
+def leaking_parent(pid_path):
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    with open(pid_path, "w", encoding="ascii") as output:
+        output.write(str(child.pid))
+        output.flush()
+        os.fsync(output.fileno())
+    return 0
+
+
+def migration_attack(parent):
+    for interface in ("cgroup.procs", "cgroup.threads"):
+        try:
+            with open(Path(parent) / interface, "w", encoding="ascii") as output:
+                output.write(f"{{os.getpid()}}\\n")
+        except PermissionError as error:
+            if error.errno not in {{errno.EACCES, errno.EPERM}}:
+                return 91
+        else:
+            return 90
+    return parent_workload(4, 0.3)
+
+
+def main():
+    if ARGUMENTS[0] == "--workload-parent":
+        return parent_workload(int(ARGUMENTS[1]), float(ARGUMENTS[2]))
+    if ARGUMENTS[0] == "--workload-leak":
+        return leaking_parent(ARGUMENTS[1])
+    if ARGUMENTS[0] == "--workload-migration-attack":
+        return migration_attack(ARGUMENTS[1])
+    raise ValueError(f"unsupported fixture workload: {{ARGUMENTS!r}}")
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+""",
             encoding="utf-8",
         )
         engine.chmod(0o555)
@@ -501,6 +619,8 @@ def sampled(command: list[str], descendant_grace_ms: float = 1000.0) -> dict:
             "250",
             "--descendant-grace-ms",
             str(descendant_grace_ms),
+            "--cwd",
+            str(Path(command[0]).parent),
             "--",
             *command,
         ],
@@ -535,11 +655,16 @@ def assert_exact_counters(proof: dict) -> None:
 
 def assert_validator_accepts(proof: dict, ok: bool) -> None:
     diagnostics = proof["sampled_diagnostics"]
+    minimum_one_shot_wall_ms = round(
+        proof["wall_ms"] + proof["drain_ms"] + proof["accounting_settle"]["duration_ms"],
+        3,
+    )
     sample = {
         "ok": ok,
         "exit_code": proof["exit_code"],
         "signal": proof["signal"],
         "wall_ms": proof["wall_ms"],
+        "one_shot_wall_ms": minimum_one_shot_wall_ms,
         "user_ms": proof["cpu_user_ms"],
         "sys_ms": proof["cpu_sys_ms"],
         "memory_current_bytes": proof["memory_current_bytes"],
@@ -566,7 +691,7 @@ def live_cgroup_proofs() -> dict:
     parent = os.environ["PLIEGO_BENCHMARK_CGROUP_PARENT"]
     with workload_engine(["--workload-migration-attack", parent]) as engine:
         attacked = sampled(workload_command(engine))
-        assert attacked["exit_code"] == 0
+        assert attacked["exit_code"] == 0, attacked
         assert attacked["counters"]["final"]["pids_peak"] >= 3
         assert set(attacked["launch_security"]["migration_write_probes"]["parent"].values()) <= {
             "EACCES",
@@ -651,6 +776,15 @@ def php_integration_proof() -> None:
         engine.write_text(
             f"""#!/usr/bin/env python3
 import base64, hashlib, json, os, pathlib, sys
+
+
+def write_synced(path, payload):
+    with path.open('wb') as output:
+        output.write(payload)
+        output.flush()
+        os.fsync(output.fileno())
+
+
 assert sys.argv[1:] == ['render-api2']
 request_bytes = sys.stdin.buffer.read()
 request = json.loads(request_bytes)
@@ -673,10 +807,10 @@ pdf = base64.b64decode({pdf_base64!r})
 scene = base64.b64decode({scene_base64!r})
 bundle = base64.b64decode({bundle_base64!r})
 environment = b'{{"fixture":true}}\\n'
-(delivery / 'document.pdf').write_bytes(pdf)
-(delivery / 'scene.json').write_bytes(scene)
-(delivery / 'bundle.json').write_bytes(bundle)
-(diagnostics / 'environment.json').write_bytes(environment)
+write_synced(delivery / 'document.pdf', pdf)
+write_synced(delivery / 'scene.json', scene)
+write_synced(delivery / 'bundle.json', bundle)
+write_synced(diagnostics / 'environment.json', environment)
 result = {{
     'schema': 'pliego.render-result',
     'version': 1,

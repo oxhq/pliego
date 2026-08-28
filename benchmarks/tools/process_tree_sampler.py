@@ -427,7 +427,18 @@ def parse_io_stat(raw: str, label: str) -> dict[str, dict[str, int]]:
     devices: dict[str, dict[str, int]] = {}
     for line in raw.splitlines():
         fields = line.split()
-        if len(fields) < 2 or fields[0] in devices:
+        if not fields:
+            raise incomplete("CGROUP_COUNTER_INVALID", f"malformed io.stat line in {label}: {line!r}")
+        device = fields[0]
+        major, separator, minor = device.partition(":")
+        if (
+            not separator
+            or not major.isascii()
+            or not major.isdigit()
+            or not minor.isascii()
+            or not minor.isdigit()
+            or device in devices
+        ):
             raise incomplete("CGROUP_COUNTER_INVALID", f"malformed io.stat line in {label}: {line!r}")
         counters: dict[str, int] = {}
         for field in fields[1:]:
@@ -441,10 +452,16 @@ def parse_io_stat(raw: str, label: str) -> dict[str, dict[str, int]]:
             if value < 0:
                 raise incomplete("CGROUP_COUNTER_INVALID", f"negative io.stat field: {field!r}")
             counters[key] = value
-        for required in ("rbytes", "wbytes", "rios", "wios"):
-            if required not in counters:
-                raise incomplete("CGROUP_COUNTER_MISSING", f"io.stat device {fields[0]} omitted {required}")
-        devices[fields[0]] = counters
+        required = frozenset({"rbytes", "wbytes", "rios", "wios"})
+        present = required & counters.keys()
+        if present and present != required:
+            missing = sorted(required - present)
+            raise incomplete("CGROUP_COUNTER_MISSING", f"io.stat device {device} omitted {missing}")
+        # blkcg_print_one_stat emits only "MAJ:MIN " when all four primary
+        # counters are zero, while policy-specific counters may still follow.
+        for key in required:
+            counters.setdefault(key, 0)
+        devices[device] = counters
     return devices
 
 
@@ -548,14 +565,11 @@ def require_delegated_parent(
         raise incomplete("CGROUP_V2_REQUIRED", f"{root} is not a cgroup-v2 mount")
     bound = open_bound_directory(parent, root)
     try:
-        require_bound_security(
-            bound,
-            frozenset(
-                {"cgroup.controllers", "cgroup.procs", "cgroup.subtree_control", "cgroup.threads", "cgroup.type"}
-            ),
-            owner_uid,
-            owner_gid,
-        )
+        namespace_root = bound.path == root
+        parent_interfaces = {"cgroup.controllers", "cgroup.procs", "cgroup.subtree_control", "cgroup.threads"}
+        if not namespace_root:
+            parent_interfaces.add("cgroup.type")
+        require_bound_security(bound, frozenset(parent_interfaces), owner_uid, owner_gid)
         if os.fstat(bound.fd).st_dev != os.stat(root, follow_symlinks=False).st_dev:
             raise incomplete("CGROUP_PARENT_OUTSIDE_V2", "delegated parent is not on the cgroup-v2 mount")
         relative = cgroup_relative("self", proc_root).lstrip("/")
@@ -579,7 +593,7 @@ def require_delegated_parent(
             )
         finally:
             harness.close()
-        if read_bound(bound, "cgroup.type").strip() != "domain":
+        if not namespace_root and read_bound(bound, "cgroup.type").strip() != "domain":
             raise incomplete("CGROUP_DOMAIN_REQUIRED", f"{bound.path} is not a domain cgroup")
 
         controllers = set(read_bound(bound, "cgroup.controllers").split())
@@ -986,7 +1000,12 @@ def finish_authority_handshake(
     if security["no_new_privs"] != 1:
         raise incomplete("ENGINE_PRIVILEGES_UNSAFE", "launcher did not set no_new_privs")
     if handshake.get("executable_accessible") is not True or handshake.get("cwd_accessible") is not True:
-        raise incomplete("ENGINE_PATH_INACCESSIBLE", "engine account cannot access its executable or cwd")
+        raise incomplete(
+            "ENGINE_PATH_INACCESSIBLE",
+            "engine account path access failed: "
+            f"executable_accessible={handshake.get('executable_accessible')!r} "
+            f"cwd_accessible={handshake.get('cwd_accessible')!r}",
+        )
     if handshake.get("executable_writable") is not False:
         raise incomplete("ENGINE_EXECUTABLE_MUTABLE", "engine account can write its executable")
     probes = handshake.get("migration_write_probes")

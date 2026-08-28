@@ -68,6 +68,42 @@ jobs:
             --no-dev --no-interaction --prefer-dist --classmap-authoritative
           npm ci --prefix benchmarks/adapters/browsershot --omit=dev
 
+      - name: Check hosted delegated-cgroup preflight
+        run: |
+          set -euo pipefail
+          if ! getent passwd pliego-benchmark-engine >/dev/null; then
+            sudo useradd --system --no-create-home \
+              --home-dir /nonexistent/pliego-benchmark-engine \
+              --shell /usr/sbin/nologin pliego-benchmark-engine
+          fi
+          test "$(id -u pliego-benchmark-engine)" -gt 0
+          test "$(id -g pliego-benchmark-engine)" -gt 0
+          sudo -u pliego-benchmark-engine test -r benchmarks/fixtures/minimal-static
+          sudo -u pliego-benchmark-engine test -x benchmarks/fixtures/minimal-static
+          sudo systemd-run --quiet --wait --pipe --collect --expand-environment=no \
+            -p Type=exec \
+            -p Delegate=yes \
+            -p DelegateSubgroup=harness \
+            -p KillMode=control-group \
+            -p TimeoutStopSec=10s \
+            -p RuntimeMaxSec=5min \
+            -p "WorkingDirectory=$GITHUB_WORKSPACE" \
+            /bin/bash -c '
+              set -euo pipefail
+              unified_line="$(grep -E "^0::/" /proc/self/cgroup)"
+              test "$(grep -Ec "^0::/" /proc/self/cgroup)" -eq 1
+              relative="${unified_line#0::}"
+              case "$relative" in
+                */harness) ;;
+                *) echo "unexpected delegated cgroup: $relative" >&2; exit 1 ;;
+              esac
+              parent="/sys/fs/cgroup${relative%/harness}"
+              printf "+cpu +io +memory +pids" > "$parent/cgroup.subtree_control"
+              export PLIEGO_BENCHMARK_CGROUP_PARENT="$parent"
+              /usr/bin/python3 -E -s benchmarks/tools/test_process_tree_sampler.py --live --php-integration
+              /usr/bin/python3 -E -s benchmarks/tools/process_tree_sampler.py --probe-network-isolation >/dev/null
+            '
+
       - name: Check shared PDF oracle
         run: python benchmarks/tools/test_pdf_oracle.py
 
