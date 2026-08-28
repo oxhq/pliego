@@ -333,9 +333,11 @@ def validate_resource_usage(sample: dict[str, Any], path: str, violations: list[
         f"{path}.resource_usage.launch_security.temporary_storage",
         launch["temporary_storage"],
         {
+            "access_time": "FS_NOATIME_FL",
             "directory_sync": "FS_DIRSYNC_FL",
             "file_sync": "FS_SYNC_FL",
             "filesystem": "ext4",
+            "runtime_environment": "fresh-private-home-xdg-v1",
             "scope": "per-invocation-private",
         },
         violations,

@@ -88,12 +88,14 @@ benchmarks/
   `pliego-benchmark-engine`. The broker must run in the parent's sole direct
   child, `harness`; set `PLIEGO_BENCHMARK_CGROUP_PARENT` to the canonical,
   empty root-owned parent. The sampler does not provision the service/account.
-* A dedicated root-owned mode-0711 ext4 directory whose `FS_SYNC_FL` and
-  `FS_DIRSYNC_FL` flags are set before any samples. Set
+* A dedicated root-owned mode-0711 ext4 directory whose `FS_NOATIME_FL`,
+  `FS_SYNC_FL`, and `FS_DIRSYNC_FL` flags are set before any samples. Set
   `PLIEGO_BENCHMARK_ENGINE_TEMP_ROOT` to that root. Every target receives a
   fresh mode-0700 child as `TMPDIR`; temporary database writes remain
-  block-I/O-accounted while inherited synchronous file and directory updates
-  prevent deleted scratch trees from escaping the zero-dirty gate.
+  block-I/O-accounted while inherited no-atime and synchronous file/directory
+  updates prevent scratch access or deletion from escaping the zero-dirty gate.
+  `HOME` and all XDG roots are fresh private children of that same measured
+  scratch directory, so browser state never falls back to a host account.
   This is a deliberate non-default benchmark condition; its synchronous
   metadata cost remains included in the retained wall-time and I/O totals.
 * All resources local, network disabled, same fonts and assets for every run.
@@ -324,9 +326,10 @@ All later descendants, including new sessions, remain contained. The retained
 final `cpu.stat`, `io.stat`, `memory.current`, `memory.peak`, and `pids.peak`
 counters are the accounting source. Engine wall time ends with the root process.
 The sampler also verifies that each private per-invocation temporary directory
-is ext4-backed and carries inherited `FS_SYNC_FL` plus `FS_DIRSYNC_FL` both
-before launch and after descendant drain; that storage remains on disk, inside
-the measured process tree, and is not replaced by tmpfs.
+is ext4-backed and carries inherited `FS_NOATIME_FL`, `FS_SYNC_FL`, and
+`FS_DIRSYNC_FL` both before launch and after descendant drain; that storage
+remains on disk, inside the measured process tree, and is not replaced by
+tmpfs. The fresh HOME/XDG contract is also retained for every sample.
 Descendant drain and accounting-settle durations are recorded separately. The
 runner also retains a complete one-shot wall interval from process open through
 sampler exit; serial throughput is derived only from that boundary, so leaked or

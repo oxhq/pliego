@@ -1269,9 +1269,13 @@ function run_adapter_sample(array $state, int $index): array
 {
     assert_fixture_identity($state);
     $artifactsDir = benchmark_engine_temporary_path('pliego-bench-');
+    $temporaryDir = PHP_OS_FAMILY === 'Linux'
+        ? benchmark_engine_temporary_path('pliego-bench-runtime-')
+        : null;
     $outDir = sys_get_temp_dir() . '/pliego-bench-out-' . bin2hex(random_bytes(8));
     if (PHP_OS_FAMILY === 'Linux') {
         prepare_engine_directory($outDir, $state['engineUid'], $state['engineGid']);
+        prepare_engine_directory($temporaryDir, $state['engineUid'], $state['engineGid']);
         if (!$state['requireSceneReport']) {
             prepare_engine_directory($artifactsDir, $state['engineUid'], $state['engineGid']);
         }
@@ -1306,7 +1310,13 @@ function run_adapter_sample(array $state, int $index): array
         array_push($command, '--timezone', $state['timezone']);
     }
 
-    $exec = run_engine($command, $state['cwd'], $state['isolateNetwork'], null);
+    try {
+        $exec = run_engine($command, $state['cwd'], $state['isolateNetwork'], null, $temporaryDir);
+    } finally {
+        if ($temporaryDir !== null) {
+            rrmdir($temporaryDir);
+        }
+    }
     if (isset($exec['error'])) {
         rrmdir($artifactsDir);
         rrmdir($outDir);

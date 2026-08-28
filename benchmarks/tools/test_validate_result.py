@@ -108,9 +108,11 @@ def resource_usage() -> dict:
                 for label in ("parent", "harness", "staging", "measurement")
             },
             "temporary_storage": {
+                "access_time": "FS_NOATIME_FL",
                 "directory_sync": "FS_DIRSYNC_FL",
                 "file_sync": "FS_SYNC_FL",
                 "filesystem": "ext4",
+                "runtime_environment": "fresh-private-home-xdg-v1",
                 "scope": "per-invocation-private",
             },
         },
@@ -542,6 +544,20 @@ def main() -> None:
         valid,
         lambda value: value["samples"][0]["resource_usage"]["launch_security"]["temporary_storage"].update(
             file_sync="none"
+        ),
+        "launch_security.temporary_storage",
+    )
+    changed(
+        valid,
+        lambda value: value["samples"][0]["resource_usage"]["launch_security"]["temporary_storage"].update(
+            runtime_environment="host-home"
+        ),
+        "launch_security.temporary_storage",
+    )
+    changed(
+        valid,
+        lambda value: value["samples"][0]["resource_usage"]["launch_security"]["temporary_storage"].update(
+            access_time="relatime"
         ),
         "launch_security.temporary_storage",
     )

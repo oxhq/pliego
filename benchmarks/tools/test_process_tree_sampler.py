@@ -180,6 +180,12 @@ def fixture_proofs() -> None:
     assert child_environment["BROWSERSHOT_CHROME_PATH"] == "/opt/chrome"
     assert child_environment["BROWSERSHOT_NODE_BINARY"] == "/usr/bin/node"
     assert child_environment["TMPDIR"] == "/engine-owned-artifacts"
+    assert child_environment["HOME"] == "/engine-owned-artifacts/home"
+    assert child_environment["XDG_CACHE_HOME"] == "/engine-owned-artifacts/xdg-cache"
+    assert child_environment["XDG_CONFIG_HOME"] == "/engine-owned-artifacts/xdg-config"
+    assert child_environment["XDG_DATA_HOME"] == "/engine-owned-artifacts/xdg-data"
+    assert child_environment["XDG_RUNTIME_DIR"] == "/engine-owned-artifacts/xdg-runtime"
+    assert child_environment["XDG_STATE_HOME"] == "/engine-owned-artifacts/xdg-state"
     if sys.platform == "linux":
         with tempfile.TemporaryDirectory(prefix="pliego mount ") as raw:
             root = Path(raw).resolve()
@@ -202,20 +208,36 @@ def fixture_proofs() -> None:
             mock.patch.object(
                 process_tree_sampler,
                 "directory_inode_flags",
-                return_value=process_tree_sampler.FS_DIRSYNC_FL | process_tree_sampler.FS_SYNC_FL,
+                return_value=(
+                    process_tree_sampler.FS_DIRSYNC_FL
+                    | process_tree_sampler.FS_SYNC_FL
+                    | process_tree_sampler.FS_NOATIME_FL
+                ),
             ),
         ):
-            artifacts = Path(raw).resolve()
-            artifacts.chmod(0o700)
+            root = Path(raw).resolve()
+            artifacts = root / "artifacts"
+            temporary = root / "temporary"
+            artifacts.mkdir(mode=0o700)
+            temporary.mkdir(mode=0o700)
             current_account = process_tree_sampler.EngineAccount(
                 "fixture-engine",
                 os.getuid(),
                 os.getgid(),
                 "/nonexistent",
             )
+            runtime_environment = process_tree_sampler.prepare_runtime_directories(temporary, current_account)
+            assert runtime_environment == {
+                variable: str(temporary / name)
+                for variable, name in process_tree_sampler.RUNTIME_DIRECTORY_NAMES.items()
+            }
             adapter_command = ("/adapter", "render", "input.html", "--artifacts", str(artifacts))
-            assert process_tree_sampler.engine_temporary_directory(adapter_command, current_account, None) == str(
-                artifacts
+            assert process_tree_sampler.engine_temporary_directory(
+                adapter_command, current_account, str(temporary)
+            ) == str(temporary)
+            must_be_incomplete(
+                "ENGINE_TEMPORARY_DIRECTORY_REQUIRED",
+                lambda: process_tree_sampler.engine_temporary_directory(adapter_command, current_account, None),
             )
             assert process_tree_sampler.engine_temporary_directory(
                 ("/pliego", "render-api2"), current_account, str(artifacts)
@@ -237,7 +259,9 @@ def fixture_proofs() -> None:
             artifacts.chmod(0o755)
             must_be_incomplete(
                 "ENGINE_TEMPORARY_DIRECTORY_UNSAFE",
-                lambda: process_tree_sampler.engine_temporary_directory(adapter_command, current_account, None),
+                lambda: process_tree_sampler.engine_temporary_directory(
+                    adapter_command, current_account, str(temporary)
+                ),
             )
             artifacts.chmod(0o700)
             with mock.patch.object(process_tree_sampler, "mountinfo_filesystem_type", return_value="tmpfs"):
@@ -248,7 +272,7 @@ def fixture_proofs() -> None:
             with mock.patch.object(
                 process_tree_sampler,
                 "directory_inode_flags",
-                return_value=process_tree_sampler.FS_SYNC_FL,
+                return_value=process_tree_sampler.FS_SYNC_FL | process_tree_sampler.FS_NOATIME_FL,
             ):
                 must_be_incomplete(
                     "ENGINE_TEMPORARY_DIRECTORY_UNSAFE",
@@ -257,7 +281,16 @@ def fixture_proofs() -> None:
             with mock.patch.object(
                 process_tree_sampler,
                 "directory_inode_flags",
-                return_value=process_tree_sampler.FS_DIRSYNC_FL,
+                return_value=process_tree_sampler.FS_DIRSYNC_FL | process_tree_sampler.FS_NOATIME_FL,
+            ):
+                must_be_incomplete(
+                    "ENGINE_TEMPORARY_DIRECTORY_UNSAFE",
+                    lambda: process_tree_sampler.validate_engine_temporary_directory(artifacts, current_account),
+                )
+            with mock.patch.object(
+                process_tree_sampler,
+                "directory_inode_flags",
+                return_value=process_tree_sampler.FS_DIRSYNC_FL | process_tree_sampler.FS_SYNC_FL,
             ):
                 must_be_incomplete(
                     "ENGINE_TEMPORARY_DIRECTORY_UNSAFE",
@@ -898,6 +931,10 @@ assert request['api'] == 2
 root = pathlib.Path.cwd()
 temporary = pathlib.Path(os.environ['TMPDIR'])
 assert temporary.is_dir()
+for variable in ('HOME', 'XDG_CACHE_HOME', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_RUNTIME_DIR', 'XDG_STATE_HOME'):
+    runtime_directory = pathlib.Path(os.environ[variable])
+    assert runtime_directory.parent == temporary
+    assert runtime_directory.is_dir()
 assert sorted(path.name for path in root.iterdir()) == ['input', 'input-manifest.json']
 manifest_bytes = (root / 'input-manifest.json').read_bytes()
 manifest_descriptor = request['input']['manifest']

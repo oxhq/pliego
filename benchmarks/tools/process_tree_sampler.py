@@ -56,7 +56,16 @@ DURABLE_WRITE_FLAG = getattr(os, "O_DSYNC", getattr(os, "O_SYNC", 0))
 ENGINE_OUTPUT_OPEN_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_CLOEXEC | DURABLE_WRITE_FLAG
 FS_IOC_GETFLAGS = 0x80086601
 FS_SYNC_FL = 0x00000008
+FS_NOATIME_FL = 0x00000080
 FS_DIRSYNC_FL = 0x00010000
+RUNTIME_DIRECTORY_NAMES = {
+    "HOME": "home",
+    "XDG_CACHE_HOME": "xdg-cache",
+    "XDG_CONFIG_HOME": "xdg-config",
+    "XDG_DATA_HOME": "xdg-data",
+    "XDG_RUNTIME_DIR": "xdg-runtime",
+    "XDG_STATE_HOME": "xdg-state",
+}
 
 
 class MeasurementIncomplete(RuntimeError):
@@ -868,6 +877,11 @@ def validate_engine_temporary_directory(requested: Path, account: EngineAccount)
             "ENGINE_TEMPORARY_DIRECTORY_UNSAFE",
             "engine temporary path must carry the inherited FS_SYNC_FL flag",
         )
+    if flags & FS_NOATIME_FL == 0:
+        raise incomplete(
+            "ENGINE_TEMPORARY_DIRECTORY_UNSAFE",
+            "engine temporary path must carry the inherited FS_NOATIME_FL flag",
+        )
     return str(resolved)
 
 
@@ -934,18 +948,55 @@ def revalidate_engine_temporary_directory(
         )
 
 
+def prepare_runtime_directories(root: Path, account: EngineAccount) -> dict[str, str]:
+    environment: dict[str, str] = {}
+    for variable, name in RUNTIME_DIRECTORY_NAMES.items():
+        path = root / name
+        try:
+            os.mkdir(path, 0o700)
+            os.chown(path, account.uid, account.gid)
+            os.chmod(path, 0o700)
+        except OSError as error:
+            raise incomplete(
+                "ENGINE_RUNTIME_DIRECTORY_UNAVAILABLE",
+                f"cannot provision private {variable} directory: {error}",
+            ) from error
+        validate_engine_temporary_directory(path, account)
+        try:
+            with os.scandir(path) as entries:
+                list(entries)
+            descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        except OSError as error:
+            raise incomplete(
+                "ENGINE_RUNTIME_DIRECTORY_UNAVAILABLE",
+                f"cannot seal private {variable} directory: {error}",
+            ) from error
+        environment[variable] = str(path)
+    return environment
+
+
 def engine_temporary_directory(command: tuple[str, ...], account: EngineAccount, explicit: str | None) -> str:
     if len(command) >= 2 and command[1] == "render":
         positions = [index for index, value in enumerate(command) if value == "--artifacts"]
         if len(positions) != 1 or positions[0] + 1 >= len(command):
             raise incomplete("ENGINE_COMMAND_INVALID", "benchmark adapter argv must contain one --artifacts path")
         artifacts = validate_engine_temporary_directory(Path(command[positions[0] + 1]), account)
-        if explicit is not None and validate_engine_temporary_directory(Path(explicit), account) != artifacts:
+        if explicit is None:
+            raise incomplete(
+                "ENGINE_TEMPORARY_DIRECTORY_REQUIRED",
+                "benchmark adapter requires an explicit private temporary directory",
+            )
+        temporary = validate_engine_temporary_directory(Path(explicit), account)
+        if temporary == artifacts:
             raise incomplete(
                 "ENGINE_TEMPORARY_DIRECTORY_UNSAFE",
-                "adapter temporary path must equal its canonical artifact directory",
+                "adapter temporary path must be distinct from its artifact directory",
             )
-        return artifacts
+        return temporary
     if len(command) >= 2 and command[1] == "render-api2":
         if explicit is None:
             raise incomplete(
@@ -958,7 +1009,11 @@ def engine_temporary_directory(command: tuple[str, ...], account: EngineAccount,
     return "/tmp"
 
 
-def engine_environment(account: EngineAccount, temporary_directory: str = "/tmp") -> dict[str, str]:
+def engine_environment(
+    account: EngineAccount,
+    temporary_directory: str = "/tmp",
+    runtime_directories: dict[str, str] | None = None,
+) -> dict[str, str]:
     allowed = {
         "BROWSERSHOT_CHROME_PATH",
         "BROWSERSHOT_NODE_BINARY",
@@ -972,9 +1027,12 @@ def engine_environment(account: EngineAccount, temporary_directory: str = "/tmp"
     environment = {
         name: value for name, value in os.environ.items() if name in allowed or name.startswith("FONTCONFIG_")
     }
+    private_runtime = runtime_directories or {
+        variable: str(Path(temporary_directory) / name) for variable, name in RUNTIME_DIRECTORY_NAMES.items()
+    }
     environment.update(
         {
-            "HOME": account.home,
+            **private_runtime,
             "LOGNAME": account.name,
             "PATH": environment.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
             "TMPDIR": temporary_directory,
@@ -995,6 +1053,7 @@ def fork_stopped(
     isolate_network: bool,
     host_network_namespace: str,
     temporary_directory: str,
+    runtime_directories: dict[str, str],
 ) -> tuple[int, int]:
     descriptors = [open_stdin_descriptor(stdin_path)]
     if DURABLE_WRITE_FLAG == 0:
@@ -1043,7 +1102,11 @@ def fork_stopped(
                     payload["network_isolation"] = network_isolation
                 os.write(handshake_write, json.dumps(payload, separators=(",", ":")).encode("ascii"))
                 os.kill(os.getpid(), signal.SIGSTOP)
-                os.execve(command[0], command, engine_environment(account, temporary_directory))
+                os.execve(
+                    command[0],
+                    command,
+                    engine_environment(account, temporary_directory, runtime_directories),
+                )
             except BaseException as error:
                 with contextlib.suppress(BaseException):
                     payload = {"ok": False, "error": f"{type(error).__name__}: {error}"}
@@ -1336,10 +1399,11 @@ def sample_command(
         raise incomplete("PIDFD_REQUIRED", "os.pidfd_open is unavailable")
     require_broker_root()
     account = resolve_engine_account()
+    argv, executable = command_identity(command, account)
     engine_tmpdir = engine_temporary_directory(tuple(command), account, temporary_directory)
     engine_tmpdir_identity = engine_temporary_directory_identity(Path(engine_tmpdir))
+    runtime_directories = prepare_runtime_directories(Path(engine_tmpdir), account)
     host_network_namespace = os.readlink(proc_root / "self" / "ns" / "net")
-    argv, executable = command_identity(command, account)
     parent = require_delegated_parent(cgroup_parent, cgroup_root, proc_root)
     child: BoundDirectory | None = None
     staging: BoundDirectory | None = None
@@ -1375,6 +1439,7 @@ def sample_command(
                 isolate_network,
                 host_network_namespace,
                 engine_tmpdir,
+                runtime_directories,
             )
             root_identity = move_stopped_child(root_pid, staging, cgroup_root, proc_root)
             launch_security = finish_authority_handshake(
@@ -1517,9 +1582,11 @@ def sample_command(
                 raise incomplete("CGROUP_CLEANUP_FAILED", "render cgroup repopulated during accounting settle")
             revalidate_engine_temporary_directory(Path(engine_tmpdir), account, engine_tmpdir_identity)
             launch_security["temporary_storage"] = {
+                "access_time": "FS_NOATIME_FL",
                 "directory_sync": "FS_DIRSYNC_FL",
                 "file_sync": "FS_SYNC_FL",
                 "filesystem": "ext4",
+                "runtime_environment": "fresh-private-home-xdg-v1",
                 "scope": "per-invocation-private",
             }
 

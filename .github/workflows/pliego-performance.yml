@@ -90,10 +90,11 @@ jobs:
           engine_temp_root=/var/lib/pliego-benchmark-engine-temp
           test ! -e "$engine_temp_root"
           sudo install -d -o root -g root -m 0711 "$engine_temp_root"
-          sudo chattr +S +D "$engine_temp_root"
+          sudo chattr +A +S +D "$engine_temp_root"
           test "$(findmnt -T "$engine_temp_root" -n -o FSTYPE)" = ext4
           engine_temp_attributes="$(sudo lsattr -d "$engine_temp_root" | awk '{print $1}')"
-          [[ "$engine_temp_attributes" == *S* && "$engine_temp_attributes" == *D* ]]
+          [[ "$engine_temp_attributes" == *A* && "$engine_temp_attributes" == *S* \
+            && "$engine_temp_attributes" == *D* ]]
           engine_test=(sudo setpriv --reuid="$engine_uid" --regid="$engine_gid" --clear-groups \
             --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs /usr/bin/test)
           engine_find=(sudo setpriv --reuid="$engine_uid" --regid="$engine_gid" --clear-groups \
