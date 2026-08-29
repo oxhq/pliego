@@ -262,6 +262,11 @@ def render_readme_body(series: dict[str, Any], manifest: dict[str, Any]) -> str:
     lines.extend(
         [
             "",
+            "Browsershot's Node/Chromium generic temporary storage uses a disclosed private tmpfs `TMPDIR`; "
+            "it remains charged to cgroup memory but is outside block-device I/O. Its PHP `TMPDIR`, "
+            "HOME/XDG roots, explicit Chromium profile, artifacts, and PDF remain on measured ext4. "
+            "This target-specific storage accommodation can affect wall time; see the methodology.",
+            "",
             f"All {total_samples} timed samples passed the shared PDF oracle. " + CLAIM_BOUNDARY,
             "",
             f"[Full report with all retained metrics and spread]({report}) · "

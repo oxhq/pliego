@@ -183,6 +183,11 @@ def main() -> None:
         assert public_hosted_benchmark.CLAIM_BOUNDARY in body
         assert "to" in body and "Full report with all retained metrics and spread" in body
         assert "Immutable evidence release" in body
+        assert (
+            "Browsershot's Node/Chromium generic temporary storage uses a disclosed private tmpfs `TMPDIR`"
+            in body
+        )
+        assert "This target-specific storage accommodation can affect wall time" in body
 
         release_metadata = root / "github-release.json"
         canonical_release = {
