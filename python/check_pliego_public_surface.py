@@ -111,7 +111,7 @@ def verify_current_copy(published_benchmark: bool) -> None:
             "sealed three-repeat series",
             "timed samples passed the shared PDF oracle",
             "no best or canonical repeat is selected",
-            "[Full report with all retained metrics and spread]",
+            "[Full comparative aggregate report and spread]",
             "[Immutable evidence release]",
             "Authoritative\ntables and production rankings remain N/A",
         ):

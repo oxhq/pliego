@@ -692,10 +692,15 @@ def main() -> None:
         assert "Repeat 1 p50 (ms)" in body
         assert "No best or canonical repeat is selected" not in body
         assert public_hosted_benchmark.CLAIM_BOUNDARY in body
-        assert "to" in body and "Full report with all retained metrics and spread" in body
+        assert "to" in body and "Full comparative aggregate report and spread" in body
+        assert "all retained metrics" not in body
         assert "Immutable evidence release" in body
         assert "Browsershot's Node/Chromium generic temporary storage uses a disclosed private tmpfs `TMPDIR`" in body
         assert "This target-specific storage accommodation can affect wall time" in body
+        report = public_hosted_benchmark.publication_directory(root) / public_hosted_benchmark.REPORT_FILE
+        report_body = report.read_text(encoding="utf-8")
+        assert "Cadence-dependent PSS observations remain in each raw repeat artifact only" in report_body
+        assert "`sampled_peak_pss_kib_lower_bound`" not in report_body
 
         release_metadata = root / "github-release.json"
         _, provenance, _, _, _ = public_hosted_benchmark.load_publication(root)

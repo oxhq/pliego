@@ -1072,8 +1072,7 @@ def render_readme_body(series: dict[str, Any], manifest: dict[str, Any]) -> str:
             "",
             f"All {total_samples} timed samples passed the shared PDF oracle. " + CLAIM_BOUNDARY,
             "",
-            f"[Full report with all retained metrics and spread]({report}) · "
-            f"[Immutable evidence release]({release_url})",
+            f"[Full comparative aggregate report and spread]({report}) · [Immutable evidence release]({release_url})",
             "",
             "Authoritative tables and production rankings remain N/A until the stricter dedicated-host,",
             "immutable-runtime, and canonical-oracle gates pass. Read the exact boundary and reproduction",
