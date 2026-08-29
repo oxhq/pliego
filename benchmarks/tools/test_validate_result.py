@@ -528,6 +528,25 @@ def main() -> None:
     browser_violations: list[validate_result.Violation] = []
     validate_result.validate_resource_usage(browser_sample, "$.sample", browser_violations)
     assert not browser_violations, browser_violations
+    browser_target = TEST_MANIFEST["targets"]["browsershot-5.4.0-puppeteer-25.8.0"]
+    expected_feature = browser_target["identity_values"]["chromium_enabled_features"]
+    identity_value_violations: list[validate_result.Violation] = []
+    validate_result.validate_adapter_identity_values(
+        {"adapter.chromium_enabled_features": expected_feature},
+        browser_target,
+        "$.result",
+        identity_value_violations,
+    )
+    assert not identity_value_violations
+    validate_result.validate_adapter_identity_values(
+        {"adapter.chromium_enabled_features": "unexpected"},
+        browser_target,
+        "$.result",
+        identity_value_violations,
+    )
+    assert len(identity_value_violations) == 1
+    assert "chromium_enabled_features" in str(identity_value_violations[0])
+    assert "PersistentHistograms:storage/LocalMemory" in str(identity_value_violations[0])
     false_native_browser = deepcopy(browser_sample)
     false_native_browser["resource_usage"]["launch_security"]["temporary_storage"]["native_api2_path_bindings"] = (
         deepcopy(

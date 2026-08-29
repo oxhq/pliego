@@ -144,7 +144,19 @@ output-capture bindings.
   `io.stat`. Browser teardown and all CPU and wall cost stay inside the sample;
   block-I/O totals cover the ext4-backed Browser state listed above, not this
   disclosed memory-backed carve-out. The sampler never flushes browser state on
-  the adapter's behalf.
+  the adapter's behalf. Puppeteer also enables Chrome metrics recording by
+  default. Chromium's default `PersistentHistograms` feature stores that
+  non-rendering telemetry in a writable, profile-backed `BrowserMetrics` PMA
+  mapping. A one-shot browser can retire or move that mapping during shutdown;
+  pathname-based post-exit syncing cannot cover an inode once it is no longer
+  enumerable. The locked adapter therefore enables `PersistentHistograms` with
+  its supported `storage=LocalMemory` feature parameter. Metrics recording and
+  the allocator lifecycle remain in place, and the allocated pages remain
+  charged to cgroup memory, but there is no file-backed PMA mapping whose
+  lifecycle must be inferred. Results describe this exact target-specific
+  configuration rather than stock Browsershot defaults. The adapter identity
+  records the exact enabled-feature value and both result validators bind it to
+  the manifest.
   The sampler and both hosted workflows reject any other passwd home and require
   that exact path to be absent or non-writable to the engine account.
   This is a deliberate non-default benchmark condition; its synchronous

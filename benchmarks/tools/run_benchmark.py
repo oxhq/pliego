@@ -543,6 +543,9 @@ def adapter_identity(adapter: Path, target_id: str, target: dict[str, Any]) -> t
     for key, expected in target.get("identity_paths", {}).items():
         if identity.get(key) != expected:
             fail(f"adapter {target_id!r} path {key!r} does not match the immutable image contract")
+    for key, expected in target.get("identity_values", {}).items():
+        if identity.get(key) != expected:
+            fail(f"adapter {target_id!r} identity {key!r} must be {expected!r}, got {identity.get(key)!r}")
     engine = {
         "name": target["package"].split("/")[-1],
         "version": target["version"],

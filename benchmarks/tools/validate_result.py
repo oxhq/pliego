@@ -253,6 +253,21 @@ def require_equal(path: str, actual: Any, expected: Any, violations: list[Violat
         violations.append(Violation(path, f"must equal {expected!r}, got {actual!r}"))
 
 
+def validate_adapter_identity_values(
+    competitors: dict[str, str],
+    target: dict[str, Any],
+    path: str,
+    violations: list[Violation],
+) -> None:
+    for key, expected in target.get("identity_values", {}).items():
+        require_equal(
+            f"{path}.toolchain.competitors.adapter.{key}",
+            competitors.get(f"adapter.{key}"),
+            expected,
+            violations,
+        )
+
+
 def oracle_manifest_pins_complete(manifest: dict[str, Any]) -> bool:
     oracle = manifest.get("oracle", {})
     if oracle.get("contract") != "pliego.pdf-oracle.v1":
@@ -1276,6 +1291,7 @@ def validate_manifest_contract(
             "environment.read_only.adapter_path": "true",
         }.items():
             require_equal(f"{path}.toolchain.competitors.{field}", competitors.get(field), expected, violations)
+        validate_adapter_identity_values(competitors, target, path, violations)
         for lock_name in target.get("lockfiles", []):
             lock = (ROOT / lock_name).resolve()
             key = f"adapter.{lock.name.removesuffix('.json').replace('-', '_').replace('.', '_')}_sha256"

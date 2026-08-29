@@ -165,6 +165,19 @@ but inside the retained sampler-lifecycle `one_shot_wall_ms` interval. The
 per-sample `bound-private-tmpfs-browser-shared-memory-v1` proof makes this
 target-specific carve-out visible and rejects it for Pliego or dompdf samples.
 
+Puppeteer also enables Chrome metrics recording by default. Chromium's default
+`PersistentHistograms` feature stores that non-rendering telemetry in a
+writable, profile-backed `BrowserMetrics` PMA mapping. A one-shot browser can
+retire or move that mapping during shutdown; pathname-based post-exit syncing
+cannot cover an inode once it is no longer enumerable. The locked adapter
+therefore enables `PersistentHistograms` with its supported
+`storage=LocalMemory` feature parameter. Metrics recording and the allocator
+lifecycle remain in place, and the allocated pages remain charged to cgroup
+memory, but there is no file-backed PMA mapping whose lifecycle must be
+inferred. Results describe this exact target-specific configuration rather than
+stock Browsershot defaults. The adapter identity records the exact
+enabled-feature value and both result validators bind it to the manifest.
+
 After immutable images are pinned, each target uses the same order: one discarded correctness preflight, discarded
 warmups, then cold one-shot timed samples. The adapter root and every descendant
 (including PHP, Node, and Chromium) remain in the existing retained cgroup-v2

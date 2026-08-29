@@ -91,6 +91,7 @@ def target_identities() -> list[dict[str, Any]]:
                         "chrome_version": "Google Chrome 140",
                     }
                 )
+            runtime.update(target.get("identity_values", {}))
         identities.append(
             run_comparison.seal_target_identity(
                 {"id": target_id, "label": target["label"], "engine": engine, "runtime": runtime}
