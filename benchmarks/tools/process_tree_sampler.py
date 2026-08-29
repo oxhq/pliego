@@ -2894,6 +2894,39 @@ def combined_cgroup_cleanup_failure(
     )
 
 
+def combined_sample_finalization_failure(
+    failures: list[tuple[str, BaseException]],
+    original_failure: BaseException | None,
+) -> MeasurementIncomplete:
+    browser_failure = next(
+        (error for phase, error in failures if phase == "browser" and isinstance(error, MeasurementIncomplete)),
+        None,
+    )
+    code = (
+        browser_failure.code
+        if browser_failure is not None and browser_failure.code == "BROWSER_SHARED_MEMORY_CLEANUP_FAILED"
+        else "CGROUP_CLEANUP_FAILED"
+    )
+    diagnostic = json.dumps(
+        {
+            "original_failure": bounded_exception_diagnostic(original_failure),
+            "teardown": [
+                {
+                    "phase": phase,
+                    "failure": bounded_exception_diagnostic(error),
+                }
+                for phase, error in failures
+            ],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return incomplete(
+        code,
+        f"sample finalization failed; diagnostic={diagnostic}",
+    )
+
+
 def cleanup_failed_sample_resources(
     parent: BoundDirectory,
     child: BoundDirectory | None,
@@ -2907,40 +2940,51 @@ def cleanup_failed_sample_resources(
     """Run every finalizer and prohibit browser purge unless all owning cgroups drain."""
 
     cgroup_cleanup_failures: list[tuple[str, BaseException]] = []
-    try:
-        if child is not None:
-            try:
-                force_cleanup(child, parent, None if root_reaped or not root_in_measurement else root_pid)
-            except BaseException as error:
-                cgroup_cleanup_failures.append(("measurement", error))
-            finally:
-                with contextlib.suppress(OSError):
-                    child.close()
-        if staging is not None:
-            try:
-                force_cleanup(staging, parent, None if root_reaped or root_in_measurement else root_pid)
-            except BaseException as error:
-                cgroup_cleanup_failures.append(("staging", error))
-            finally:
-                with contextlib.suppress(OSError):
-                    staging.close()
-    finally:
-        cgroup_cleanup_error = combined_cgroup_cleanup_failure(
-            cgroup_cleanup_failures,
-            original_failure,
-        )
+    finalization_failures: list[tuple[str, BaseException]] = []
+    if child is not None:
         try:
-            if browser_shared_memory is not None:
-                cleanup_failed_browser_shared_memory(
-                    browser_shared_memory,
-                    original_failure,
-                    cgroup_cleanup_error,
-                )
-            if cgroup_cleanup_error is not None:
-                raise cgroup_cleanup_error
-        finally:
-            with contextlib.suppress(OSError):
-                parent.close()
+            force_cleanup(child, parent, None if root_reaped or not root_in_measurement else root_pid)
+        except BaseException as error:
+            cgroup_cleanup_failures.append(("measurement", error))
+            finalization_failures.append(("measurement.cleanup", error))
+        try:
+            child.close()
+        except BaseException as error:
+            finalization_failures.append(("measurement.close", error))
+    if staging is not None:
+        try:
+            force_cleanup(staging, parent, None if root_reaped or root_in_measurement else root_pid)
+        except BaseException as error:
+            cgroup_cleanup_failures.append(("staging", error))
+            finalization_failures.append(("staging.cleanup", error))
+        try:
+            staging.close()
+        except BaseException as error:
+            finalization_failures.append(("staging.close", error))
+
+    cgroup_cleanup_error = combined_cgroup_cleanup_failure(
+        cgroup_cleanup_failures,
+        original_failure,
+    )
+    if browser_shared_memory is not None:
+        try:
+            cleanup_failed_browser_shared_memory(
+                browser_shared_memory,
+                original_failure,
+                cgroup_cleanup_error,
+            )
+        except BaseException as error:
+            finalization_failures.append(("browser", error))
+    try:
+        parent.close()
+    except BaseException as error:
+        finalization_failures.append(("parent.close", error))
+
+    if len(finalization_failures) == 1 and finalization_failures[0][0] == "browser":
+        raise finalization_failures[0][1]
+    if finalization_failures:
+        failure = combined_sample_finalization_failure(finalization_failures, original_failure)
+        raise failure from finalization_failures[-1][1]
 
 
 def wait_for_accounting_quiescence(

@@ -38,6 +38,11 @@ const GOOGLE_CHROME_RUNTIME_SOCKET_SUFFIX = '/com.google.Chrome.XXXXXX/Singleton
 const CHROMIUM_RUNTIME_SOCKET_SUFFIX = '/org.chromium.Chromium.XXXXXX/SingletonSocket';
 const BROWSER_RUNTIME_TEMP_MAX_BYTES = 62;
 const ENGINE_OUTPUT_CAPTURE_MAX_BYTES = 16 * 1024 * 1024;
+const BROWSER_SHARED_MEMORY_ROOT = '/dev/shm';
+const BROWSER_SHARED_MEMORY_CONTAINER_PREFIX = 'pliego-bench-shm-';
+const BROWSER_SHARED_MEMORY_DIRECTORY = 'tmp';
+const BROWSER_SHARED_MEMORY_CONTRACT = 'bound-private-tmpfs-browser-shared-memory-v1';
+const BROWSER_SHARED_MEMORY_SEMANTICS = 'puppeteer-node-chrome-temporary-storage-v1';
 
 const USAGE = <<<EOT
 Usage: php pliego.php --binary <path> --input <file.html> --output <file.pdf> --artifacts <dir>
@@ -217,6 +222,84 @@ if (array_key_exists('self-test', $options)) {
             'bytes' => 42,
         ], 'document.pdf', 'application/pdf', 42, str_repeat('a', 64))) {
         fail('API 2 request normalization self-test failed', 1);
+    }
+    $browserContainer = '/dev/shm/pliego-bench-shm-0123456789abcdef0123456789abcdef';
+    $browserDirectory = $browserContainer . '/tmp';
+    $capture = [
+        'root' => [
+            'path' => '/dev/shm',
+            'identity' => ['device' => 17, 'inode' => 100],
+            'owner_uid' => 0,
+            'owner_gid' => 0,
+            'mode' => 01777,
+        ],
+        'streams' => [
+            'stdout' => ['identity' => ['device' => 17, 'inode' => 101]],
+            'stderr' => ['identity' => ['device' => 17, 'inode' => 102]],
+        ],
+    ];
+    $snapshot = [
+        'root' => $capture['root'],
+        'container' => [
+            'path' => $browserContainer,
+            'identity' => ['device' => 17, 'inode' => 103],
+            'owner_uid' => 0,
+            'owner_gid' => 0,
+            'mode' => 0711,
+            'link_count' => 3,
+        ],
+        'directory' => [
+            'path' => $browserDirectory,
+            'identity' => ['device' => 17, 'inode' => 104],
+            'owner_uid' => 1001,
+            'owner_gid' => 1002,
+            'mode' => 0700,
+            'link_count' => 2,
+        ],
+        'container_entries' => ['tmp'],
+        'directory_entries' => [],
+    ];
+    $browserProof = [
+        'contract' => BROWSER_SHARED_MEMORY_CONTRACT,
+        'filesystem' => 'tmpfs',
+        'semantics' => BROWSER_SHARED_MEMORY_SEMANTICS,
+        'pre' => $snapshot,
+        'post' => $snapshot,
+    ];
+    $browserMeasurement = [
+        'launch_security' => [
+            'uid' => 1001,
+            'gid' => 1002,
+            'launch_context' => ['browser_tmpdir' => $browserDirectory],
+            'temporary_storage' => ['browser_shared_memory' => $browserProof],
+        ],
+    ];
+    $genericMeasurement = [
+        'launch_security' => [
+            'uid' => 1001,
+            'gid' => 1002,
+            'launch_context' => ['browser_tmpdir' => null],
+            'temporary_storage' => ['browser_shared_memory' => null],
+        ],
+    ];
+    $browserCommand = ['/repo/benchmarks/adapters/browsershot/adapter.php', 'render'];
+    $genericCommand = ['/repo/benchmarks/adapters/dompdf/adapter.php', 'render'];
+    $missingProof = $browserMeasurement;
+    unset($missingProof['launch_security']['temporary_storage']['browser_shared_memory']);
+    $malformedProof = $browserMeasurement;
+    $malformedProof['launch_security']['temporary_storage']['browser_shared_memory']['pre']['container']['mode'] = 0700;
+    $malformedProof['launch_security']['temporary_storage']['browser_shared_memory']['post']['container']['mode'] = 0700;
+    $malformedEnvelope = $browserMeasurement;
+    $malformedEnvelope['launch_security']['temporary_storage']['browser_shared_memory']['contract'] = 'wrong';
+    $coupledProof = $genericMeasurement;
+    $coupledProof['launch_security']['temporary_storage']['browser_shared_memory'] = $browserProof;
+    if (sampler_browser_shared_memory_proof_error($browserMeasurement, $browserCommand, $capture) !== null
+        || sampler_browser_shared_memory_proof_error($genericMeasurement, $genericCommand, $capture) !== null
+        || sampler_browser_shared_memory_proof_error($missingProof, $browserCommand, $capture) === null
+        || sampler_browser_shared_memory_proof_error($malformedProof, $browserCommand, $capture) === null
+        || sampler_browser_shared_memory_proof_error($malformedEnvelope, $browserCommand, $capture) === null
+        || sampler_browser_shared_memory_proof_error($coupledProof, $genericCommand, $capture) === null) {
+        fail('browser shared-memory sampler proof self-test failed', 1);
     }
     if (PHP_OS_FAMILY === 'Linux' && sampler_interpreter() === null) {
         fail('sampler interpreter self-test failed', 1);
@@ -432,6 +515,143 @@ function stable_engine_output_binding(array $binding): array
 {
     unset($binding['size_bytes']);
     return $binding;
+}
+
+/** @param list<string> $expected */
+function has_exact_sampler_object_keys(mixed $value, array $expected): bool
+{
+    if (!is_array($value)) {
+        return false;
+    }
+    $actual = array_keys($value);
+    sort($actual, SORT_STRING);
+    sort($expected, SORT_STRING);
+    return $actual === $expected;
+}
+
+function browser_shared_memory_identity_is_valid(mixed $identity): bool
+{
+    return has_exact_sampler_object_keys($identity, ['device', 'inode'])
+        && is_int($identity['device']) && $identity['device'] >= 0
+        && is_int($identity['inode']) && $identity['inode'] >= 1;
+}
+
+function browser_shared_memory_binding_is_valid(mixed $binding, bool $withLinkCount): bool
+{
+    $keys = ['path', 'identity', 'owner_uid', 'owner_gid', 'mode'];
+    if ($withLinkCount) {
+        $keys[] = 'link_count';
+    }
+    return has_exact_sampler_object_keys($binding, $keys)
+        && is_string($binding['path']) && $binding['path'] !== ''
+        && browser_shared_memory_identity_is_valid($binding['identity'])
+        && is_int($binding['owner_uid']) && $binding['owner_uid'] >= 0
+        && is_int($binding['owner_gid']) && $binding['owner_gid'] >= 0
+        && is_int($binding['mode']) && $binding['mode'] >= 0
+        && (!$withLinkCount || (is_int($binding['link_count']) && $binding['link_count'] >= 1));
+}
+
+/**
+ * @param array<string, mixed> $measurement
+ * @param list<string> $command
+ * @param array<string, mixed> $expectedOutputCapture
+ */
+function sampler_browser_shared_memory_proof_error(
+    array $measurement,
+    array $command,
+    array $expectedOutputCapture
+): ?string {
+    $launch = $measurement['launch_security'] ?? null;
+    $launchContext = is_array($launch) ? ($launch['launch_context'] ?? null) : null;
+    $temporaryStorage = is_array($launch) ? ($launch['temporary_storage'] ?? null) : null;
+    if (!is_array($launch) || !is_array($launchContext) || !is_array($temporaryStorage)
+        || !array_key_exists('browser_tmpdir', $launchContext)
+        || !array_key_exists('browser_shared_memory', $temporaryStorage)) {
+        return 'cgroup-v2 sampler omitted browser shared-memory proof coupling fields';
+    }
+
+    $browserTmpdir = $launchContext['browser_tmpdir'];
+    $proof = $temporaryStorage['browser_shared_memory'];
+    $expectsBrowserProof = isset($command[0]) && is_string($command[0])
+        && is_browsershot_adapter_path($command[0]);
+    if (!$expectsBrowserProof) {
+        return $proof === null && $browserTmpdir === null
+            ? null
+            : 'cgroup-v2 sampler attached browser shared-memory storage to a non-Browsershot target';
+    }
+    if (!is_string($browserTmpdir) || $browserTmpdir === '' || !is_array($proof)) {
+        return 'cgroup-v2 sampler omitted Browsershot shared-memory storage';
+    }
+    if (!has_exact_sampler_object_keys($proof, ['contract', 'filesystem', 'semantics', 'pre', 'post'])
+        || $proof['contract'] !== BROWSER_SHARED_MEMORY_CONTRACT
+        || $proof['filesystem'] !== 'tmpfs'
+        || $proof['semantics'] !== BROWSER_SHARED_MEMORY_SEMANTICS
+        || !is_array($proof['pre']) || !is_array($proof['post'])
+        || $proof['pre'] !== $proof['post']) {
+        return 'cgroup-v2 sampler returned invalid browser shared-memory proof envelope';
+    }
+
+    $snapshot = $proof['pre'];
+    if (!has_exact_sampler_object_keys(
+        $snapshot,
+        ['root', 'container', 'directory', 'container_entries', 'directory_entries']
+    ) || !browser_shared_memory_binding_is_valid($snapshot['root'] ?? null, false)
+        || !browser_shared_memory_binding_is_valid($snapshot['container'] ?? null, true)
+        || !browser_shared_memory_binding_is_valid($snapshot['directory'] ?? null, true)) {
+        return 'cgroup-v2 sampler returned invalid browser shared-memory binding shape';
+    }
+    $root = $snapshot['root'];
+    $container = $snapshot['container'];
+    $directory = $snapshot['directory'];
+    $expectedRoot = $expectedOutputCapture['root'] ?? null;
+    $engineUid = $launch['uid'] ?? null;
+    $engineGid = $launch['gid'] ?? null;
+    if (!is_array($expectedRoot) || $root !== $expectedRoot
+        || $root['path'] !== BROWSER_SHARED_MEMORY_ROOT
+        || $root['owner_uid'] !== 0 || $root['owner_gid'] !== 0 || $root['mode'] !== 01777
+        || !is_int($engineUid) || $engineUid <= 0 || !is_int($engineGid) || $engineGid <= 0
+        || $container['owner_uid'] !== 0 || $container['owner_gid'] !== 0
+        || $container['mode'] !== 0711 || $container['link_count'] !== 3
+        || $directory['owner_uid'] !== $engineUid || $directory['owner_gid'] !== $engineGid
+        || $directory['mode'] !== 0700 || $directory['link_count'] !== 2) {
+        return 'cgroup-v2 sampler returned unsafe browser shared-memory ownership, mode, or links';
+    }
+
+    $containerPath = $container['path'];
+    $directoryPath = $directory['path'];
+    if (preg_match(
+        '~\A/dev/shm/pliego-bench-shm-[0-9a-f]{32}\z~',
+        $containerPath
+    ) !== 1 || $directoryPath !== $containerPath . '/' . BROWSER_SHARED_MEMORY_DIRECTORY
+        || $browserTmpdir !== $directoryPath
+        || $snapshot['container_entries'] !== [BROWSER_SHARED_MEMORY_DIRECTORY]
+        || $snapshot['directory_entries'] !== []) {
+        return 'cgroup-v2 sampler returned invalid browser shared-memory paths or topology';
+    }
+
+    $bindings = [$root, $container, $directory];
+    $devices = [];
+    $identities = [];
+    foreach ($bindings as $binding) {
+        $identity = $binding['identity'];
+        $devices[] = $identity['device'];
+        $identities[] = $identity['device'] . ':' . $identity['inode'];
+    }
+    if (count(array_unique($devices, SORT_REGULAR)) !== 1
+        || count(array_unique($identities, SORT_STRING)) !== 3) {
+        return 'cgroup-v2 sampler returned invalid browser shared-memory device or identities';
+    }
+    foreach (['stdout', 'stderr'] as $stream) {
+        $outputIdentity = $expectedOutputCapture['streams'][$stream]['identity'] ?? null;
+        if (!browser_shared_memory_identity_is_valid($outputIdentity)) {
+            return 'runner output-capture binding is incomplete for browser shared-memory validation';
+        }
+        $key = $outputIdentity['device'] . ':' . $outputIdentity['inode'];
+        if (in_array($key, $identities, true)) {
+            return 'cgroup-v2 sampler reused an engine output identity for browser shared-memory storage';
+        }
+    }
+    return null;
 }
 
 /** @param array<string, mixed> $expected
@@ -686,6 +906,14 @@ function run_engine(
         ];
         if (!is_array($captureProof) || $captureProof !== $expectedCaptureProof) {
             return ['error' => 'cgroup-v2 sampler returned invalid engine output capture proof'];
+        }
+        $browserProofError = sampler_browser_shared_memory_proof_error(
+            $measurement,
+            $command,
+            $captureBefore
+        );
+        if ($browserProofError !== null) {
+            return ['error' => $browserProofError];
         }
         $diagnostics = $measurement['sampled_diagnostics'];
         if (!is_array($diagnostics)) {

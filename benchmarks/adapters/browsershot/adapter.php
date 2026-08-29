@@ -333,8 +333,7 @@ function is_browser_shared_memory_path(string $path, string $root = BROWSER_SHAR
 }
 
 /** @param null|callable(string): iterable<mixed> $entries */
-function validate_browser_shared_memory_topology(
-    string $container,
+function validate_browser_shared_memory_directory_entries(
     string $directory,
     ?callable $entries = null
 ): void {
@@ -342,19 +341,8 @@ function validate_browser_shared_memory_topology(
         $path,
         FilesystemIterator::SKIP_DOTS
     );
-    $failure = 'browser shared-memory hierarchy must contain only one empty bound directory';
+    $failure = 'browser shared-memory bound directory must be empty';
     try {
-        $containerEntrySeen = false;
-        foreach ($entries($container) as $entry) {
-            $name = $entry instanceof SplFileInfo ? $entry->getFilename() : (string) $entry;
-            if ($containerEntrySeen || $name !== BROWSER_SHARED_MEMORY_DIRECTORY) {
-                throw new RuntimeException($failure);
-            }
-            $containerEntrySeen = true;
-        }
-        if (!$containerEntrySeen) {
-            throw new RuntimeException($failure);
-        }
         foreach ($entries($directory) as $_entry) {
             // Fail on the first entry; never materialize an attacker-sized list.
             throw new RuntimeException($failure);
@@ -363,7 +351,7 @@ function validate_browser_shared_memory_topology(
         if ($error->getMessage() === $failure) {
             throw $error;
         }
-        throw new RuntimeException('cannot enumerate the browser shared-memory hierarchy', 0, $error);
+        throw new RuntimeException('cannot enumerate the browser shared-memory bound directory', 0, $error);
     }
 }
 
@@ -414,7 +402,9 @@ function validate_browser_shared_memory_directory(
         || count(array_unique($identities)) !== 3) {
         throw new RuntimeException('browser shared-memory hierarchy ownership, mode, links, or device is unsafe');
     }
-    validate_browser_shared_memory_topology($containerValue, $configured);
+    // The protected 0711 container is deliberately not listable by the engine.
+    // Its exact entry set is bound and retained independently by the root sampler.
+    validate_browser_shared_memory_directory_entries($configured);
     return $directory;
 }
 
@@ -466,16 +456,24 @@ function create_private_browser_profile(?string $runtimeRoot): ?string
     return $profile;
 }
 
+/** @param callable(callable(): void): void $browser */
 function run_browser_with_finalizer(callable $browser, ?callable $finalize): void
 {
+    $descendantsMayExist = false;
+    $markDescendantsPossible = static function () use (&$descendantsMayExist): void {
+        $descendantsMayExist = true;
+    };
     $browserFailure = null;
     try {
-        $browser();
+        $browser($markDescendantsPossible);
     } catch (Throwable $error) {
         $browserFailure = $error;
     }
     $finalizerFailure = null;
-    if ($finalize !== null) {
+    // Before savePdf() there cannot be browser descendants, so setup residue
+    // can be cleared immediately. Once launch may have occurred, preserve the
+    // runtime for the root sampler to kill/drain before its outer cleanup.
+    if ($finalize !== null && ($browserFailure === null || !$descendantsMayExist)) {
         try {
             $finalize();
         } catch (Throwable $error) {
@@ -648,59 +646,16 @@ function render(array $arguments): void
     $runtime = load_dependencies();
     $privateRuntimeRoot = private_runtime_root();
     $browserSharedMemory = browser_shared_memory_directory($privateRuntimeRoot);
-    $privateBrowserProfile = create_private_browser_profile($privateRuntimeRoot);
     $temporary = $parent . DIRECTORY_SEPARATOR . '.' . basename($output) . '.tmp-' . bin2hex(random_bytes(8));
-
-    $shot = Spatie\Browsershot\Browsershot::htmlFromFilePath($inputPath)
-        ->setNodeBinary($runtime['node'])
-        ->setChromePath($runtime['chrome'])
-        ->setNodeModulePath(__DIR__ . '/node_modules')
-        ->setCustomTempPath($artifacts)
-        ->paperSize($width / 96.0, $height / 96.0, 'in')
-        ->margins($top / 96.0, $right / 96.0, $bottom / 96.0, $left / 96.0, 'in')
-        ->showBackground()
-        // Browsershot treats these values as substrings, not glob patterns.
-        ->blockUrls(BLOCKED_NETWORK_URL_SUBSTRINGS)
-        ->disableRedirects()
-        ->addChromiumArguments([
-            'allow-file-access-from-files',
-            'disable-background-networking',
-            'disable-component-update',
-            // Chromium's benchmark-only Crashpad metrics mmap can outlive the
-            // deleted Puppeteer profile as a dirty page after browser exit.
-            'disable-crashpad-metrics',
-            'disable-domain-reliability',
-            'disable-sync',
-            'metrics-recording-only',
-            // The sampler is the benchmark sandbox: fixed UID, no capabilities,
-            // no_new_privs, private network namespace, and a sealed filesystem
-            // closure. Chrome's copied setuid helper cannot elevate inside it.
-            'no-sandbox',
-            'no-first-run',
-        ]);
-    if ($privateBrowserProfile !== null) {
-        // Puppeteer otherwise creates and recursively deletes an implicit
-        // profile before the adapter can flush its file-backed pages.
-        $shot->setUserDataDir($privateBrowserProfile);
-    }
-    if ($browserSharedMemory !== null) {
-        // Keep the adapter's own TMPDIR/XDG/profile hierarchy on the measured
-        // ext4 runtime. Only the Node process and its Chrome child inherit this
-        // sampler-bound memory-backed temporary directory.
-        bind_browser_shared_memory_to_node($shot, $browserSharedMemory);
-    }
-    if (($privateRuntimeRoot === null) !== ($privateBrowserProfile === null)
-        || ($privateRuntimeRoot === null) !== ($browserSharedMemory === null)) {
-        throw new RuntimeException('controlled browser storage binding is incomplete');
-    }
+    $privateBrowserProfile = $privateRuntimeRoot === null
+        ? null
+        : $privateRuntimeRoot . DIRECTORY_SEPARATOR . PRIVATE_BROWSER_PROFILE;
     $profileFinalizer = null;
     if ($privateRuntimeRoot !== null && $privateBrowserProfile !== null) {
         $profileFinalizer = static function () use ($privateRuntimeRoot, $privateBrowserProfile): void {
-            // savePdf waits for Node and Chrome to exit. Flush all retained
-            // state before removing every per-invocation cache/profile entry.
-            // The bound top-level runtime directories retain their identities.
-            // Teardown remains inside the measured cgroup and also runs after a
-            // browser failure so diagnostics are not masked by dirty pages.
+            // A successful savePdf waits for Node and Chrome to exit. Flush all
+            // retained state before removing every cache/profile entry while
+            // keeping the bound top-level runtime directory identities.
             clear_synced_runtime_root($privateRuntimeRoot);
             if (file_exists($privateBrowserProfile) || is_link($privateBrowserProfile)) {
                 throw new RuntimeException('private browser profile survived runtime teardown');
@@ -708,7 +663,67 @@ function render(array $arguments): void
         };
     }
     run_browser_with_finalizer(
-        static function () use ($shot, $temporary): void {
+        static function (callable $markDescendantsPossible) use (
+            $artifacts,
+            $browserSharedMemory,
+            $height,
+            $inputPath,
+            $privateBrowserProfile,
+            $privateRuntimeRoot,
+            $runtime,
+            $temporary,
+            $top,
+            $right,
+            $bottom,
+            $left,
+            $width
+        ): void {
+            $createdProfile = create_private_browser_profile($privateRuntimeRoot);
+            if ($createdProfile !== $privateBrowserProfile
+                || ($privateRuntimeRoot === null) !== ($browserSharedMemory === null)) {
+                throw new RuntimeException('controlled browser storage binding is incomplete');
+            }
+            $shot = Spatie\Browsershot\Browsershot::htmlFromFilePath($inputPath)
+                ->setNodeBinary($runtime['node'])
+                ->setChromePath($runtime['chrome'])
+                ->setNodeModulePath(__DIR__ . '/node_modules')
+                ->setCustomTempPath($artifacts)
+                ->paperSize($width / 96.0, $height / 96.0, 'in')
+                ->margins($top / 96.0, $right / 96.0, $bottom / 96.0, $left / 96.0, 'in')
+                ->showBackground()
+                // Browsershot treats these values as substrings, not glob patterns.
+                ->blockUrls(BLOCKED_NETWORK_URL_SUBSTRINGS)
+                ->disableRedirects()
+                ->addChromiumArguments([
+                    'allow-file-access-from-files',
+                    'disable-background-networking',
+                    'disable-component-update',
+                    // Chromium's benchmark-only Crashpad metrics mmap can outlive the
+                    // deleted Puppeteer profile as a dirty page after browser exit.
+                    'disable-crashpad-metrics',
+                    'disable-domain-reliability',
+                    'disable-sync',
+                    'metrics-recording-only',
+                    // The sampler is the benchmark sandbox: fixed UID, no capabilities,
+                    // no_new_privs, private network namespace, and a sealed filesystem
+                    // closure. Chrome's copied setuid helper cannot elevate inside it.
+                    'no-sandbox',
+                    'no-first-run',
+                ]);
+            if ($privateBrowserProfile !== null) {
+                // Puppeteer otherwise creates and recursively deletes an implicit
+                // profile before the adapter can flush its file-backed pages.
+                $shot->setUserDataDir($privateBrowserProfile);
+            }
+            if ($browserSharedMemory !== null) {
+                // Keep the adapter's own TMPDIR/XDG/profile hierarchy on the measured
+                // ext4 runtime. Only the Node process and its Chrome child inherit this
+                // sampler-bound memory-backed temporary directory.
+                bind_browser_shared_memory_to_node($shot, $browserSharedMemory);
+            }
+            // From this boundary onward a thrown process error cannot prove
+            // that Chrome descendants are gone. The root sampler owns cleanup.
+            $markDescendantsPossible();
             $shot->savePdf($temporary);
         },
         $profileFinalizer
@@ -803,28 +818,24 @@ if ($mode === 'self-test') {
         abort_adapter('browser shared-memory Node environment self-test failed', 1);
     }
     $boundedEntryVisits = 0;
-    $boundedEntries = static function (string $path) use (&$boundedEntryVisits): Generator {
-        if ($path === '/container') {
-            $boundedEntryVisits++;
-            yield BROWSER_SHARED_MEMORY_DIRECTORY;
-            return;
-        }
+    $boundedEntryPaths = [];
+    $boundedEntries = static function (string $path) use (&$boundedEntryVisits, &$boundedEntryPaths): Generator {
+        $boundedEntryPaths[] = $path;
         for ($index = 0; $index < 1_000_000; $index++) {
             $boundedEntryVisits++;
             yield "state-{$index}";
         }
     };
     $expectRuntimeFailure(
-        static fn (): null => validate_browser_shared_memory_topology(
-            '/container',
+        static fn (): null => validate_browser_shared_memory_directory_entries(
             '/directory',
             $boundedEntries
         ),
-        'browser shared-memory hierarchy must contain only one empty bound directory',
-        'bounded browser shared-memory topology'
+        'browser shared-memory bound directory must be empty',
+        'bounded browser shared-memory directory'
     );
-    if ($boundedEntryVisits !== 2) {
-        abort_adapter('browser shared-memory topology self-test materialized an unbounded inventory', 1);
+    if ($boundedEntryVisits !== 1 || $boundedEntryPaths !== ['/directory']) {
+        abort_adapter('browser shared-memory directory self-test materialized an unbounded inventory', 1);
     }
 
     $sharedMemoryTestRoot = null;
@@ -888,26 +899,10 @@ if ($mode === 'self-test') {
                     $uid,
                     $gid
                 ),
-                'browser shared-memory hierarchy must contain only one empty bound directory',
-                'browser shared-memory directory topology'
+                'browser shared-memory bound directory must be empty',
+                'browser shared-memory directory entries'
             );
             unlink($sharedMemoryDirectory . '/state.bin');
-            if (file_put_contents($sharedMemoryContainer . '/unexpected.bin', 'state') === false) {
-                abort_adapter('browser shared-memory container topology self-test setup failed', 1);
-            }
-            $expectRuntimeFailure(
-                static fn (): string => validate_browser_shared_memory_directory(
-                    $sharedMemoryDirectory,
-                    $uid,
-                    $gid,
-                    $sharedMemoryTestRoot,
-                    $uid,
-                    $gid
-                ),
-                'browser shared-memory hierarchy must contain only one empty bound directory',
-                'browser shared-memory container topology'
-            );
-            unlink($sharedMemoryContainer . '/unexpected.bin');
             if (!mkdir($escapedContainer, 0711) || !mkdir($escapedDirectory, 0700)) {
                 abort_adapter('browser shared-memory escaped-path self-test setup failed', 1);
             }
@@ -956,7 +951,6 @@ if ($mode === 'self-test') {
             @rmdir($escapedDirectory);
             @rmdir($escapedContainer);
             @unlink($sharedMemoryDirectory . '/state.bin');
-            @unlink($sharedMemoryContainer . '/unexpected.bin');
             @rmdir($sharedMemoryDirectory);
             @rmdir($sharedMemoryContainer);
             @rmdir($sharedMemoryTestRoot);
@@ -965,8 +959,9 @@ if ($mode === 'self-test') {
     $finalizerEvents = [];
     try {
         run_browser_with_finalizer(
-            static function () use (&$finalizerEvents): void {
+            static function (callable $markDescendantsPossible) use (&$finalizerEvents): void {
                 $finalizerEvents[] = 'browser';
+                $markDescendantsPossible();
                 throw new RuntimeException('injected browser failure');
             },
             static function () use (&$finalizerEvents): void {
@@ -976,10 +971,44 @@ if ($mode === 'self-test') {
         abort_adapter('browser failure bypassed the profile finalizer', 1);
     } catch (RuntimeException $error) {
         if ($error->getMessage() !== 'Chromium render failed: injected browser failure'
-            || $finalizerEvents !== ['browser', 'finalizer']
+            || $finalizerEvents !== ['browser']
             || $error->getPrevious()?->getMessage() !== 'injected browser failure') {
-            abort_adapter('browser failure finalization was not retained', 1);
+            abort_adapter('browser failure residue was not retained for broker cleanup', 1);
         }
+    }
+    $prelaunchEvents = [];
+    try {
+        run_browser_with_finalizer(
+            static function (callable $_markDescendantsPossible) use (&$prelaunchEvents): void {
+                $prelaunchEvents[] = 'setup';
+                throw new RuntimeException('injected setup failure');
+            },
+            static function () use (&$prelaunchEvents): void {
+                $prelaunchEvents[] = 'finalizer';
+                throw new RuntimeException('injected setup teardown failure');
+            }
+        );
+        abort_adapter('prelaunch failure bypassed safe profile finalization', 1);
+    } catch (RuntimeException $error) {
+        if ($error->getMessage() !== 'Chromium render failed: injected setup failure; '
+                . 'profile teardown failed: injected setup teardown failure'
+            || $prelaunchEvents !== ['setup', 'finalizer']
+            || $error->getPrevious()?->getMessage() !== 'injected setup failure') {
+            abort_adapter('prelaunch failure finalization was not retained', 1);
+        }
+    }
+    $successfulFinalizationEvents = [];
+    run_browser_with_finalizer(
+        static function (callable $markDescendantsPossible) use (&$successfulFinalizationEvents): void {
+            $successfulFinalizationEvents[] = 'browser';
+            $markDescendantsPossible();
+        },
+        static function () use (&$successfulFinalizationEvents): void {
+            $successfulFinalizationEvents[] = 'finalizer';
+        }
+    );
+    if ($successfulFinalizationEvents !== ['browser', 'finalizer']) {
+        abort_adapter('successful browser run bypassed profile finalization', 1);
     }
     $syncRoot = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'pliego-browsershot-sync-' . bin2hex(random_bytes(8));
     $syncNested = $syncRoot . DIRECTORY_SEPARATOR . 'nested';

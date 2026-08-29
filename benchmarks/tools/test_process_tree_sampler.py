@@ -322,6 +322,25 @@ def fixture_proofs() -> None:
     unreaped_diagnostic = json.loads(str(unreaped_failure).split("diagnostic=", 1)[1])
     assert unreaped_diagnostic["populated"] == 0
     assert unreaped_diagnostic["root_reaped"] is False
+    delayed_pid = 4243
+    with (
+        mock.patch.object(process_tree_sampler, "write_bound"),
+        mock.patch.object(process_tree_sampler, "cgroup_flat", return_value={"populated": 0}),
+        mock.patch.object(
+            process_tree_sampler.os,
+            "waitpid",
+            side_effect=[(0, 0), (delayed_pid, 9)],
+        ) as delayed_waitpid,
+        mock.patch.object(process_tree_sampler.os, "kill") as delayed_kill,
+        mock.patch.object(process_tree_sampler, "remove_bound_leaf") as remove_reaped_cgroup,
+    ):
+        process_tree_sampler.force_cleanup(fake_cgroup, fake_parent, delayed_pid)
+    assert [call.args for call in delayed_waitpid.call_args_list] == [
+        (delayed_pid, os.WNOHANG),
+        (delayed_pid, os.WNOHANG),
+    ]
+    delayed_kill.assert_called_once_with(delayed_pid, process_tree_sampler.signal.SIGKILL)
+    remove_reaped_cgroup.assert_called_once_with(fake_cgroup, fake_parent)
     combined_failure = process_tree_sampler.combined_cgroup_cleanup_failure(
         [("measurement", cgroup_failure)],
         long_original,
@@ -372,6 +391,92 @@ def fixture_proofs() -> None:
             assert browser_arguments[0] is browser_resource
             assert browser_arguments[1] is long_original
             assert browser_arguments[2].code == "CGROUP_CLEANUP_FAILED"
+
+    finalization_order: list[str] = []
+
+    def failing_close(phase: str) -> None:
+        finalization_order.append(phase)
+        raise OSError(errno.EIO, f"fixture {phase} failure")
+
+    measurement_resource = SimpleNamespace(
+        label="measurement",
+        close=lambda: failing_close("measurement.close"),
+    )
+    staging_resource = SimpleNamespace(
+        label="staging",
+        close=lambda: failing_close("staging.close"),
+    )
+    parent_resource = SimpleNamespace(close=lambda: failing_close("parent.close"))
+    browser_resource = object()
+
+    def ordered_cgroup_cleanup(resource: SimpleNamespace, _parent: object, _pid: int | None) -> None:
+        finalization_order.append(f"{resource.label}.cleanup")
+        if resource is measurement_resource:
+            raise process_tree_sampler.incomplete(
+                "CGROUP_CLEANUP_FAILED",
+                "fixture measurement cleanup failure",
+            )
+
+    def ordered_browser_cleanup(
+        resource: object,
+        original: BaseException | None,
+        blocker: BaseException | None,
+    ) -> None:
+        finalization_order.append("browser")
+        assert resource is browser_resource
+        assert original is long_original
+        assert isinstance(blocker, process_tree_sampler.MeasurementIncomplete)
+        assert blocker.code == "CGROUP_CLEANUP_FAILED"
+        raise process_tree_sampler.incomplete(
+            "BROWSER_SHARED_MEMORY_CLEANUP_FAILED",
+            "fixture browser cleanup blocked by cgroup failure",
+        )
+
+    with (
+        mock.patch.object(process_tree_sampler, "force_cleanup", side_effect=ordered_cgroup_cleanup),
+        mock.patch.object(
+            process_tree_sampler,
+            "cleanup_failed_browser_shared_memory",
+            side_effect=ordered_browser_cleanup,
+        ),
+    ):
+        aggregate_finalization = captured_incomplete(
+            "BROWSER_SHARED_MEMORY_CLEANUP_FAILED",
+            lambda: process_tree_sampler.cleanup_failed_sample_resources(
+                parent_resource,
+                measurement_resource,
+                staging_resource,
+                browser_resource,
+                None,
+                False,
+                False,
+                long_original,
+            ),
+        )
+    assert finalization_order == [
+        "measurement.cleanup",
+        "measurement.close",
+        "staging.cleanup",
+        "staging.close",
+        "browser",
+        "parent.close",
+    ]
+    aggregate_diagnostic = json.loads(str(aggregate_finalization).split("diagnostic=", 1)[1])
+    assert aggregate_diagnostic["original_failure"]["code"] == "FIXTURE_ORIGINAL_FAILURE"
+    assert [entry["phase"] for entry in aggregate_diagnostic["teardown"]] == [
+        "measurement.cleanup",
+        "measurement.close",
+        "staging.close",
+        "browser",
+        "parent.close",
+    ]
+    assert [entry["failure"]["type"] for entry in aggregate_diagnostic["teardown"]] == [
+        "MeasurementIncomplete",
+        "OSError",
+        "OSError",
+        "MeasurementIncomplete",
+        "OSError",
+    ]
 
     if sys.platform == "linux":
         assert process_tree_sampler.shutil.rmtree.avoids_symlink_attacks
