@@ -113,7 +113,7 @@ def verify_current_copy(published_benchmark: bool) -> None:
             "no best or canonical repeat is selected",
             "[Full comparative aggregate report and spread]",
             "[Immutable evidence release]",
-            "Authoritative\ntables and production rankings remain N/A",
+            "Authoritative tables and production rankings remain N/A",
         ):
             require(needle in readme, f"README omitted published benchmark boundary: {needle!r}")
 

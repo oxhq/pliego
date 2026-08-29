@@ -14,8 +14,9 @@ competitor images are pinned. A separate manual workflow can produce measured,
 directional `github-hosted-exploratory` snapshots; those can never validate as a
 dedicated baseline or support a general production ranking. Every other
 competitor/fixture pair is an explicit `not-applicable` record with a reason. The
-repository contains **no committed performance snapshot yet**, so no comparative
-speed, memory, or CPU conclusion should be inferred from this document.
+repository now retains [one checksum-bound snapshot](results/v0.3.3-minimal-static-github-hosted/all-repeats.md)
+for the exact named run. Its timing and resource values are inspectable evidence
+for that run only, not a generalized speed, memory, or CPU conclusion.
 
 The detailed harness contract, fixture inventory, metric definitions, and target
 manifest live in the [benchmark source directory](../../benchmarks/README.md).
@@ -277,7 +278,7 @@ not satisfy or weaken the authoritative gates above.
 
 | Target | Runner status | Eligible public claim today |
 | --- | --- | --- |
-| Pliego v0.3.3 API 2 | Implemented and pinned | Published bundle and correctness harness can be reproduced; no committed hosted snapshot yet |
+| Pliego v0.3.3 API 2 | Implemented and pinned | Published bundle, correctness harness, and one checksum-bound exact-run hosted snapshot; authoritative and generalized claims remain N/A |
 | Pliego candidate | Stable-outcome parity comparator only; arbitrary candidate performance runs are not implemented | Parity can be checked locally; no candidate performance claim |
 | dompdf 3.1.6 | Locked one-shot adapter; configured Ubuntu/Poppler smoke | Authoritative timing N/A pending image attestation and oracle pins; eligible only for exact-run hosted snapshots |
 | Browsershot 5.4.0 + Puppeteer 25.8.0 | Locked one-shot adapter; configured network-isolated Ubuntu/Poppler smoke | Authoritative timing N/A pending image attestation and oracle pins; eligible only for exact-run hosted snapshots |

@@ -1,0 +1,84 @@
+{
+  "schema": "pliego.benchmark-source-provenance",
+  "version": 1,
+  "contract": "pliego.github-actions-source-provenance.v1",
+  "provenance_sha256": "5033f5f42706aeedbd803f6e285550cb2ad6b3bc840499ed935c54fbc7368278",
+  "source": {
+    "event_name": "workflow_dispatch",
+    "job": "hosted-snapshot",
+    "ref": "refs/heads/main",
+    "repository": "oxhq/pliego",
+    "revision": "48e8192992d1e9b66eed8ded164ba67cc25a3e7c",
+    "run_attempt": 1,
+    "run_id": 33243607869,
+    "run_url": "https://github.com/oxhq/pliego/actions/runs/33243607869/attempts/1",
+    "workflow": "Pliego hosted performance snapshot",
+    "workflow_ref": "oxhq/pliego/.github/workflows/pliego-performance.yml@refs/heads/main"
+  },
+  "actions_run": {
+    "id": 33243607869,
+    "attempt": 1,
+    "head_sha": "48e8192992d1e9b66eed8ded164ba67cc25a3e7c",
+    "head_branch": "main",
+    "event": "workflow_dispatch",
+    "status": "completed",
+    "conclusion": "success",
+    "workflow_name": "Pliego hosted performance snapshot",
+    "workflow_path": ".github/workflows/pliego-performance.yml",
+    "workflow_id": 344689082,
+    "repository": "oxhq/pliego",
+    "repository_id": 1301051584
+  },
+  "actions_artifact": {
+    "id": 9712236787,
+    "name": "pliego-hosted-performance-series-48e8192992d1e9b66eed8ded164ba67cc25a3e7c-33243607869-1",
+    "server_digest": "sha256:bec3e460e82331e7f003e60042c6f15b13dbb030e14c5c662321ba6ec58edcd4",
+    "zip_sha256": "bec3e460e82331e7f003e60042c6f15b13dbb030e14c5c662321ba6ec58edcd4",
+    "size_in_bytes": 2612910,
+    "expired_at_publication": false,
+    "created_at": "2026-08-29T08:48:20Z",
+    "expires_at": "2026-11-27T08:37:54Z",
+    "workflow_run_id": 33243607869,
+    "head_sha": "48e8192992d1e9b66eed8ded164ba67cc25a3e7c"
+  },
+  "benchmark_tag": {
+    "ref": "refs/tags/benchmark-v0.3.3-minimal-static-gh-33243607869-a1",
+    "object_type": "commit",
+    "target_sha": "48e8192992d1e9b66eed8ded164ba67cc25a3e7c"
+  },
+  "release": {
+    "id": 378927889,
+    "tag_name": "benchmark-v0.3.3-minimal-static-gh-33243607869-a1",
+    "immutable": true,
+    "draft": false,
+    "prerelease": false,
+    "latest": false,
+    "assets": [
+      {
+        "id": 534996046,
+        "name": "pliego-benchmark-v0.3.3-minimal-static-gh-run-33243607869-attempt-1.tar.gz",
+        "url": "https://github.com/oxhq/pliego/releases/download/benchmark-v0.3.3-minimal-static-gh-33243607869-a1/pliego-benchmark-v0.3.3-minimal-static-gh-run-33243607869-attempt-1.tar.gz",
+        "state": "uploaded",
+        "size": 2437348,
+        "digest": "sha256:f54a2b8923b225b3d7d12fc868801078c7255615e77d8e6682d5fe02b9b6b744"
+      },
+      {
+        "id": 534996045,
+        "name": "pliego-benchmark-v0.3.3-minimal-static-gh-run-33243607869-attempt-1.tar.gz.sha256",
+        "url": "https://github.com/oxhq/pliego/releases/download/benchmark-v0.3.3-minimal-static-gh-33243607869-a1/pliego-benchmark-v0.3.3-minimal-static-gh-run-33243607869-attempt-1.tar.gz.sha256",
+        "state": "uploaded",
+        "size": 141,
+        "digest": "sha256:851e67cd5875dc0a1348c6bf50e39146b8588ebb70b6680f77af55d9361e2e98"
+      }
+    ]
+  },
+  "evidence": {
+    "manifest_sha256": "a7180cfc2348cdc81f8ed82311ce8e73e259ecfd03bef9f7184a7a0482f3fb13",
+    "archive_name": "pliego-benchmark-v0.3.3-minimal-static-gh-run-33243607869-attempt-1.tar.gz",
+    "archive_sha256": "f54a2b8923b225b3d7d12fc868801078c7255615e77d8e6682d5fe02b9b6b744",
+    "archive_bytes": 2437348,
+    "checksum_name": "pliego-benchmark-v0.3.3-minimal-static-gh-run-33243607869-attempt-1.tar.gz.sha256",
+    "checksum_sha256": "851e67cd5875dc0a1348c6bf50e39146b8588ebb70b6680f77af55d9361e2e98",
+    "checksum_bytes": 141
+  }
+}

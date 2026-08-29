@@ -143,19 +143,26 @@ produce a link operation without exact fixed-point authority fail closed with
 ## Benchmark evidence
 
 <!-- pliego-hosted-benchmark:start -->
-The hosted comparator lane now renders the published Pliego v0.3.2 bundle and
-version-locked adapter dependency graphs for dompdf 3.1.6 and Browsershot 5.4.0
-with Puppeteer 25.8.0. Their shared
-`minimal-static` correctness slice passes PDF parsing, page geometry, normalized
-text, the embedded font, and raster output through the same Poppler oracle.
+The published `minimal-static` snapshot measures the released Pliego v0.3.3 bundle and the
+version-locked adapter dependency graphs for dompdf 3.1.6 and Browsershot 5.4.0 with Puppeteer
+25.8.0. Every displayed value comes from the sealed three-repeat series; the table shows each
+fresh VM's p50 wall time and the complete between-run range.
 
-This is comparison infrastructure and correctness evidence, not a speed claim.
-There is no committed performance snapshot yet. A manual lane can now produce
-directional `github-hosted-exploratory` timing/resource evidence with three
-no-selection repeats, exact descendant accounting, and raw samples. Authoritative
-tables and production rankings remain N/A until the stricter dedicated-host,
-immutable-runtime, and canonical-oracle gates pass. Read the exact boundary and
-reproduction commands in the [benchmark methodology](docs/benchmarks/README.md).
+| Renderer | Repeat 1 p50 (ms) | Repeat 2 p50 (ms) | Repeat 3 p50 (ms) | p50 range (ms) |
+| --- | ---: | ---: | ---: | ---: |
+| Browsershot 5.4.0 + Puppeteer 25.8.0 (cold Chromium adapter) | 1117.57 | 947.887 | 879.863 | 879.863 to 1117.57 |
+| dompdf 3.1.6 (cold Composer adapter) | 531.282 | 330.605 | 313.688 | 313.688 to 531.282 |
+| Pliego 0.3.3 (published API 2 bundle) | 558.748 | 558.546 | 447.58 | 447.58 to 558.748 |
+
+Browsershot's Node/Chromium generic temporary storage uses a disclosed private tmpfs `TMPDIR`; it remains charged to cgroup memory but is outside block-device I/O. Its PHP `TMPDIR`, HOME/XDG roots, explicit Chromium profile, artifacts, and PDF remain on measured ext4. This target-specific storage accommodation can affect wall time; see the methodology.
+
+All 900 timed samples passed the shared PDF oracle. Three correctness-gated repeats on GitHub-hosted VMs; repeat-to-repeat spread is retained, no best or canonical repeat is selected, and the series is not dedicated-host evidence or a general production-performance ranking.
+
+[Full comparative aggregate report and spread](docs/benchmarks/results/v0.3.3-minimal-static-github-hosted/all-repeats.md) · [Immutable evidence release](https://github.com/oxhq/pliego/releases/tag/benchmark-v0.3.3-minimal-static-gh-33243607869-a1)
+
+Authoritative tables and production rankings remain N/A until the stricter dedicated-host,
+immutable-runtime, and canonical-oracle gates pass. Read the exact boundary and reproduction
+commands in the [benchmark methodology](docs/benchmarks/README.md).
 <!-- pliego-hosted-benchmark:end -->
 
 ## Release evidence and limits

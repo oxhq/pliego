@@ -1,0 +1,1304 @@
+{
+  "claim_boundary": "Three correctness-gated repeats on GitHub-hosted VMs; repeat-to-repeat spread is retained, no best or canonical repeat is selected, and the series is not dedicated-host evidence or a general production-performance ranking.",
+  "evidence_class": "github-hosted-exploratory",
+  "fixture": {
+    "bundle_sha256": "0c478804dfbfd66346799e87eb8d1beafd926ecaa252832ff5d31d63fc8d6ce7",
+    "id": "minimal-static",
+    "input": "benchmarks/fixtures/minimal-static/comparator.html",
+    "input_sha256": "657b662eee0d7df8ae89db504712d2aadff1add2a740fc79b3c49000f1fc8cc8"
+  },
+  "generated_at": "2026-08-29T08:47:58.516876+00:00",
+  "oracle": {
+    "contract": "pliego.pdf-oracle.v1",
+    "oracle_path": "/home/runner/work/pliego/pliego/benchmarks/tools/pdf_oracle.py",
+    "oracle_sha256": "2faba9d9a20d426f36082dd8f817b7a3057fc85907a1624b2e70b434355489ee",
+    "pdffonts_path": "/usr/bin/pdffonts",
+    "pdffonts_sha256": "9855e69c629b8d67423864ba4657750efba3c76370ca02106b157668e9c2190c",
+    "pdffonts_version": "pdffonts version 24.02.0",
+    "pdfinfo_path": "/usr/bin/pdfinfo",
+    "pdfinfo_sha256": "3293dda06d80e1e38dab859aa47368c2876aedc41cbc2e24e8fb9a4e66392078",
+    "pdfinfo_version": "pdfinfo version 24.02.0",
+    "pdftoppm_path": "/usr/bin/pdftoppm",
+    "pdftoppm_sha256": "207dcabcaeea0ce572aefc498d07d44d56a9ca06a85b3ae1fecd050476a34bf8",
+    "pdftoppm_version": "pdftoppm version 24.02.0",
+    "pdftotext_path": "/usr/bin/pdftotext",
+    "pdftotext_sha256": "0fb98ea179e19154a90202608c164f2a319b79f16576fa6534b2d601033565e7",
+    "pdftotext_version": "pdftotext version 24.02.0"
+  },
+  "protocol": {
+    "correctness_preflight_iterations": 1,
+    "fixture_id": "minimal-static",
+    "measurement_method": "linux-cgroup-v2-v1",
+    "network": "private-loopback-only",
+    "percentile_method": "nearest-rank-v1",
+    "sample_count": 100,
+    "sample_order": "globally-interleaved-seeded",
+    "schedule_contract": "pliego.cross-target-schedule.v1",
+    "seed": 1,
+    "targets": [
+      "browsershot-5.4.0-puppeteer-25.8.0",
+      "dompdf-3.1.6",
+      "pliego-0.3.3"
+    ],
+    "warmup_iterations": 10
+  },
+  "publication_status": "hosted-series",
+  "runner_image": {
+    "image_os": "ubuntu24",
+    "image_version": "20260823.283.1"
+  },
+  "runs": [
+    {
+      "ambient": {
+        "after": {
+          "loadavg": "2.09 2.03 1.11 1/252 25824",
+          "meminfo": "MemTotal:       16377684 kB\nMemFree:         7806780 kB\nMemAvailable:   15125840 kB\nBuffers:          256084 kB\nCached:          6920964 kB\nSwapCached:            0 kB\nActive:           890376 kB\nInactive:        6612696 kB\nActive(anon):     384276 kB\nInactive(anon):        0 kB\nActive(file):     506100 kB\nInactive(file):  6612696 kB\nUnevictable:       46752 kB\nMlocked:           43680 kB\nSwapTotal:       3145724 kB\nSwapFree:        3145724 kB\nZswap:                 0 kB\nZswapped:              0 kB\nDirty:               152 kB\nWriteback:             0 kB\nAnonPages:        356076 kB\nMapped:           322752 kB\nShmem:             49528 kB\nKReclaimable:     546228 kB\nSlab:             679276 kB\nSReclaimable:     546228 kB\nSUnreclaim:       133048 kB\nKernelStack:        4080 kB\nPageTables:         6664 kB\nSecPageTables:         0 kB\nNFS_Unstable:          0 kB\nBounce:                0 kB\nWritebackTmp:          0 kB\nCommitLimit:    11334564 kB\nCommitted_AS:    2060420 kB\nVmallocTotal:   34359738367 kB\nVmallocUsed:       39408 kB\nVmallocChunk:          0 kB\nPercpu:             2288 kB\nHardwareCorrupted:     0 kB\nAnonHugePages:    174080 kB\nShmemHugePages:        0 kB\nShmemPmdMapped:        0 kB\nFileHugePages:    118784 kB\nFilePmdMapped:         0 kB\nCmaTotal:              0 kB\nCmaFree:               0 kB\nUnaccepted:            0 kB\nBalloon:               0 kB\nHugePages_Total:       0\nHugePages_Free:        0\nHugePages_Rsvd:        0\nHugePages_Surp:        0\nHugepagesize:       2048 kB\nHugetlb:               0 kB\nDirectMap4k:      130312 kB\nDirectMap2M:     3014656 kB\nDirectMap1G:    15728640 kB",
+          "pressure_cpu": "some avg10=4.72 avg60=4.51 avg300=4.06 total=28700244\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0",
+          "pressure_io": "some avg10=6.67 avg60=6.60 avg300=6.25 total=50161687\nfull avg10=4.70 avg60=4.85 avg300=4.86 total=41535696",
+          "pressure_memory": "some avg10=0.00 avg60=0.00 avg300=0.00 total=9\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=9",
+          "process_count": 158
+        },
+        "before": {
+          "loadavg": "1.82 0.72 0.27 2/259 3259",
+          "meminfo": "MemTotal:       16377684 kB\nMemFree:         8012960 kB\nMemAvailable:   15169060 kB\nBuffers:          195120 kB\nCached:          6820976 kB\nSwapCached:            0 kB\nActive:           749224 kB\nInactive:        6549972 kB\nActive(anon):     340056 kB\nInactive(anon):        0 kB\nActive(file):     409168 kB\nInactive(file):  6549972 kB\nUnevictable:       46752 kB\nMlocked:           43680 kB\nSwapTotal:       3145724 kB\nSwapFree:        3145724 kB\nZswap:                 0 kB\nZswapped:              0 kB\nDirty:            443940 kB\nWriteback:             0 kB\nAnonPages:        317900 kB\nMapped:           325708 kB\nShmem:             48208 kB\nKReclaimable:     542924 kB\nSlab:             674008 kB\nSReclaimable:     542924 kB\nSUnreclaim:       131084 kB\nKernelStack:        4228 kB\nPageTables:         7032 kB\nSecPageTables:         0 kB\nNFS_Unstable:          0 kB\nBounce:                0 kB\nWritebackTmp:          0 kB\nCommitLimit:    11334564 kB\nCommitted_AS:    2062972 kB\nVmallocTotal:   34359738367 kB\nVmallocUsed:       39552 kB\nVmallocChunk:          0 kB\nPercpu:             2240 kB\nHardwareCorrupted:     0 kB\nAnonHugePages:     83968 kB\nShmemHugePages:        0 kB\nShmemPmdMapped:        0 kB\nFileHugePages:    118784 kB\nFilePmdMapped:         0 kB\nCmaTotal:              0 kB\nCmaFree:               0 kB\nUnaccepted:            0 kB\nBalloon:               0 kB\nHugePages_Total:       0\nHugePages_Free:        0\nHugePages_Rsvd:        0\nHugePages_Surp:        0\nHugepagesize:       2048 kB\nHugetlb:               0 kB\nDirectMap4k:      130312 kB\nDirectMap2M:     3014656 kB\nDirectMap1G:    15728640 kB",
+          "pressure_cpu": "some avg10=0.02 avg60=0.64 avg300=0.41 total=2063031\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0",
+          "pressure_io": "some avg10=23.93 avg60=11.68 avg300=3.54 total=12186425\nfull avg10=23.81 avg60=11.37 avg300=3.36 total=11419116",
+          "pressure_memory": "some avg10=0.00 avg60=0.00 avg300=0.00 total=0\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0",
+          "process_count": 163
+        }
+      },
+      "comparison_sha256": "00aef39189f127b0db2696f4b6eb3c4bde2db140789181b242132c031428ed84",
+      "generated_at": "2026-08-29T08:47:13.577850+00:00",
+      "host": {
+        "arch": "x86_64",
+        "cgroup": {
+          "clocksource": "tsc",
+          "controllers": "cpuset cpu io memory hugetlb pids rdma misc dmem",
+          "cpu_max": null,
+          "cpuset_cpus_effective": "0-3",
+          "memory_max": null,
+          "mount": "/sys/fs/cgroup cgroup2 rw,nosuid,nodev,noexec,relatime,nsdelegate,memory_recursiveprot",
+          "pids_max": null,
+          "self": "0::/system.slice/run-u23.service/harness"
+        },
+        "cores": 4,
+        "cpu_model": "AMD EPYC 7763 64-Core Processor",
+        "dedicated": false,
+        "kernel": "6.17.0-1022-azure",
+        "lscpu_json": "{\n   \"lscpu\": [\n      {\n         \"field\": \"Architecture:\",\n         \"data\": \"x86_64\"\n      },{\n         \"field\": \"CPU op-mode(s):\",\n         \"data\": \"32-bit, 64-bit\"\n      },{\n         \"field\": \"Address sizes:\",\n         \"data\": \"48 bits physical, 48 bits virtual\"\n      },{\n         \"field\": \"Byte Order:\",\n         \"data\": \"Little Endian\"\n      },{\n         \"field\": \"CPU(s):\",\n         \"data\": \"4\"\n      },{\n         \"field\": \"On-line CPU(s) list:\",\n         \"data\": \"0-3\"\n      },{\n         \"field\": \"Vendor ID:\",\n         \"data\": \"AuthenticAMD\"\n      },{\n         \"field\": \"BIOS Vendor ID:\",\n         \"data\": \"Advanced Micro Devices, Inc.\"\n      },{\n         \"field\": \"Model name:\",\n         \"data\": \"AMD EPYC 7763 64-Core Processor\"\n      },{\n         \"field\": \"BIOS Model name:\",\n         \"data\": \"AMD EPYC 7763 64-Core Processor                 None CPU @ 2.4GHz\"\n      },{\n         \"field\": \"BIOS CPU family:\",\n         \"data\": \"107\"\n      },{\n         \"field\": \"CPU family:\",\n         \"data\": \"25\"\n      },{\n         \"field\": \"Model:\",\n         \"data\": \"1\"\n      },{\n         \"field\": \"Thread(s) per core:\",\n         \"data\": \"2\"\n      },{\n         \"field\": \"Core(s) per socket:\",\n         \"data\": \"2\"\n      },{\n         \"field\": \"Socket(s):\",\n         \"data\": \"1\"\n      },{\n         \"field\": \"Stepping:\",\n         \"data\": \"1\"\n      },{\n         \"field\": \"BogoMIPS:\",\n         \"data\": \"4890.86\"\n      },{\n         \"field\": \"Flags:\",\n         \"data\": \"fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ht syscall nx mmxext fxsr_opt pdpe1gb rdtscp lm constant_tsc rep_good nopl tsc_reliable nonstop_tsc cpuid extd_apicid aperfmperf tsc_known_freq pni pclmulqdq ssse3 fma cx16 pcid sse4_1 sse4_2 movbe popcnt aes xsave avx f16c rdrand hypervisor lahf_lm cmp_legacy svm cr8_legacy abm sse4a misalignsse 3dnowprefetch osvw topoext vmmcall fsgsbase bmi1 avx2 smep bmi2 erms invpcid rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves user_shstk clzero xsaveerptr rdpru arat npt nrip_save tsc_scale vmcb_clean flushbyasid decodeassists pausefilter pfthreshold v_vmsave_vmload umip vaes vpclmulqdq rdpid fsrm\"\n      },{\n         \"field\": \"Virtualization:\",\n         \"data\": \"AMD-V\"\n      },{\n         \"field\": \"Hypervisor vendor:\",\n         \"data\": \"Microsoft\"\n      },{\n         \"field\": \"Virtualization type:\",\n         \"data\": \"full\"\n      },{\n         \"field\": \"L1d cache:\",\n         \"data\": \"64 KiB (2 instances)\"\n      },{\n         \"field\": \"L1i cache:\",\n         \"data\": \"64 KiB (2 instances)\"\n      },{\n         \"field\": \"L2 cache:\",\n         \"data\": \"1 MiB (2 instances)\"\n      },{\n         \"field\": \"L3 cache:\",\n         \"data\": \"32 MiB (1 instance)\"\n      },{\n         \"field\": \"NUMA node(s):\",\n         \"data\": \"1\"\n      },{\n         \"field\": \"NUMA node0 CPU(s):\",\n         \"data\": \"0-3\"\n      },{\n         \"field\": \"Vulnerability Gather data sampling:\",\n         \"data\": \"Not affected\"\n      },{\n         \"field\": \"Vulnerability Ghostwrite:\",\n         \"data\": \"Not affected\"\n      },{\n         \"field\": \"Vulnerability Indirect target selection:\",\n         \"data\": \"Not affected\"\n      },{\n         \"field\": \"Vulnerability Itlb multihit:\",\n         \"data\": \"Not affected\"\n      },{\n         \"field\": \"Vulnerability L1tf:\",\n         \"data\": \"Not affected\"\n      },{\n         \"field\": \"Vulnerability Mds:\",\n         \"data\": \"Not affected\"\n      },{\n         \"field\": \"Vulnerability Meltdown:\",\n         \"data\": \"Not affected\"\n      },{\n         \"field\": \"Vulnerability Mmio stale data:\",\n         \"data\": \"Not affected\"\n      },{\n         \"field\": \"Vulnerability Old microcode:\",\n         \"data\": \"Not affected\"\n      },{\n         \"field\": \"Vulnerability Reg file data sampling:\",\n         \"data\": \"Not affected\"\n      },{\n         \"field\": \"Vulnerability Retbleed:\",\n         \"data\": \"Not affected\"\n      },{\n         \"field\": \"Vulnerability Spec rstack overflow:\",\n         \"data\": \"Vulnerable: Safe RET, no microcode\"\n      },{\n         \"field\": \"Vulnerability Spec store bypass:\",\n         \"data\": \"Vulnerable\"\n      },{\n         \"field\": \"Vulnerability Spectre v1:\",\n         \"data\": \"Mitigation; usercopy/swapgs barriers and __user pointer sanitization\"\n      },{\n         \"field\": \"Vulnerability Spectre v2:\",\n         \"data\": \"Mitigation; Retpolines; STIBP disabled; RSB filling; PBRSB-eIBRS Not affected; BHI Not affected\"\n      },{\n         \"field\": \"Vulnerability Srbds:\",\n         \"data\": \"Not affected\"\n      },{\n         \"field\": \"Vulnerability Tsa:\",\n         \"data\": \"Vulnerable: No microcode\"\n      },{\n         \"field\": \"Vulnerability Tsx async abort:\",\n         \"data\": \"Not affected\"\n      },{\n         \"field\": \"Vulnerability Vmscape:\",\n         \"data\": \"Not affected\"\n      }\n   ]\n}",
+        "os": "Linux",
+        "os_release": "PRETTY_NAME=\"Ubuntu 24.04.4 LTS\"\nNAME=\"Ubuntu\"\nVERSION_ID=\"24.04\"\nVERSION=\"24.04.4 LTS (Noble Numbat)\"\nVERSION_CODENAME=noble\nID=ubuntu\nID_LIKE=debian\nHOME_URL=\"https://www.ubuntu.com/\"\nSUPPORT_URL=\"https://help.ubuntu.com/\"\nBUG_REPORT_URL=\"https://bugs.launchpad.net/ubuntu/\"\nPRIVACY_POLICY_URL=\"https://www.ubuntu.com/legal/terms-and-policies/privacy-policy\"\nUBUNTU_CODENAME=noble\nLOGO=ubuntu-logo",
+        "ram_bytes": 16770748416,
+        "uname": "Linux runnervmgx7h7 6.17.0-1022-azure #22-Ubuntu SMP Mon Jul 27 17:24:03 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux",
+        "virtualization": "microsoft"
+      },
+      "interleaved_artifact_sha256": "9f311eb9dc313cb20097a7be9a80f29d7059ef2c493c8eb28391f39ac5763846",
+      "repeat": 1,
+      "runner": {
+        "arch": "X64",
+        "environment": "github-hosted",
+        "image_os": "ubuntu24",
+        "image_version": "20260823.283.1",
+        "name": "GitHub Actions 1000007835",
+        "os": "Linux"
+      },
+      "schedule_sha256": "168ff06590e9f3a6cd9346c223a4b5b9151c081f7a0925492d368cb46b45dee3"
+    },
+    {
+      "ambient": {
+        "after": {
+          "loadavg": "1.15 1.65 0.98 1/252 26439",
+          "meminfo": "MemTotal:       16373452 kB\nMemFree:         7656384 kB\nMemAvailable:   15050228 kB\nBuffers:          256980 kB\nCached:          6981820 kB\nSwapCached:            0 kB\nActive:           906176 kB\nInactive:        6676324 kB\nActive(anon):     400036 kB\nInactive(anon):        0 kB\nActive(file):     506140 kB\nInactive(file):  6676324 kB\nUnevictable:       46752 kB\nMlocked:           43680 kB\nSwapTotal:       3145724 kB\nSwapFree:        3145724 kB\nZswap:                 0 kB\nZswapped:              0 kB\nDirty:               132 kB\nWriteback:             0 kB\nAnonPages:        364740 kB\nMapped:           321220 kB\nShmem:             47612 kB\nKReclaimable:     557332 kB\nSlab:             690808 kB\nSReclaimable:     557332 kB\nSUnreclaim:       133476 kB\nKernelStack:        4080 kB\nPageTables:         6700 kB\nSecPageTables:         0 kB\nNFS_Unstable:          0 kB\nBounce:                0 kB\nWritebackTmp:          0 kB\nCommitLimit:    11332448 kB\nCommitted_AS:    2102628 kB\nVmallocTotal:   34359738367 kB\nVmallocUsed:       39408 kB\nVmallocChunk:          0 kB\nPercpu:             2336 kB\nHardwareCorrupted:     0 kB\nAnonHugePages:    190464 kB\nShmemHugePages:        0 kB\nShmemPmdMapped:        0 kB\nFileHugePages:    118784 kB\nFilePmdMapped:         0 kB\nCmaTotal:              0 kB\nCmaFree:               0 kB\nUnaccepted:            0 kB\nBalloon:               0 kB\nHugePages_Total:       0\nHugePages_Free:        0\nHugePages_Rsvd:        0\nHugePages_Surp:        0\nHugepagesize:       2048 kB\nHugetlb:               0 kB\nDirectMap4k:      113792 kB\nDirectMap2M:     6172672 kB\nDirectMap1G:    12582912 kB",
+          "pressure_cpu": "some avg10=4.31 avg60=5.01 avg300=4.65 total=32289667\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0",
+          "pressure_io": "some avg10=1.96 avg60=2.45 avg300=3.25 total=34727435\nfull avg10=1.24 avg60=1.60 avg300=2.51 total=29844750",
+          "pressure_memory": "some avg10=0.00 avg60=0.00 avg300=0.00 total=10\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=10",
+          "process_count": 160
+        },
+        "before": {
+          "loadavg": "0.58 0.23 0.09 2/259 3920",
+          "meminfo": "MemTotal:       16373452 kB\nMemFree:         8069396 kB\nMemAvailable:   15279300 kB\nBuffers:          197124 kB\nCached:          6858940 kB\nSwapCached:            0 kB\nActive:           740028 kB\nInactive:        6592164 kB\nActive(anon):     330860 kB\nInactive(anon):        0 kB\nActive(file):     409168 kB\nInactive(file):  6592164 kB\nUnevictable:       46752 kB\nMlocked:           43680 kB\nSwapTotal:       3145724 kB\nSwapFree:        3145724 kB\nZswap:                 0 kB\nZswapped:              0 kB\nDirty:            421620 kB\nWriteback:             0 kB\nAnonPages:        316000 kB\nMapped:           324000 kB\nShmem:             45984 kB\nKReclaimable:     554524 kB\nSlab:             685796 kB\nSReclaimable:     554524 kB\nSUnreclaim:       131272 kB\nKernelStack:        4212 kB\nPageTables:         6812 kB\nSecPageTables:         0 kB\nNFS_Unstable:          0 kB\nBounce:                0 kB\nWritebackTmp:          0 kB\nCommitLimit:    11332448 kB\nCommitted_AS:    2076780 kB\nVmallocTotal:   34359738367 kB\nVmallocUsed:       39536 kB\nVmallocChunk:          0 kB\nPercpu:             2240 kB\nHardwareCorrupted:     0 kB\nAnonHugePages:    122880 kB\nShmemHugePages:        0 kB\nShmemPmdMapped:        0 kB\nFileHugePages:    118784 kB\nFilePmdMapped:         0 kB\nCmaTotal:              0 kB\nCmaFree:               0 kB\nUnaccepted:            0 kB\nBalloon:               0 kB\nHugePages_Total:       0\nHugePages_Free:        0\nHugePages_Rsvd:        0\nHugePages_Surp:        0\nHugepagesize:       2048 kB\nHugetlb:               0 kB\nDirectMap4k:      113792 kB\nDirectMap2M:     6172672 kB\nDirectMap1G:    12582912 kB",
+          "pressure_cpu": "some avg10=0.03 avg60=0.35 avg300=0.44 total=2641004\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0",
+          "pressure_io": "some avg10=30.26 avg60=15.95 avg300=4.96 total=17693339\nfull avg10=30.09 avg60=15.84 avg300=4.87 total=17259522",
+          "pressure_memory": "some avg10=0.00 avg60=0.00 avg300=0.00 total=1\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=1",
+          "process_count": 164
+        }
+      },
+      "comparison_sha256": "27c73bacd62c080a4f3134a9b1ed50d03c7f8cd0f50ada5d23d6ea78ef59878f",
+      "generated_at": "2026-08-29T08:46:53.175843+00:00",
+      "host": {
+        "arch": "x86_64",
+        "cgroup": {
+          "clocksource": "tsc",
+          "controllers": "cpuset cpu io memory hugetlb pids rdma misc dmem",
+          "cpu_max": null,
+          "cpuset_cpus_effective": "0-3",
+          "memory_max": null,
+          "mount": "/sys/fs/cgroup cgroup2 rw,nosuid,nodev,noexec,relatime,nsdelegate,memory_recursiveprot",
+          "pids_max": null,
+          "self": "0::/system.slice/run-u25.service/harness"
+        },
+        "cores": 4,
+        "cpu_model": "AMD EPYC 7763 64-Core Processor",
+        "dedicated": false,
+        "kernel": "6.17.0-1022-azure",
+        "lscpu_json": "{\n   \"lscpu\": [\n      {\n         \"field\": \"Architecture:\",\n         \"data\": \"x86_64\"\n      },{\n         \"field\": \"CPU op-mode(s):\",\n         \"data\": \"32-bit, 64-bit\"\n      },{\n         \"field\": \"Address sizes:\",\n         \"data\": \"48 bits physical, 48 bits virtual\"\n      },{\n         \"field\": \"Byte Order:\",\n         \"data\": \"Little Endian\"\n      },{\n         \"field\": \"CPU(s):\",\n         \"data\": \"4\"\n      },{\n         \"field\": \"On-line CPU(s) list:\",\n         \"data\": \"0-3\"\n      },{\n         \"field\": \"Vendor ID:\",\n         \"data\": \"AuthenticAMD\"\n      },{\n         \"field\": \"BIOS Vendor ID:\",\n         \"data\": \"Advanced Micro Devices, Inc.\"\n      },{\n         \"field\": \"Model name:\",\n         \"data\": \"AMD EPYC 7763 64-Core Processor\"\n      },{\n         \"field\": \"BIOS Model name:\",\n         \"data\": \"AMD EPYC 7763 64-Core Processor                 None CPU @ 2.4GHz\"\n      },{\n         \"field\": \"BIOS CPU family:\",\n         \"data\": \"107\"\n      },{\n         \"field\": \"CPU family:\",\n         \"data\": \"25\"\n      },{\n         \"field\": \"Model:\",\n         \"data\": \"1\"\n      },{\n         \"field\": \"Thread(s) per core:\",\n         \"data\": \"2\"\n      },{\n         \"field\": \"Core(s) per socket:\",\n         \"data\": \"2\"\n      },{\n         \"field\": \"Socket(s):\",\n         \"data\": \"1\"\n      },{\n         \"field\": \"Stepping:\",\n         \"data\": \"1\"\n      },{\n         \"field\": \"BogoMIPS:\",\n         \"data\": \"4890.86\"\n      },{\n         \"field\": \"Flags:\",\n         \"data\": \"fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ht syscall nx mmxext fxsr_opt pdpe1gb rdtscp lm constant_tsc rep_good nopl tsc_reliable nonstop_tsc cpuid extd_apicid aperfmperf tsc_known_freq pni pclmulqdq ssse3 fma cx16 pcid sse4_1 sse4_2 movbe popcnt aes xsave avx f16c rdrand hypervisor lahf_lm cmp_legacy svm cr8_legacy abm sse4a misalignsse 3dnowprefetch osvw topoext vmmcall fsgsbase bmi1 avx2 smep bmi2 erms invpcid rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves user_shstk clzero xsaveerptr rdpru arat npt nrip_save tsc_scale vmcb_clean flushbyasid decodeassists pausefilter pfthreshold v_vmsave_vmload umip vaes vpclmulqdq rdpid fsrm\"\n      },{\n         \"field\": \"Virtualization:\",\n         \"data\": \"AMD-V\"\n      },{\n         \"field\": \"Hypervisor vendor:\",\n         \"data\": \"Microsoft\"\n      },{\n         \"field\": \"Virtualization type:\",\n         \"data\": \"full\"\n      },{\n         \"field\": \"L1d cache:\",\n         \"data\": \"64 KiB (2 instances)\"\n      },{\n         \"field\": \"L1i cache:\",\n         \"data\": \"64 KiB (2 instances)\"\n      },{\n         \"field\": \"L2 cache:\",\n         \"data\": \"1 MiB (2 instances)\"\n      },{\n         \"field\": \"L3 cache:\",\n         \"data\": \"32 MiB (1 instance)\"\n      },{\n         \"field\": \"NUMA node(s):\",\n         \"data\": \"1\"\n      },{\n         \"field\": \"NUMA node0 CPU(s):\",\n         \"data\": \"0-3\"\n      },{\n         \"field\": \"Vulnerability Gather data sampling:\",\n         \"data\": \"Not affected\"\n      },{\n         \"field\": \"Vulnerability Ghostwrite:\",\n         \"data\": \"Not affected\"\n      },{\n         \"field\": \"Vulnerability Indirect target selection:\",\n         \"data\": \"Not affected\"\n      },{\n         \"field\": \"Vulnerability Itlb multihit:\",\n         \"data\": \"Not affected\"\n      },{\n         \"field\": \"Vulnerability L1tf:\",\n         \"data\": \"Not affected\"\n      },{\n         \"field\": \"Vulnerability Mds:\",\n         \"data\": \"Not affected\"\n      },{\n         \"field\": \"Vulnerability Meltdown:\",\n         \"data\": \"Not affected\"\n      },{\n         \"field\": \"Vulnerability Mmio stale data:\",\n         \"data\": \"Not affected\"\n      },{\n         \"field\": \"Vulnerability Old microcode:\",\n         \"data\": \"Not affected\"\n      },{\n         \"field\": \"Vulnerability Reg file data sampling:\",\n         \"data\": \"Not affected\"\n      },{\n         \"field\": \"Vulnerability Retbleed:\",\n         \"data\": \"Not affected\"\n      },{\n         \"field\": \"Vulnerability Spec rstack overflow:\",\n         \"data\": \"Vulnerable: Safe RET, no microcode\"\n      },{\n         \"field\": \"Vulnerability Spec store bypass:\",\n         \"data\": \"Vulnerable\"\n      },{\n         \"field\": \"Vulnerability Spectre v1:\",\n         \"data\": \"Mitigation; usercopy/swapgs barriers and __user pointer sanitization\"\n      },{\n         \"field\": \"Vulnerability Spectre v2:\",\n         \"data\": \"Mitigation; Retpolines; STIBP disabled; RSB filling; PBRSB-eIBRS Not affected; BHI Not affected\"\n      },{\n         \"field\": \"Vulnerability Srbds:\",\n         \"data\": \"Not affected\"\n      },{\n         \"field\": \"Vulnerability Tsa:\",\n         \"data\": \"Vulnerable: No microcode\"\n      },{\n         \"field\": \"Vulnerability Tsx async abort:\",\n         \"data\": \"Not affected\"\n      },{\n         \"field\": \"Vulnerability Vmscape:\",\n         \"data\": \"Not affected\"\n      }\n   ]\n}",
+        "os": "Linux",
+        "os_release": "PRETTY_NAME=\"Ubuntu 24.04.4 LTS\"\nNAME=\"Ubuntu\"\nVERSION_ID=\"24.04\"\nVERSION=\"24.04.4 LTS (Noble Numbat)\"\nVERSION_CODENAME=noble\nID=ubuntu\nID_LIKE=debian\nHOME_URL=\"https://www.ubuntu.com/\"\nSUPPORT_URL=\"https://help.ubuntu.com/\"\nBUG_REPORT_URL=\"https://bugs.launchpad.net/ubuntu/\"\nPRIVACY_POLICY_URL=\"https://www.ubuntu.com/legal/terms-and-policies/privacy-policy\"\nUBUNTU_CODENAME=noble\nLOGO=ubuntu-logo",
+        "ram_bytes": 16766414848,
+        "uname": "Linux runnervmgx7h7 6.17.0-1022-azure #22-Ubuntu SMP Mon Jul 27 17:24:03 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux",
+        "virtualization": "microsoft"
+      },
+      "interleaved_artifact_sha256": "15e86ad2aa2d35460ca373abb8f0907be20f4929a9f5fa17a7789ce891534acb",
+      "repeat": 2,
+      "runner": {
+        "arch": "X64",
+        "environment": "github-hosted",
+        "image_os": "ubuntu24",
+        "image_version": "20260823.283.1",
+        "name": "GitHub Actions 1000007836",
+        "os": "Linux"
+      },
+      "schedule_sha256": "168ff06590e9f3a6cd9346c223a4b5b9151c081f7a0925492d368cb46b45dee3"
+    },
+    {
+      "ambient": {
+        "after": {
+          "loadavg": "2.44 2.03 1.09 1/249 25607",
+          "meminfo": "MemTotal:       16373448 kB\nMemFree:         7728260 kB\nMemAvailable:   15085432 kB\nBuffers:          255388 kB\nCached:          6958808 kB\nSwapCached:            0 kB\nActive:           938472 kB\nInactive:        6611164 kB\nActive(anon):     393508 kB\nInactive(anon):        0 kB\nActive(file):     544964 kB\nInactive(file):  6611164 kB\nUnevictable:       46720 kB\nMlocked:           43648 kB\nSwapTotal:       3145724 kB\nSwapFree:        3145724 kB\nZswap:                 0 kB\nZswapped:              0 kB\nDirty:               152 kB\nWriteback:             0 kB\nAnonPages:        367392 kB\nMapped:           323148 kB\nShmem:             49344 kB\nKReclaimable:     546996 kB\nSlab:             680520 kB\nSReclaimable:     546996 kB\nSUnreclaim:       133524 kB\nKernelStack:        4032 kB\nPageTables:         6684 kB\nSecPageTables:         0 kB\nNFS_Unstable:          0 kB\nBounce:                0 kB\nWritebackTmp:          0 kB\nCommitLimit:    11332448 kB\nCommitted_AS:    2117788 kB\nVmallocTotal:   34359738367 kB\nVmallocUsed:       39360 kB\nVmallocChunk:          0 kB\nPercpu:             2304 kB\nHardwareCorrupted:     0 kB\nAnonHugePages:    169984 kB\nShmemHugePages:        0 kB\nShmemPmdMapped:        0 kB\nFileHugePages:    118784 kB\nFilePmdMapped:         0 kB\nCmaTotal:              0 kB\nCmaFree:               0 kB\nUnaccepted:            0 kB\nBalloon:               0 kB\nHugePages_Total:       0\nHugePages_Free:        0\nHugePages_Rsvd:        0\nHugePages_Surp:        0\nHugepagesize:       2048 kB\nHugetlb:               0 kB\nDirectMap4k:      119936 kB\nDirectMap2M:     5117952 kB\nDirectMap1G:    13631488 kB",
+          "pressure_cpu": "some avg10=2.99 avg60=3.86 avg300=3.50 total=23163229\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0",
+          "pressure_io": "some avg10=10.09 avg60=8.27 avg300=7.71 total=59951823\nfull avg10=7.86 avg60=6.52 avg300=6.40 total=52085611",
+          "pressure_memory": "some avg10=0.00 avg60=0.00 avg300=0.00 total=17\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=11",
+          "process_count": 156
+        },
+        "before": {
+          "loadavg": "1.82 0.72 0.27 2/262 3055",
+          "meminfo": "MemTotal:       16373448 kB\nMemFree:         8015584 kB\nMemAvailable:   15213316 kB\nBuffers:          195304 kB\nCached:          6861072 kB\nSwapCached:            0 kB\nActive:           786164 kB\nInactive:        6550476 kB\nActive(anon):     336916 kB\nInactive(anon):        0 kB\nActive(file):     449248 kB\nInactive(file):  6550476 kB\nUnevictable:       46720 kB\nMlocked:           43648 kB\nSwapTotal:       3145724 kB\nSwapFree:        3145724 kB\nZswap:                 0 kB\nZswapped:              0 kB\nDirty:            333312 kB\nWriteback:             0 kB\nAnonPages:        316956 kB\nMapped:           325916 kB\nShmem:             47928 kB\nKReclaimable:     543960 kB\nSlab:             675320 kB\nSReclaimable:     543960 kB\nSUnreclaim:       131360 kB\nKernelStack:        4272 kB\nPageTables:         6800 kB\nSecPageTables:         0 kB\nNFS_Unstable:          0 kB\nBounce:                0 kB\nWritebackTmp:          0 kB\nCommitLimit:    11332448 kB\nCommitted_AS:    2119068 kB\nVmallocTotal:   34359738367 kB\nVmallocUsed:       39568 kB\nVmallocChunk:          0 kB\nPercpu:             2256 kB\nHardwareCorrupted:     0 kB\nAnonHugePages:     88064 kB\nShmemHugePages:        0 kB\nShmemPmdMapped:        0 kB\nFileHugePages:    118784 kB\nFilePmdMapped:         0 kB\nCmaTotal:              0 kB\nCmaFree:               0 kB\nUnaccepted:            0 kB\nBalloon:               0 kB\nHugePages_Total:       0\nHugePages_Free:        0\nHugePages_Rsvd:        0\nHugePages_Surp:        0\nHugepagesize:       2048 kB\nHugetlb:               0 kB\nDirectMap4k:      119936 kB\nDirectMap2M:     5117952 kB\nDirectMap1G:    13631488 kB",
+          "pressure_cpu": "some avg10=0.05 avg60=0.65 avg300=0.41 total=2054355\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0",
+          "pressure_io": "some avg10=34.23 avg60=19.40 avg300=6.16 total=21046777\nfull avg10=33.58 avg60=18.73 avg300=5.87 total=20056970",
+          "pressure_memory": "some avg10=0.00 avg60=0.00 avg300=0.00 total=0\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0",
+          "process_count": 165
+        }
+      },
+      "comparison_sha256": "126131143f1c0ab0f99da86cb11a7ab7820e9e6f9f9afc4c9a14abb39b74caf0",
+      "generated_at": "2026-08-29T08:46:11.704199+00:00",
+      "host": {
+        "arch": "x86_64",
+        "cgroup": {
+          "clocksource": "tsc",
+          "controllers": "cpuset cpu io memory hugetlb pids rdma misc dmem",
+          "cpu_max": null,
+          "cpuset_cpus_effective": "0-3",
+          "memory_max": null,
+          "mount": "/sys/fs/cgroup cgroup2 rw,nosuid,nodev,noexec,relatime,nsdelegate,memory_recursiveprot",
+          "pids_max": null,
+          "self": "0::/system.slice/run-u23.service/harness"
+        },
+        "cores": 4,
+        "cpu_model": "AMD EPYC 9V74 80-Core Processor",
+        "dedicated": false,
+        "kernel": "6.17.0-1022-azure",
+        "lscpu_json": "{\n   \"lscpu\": [\n      {\n         \"field\": \"Architecture:\",\n         \"data\": \"x86_64\"\n      },{\n         \"field\": \"CPU op-mode(s):\",\n         \"data\": \"32-bit, 64-bit\"\n      },{\n         \"field\": \"Address sizes:\",\n         \"data\": \"48 bits physical, 48 bits virtual\"\n      },{\n         \"field\": \"Byte Order:\",\n         \"data\": \"Little Endian\"\n      },{\n         \"field\": \"CPU(s):\",\n         \"data\": \"4\"\n      },{\n         \"field\": \"On-line CPU(s) list:\",\n         \"data\": \"0-3\"\n      },{\n         \"field\": \"Vendor ID:\",\n         \"data\": \"AuthenticAMD\"\n      },{\n         \"field\": \"BIOS Vendor ID:\",\n         \"data\": \"Advanced Micro Devices, Inc.\"\n      },{\n         \"field\": \"Model name:\",\n         \"data\": \"AMD EPYC 9V74 80-Core Processor\"\n      },{\n         \"field\": \"BIOS Model name:\",\n         \"data\": \"AMD EPYC 9V74 80-Core Processor                 None CPU @ 2.6GHz\"\n      },{\n         \"field\": \"BIOS CPU family:\",\n         \"data\": \"107\"\n      },{\n         \"field\": \"CPU family:\",\n         \"data\": \"25\"\n      },{\n         \"field\": \"Model:\",\n         \"data\": \"17\"\n      },{\n         \"field\": \"Thread(s) per core:\",\n         \"data\": \"2\"\n      },{\n         \"field\": \"Core(s) per socket:\",\n         \"data\": \"2\"\n      },{\n         \"field\": \"Socket(s):\",\n         \"data\": \"1\"\n      },{\n         \"field\": \"Stepping:\",\n         \"data\": \"1\"\n      },{\n         \"field\": \"BogoMIPS:\",\n         \"data\": \"5192.29\"\n      },{\n         \"field\": \"Flags:\",\n         \"data\": \"fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ht syscall nx mmxext fxsr_opt pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology tsc_reliable nonstop_tsc cpuid extd_apicid aperfmperf tsc_known_freq pni pclmulqdq ssse3 fma cx16 pcid sse4_1 sse4_2 movbe popcnt aes xsave avx f16c rdrand hypervisor lahf_lm cmp_legacy svm cr8_legacy abm sse4a misalignsse 3dnowprefetch osvw topoext vmmcall fsgsbase bmi1 avx2 smep bmi2 erms invpcid avx512f avx512dq rdseed adx smap avx512ifma clflushopt clwb avx512cd sha_ni avx512bw avx512vl xsaveopt xsavec xgetbv1 xsaves user_shstk avx512_bf16 clzero xsaveerptr rdpru arat npt nrip_save tsc_scale vmcb_clean flushbyasid decodeassists pausefilter pfthreshold v_vmsave_vmload avx512vbmi umip avx512_vbmi2 gfni vaes vpclmulqdq avx512_vnni avx512_bitalg avx512_vpopcntdq rdpid fsrm\"\n      },{\n         \"field\": \"Virtualization:\",\n         \"data\": \"AMD-V\"\n      },{\n         \"field\": \"Hypervisor vendor:\",\n         \"data\": \"Microsoft\"\n      },{\n         \"field\": \"Virtualization type:\",\n         \"data\": \"full\"\n      },{\n         \"field\": \"L1d cache:\",\n         \"data\": \"64 KiB (2 instances)\"\n      },{\n         \"field\": \"L1i cache:\",\n         \"data\": \"64 KiB (2 instances)\"\n      },{\n         \"field\": \"L2 cache:\",\n         \"data\": \"2 MiB (2 instances)\"\n      },{\n         \"field\": \"L3 cache:\",\n         \"data\": \"32 MiB (1 instance)\"\n      },{\n         \"field\": \"NUMA node(s):\",\n         \"data\": \"1\"\n      },{\n         \"field\": \"NUMA node0 CPU(s):\",\n         \"data\": \"0-3\"\n      },{\n         \"field\": \"Vulnerability Gather data sampling:\",\n         \"data\": \"Not affected\"\n      },{\n         \"field\": \"Vulnerability Ghostwrite:\",\n         \"data\": \"Not affected\"\n      },{\n         \"field\": \"Vulnerability Indirect target selection:\",\n         \"data\": \"Not affected\"\n      },{\n         \"field\": \"Vulnerability Itlb multihit:\",\n         \"data\": \"Not affected\"\n      },{\n         \"field\": \"Vulnerability L1tf:\",\n         \"data\": \"Not affected\"\n      },{\n         \"field\": \"Vulnerability Mds:\",\n         \"data\": \"Not affected\"\n      },{\n         \"field\": \"Vulnerability Meltdown:\",\n         \"data\": \"Not affected\"\n      },{\n         \"field\": \"Vulnerability Mmio stale data:\",\n         \"data\": \"Not affected\"\n      },{\n         \"field\": \"Vulnerability Old microcode:\",\n         \"data\": \"Not affected\"\n      },{\n         \"field\": \"Vulnerability Reg file data sampling:\",\n         \"data\": \"Not affected\"\n      },{\n         \"field\": \"Vulnerability Retbleed:\",\n         \"data\": \"Not affected\"\n      },{\n         \"field\": \"Vulnerability Spec rstack overflow:\",\n         \"data\": \"Vulnerable: Safe RET, no microcode\"\n      },{\n         \"field\": \"Vulnerability Spec store bypass:\",\n         \"data\": \"Vulnerable\"\n      },{\n         \"field\": \"Vulnerability Spectre v1:\",\n         \"data\": \"Mitigation; usercopy/swapgs barriers and __user pointer sanitization\"\n      },{\n         \"field\": \"Vulnerability Spectre v2:\",\n         \"data\": \"Mitigation; Retpolines; STIBP disabled; RSB filling; PBRSB-eIBRS Not affected; BHI Not affected\"\n      },{\n         \"field\": \"Vulnerability Srbds:\",\n         \"data\": \"Not affected\"\n      },{\n         \"field\": \"Vulnerability Tsa:\",\n         \"data\": \"Vulnerable: No microcode\"\n      },{\n         \"field\": \"Vulnerability Tsx async abort:\",\n         \"data\": \"Not affected\"\n      },{\n         \"field\": \"Vulnerability Vmscape:\",\n         \"data\": \"Not affected\"\n      }\n   ]\n}",
+        "os": "Linux",
+        "os_release": "PRETTY_NAME=\"Ubuntu 24.04.4 LTS\"\nNAME=\"Ubuntu\"\nVERSION_ID=\"24.04\"\nVERSION=\"24.04.4 LTS (Noble Numbat)\"\nVERSION_CODENAME=noble\nID=ubuntu\nID_LIKE=debian\nHOME_URL=\"https://www.ubuntu.com/\"\nSUPPORT_URL=\"https://help.ubuntu.com/\"\nBUG_REPORT_URL=\"https://bugs.launchpad.net/ubuntu/\"\nPRIVACY_POLICY_URL=\"https://www.ubuntu.com/legal/terms-and-policies/privacy-policy\"\nUBUNTU_CODENAME=noble\nLOGO=ubuntu-logo",
+        "ram_bytes": 16766410752,
+        "uname": "Linux runnervmgx7h7 6.17.0-1022-azure #22-Ubuntu SMP Mon Jul 27 17:24:03 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux",
+        "virtualization": "microsoft"
+      },
+      "interleaved_artifact_sha256": "543ac0a0edd774e432874645ccfb0107a2d70888781a9c7d5224591d93ad5e30",
+      "repeat": 3,
+      "runner": {
+        "arch": "X64",
+        "environment": "github-hosted",
+        "image_os": "ubuntu24",
+        "image_version": "20260823.283.1",
+        "name": "GitHub Actions 1000007837",
+        "os": "Linux"
+      },
+      "schedule_sha256": "168ff06590e9f3a6cd9346c223a4b5b9151c081f7a0925492d368cb46b45dee3"
+    }
+  ],
+  "schema": "pliego.benchmark-hosted-series",
+  "selection_policy": "all-repeats-no-selection",
+  "series_sha256": "a905a74ff67c85da7aa4f339ae87aa44d4e974da91c18115ceedaae43f8997f0",
+  "source": {
+    "event_name": "workflow_dispatch",
+    "job": "hosted-snapshot",
+    "ref": "refs/heads/main",
+    "repository": "oxhq/pliego",
+    "revision": "48e8192992d1e9b66eed8ded164ba67cc25a3e7c",
+    "run_attempt": 1,
+    "run_id": 33243607869,
+    "run_url": "https://github.com/oxhq/pliego/actions/runs/33243607869/attempts/1",
+    "workflow": "Pliego hosted performance snapshot",
+    "workflow_ref": "oxhq/pliego/.github/workflows/pliego-performance.yml@refs/heads/main"
+  },
+  "summary": {
+    "basis": "three-per-run-p50s",
+    "repeats": [
+      1,
+      2,
+      3
+    ],
+    "targets": [
+      {
+        "metrics": {
+          "artifact_bytes": {
+            "max": 0.0,
+            "mean": 0.0,
+            "min": 0.0,
+            "per_repeat": [
+              {
+                "p50": 0.0,
+                "repeat": 1
+              },
+              {
+                "p50": 0.0,
+                "repeat": 2
+              },
+              {
+                "p50": 0.0,
+                "repeat": 3
+              }
+            ],
+            "relative_spread_percent": 0.0,
+            "unit": "bytes"
+          },
+          "cpu_system_ms": {
+            "max": 565.974,
+            "mean": 518.6496666666667,
+            "min": 450.495,
+            "per_repeat": [
+              {
+                "p50": 539.48,
+                "repeat": 1
+              },
+              {
+                "p50": 565.974,
+                "repeat": 2
+              },
+              {
+                "p50": 450.495,
+                "repeat": 3
+              }
+            ],
+            "relative_spread_percent": 22.2653184648083,
+            "unit": "ms"
+          },
+          "cpu_total_ms": {
+            "max": 1380.981,
+            "mean": 1254.471,
+            "min": 1066.083,
+            "per_repeat": [
+              {
+                "p50": 1316.349,
+                "repeat": 1
+              },
+              {
+                "p50": 1380.981,
+                "repeat": 2
+              },
+              {
+                "p50": 1066.083,
+                "repeat": 3
+              }
+            ],
+            "relative_spread_percent": 25.10205496978407,
+            "unit": "ms"
+          },
+          "cpu_user_ms": {
+            "max": 812.988,
+            "mean": 734.782,
+            "min": 612.575,
+            "per_repeat": [
+              {
+                "p50": 778.783,
+                "repeat": 1
+              },
+              {
+                "p50": 812.988,
+                "repeat": 2
+              },
+              {
+                "p50": 612.575,
+                "repeat": 3
+              }
+            ],
+            "relative_spread_percent": 27.275164606645237,
+            "unit": "ms"
+          },
+          "memory_current_bytes": {
+            "max": 548864.0,
+            "mean": 536576.0,
+            "min": 528384.0,
+            "per_repeat": [
+              {
+                "p50": 548864.0,
+                "repeat": 1
+              },
+              {
+                "p50": 532480.0,
+                "repeat": 2
+              },
+              {
+                "p50": 528384.0,
+                "repeat": 3
+              }
+            ],
+            "relative_spread_percent": 3.816793893129771,
+            "unit": "bytes"
+          },
+          "memory_peak_bytes": {
+            "max": 224124928.0,
+            "mean": 216332970.66666666,
+            "min": 201170944.0,
+            "per_repeat": [
+              {
+                "p50": 223703040.0,
+                "repeat": 1
+              },
+              {
+                "p50": 201170944.0,
+                "repeat": 2
+              },
+              {
+                "p50": 224124928.0,
+                "repeat": 3
+              }
+            ],
+            "relative_spread_percent": 10.610488049631739,
+            "unit": "bytes"
+          },
+          "one_shot_wall_ms": {
+            "max": 1338.267,
+            "mean": 1198.8533333333332,
+            "min": 1079.396,
+            "per_repeat": [
+              {
+                "p50": 1338.267,
+                "repeat": 1
+              },
+              {
+                "p50": 1178.897,
+                "repeat": 2
+              },
+              {
+                "p50": 1079.396,
+                "repeat": 3
+              }
+            ],
+            "relative_spread_percent": 21.593216851658262,
+            "unit": "ms"
+          },
+          "pdf_bytes": {
+            "max": 4364.0,
+            "mean": 4364.0,
+            "min": 4364.0,
+            "per_repeat": [
+              {
+                "p50": 4364.0,
+                "repeat": 1
+              },
+              {
+                "p50": 4364.0,
+                "repeat": 2
+              },
+              {
+                "p50": 4364.0,
+                "repeat": 3
+              }
+            ],
+            "relative_spread_percent": 0.0,
+            "unit": "bytes"
+          },
+          "read_bytes": {
+            "max": 24133632.0,
+            "mean": 16061781.333333334,
+            "min": 0.0,
+            "per_repeat": [
+              {
+                "p50": 24133632.0,
+                "repeat": 1
+              },
+              {
+                "p50": 0.0,
+                "repeat": 2
+              },
+              {
+                "p50": 24051712.0,
+                "repeat": 3
+              }
+            ],
+            "relative_spread_percent": 150.25501530091805,
+            "unit": "bytes"
+          },
+          "read_operations": {
+            "max": 171.0,
+            "mean": 90.33333333333333,
+            "min": 0.0,
+            "per_repeat": [
+              {
+                "p50": 100.0,
+                "repeat": 1
+              },
+              {
+                "p50": 0.0,
+                "repeat": 2
+              },
+              {
+                "p50": 171.0,
+                "repeat": 3
+              }
+            ],
+            "relative_spread_percent": 189.2988929889299,
+            "unit": "operations"
+          },
+          "sampled_peak_rss_kib_lower_bound": {
+            "max": 1074512.0,
+            "mean": 1061726.6666666667,
+            "min": 1046716.0,
+            "per_repeat": [
+              {
+                "p50": 1063952.0,
+                "repeat": 1
+              },
+              {
+                "p50": 1046716.0,
+                "repeat": 2
+              },
+              {
+                "p50": 1074512.0,
+                "repeat": 3
+              }
+            ],
+            "relative_spread_percent": 2.6179996106970407,
+            "unit": "KiB"
+          },
+          "wall_ms": {
+            "max": 1117.57,
+            "mean": 981.7733333333332,
+            "min": 879.863,
+            "per_repeat": [
+              {
+                "p50": 1117.57,
+                "repeat": 1
+              },
+              {
+                "p50": 947.887,
+                "repeat": 2
+              },
+              {
+                "p50": 879.863,
+                "repeat": 3
+              }
+            ],
+            "relative_spread_percent": 24.212004128583644,
+            "unit": "ms"
+          },
+          "write_bytes": {
+            "max": 5193728.0,
+            "mean": 5193728.0,
+            "min": 5193728.0,
+            "per_repeat": [
+              {
+                "p50": 5193728.0,
+                "repeat": 1
+              },
+              {
+                "p50": 5193728.0,
+                "repeat": 2
+              },
+              {
+                "p50": 5193728.0,
+                "repeat": 3
+              }
+            ],
+            "relative_spread_percent": 0.0,
+            "unit": "bytes"
+          },
+          "write_operations": {
+            "max": 1804.0,
+            "mean": 1417.3333333333333,
+            "min": 1224.0,
+            "per_repeat": [
+              {
+                "p50": 1224.0,
+                "repeat": 1
+              },
+              {
+                "p50": 1224.0,
+                "repeat": 2
+              },
+              {
+                "p50": 1804.0,
+                "repeat": 3
+              }
+            ],
+            "relative_spread_percent": 40.92191909689558,
+            "unit": "operations"
+          }
+        },
+        "serial_throughput": {
+          "max": 49.111797990536765,
+          "mean": 46.44364334828739,
+          "min": 45.016369752696875,
+          "per_repeat": [
+            {
+              "renders_per_minute": 45.016369752696875,
+              "repeat": 1
+            },
+            {
+              "renders_per_minute": 45.202762301628525,
+              "repeat": 2
+            },
+            {
+              "renders_per_minute": 49.111797990536765,
+              "repeat": 3
+            }
+          ],
+          "relative_spread_percent": 8.818059787273146,
+          "unit": "renders/minute"
+        },
+        "target_id": "browsershot-5.4.0-puppeteer-25.8.0"
+      },
+      {
+        "metrics": {
+          "artifact_bytes": {
+            "max": 49101.0,
+            "mean": 49101.0,
+            "min": 49101.0,
+            "per_repeat": [
+              {
+                "p50": 49101.0,
+                "repeat": 1
+              },
+              {
+                "p50": 49101.0,
+                "repeat": 2
+              },
+              {
+                "p50": 49101.0,
+                "repeat": 3
+              }
+            ],
+            "relative_spread_percent": 0.0,
+            "unit": "bytes"
+          },
+          "cpu_system_ms": {
+            "max": 40.034,
+            "mean": 38.43933333333333,
+            "min": 37.416,
+            "per_repeat": [
+              {
+                "p50": 37.416,
+                "repeat": 1
+              },
+              {
+                "p50": 40.034,
+                "repeat": 2
+              },
+              {
+                "p50": 37.868,
+                "repeat": 3
+              }
+            ],
+            "relative_spread_percent": 6.810732062644173,
+            "unit": "ms"
+          },
+          "cpu_total_ms": {
+            "max": 144.94,
+            "mean": 128.94366666666667,
+            "min": 104.182,
+            "per_repeat": [
+              {
+                "p50": 137.709,
+                "repeat": 1
+              },
+              {
+                "p50": 144.94,
+                "repeat": 2
+              },
+              {
+                "p50": 104.182,
+                "repeat": 3
+              }
+            ],
+            "relative_spread_percent": 31.609152317161755,
+            "unit": "ms"
+          },
+          "cpu_user_ms": {
+            "max": 105.28,
+            "mean": 90.71733333333333,
+            "min": 66.75,
+            "per_repeat": [
+              {
+                "p50": 100.122,
+                "repeat": 1
+              },
+              {
+                "p50": 105.28,
+                "repeat": 2
+              },
+              {
+                "p50": 66.75,
+                "repeat": 3
+              }
+            ],
+            "relative_spread_percent": 42.4725888474088,
+            "unit": "ms"
+          },
+          "memory_current_bytes": {
+            "max": 495616.0,
+            "mean": 473770.6666666667,
+            "min": 454656.0,
+            "per_repeat": [
+              {
+                "p50": 454656.0,
+                "repeat": 1
+              },
+              {
+                "p50": 495616.0,
+                "repeat": 2
+              },
+              {
+                "p50": 471040.0,
+                "repeat": 3
+              }
+            ],
+            "relative_spread_percent": 8.645533141210374,
+            "unit": "bytes"
+          },
+          "memory_peak_bytes": {
+            "max": 22183936.0,
+            "mean": 22162090.666666668,
+            "min": 22142976.0,
+            "per_repeat": [
+              {
+                "p50": 22142976.0,
+                "repeat": 1
+              },
+              {
+                "p50": 22159360.0,
+                "repeat": 2
+              },
+              {
+                "p50": 22183936.0,
+                "repeat": 3
+              }
+            ],
+            "relative_spread_percent": 0.18482010842779695,
+            "unit": "bytes"
+          },
+          "one_shot_wall_ms": {
+            "max": 725.169,
+            "mean": 579.599,
+            "min": 487.344,
+            "per_repeat": [
+              {
+                "p50": 725.169,
+                "repeat": 1
+              },
+              {
+                "p50": 526.284,
+                "repeat": 2
+              },
+              {
+                "p50": 487.344,
+                "repeat": 3
+              }
+            ],
+            "relative_spread_percent": 41.0326794904753,
+            "unit": "ms"
+          },
+          "pdf_bytes": {
+            "max": 3628.0,
+            "mean": 3628.0,
+            "min": 3628.0,
+            "per_repeat": [
+              {
+                "p50": 3628.0,
+                "repeat": 1
+              },
+              {
+                "p50": 3628.0,
+                "repeat": 2
+              },
+              {
+                "p50": 3628.0,
+                "repeat": 3
+              }
+            ],
+            "relative_spread_percent": 0.0,
+            "unit": "bytes"
+          },
+          "read_bytes": {
+            "max": 0.0,
+            "mean": 0.0,
+            "min": 0.0,
+            "per_repeat": [
+              {
+                "p50": 0.0,
+                "repeat": 1
+              },
+              {
+                "p50": 0.0,
+                "repeat": 2
+              },
+              {
+                "p50": 0.0,
+                "repeat": 3
+              }
+            ],
+            "relative_spread_percent": 0.0,
+            "unit": "bytes"
+          },
+          "read_operations": {
+            "max": 0.0,
+            "mean": 0.0,
+            "min": 0.0,
+            "per_repeat": [
+              {
+                "p50": 0.0,
+                "repeat": 1
+              },
+              {
+                "p50": 0.0,
+                "repeat": 2
+              },
+              {
+                "p50": 0.0,
+                "repeat": 3
+              }
+            ],
+            "relative_spread_percent": 0.0,
+            "unit": "operations"
+          },
+          "sampled_peak_rss_kib_lower_bound": {
+            "max": 59148.0,
+            "mean": 59070.666666666664,
+            "min": 59028.0,
+            "per_repeat": [
+              {
+                "p50": 59036.0,
+                "repeat": 1
+              },
+              {
+                "p50": 59028.0,
+                "repeat": 2
+              },
+              {
+                "p50": 59148.0,
+                "repeat": 3
+              }
+            ],
+            "relative_spread_percent": 0.2031465137801052,
+            "unit": "KiB"
+          },
+          "wall_ms": {
+            "max": 531.282,
+            "mean": 391.85833333333335,
+            "min": 313.688,
+            "per_repeat": [
+              {
+                "p50": 531.282,
+                "repeat": 1
+              },
+              {
+                "p50": 330.605,
+                "repeat": 2
+              },
+              {
+                "p50": 313.688,
+                "repeat": 3
+              }
+            ],
+            "relative_spread_percent": 55.528741254279836,
+            "unit": "ms"
+          },
+          "write_bytes": {
+            "max": 3104768.0,
+            "mean": 3104768.0,
+            "min": 3104768.0,
+            "per_repeat": [
+              {
+                "p50": 3104768.0,
+                "repeat": 1
+              },
+              {
+                "p50": 3104768.0,
+                "repeat": 2
+              },
+              {
+                "p50": 3104768.0,
+                "repeat": 3
+              }
+            ],
+            "relative_spread_percent": 0.0,
+            "unit": "bytes"
+          },
+          "write_operations": {
+            "max": 799.0,
+            "mean": 763.0,
+            "min": 745.0,
+            "per_repeat": [
+              {
+                "p50": 745.0,
+                "repeat": 1
+              },
+              {
+                "p50": 745.0,
+                "repeat": 2
+              },
+              {
+                "p50": 799.0,
+                "repeat": 3
+              }
+            ],
+            "relative_spread_percent": 7.077326343381389,
+            "unit": "operations"
+          }
+        },
+        "serial_throughput": {
+          "max": 113.85458924509057,
+          "mean": 99.31151240202432,
+          "min": 82.58247625454446,
+          "per_repeat": [
+            {
+              "renders_per_minute": 82.58247625454446,
+              "repeat": 1
+            },
+            {
+              "renders_per_minute": 113.85458924509057,
+              "repeat": 2
+            },
+            {
+              "renders_per_minute": 101.4974717064379,
+              "repeat": 3
+            }
+          ],
+          "relative_spread_percent": 31.488910232232726,
+          "unit": "renders/minute"
+        },
+        "target_id": "dompdf-3.1.6"
+      },
+      {
+        "metrics": {
+          "artifact_bytes": {
+            "max": 41569.0,
+            "mean": 41569.0,
+            "min": 41569.0,
+            "per_repeat": [
+              {
+                "p50": 41569.0,
+                "repeat": 1
+              },
+              {
+                "p50": 41569.0,
+                "repeat": 2
+              },
+              {
+                "p50": 41569.0,
+                "repeat": 3
+              }
+            ],
+            "relative_spread_percent": 0.0,
+            "unit": "bytes"
+          },
+          "cpu_system_ms": {
+            "max": 115.797,
+            "mean": 107.89433333333334,
+            "min": 98.225,
+            "per_repeat": [
+              {
+                "p50": 109.661,
+                "repeat": 1
+              },
+              {
+                "p50": 115.797,
+                "repeat": 2
+              },
+              {
+                "p50": 98.225,
+                "repeat": 3
+              }
+            ],
+            "relative_spread_percent": 16.28630481057084,
+            "unit": "ms"
+          },
+          "cpu_total_ms": {
+            "max": 636.37,
+            "mean": 584.2869999999999,
+            "min": 492.491,
+            "per_repeat": [
+              {
+                "p50": 624.0,
+                "repeat": 1
+              },
+              {
+                "p50": 636.37,
+                "repeat": 2
+              },
+              {
+                "p50": 492.491,
+                "repeat": 3
+              }
+            ],
+            "relative_spread_percent": 24.624713539750164,
+            "unit": "ms"
+          },
+          "cpu_user_ms": {
+            "max": 519.304,
+            "mean": 475.42366666666663,
+            "min": 393.62,
+            "per_repeat": [
+              {
+                "p50": 513.347,
+                "repeat": 1
+              },
+              {
+                "p50": 519.304,
+                "repeat": 2
+              },
+              {
+                "p50": 393.62,
+                "repeat": 3
+              }
+            ],
+            "relative_spread_percent": 26.43621022933229,
+            "unit": "ms"
+          },
+          "memory_current_bytes": {
+            "max": 696320.0,
+            "mean": 678570.6666666666,
+            "min": 655360.0,
+            "per_repeat": [
+              {
+                "p50": 696320.0,
+                "repeat": 1
+              },
+              {
+                "p50": 684032.0,
+                "repeat": 2
+              },
+              {
+                "p50": 655360.0,
+                "repeat": 3
+              }
+            ],
+            "relative_spread_percent": 6.036217303822938,
+            "unit": "bytes"
+          },
+          "memory_peak_bytes": {
+            "max": 178429952.0,
+            "mean": 178219690.66666666,
+            "min": 178094080.0,
+            "per_repeat": [
+              {
+                "p50": 178094080.0,
+                "repeat": 1
+              },
+              {
+                "p50": 178135040.0,
+                "repeat": 2
+              },
+              {
+                "p50": 178429952.0,
+                "repeat": 3
+              }
+            ],
+            "relative_spread_percent": 0.18845953482670919,
+            "unit": "bytes"
+          },
+          "one_shot_wall_ms": {
+            "max": 897.63,
+            "mean": 844.2049999999999,
+            "min": 743.124,
+            "per_repeat": [
+              {
+                "p50": 891.861,
+                "repeat": 1
+              },
+              {
+                "p50": 897.63,
+                "repeat": 2
+              },
+              {
+                "p50": 743.124,
+                "repeat": 3
+              }
+            ],
+            "relative_spread_percent": 18.301952724752873,
+            "unit": "ms"
+          },
+          "pdf_bytes": {
+            "max": 3925.0,
+            "mean": 3925.0,
+            "min": 3925.0,
+            "per_repeat": [
+              {
+                "p50": 3925.0,
+                "repeat": 1
+              },
+              {
+                "p50": 3925.0,
+                "repeat": 2
+              },
+              {
+                "p50": 3925.0,
+                "repeat": 3
+              }
+            ],
+            "relative_spread_percent": 0.0,
+            "unit": "bytes"
+          },
+          "read_bytes": {
+            "max": 0.0,
+            "mean": 0.0,
+            "min": 0.0,
+            "per_repeat": [
+              {
+                "p50": 0.0,
+                "repeat": 1
+              },
+              {
+                "p50": 0.0,
+                "repeat": 2
+              },
+              {
+                "p50": 0.0,
+                "repeat": 3
+              }
+            ],
+            "relative_spread_percent": 0.0,
+            "unit": "bytes"
+          },
+          "read_operations": {
+            "max": 0.0,
+            "mean": 0.0,
+            "min": 0.0,
+            "per_repeat": [
+              {
+                "p50": 0.0,
+                "repeat": 1
+              },
+              {
+                "p50": 0.0,
+                "repeat": 2
+              },
+              {
+                "p50": 0.0,
+                "repeat": 3
+              }
+            ],
+            "relative_spread_percent": 0.0,
+            "unit": "operations"
+          },
+          "sampled_peak_rss_kib_lower_bound": {
+            "max": 302584.0,
+            "mean": 301669.3333333333,
+            "min": 300808.0,
+            "per_repeat": [
+              {
+                "p50": 300808.0,
+                "repeat": 1
+              },
+              {
+                "p50": 302584.0,
+                "repeat": 2
+              },
+              {
+                "p50": 301616.0,
+                "repeat": 3
+              }
+            ],
+            "relative_spread_percent": 0.5887240775772148,
+            "unit": "KiB"
+          },
+          "wall_ms": {
+            "max": 558.748,
+            "mean": 521.6246666666667,
+            "min": 447.58,
+            "per_repeat": [
+              {
+                "p50": 558.748,
+                "repeat": 1
+              },
+              {
+                "p50": 558.546,
+                "repeat": 2
+              },
+              {
+                "p50": 447.58,
+                "repeat": 3
+              }
+            ],
+            "relative_spread_percent": 21.311875588705554,
+            "unit": "ms"
+          },
+          "write_bytes": {
+            "max": 786432.0,
+            "mean": 786432.0,
+            "min": 786432.0,
+            "per_repeat": [
+              {
+                "p50": 786432.0,
+                "repeat": 1
+              },
+              {
+                "p50": 786432.0,
+                "repeat": 2
+              },
+              {
+                "p50": 786432.0,
+                "repeat": 3
+              }
+            ],
+            "relative_spread_percent": 0.0,
+            "unit": "bytes"
+          },
+          "write_operations": {
+            "max": 284.0,
+            "mean": 216.66666666666666,
+            "min": 183.0,
+            "per_repeat": [
+              {
+                "p50": 183.0,
+                "repeat": 1
+              },
+              {
+                "p50": 183.0,
+                "repeat": 2
+              },
+              {
+                "p50": 284.0,
+                "repeat": 3
+              }
+            ],
+            "relative_spread_percent": 46.61538461538462,
+            "unit": "operations"
+          }
+        },
+        "serial_throughput": {
+          "max": 77.77591274019616,
+          "mean": 70.59040376786056,
+          "min": 66.80952324323357,
+          "per_repeat": [
+            {
+              "renders_per_minute": 67.18577532015198,
+              "repeat": 1
+            },
+            {
+              "renders_per_minute": 66.80952324323357,
+              "repeat": 2
+            },
+            {
+              "renders_per_minute": 77.77591274019616,
+              "repeat": 3
+            }
+          ],
+          "relative_spread_percent": 15.535241210726053,
+          "unit": "renders/minute"
+        },
+        "target_id": "pliego-0.3.3"
+      }
+    ]
+  },
+  "targets": [
+    {
+      "engine": {
+        "binary_bytes": 57078,
+        "binary_path": "/home/runner/work/pliego/pliego/benchmarks/adapters/browsershot/adapter.php",
+        "binary_sha256": "f5062e8a7b419fe1864ff06a883ef7391bb7d871f76587810419507ba9b67b42",
+        "name": "browsershot",
+        "package": "spatie/browsershot",
+        "profile": "composer-npm-lock-cold-one-shot",
+        "version": "5.4.0"
+      },
+      "id": "browsershot-5.4.0-puppeteer-25.8.0",
+      "identity_sha256": "9e7bff2e7da945e0640f05a2ac775ff74fc15ec9ee2acb793c906ca8319eda39",
+      "label": "Browsershot 5.4.0 + Puppeteer 25.8.0 (cold Chromium adapter)",
+      "runtime": {
+        "adapter_path": "/home/runner/work/pliego/pliego/benchmarks/adapters/browsershot/adapter.php",
+        "adapter_sha256": "f5062e8a7b419fe1864ff06a883ef7391bb7d871f76587810419507ba9b67b42",
+        "chrome_path": "/usr/lib/pliego-benchmark/chrome/google-chrome",
+        "chrome_sha256": "aea09d69ce7f24d5901f6bfb15dd44d0c856e793e0a498f8d8393ec7d2c308ec",
+        "chrome_version": "Google Chrome 151.0.7922.173",
+        "composer_lock_sha256": "706f8056ab11c7aa30a88931ad141221c014f969fffa04de4dbd37d091d01e45",
+        "composer_vendor_path": "/home/runner/work/pliego/pliego/benchmarks/adapters/browsershot/vendor",
+        "composer_vendor_sha256": "40ef1348a982ac09d911d0239d85958654008748defe1e10a3afd2bae0f3041c",
+        "contract": "pliego.benchmark-adapter.v1",
+        "node_modules_path": "/home/runner/work/pliego/pliego/benchmarks/adapters/browsershot/node_modules",
+        "node_modules_sha256": "b0aebcbc76119c9adfc332ad6c4f5856686a705e5a869215fe45c5409cf78f8b",
+        "node_path": "/usr/lib/pliego-benchmark/node",
+        "node_sha256": "3517c2df0b2f8cd7f422b4b8450ef81c6889f08eb03e281d6de9079b15e6a327",
+        "node_version": "v22.23.2",
+        "package": "spatie/browsershot",
+        "package_lock_sha256": "db2dd6754e6c4bf8726ea71d62f103e60a10fd55c9d3166d5c678314e5c63144",
+        "package_version": "5.4.0",
+        "php_path": "/usr/bin/php8.3",
+        "php_sha256": "0b2aab87f36b15c3a7ca265fb90f73b2f6cb22f703bdd4bce0d9adf8fc04b0f3",
+        "php_version": "8.3.6",
+        "puppeteer_version": "25.8.0",
+        "target": "browsershot-5.4.0-puppeteer-25.8.0"
+      }
+    },
+    {
+      "engine": {
+        "binary_bytes": 14659,
+        "binary_path": "/home/runner/work/pliego/pliego/benchmarks/adapters/dompdf/adapter.php",
+        "binary_sha256": "cf01b40980d21cf9bbc93029afe5f909c601f34f6499da1e52046e462b9284a8",
+        "name": "dompdf",
+        "package": "dompdf/dompdf",
+        "profile": "composer-lock-cold-one-shot",
+        "version": "3.1.6"
+      },
+      "id": "dompdf-3.1.6",
+      "identity_sha256": "651b54844f48ae1576d1b55aad959eb387b3ec5717a1257687478bbb8db48cc4",
+      "label": "dompdf 3.1.6 (cold Composer adapter)",
+      "runtime": {
+        "adapter_path": "/home/runner/work/pliego/pliego/benchmarks/adapters/dompdf/adapter.php",
+        "adapter_sha256": "cf01b40980d21cf9bbc93029afe5f909c601f34f6499da1e52046e462b9284a8",
+        "composer_lock_sha256": "ee8abef30a8fc0b769d337c00899c5d7c5b7ed9f240e7879b4e3bf334ce90ae0",
+        "composer_vendor_path": "/home/runner/work/pliego/pliego/benchmarks/adapters/dompdf/vendor",
+        "composer_vendor_sha256": "d5e2f07e9cabe2e88c3449109d6a77cd4fd8f815a038639732e6a9c838d8864f",
+        "contract": "pliego.benchmark-adapter.v1",
+        "package": "dompdf/dompdf",
+        "package_version": "3.1.6",
+        "php_path": "/usr/bin/php8.3",
+        "php_sha256": "0b2aab87f36b15c3a7ca265fb90f73b2f6cb22f703bdd4bce0d9adf8fc04b0f3",
+        "php_version": "8.3.6",
+        "target": "dompdf-3.1.6"
+      }
+    },
+    {
+      "engine": {
+        "binary_bytes": 197791952,
+        "binary_path": "/usr/lib/pliego-benchmark/pliego",
+        "binary_sha256": "2045867c2a7928bb2de9b4695cfb9678523faeaacb507bf43b31ecd0a2e6347f",
+        "bundle": "pliego-0.3.3-linux-x86_64.tar.gz",
+        "bundle_bytes": 62996175,
+        "bundle_sha256": "bd1d87e18f26e476439bd996e7f3f65f9a3a49884b581337bef77303503ddb55",
+        "commit": "41c6cf0e9cf1c73f4f70eba9d413fa97063a3154",
+        "name": "pliego",
+        "profile": "checked-release",
+        "release_tag": "v0.3.3",
+        "servo_base": "313b6d5ecc113b08010ce434140db3ca5abcc71c",
+        "servo_build": "0.4.0-41c6cf0e9",
+        "version": "0.3.3"
+      },
+      "id": "pliego-0.3.3",
+      "identity_sha256": "732b814e22d47f90f860da006b25a205507eba39534f60370c0f0c1768da58eb",
+      "label": "Pliego 0.3.3 (published API 2 bundle)",
+      "runtime": {
+        "bundle": "pliego-0.3.3-linux-x86_64.tar.gz",
+        "bundle_sha256": "bd1d87e18f26e476439bd996e7f3f65f9a3a49884b581337bef77303503ddb55",
+        "commit": "41c6cf0e9cf1c73f4f70eba9d413fa97063a3154",
+        "contract": "pliego.published-runtime.v1",
+        "profile": "checked-release",
+        "release_tag": "v0.3.3",
+        "servo_base": "313b6d5ecc113b08010ce434140db3ca5abcc71c",
+        "servo_build": "0.4.0-41c6cf0e9"
+      }
+    }
+  ],
+  "version": 1
+}
