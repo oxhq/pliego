@@ -255,8 +255,8 @@ jobs:
           set -euo pipefail
           work="$(mktemp -d)"
           trap 'rm -rf "$work"' EXIT
-          mkdir "$work/dom-artifacts" "$work/browser-artifacts" "$work/xdg"
-          chmod 700 "$work/xdg"
+          mkdir "$work/dom-artifacts" "$work/browser-artifacts" "$work/browser-home" "$work/browser-tmp" "$work/xdg"
+          chmod 700 "$work/browser-home" "$work/browser-tmp" "$work/xdg"
           fixture="$GITHUB_WORKSPACE/benchmarks/fixtures/minimal-static"
           expected_text='Minimal Hello, Pliego. This fixture measures pure startup: one small page, one bundled font, no scripts or images.'
           raster='0f9edcf2b796a110d1a68efed00ce684921fec9ff7b52ccdc68bb718d1b93444'
@@ -338,6 +338,7 @@ jobs:
                 -u XDG_DATA_HOME \
                 -u XDG_RUNTIME_DIR \
                 -u XDG_STATE_HOME \
+                HOME="$work/browser-home" TMPDIR="$work/browser-tmp" \
                 BROWSERSHOT_NODE_BINARY="$node" BROWSERSHOT_CHROME_PATH="$chrome" \
                 "$adapter" render comparator.html \
                   --output "$work/browsershot.pdf" --artifacts "$work/browser-artifacts" \
