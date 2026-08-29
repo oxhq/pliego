@@ -473,7 +473,7 @@
     "launch_security": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["account", "uid", "gid", "argv", "executable", "launch_context", "status", "migration_write_probes", "temporary_storage"],
+      "required": ["account", "uid", "gid", "argv", "executable", "launch_context", "output_capture", "status", "migration_write_probes", "temporary_storage"],
       "properties": {
         "account": { "const": "pliego-benchmark-engine" },
         "uid": { "type": "integer", "minimum": 1 },
@@ -501,6 +501,19 @@
           "properties": {
             "cwd": { "type": "string", "minLength": 1 },
             "tmpdir": { "type": "string", "minLength": 1 }
+          }
+        },
+        "output_capture": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["contract", "filesystem", "max_bytes_per_stream", "write_sync", "pre", "post"],
+          "properties": {
+            "contract": { "const": "root-bound-tmpfs-engine-output-v1" },
+            "filesystem": { "const": "tmpfs" },
+            "max_bytes_per_stream": { "const": 16777216 },
+            "write_sync": { "const": "O_SYNC" },
+            "pre": { "$ref": "#/definitions/engine_output_capture_snapshot" },
+            "post": { "$ref": "#/definitions/engine_output_capture_snapshot" }
           }
         },
         "status": {
@@ -612,6 +625,49 @@
       "properties": {
         "device": { "type": "integer", "minimum": 0 },
         "inode": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "engine_output_capture_snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["root", "streams"],
+      "properties": {
+        "root": { "$ref": "#/definitions/output_capture_root_binding" },
+        "streams": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["stdout", "stderr"],
+          "properties": {
+            "stdout": { "$ref": "#/definitions/output_capture_stream_binding" },
+            "stderr": { "$ref": "#/definitions/output_capture_stream_binding" }
+          }
+        }
+      }
+    },
+    "output_capture_root_binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "identity", "owner_uid", "owner_gid", "mode"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "identity": { "$ref": "#/definitions/filesystem_identity" },
+        "owner_uid": { "type": "integer", "minimum": 0 },
+        "owner_gid": { "type": "integer", "minimum": 0 },
+        "mode": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "output_capture_stream_binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "identity", "owner_uid", "owner_gid", "mode", "link_count", "size_bytes"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "identity": { "$ref": "#/definitions/filesystem_identity" },
+        "owner_uid": { "type": "integer", "minimum": 0 },
+        "owner_gid": { "type": "integer", "minimum": 0 },
+        "mode": { "type": "integer", "minimum": 0 },
+        "link_count": { "type": "integer", "minimum": 1 },
+        "size_bytes": { "type": "integer", "minimum": 0 }
       }
     },
     "native_api2_storage_snapshot": {

@@ -38,6 +38,8 @@ MANIFEST = ROOT / "benchmarks" / "manifest.toml"
 PDF_ORACLE = ROOT / "benchmarks" / "tools" / "pdf_oracle.py"
 PERCENTILE_METHOD = "nearest-rank-v1"
 ENGINE_ACCOUNT_HOME = "/nonexistent/pliego-benchmark-engine"
+ENGINE_OUTPUT_CAPTURE_ROOT = PurePosixPath("/dev/shm")
+ENGINE_OUTPUT_CAPTURE_CONTRACT = "root-bound-tmpfs-engine-output-v1"
 RUNTIME_DIRECTORY_NAMES = {
     "HOME": "home",
     "XDG_CACHE_HOME": "xdg-cache",
@@ -340,6 +342,102 @@ def validate_resource_usage(sample: dict[str, Any], path: str, violations: list[
         require_equal(f"{path}.resource_usage.exit_code", usage["exit_code"], 128 + usage["signal"], violations)
 
     launch = usage["launch_security"]
+    output_capture = launch["output_capture"]
+    for field, expected in {
+        "contract": ENGINE_OUTPUT_CAPTURE_CONTRACT,
+        "filesystem": "tmpfs",
+        "max_bytes_per_stream": 16 * 1024 * 1024,
+        "write_sync": "O_SYNC",
+    }.items():
+        require_equal(
+            f"{path}.resource_usage.launch_security.output_capture.{field}",
+            output_capture[field],
+            expected,
+            violations,
+        )
+    output_pre = output_capture["pre"]
+    output_post = output_capture["post"]
+    require_equal(
+        f"{path}.resource_usage.launch_security.output_capture.post.root",
+        output_post["root"],
+        output_pre["root"],
+        violations,
+    )
+    output_root = output_pre["root"]
+    for field, expected in {
+        "path": str(ENGINE_OUTPUT_CAPTURE_ROOT),
+        "owner_uid": 0,
+        "owner_gid": 0,
+        "mode": 0o1777,
+    }.items():
+        require_equal(
+            f"{path}.resource_usage.launch_security.output_capture.pre.root.{field}",
+            output_root[field],
+            expected,
+            violations,
+        )
+    output_identities: set[tuple[int, int]] = {(output_root["identity"]["device"], output_root["identity"]["inode"])}
+    output_paths: set[PurePosixPath] = set()
+    for label, prefix in (("stdout", "pliego-bench-out-"), ("stderr", "pliego-bench-err-")):
+        binding = output_pre["streams"][label]
+        post_binding = output_post["streams"][label]
+        stable_binding = {key: value for key, value in binding.items() if key != "size_bytes"}
+        stable_post_binding = {key: value for key, value in post_binding.items() if key != "size_bytes"}
+        require_equal(
+            f"{path}.resource_usage.launch_security.output_capture.post.streams.{label}",
+            stable_post_binding,
+            stable_binding,
+            violations,
+        )
+        candidate = PurePosixPath(binding["path"])
+        if (
+            not candidate.is_absolute()
+            or candidate.parent != ENGINE_OUTPUT_CAPTURE_ROOT
+            or not candidate.name.startswith(prefix)
+            or len(candidate.name) == len(prefix)
+            or str(candidate) != binding["path"]
+        ):
+            violations.append(
+                Violation(
+                    f"{path}.resource_usage.launch_security.output_capture.pre.streams.{label}.path",
+                    f"must be a canonical direct child of {ENGINE_OUTPUT_CAPTURE_ROOT} with prefix {prefix!r}",
+                )
+            )
+        for field, expected in {
+            "owner_uid": 0,
+            "owner_gid": 0,
+            "mode": 0o600,
+            "link_count": 1,
+            "size_bytes": 0,
+        }.items():
+            require_equal(
+                f"{path}.resource_usage.launch_security.output_capture.pre.streams.{label}.{field}",
+                binding[field],
+                expected,
+                violations,
+            )
+        if post_binding["size_bytes"] > output_capture["max_bytes_per_stream"]:
+            violations.append(
+                Violation(
+                    f"{path}.resource_usage.launch_security.output_capture.post.streams.{label}.size_bytes",
+                    "must not exceed max_bytes_per_stream",
+                )
+            )
+        require_equal(
+            f"{path}.resource_usage.launch_security.output_capture.pre.streams.{label}.identity.device",
+            binding["identity"]["device"],
+            output_root["identity"]["device"],
+            violations,
+        )
+        output_paths.add(candidate)
+        output_identities.add((binding["identity"]["device"], binding["identity"]["inode"]))
+    if len(output_paths) != 2 or len(output_identities) != 3:
+        violations.append(
+            Violation(
+                f"{path}.resource_usage.launch_security.output_capture.pre.streams",
+                "must bind distinct stdout and stderr files with identities distinct from the tmpfs root",
+            )
+        )
     temporary_storage = launch["temporary_storage"]
     for field, expected in {
         "access_time": "FS_NOATIME_FL",
@@ -358,11 +456,7 @@ def validate_resource_usage(sample: dict[str, Any], path: str, violations: list[
     launch_context = launch["launch_context"]
     for name in ("cwd", "tmpdir"):
         candidate = PurePosixPath(launch_context[name])
-        if (
-            not candidate.is_absolute()
-            or ".." in candidate.parts
-            or str(candidate) != launch_context[name]
-        ):
+        if not candidate.is_absolute() or ".." in candidate.parts or str(candidate) != launch_context[name]:
             violations.append(
                 Violation(
                     f"{path}.resource_usage.launch_security.launch_context.{name}",
@@ -415,11 +509,7 @@ def validate_resource_usage(sample: dict[str, Any], path: str, violations: list[
             for name in ("controlled_root", "sandbox", "job", "temporary"):
                 binding = pre_bindings[name]
                 candidate = PurePosixPath(binding["path"])
-                if (
-                    not candidate.is_absolute()
-                    or ".." in candidate.parts
-                    or str(candidate) != binding["path"]
-                ):
+                if not candidate.is_absolute() or ".." in candidate.parts or str(candidate) != binding["path"]:
                     violations.append(
                         Violation(
                             f"{path}.resource_usage.launch_security.temporary_storage."

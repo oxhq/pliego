@@ -322,6 +322,10 @@ def main() -> None:
     assert "Wall p99" in markdown
     assert "Full aggregate table" in markdown
     assert "`sampled_peak_pss_kib_lower_bound`" in markdown
+    assert (
+        "`read_bytes` and `write_bytes` come from cgroup `io.stat`; memory-backed stdout/stderr capture is excluded."
+        in markdown
+    )
     assert "not dedicated-host production claims" in markdown
 
     changed_claim = deepcopy(data)

@@ -127,6 +127,10 @@ def main() -> None:
         assert "Relative spread" in markdown
         assert "No best or canonical repeat is selected" in markdown
         assert "Per-repeat hosted environments" in markdown
+        assert (
+            "For `read_bytes` and `write_bytes`, values come from cgroup `io.stat`; memory-backed stdout/stderr capture is excluded."
+            in markdown
+        )
         for run in series["runs"]:
             assert run["comparison_sha256"] in markdown
             assert run["interleaved_artifact_sha256"] in markdown

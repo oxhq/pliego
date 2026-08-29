@@ -7,7 +7,7 @@
  * Executes one target process per sample and runs the shared PDF oracle after
  * timing. Pliego uses native `render-api2`; competitor adapters retain the
  * benchmark `render INPUT ...` contract. On Linux, cgroup-v2 supplies
- * authoritative CPU, memory, and I/O accounting for the adapter and every
+ * authoritative CPU, memory, and block-device I/O accounting for the adapter and every
  * descendant. One correctness preflight and all warmups are discarded before
  * real samples. Internal phase entrypoints let the Python coordinator execute
  * one preflight, warmup, or indexed timed sample at a time when it owns a
@@ -37,6 +37,7 @@ const LINUX_UNIX_SOCKET_PATH_MAX_BYTES = 107;
 const GOOGLE_CHROME_RUNTIME_SOCKET_SUFFIX = '/com.google.Chrome.XXXXXX/SingletonSocket';
 const CHROMIUM_RUNTIME_SOCKET_SUFFIX = '/org.chromium.Chromium.XXXXXX/SingletonSocket';
 const BROWSER_RUNTIME_TEMP_MAX_BYTES = 62;
+const ENGINE_OUTPUT_CAPTURE_MAX_BYTES = 16 * 1024 * 1024;
 
 const USAGE = <<<EOT
 Usage: php pliego.php --binary <path> --input <file.html> --output <file.pdf> --artifacts <dir>
@@ -355,6 +356,153 @@ if (PHP_OS_FAMILY === 'Linux') {
  *     signal: int|null, resource_usage: object|null,
  *     exit_code: int, stdout: string, stderr: string}
  */
+function engine_output_capture_root(): ?string
+{
+    $candidate = PHP_OS_FAMILY === 'Linux' ? '/dev/shm' : sys_get_temp_dir();
+    $resolved = realpath($candidate);
+    if ($resolved === false || !is_dir($resolved)
+        || (PHP_OS_FAMILY === 'Linux' && ($resolved !== $candidate || is_link($candidate)))) {
+        return null;
+    }
+    return $resolved;
+}
+
+/** @return array{error: string}|array{binding: array<string, mixed>} */
+function engine_output_stream_binding(string $path, int $rootDevice, bool $requireEmpty): array
+{
+    clearstatcache(true, $path);
+    $resolved = realpath($path);
+    $metadata = @lstat($path);
+    if ($resolved === false || $resolved !== $path || dirname($path) !== '/dev/shm'
+        || !is_array($metadata) || ($metadata['mode'] & 0170000) !== 0100000
+        || (int) $metadata['uid'] !== 0 || (int) $metadata['gid'] !== 0
+        || ($metadata['mode'] & 07777) !== 0600 || (int) $metadata['nlink'] !== 1
+        || (int) $metadata['dev'] !== $rootDevice || ($requireEmpty && (int) $metadata['size'] !== 0)) {
+        return ['error' => "unsafe engine output capture path: {$path}"];
+    }
+    return ['binding' => [
+        'path' => $path,
+        'identity' => ['device' => (int) $metadata['dev'], 'inode' => (int) $metadata['ino']],
+        'owner_uid' => (int) $metadata['uid'],
+        'owner_gid' => (int) $metadata['gid'],
+        'mode' => $metadata['mode'] & 07777,
+        'link_count' => (int) $metadata['nlink'],
+        'size_bytes' => (int) $metadata['size'],
+    ]];
+}
+
+/** @return array{error: string}|array{snapshot: array<string, mixed>} */
+function bind_engine_output_capture(string $stdoutPath, string $stderrPath): array
+{
+    $root = engine_output_capture_root();
+    $rootMetadata = $root === null ? false : @lstat($root);
+    if ($root !== '/dev/shm' || !is_array($rootMetadata)
+        || ($rootMetadata['mode'] & 0170000) !== 0040000
+        || (int) $rootMetadata['uid'] !== 0 || (int) $rootMetadata['gid'] !== 0
+        || ($rootMetadata['mode'] & 07777) !== 01777) {
+        return ['error' => 'engine output capture root must be canonical root-owned mode-01777 /dev/shm'];
+    }
+    $rootDevice = (int) $rootMetadata['dev'];
+    $stdout = engine_output_stream_binding($stdoutPath, $rootDevice, true);
+    $stderr = engine_output_stream_binding($stderrPath, $rootDevice, true);
+    if (isset($stdout['error']) || isset($stderr['error'])) {
+        return ['error' => (string) ($stdout['error'] ?? $stderr['error'])];
+    }
+    $stdoutBinding = $stdout['binding'];
+    $stderrBinding = $stderr['binding'];
+    if (!str_starts_with(basename($stdoutPath), 'pliego-bench-out-')
+        || !str_starts_with(basename($stderrPath), 'pliego-bench-err-')
+        || $stdoutBinding['identity'] === $stderrBinding['identity']) {
+        return ['error' => 'engine stdout and stderr captures must be distinct prefixed files'];
+    }
+    return ['snapshot' => [
+        'root' => [
+            'path' => $root,
+            'identity' => ['device' => $rootDevice, 'inode' => (int) $rootMetadata['ino']],
+            'owner_uid' => (int) $rootMetadata['uid'],
+            'owner_gid' => (int) $rootMetadata['gid'],
+            'mode' => $rootMetadata['mode'] & 07777,
+        ],
+        'streams' => ['stdout' => $stdoutBinding, 'stderr' => $stderrBinding],
+    ]];
+}
+
+/** @param array<string, mixed> $binding */
+function stable_engine_output_binding(array $binding): array
+{
+    unset($binding['size_bytes']);
+    return $binding;
+}
+
+/** @param array<string, mixed> $expected
+ *  @return array{error: string}|array{content: string, binding: array<string, mixed>}
+ */
+function read_bound_engine_output_capture(string $path, array $expected, int $rootDevice): array
+{
+    $observed = engine_output_stream_binding($path, $rootDevice, false);
+    if (isset($observed['error'])) {
+        return ['error' => $observed['error']];
+    }
+    $binding = $observed['binding'];
+    if (stable_engine_output_binding($binding) !== stable_engine_output_binding($expected)) {
+        return ['error' => "engine output capture identity changed before read: {$path}"];
+    }
+    if ($binding['size_bytes'] > ENGINE_OUTPUT_CAPTURE_MAX_BYTES) {
+        return ['error' => "engine output capture exceeded the per-stream byte limit: {$path}"];
+    }
+    $content = @file_get_contents($path, false, null, 0, ENGINE_OUTPUT_CAPTURE_MAX_BYTES + 1);
+    if (!is_string($content) || strlen($content) !== $binding['size_bytes']
+        || strlen($content) > ENGINE_OUTPUT_CAPTURE_MAX_BYTES) {
+        return ['error' => "engine output capture changed or exceeded its limit during read: {$path}"];
+    }
+    return ['content' => $content, 'binding' => $binding];
+}
+
+/** @param array<string, mixed> $snapshot */
+function cleanup_bound_engine_output_capture(array $snapshot): ?string
+{
+    $rootDevice = (int) $snapshot['root']['identity']['device'];
+    $errors = [];
+    foreach ($snapshot['streams'] as $label => $expected) {
+        $path = (string) $expected['path'];
+        $observed = engine_output_stream_binding($path, $rootDevice, false);
+        if (isset($observed['error'])
+            || stable_engine_output_binding($observed['binding'] ?? []) !== stable_engine_output_binding($expected)
+            || !@unlink($path)) {
+            $errors[] = "cannot remove bound engine {$label} capture";
+            continue;
+        }
+        clearstatcache(true, $path);
+        if (@lstat($path) !== false) {
+            $errors[] = "bound engine {$label} capture remained after removal";
+        }
+    }
+    return $errors === [] ? null : implode('; ', $errors);
+}
+
+/** @param array<string, mixed>|null $snapshot */
+function cleanup_engine_output_capture_files(mixed $stdoutPath, mixed $stderrPath, ?array $snapshot): ?string
+{
+    if ($snapshot !== null) {
+        return cleanup_bound_engine_output_capture($snapshot);
+    }
+    $errors = [];
+    foreach ([$stdoutPath, $stderrPath] as $path) {
+        if (!is_string($path) || @lstat($path) === false) {
+            continue;
+        }
+        if (!@unlink($path)) {
+            $errors[] = "cannot remove engine output capture: {$path}";
+            continue;
+        }
+        clearstatcache(true, $path);
+        if (@lstat($path) !== false) {
+            $errors[] = "engine output capture remained after removal: {$path}";
+        }
+    }
+    return $errors === [] ? null : implode('; ', $errors);
+}
+
 function run_engine(
     array $command,
     string $cwd,
@@ -364,24 +512,42 @@ function run_engine(
 ): array
 {
     $nullDevice = PHP_OS_FAMILY === 'Windows' ? 'NUL' : '/dev/null';
-    $stdoutTmp = tempnam(sys_get_temp_dir(), 'pliego-bench-out-');
-    $stderrTmp = tempnam(sys_get_temp_dir(), 'pliego-bench-err-');
-    if ($stdoutTmp === false || $stderrTmp === false) {
-        return ['error' => 'cannot create engine output files'];
-    }
     $linux = PHP_OS_FAMILY === 'Linux';
+    $captureRoot = engine_output_capture_root();
+    if ($captureRoot === null) {
+        return ['error' => 'cannot resolve engine output capture root'];
+    }
+    $stdoutTmp = @tempnam($captureRoot, 'pliego-bench-out-');
+    $stderrTmp = @tempnam($captureRoot, 'pliego-bench-err-');
+    if ($stdoutTmp === false || $stderrTmp === false
+        || realpath($stdoutTmp) !== $stdoutTmp || realpath($stderrTmp) !== $stderrTmp
+        || dirname($stdoutTmp) !== $captureRoot || dirname($stderrTmp) !== $captureRoot
+        || !is_file($stdoutTmp) || !is_file($stderrTmp)
+        || is_link($stdoutTmp) || is_link($stderrTmp) || $stdoutTmp === $stderrTmp) {
+        $cleanupError = cleanup_engine_output_capture_files($stdoutTmp, $stderrTmp, null);
+        return ['error' => 'cannot create bound engine output capture files'
+            . ($cleanupError === null ? '' : "; {$cleanupError}")];
+    }
+    $captureBefore = null;
+    if ($linux) {
+        $captureBinding = bind_engine_output_capture($stdoutTmp, $stderrTmp);
+        if (isset($captureBinding['error'])) {
+            $cleanupError = cleanup_engine_output_capture_files($stdoutTmp, $stderrTmp, null);
+            return ['error' => $captureBinding['error'] . ($cleanupError === null ? '' : "; {$cleanupError}")];
+        }
+        $captureBefore = $captureBinding['snapshot'];
+    }
     $samplerResultTmp = $linux ? tempnam(sys_get_temp_dir(), 'pliego-bench-cgroup-') : null;
     $samplerErrorTmp = $linux ? tempnam(sys_get_temp_dir(), 'pliego-bench-cgroup-err-') : null;
     if ($linux && ($samplerResultTmp === false || $samplerErrorTmp === false)) {
-        @unlink($stdoutTmp);
-        @unlink($stderrTmp);
+        $cleanupError = cleanup_engine_output_capture_files($stdoutTmp, $stderrTmp, $captureBefore);
         if (is_string($samplerResultTmp)) {
             @unlink($samplerResultTmp);
         }
         if (is_string($samplerErrorTmp)) {
             @unlink($samplerErrorTmp);
         }
-        return ['error' => 'cannot create sampler output files'];
+        return ['error' => 'cannot create sampler output files' . ($cleanupError === null ? '' : "; {$cleanupError}")];
     }
 
     $launchedCommand = $command;
@@ -389,19 +555,18 @@ function run_engine(
     if ($linux) {
         $sampler = dirname(__DIR__) . '/tools/process_tree_sampler.py';
         if (!is_file($sampler)) {
-            @unlink($stdoutTmp);
-            @unlink($stderrTmp);
+            $cleanupError = cleanup_engine_output_capture_files($stdoutTmp, $stderrTmp, $captureBefore);
             @unlink($samplerResultTmp);
             @unlink($samplerErrorTmp);
-            return ['error' => "cgroup-v2 sampler not found: {$sampler}"];
+            return ['error' => "cgroup-v2 sampler not found: {$sampler}" . ($cleanupError === null ? '' : "; {$cleanupError}")];
         }
         $interpreter = sampler_interpreter();
         if ($interpreter === null) {
-            @unlink($stdoutTmp);
-            @unlink($stderrTmp);
+            $cleanupError = cleanup_engine_output_capture_files($stdoutTmp, $stderrTmp, $captureBefore);
             @unlink($samplerResultTmp);
             @unlink($samplerErrorTmp);
-            return ['error' => 'sampler interpreter is not a canonical root-owned, non-writable executable: ' . SAMPLER_PYTHON];
+            return ['error' => 'sampler interpreter is not a canonical root-owned, non-writable executable: '
+                . SAMPLER_PYTHON . ($cleanupError === null ? '' : "; {$cleanupError}")];
         }
         $launchedCommand = [
             $interpreter, '-I', $sampler,
@@ -433,23 +598,63 @@ function run_engine(
     $wallStart = microtime(true);
     $process = proc_open($launchedCommand, $descriptors, $pipes, $cwd, $processEnvironment);
     if (!is_resource($process)) {
-        @unlink($stdoutTmp);
-        @unlink($stderrTmp);
+        $cleanupError = cleanup_engine_output_capture_files($stdoutTmp, $stderrTmp, $captureBefore);
         if (is_string($samplerResultTmp)) {
             @unlink($samplerResultTmp);
         }
         if (is_string($samplerErrorTmp)) {
             @unlink($samplerErrorTmp);
         }
-        return ['error' => 'proc_open failed for engine command'];
+        return ['error' => 'proc_open failed for engine command' . ($cleanupError === null ? '' : "; {$cleanupError}")];
     }
 
     $launcherExitCode = proc_close($process);
     $wallMs = (microtime(true) - $wallStart) * 1000.0;
-    $stdout = (string) file_get_contents($stdoutTmp);
-    $stderr = (string) file_get_contents($stderrTmp);
-    @unlink($stdoutTmp);
-    @unlink($stderrTmp);
+    $captureAfter = null;
+    $readError = null;
+    if ($linux) {
+        $rootDevice = (int) $captureBefore['root']['identity']['device'];
+        $stdoutRead = read_bound_engine_output_capture(
+            $stdoutTmp,
+            $captureBefore['streams']['stdout'],
+            $rootDevice
+        );
+        $stderrRead = read_bound_engine_output_capture(
+            $stderrTmp,
+            $captureBefore['streams']['stderr'],
+            $rootDevice
+        );
+        $readError = $stdoutRead['error'] ?? $stderrRead['error'] ?? null;
+        $stdout = isset($stdoutRead['content']) ? $stdoutRead['content'] : '';
+        $stderr = isset($stderrRead['content']) ? $stderrRead['content'] : '';
+        if ($readError === null) {
+            $captureAfter = [
+                'root' => $captureBefore['root'],
+                'streams' => [
+                    'stdout' => $stdoutRead['binding'],
+                    'stderr' => $stderrRead['binding'],
+                ],
+            ];
+        }
+    } else {
+        $stdoutRead = @file_get_contents($stdoutTmp, false, null, 0, ENGINE_OUTPUT_CAPTURE_MAX_BYTES + 1);
+        $stderrRead = @file_get_contents($stderrTmp, false, null, 0, ENGINE_OUTPUT_CAPTURE_MAX_BYTES + 1);
+        if (!is_string($stdoutRead) || !is_string($stderrRead)
+            || strlen($stdoutRead) > ENGINE_OUTPUT_CAPTURE_MAX_BYTES
+            || strlen($stderrRead) > ENGINE_OUTPUT_CAPTURE_MAX_BYTES) {
+            $readError = 'cannot read bounded engine output capture';
+        }
+        $stdout = is_string($stdoutRead) ? $stdoutRead : '';
+        $stderr = is_string($stderrRead) ? $stderrRead : '';
+    }
+    $cleanupError = cleanup_engine_output_capture_files($stdoutTmp, $stderrTmp, $captureBefore);
+    if ($readError !== null || $cleanupError !== null) {
+        if ($linux) {
+            @unlink($samplerResultTmp);
+            @unlink($samplerErrorTmp);
+        }
+        return ['error' => implode('; ', array_filter([$readError, $cleanupError]))];
+    }
 
     if ($linux) {
         $measurementJson = (string) file_get_contents($samplerResultTmp);
@@ -470,15 +675,27 @@ function run_engine(
                 return ['error' => "cgroup-v2 sampler omitted {$field}"];
             }
         }
+        $captureProof = $measurement['launch_security']['output_capture'] ?? null;
+        $expectedCaptureProof = [
+            'contract' => 'root-bound-tmpfs-engine-output-v1',
+            'filesystem' => 'tmpfs',
+            'max_bytes_per_stream' => ENGINE_OUTPUT_CAPTURE_MAX_BYTES,
+            'write_sync' => 'O_SYNC',
+            'pre' => $captureBefore,
+            'post' => $captureAfter,
+        ];
+        if (!is_array($captureProof) || $captureProof !== $expectedCaptureProof) {
+            return ['error' => 'cgroup-v2 sampler returned invalid engine output capture proof'];
+        }
         $diagnostics = $measurement['sampled_diagnostics'];
         if (!is_array($diagnostics)) {
             return ['error' => 'cgroup-v2 sampler returned invalid sampled_diagnostics'];
         }
         return [
             'wall_ms' => (float) $measurement['wall_ms'],
-            // Unlike engine wall time, this includes sampler launch, descendant
-            // drain, retained-counter settlement, and sampler exit. Serial
-            // throughput must use this complete one-shot boundary.
+            // Unlike engine wall time, this includes sampler launch, capture
+            // validation, descendant drain, retained-counter settlement, and
+            // sampler exit. Serial throughput uses this sampler-lifecycle boundary.
             'one_shot_wall_ms' => round($wallMs, 3),
             'user_ms' => (float) $measurement['cpu_user_ms'],
             'sys_ms' => (float) $measurement['cpu_sys_ms'],

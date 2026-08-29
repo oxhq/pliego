@@ -688,9 +688,11 @@ def render_markdown(data: dict[str, Any]) -> str:
     lines.extend(
         [
             "",
-            "## I/O and output",
+            "## Block-device I/O and output",
             "",
-            "| Renderer | Read p50 | Write p50 | PDF bytes p50 | Correct samples | PDF hash variants |",
+            "`read_bytes` and `write_bytes` come from cgroup `io.stat`; memory-backed stdout/stderr capture is excluded.",
+            "",
+            "| Renderer | Block read p50 (`io.stat`) | Block write p50 (`io.stat`) | PDF bytes p50 | Correct samples | PDF hash variants |",
             "| --- | ---: | ---: | ---: | ---: | ---: |",
         ]
     )

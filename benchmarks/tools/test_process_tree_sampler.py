@@ -128,8 +128,10 @@ def must_be_incomplete(code: str, operation: object) -> None:
 
 def fixture_proofs() -> None:
     if sys.platform == "linux":
-        assert process_tree_sampler.DURABLE_WRITE_FLAG == os.O_SYNC
-        assert process_tree_sampler.ENGINE_OUTPUT_OPEN_FLAGS & process_tree_sampler.DURABLE_WRITE_FLAG
+        assert process_tree_sampler.SYNC_WRITE_FLAG == os.O_SYNC
+        assert process_tree_sampler.ENGINE_OUTPUT_OPEN_FLAGS & process_tree_sampler.SYNC_WRITE_FLAG
+        assert process_tree_sampler.ENGINE_OUTPUT_OPEN_FLAGS & os.O_NOFOLLOW
+        assert process_tree_sampler.ENGINE_OUTPUT_OPEN_FLAGS & os.O_CREAT == 0
     empty_io = process_tree_sampler.parse_io_stat("8:0 \n", "hosted-zero-io")
     assert empty_io == {"8:0": {"rbytes": 0, "wbytes": 0, "rios": 0, "wios": 0}}
     must_be_incomplete(
@@ -226,9 +228,7 @@ def fixture_proofs() -> None:
         os.utime(newer, ns=(2_000_000_000, 2_000_000_000))
         runtime_metadata = runtime_root.stat()
         runtime_identity = (runtime_metadata.st_dev, runtime_metadata.st_ino)
-        diagnostics = process_tree_sampler.runtime_directory_diagnostics(
-            runtime_root, runtime_identity, limit=1
-        )
+        diagnostics = process_tree_sampler.runtime_directory_diagnostics(runtime_root, runtime_identity, limit=1)
     assert "xdg-cache/newer.bin:file:size=6" in diagnostics
     assert "home/older.bin" not in diagnostics
     assert "browser-runtime-file-count=2" in diagnostics
@@ -238,9 +238,7 @@ def fixture_proofs() -> None:
             (exact_root / f"exact-{index}").write_text("fixture", encoding="ascii")
         exact_metadata = exact_root.stat()
         exact_identity = (exact_metadata.st_dev, exact_metadata.st_ino)
-        exact_inventory = process_tree_sampler.runtime_directory_diagnostics(
-            exact_root, exact_identity, scan_limit=3
-        )
+        exact_inventory = process_tree_sampler.runtime_directory_diagnostics(exact_root, exact_identity, scan_limit=3)
         (exact_root / "overflow").write_text("fixture", encoding="ascii")
         with mock.patch.object(
             process_tree_sampler.os,
@@ -309,9 +307,7 @@ def fixture_proofs() -> None:
             expected_identity = (temporary_metadata.st_dev, temporary_metadata.st_ino)
             temporary.rmdir()
             temporary.symlink_to(outside, target_is_directory=True)
-            replaced = process_tree_sampler.directory_diagnostics(
-                temporary, "engine-temporary", expected_identity
-            )
+            replaced = process_tree_sampler.directory_diagnostics(temporary, "engine-temporary", expected_identity)
         assert replaced.startswith("engine-temporary-inventory-unavailable=")
         assert "must-not-leak" not in replaced
         with tempfile.TemporaryDirectory() as raw:
@@ -328,9 +324,7 @@ def fixture_proofs() -> None:
                 return metadata
 
             descriptors_before = len(list(Path("/proc/self/fd").iterdir()))
-            with mock.patch.object(
-                process_tree_sampler.os, "fstat", side_effect=fail_child_fstat
-            ):
+            with mock.patch.object(process_tree_sampler.os, "fstat", side_effect=fail_child_fstat):
                 unavailable_child = process_tree_sampler.directory_diagnostics(
                     diagnostic_root, "engine-temporary", root_identity
                 )
@@ -352,6 +346,139 @@ def fixture_proofs() -> None:
             assert process_tree_sampler.decode_mountinfo_path(escaped_nested) == str(nested)
             assert process_tree_sampler.mountinfo_filesystem_type(root, mountinfo) == "ext4"
             assert process_tree_sampler.mountinfo_filesystem_type(leaf, mountinfo) == "xfs"
+
+        with tempfile.TemporaryDirectory() as raw:
+            capture_root = Path(raw).resolve()
+            capture_root.chmod(0o1777)
+            stdout_path = capture_root / "pliego-bench-out-fixture"
+            stderr_path = capture_root / "pliego-bench-err-fixture"
+            stdout_path.write_bytes(b"")
+            stderr_path.write_bytes(b"")
+            stdout_path.chmod(0o600)
+            stderr_path.chmod(0o600)
+            broker_uid = os.getuid()
+            broker_gid = os.getgid()
+            capture_account = process_tree_sampler.EngineAccount(
+                "fixture-engine",
+                broker_uid + 10000,
+                broker_gid + 10000,
+                process_tree_sampler.ENGINE_ACCOUNT_HOME,
+            )
+            with mock.patch.object(process_tree_sampler, "mountinfo_filesystem_type", return_value="tmpfs"):
+                output_before = process_tree_sampler.engine_output_capture_snapshot(
+                    stdout_path,
+                    stderr_path,
+                    capture_account,
+                    capture_root=capture_root,
+                    broker_uid=broker_uid,
+                    broker_gid=broker_gid,
+                )
+                assert output_before["root"]["mode"] == 0o1777
+                assert output_before["streams"]["stdout"]["mode"] == 0o600
+                descriptor = process_tree_sampler.open_bound_engine_output(str(stdout_path), output_before, "stdout")
+                os.close(descriptor)
+                assert (
+                    process_tree_sampler.engine_output_capture_snapshot(
+                        stdout_path,
+                        stderr_path,
+                        capture_account,
+                        expected=output_before,
+                        capture_root=capture_root,
+                        broker_uid=broker_uid,
+                        broker_gid=broker_gid,
+                    )
+                    == output_before
+                )
+                stdout_path.write_bytes(b"xx")
+                must_be_incomplete(
+                    "ENGINE_OUTPUT_CAPTURE_LIMIT_EXCEEDED",
+                    lambda: process_tree_sampler.engine_output_capture_snapshot(
+                        stdout_path,
+                        stderr_path,
+                        capture_account,
+                        expected=output_before,
+                        capture_root=capture_root,
+                        broker_uid=broker_uid,
+                        broker_gid=broker_gid,
+                        max_bytes_per_stream=1,
+                    ),
+                )
+                stdout_path.write_bytes(b"")
+                hard_link = capture_root / "hard-link"
+                os.link(stdout_path, hard_link)
+                must_be_incomplete(
+                    "ENGINE_OUTPUT_CAPTURE_UNSAFE",
+                    lambda: process_tree_sampler.engine_output_capture_snapshot(
+                        stdout_path,
+                        stderr_path,
+                        capture_account,
+                        capture_root=capture_root,
+                        broker_uid=broker_uid,
+                        broker_gid=broker_gid,
+                    ),
+                )
+                hard_link.unlink()
+
+                replacement = capture_root / "replacement"
+                replacement.write_bytes(b"")
+                replacement.chmod(0o600)
+                stdout_path.unlink()
+                replacement.rename(stdout_path)
+                must_be_incomplete(
+                    "ENGINE_OUTPUT_CAPTURE_REPLACED",
+                    lambda: process_tree_sampler.engine_output_capture_snapshot(
+                        stdout_path,
+                        stderr_path,
+                        capture_account,
+                        expected=output_before,
+                        capture_root=capture_root,
+                        broker_uid=broker_uid,
+                        broker_gid=broker_gid,
+                    ),
+                )
+                must_be_incomplete(
+                    "ENGINE_OUTPUT_CAPTURE_REPLACED",
+                    lambda: process_tree_sampler.open_bound_engine_output(str(stdout_path), output_before, "stdout"),
+                )
+                stdout_path.chmod(0o666)
+                must_be_incomplete(
+                    "ENGINE_OUTPUT_CAPTURE_UNSAFE",
+                    lambda: process_tree_sampler.engine_output_capture_snapshot(
+                        stdout_path,
+                        stderr_path,
+                        capture_account,
+                        capture_root=capture_root,
+                        broker_uid=broker_uid,
+                        broker_gid=broker_gid,
+                    ),
+                )
+                stdout_path.chmod(0o600)
+                capture_root.chmod(0o0777)
+                must_be_incomplete(
+                    "ENGINE_OUTPUT_CAPTURE_UNSAFE",
+                    lambda: process_tree_sampler.engine_output_capture_snapshot(
+                        stdout_path,
+                        stderr_path,
+                        capture_account,
+                        capture_root=capture_root,
+                        broker_uid=broker_uid,
+                        broker_gid=broker_gid,
+                    ),
+                )
+                capture_root.chmod(0o1777)
+
+            with mock.patch.object(process_tree_sampler, "mountinfo_filesystem_type", return_value="ext4"):
+                must_be_incomplete(
+                    "ENGINE_OUTPUT_CAPTURE_BACKING_UNSAFE",
+                    lambda: process_tree_sampler.engine_output_capture_snapshot(
+                        stdout_path,
+                        stderr_path,
+                        capture_account,
+                        capture_root=capture_root,
+                        broker_uid=broker_uid,
+                        broker_gid=broker_gid,
+                    ),
+                )
 
         with (
             tempfile.TemporaryDirectory() as raw,
@@ -408,17 +535,13 @@ def fixture_proofs() -> None:
             wrong_job.mkdir(mode=0o700)
             must_be_incomplete(
                 "NATIVE_API2_STORAGE_UNSAFE",
-                lambda: process_tree_sampler.bind_native_api2_storage(
-                    wrong_job, native_temporary, current_account
-                ),
+                lambda: process_tree_sampler.bind_native_api2_storage(wrong_job, native_temporary, current_account),
             )
             wrong_temporary = native_sandbox / "scratch"
             wrong_temporary.mkdir(mode=0o700)
             must_be_incomplete(
                 "NATIVE_API2_STORAGE_UNSAFE",
-                lambda: process_tree_sampler.bind_native_api2_storage(
-                    native_job, wrong_temporary, current_account
-                ),
+                lambda: process_tree_sampler.bind_native_api2_storage(native_job, wrong_temporary, current_account),
             )
             other_sandbox = root / "other-native-sandbox"
             other_temporary = other_sandbox / "temporary"
@@ -426,9 +549,7 @@ def fixture_proofs() -> None:
             other_temporary.mkdir(mode=0o700)
             must_be_incomplete(
                 "NATIVE_API2_STORAGE_UNSAFE",
-                lambda: process_tree_sampler.bind_native_api2_storage(
-                    native_job, other_temporary, current_account
-                ),
+                lambda: process_tree_sampler.bind_native_api2_storage(native_job, other_temporary, current_account),
             )
 
             unexpected_job_entry = native_job / "unexpected"
@@ -928,6 +1049,16 @@ def fixture_proofs() -> None:
     )
     assert missing.returncode == 2
     assert "measurement-incomplete[CGROUP_PARENT_REQUIRED]" in missing.stderr
+    env["PLIEGO_BENCHMARK_CGROUP_PARENT"] = "/nonexistent-fixture-parent"
+    missing_capture = subprocess.run(
+        [sys.executable, str(SAMPLER), "--", sys.executable, "-c", "raise SystemExit(99)"],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=10,
+    )
+    assert missing_capture.returncode == 2
+    assert "measurement-incomplete[ENGINE_OUTPUT_CAPTURE_REQUIRED]" in missing_capture.stderr
 
 
 def child_workload(mebibytes: int, duration: float) -> int:
@@ -1052,6 +1183,12 @@ def migration_attack(parent):
     return parent_workload(4, 0.3)
 
 
+def output_workload():
+    os.write(1, b"fixture stdout\\n")
+    os.write(2, b"fixture stderr\\n")
+    return 0
+
+
 def main():
     if ARGUMENTS[0] == "--workload-parent":
         return parent_workload(int(ARGUMENTS[1]), float(ARGUMENTS[2]))
@@ -1059,6 +1196,8 @@ def main():
         return leaking_parent(ARGUMENTS[1])
     if ARGUMENTS[0] == "--workload-migration-attack":
         return migration_attack(ARGUMENTS[1])
+    if ARGUMENTS[0] == "--workload-output":
+        return output_workload()
     raise ValueError(f"unsupported fixture workload: {{ARGUMENTS!r}}")
 
 
@@ -1073,6 +1212,30 @@ if __name__ == "__main__":
 
 def workload_command(engine: str) -> list[str]:
     return [engine, "render-api2"]
+
+
+@contextlib.contextmanager
+def live_output_capture_paths() -> Iterator[tuple[Path, Path]]:
+    paths: list[Path] = []
+    identities: list[tuple[int, int]] = []
+    try:
+        for prefix in ("pliego-bench-out-", "pliego-bench-err-"):
+            descriptor, raw = tempfile.mkstemp(prefix=prefix, dir=process_tree_sampler.ENGINE_OUTPUT_CAPTURE_ROOT)
+            try:
+                os.fchmod(descriptor, 0o600)
+            finally:
+                os.close(descriptor)
+            path = Path(raw).resolve(strict=True)
+            metadata = path.stat(follow_symlinks=False)
+            paths.append(path)
+            identities.append((metadata.st_dev, metadata.st_ino))
+        yield paths[0], paths[1]
+    finally:
+        for path, identity in zip(paths, identities):
+            metadata = path.stat(follow_symlinks=False)
+            assert (metadata.st_dev, metadata.st_ino) == identity
+            path.unlink()
+            assert not path.exists()
 
 
 def sampled(command: list[str], descendant_grace_ms: float = 1000.0) -> dict:
@@ -1092,27 +1255,32 @@ def sampled(command: list[str], descendant_grace_ms: float = 1000.0) -> dict:
         for path in (job, temporary, job / "input", job / "input-manifest.json"):
             os.chown(path, account.uid, account.gid)
             path.chmod(0o700 if path.is_dir() else 0o600)
-        result = subprocess.run(
-            [
-                sys.executable,
-                str(SAMPLER),
-                "--interval-ms",
-                "75",
-                "--pss-interval-ms",
-                "250",
-                "--descendant-grace-ms",
-                str(descendant_grace_ms),
-                "--cwd",
-                str(job),
-                "--temporary-directory",
-                str(temporary),
-                "--",
-                *command,
-            ],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
+        with live_output_capture_paths() as (stdout_path, stderr_path):
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SAMPLER),
+                    "--interval-ms",
+                    "75",
+                    "--pss-interval-ms",
+                    "250",
+                    "--descendant-grace-ms",
+                    str(descendant_grace_ms),
+                    "--cwd",
+                    str(job),
+                    "--temporary-directory",
+                    str(temporary),
+                    "--stdout",
+                    str(stdout_path),
+                    "--stderr",
+                    str(stderr_path),
+                    "--",
+                    *command,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout)
 
@@ -1182,6 +1350,14 @@ def live_cgroup_proofs() -> dict:
             "EACCES",
             "EPERM",
         }
+    with workload_engine(["--workload-output"]) as engine:
+        captured = sampled(workload_command(engine))
+    assert captured["launch_security"]["output_capture"]["post"]["streams"]["stdout"]["size_bytes"] == len(
+        b"fixture stdout\n"
+    )
+    assert captured["launch_security"]["output_capture"]["post"]["streams"]["stderr"]["size_bytes"] == len(
+        b"fixture stderr\n"
+    )
     assert proof["method"] == "linux-cgroup-v2-v1"
     assert proof["scope"] == "fresh-root-owned-cgroup-subtree"
     launch = proof["launch_security"]
@@ -1201,6 +1377,31 @@ def live_cgroup_proofs() -> dict:
         )
     )
     assert launch["status"]["no_new_privs"] == 1
+    output_capture = launch["output_capture"]
+    assert output_capture["contract"] == process_tree_sampler.ENGINE_OUTPUT_CAPTURE_CONTRACT
+    assert output_capture["filesystem"] == "tmpfs"
+    assert output_capture["max_bytes_per_stream"] == process_tree_sampler.ENGINE_OUTPUT_CAPTURE_MAX_BYTES
+    assert output_capture["write_sync"] == "O_SYNC"
+    assert output_capture["pre"]["root"] == output_capture["post"]["root"]
+    assert output_capture["pre"]["root"]["path"] == str(process_tree_sampler.ENGINE_OUTPUT_CAPTURE_ROOT)
+    assert output_capture["pre"]["root"]["mode"] == 0o1777
+    output_streams = output_capture["pre"]["streams"]
+    output_streams_after = output_capture["post"]["streams"]
+    assert {binding["mode"] for binding in output_streams.values()} == {0o600}
+    assert {binding["owner_uid"] for binding in output_streams.values()} == {0}
+    assert {binding["link_count"] for binding in output_streams.values()} == {1}
+    assert {binding["size_bytes"] for binding in output_streams.values()} == {0}
+    assert all(
+        0 <= binding["size_bytes"] <= process_tree_sampler.ENGINE_OUTPUT_CAPTURE_MAX_BYTES
+        for binding in output_streams_after.values()
+    )
+    for label in ("stdout", "stderr"):
+        assert {key: value for key, value in output_streams[label].items() if key != "size_bytes"} == {
+            key: value for key, value in output_streams_after[label].items() if key != "size_bytes"
+        }
+    assert (
+        len({(binding["identity"]["device"], binding["identity"]["inode"]) for binding in output_streams.values()}) == 2
+    )
     assert proof["cgroup_drained"] is True
     assert proof["cleanup"]["kill_used"] is False
     assert proof["counters"]["final"]["pids_peak"] >= 3
@@ -1409,20 +1610,20 @@ os.fsync(sys.stdout.fileno())
         assert sample["resource_usage"]["root_start_ticks"] > 0
         assert sample["resource_usage"]["cgroup_drained"] is True
         assert sample["resource_usage"]["launch_security"]["argv"] == [str(engine.resolve()), "render-api2"]
-        native_storage = sample["resource_usage"]["launch_security"]["temporary_storage"][
-            "native_api2_path_bindings"
-        ]
+        output_capture = sample["resource_usage"]["launch_security"]["output_capture"]
+        assert output_capture["contract"] == process_tree_sampler.ENGINE_OUTPUT_CAPTURE_CONTRACT
+        assert output_capture["pre"]["root"] == output_capture["post"]["root"]
+        assert output_capture["pre"]["root"]["path"] == str(process_tree_sampler.ENGINE_OUTPUT_CAPTURE_ROOT)
+        assert output_capture["post"]["streams"]["stdout"]["size_bytes"] > 0
+        native_storage = sample["resource_usage"]["launch_security"]["temporary_storage"]["native_api2_path_bindings"]
         assert native_storage["pre"] == native_storage["post"]
         bindings = native_storage["pre"]["bindings"]
         sandbox = Path(bindings["sandbox"]["path"])
         assert Path(bindings["job"]["path"]) == sandbox / "job"
         assert Path(bindings["temporary"]["path"]) == sandbox / "temporary"
-        assert len(
-            {
-                (binding["identity"]["device"], binding["identity"]["inode"])
-                for binding in bindings.values()
-            }
-        ) == 4
+        assert (
+            len({(binding["identity"]["device"], binding["identity"]["inode"]) for binding in bindings.values()}) == 4
+        )
         assert sample["memory_peak_bytes"] == sample["resource_usage"]["memory_peak_bytes"]
         violations: list[validate_result.Violation] = []
         validate_result.validate_resource_usage(sample, "$.sample", violations)

@@ -60,7 +60,8 @@ benchmarks/
 
 These `v1` evidence schemas remain pre-publication contracts until the first
 immutable hosted campaign is released. No earlier public evidence bundle is
-accepted as a compatibility baseline for this required storage-binding field.
+accepted as a compatibility baseline for these required storage and
+output-capture bindings.
 
 ## Prerequisites
 
@@ -105,20 +106,37 @@ accepted as a compatibility baseline for this required storage-binding field.
   pre/post path identities in each sample. This binding assumes the exact
   hash-pinned renderer is trusted; it detects path replacement but is not a
   sandbox against a renderer deliberately attempting inode-reuse attacks.
+  Engine stdout and stderr use a memory-backed approximation of production pipe
+  transport: the root runner creates distinct mode-0600 files directly below
+  canonical root-owned mode-01777 `/dev/shm`, and the sampler requires that mount
+  to be `tmpfs`, opens each path with `O_NOFOLLOW|O_SYNC`, and retains matching
+  owner, mode, device, inode, link-count, and post-run byte-count evidence. A
+  sample is rejected if either stream exceeds 16 MiB; each file remains present
+  until the sampler exits. Capture
+  writes by the measured process tree are included in descendant CPU and the
+  sampler-lifecycle wall interval; writes completed before the root exits are also
+  inside engine wall time. Their shmem pages can contribute to cgroup memory, but
+  their traffic is excluded from block-device `io.stat`. Capture-file creation and
+  post-sampler read/unlink are outside `one_shot_wall_ms`; sampler binding and
+  revalidation are inside it. Here `O_SYNC` describes synchronous tmpfs
+  regular-file writes, not durable storage. Output volume remains target/protocol
+  work, so these measurements are not renderer-core-only comparisons.
   Browsershot additionally receives fresh private `HOME` and XDG roots below
   that same measured scratch directory. Pliego and dompdf retain the exact
   `/nonexistent/pliego-benchmark-engine` account home and receive no XDG roots.
   The adapter gives Puppeteer an explicit fresh profile inside that tree so its
   normal temporary-profile deletion cannot make dirty file-backed pages
   unreachable. After Chromium returns, the measured adapter durability-syncs
-  the private runtime tree, removes the synced profile, and syncs the profile
-  deletion before publishing the PDF. Profile teardown and all related CPU,
-  wall, and I/O cost stay inside the sample. The sampler never flushes browser
-  state on the adapter's behalf.
+  the private runtime tree, clears every runtime entry while preserving the
+  bound private root and `HOME`/XDG directory identities, and syncs those
+  deletions before publishing the PDF. The sampler independently requires those
+  directories to remain bound and empty after the cgroup drains. Browser teardown
+  and all related CPU, wall, and block-device I/O cost stay inside the sample. The sampler
+  never flushes browser state on the adapter's behalf.
   The sampler and both hosted workflows reject any other passwd home and require
   that exact path to be absent or non-writable to the engine account.
   This is a deliberate non-default benchmark condition; its synchronous
-  metadata cost remains included in the retained wall-time and I/O totals.
+  metadata cost remains included in the retained wall-time and block-device I/O totals.
 * All resources local, network disabled, same fonts and assets for every run.
 
 ## Freezing and generating fixtures
@@ -233,8 +251,9 @@ maximum of the old 50-sample short-document population.
 
 Every target, including Pliego and dompdf, runs in a fresh private network
 namespace containing only loopback. The workflow provisions the existing root
-cgroup-v2 broker and retains exact descendant CPU, `memory.peak`, I/O, sampled
-RSS/PSS lower bounds, engine wall time, full one-shot wall time, output size,
+cgroup-v2 broker and retains exact descendant CPU, `memory.peak`, block-device
+`io.stat`, sampled RSS/PSS lower bounds, engine wall time, sampler-lifecycle
+one-shot wall time, output size,
 correctness, and PDF-hash variation. It also records the GitHub run and runner
 image, host and pressure snapshots, verified Pliego release metadata, Poppler
 paths/versions/hashes, adapter/runtime paths/versions/hashes, the complete raw
@@ -356,9 +375,11 @@ HOME/XDG child paths to unique filesystem device/inode identities before
 launch and revalidates the same identities after descendant drain; non-browser
 samples must not carry that private-browser proof.
 Descendant drain and accounting-settle durations are recorded separately. The
-runner also retains a complete one-shot wall interval from process open through
-sampler exit; serial throughput is derived only from that boundary, so leaked or
-slow descendants cannot inflate the rate.
+runner also retains a sampler-lifecycle one-shot interval from process open
+through sampler exit; it includes output-capture binding and revalidation but
+excludes capture-file creation and post-sampler read/unlink. Serial throughput is
+derived only from that boundary, so leaked or slow descendants cannot inflate
+the rate.
 
 The `minimal-static` oracle declares ISO A4 in points and permits at most 0.75
 points of print-grid quantization. All text explicitly uses normal-weight Ahem.
@@ -373,7 +394,7 @@ Publication fails unless `cgroup.events` drains recursively. After it empties,
 `cpu.stat` and `io.stat` reads must match. A bounded `cgroup.kill` cleans leaked
 descendants, but its use fails a passing sample. Launcher setup and privilege
 removal happen in the staging leaf, so the measurement leaf starts with only
-the stopped unprivileged launcher and zero CPU/I/O/memory counters before exec.
+the stopped unprivileged launcher and zero CPU/block-I/O/memory counters before exec.
 
 Periodic `/proc` PID/start-time, summed RSS, and summed PSS observations are
 retained only as sampled lower-bound diagnostics; short-lived processes may be
@@ -412,7 +433,7 @@ This foundation records wall latency (p50/p95/p99/min/max/mean), serial
 throughput, per-page wall time, PDF and artifact bytes, page count, page
 dimensions, required text, link targets, capture status, PDF hash variation,
 and typed failure publication state.
-CPU, cgroup memory, and cgroup I/O are exact retained counters. Sampled summed
+CPU, cgroup memory, and cgroup block-device I/O from `io.stat` are exact retained counters. Sampled summed
 RSS/PSS are explicitly lower bounds. Runtime archive size and deeper document
 checks remain separate audited increments before a signed baseline is published.
 

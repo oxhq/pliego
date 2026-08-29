@@ -56,10 +56,15 @@ SIOCGIFFLAGS = 0x8913
 SIOCSIFFLAGS = 0x8914
 IFF_UP = 0x1
 API2_REQUEST_MAX_BYTES = 1024 * 1024
-# Keep redirected engine output quiescent at root exit. O_DSYNC is insufficient
-# for the zero-dirty contract; O_SYNC keeps the synchronous cost in the sample.
-DURABLE_WRITE_FLAG = getattr(os, "O_SYNC", 0)
-ENGINE_OUTPUT_OPEN_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_CLOEXEC | DURABLE_WRITE_FLAG
+# Production clients receive engine stdout/stderr through memory-backed pipes.
+# The benchmark uses bound tmpfs files so the outer PHP runner can read output
+# after the sampler exits without introducing artificial block-backed dirty pages.
+# O_SYNC preserves synchronous regular-file write semantics inside the sample.
+SYNC_WRITE_FLAG = getattr(os, "O_SYNC", 0)
+ENGINE_OUTPUT_OPEN_FLAGS = os.O_WRONLY | os.O_TRUNC | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0) | SYNC_WRITE_FLAG
+ENGINE_OUTPUT_CAPTURE_ROOT = Path("/dev/shm")
+ENGINE_OUTPUT_CAPTURE_CONTRACT = "root-bound-tmpfs-engine-output-v1"
+ENGINE_OUTPUT_CAPTURE_MAX_BYTES = 16 * 1024 * 1024
 FS_IOC_GETFLAGS = 0x80086601
 FS_SYNC_FL = 0x00000008
 FS_NOATIME_FL = 0x00000080
@@ -968,6 +973,187 @@ def mountinfo_filesystem_type(path: Path, mountinfo: str | None = None) -> str |
     return selected[1] if selected is not None else None
 
 
+def output_capture_root_binding(path: Path, metadata: os.stat_result) -> dict[str, Any]:
+    return {
+        "path": str(path),
+        "identity": {"device": metadata.st_dev, "inode": metadata.st_ino},
+        "owner_uid": metadata.st_uid,
+        "owner_gid": metadata.st_gid,
+        "mode": stat.S_IMODE(metadata.st_mode),
+    }
+
+
+def output_capture_stream_binding(path: Path, metadata: os.stat_result) -> dict[str, Any]:
+    return {
+        **output_capture_root_binding(path, metadata),
+        "link_count": metadata.st_nlink,
+        "size_bytes": metadata.st_size,
+    }
+
+
+def engine_output_capture_snapshot(
+    stdout_path: Path,
+    stderr_path: Path,
+    account: EngineAccount,
+    expected: dict[str, Any] | None = None,
+    capture_root: Path = ENGINE_OUTPUT_CAPTURE_ROOT,
+    broker_uid: int = 0,
+    broker_gid: int = 0,
+    max_bytes_per_stream: int = ENGINE_OUTPUT_CAPTURE_MAX_BYTES,
+) -> dict[str, Any]:
+    """Bind root-created memory-backed output paths the engine cannot replace."""
+
+    try:
+        resolved_root = capture_root.resolve(strict=True)
+        root_metadata = os.stat(capture_root, follow_symlinks=False)
+    except OSError as error:
+        raise incomplete(
+            "ENGINE_OUTPUT_CAPTURE_UNSAFE",
+            f"cannot bind engine output capture root {capture_root}: {error}",
+        ) from error
+    if capture_root != resolved_root or not stat.S_ISDIR(root_metadata.st_mode):
+        raise incomplete(
+            "ENGINE_OUTPUT_CAPTURE_UNSAFE",
+            "engine output capture root must be a canonical directory",
+        )
+    if (
+        root_metadata.st_uid != broker_uid
+        or root_metadata.st_gid != broker_gid
+        or stat.S_IMODE(root_metadata.st_mode) != 0o1777
+    ):
+        raise incomplete(
+            "ENGINE_OUTPUT_CAPTURE_UNSAFE",
+            f"engine output capture root must be owned by {broker_uid}:{broker_gid} with mode 01777",
+        )
+    try:
+        filesystem = mountinfo_filesystem_type(capture_root)
+    except (OSError, UnicodeError) as error:
+        raise incomplete(
+            "ENGINE_OUTPUT_CAPTURE_BACKING_UNSAFE",
+            f"cannot determine engine output capture backing: {error}",
+        ) from error
+    if filesystem != "tmpfs":
+        raise incomplete(
+            "ENGINE_OUTPUT_CAPTURE_BACKING_UNSAFE",
+            "engine output capture root must be backed by tmpfs",
+        )
+
+    streams: dict[str, dict[str, Any]] = {}
+    for label, requested in (("stdout", stdout_path), ("stderr", stderr_path)):
+        try:
+            resolved = requested.resolve(strict=True)
+            metadata = os.stat(requested, follow_symlinks=False)
+        except OSError as error:
+            raise incomplete(
+                "ENGINE_OUTPUT_CAPTURE_UNSAFE",
+                f"cannot bind engine {label} capture path {requested}: {error}",
+            ) from error
+        if (
+            not requested.is_absolute()
+            or requested != resolved
+            or requested.parent != capture_root
+            or not stat.S_ISREG(metadata.st_mode)
+        ):
+            raise incomplete(
+                "ENGINE_OUTPUT_CAPTURE_UNSAFE",
+                f"engine {label} capture must be a canonical regular direct child of {capture_root}",
+            )
+        if (
+            metadata.st_uid != broker_uid
+            or metadata.st_gid != broker_gid
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+            or metadata.st_nlink != 1
+            or metadata.st_dev != root_metadata.st_dev
+            or identity_can_write(metadata, account.uid, account.gid)
+            or child_replaceable(root_metadata, metadata, account.uid, account.gid)
+        ):
+            raise incomplete(
+                "ENGINE_OUTPUT_CAPTURE_UNSAFE",
+                f"engine {label} capture must be a single-link same-tmpfs broker-owned mode-0600 file "
+                "that is non-replaceable by the engine account",
+            )
+        if expected is None and metadata.st_size != 0:
+            raise incomplete(
+                "ENGINE_OUTPUT_CAPTURE_UNSAFE",
+                f"engine {label} capture must be empty before launch",
+            )
+        if metadata.st_size > max_bytes_per_stream:
+            raise incomplete(
+                "ENGINE_OUTPUT_CAPTURE_LIMIT_EXCEEDED",
+                f"engine {label} capture exceeded {max_bytes_per_stream} bytes",
+            )
+        streams[label] = output_capture_stream_binding(requested, metadata)
+
+    stdout_identity = (
+        streams["stdout"]["identity"]["device"],
+        streams["stdout"]["identity"]["inode"],
+    )
+    stderr_identity = (
+        streams["stderr"]["identity"]["device"],
+        streams["stderr"]["identity"]["inode"],
+    )
+    if stdout_path == stderr_path or stdout_identity == stderr_identity:
+        raise incomplete(
+            "ENGINE_OUTPUT_CAPTURE_UNSAFE",
+            "engine stdout and stderr capture paths must bind distinct files",
+        )
+    snapshot = {
+        "root": output_capture_root_binding(capture_root, root_metadata),
+        "streams": streams,
+    }
+    if expected is not None:
+        if snapshot["root"] != expected["root"]:
+            raise incomplete(
+                "ENGINE_OUTPUT_CAPTURE_REPLACED",
+                "engine output capture root identity changed during execution",
+            )
+        for label in ("stdout", "stderr"):
+            before = {key: value for key, value in expected["streams"][label].items() if key != "size_bytes"}
+            after = {key: value for key, value in snapshot["streams"][label].items() if key != "size_bytes"}
+            if after != before:
+                raise incomplete(
+                    "ENGINE_OUTPUT_CAPTURE_REPLACED",
+                    f"engine {label} capture path identity changed during execution",
+                )
+    return snapshot
+
+
+def open_bound_engine_output(path: str, snapshot: dict[str, Any], label: str) -> int:
+    requested = Path(path)
+    root_binding = snapshot["root"]
+    binding = snapshot["streams"][label]
+    root_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        root_descriptor = os.open(requested.parent, root_flags)
+    except OSError as error:
+        raise incomplete(
+            "ENGINE_OUTPUT_CAPTURE_UNSAFE",
+            f"cannot open bound engine output capture root: {error}",
+        ) from error
+    try:
+        root_metadata = os.fstat(root_descriptor)
+        if output_capture_root_binding(requested.parent, root_metadata) != root_binding:
+            raise incomplete(
+                "ENGINE_OUTPUT_CAPTURE_REPLACED",
+                "engine output capture root identity changed before launch",
+            )
+        descriptor = os.open(requested.name, ENGINE_OUTPUT_OPEN_FLAGS, dir_fd=root_descriptor)
+        try:
+            metadata = os.fstat(descriptor)
+            observed = output_capture_stream_binding(requested, metadata)
+            if not stat.S_ISREG(metadata.st_mode) or observed != binding:
+                raise incomplete(
+                    "ENGINE_OUTPUT_CAPTURE_REPLACED",
+                    f"engine {label} capture identity changed before launch",
+                )
+            return descriptor
+        except BaseException:
+            os.close(descriptor)
+            raise
+    finally:
+        os.close(root_descriptor)
+
+
 def directory_inode_flags(path: Path) -> int:
     descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0))
     try:
@@ -1214,9 +1400,7 @@ def directory_diagnostics(
                         metadata = entry.stat(follow_symlinks=False)
                         relative = f"{prefix}/{name}" if prefix else name
                         if stat.S_ISDIR(metadata.st_mode):
-                            child_descriptor: int | None = os.open(
-                                name, flags, dir_fd=current_descriptor
-                            )
+                            child_descriptor: int | None = os.open(name, flags, dir_fd=current_descriptor)
                             try:
                                 child_metadata = os.fstat(child_descriptor)
                                 if (child_metadata.st_dev, child_metadata.st_ino) != (
@@ -1493,20 +1677,27 @@ def fork_stopped(
     host_network_namespace: str,
     temporary_directory: str,
     runtime_directories: dict[str, str] | None,
+    output_capture_before: dict[str, Any],
 ) -> tuple[int, int]:
+    if SYNC_WRITE_FLAG == 0:
+        raise incomplete("SYNCHRONOUS_ENGINE_OUTPUT_UNAVAILABLE", "the host exposes no O_SYNC")
     descriptors = [open_stdin_descriptor(stdin_path)]
-    if DURABLE_WRITE_FLAG == 0:
-        raise incomplete("DURABLE_ENGINE_OUTPUT_UNAVAILABLE", "the host exposes no O_SYNC")
     try:
-        descriptors.append(os.open(stdout_path, ENGINE_OUTPUT_OPEN_FLAGS, 0o600))
-        descriptors.append(os.open(stderr_path, ENGINE_OUTPUT_OPEN_FLAGS, 0o600))
+        descriptors.append(open_bound_engine_output(stdout_path, output_capture_before, "stdout"))
+        descriptors.append(open_bound_engine_output(stderr_path, output_capture_before, "stderr"))
     except BaseException:
         for descriptor in descriptors:
             with contextlib.suppress(OSError):
                 os.close(descriptor)
         raise
     launch_environment = engine_environment(account, temporary_directory, runtime_directories)
-    handshake_read, handshake_write = os.pipe2(os.O_CLOEXEC)
+    try:
+        handshake_read, handshake_write = os.pipe2(os.O_CLOEXEC)
+    except BaseException:
+        for descriptor in descriptors:
+            with contextlib.suppress(OSError):
+                os.close(descriptor)
+        raise
     try:
         pid = os.fork()
         if pid == 0:
@@ -1554,6 +1745,9 @@ def fork_stopped(
                     os.write(handshake_write, json.dumps(payload, separators=(",", ":")).encode("utf-8", "replace"))
                     os.write(2, f"cgroup launcher: {error}\n".encode("utf-8", "replace"))
                 os._exit(127)
+    except BaseException:
+        os.close(handshake_read)
+        raise
     finally:
         os.close(handshake_write)
         for descriptor in descriptors:
@@ -1853,6 +2047,7 @@ def sample_command(
     account = resolve_engine_account()
     account_home_before = validate_engine_account_home(account)
     argv, executable = command_identity(command, account)
+    output_capture_before = engine_output_capture_snapshot(Path(stdout_path), Path(stderr_path), account)
     engine_tmpdir = engine_temporary_directory(tuple(command), account, temporary_directory)
     engine_tmpdir_identity = engine_temporary_directory_identity(Path(engine_tmpdir))
     target_classification = runtime_target(argv)
@@ -1910,6 +2105,7 @@ def sample_command(
                 host_network_namespace,
                 engine_tmpdir,
                 runtime_directories,
+                output_capture_before,
             )
             root_identity = move_stopped_child(root_pid, staging, cgroup_root, proc_root)
             launch_security = finish_authority_handshake(
@@ -2114,16 +2310,18 @@ def sample_command(
                     expected=native_api2_storage,
                 )
                 native_api2_path_bindings = {
-                    "pre": native_api2_storage_snapshot(
-                        Path(cwd), Path(engine_tmpdir), native_api2_storage
-                    ),
-                    "post": native_api2_storage_snapshot(
-                        Path(cwd), Path(engine_tmpdir), native_api2_storage_after
-                    ),
+                    "pre": native_api2_storage_snapshot(Path(cwd), Path(engine_tmpdir), native_api2_storage),
+                    "post": native_api2_storage_snapshot(Path(cwd), Path(engine_tmpdir), native_api2_storage_after),
                 }
             account_home_after = validate_engine_account_home(account)
             if account_home_after != account_home_before:
                 raise incomplete("ENGINE_ACCOUNT_HOME_REPLACED", "engine account home state changed during execution")
+            output_capture_after = engine_output_capture_snapshot(
+                Path(stdout_path),
+                Path(stderr_path),
+                account,
+                expected=output_capture_before,
+            )
             runtime_path_bindings = None
             if runtime_directories is not None and runtime_bindings_before is not None:
                 expected_runtime_identities = {
@@ -2151,6 +2349,14 @@ def sample_command(
                 "account_home": account_home_after,
                 "runtime_path_bindings": runtime_path_bindings,
                 "scope": "per-invocation-private",
+            }
+            launch_security["output_capture"] = {
+                "contract": ENGINE_OUTPUT_CAPTURE_CONTRACT,
+                "filesystem": "tmpfs",
+                "max_bytes_per_stream": ENGINE_OUTPUT_CAPTURE_MAX_BYTES,
+                "write_sync": "O_SYNC",
+                "pre": output_capture_before,
+                "post": output_capture_after,
             }
 
             exit_code, child_signal = exit_fields(status_value)
@@ -2239,8 +2445,8 @@ def main() -> int:
     parser.add_argument("--cwd", default=os.getcwd())
     parser.add_argument("--temporary-directory", help="private engine-owned temporary directory")
     parser.add_argument("--stdin", help="canonical root-owned, read-only API 2 request file")
-    parser.add_argument("--stdout", default=os.devnull, help="command stdout file")
-    parser.add_argument("--stderr", default=os.devnull, help="command stderr file")
+    parser.add_argument("--stdout", help="bound command stdout capture file")
+    parser.add_argument("--stderr", help="bound command stderr capture file")
     parser.add_argument("--interval-ms", type=float, default=75.0)
     parser.add_argument("--pss-interval-ms", type=float, default=250.0)
     parser.add_argument("--descendant-grace-ms", type=float, default=1000.0)
@@ -2271,6 +2477,13 @@ def main() -> int:
     configured_parent = os.environ.get("PLIEGO_BENCHMARK_CGROUP_PARENT")
     if not configured_parent:
         error = incomplete("CGROUP_PARENT_REQUIRED", "PLIEGO_BENCHMARK_CGROUP_PARENT is required")
+        print(f"process_tree_sampler: measurement-incomplete[{error.code}]: {error}", file=sys.stderr)
+        return 2
+    if args.stdout is None or args.stderr is None:
+        error = incomplete(
+            "ENGINE_OUTPUT_CAPTURE_REQUIRED",
+            "both --stdout and --stderr bound capture paths are required",
+        )
         print(f"process_tree_sampler: measurement-incomplete[{error.code}]: {error}", file=sys.stderr)
         return 2
     try:

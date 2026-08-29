@@ -96,6 +96,70 @@ def resource_usage() -> dict:
                 "cwd": "/var/lib/pliego-benchmark-engine-temp/pliego-bench-api2-fixture/job",
                 "tmpdir": "/var/lib/pliego-benchmark-engine-temp/pliego-bench-api2-fixture/temporary",
             },
+            "output_capture": {
+                "contract": "root-bound-tmpfs-engine-output-v1",
+                "filesystem": "tmpfs",
+                "max_bytes_per_stream": 16777216,
+                "write_sync": "O_SYNC",
+                "pre": {
+                    "root": {
+                        "path": "/dev/shm",
+                        "identity": {"device": 2, "inode": 10},
+                        "owner_uid": 0,
+                        "owner_gid": 0,
+                        "mode": 0o1777,
+                    },
+                    "streams": {
+                        "stdout": {
+                            "path": "/dev/shm/pliego-bench-out-fixture",
+                            "identity": {"device": 2, "inode": 11},
+                            "owner_uid": 0,
+                            "owner_gid": 0,
+                            "mode": 0o600,
+                            "link_count": 1,
+                            "size_bytes": 0,
+                        },
+                        "stderr": {
+                            "path": "/dev/shm/pliego-bench-err-fixture",
+                            "identity": {"device": 2, "inode": 12},
+                            "owner_uid": 0,
+                            "owner_gid": 0,
+                            "mode": 0o600,
+                            "link_count": 1,
+                            "size_bytes": 0,
+                        },
+                    },
+                },
+                "post": {
+                    "root": {
+                        "path": "/dev/shm",
+                        "identity": {"device": 2, "inode": 10},
+                        "owner_uid": 0,
+                        "owner_gid": 0,
+                        "mode": 0o1777,
+                    },
+                    "streams": {
+                        "stdout": {
+                            "path": "/dev/shm/pliego-bench-out-fixture",
+                            "identity": {"device": 2, "inode": 11},
+                            "owner_uid": 0,
+                            "owner_gid": 0,
+                            "mode": 0o600,
+                            "link_count": 1,
+                            "size_bytes": 100,
+                        },
+                        "stderr": {
+                            "path": "/dev/shm/pliego-bench-err-fixture",
+                            "identity": {"device": 2, "inode": 12},
+                            "owner_uid": 0,
+                            "owner_gid": 0,
+                            "mode": 0o600,
+                            "link_count": 1,
+                            "size_bytes": 10,
+                        },
+                    },
+                },
+            },
             "status": {
                 "uid": [991, 991, 991, 991],
                 "gid": [991, 991, 991, 991],
@@ -434,12 +498,10 @@ def main() -> None:
     validate_result.validate_resource_usage(browser_sample, "$.sample", browser_violations)
     assert not browser_violations, browser_violations
     false_native_browser = deepcopy(browser_sample)
-    false_native_browser["resource_usage"]["launch_security"]["temporary_storage"][
-        "native_api2_path_bindings"
-    ] = deepcopy(
-        valid["samples"][0]["resource_usage"]["launch_security"]["temporary_storage"][
-            "native_api2_path_bindings"
-        ]
+    false_native_browser["resource_usage"]["launch_security"]["temporary_storage"]["native_api2_path_bindings"] = (
+        deepcopy(
+            valid["samples"][0]["resource_usage"]["launch_security"]["temporary_storage"]["native_api2_path_bindings"]
+        )
     )
     false_native_browser_violations: list[validate_result.Violation] = []
     validate_result.validate_resource_usage(false_native_browser, "$.sample", false_native_browser_violations)
@@ -629,6 +691,74 @@ def main() -> None:
         valid,
         lambda value: value["samples"][0]["resource_usage"]["launch_security"]["executable"].update(sha256="1" * 64),
         "launch_security.executable.sha256",
+    )
+    changed(
+        valid,
+        lambda value: value["samples"][0]["resource_usage"]["launch_security"].pop("output_capture"),
+        "missing required property 'output_capture'",
+    )
+    changed(
+        valid,
+        lambda value: value["samples"][0]["resource_usage"]["launch_security"]["output_capture"].update(
+            filesystem="ext4"
+        ),
+        "launch_security.output_capture.filesystem",
+    )
+    changed(
+        valid,
+        lambda value: value["samples"][0]["resource_usage"]["launch_security"]["output_capture"]["post"]["streams"][
+            "stdout"
+        ]["identity"].update(inode=99),
+        "launch_security.output_capture.post",
+    )
+    changed(
+        valid,
+        lambda value: value["samples"][0]["resource_usage"]["launch_security"]["output_capture"]["pre"]["root"].update(
+            mode=0o777
+        ),
+        "output_capture.pre.root.mode",
+    )
+    changed(
+        valid,
+        lambda value: value["samples"][0]["resource_usage"]["launch_security"]["output_capture"]["pre"]["streams"][
+            "stdout"
+        ].update(path="/tmp/pliego-bench-out-escaped"),
+        "output_capture.pre.streams.stdout.path",
+    )
+    changed(
+        valid,
+        lambda value: value["samples"][0]["resource_usage"]["launch_security"]["output_capture"]["pre"]["streams"][
+            "stderr"
+        ]["identity"].update(inode=11),
+        "must bind distinct stdout and stderr",
+    )
+    changed(
+        valid,
+        lambda value: value["samples"][0]["resource_usage"]["launch_security"]["output_capture"]["pre"]["streams"][
+            "stdout"
+        ].update(size_bytes=1),
+        "output_capture.pre.streams.stdout.size_bytes",
+    )
+    changed(
+        valid,
+        lambda value: value["samples"][0]["resource_usage"]["launch_security"]["output_capture"]["post"]["streams"][
+            "stdout"
+        ].update(size_bytes=16777217),
+        "must not exceed max_bytes_per_stream",
+    )
+    changed(
+        valid,
+        lambda value: value["samples"][0]["resource_usage"]["launch_security"]["output_capture"]["post"]["streams"][
+            "stdout"
+        ].update(link_count=2),
+        "output_capture.post.streams.stdout",
+    )
+    changed(
+        valid,
+        lambda value: value["samples"][0]["resource_usage"]["launch_security"]["output_capture"]["pre"]["streams"][
+            "stdout"
+        ]["identity"].update(device=3),
+        "output_capture.pre.streams.stdout.identity.device",
     )
     changed(
         valid,
