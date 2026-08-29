@@ -2,10 +2,10 @@
 
 Laravel 13 integration for application-owned Blade documents.
 
-The v0.3 package uses Pliego API 2 and pins `oxhq/pliego-php` 0.3.2:
+The v0.3 package uses Pliego API 2 and pins `oxhq/pliego-php` 0.3.3:
 
 ```sh
-composer require oxhq/pliego-laravel:^0.3.2
+composer require oxhq/pliego-laravel:^0.3.3
 php artisan pliego:install
 php artisan pliego:doctor
 ```
@@ -134,7 +134,7 @@ loadReportData()
 
 The broader controlled-capture regression corpus contains a fixed, non-animated
 Chart.js 4.5.1 fixture with a synchronous full-canvas readback. That fixture has not
-passed the narrower v0.3.2 API 2 scene-encoding gate, so Chart.js is not advertised
+passed the narrower v0.3.3 API 2 scene-encoding gate, so Chart.js is not advertised
 as a current API 2 package capability.
 
 `render()` and `download()` reject partial scene capture instead of returning a PDF
@@ -142,9 +142,9 @@ with unsupported paint omitted. Retained artifacts remain available on the typed
 exception.
 
 PDF paint retains resolved sRGB text colors, solid backgrounds, and uniform-color
-sharp axis-aligned solid borders. In v0.3.2 API 2, an unsupported
+sharp axis-aligned solid borders. In v0.3.3 API 2, an unsupported
 `collapsed-table-borders` capture event fails closed; use separated table borders.
-Link annotations are also outside the advertised v0.3.2 API 2 profile. CSS
+Link annotations are also outside the advertised v0.3.3 API 2 profile. CSS
 gradients and background-image layers, box and text shadows, text decorations,
 rounded or mixed-color borders, clips, non-solid and image borders, transforms,
 opacity, filters, and blend modes are explicitly unsupported and reported rather

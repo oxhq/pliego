@@ -27,6 +27,7 @@ PUBLIC_MARKDOWN = (
     ROOT / "ROADMAP.md",
     ROOT / "docs" / "project-overview.md",
     ROOT / "docs" / "releases" / "v0.3.md",
+    ROOT / "docs" / "releases" / "v0.3.3.md",
     ROOT / "docs" / "pliego" / "support-profile.md",
     ROOT / "docs" / "security" / "threat-model.md",
     ROOT / "docs" / "funding" / "2026.md",
@@ -72,6 +73,7 @@ def verify_current_copy(published_benchmark: bool) -> None:
     readme = read(ROOT / "README.md")
     overview = read(ROOT / "docs" / "project-overview.md")
     launch = read(ROOT / "docs" / "releases" / "v0.3.md")
+    patch_release = read(ROOT / "docs" / "releases" / "v0.3.3.md")
     support = read(ROOT / "docs" / "pliego" / "support-profile.md")
     threat_model = read(ROOT / "docs" / "security" / "threat-model.md")
     laravel = read(ROOT / "sdk" / "laravel" / "README.md")
@@ -85,11 +87,11 @@ def verify_current_copy(published_benchmark: bool) -> None:
         require("v0.1.1" not in content, f"stale v0.1.1 buyer-facing copy: {path.relative_to(ROOT)}")
 
     required_readme = (
-        "**Current stable line:** Pliego 0.3 / API 2. **Recommended build:** v0.3.2.",
+        "**Current stable line:** Pliego 0.3 / API 2. **Recommended build:** v0.3.3.",
         "->store(",
         "Storage::disk($stored->disk)->download(",
         "pliego --contract-probe",
-        "Link annotations are also outside the advertised v0.3.2 API 2 profile.",
+        "Link annotations are also outside the advertised v0.3.3 API 2 profile.",
         "passes it to Laravel Storage",
         "version-locked adapter dependency graphs",
         "docs/pliego/showcase/manifest.json",
@@ -103,6 +105,17 @@ def verify_current_copy(published_benchmark: bool) -> None:
             "Authoritative\ntables and production rankings remain N/A",
         ):
             require(needle in readme, f"README omitted unpublished benchmark boundary: {needle!r}")
+    else:
+        for needle in (
+            "The published `minimal-static` snapshot measures the released Pliego v0.3.3 bundle",
+            "sealed three-repeat series",
+            "timed samples passed the shared PDF oracle",
+            "no best or canonical repeat is selected",
+            "[Full report with all retained metrics and spread]",
+            "[Immutable evidence release]",
+            "Authoritative\ntables and production rankings remain N/A",
+        ):
+            require(needle in readme, f"README omitted published benchmark boundary: {needle!r}")
 
     forbidden = (
         "Network access remains opt-in",
@@ -112,24 +125,42 @@ def verify_current_copy(published_benchmark: bool) -> None:
         "pinned one-shot paths",
         "`store()` never buffers",
     )
-    combined = "\n".join((readme, overview, launch))
+    combined = "\n".join((readme, overview, launch, patch_release))
     for needle in forbidden:
         require(needle not in combined, f"unsupported public claim or stale artifact reference: {needle!r}")
     require(
         re.search(r"\b\d+(?:\.\d+)?[xX]\s+faster\b", combined) is None,
         "buyer-facing copy contains an unretained multiplicative performance claim",
     )
-    require("PDF link annotations | Not advertised in v0.3.2 API 2" in support, "link limitation is not public")
+    require("PDF link annotations | Not advertised in v0.3.3 API 2" in support, "link limitation is not public")
     require("collapsed-table-borders" in support, "collapsed-table API 2 limitation is not public")
     require("Chart.js is not advertised" in laravel, "Laravel guide overstates current Chart.js support")
     require("collapsed-table-borders" in laravel, "Laravel guide omits the collapsed-table API 2 limit")
-    require("current stable package is 0.3.2" in php, "PHP guide omits the current stable package")
+    require("current stable package is 0.3.3" in php, "PHP guide omits the current stable package")
     require("pass their paths through `InputAsset`" in php, "PHP guide misstates the API 2 asset input")
     require("makes no comparative performance claim" in php, "PHP guide omits the benchmark boundary")
     require("supply their bytes through `assets`" not in php, "PHP guide retains stale API 2 asset guidance")
     require(
-        "v0.3.2 API 2 does not advertise link annotations" in threat_model,
+        "v0.3.3 API 2 does not advertise link annotations" in threat_model,
         "threat model overstates API 2 link support",
+    )
+    require(
+        "v0.3.3 is the current recommended build" in overview,
+        "project overview omits the current recommended release",
+    )
+    require("The current recommended patch is **v0.3.3**." in launch, "launch overview recommends a stale patch")
+    for needle in (
+        "41c6cf0e9cf1c73f4f70eba9d413fa97063a3154",
+        "496d2809d3b47e6aef6596b229a8b7f2135d35ae",
+        "788bc6980b117375625b56ec93d40a60da5a3a2d",
+        "package run 33198517854",
+        "promotion run 33203326313",
+        "(`immutable: false`)",
+    ):
+        require(needle in patch_release, f"v0.3.3 notes omit exact release evidence: {needle!r}")
+    require(
+        "fresh public-only v0.3.3 Laravel consumer proof remains\npending" in launch,
+        "launch overview overstates v0.3.3 public-consumer proof",
     )
 
 
@@ -243,7 +274,7 @@ def main() -> int:
         print(f"check_pliego_public_surface: {error}", file=sys.stderr)
         return 1
     suffix = " and the checksum-bound hosted benchmark" if published_benchmark else ""
-    print(f"Pliego public surface matches retained v0.3.2 evidence{suffix}")
+    print(f"Pliego public surface matches v0.3.3 release evidence, the retained v0.3.2 showcase{suffix}")
     return 0
 
 

@@ -4,7 +4,7 @@ Pliego is an open-source native HTML-to-PDF engine built on Servo for
 application-owned invoices, statements, and operational reports. It turns HTML and
 CSS into paginated PDFs without Chromium, Node.js, or Java in the runtime.
 
-**Current stable line:** Pliego 0.3 / API 2. **Recommended build:** v0.3.2.
+**Current stable line:** Pliego 0.3 / API 2. **Recommended build:** v0.3.3.
 
 Pliego focuses on document workflows whose inputs and failure boundaries can be made
 explicit:
@@ -37,7 +37,7 @@ The Laravel package installs the exact PHP bridge and downloads the package-pinn
 native runtime:
 
 ```sh
-composer require oxhq/pliego-laravel:^0.3.2
+composer require oxhq/pliego-laravel:^0.3.3
 php artisan pliego:install
 php artisan pliego:doctor
 ```
@@ -96,7 +96,7 @@ loadReportData()
 API 2 never fetches live network resources or discovers host fonts. Fetch reviewed
 remote resources in the application, then provide their exact bytes with `asset()`.
 The [support profile](docs/pliego/support-profile.md) distinguishes the broader
-controlled-capture regression corpus from the narrower operations that v0.3.2 API 2
+controlled-capture regression corpus from the narrower operations that v0.3.3 API 2
 can encode and publish exactly.
 
 Ubuntu 22.04 x86_64 needs `ca-certificates`, `libfontconfig1`, `libegl1`, and
@@ -136,7 +136,7 @@ API 1 compatibility details.
 Semantic and accessible-PDF profiles are deliberately unadvertised until their
 separate release and evidence gates are satisfied.
 
-Link annotations are also outside the advertised v0.3.2 API 2 profile. Inputs that
+Link annotations are also outside the advertised v0.3.3 API 2 profile. Inputs that
 produce a link operation without exact fixed-point authority fail closed with
 `SCENE_ENCODING_FAILED`; no PDF is delivered.
 
@@ -182,7 +182,7 @@ Read the [Pliego 0.3 launch overview](docs/releases/v0.3.md), then use:
 
 ## Evaluate Pliego on a real document
 
-We are looking for PHP/Laravel teams willing to evaluate v0.3.2 against one
+We are looking for PHP/Laravel teams willing to evaluate v0.3.3 against one
 application-owned invoice, statement, or operational-report family. Share the
 platform, deployment shape, install/doctor outcome, and retained failure kind—but
 never confidential HTML or retained artifacts—in

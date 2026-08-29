@@ -9,7 +9,7 @@ Chromium, Node.js, or Java with an application.
 
 | Item | Current public boundary |
 | --- | --- |
-| Source release line | v0.3.x API 2 base-engine line; this source targets v0.3.2 |
+| Source release line | v0.3.x API 2 base-engine line; v0.3.3 is the current recommended build |
 | Publication status | GitHub Releases is authoritative for the latest exact tag and native assets |
 | Engine protocol | API 2 profile-null tuple; API 1 compatibility commands retained temporarily |
 | Supported input trust | Application-owned HTML and assets |
@@ -27,7 +27,7 @@ paint, resource, platform, and operational limits.
 
 Business documents need pagination, selectable text, embedded fonts, stable assets,
 and failures an application can handle. Some also need link annotations; those are
-outside the advertised v0.3.2 API 2 profile and currently fail closed.
+outside the advertised v0.3.3 API 2 profile and currently fail closed.
 General-purpose browser automation can provide broad web compatibility, but it also
 brings a browser process tree and an execution model that is larger than many
 document workflows need. Pliego is developing a narrower, explicit document path on
@@ -47,7 +47,7 @@ success-shaped response when the supported path cannot finish.
 3. Pliego records the supported document scene and rejects unsupported paint by
    default.
 4. The PDF backend writes searchable text, images, paths, and embedded font data
-   from an accepted scene. Link annotations are not advertised by v0.3.2 API 2.
+   from an accepted scene. Link annotations are not advertised by v0.3.3 API 2.
 5. The caller receives either a completed PDF and artifact metadata or a typed
    failure.
 
@@ -72,11 +72,13 @@ records the public boundary.
 - Focused fixtures cover the advertised API 2 pagination, font, image, and
   fail-closed behavior. The broader controlled-capture regression corpus also
   exercises links and Chart.js, but those cases have not passed the narrower
-  v0.3.2 API 2 scene-encoding gate and are not current product claims.
+  v0.3.3 API 2 scene-encoding gate and are not current product claims.
 - The Laravel package exposes installation, environment diagnosis, rendering, typed
   failures, and retained artifacts for the supported path.
 - A clean public-only Laravel consumer has exercised install, doctor, render,
-  durable storage, stream retrieval, and typed failure against v0.3.2.
+  durable storage, stream retrieval, and typed failure against v0.3.2. A fresh
+  public-only v0.3.3 consumer run remains pending, so that proof has not yet been
+  extended to the current recommendation.
 
 These are implementation and release-mechanism claims. They are not evidence of
 market adoption, arbitrary-page compatibility, hostile-input isolation, or
