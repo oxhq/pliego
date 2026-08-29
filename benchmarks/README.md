@@ -108,10 +108,13 @@ accepted as a compatibility baseline for this required storage-binding field.
   Browsershot additionally receives fresh private `HOME` and XDG roots below
   that same measured scratch directory. Pliego and dompdf retain the exact
   `/nonexistent/pliego-benchmark-engine` account home and receive no XDG roots.
-  After Chromium returns, the measured Browsershot adapter durability-syncs
-  its retained private runtime tree before publishing the PDF; that CPU, wall,
-  and I/O cost stays inside the sample. The sampler never flushes browser state
-  on the adapter's behalf.
+  The adapter gives Puppeteer an explicit fresh profile inside that tree so its
+  normal temporary-profile deletion cannot make dirty file-backed pages
+  unreachable. After Chromium returns, the measured adapter durability-syncs
+  the private runtime tree, removes the synced profile, and syncs the profile
+  deletion before publishing the PDF. Profile teardown and all related CPU,
+  wall, and I/O cost stay inside the sample. The sampler never flushes browser
+  state on the adapter's behalf.
   The sampler and both hosted workflows reject any other passwd home and require
   that exact path to be absent or non-writable to the engine account.
   This is a deliberate non-default benchmark condition; its synchronous

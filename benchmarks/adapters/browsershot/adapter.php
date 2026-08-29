@@ -11,6 +11,7 @@ const PACKAGE = 'spatie/browsershot';
 const PACKAGE_VERSION = '5.4.0';
 const PUPPETEER_VERSION = '25.8.0';
 const BLOCKED_NETWORK_URL_SUBSTRINGS = ['http://', 'https://'];
+const PRIVATE_BROWSER_PROFILE = 'chrome-profile';
 const PRIVATE_RUNTIME_DIRECTORIES = [
     'HOME' => 'home',
     'XDG_CACHE_HOME' => 'xdg-cache',
@@ -186,6 +187,25 @@ function sync_tree(string $path, ?callable $sync = null): void
     }
 }
 
+function remove_synced_tree(string $path, ?callable $sync = null): void
+{
+    $plan = durability_sync_plan($path);
+    $sync ??= static function (string $entry, bool $directory): void {
+        sync_path($entry, $directory);
+    };
+    foreach ($plan['files'] as $file) {
+        if (!unlink($file)) {
+            throw new RuntimeException("cannot remove synced benchmark file: {$file}");
+        }
+    }
+    foreach ($plan['directories'] as $directory) {
+        $sync($directory, true);
+        if (!rmdir($directory)) {
+            throw new RuntimeException("cannot remove synced benchmark directory: {$directory}");
+        }
+    }
+}
+
 /** @param null|callable(string): mixed $environment */
 function private_runtime_root(?callable $environment = null): ?string
 {
@@ -228,6 +248,51 @@ function private_runtime_root(?callable $environment = null): ?string
         }
     }
     return $root;
+}
+
+function create_private_browser_profile(?string $runtimeRoot): ?string
+{
+    if ($runtimeRoot === null) {
+        return null;
+    }
+    $profile = $runtimeRoot . DIRECTORY_SEPARATOR . PRIVATE_BROWSER_PROFILE;
+    if (file_exists($profile) || is_link($profile) || !mkdir($profile, 0700)) {
+        throw new RuntimeException('cannot create a fresh private browser profile');
+    }
+    $resolved = realpath($profile);
+    if ($resolved === false || $resolved !== $profile || !is_dir($resolved) || is_link($profile)) {
+        throw new RuntimeException('private browser profile identity is unsafe');
+    }
+    return $profile;
+}
+
+function run_browser_with_finalizer(callable $browser, ?callable $finalize): void
+{
+    $browserFailure = null;
+    try {
+        $browser();
+    } catch (Throwable $error) {
+        $browserFailure = $error;
+    }
+    $finalizerFailure = null;
+    if ($finalize !== null) {
+        try {
+            $finalize();
+        } catch (Throwable $error) {
+            $finalizerFailure = $error;
+        }
+    }
+    if ($browserFailure !== null) {
+        $suffix = $finalizerFailure === null ? '' : '; profile teardown failed: ' . $finalizerFailure->getMessage();
+        throw new RuntimeException('Chromium render failed: ' . $browserFailure->getMessage() . $suffix, 0, $browserFailure);
+    }
+    if ($finalizerFailure !== null) {
+        throw new RuntimeException(
+            'private browser profile teardown failed: ' . $finalizerFailure->getMessage(),
+            0,
+            $finalizerFailure
+        );
+    }
 }
 
 function commit_pdf_output(string $temporary, string $output, ?callable $sync = null): void
@@ -308,6 +373,9 @@ function load_dependencies(): array
     if (ltrim((string) $installed, 'v') !== PACKAGE_VERSION) {
         abort_adapter('installed Browsershot version does not match the pinned adapter');
     }
+    if (!method_exists(Spatie\Browsershot\Browsershot::class, 'setUserDataDir')) {
+        abort_adapter('installed Browsershot does not expose controlled profile binding');
+    }
     $puppeteerPath = required_file(__DIR__ . '/node_modules/puppeteer/package.json');
     $puppeteer = json_decode((string) file_get_contents($puppeteerPath), true);
     if (!is_array($puppeteer) || ($puppeteer['version'] ?? null) !== PUPPETEER_VERSION) {
@@ -378,6 +446,7 @@ function render(array $arguments): void
     [$top, $right, $bottom, $left] = page_margins($options['--page-margins']);
     $runtime = load_dependencies();
     $privateRuntimeRoot = private_runtime_root();
+    $privateBrowserProfile = create_private_browser_profile($privateRuntimeRoot);
     $temporary = $parent . DIRECTORY_SEPARATOR . '.' . basename($output) . '.tmp-' . bin2hex(random_bytes(8));
 
     $shot = Spatie\Browsershot\Browsershot::htmlFromFilePath($inputPath)
@@ -407,12 +476,33 @@ function render(array $arguments): void
             'no-sandbox',
             'no-first-run',
         ]);
-    $shot->savePdf($temporary);
-    if ($privateRuntimeRoot !== null) {
-        // savePdf waits for Node and Chrome to exit. Flush their retained
-        // runtime state here, inside the measured cgroup, before PHP exits.
-        sync_tree($privateRuntimeRoot);
+    if ($privateBrowserProfile !== null) {
+        // Puppeteer otherwise creates and recursively deletes an implicit
+        // profile before the adapter can flush its file-backed pages.
+        $shot->setUserDataDir($privateBrowserProfile);
     }
+    if (($privateRuntimeRoot === null) !== ($privateBrowserProfile === null)) {
+        throw new RuntimeException('controlled browser profile binding is incomplete');
+    }
+    $profileFinalizer = null;
+    if ($privateRuntimeRoot !== null && $privateBrowserProfile !== null) {
+        $profileFinalizer = static function () use ($privateRuntimeRoot, $privateBrowserProfile): void {
+            // savePdf waits for Node and Chrome to exit. Flush all retained
+            // state before deleting the explicit profile, then durably record
+            // that deletion. Teardown remains inside the measured cgroup and
+            // also runs after a browser failure so diagnostics are not masked
+            // by unreachable dirty pages.
+            sync_tree($privateRuntimeRoot);
+            remove_synced_tree($privateBrowserProfile);
+            sync_path($privateRuntimeRoot, true);
+        };
+    }
+    run_browser_with_finalizer(
+        static function () use ($shot, $temporary): void {
+            $shot->savePdf($temporary);
+        },
+        $profileFinalizer
+    );
     $pdf = (string) file_get_contents($temporary);
     if (!str_starts_with($pdf, '%PDF-') || !str_contains(substr($pdf, -4096), '%%EOF')) {
         abort_adapter('Chromium returned an invalid PDF envelope', 1);
@@ -447,6 +537,25 @@ if ($mode === 'self-test') {
     if (BLOCKED_NETWORK_URL_SUBSTRINGS !== ['http://', 'https://']) {
         abort_adapter('network block self-test failed', 1);
     }
+    $finalizerEvents = [];
+    try {
+        run_browser_with_finalizer(
+            static function () use (&$finalizerEvents): void {
+                $finalizerEvents[] = 'browser';
+                throw new RuntimeException('injected browser failure');
+            },
+            static function () use (&$finalizerEvents): void {
+                $finalizerEvents[] = 'finalizer';
+            }
+        );
+        abort_adapter('browser failure bypassed the profile finalizer', 1);
+    } catch (RuntimeException $error) {
+        if ($error->getMessage() !== 'Chromium render failed: injected browser failure'
+            || $finalizerEvents !== ['browser', 'finalizer']
+            || $error->getPrevious()?->getMessage() !== 'injected browser failure') {
+            abort_adapter('browser failure finalization was not retained', 1);
+        }
+    }
     $syncRoot = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'pliego-browsershot-sync-' . bin2hex(random_bytes(8));
     $syncNested = $syncRoot . DIRECTORY_SEPARATOR . 'nested';
     if (!mkdir($syncNested, 0700, true) || file_put_contents($syncNested . DIRECTORY_SEPARATOR . 'cache.bin', 'cache') === false) {
@@ -455,6 +564,9 @@ if ($mode === 'self-test') {
     $runtimeRoot = $syncRoot . DIRECTORY_SEPARATOR . 'runtime';
     $runtimeEnvironment = [];
     $runtimeCache = null;
+    $runtimeProfile = null;
+    $runtimeProfileNested = null;
+    $runtimeProfileState = null;
     try {
         $plan = durability_sync_plan($syncRoot);
         if ($plan['files'] !== [$syncNested . DIRECTORY_SEPARATOR . 'cache.bin']
@@ -481,8 +593,24 @@ if ($mode === 'self-test') {
         }
         $runtimeGetter = static fn (string $name): string|false => $runtimeEnvironment[$name] ?? false;
         if (private_runtime_root($runtimeGetter) !== $runtimeRoot
-            || private_runtime_root(static fn (string $_name): false => false) !== null) {
+            || private_runtime_root(static fn (string $_name): false => false) !== null
+            || create_private_browser_profile(null) !== null) {
             abort_adapter('private runtime binding self-test failed', 1);
+        }
+        $runtimeProfile = create_private_browser_profile($runtimeRoot);
+        $runtimeProfileNested = $runtimeProfile . DIRECTORY_SEPARATOR . 'Default';
+        $runtimeProfileState = $runtimeProfileNested . DIRECTORY_SEPARATOR . 'Preferences';
+        if (!mkdir($runtimeProfileNested, 0700)
+            || file_put_contents($runtimeProfileState, 'profile-state') === false) {
+            abort_adapter('private browser profile self-test setup failed', 1);
+        }
+        try {
+            create_private_browser_profile($runtimeRoot);
+            abort_adapter('private browser profile reused an existing directory', 1);
+        } catch (RuntimeException $error) {
+            if ($error->getMessage() !== 'cannot create a fresh private browser profile') {
+                abort_adapter('private browser profile reuse failure was not typed', 1);
+            }
         }
         $partialEnvironment = ['XDG_CACHE_HOME' => $runtimeEnvironment['XDG_CACHE_HOME']];
         try {
@@ -521,12 +649,56 @@ if ($mode === 'self-test') {
             }
             $directorySeen = $directorySeen || $directory;
         }
-        if ($syncEvents === [] || $syncEvents[0] !== [$runtimeCache, false]
+        $syncedFiles = array_values(array_filter(
+            $syncEvents,
+            static fn (array $event): bool => $event[1] === false
+        ));
+        $expectedFiles = [[$runtimeProfileState, false], [$runtimeCache, false]];
+        usort($expectedFiles, static fn (array $left, array $right): int => strcmp($left[0], $right[0]));
+        if ($syncEvents === [] || $syncedFiles !== $expectedFiles
             || $syncEvents[count($syncEvents) - 1] !== [$runtimeRoot, true]) {
             abort_adapter('private runtime sync ordering self-test failed', 1);
         }
         if (PHP_OS_FAMILY !== 'Windows') {
             sync_tree($runtimeRoot);
+        }
+        $removalPlan = durability_sync_plan($runtimeProfile);
+        $removalSyncEvents = [];
+        remove_synced_tree(
+            $runtimeProfile,
+            static function (string $path, bool $directory) use (&$removalSyncEvents): void {
+                $removalSyncEvents[] = [$path, $directory];
+            }
+        );
+        $expectedRemovalSyncEvents = array_map(
+            static fn (string $directory): array => [$directory, true],
+            $removalPlan['directories']
+        );
+        if ($removalSyncEvents !== $expectedRemovalSyncEvents) {
+            abort_adapter('private browser profile deletion was not synced deepest-first', 1);
+        }
+        if (file_exists($runtimeProfile)) {
+            abort_adapter('private browser profile removal self-test failed', 1);
+        }
+        $runtimeProfile = null;
+        $runtimeProfileNested = null;
+        $runtimeProfileState = null;
+        $blockedProfile = $runtimeRoot . DIRECTORY_SEPARATOR . PRIVATE_BROWSER_PROFILE;
+        if (file_put_contents($blockedProfile, 'not-a-directory') === false) {
+            abort_adapter('private browser profile collision self-test setup failed', 1);
+        }
+        try {
+            create_private_browser_profile($runtimeRoot);
+            abort_adapter('private browser profile replaced a non-directory', 1);
+        } catch (RuntimeException $error) {
+            if ($error->getMessage() !== 'cannot create a fresh private browser profile') {
+                abort_adapter('private browser profile collision failure was not typed', 1);
+            }
+        } finally {
+            @unlink($blockedProfile);
+        }
+        if (PHP_OS_FAMILY !== 'Windows') {
+            sync_path($runtimeRoot, true);
         }
         $temporaryOutput = $syncRoot . DIRECTORY_SEPARATOR . 'temporary.pdf';
         $requestedOutput = $syncRoot . DIRECTORY_SEPARATOR . 'requested.pdf';
@@ -561,7 +733,29 @@ if ($mode === 'self-test') {
             }
             unlink($link);
         }
+        if (PHP_OS_FAMILY !== 'Windows' && function_exists('posix_mkfifo')) {
+            $fifo = $syncRoot . DIRECTORY_SEPARATOR . 'unsafe-fifo';
+            if (!posix_mkfifo($fifo, 0600)) {
+                abort_adapter('artifact sync-plan FIFO self-test setup failed', 1);
+            }
+            try {
+                durability_sync_plan($syncRoot);
+                abort_adapter('artifact sync-plan accepted a special file', 1);
+            } catch (RuntimeException) {
+                // Expected: benchmark artifact durability opens only regular files and directories.
+            }
+            unlink($fifo);
+        }
     } finally {
+        if (is_string($runtimeProfileState)) {
+            @unlink($runtimeProfileState);
+        }
+        if (is_string($runtimeProfileNested)) {
+            @rmdir($runtimeProfileNested);
+        }
+        if (is_string($runtimeProfile)) {
+            @rmdir($runtimeProfile);
+        }
         if (is_string($runtimeCache)) {
             @unlink($runtimeCache);
         }

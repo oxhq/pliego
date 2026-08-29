@@ -119,6 +119,10 @@ Browsershot receives fresh private `HOME`, `XDG_CACHE_HOME`, `XDG_CONFIG_HOME`,
 same measured scratch root. Pliego and dompdf retain the fixed unprivileged
 account home (nonexistent on the hosted lane) with no XDG roots, so they cannot
 create user caches and browser state cannot escape into a host account.
+Puppeteer's fresh profile is explicitly retained inside the private tree until
+Chromium exits; the measured adapter syncs its data, removes it, and syncs that
+deletion so neither profile teardown nor dirty file-backed pages escape the
+sample.
 
 After immutable images are pinned, each target uses the same order: one discarded correctness preflight, discarded
 warmups, then cold one-shot timed samples. The adapter root and every descendant
