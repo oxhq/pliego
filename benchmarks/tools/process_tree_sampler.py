@@ -1179,8 +1179,13 @@ def prepare_runtime_directories(root: Path, account: EngineAccount) -> dict[str,
     return environment
 
 
-def runtime_directory_diagnostics(root: Path, limit: int = 12, scan_limit: int = RUNTIME_INVENTORY_SCAN_LIMIT) -> str:
-    """Describe a bounded sample of the newest browser-runtime files after failure."""
+def directory_diagnostics(
+    root: Path,
+    label: str,
+    limit: int = 12,
+    scan_limit: int = RUNTIME_INVENTORY_SCAN_LIMIT,
+) -> str:
+    """Describe a bounded sample of the newest files after failure."""
 
     files: list[tuple[int, str]] = []
     entries_examined = 0
@@ -1211,13 +1216,19 @@ def runtime_directory_diagnostics(root: Path, limit: int = 12, scan_limit: int =
                         )
                     )
     except OSError as error:
-        return f"browser-runtime-inventory-unavailable={type(error).__name__}:{error.errno}"
+        return f"{label}-inventory-unavailable={type(error).__name__}:{error.errno}"
     files.sort(key=lambda item: (-item[0], item[1]))
     retained = [description for _, description in files[:limit]]
     return (
-        f"browser-runtime-files-newest={retained!r}; browser-runtime-file-count={len(files)};"
-        f" browser-runtime-entries-examined={entries_examined}; browser-runtime-scan-truncated={str(truncated).lower()}"
+        f"{label}-files-newest={retained!r}; {label}-file-count={len(files)};"
+        f" {label}-entries-examined={entries_examined}; {label}-scan-truncated={str(truncated).lower()}"
     )
+
+
+def runtime_directory_diagnostics(root: Path, limit: int = 12, scan_limit: int = RUNTIME_INVENTORY_SCAN_LIMIT) -> str:
+    """Describe a bounded sample of the newest browser-runtime files after failure."""
+
+    return directory_diagnostics(root, "browser-runtime", limit, scan_limit)
 
 
 def browser_failure_diagnostics(root: Path) -> str:
@@ -1244,6 +1255,46 @@ def bounded_output_tail(path: Path, limit: int = 2048) -> str:
         return f"unavailable:{type(error).__name__}:{error.errno}"
     text = payload.decode("utf-8", "replace")
     return json.dumps(text, ensure_ascii=True)
+
+
+def output_path_metadata(path: Path) -> dict[str, Any]:
+    """Retain bounded output-file identity without reading protocol payloads."""
+
+    try:
+        metadata = path.stat(follow_symlinks=False)
+    except OSError as error:
+        return {"status": "unavailable", "error": f"{type(error).__name__}:{error.errno}"}
+    kind = "file" if stat.S_ISREG(metadata.st_mode) else "other"
+    return {
+        "status": "present",
+        "kind": kind,
+        "size": metadata.st_size,
+        "blocks": metadata.st_blocks,
+        "device": metadata.st_dev,
+        "inode": metadata.st_ino,
+    }
+
+
+def engine_failure_diagnostics(
+    cwd: Path,
+    engine_tmpdir: Path,
+    stdout_path: Path,
+    stderr_path: Path,
+    native_api2: bool,
+) -> str:
+    """Keep target-neutral storage context bounded after a quiescence failure."""
+
+    roots = [("engine-temporary", engine_tmpdir)]
+    if native_api2:
+        roots.append(("engine-sandbox", cwd.parent))
+    inventories = [directory_diagnostics(path, label) for label, path in roots]
+    outputs = {
+        "stdout": output_path_metadata(stdout_path),
+        "stderr": output_path_metadata(stderr_path),
+    }
+    inventories.append(f"engine-output-metadata={json.dumps(outputs, sort_keys=True, separators=(',', ':'))}")
+    inventories.append(f"engine-stderr-tail={bounded_output_tail(stderr_path)}")
+    return "; ".join(inventories)
 
 
 def runtime_directory_bindings(
@@ -1743,7 +1794,7 @@ def sample_command(
     handshake_read: int | None = None
     root_in_measurement = False
     root_reaped = False
-    browser_root_exit: dict[str, Any] | None = None
+    root_exit_state: dict[str, Any] | None = None
     usage_start = resource.getrusage(resource.RUSAGE_SELF)
 
     try:
@@ -1886,25 +1937,24 @@ def sample_command(
                             raise incomplete("ROOT_WAIT_INVALID", f"waited for unexpected PID {waited}")
                         root_reaped = True
                         root_ended = now
-                        if private_browser_runtime:
-                            root_exit_counters = counter_snapshot(child)
-                            root_exit_members = scan_cgroup(child, False, root_identity, proc_root)
-                            browser_root_exit = {
-                                "dirty": root_exit_counters["memory_file_dirty_bytes"],
-                                "writeback": root_exit_counters["memory_file_writeback_bytes"],
-                                "populated": root_exit_counters["cgroup_events"]["populated"],
-                                "member_count": len(root_exit_members),
-                                "members": [
-                                    {
-                                        "pid": int(member["pid"]),
-                                        "ppid": int(member["ppid"]),
-                                        "process_group": int(member["process_group"]),
-                                        "session": int(member["session"]),
-                                        "start_ticks": int(member["start_ticks"]),
-                                    }
-                                    for member in root_exit_members[:32]
-                                ],
-                            }
+                        root_exit_counters = counter_snapshot(child)
+                        root_exit_members = scan_cgroup(child, False, root_identity, proc_root)
+                        root_exit_state = {
+                            "dirty": root_exit_counters["memory_file_dirty_bytes"],
+                            "writeback": root_exit_counters["memory_file_writeback_bytes"],
+                            "populated": root_exit_counters["cgroup_events"]["populated"],
+                            "member_count": len(root_exit_members),
+                            "members": [
+                                {
+                                    "pid": int(member["pid"]),
+                                    "ppid": int(member["ppid"]),
+                                    "process_group": int(member["process_group"]),
+                                    "session": int(member["session"]),
+                                    "start_ticks": int(member["start_ticks"]),
+                                }
+                                for member in root_exit_members[:32]
+                            ],
+                        }
                     if now >= next_sample or ready:
                         take_sample(started, now)
                         while next_sample <= now:
@@ -1938,11 +1988,10 @@ def sample_command(
             try:
                 final, settle = wait_for_accounting_quiescence(child, interval_ms, settle_timeout_ms)
             except MeasurementIncomplete as error:
-                if error.code == "CGROUP_ACCOUNTING_NOT_QUIESCENT" and private_browser_runtime:
-                    diagnostics = browser_failure_diagnostics(Path(engine_tmpdir))
+                if error.code == "CGROUP_ACCOUNTING_NOT_QUIESCENT":
                     exit_code, child_signal = exit_fields(status_value)
                     lifecycle = {
-                        "root_exit": browser_root_exit,
+                        "root_exit": root_exit_state,
                         "root_exit_code": exit_code,
                         "root_signal": child_signal,
                         "engine_wall_ms": round((root_ended - started) * 1000.0, 3),
@@ -1950,11 +1999,22 @@ def sample_command(
                         "kill_used": kill_used,
                         "lingering_before_kill": lingering_before_kill[:32],
                     }
-                    stderr_tail = bounded_output_tail(Path(stderr_path))
+                    diagnostics = engine_failure_diagnostics(
+                        Path(cwd),
+                        Path(engine_tmpdir),
+                        Path(stdout_path),
+                        Path(stderr_path),
+                        native_api2_storage is not None,
+                    )
+                    browser = (
+                        f"; {browser_failure_diagnostics(Path(engine_tmpdir))}"
+                        if private_browser_runtime
+                        else ""
+                    )
                     raise incomplete(
                         error.code,
-                        f"{error}; browser-lifecycle={json.dumps(lifecycle, sort_keys=True, separators=(',', ':'))}; "
-                        f"engine-stderr-tail={stderr_tail}; {diagnostics}",
+                        f"{error}; engine-lifecycle={json.dumps(lifecycle, sort_keys=True, separators=(',', ':'))}; "
+                        f"{diagnostics}{browser}",
                     ) from error
                 raise
             if final["cgroup_events"]["populated"] != 0:

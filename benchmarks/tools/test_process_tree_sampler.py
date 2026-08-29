@@ -249,8 +249,30 @@ def fixture_proofs() -> None:
         output = Path(raw) / "engine.stderr"
         output.write_bytes(b"prefix\n" + b"x" * 32)
         assert process_tree_sampler.bounded_output_tail(output, limit=8) == json.dumps("x" * 8)
+        metadata = process_tree_sampler.output_path_metadata(output)
+        assert metadata["status"] == "present"
+        assert metadata["kind"] == "file"
+        assert metadata["size"] == 39
+        assert metadata["blocks"] >= 0
         missing = process_tree_sampler.bounded_output_tail(Path(raw) / "missing")
         assert missing.startswith("unavailable:FileNotFoundError:")
+        assert process_tree_sampler.output_path_metadata(Path(raw) / "missing")["status"] == "unavailable"
+
+        sandbox = Path(raw) / "sandbox"
+        cwd = sandbox / "job"
+        temporary = sandbox / "temporary"
+        cwd.mkdir(parents=True)
+        temporary.mkdir()
+        (cwd / "delivery.json").write_text("fixture", encoding="ascii")
+        stdout = Path(raw) / "engine.stdout"
+        stdout.write_text("result", encoding="ascii")
+        failure = process_tree_sampler.engine_failure_diagnostics(cwd, temporary, stdout, output, True)
+        assert "engine-temporary-file-count=0" in failure
+        assert "engine-sandbox-files-newest=" in failure
+        assert "job/delivery.json:file:size=7" in failure
+        assert 'engine-output-metadata={"stderr":{"blocks":' in failure
+        assert '"stdout":{"blocks":' in failure
+        assert 'engine-stderr-tail="prefix\\n' in failure
     if sys.platform == "linux":
         with tempfile.TemporaryDirectory(prefix="pliego mount ") as raw:
             root = Path(raw).resolve()
