@@ -179,6 +179,7 @@ def write_publication(root: Path) -> tuple[dict[str, Any], dict[str, bytes]]:
             "immutable": True,
             "draft": False,
             "prerelease": False,
+            "latest": False,
             "assets": [
                 {
                     "id": 5002,
@@ -239,6 +240,8 @@ def write_live_metadata(
     artifact_id = 6001
     artifact_payload = artifact_zip.read_bytes()
     expected = public_hosted_benchmark._expected_release_assets(assets.manifest)
+    draft_tag = "untagged-0123456789abcdefabcd"
+    draft_expected = public_hosted_benchmark._expected_release_assets(assets.manifest, download_tag=draft_tag)
     payloads: dict[str, dict[str, Any]] = {
         "run": {
             "id": source["run_id"],
@@ -314,6 +317,38 @@ def write_live_metadata(
                 },
             ],
         },
+        "draft_release": {
+            "id": 5001,
+            "tag_name": release["tag"],
+            "immutable": False,
+            "draft": True,
+            "prerelease": False,
+            "html_url": f"https://github.com/oxhq/pliego/releases/tag/{draft_tag}",
+            "assets": [
+                {
+                    "id": 5002,
+                    "name": expected["archive_name"],
+                    "browser_download_url": draft_expected["archive_url"],
+                    "state": "uploaded",
+                    "size": assets.archive.stat().st_size,
+                    "digest": f"sha256:{hashlib.sha256(assets.archive.read_bytes()).hexdigest()}",
+                },
+                {
+                    "id": 5003,
+                    "name": expected["checksum_name"],
+                    "browser_download_url": draft_expected["checksum_url"],
+                    "state": "uploaded",
+                    "size": assets.checksum.stat().st_size,
+                    "digest": f"sha256:{hashlib.sha256(assets.checksum.read_bytes()).hexdigest()}",
+                },
+            ],
+        },
+        "latest_release": {
+            "id": 4001,
+            "tag_name": "v0.3.3",
+            "draft": False,
+            "prerelease": False,
+        },
     }
     paths: dict[str, Path] = {}
     for name, payload in payloads.items():
@@ -363,6 +398,7 @@ def stage_fixture(
         artifact_zip,
         metadata["tag"],
         metadata["release"],
+        metadata["latest_release"],
         publication,
         _transaction_hook=hook,
     )
@@ -382,6 +418,24 @@ def verify_origin_fixture(
         artifact_zip,
         public_hosted_benchmark.load_json(metadata["tag"]),
         public_hosted_benchmark.load_json(metadata["release"]),
+        public_hosted_benchmark.load_json(metadata["latest_release"]),
+    )
+
+
+def verify_prepublish_fixture(
+    assets: package_hosted_evidence.ArchiveAssets,
+    artifact_zip: Path,
+    metadata: dict[str, Path],
+) -> dict[str, Any]:
+    return public_hosted_benchmark.verify_prepublish(
+        assets.archive,
+        assets.checksum,
+        metadata["run"],
+        metadata["artifact"],
+        artifact_zip,
+        metadata["tag"],
+        metadata["draft_release"],
+        metadata["latest_release"],
     )
 
 
@@ -431,6 +485,7 @@ def test_packaged_archive_integration(root: Path) -> None:
             artifact_zip,
             metadata["tag"],
             metadata["release"],
+            metadata["latest_release"],
             publication,
         )
         == provenance
@@ -452,7 +507,7 @@ def test_packaged_archive_integration(root: Path) -> None:
     metadata["artifact"].write_text(json.dumps(artifact_listing), encoding="utf-8")
     assert public_hosted_benchmark.verify_publication(publication)
     public_hosted_benchmark.verify_github_tag(metadata["tag"], publication)
-    public_hosted_benchmark.verify_github_release(metadata["release"], publication)
+    public_hosted_benchmark.verify_github_release(metadata["release"], metadata["latest_release"], publication)
 
 
 def test_transaction_rollback_and_retry(root: Path) -> None:
@@ -633,6 +688,11 @@ def test_publication_origin_fail_closed(root: Path) -> None:
         ),
         ("tag", lambda data: data["object"].__setitem__("type", "tag"), "annotated"),
         ("release", lambda data: data.__setitem__("immutable", False), "is not immutable"),
+        (
+            "latest_release",
+            lambda data: data.__setitem__("id", 5001),
+            "must not be the repository Latest release",
+        ),
     )
     for name, mutation, expected in cases:
         path = metadata[name]
@@ -667,6 +727,167 @@ def test_publication_origin_fail_closed(root: Path) -> None:
     )
     assert (publication / "README.md").read_bytes() == original_readme
     assert not os.path.lexists(public_hosted_benchmark.publication_directory(publication))
+
+
+def test_prepublish_gate(root: Path) -> None:
+    assets, artifact_zip, metadata, _ = packaged_publication_fixture(root)
+    attestation = verify_prepublish_fixture(assets, artifact_zip, metadata)
+    assert attestation["release"]["draft"] is True
+    assert attestation["release"]["immutable"] is False
+    assert attestation["release"]["latest"] is False
+    assert attestation["benchmark_tag"]["target_sha"] == assets.manifest["source"]["revision"]
+    assert (
+        public_hosted_benchmark.main(
+            [
+                "prepublish",
+                str(assets.archive),
+                "--checksum",
+                str(assets.checksum),
+                "--run-metadata",
+                str(metadata["run"]),
+                "--artifact-metadata",
+                str(metadata["artifact"]),
+                "--artifact-zip",
+                str(artifact_zip),
+                "--tag-metadata",
+                str(metadata["tag"]),
+                "--draft-release-metadata",
+                str(metadata["draft_release"]),
+                "--latest-release-metadata",
+                str(metadata["latest_release"]),
+            ]
+        )
+        == 0
+    )
+
+    tampered_zip = artifact_zip.with_name("prepublish-tampered.zip")
+    tampered_zip.write_bytes(artifact_zip.read_bytes() + b"tampered")
+    expect_error(
+        lambda: verify_prepublish_fixture(assets, tampered_zip, metadata),
+        "byte count differs",
+    )
+
+    changed_source = root / "changed-series-artifact"
+    shutil.copytree(root / "downloaded-series-artifact", changed_source)
+    changed_report = changed_source / "pliego-hosted-performance-series" / summarize_comparisons.REPORT_FILE
+    changed_report.write_bytes(changed_report.read_bytes() + b"tampered\n")
+    changed_zip = root / "server-consistent-wrong-series-artifact.zip"
+    changed_payload = write_actions_zip(changed_source, changed_zip)
+    changed_artifact_metadata = root / "github-changed-artifact.json"
+    changed_listing = public_hosted_benchmark.load_json(metadata["artifact"])
+    changed_listing["artifacts"][0]["size_in_bytes"] = len(changed_payload)
+    changed_listing["artifacts"][0]["digest"] = f"sha256:{hashlib.sha256(changed_payload).hexdigest()}"
+    changed_artifact_metadata.write_text(json.dumps(changed_listing), encoding="utf-8")
+    changed_metadata = {**metadata, "artifact": changed_artifact_metadata}
+    expect_error(
+        lambda: verify_prepublish_fixture(assets, changed_zip, changed_metadata),
+        "downloaded Actions artifact is not the exact hosted evidence source",
+    )
+
+    archive_name = assets.manifest["release"]["archive_filename"]
+    checksum_name = assets.manifest["release"]["checksum_filename"]
+    payloads = {archive_name: assets.archive.read_bytes(), checksum_name: assets.checksum.read_bytes()}
+    canonical_draft = public_hosted_benchmark.load_json(metadata["draft_release"])
+    canonical_latest = public_hosted_benchmark.load_json(metadata["latest_release"])
+
+    cases: tuple[tuple[Callable[[dict[str, Any]], None], str], ...] = (
+        (lambda data: data.__setitem__("id", 0), "release ID is invalid"),
+        (lambda data: data.__setitem__("tag_name", "benchmark-wrong"), "release tag differs"),
+        (lambda data: data.__setitem__("draft", False), "is not a draft"),
+        (lambda data: data.__setitem__("immutable", True), "unexpectedly reports immutable"),
+        (lambda data: data.__setitem__("prerelease", True), "marked as a prerelease"),
+        (
+            lambda data: data.__setitem__(
+                "html_url", "https://github.com/not-oxhq/pliego/releases/tag/untagged-0123456789abcdefabcd"
+            ),
+            "exact oxhq/pliego untagged release URL",
+        ),
+        (
+            lambda data: data.__setitem__(
+                "html_url", f"https://github.com/oxhq/pliego/releases/tag/{assets.manifest['release']['tag']}"
+            ),
+            "exact oxhq/pliego untagged release URL",
+        ),
+        (lambda data: data["assets"].pop(), "exactly the two committed evidence assets"),
+        (
+            lambda data: data["assets"].append(
+                {
+                    "id": 5999,
+                    "name": "extra.txt",
+                    "browser_download_url": "https://example.invalid/extra.txt",
+                    "state": "uploaded",
+                    "size": 1,
+                    "digest": f"sha256:{'f' * 64}",
+                }
+            ),
+            "exactly the two committed evidence assets",
+        ),
+        (
+            lambda data: data["assets"][0].__setitem__("name", "renamed.tar.gz"),
+            "exactly the two committed evidence assets",
+        ),
+        (
+            lambda data: data["assets"][0].__setitem__("browser_download_url", "https://example.invalid/wrong"),
+            "exactly the two committed evidence assets",
+        ),
+        (
+            lambda data: data["assets"][0].__setitem__(
+                "browser_download_url",
+                data["assets"][0]["browser_download_url"].replace(
+                    "untagged-0123456789abcdefabcd", "untagged-fedcba9876543210fedc"
+                ),
+            ),
+            "exactly the two committed evidence assets",
+        ),
+        (
+            lambda data: data["assets"][0].__setitem__(
+                "browser_download_url",
+                data["assets"][0]["browser_download_url"].replace("/oxhq/pliego/", "/not-oxhq/pliego/"),
+            ),
+            "exactly the two committed evidence assets",
+        ),
+        (lambda data: data["assets"][0].__setitem__("size", 1), "size differs from its bytes"),
+        (
+            lambda data: data["assets"][0].__setitem__("digest", f"sha256:{'0' * 64}"),
+            "digest differs",
+        ),
+        (lambda data: data["assets"][0].__setitem__("state", "new"), "is not uploaded"),
+        (
+            lambda data: data["assets"][1].__setitem__("id", data["assets"][0]["id"]),
+            "has no exact unique ID",
+        ),
+    )
+    for mutation, expected in cases:
+        changed = deepcopy(canonical_draft)
+        mutation(changed)
+        expect_error(
+            lambda changed=changed: public_hosted_benchmark._github_draft_release_attestation(
+                changed,
+                canonical_latest,
+                assets.manifest,
+                payloads,
+            ),
+            expected,
+        )
+
+    latest_is_benchmark = deepcopy(canonical_latest)
+    latest_is_benchmark["id"] = canonical_draft["id"]
+    expect_error(
+        lambda: public_hosted_benchmark._github_draft_release_attestation(
+            canonical_draft,
+            latest_is_benchmark,
+            assets.manifest,
+            payloads,
+        ),
+        "must not be the repository Latest release",
+    )
+
+    annotated_tag = public_hosted_benchmark.load_json(metadata["tag"])
+    annotated_tag["object"]["type"] = "tag"
+    expect_error(
+        lambda: public_hosted_benchmark._benchmark_tag_attestation(annotated_tag, assets.manifest),
+        "annotated",
+    )
 
 
 def main() -> None:
@@ -731,13 +952,33 @@ def main() -> None:
                 },
             ],
         }
+        latest_release_metadata = root / "github-latest-release.json"
+        latest_release_metadata.write_text(
+            json.dumps({"id": 4001, "tag_name": "v0.3.3", "draft": False, "prerelease": False}),
+            encoding="utf-8",
+        )
         release_metadata.write_text(json.dumps(canonical_release), encoding="utf-8")
-        public_hosted_benchmark.verify_github_release(release_metadata, root)
+        public_hosted_benchmark.verify_github_release(release_metadata, latest_release_metadata, root)
+        latest_is_benchmark = {
+            "id": canonical_release["id"],
+            "tag_name": canonical_release["tag_name"],
+            "draft": False,
+            "prerelease": False,
+        }
+        latest_release_metadata.write_text(json.dumps(latest_is_benchmark), encoding="utf-8")
+        expect_error(
+            lambda: public_hosted_benchmark.verify_github_release(release_metadata, latest_release_metadata, root),
+            "must not be the repository Latest release",
+        )
+        latest_release_metadata.write_text(
+            json.dumps({"id": 4001, "tag_name": "v0.3.3", "draft": False, "prerelease": False}),
+            encoding="utf-8",
+        )
         mutable_release = deepcopy(canonical_release)
         mutable_release["immutable"] = False
         release_metadata.write_text(json.dumps(mutable_release), encoding="utf-8")
         expect_error(
-            lambda: public_hosted_benchmark.verify_github_release(release_metadata, root),
+            lambda: public_hosted_benchmark.verify_github_release(release_metadata, latest_release_metadata, root),
             "is not immutable",
         )
         extra_asset_release = deepcopy(canonical_release)
@@ -753,7 +994,7 @@ def main() -> None:
         )
         release_metadata.write_text(json.dumps(extra_asset_release), encoding="utf-8")
         expect_error(
-            lambda: public_hosted_benchmark.verify_github_release(release_metadata, root),
+            lambda: public_hosted_benchmark.verify_github_release(release_metadata, latest_release_metadata, root),
             "exactly the two committed evidence assets",
         )
 
@@ -794,6 +1035,7 @@ def main() -> None:
         test_destination_reservation_race(root / "destination-reservation-race")
         test_symlink_replacement_rollback(root / "symlink-replacement")
         test_publication_origin_fail_closed(root / "origin-fail-closed")
+        test_prepublish_gate(root / "prepublish")
 
 
 if __name__ == "__main__":

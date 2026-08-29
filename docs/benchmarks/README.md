@@ -131,8 +131,11 @@ values into Markdown. A hosted series becomes public only after the complete
 three-repeat tree is packaged, validated, and attached to its canonical
 immutable benchmark release. The publication tool copies the exact sealed
 report from that archive and derives the compact README table from the same
-series; the public-surface workflow verifies GitHub's immutable-release flag,
-downloads both release assets again, and checks byte-for-byte equality. See the [source benchmark protocol](../../benchmarks/README.md#public-snapshot-gate)
+series. Before the draft is published, its `prepublish` gate binds the live
+Actions artifact ZIP, lightweight source tag, exact two draft assets, and
+non-latest release state. The public-surface workflow then verifies GitHub's
+immutable-release flag, rechecks that the benchmark is not Latest, downloads
+both release assets again, and checks byte-for-byte equality. See the [source benchmark protocol](../../benchmarks/README.md#public-snapshot-gate)
 for the exact gate and command.
 
 Each target's measured engine or PHP adapter gets a fresh private on-disk

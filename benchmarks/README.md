@@ -352,11 +352,14 @@ benchmark-v0.3.3-minimal-static-gh-<run-id>-a<attempt>
 ```
 
 and contains only the canonical `.tar.gz` asset and its `.sha256` companion.
-Create that release as a draft, upload those two assets, and publish it only
-after both uploads succeed. Repository release immutability is enabled for new
-releases; the public-surface gate requires GitHub to report `immutable: true`,
-requires the release to contain exactly those two uploaded assets, downloads
-both again, and verifies their bytes before the snapshot can be published.
+Create that release as a non-latest draft and upload those two assets. Before
+publishing, `prepublish` proves that the server-digested Actions ZIP derives the
+archive, the lightweight tag targets the measured revision, the draft contains
+exactly the two checksum-matching assets, and the benchmark is not the
+repository Latest release. Repository release immutability is enabled for new
+releases; after publication the public-surface gate requires GitHub to report
+`immutable: true`, rechecks the non-latest boundary, downloads both assets
+again, and verifies their bytes before the snapshot can be published.
 
 Only after those exact assets exist may the buyer-facing snapshot be staged:
 
@@ -385,8 +388,39 @@ artifact_id=$(jq -er \
   "$live/artifact.json")
 "${api[@]}" "repos/$repo/actions/artifacts/$artifact_id/zip" \
   > "$live/artifact.zip"
+"${api[@]}" --method POST "repos/$repo/git/refs" \
+  -f "ref=refs/tags/$release_tag" -f "sha=$source_revision" \
+  > "$live/tag-created.json"
+"${api[@]}" "repos/$repo/git/ref/tags/$release_tag" > "$live/tag.json"
+
+gh release create "$release_tag" "$archive" "$checksum" \
+  --repo "$repo" --draft --verify-tag --latest=false \
+  --title "Pliego v0.3.3 minimal-static hosted benchmark" \
+  --notes "GitHub-hosted exploratory evidence; not a production ranking."
+"${api[@]}" --paginate --slurp --method GET "repos/$repo/releases" \
+  -f per_page=100 > "$live/release-pages.json"
+draft_release_id=$(jq -er --arg tag "$release_tag" '
+  [.[][] | select(.tag_name == $tag and .draft == true)]
+  | select(length == 1) | .[0].id
+' "$live/release-pages.json")
+"${api[@]}" "repos/$repo/releases/$draft_release_id" \
+  > "$live/draft-release.json"
+"${api[@]}" "repos/$repo/releases/latest" > "$live/latest-release.json"
+
+python3 benchmarks/tools/public_hosted_benchmark.py prepublish \
+  "$archive" \
+  --checksum "$checksum" \
+  --run-metadata "$live/run.json" \
+  --artifact-metadata "$live/artifact.json" \
+  --artifact-zip "$live/artifact.zip" \
+  --tag-metadata "$live/tag.json" \
+  --draft-release-metadata "$live/draft-release.json" \
+  --latest-release-metadata "$live/latest-release.json"
+
+gh release edit "$release_tag" --repo "$repo" --draft=false --latest=false
 "${api[@]}" "repos/$repo/git/ref/tags/$release_tag" > "$live/tag.json"
 "${api[@]}" "repos/$repo/releases/tags/$release_tag" > "$live/release.json"
+"${api[@]}" "repos/$repo/releases/latest" > "$live/latest-release.json"
 
 python3 benchmarks/tools/public_hosted_benchmark.py stage \
   "$archive" \
@@ -395,12 +429,14 @@ python3 benchmarks/tools/public_hosted_benchmark.py stage \
   --artifact-metadata "$live/artifact.json" \
   --artifact-zip "$live/artifact.zip" \
   --tag-metadata "$live/tag.json" \
-  --release-metadata "$live/release.json"
+  --release-metadata "$live/release.json" \
+  --latest-release-metadata "$live/latest-release.json"
 ```
 
-The staging command does not accept numbers or prose. It first runs the archive
-validator and proves the exact Actions run attempt, exact-name artifact listing
-and ZIP, lightweight tag, and immutable release before copying the archive's
+The prepublish and staging commands do not accept numbers or prose. They run the
+archive validator and prove the exact Actions run attempt, exact-name artifact
+listing and ZIP, lightweight tag, non-latest state, and exact draft/final
+release assets before copying the archive's
 evidence manifest, sealed series, deterministic report, source-provenance
 receipt, and exact checksum into `docs/benchmarks/results/`. It then derives the
 compact README table from the sealed series. The public-surface check recomputes

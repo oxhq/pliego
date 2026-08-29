@@ -104,11 +104,17 @@ jobs:
         run: |
           set -euo pipefail
           metadata="$RUNNER_TEMP/pliego-benchmark-release.json"
+          latest_metadata="$RUNNER_TEMP/pliego-latest-release.json"
           gh api \
             --header 'Accept: application/vnd.github+json' \
             --header 'X-GitHub-Api-Version: 2026-03-10' \
             "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" > "$metadata"
-          python3 -E -s benchmarks/tools/public_hosted_benchmark.py verify-release "$metadata"
+          gh api \
+            --header 'Accept: application/vnd.github+json' \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/releases/latest" > "$latest_metadata"
+          python3 -E -s benchmarks/tools/public_hosted_benchmark.py verify-release \
+            "$metadata" --latest-release-metadata "$latest_metadata"
 
       - name: Verify lightweight benchmark tag target
         if: steps.benchmark.outputs.published == 'true'
@@ -185,7 +191,8 @@ jobs:
             --artifact-metadata "$live/artifact.json" \
             --artifact-zip "$live/artifact.zip" \
             --tag-metadata "$RUNNER_TEMP/pliego-benchmark-tag.json" \
-            --release-metadata "$RUNNER_TEMP/pliego-benchmark-release.json"
+            --release-metadata "$RUNNER_TEMP/pliego-benchmark-release.json" \
+            --latest-release-metadata "$RUNNER_TEMP/pliego-latest-release.json"
 
       - name: Prove showcase symlinks fail closed
         shell: bash

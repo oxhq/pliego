@@ -61,6 +61,7 @@ RELEASE_TAG = re.compile(r"^benchmark-v0\.3\.3-minimal-static-gh-([1-9][0-9]*)-a
 ARCHIVE_ROOT = re.compile(r"^pliego-benchmark-v0\.3\.3-minimal-static-gh-run-([1-9][0-9]*)-attempt-([1-9][0-9]*)$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 ARTIFACT_DIGEST = re.compile(r"^sha256:([0-9a-f]{64})$")
+DRAFT_RELEASE_URL = re.compile(r"^https://github\.com/oxhq/pliego/releases/tag/(untagged-[0-9a-f]{20})$")
 SOURCE_PROVENANCE_CONTRACT = "pliego.github-actions-source-provenance.v1"
 PERFORMANCE_WORKFLOW_PATH = ".github/workflows/pliego-performance.yml"
 GITHUB_API = "https://api.github.com"
@@ -472,9 +473,9 @@ def validate_evidence_manifest(manifest: dict[str, Any]) -> None:
     require(set(paths) == EXPECTED_ARCHIVE_FILES, "evidence manifest file inventory changed")
 
 
-def _expected_release_assets(manifest: dict[str, Any]) -> dict[str, str]:
+def _expected_release_assets(manifest: dict[str, Any], *, download_tag: str | None = None) -> dict[str, str]:
     tag, _, archive, checksum = _release_identity(manifest)
-    base = f"{GITHUB_WEB}/oxhq/pliego/releases/download/{tag}"
+    base = f"{GITHUB_WEB}/oxhq/pliego/releases/download/{download_tag or tag}"
     return {
         "release_tag": tag,
         "archive_name": archive,
@@ -620,21 +621,30 @@ def _benchmark_tag_attestation(metadata: dict[str, Any], manifest: dict[str, Any
     return {"ref": f"refs/tags/{tag}", "object_type": "commit", "target_sha": revision}
 
 
-def _github_release_attestation(
-    metadata: dict[str, Any], manifest: dict[str, Any], payloads: dict[str, bytes] | None = None
-) -> dict[str, Any]:
-    assets = _expected_release_assets(manifest)
+def _require_not_latest_release(metadata: dict[str, Any], latest_metadata: dict[str, Any]) -> None:
+    release_id = metadata.get("id")
+    latest_id = latest_metadata.get("id")
+    require(isinstance(release_id, int) and release_id > 0, "GitHub benchmark release ID is invalid")
+    require(isinstance(latest_id, int) and latest_id > 0, "GitHub Latest release ID is invalid")
+    require(latest_metadata.get("draft") is False, "GitHub Latest release is unexpectedly a draft")
+    require(latest_metadata.get("prerelease") is False, "GitHub Latest release is unexpectedly a prerelease")
+    latest_tag = latest_metadata.get("tag_name")
+    require(isinstance(latest_tag, str) and latest_tag, "GitHub Latest release tag is absent")
+    require(release_id != latest_id, "GitHub benchmark release must not be the repository Latest release")
+
+
+def _github_release_assets_attestation(
+    metadata: dict[str, Any],
+    manifest: dict[str, Any],
+    payloads: dict[str, bytes] | None = None,
+    *,
+    download_tag: str | None = None,
+) -> tuple[int, dict[str, str], dict[str, tuple[int, str, int, str]]]:
+    assets = _expected_release_assets(manifest, download_tag=download_tag)
     release_id = metadata.get("id")
     require(isinstance(release_id, int) and release_id > 0, "GitHub benchmark release ID is invalid")
     require(metadata.get("tag_name") == assets["release_tag"], "GitHub release tag differs from committed evidence")
-    require(metadata.get("immutable") is True, "GitHub benchmark release is not immutable")
-    require(metadata.get("draft") is False, "GitHub benchmark release is still a draft")
     require(metadata.get("prerelease") is False, "GitHub benchmark release is marked as a prerelease")
-    require(
-        metadata.get("html_url") == f"{GITHUB_WEB}/oxhq/pliego/releases/tag/{assets['release_tag']}",
-        "GitHub benchmark release URL differs from its tag",
-    )
-
     released_assets = metadata.get("assets")
     require(isinstance(released_assets, list), "GitHub benchmark release assets are absent")
     expected = {
@@ -642,6 +652,7 @@ def _github_release_attestation(
         assets["checksum_name"]: assets["checksum_url"],
     }
     observed: dict[str, tuple[int, str, int, str]] = {}
+    asset_ids: set[int] = set()
     for item in released_assets:
         require(isinstance(item, dict), "GitHub benchmark release contains an invalid asset")
         name = item.get("name")
@@ -650,7 +661,11 @@ def _github_release_attestation(
         size = item.get("size")
         digest = item.get("digest")
         require(isinstance(name, str) and isinstance(url, str), "GitHub benchmark release asset identity is invalid")
-        require(isinstance(asset_id, int) and asset_id > 0, f"GitHub benchmark release asset {name!r} has no exact ID")
+        require(
+            isinstance(asset_id, int) and asset_id > 0 and asset_id not in asset_ids,
+            f"GitHub benchmark release asset {name!r} has no exact unique ID",
+        )
+        asset_ids.add(asset_id)
         require(isinstance(size, int) and size > 0, f"GitHub benchmark release asset {name!r} has no exact size")
         require(
             isinstance(digest, str) and ARTIFACT_DIGEST.fullmatch(digest) is not None,
@@ -673,12 +688,70 @@ def _github_release_attestation(
             require(
                 digest == f"sha256:{sha256_bytes(payload)}", f"GitHub benchmark release asset {name!r} digest differs"
             )
+    return release_id, expected, observed
+
+
+def _github_draft_release_attestation(
+    metadata: dict[str, Any],
+    latest_metadata: dict[str, Any],
+    manifest: dict[str, Any],
+    payloads: dict[str, bytes],
+) -> dict[str, Any]:
+    html_url = metadata.get("html_url")
+    match = DRAFT_RELEASE_URL.fullmatch(html_url) if isinstance(html_url, str) else None
+    require(match is not None, "GitHub draft release URL is not an exact oxhq/pliego untagged release URL")
+    release_id, expected, observed = _github_release_assets_attestation(
+        metadata,
+        manifest,
+        payloads,
+        download_tag=match.group(1),
+    )
+    require(metadata.get("immutable") is False, "GitHub draft benchmark release unexpectedly reports immutable")
+    require(metadata.get("draft") is True, "GitHub benchmark release is not a draft")
+    _require_not_latest_release(metadata, latest_metadata)
     return {
         "id": release_id,
-        "tag_name": assets["release_tag"],
+        "tag_name": metadata["tag_name"],
+        "immutable": False,
+        "draft": True,
+        "prerelease": False,
+        "latest": False,
+        "assets": [
+            {
+                "id": observed[name][0],
+                "name": name,
+                "url": expected[name],
+                "state": "uploaded",
+                "size": observed[name][2],
+                "digest": observed[name][3],
+            }
+            for name in sorted(expected, key=lambda value: value.encode("utf-8"))
+        ],
+    }
+
+
+def _github_release_attestation(
+    metadata: dict[str, Any],
+    latest_metadata: dict[str, Any],
+    manifest: dict[str, Any],
+    payloads: dict[str, bytes] | None = None,
+) -> dict[str, Any]:
+    assets = _expected_release_assets(manifest)
+    require(
+        metadata.get("html_url") == f"{GITHUB_WEB}/oxhq/pliego/releases/tag/{assets['release_tag']}",
+        "GitHub benchmark release URL differs from its tag",
+    )
+    release_id, expected, observed = _github_release_assets_attestation(metadata, manifest, payloads)
+    require(metadata.get("immutable") is True, "GitHub benchmark release is not immutable")
+    require(metadata.get("draft") is False, "GitHub benchmark release is still a draft")
+    _require_not_latest_release(metadata, latest_metadata)
+    return {
+        "id": release_id,
+        "tag_name": metadata["tag_name"],
         "immutable": True,
         "draft": False,
         "prerelease": False,
+        "latest": False,
         "assets": [
             {
                 "id": observed[name][0],
@@ -762,6 +835,42 @@ def _verify_artifact_derivation(payload: bytes, archive: Path, checksum: Path) -
         )
 
 
+def verify_prepublish(
+    archive: Path,
+    checksum: Path,
+    run_metadata: Path,
+    artifact_metadata: Path,
+    artifact_zip: Path,
+    tag_metadata: Path,
+    draft_release_metadata: Path,
+    latest_release_metadata: Path,
+) -> dict[str, Any]:
+    """Prove the live source, lightweight tag, and exact draft before publication."""
+
+    _validate_packaged_archive(archive, checksum)
+    manifest, _ = _archive_payloads(archive)
+    run = _actions_run_attestation(load_json(run_metadata), manifest)
+    artifact, artifact_payload = _actions_artifact_attestation(
+        load_json(artifact_metadata), artifact_zip, manifest, run
+    )
+    _verify_artifact_derivation(artifact_payload, archive, checksum)
+    tag = _benchmark_tag_attestation(load_json(tag_metadata), manifest)
+    _, _, archive_name, checksum_name = _release_identity(manifest)
+    archive_payload, _ = _stable_regular_bytes(archive, "supplied evidence archive")
+    checksum_payload, _ = _stable_regular_bytes(checksum, "supplied evidence checksum")
+    require(
+        parse_archive_checksum(checksum_payload, archive_name) == sha256_bytes(archive_payload),
+        "supplied evidence archive differs from its checksum",
+    )
+    release = _github_draft_release_attestation(
+        load_json(draft_release_metadata),
+        load_json(latest_release_metadata),
+        manifest,
+        {archive_name: archive_payload, checksum_name: checksum_payload},
+    )
+    return {"actions_run": run, "actions_artifact": artifact, "benchmark_tag": tag, "release": release}
+
+
 def build_source_provenance(
     manifest: dict[str, Any],
     archive: Path,
@@ -771,6 +880,7 @@ def build_source_provenance(
     artifact_zip: Path,
     tag_metadata: dict[str, Any],
     release_metadata: dict[str, Any],
+    latest_release_metadata: dict[str, Any],
 ) -> dict[str, Any]:
     validate_evidence_manifest(manifest)
     run = _actions_run_attestation(run_metadata, manifest)
@@ -783,12 +893,13 @@ def build_source_provenance(
         parse_archive_checksum(checksum_payload, archive_name) == sha256_bytes(archive_payload),
         "supplied evidence archive differs from its checksum",
     )
+    _verify_artifact_derivation(artifact_payload, archive, checksum)
     release = _github_release_attestation(
         release_metadata,
+        latest_release_metadata,
         manifest,
         {archive_name: archive_payload, checksum_name: checksum_payload},
     )
-    _verify_artifact_derivation(artifact_payload, archive, checksum)
     provenance: dict[str, Any] = {
         "schema": "pliego.benchmark-source-provenance",
         "version": 1,
@@ -927,13 +1038,16 @@ def validate_source_provenance(provenance: dict[str, Any], manifest: dict[str, A
     release = provenance.get("release")
     require(isinstance(release, dict), "committed release provenance is absent")
     require(
-        set(release) == {"id", "tag_name", "immutable", "draft", "prerelease", "assets"},
+        set(release) == {"id", "tag_name", "immutable", "draft", "prerelease", "latest", "assets"},
         "committed release provenance shape changed",
     )
     require(release.get("tag_name") == tag, "committed release provenance tag differs")
     require(
-        release.get("immutable") is True and release.get("draft") is False and release.get("prerelease") is False,
-        "committed release provenance is not an immutable published release",
+        release.get("immutable") is True
+        and release.get("draft") is False
+        and release.get("prerelease") is False
+        and release.get("latest") is False,
+        "committed release provenance is not an immutable published non-latest release",
     )
     require(isinstance(release.get("id"), int) and release["id"] > 0, "committed release ID is invalid")
     release_assets = release.get("assets")
@@ -1229,10 +1343,10 @@ def release_urls(root: Path = ROOT) -> tuple[str, str] | None:
     return assets["archive_url"], assets["checksum_url"]
 
 
-def verify_github_release(metadata: Path, root: Path = ROOT) -> None:
+def verify_github_release(metadata: Path, latest_metadata: Path, root: Path = ROOT) -> None:
     require(verify_publication(root), "no committed public benchmark release exists")
     manifest, provenance, _, _, _ = load_publication(root)
-    observed = _github_release_attestation(load_json(metadata), manifest)
+    observed = _github_release_attestation(load_json(metadata), load_json(latest_metadata), manifest)
     require(observed == provenance["release"], "live GitHub release metadata differs from committed provenance")
 
 
@@ -1720,6 +1834,7 @@ def stage_publication(
     artifact_zip: Path,
     tag_metadata: Path,
     release_metadata: Path,
+    latest_release_metadata: Path,
     root: Path = ROOT,
     *,
     _transaction_hook: Callable[[str], None] | None = None,
@@ -1747,6 +1862,7 @@ def stage_publication(
         artifact_zip,
         load_json(tag_metadata),
         load_json(release_metadata),
+        load_json(latest_release_metadata),
     )
     provenance_payload = (json.dumps(provenance, indent=2, ensure_ascii=True, allow_nan=False) + "\n").encode("utf-8")
     public_payloads = {
@@ -1773,6 +1889,7 @@ def verify_live_source(
     artifact_zip: Path,
     tag_metadata: Path,
     release_metadata: Path,
+    latest_release_metadata: Path,
     root: Path = ROOT,
 ) -> dict[str, Any]:
     _validate_packaged_archive(archive, checksum)
@@ -1786,6 +1903,7 @@ def verify_live_source(
         artifact_zip,
         load_json(tag_metadata),
         load_json(release_metadata),
+        load_json(latest_release_metadata),
     )
     _require_committed_source_provenance(manifest, provenance, root)
     return provenance
@@ -1811,14 +1929,27 @@ def _write_github_outputs(path: Path, assets: dict[str, str] | None) -> None:
         output.write("\n".join(lines) + "\n")
 
 
-def _add_source_origin_arguments(parser: argparse.ArgumentParser) -> None:
+def _add_source_origin_arguments(parser: argparse.ArgumentParser, *, draft: bool = False) -> None:
     parser.add_argument("--run-metadata", required=True, type=Path, help="exact Actions run-attempt API response")
     parser.add_argument(
         "--artifact-metadata", required=True, type=Path, help="exact-name Actions artifact-list API response"
     )
     parser.add_argument("--artifact-zip", required=True, type=Path, help="downloaded exact Actions artifact ZIP")
     parser.add_argument("--tag-metadata", required=True, type=Path, help="benchmark Git-ref API response")
-    parser.add_argument("--release-metadata", required=True, type=Path, help="immutable GitHub release API response")
+    release_option = "--draft-release-metadata" if draft else "--release-metadata"
+    parser.add_argument(
+        release_option,
+        dest="release_metadata",
+        required=True,
+        type=Path,
+        help="exact draft GitHub release API response" if draft else "immutable GitHub release API response",
+    )
+    parser.add_argument(
+        "--latest-release-metadata",
+        required=True,
+        type=Path,
+        help="current GitHub Latest release API response",
+    )
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -1829,6 +1960,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     stage.add_argument("archive", type=Path)
     stage.add_argument("--checksum", type=Path, required=True)
     _add_source_origin_arguments(stage)
+    prepublish = commands.add_parser(
+        "prepublish", help="verify the exact live source, tag, and draft before immutable publication"
+    )
+    prepublish.add_argument("archive", type=Path)
+    prepublish.add_argument("--checksum", type=Path, required=True)
+    _add_source_origin_arguments(prepublish, draft=True)
     source_verify = commands.add_parser(
         "verify-source", help="verify the live publication-time Actions, tag, and release origin"
     )
@@ -1840,6 +1977,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     archive_verify.add_argument("--checksum", type=Path, required=True)
     release_verify = commands.add_parser("verify-release", help="verify immutable GitHub release metadata")
     release_verify.add_argument("metadata", type=Path)
+    release_verify.add_argument("--latest-release-metadata", required=True, type=Path)
     tag_verify = commands.add_parser("verify-tag", help="verify the live lightweight benchmark tag target")
     tag_verify.add_argument("metadata", type=Path)
     assets = commands.add_parser("release-assets", help="emit canonical release URLs for CI")
@@ -1863,8 +2001,21 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.artifact_zip,
                 args.tag_metadata,
                 args.release_metadata,
+                args.latest_release_metadata,
             )
             print(f"staged public hosted benchmark under {RESULT_RELATIVE}")
+        elif args.command == "prepublish":
+            attestation = verify_prepublish(
+                args.archive,
+                args.checksum,
+                args.run_metadata,
+                args.artifact_metadata,
+                args.artifact_zip,
+                args.tag_metadata,
+                args.release_metadata,
+                args.latest_release_metadata,
+            )
+            print(f"verified prepublish hosted evidence for draft release {attestation['release']['id']}")
         elif args.command == "verify-source":
             provenance = verify_live_source(
                 args.archive,
@@ -1874,13 +2025,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.artifact_zip,
                 args.tag_metadata,
                 args.release_metadata,
+                args.latest_release_metadata,
             )
             print(f"verified publication-time source provenance {provenance['provenance_sha256']}")
         elif args.command == "verify-archive":
             verify_against_archive(args.archive, args.checksum)
             print("committed public benchmark matches the exact released evidence archive")
         elif args.command == "verify-release":
-            verify_github_release(args.metadata)
+            verify_github_release(args.metadata, args.latest_release_metadata)
             print("committed public benchmark is attached to an immutable GitHub release")
         elif args.command == "verify-tag":
             verify_github_tag(args.metadata)
