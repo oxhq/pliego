@@ -36,11 +36,11 @@ on:
       - "sdk/php/resources/HasubiMono-Regular.woff2"
 
 permissions:
+  actions: read
   contents: read
 
-concurrency:
-  group: pliego-public-surface-${{ github.ref }}
-  cancel-in-progress: true
+# Do not add ref-scoped concurrency here: GitHub may discard an older pending
+# main run, which could skip the live proof for a newly committed receipt.
 
 jobs:
   verify:
@@ -50,6 +50,7 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Verify hosted benchmark publication machinery
@@ -62,6 +63,38 @@ jobs:
         id: benchmark
         run: python3 -E -s benchmarks/tools/public_hosted_benchmark.py release-assets --github-output "$GITHUB_OUTPUT"
 
+      - name: Decide whether live Actions origin proof is required
+        id: origin
+        if: steps.benchmark.outputs.published == 'true'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BEFORE_SHA: ${{ github.event.before }}
+          EVENT_NAME: ${{ github.event_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          provenance="docs/benchmarks/results/v0.3.3-minimal-static-github-hosted/source-provenance.v1.json"
+          case "$EVENT_NAME" in
+            pull_request) comparison="$BASE_SHA" ;;
+            push) comparison="$BEFORE_SHA" ;;
+            *) echo "unsupported public-surface event: $EVENT_NAME" >&2; exit 1 ;;
+          esac
+          if [[ "$comparison" =~ ^0{40}$ ]]; then
+            test "$EVENT_NAME" = push
+            required=true
+          else
+            git cat-file -e "$comparison^{commit}"
+            if git diff --quiet "$comparison" "$GITHUB_SHA" -- "$provenance"; then
+              required=false
+            else
+              required=true
+            fi
+          fi
+          printf 'required=%s\n' "$required" >> "$GITHUB_OUTPUT"
+
+      # The original Actions artifact is proved while it is still live by the
+      # staging command and retained in source-provenance.v1.json. It expires;
+      # this durable gate therefore rechecks only the tag and release evidence.
       - name: Verify immutable benchmark release
         if: steps.benchmark.outputs.published == 'true'
         env:
@@ -72,9 +105,25 @@ jobs:
           set -euo pipefail
           metadata="$RUNNER_TEMP/pliego-benchmark-release.json"
           gh api \
+            --header 'Accept: application/vnd.github+json' \
             --header 'X-GitHub-Api-Version: 2026-03-10' \
             "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" > "$metadata"
           python3 -E -s benchmarks/tools/public_hosted_benchmark.py verify-release "$metadata"
+
+      - name: Verify lightweight benchmark tag target
+        if: steps.benchmark.outputs.published == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.benchmark.outputs.release_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          metadata="$RUNNER_TEMP/pliego-benchmark-tag.json"
+          gh api \
+            --header 'Accept: application/vnd.github+json' \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" > "$metadata"
+          python3 -E -s benchmarks/tools/public_hosted_benchmark.py verify-tag "$metadata"
 
       - name: Verify the exact released benchmark archive
         if: steps.benchmark.outputs.published == 'true'
@@ -96,6 +145,47 @@ jobs:
             --output "$checksum" "$CHECKSUM_URL"
           python3 -E -s benchmarks/tools/public_hosted_benchmark.py verify-archive \
             "$archive" --checksum "$checksum"
+
+      - name: Verify live Actions origin for a changed provenance receipt
+        if: steps.benchmark.outputs.published == 'true' && steps.origin.outputs.required == 'true'
+        env:
+          ARTIFACT_DIGEST: ${{ steps.benchmark.outputs.source_artifact_digest }}
+          ARTIFACT_ID: ${{ steps.benchmark.outputs.source_artifact_id }}
+          ARTIFACT_NAME: ${{ steps.benchmark.outputs.source_artifact_name }}
+          ARCHIVE_NAME: ${{ steps.benchmark.outputs.archive_name }}
+          CHECKSUM_NAME: ${{ steps.benchmark.outputs.checksum_name }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.benchmark.outputs.release_tag }}
+          RUN_ATTEMPT: ${{ steps.benchmark.outputs.source_run_attempt }}
+          RUN_ID: ${{ steps.benchmark.outputs.source_run_id }}
+          SOURCE_REVISION: ${{ steps.benchmark.outputs.source_revision }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected_name="pliego-hosted-performance-series-$SOURCE_REVISION-$RUN_ID-$RUN_ATTEMPT"
+          test "$ARTIFACT_NAME" = "$expected_name"
+          [[ "$ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$ARTIFACT_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          live="$RUNNER_TEMP/pliego-benchmark-live-origin"
+          mkdir "$live"
+          api=(gh api --header 'Accept: application/vnd.github+json' \
+            --header 'X-GitHub-Api-Version: 2026-03-10')
+          "${api[@]}" \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID/attempts/$RUN_ATTEMPT" \
+            > "$live/run.json"
+          "${api[@]}" --method GET \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID/artifacts" \
+            -f "name=$ARTIFACT_NAME" -f per_page=100 > "$live/artifact.json"
+          "${api[@]}" "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" \
+            > "$live/artifact.zip"
+          python3 -E -s benchmarks/tools/public_hosted_benchmark.py verify-source \
+            "$RUNNER_TEMP/pliego-public-benchmark/$ARCHIVE_NAME" \
+            --checksum "$RUNNER_TEMP/pliego-public-benchmark/$CHECKSUM_NAME" \
+            --run-metadata "$live/run.json" \
+            --artifact-metadata "$live/artifact.json" \
+            --artifact-zip "$live/artifact.zip" \
+            --tag-metadata "$RUNNER_TEMP/pliego-benchmark-tag.json" \
+            --release-metadata "$RUNNER_TEMP/pliego-benchmark-release.json"
 
       - name: Prove showcase symlinks fail closed
         shell: bash

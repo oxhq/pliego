@@ -360,15 +360,49 @@ both again, and verifies their bytes before the snapshot can be published.
 
 Only after those exact assets exist may the buyer-facing snapshot be staged:
 
-```sh
+```bash
+set -euo pipefail
+repo=oxhq/pliego
+run_id=RUN_ID
+attempt=ATTEMPT
+source_revision=SOURCE_REVISION
+release_tag="benchmark-v0.3.3-minimal-static-gh-${run_id}-a${attempt}"
+artifact_name="pliego-hosted-performance-series-${source_revision}-${run_id}-${attempt}"
+archive="path/to/pliego-benchmark-v0.3.3-minimal-static-gh-run-${run_id}-attempt-${attempt}.tar.gz"
+checksum="${archive}.sha256"
+live="path/to/live-origin"
+mkdir "$live"
+
+api=(gh api --header 'Accept: application/vnd.github+json' \
+  --header 'X-GitHub-Api-Version: 2026-03-10')
+"${api[@]}" "repos/$repo/actions/runs/$run_id/attempts/$attempt" \
+  > "$live/run.json"
+"${api[@]}" --method GET "repos/$repo/actions/runs/$run_id/artifacts" \
+  -f "name=$artifact_name" -f per_page=100 > "$live/artifact.json"
+artifact_id=$(jq -er \
+  --arg name "$artifact_name" \
+  '.artifacts | map(select(.name == $name)) | select(length == 1) | .[0].id' \
+  "$live/artifact.json")
+"${api[@]}" "repos/$repo/actions/artifacts/$artifact_id/zip" \
+  > "$live/artifact.zip"
+"${api[@]}" "repos/$repo/git/ref/tags/$release_tag" > "$live/tag.json"
+"${api[@]}" "repos/$repo/releases/tags/$release_tag" > "$live/release.json"
+
 python3 benchmarks/tools/public_hosted_benchmark.py stage \
-  path/to/pliego-benchmark-v0.3.3-minimal-static-gh-run-<run-id>-attempt-<attempt>.tar.gz \
-  --checksum path/to/pliego-benchmark-v0.3.3-minimal-static-gh-run-<run-id>-attempt-<attempt>.tar.gz.sha256
+  "$archive" \
+  --checksum "$checksum" \
+  --run-metadata "$live/run.json" \
+  --artifact-metadata "$live/artifact.json" \
+  --artifact-zip "$live/artifact.zip" \
+  --tag-metadata "$live/tag.json" \
+  --release-metadata "$live/release.json"
 ```
 
 The staging command does not accept numbers or prose. It first runs the archive
-validator, copies the archive's evidence manifest, sealed series, deterministic
-report, and exact checksum into `docs/benchmarks/results/`, then derives the
+validator and proves the exact Actions run attempt, exact-name artifact listing
+and ZIP, lightweight tag, and immutable release before copying the archive's
+evidence manifest, sealed series, deterministic report, source-provenance
+receipt, and exact checksum into `docs/benchmarks/results/`. It then derives the
 compact README table from the sealed series. The public-surface check recomputes
 that table and report. Hosted CI also downloads the named release assets and
 requires byte-for-byte equality with the committed evidence view. Until that
