@@ -1,0 +1,186 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://pliego.dev/schema/benchmark-evidence-archive.v1.json",
+  "title": "Pliego hosted benchmark evidence archive manifest",
+  "description": "Canonical durable packaging metadata for one exact three-repeat GitHub-hosted benchmark series.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "version",
+    "evidence_class",
+    "publication_status",
+    "claim_boundary",
+    "manifest_sha256",
+    "generated_at",
+    "archive_format",
+    "release",
+    "source",
+    "target",
+    "series",
+    "repeats",
+    "files"
+  ],
+  "properties": {
+    "schema": { "const": "pliego.benchmark-evidence-archive" },
+    "version": { "const": 1 },
+    "evidence_class": { "const": "github-hosted-exploratory" },
+    "publication_status": { "const": "packaged-hosted-series" },
+    "claim_boundary": {
+      "const": "Three correctness-gated repeats on GitHub-hosted VMs; repeat-to-repeat spread is retained, no best or canonical repeat is selected, and the series is not dedicated-host evidence or a general production-performance ranking."
+    },
+    "manifest_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "generated_at": { "type": "string", "minLength": 1 },
+    "archive_format": { "$ref": "#/definitions/archive_format" },
+    "release": { "$ref": "#/definitions/release" },
+    "source": { "$ref": "#/definitions/source" },
+    "target": { "$ref": "#/definitions/target" },
+    "series": { "$ref": "#/definitions/series" },
+    "repeats": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "items": { "$ref": "#/definitions/repeat" }
+    },
+    "files": {
+      "type": "array",
+      "minItems": 18,
+      "maxItems": 18,
+      "items": { "$ref": "#/definitions/file" }
+    }
+  },
+  "definitions": {
+    "archive_format": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract",
+        "container",
+        "tar_format",
+        "gzip_compression_level",
+        "mtime",
+        "uid",
+        "gid",
+        "file_mode",
+        "directory_mode"
+      ],
+      "properties": {
+        "contract": { "const": "pliego.canonical-tar-gzip.v1" },
+        "container": { "const": "tar.gz" },
+        "tar_format": { "const": "ustar" },
+        "gzip_compression_level": { "const": 9 },
+        "mtime": { "const": 0 },
+        "uid": { "const": 0 },
+        "gid": { "const": 0 },
+        "file_mode": { "const": "0644" },
+        "directory_mode": { "const": "0755" }
+      }
+    },
+    "release": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tag", "archive_root", "archive_filename", "checksum_filename"],
+      "properties": {
+        "tag": { "type": "string", "pattern": "^benchmark-v0\\.3\\.3-minimal-static-gh-[1-9][0-9]*-a[1-9][0-9]*$" },
+        "archive_root": {
+          "type": "string",
+          "pattern": "^pliego-benchmark-v0\\.3\\.3-minimal-static-gh-run-[1-9][0-9]*-attempt-[1-9][0-9]*$"
+        },
+        "archive_filename": {
+          "type": "string",
+          "pattern": "^pliego-benchmark-v0\\.3\\.3-minimal-static-gh-run-[1-9][0-9]*-attempt-[1-9][0-9]*\\.tar\\.gz$"
+        },
+        "checksum_filename": {
+          "type": "string",
+          "pattern": "^pliego-benchmark-v0\\.3\\.3-minimal-static-gh-run-[1-9][0-9]*-attempt-[1-9][0-9]*\\.tar\\.gz\\.sha256$"
+        }
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repository",
+        "revision",
+        "ref",
+        "event_name",
+        "workflow",
+        "workflow_ref",
+        "job",
+        "run_id",
+        "run_attempt",
+        "run_url"
+      ],
+      "properties": {
+        "repository": { "type": "string", "pattern": "^[Oo]x[Hh][Qq]/pliego$" },
+        "revision": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "ref": { "const": "refs/heads/main" },
+        "event_name": { "const": "workflow_dispatch" },
+        "workflow": { "type": "string", "minLength": 1 },
+        "workflow_ref": {
+          "type": "string",
+          "pattern": "^[Oo]x[Hh][Qq]/pliego/\\.github/workflows/pliego-performance\\.yml@refs/heads/main$"
+        },
+        "job": { "type": "string", "minLength": 1 },
+        "run_id": { "type": "integer", "minimum": 1 },
+        "run_attempt": { "type": "integer", "minimum": 1 },
+        "run_url": {
+          "type": "string",
+          "pattern": "^https://github\\.com/[Oo]x[Hh][Qq]/pliego/actions/runs/[1-9][0-9]*/attempts/[1-9][0-9]*$"
+        }
+      }
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "version", "release_tag", "fixture", "runner_environment"],
+      "properties": {
+        "id": { "const": "pliego-0.3.3" },
+        "version": { "const": "0.3.3" },
+        "release_tag": { "const": "v0.3.3" },
+        "fixture": { "const": "minimal-static" },
+        "runner_environment": { "const": "github-hosted" }
+      }
+    },
+    "series": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "series_sha256"],
+      "properties": {
+        "path": { "const": "series" },
+        "series_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "repeat": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repeat",
+        "path",
+        "comparison_sha256",
+        "interleaved_artifact_sha256",
+        "schedule_sha256"
+      ],
+      "properties": {
+        "repeat": { "type": "integer", "minimum": 1, "maximum": 3 },
+        "path": { "type": "string", "pattern": "^repeats/repeat-[123]$" },
+        "comparison_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "interleaved_artifact_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "schedule_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "file": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "bytes", "sha256"],
+      "properties": {
+        "path": {
+          "type": "string",
+          "pattern": "^(series/(SHA256SUMS|all-repeats\\.md|hosted-series\\.v1\\.json)|repeats/repeat-[123]/(SHA256SUMS|all-metrics\\.md|hosted-comparison\\.v1\\.json|interleaved-run\\.v1\\.json|verified-release\\.json))$"
+        },
+        "bytes": { "type": "integer", "minimum": 1 },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    }
+  }
+}

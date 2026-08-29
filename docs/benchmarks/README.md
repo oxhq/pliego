@@ -14,8 +14,9 @@ competitor images are pinned. A separate manual workflow can produce measured,
 directional `github-hosted-exploratory` snapshots; those can never validate as a
 dedicated baseline or support a general production ranking. Every other
 competitor/fixture pair is an explicit `not-applicable` record with a reason. The
-repository contains **no committed performance snapshot yet**, so no comparative
-speed, memory, or CPU conclusion should be inferred from this document.
+repository now retains [one checksum-bound snapshot](results/v0.3.3-minimal-static-github-hosted/all-repeats.md)
+for the exact named run. Its timing and resource values are inspectable evidence
+for that run only, not a generalized speed, memory, or CPU conclusion.
 
 The detailed harness contract, fixture inventory, metric definitions, and target
 manifest live in the [benchmark source directory](../../benchmarks/README.md).
@@ -105,6 +106,38 @@ but not an authoritative or generalized benchmark. Three independent jobs are
 sealed into one no-selection series: all repeats, per-metric p50 ranges, and
 repeat-to-repeat spread are retained, so the published report cannot silently
 choose the most favorable VM.
+
+The final downloaded series artifact can be normalized into one durable,
+checksum-bound archive without changing the measurements:
+
+```sh
+python3 benchmarks/tools/package_hosted_evidence.py build \
+  path/to/downloaded-series-artifact \
+  --out path/to/evidence-assets
+
+python3 benchmarks/tools/package_hosted_evidence.py validate \
+  path/to/evidence-assets/pliego-benchmark-v0.3.3-minimal-static-gh-run-RUN_ID-attempt-ATTEMPT.tar.gz
+```
+
+The archive retains the complete series under `series/` and the three exact raw
+sources under `repeats/repeat-{1,2,3}/`. Its manifest binds the GitHub run,
+attempt, source revision, v0.3.3 target, fixture, evidence class, nested seals,
+and every file digest. Validation rejects unsafe archive entries and requires a
+byte-identical canonical rebuild. This packages evidence; it does not by itself
+publish a release or upgrade GitHub-hosted measurements into dedicated-host
+evidence.
+
+The public README cannot be filled from a copied Actions summary or by typing
+values into Markdown. A hosted series becomes public only after the complete
+three-repeat tree is packaged, validated, and attached to its canonical
+immutable benchmark release. The publication tool copies the exact sealed
+report from that archive and derives the compact README table from the same
+series. Before the draft is published, its `prepublish` gate binds the live
+Actions artifact ZIP, lightweight source tag, exact two draft assets, and
+non-latest release state. The public-surface workflow then verifies GitHub's
+immutable-release flag, rechecks that the benchmark is not Latest, downloads
+both release assets again, and checks byte-for-byte equality. See the [source benchmark protocol](../../benchmarks/README.md#public-snapshot-gate)
+for the exact gate and command.
 
 Each target's measured engine or PHP adapter gets a fresh private on-disk
 `TMPDIR` below the same ext4 scratch root. The workflow sets and verifies
@@ -245,7 +278,7 @@ not satisfy or weaken the authoritative gates above.
 
 | Target | Runner status | Eligible public claim today |
 | --- | --- | --- |
-| Pliego v0.3.3 API 2 | Implemented and pinned | Published bundle and correctness harness can be reproduced; no committed hosted snapshot yet |
+| Pliego v0.3.3 API 2 | Implemented and pinned | Published bundle, correctness harness, and one checksum-bound exact-run hosted snapshot; authoritative and generalized claims remain N/A |
 | Pliego candidate | Stable-outcome parity comparator only; arbitrary candidate performance runs are not implemented | Parity can be checked locally; no candidate performance claim |
 | dompdf 3.1.6 | Locked one-shot adapter; configured Ubuntu/Poppler smoke | Authoritative timing N/A pending image attestation and oracle pins; eligible only for exact-run hosted snapshots |
 | Browsershot 5.4.0 + Puppeteer 25.8.0 | Locked one-shot adapter; configured network-isolated Ubuntu/Poppler smoke | Authoritative timing N/A pending image attestation and oracle pins; eligible only for exact-run hosted snapshots |

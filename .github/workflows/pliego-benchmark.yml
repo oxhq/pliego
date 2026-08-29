@@ -44,6 +44,7 @@ jobs:
           python benchmarks/tools/test_comparison_metrics.py
           python benchmarks/tools/test_run_comparison.py
           python benchmarks/tools/test_summarize_comparisons.py
+          python benchmarks/tools/test_package_hosted_evidence.py
           python benchmarks/tools/test_resolve_release.py
           python benchmarks/tools/test_compare_parity.py
           python python/check_pliego_release_archive.py --self-test

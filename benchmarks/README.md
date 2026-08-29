@@ -30,6 +30,7 @@ benchmarks/
 │   ├── benchmark-interleaved-run.v1.json
 │   ├── benchmark-hosted-comparison.v1.json
 │   ├── benchmark-hosted-series.v1.json
+│   ├── benchmark-evidence-archive.v1.json
 │   ├── benchmark-report-data.v1.json
 │   └── benchmark-result.v1.json
 ├── fixtures/                  Seven frozen fixtures
@@ -51,6 +52,7 @@ benchmarks/
 │   ├── run_benchmark.py       Orchestrator: manifest → runner → aggregates → result file
 │   ├── run_comparison.py      GitHub-hosted three-target snapshot coordinator
 │   ├── summarize_comparisons.py Sealed three-repeat spread report
+│   ├── package_hosted_evidence.py Canonical durable series archive + validator
 │   ├── test_process_tree_sampler.py Fixture, live cgroup, bridge, and overhead proof
 │   ├── validate_interleaved_run.py Cross-target schedule/raw-sample validator
 │   └── validate_result.py     Stdlib-only JSON Schema check for result files
@@ -298,6 +300,150 @@ with per-metric p50 ranges and relative spread. Selected renderer runtimes,
 dependency-tree hashes, and the GitHub runner image identity are captured, but
 the runner is not a manifest-pinned OCI environment. That is one reason this
 evidence remains directional rather than an authoritative baseline.
+
+### Package the final hosted evidence
+
+After downloading the final `pliego-hosted-performance-series-*` artifact as one
+tree containing the series bundle and all three retained comparison bundles,
+build the two release-ready evidence assets with:
+
+```sh
+python3 benchmarks/tools/package_hosted_evidence.py build \
+  path/to/downloaded-series-artifact \
+  --out path/to/evidence-assets
+```
+
+For GitHub run `RUN_ID`, attempt `ATTEMPT`, the command emits exactly:
+
+```text
+pliego-benchmark-v0.3.3-minimal-static-gh-run-RUN_ID-attempt-ATTEMPT.tar.gz
+pliego-benchmark-v0.3.3-minimal-static-gh-run-RUN_ID-attempt-ATTEMPT.tar.gz.sha256
+```
+
+The intended non-latest tag is
+`benchmark-v0.3.3-minimal-static-gh-RUN_ID-aATTEMPT`. Inside the archive, one
+same-named root contains `evidence-manifest.v1.json`, `series/`, and
+`repeats/repeat-{1,2,3}/`. The manifest binds the exact source revision, GitHub
+run and attempt, Pliego v0.3.3, `minimal-static`, the GitHub-hosted evidence
+class, every nested evidence seal, and every retained file hash and size.
+
+Validate a downloaded pair without extracting it yourself:
+
+```sh
+python3 benchmarks/tools/package_hosted_evidence.py validate \
+  path/to/pliego-benchmark-v0.3.3-minimal-static-gh-run-RUN_ID-attempt-ATTEMPT.tar.gz
+```
+
+Validation rejects links, hardlinks, special files, path traversal, duplicate or
+case-colliding paths, unexpected entries, metadata drift, checksum/name/root
+drift, and any nested bundle failure. It also rebuilds the canonical USTAR +
+gzip stream and requires byte equality. Packaging is checksum-bound evidence;
+it does not publish a GitHub release or activate repository release immutability.
+
+### Public snapshot gate
+
+The temporary Actions artifact is not the public source. After the three-repeat
+tree passes its validators, `package_hosted_evidence.py` packages the complete
+series and all three raw repeat bundles into the canonical archive named by its
+evidence manifest. The release uses:
+
+```text
+benchmark-v0.3.3-minimal-static-gh-<run-id>-a<attempt>
+```
+
+and contains only the canonical `.tar.gz` asset and its `.sha256` companion.
+Create that release as a non-latest draft and upload those two assets. Before
+publishing, `prepublish` proves that the server-digested Actions ZIP derives the
+archive, the lightweight tag targets the measured revision, the draft contains
+exactly the two checksum-matching assets, and the benchmark is not the
+repository Latest release. Repository release immutability is enabled for new
+releases; after publication the public-surface gate requires GitHub to report
+`immutable: true`, rechecks the non-latest boundary, downloads both assets
+again, and verifies their bytes before the snapshot can be published.
+
+Only after those exact assets exist may the buyer-facing snapshot be staged:
+
+```bash
+set -euo pipefail
+repo=oxhq/pliego
+run_id=RUN_ID
+attempt=ATTEMPT
+source_revision=SOURCE_REVISION
+release_tag="benchmark-v0.3.3-minimal-static-gh-${run_id}-a${attempt}"
+artifact_name="pliego-hosted-performance-series-${source_revision}-${run_id}-${attempt}"
+archive="path/to/pliego-benchmark-v0.3.3-minimal-static-gh-run-${run_id}-attempt-${attempt}.tar.gz"
+checksum="${archive}.sha256"
+live="path/to/live-origin"
+mkdir "$live"
+
+api=(gh api --header 'Accept: application/vnd.github+json' \
+  --header 'X-GitHub-Api-Version: 2026-03-10')
+"${api[@]}" "repos/$repo/actions/runs/$run_id/attempts/$attempt" \
+  > "$live/run.json"
+"${api[@]}" --method GET "repos/$repo/actions/runs/$run_id/artifacts" \
+  -f "name=$artifact_name" -f per_page=100 > "$live/artifact.json"
+artifact_id=$(jq -er \
+  --arg name "$artifact_name" \
+  '.artifacts | map(select(.name == $name)) | select(length == 1) | .[0].id' \
+  "$live/artifact.json")
+"${api[@]}" "repos/$repo/actions/artifacts/$artifact_id/zip" \
+  > "$live/artifact.zip"
+"${api[@]}" --method POST "repos/$repo/git/refs" \
+  -f "ref=refs/tags/$release_tag" -f "sha=$source_revision" \
+  > "$live/tag-created.json"
+"${api[@]}" "repos/$repo/git/ref/tags/$release_tag" > "$live/tag.json"
+
+gh release create "$release_tag" "$archive" "$checksum" \
+  --repo "$repo" --draft --verify-tag --latest=false \
+  --title "Pliego v0.3.3 minimal-static hosted benchmark" \
+  --notes "GitHub-hosted exploratory evidence; not a production ranking."
+"${api[@]}" --paginate --slurp --method GET "repos/$repo/releases" \
+  -f per_page=100 > "$live/release-pages.json"
+draft_release_id=$(jq -er --arg tag "$release_tag" '
+  [.[][] | select(.tag_name == $tag and .draft == true)]
+  | select(length == 1) | .[0].id
+' "$live/release-pages.json")
+"${api[@]}" "repos/$repo/releases/$draft_release_id" \
+  > "$live/draft-release.json"
+"${api[@]}" "repos/$repo/releases/latest" > "$live/latest-release.json"
+
+python3 benchmarks/tools/public_hosted_benchmark.py prepublish \
+  "$archive" \
+  --checksum "$checksum" \
+  --run-metadata "$live/run.json" \
+  --artifact-metadata "$live/artifact.json" \
+  --artifact-zip "$live/artifact.zip" \
+  --tag-metadata "$live/tag.json" \
+  --draft-release-metadata "$live/draft-release.json" \
+  --latest-release-metadata "$live/latest-release.json"
+
+gh release edit "$release_tag" --repo "$repo" --draft=false --latest=false
+"${api[@]}" "repos/$repo/git/ref/tags/$release_tag" > "$live/tag.json"
+"${api[@]}" "repos/$repo/releases/tags/$release_tag" > "$live/release.json"
+"${api[@]}" "repos/$repo/releases/latest" > "$live/latest-release.json"
+
+python3 benchmarks/tools/public_hosted_benchmark.py stage \
+  "$archive" \
+  --checksum "$checksum" \
+  --run-metadata "$live/run.json" \
+  --artifact-metadata "$live/artifact.json" \
+  --artifact-zip "$live/artifact.zip" \
+  --tag-metadata "$live/tag.json" \
+  --release-metadata "$live/release.json" \
+  --latest-release-metadata "$live/latest-release.json"
+```
+
+The prepublish and staging commands do not accept numbers or prose. They run the
+archive validator and prove the exact Actions run attempt, exact-name artifact
+listing and ZIP, lightweight tag, non-latest state, and exact draft/final
+release assets before copying the archive's
+evidence manifest, sealed series, deterministic report, source-provenance
+receipt, and exact checksum into `docs/benchmarks/results/`. It then derives the
+compact README table from the sealed series. The public-surface check recomputes
+that table and report. Hosted CI also downloads the named release assets and
+requires byte-for-byte equality with the committed evidence view. Until that
+gate passes, the README must continue to say that no performance snapshot is
+committed.
 
 Subset with `--fixture invoice-showcase` or select PHP with
 `--php /usr/bin/php`. `--samples` and `--warmup` are accepted only when they

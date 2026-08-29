@@ -9,7 +9,7 @@ and available funding.
 This roadmap started from Pliego v0.1.1. The v0.2.x line established the controlled
 API 1 runtime for trusted, application-owned HTML. Pliego v0.3.0 then released the
 exact profile-null API 2 tuple while retaining API 1 as a temporary compatibility
-route. **v0.3.2 is the current recommended API 2 build**, and the active 0.3.x lane is
+route. **v0.3.3 is the current recommended API 2 build**, and the active 0.3.x lane is
 real-application adoption plus backwards-compatible compatibility work. GitHub
 Releases is authoritative for the latest exact version and publication status. The
 support and deployment boundary is documented in the
@@ -18,7 +18,7 @@ support and deployment boundary is documented in the
 API 2 uses a strict probe, request decoder, fixed cwd-v1 input closure, one-shot
 render, canonical result and bundle, and exact SDK tuple negotiation. It does not
 advertise a semantic or accessible-PDF profile.
-The repository now has the published Pliego v0.3.2 identity, version-locked dompdf
+The repository now has the published Pliego v0.3.3 identity, version-locked dompdf
 and Browsershot adapter graphs, and a shared correctness slice. Comparative
 performance results have not yet been published from the benchmark protocol.
 
@@ -49,7 +49,7 @@ the upstream engine.
 | **0.2.0 — Pliego-owned controlled document runtime (released)** | Make the default `render` command and supported SDK path use the Pliego-owned `DocumentSession` controlled transaction. The normal Pliego package graph has no `servoshell` dependency, fallback, or runtime entry. | Released with packaged controlled-time, generation-bound capture, fail-closed publication, and API 1 compatibility evidence. |
 | **0.2.x — compatible runtime and SDK fixes (released)** | Correct API 1 failure-evidence promotion and add the Laravel durable-storage handoff without inventing a new product milestone. | v0.2.1 and v0.2.2 shipped as backwards-compatible patches with focused package and consumer evidence. |
 | **0.3.0 — public API 2 base engine (released)** | Graduate the empty-contract executable foundation into one complete advertised profile-null tuple and make exact-tuple negotiation the preferred PHP/Laravel path. API 1 enters a documented deprecation period with a migration bridge. | Released with `--contract-probe`, canonical request/result transport, typed errors, artifact manifest, render identity, compatibility rules, goldens, package smoke tests, cross-platform conformance, deprecation behavior, and API 1 migration behavior. |
-| **0.3.x — API 2 adoption and compatibility (active; v0.3.2 recommended)** | Exercise API 2 in representative PHP/Laravel applications and ship only backwards-compatible packaging, platform, documentation, and SDK fixes. | Real applications cover install, doctor, render, durable storage/retrieval, typed failure, queues, concurrency, paths, permissions, containers, and binary updates across meaningfully different environments. |
+| **0.3.x — API 2 adoption and compatibility (active; v0.3.3 recommended)** | Exercise API 2 in representative PHP/Laravel applications and ship only backwards-compatible packaging, platform, documentation, and SDK fixes. | Real applications cover install, doctor, render, durable storage/retrieval, typed failure, queues, concurrency, paths, permissions, containers, and binary updates across meaningfully different environments. |
 | **0.4.0 — semantic document layer and one accessible profile** | Make a canonical semantic `DocumentScene` the source of one precisely named tagged/accessible-PDF profile and its diagnostics. This is not a blanket claim of “PDF/UA support.” | OXH-339 selects the exact profile and validator versions; OXH-346 freezes its semantic/evidence contract; structure, language, alternate text, reading order, provenance, pagination, authoring diagnostics, validator output, failure policy, fixtures, and retained evidence are independently reproducible from the advertised API 2 tuple. |
 | **0.5.0 — hardened operational support boundary** | Make Pliego deployable and maintainable without project-author involvement: documented limits, supply-chain evidence, support diagnostics, repeated Servo synchronization, and correctness-first comparative reports. | The reviewed threat model, deployment/resource limits, signed and verifiable release assets, SBOM/notices/provenance, support bundle, security policy, repeated upstream-sync reports, packaged consumer, conformance matrix, and internal/dompdf/Browsershot reports are public and reproducible against exact tagged binaries. |
 | **1.0.0 — stable supported contract** | Freeze only the runtime, protocol, semantic profile, SDK, compatibility, security-reporting, and maintenance commitments that real consumers and repeated releases have shown the project can preserve. | Every 1.0 gate below passes on immutable artifacts; API 2 and the semantic profile have representative external use; installation and updates are routine; multiple Servo syncs have completed; and no known required contract change remains. An unmet gate keeps Pliego on 0.x. |
@@ -160,7 +160,10 @@ contract freeze with the semantic/accessibility architecture.
 
 Status: released. [v0.3.0](docs/releases/v0.3.0.md) introduced API 2,
 [v0.3.1](docs/releases/v0.3.1.md) corrected the Linux headless stderr boundary, and
-[v0.3.2](docs/releases/v0.3.2.md) corrected Windows private-job creation. The
+[v0.3.2](docs/releases/v0.3.2.md) corrected Windows private-job creation.
+[v0.3.3](docs/releases/v0.3.3.md) durably flushes the staged API 2 resource,
+delivery, and diagnostics directories before promotion while leaving the advertised
+tuple, schemas, and rendering profile unchanged. The
 [0.3 launch overview](docs/releases/v0.3.md) records the product-level outcome.
 
 Released evidence includes:
@@ -201,9 +204,12 @@ The active evidence target is:
   queues, and concurrent renders are exercised without fixture-only assumptions; and
 - compatible findings ship as 0.3.x patches with packaged and clean-consumer proof.
 
-The existing public-only Laravel consumer proves one Windows install/doctor/render/
-store/read-stream/typed-failure path. It is release evidence, not three-application
-adoption evidence.
+A fresh public-only Windows Laravel 13 consumer now proves the v0.3.3
+install/doctor/API 2 render/store/read-stream/typed-failure path in 53 focused
+assertions. The installed PHP and Laravel packages resolve to their published v0.3.3
+GitHub dist references, and the native runtime reports the published v0.3.3 source
+commit. This remains one release-consumer path, not three-application adoption
+evidence; the earlier v0.3.2 run remains useful historical proof.
 
 ### 5. Continuous engineering and comparative evidence
 

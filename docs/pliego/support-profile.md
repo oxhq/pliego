@@ -154,7 +154,7 @@ allow the font origin. API 2 has no network opt-in.
 | Cross-page rowspan continuation | Rejected | Pliego does not split or synthesize spanning cells across pages. |
 | Solid CSS paint | Supported | Resolved sRGB text colors, solid root and element backgrounds, and uniform-color sharp axis-aligned ordinary borders retain paint order. Collapsed-table behavior has the narrower API 2 boundary below. |
 | Complex CSS paint | Explicitly unsupported | CSS gradients and background-image layers, box and text shadows, text decorations, border radii and rounded clips, mixed-color or non-solid borders, border images, negative paint origins, transforms, clips and `clip-path`, opacity, filters, and blend modes are reported instead of approximated. |
-| Table borders | Partial | Uniform-color sharp ordinary solid borders are verified. The v0.3.2 API 2 publication path fails closed when capture reports an unsupported `collapsed-table-borders` event; use separated borders for advertised API 2 documents. Non-uniform, mixed-color or non-solid styles, border images, rounded borders, transforms, clips, and unsupported writing modes remain outside the verified contract. |
+| Table borders | Partial | Uniform-color sharp ordinary solid borders are verified. The v0.3.3 API 2 publication path fails closed when capture reports an unsupported `collapsed-table-borders` event; use separated borders for advertised API 2 documents. Non-uniform, mixed-color or non-solid styles, border images, rounded borders, transforms, clips, and unsupported writing modes remain outside the verified contract. |
 | Local TTF, OTF, WOFF, and WOFF2 | Supported | Declared fonts are embedded or subset with Unicode mappings; missing fonts do not silently fall back to the host. |
 | Fonts without embedding rights | Rejected | The application must supply an authorized face. |
 | Materialized CSS, images, and fonts | Supported | API 2 callers place every authorized byte in the input manifest and identify it by content hash. |
@@ -165,9 +165,9 @@ allow the font origin. API 2 has no network opt-in.
 | Variable-font axes | Partial | Use an authorized static instance when an axis combination is not covered. |
 | JavaScript readiness | Supported within profile | Static documents are zero-config: Pliego infers readiness after page load and waits for `document.fonts.ready`. Pages that continue asynchronous work after load call `window.pliego.defer()` before that work, then `ready()` or `fail()`. |
 | Selectable text | Supported | Embedded or subset fonts retain Unicode mappings inside the verified fixture boundary. |
-| PDF link annotations | Not advertised in v0.3.2 API 2 | A link operation without exact fixed-point authority fails closed with `SCENE_ENCODING_FAILED`; no PDF is delivered. |
+| PDF link annotations | Not advertised in v0.3.3 API 2 | A link operation without exact fixed-point authority fails closed with `SCENE_ENCODING_FAILED`; no PDF is delivered. |
 | Canvas | Partial | Retained Canvas 2D operations and bounded raster patches are covered. A synchronous full-canvas pixel readback can become the authoritative result; other Canvas APIs are not implied. |
-| Chart.js 4.5.1 | Retained controlled-capture fixture; not advertised for v0.3.2 API 2 | The controlled-capture fixture uses fixed dimensions, disables animations and events, and performs a full-canvas readback. It has not passed the narrower v0.3.2 exact API 2 scene-encoding gate, so it is not a current API 2 product claim. |
+| Chart.js 4.5.1 | Retained controlled-capture fixture; not advertised for v0.3.3 API 2 | The controlled-capture fixture uses fixed dimensions, disables animations and events, and performs a full-canvas readback. It has not passed the narrower v0.3.3 exact API 2 scene-encoding gate, so it is not a current API 2 product claim. |
 | SVG and complex scripts | Partial | Only behavior covered by focused fixtures is included. |
 
 Partial scene capture is a failure in the default CLI and SDK paths, and the
@@ -188,7 +188,7 @@ that work, call `window.pliego.ready()` only after the final DOM or canvas chang
 and call `window.pliego.fail(error)` when the work cannot produce the document.
 
 For the retained API 1 controlled-capture Chart.js fixture—not an advertised
-v0.3.2 API 2 product path—the page performs a synchronous readback of the entire
+v0.3.3 API 2 product path—the page performs a synchronous readback of the entire
 canvas after `chart.update('none')`. The retained RGBA pixels replace the preceding
 Canvas command stream as the authoritative final canvas. The covered sequence ends
 at that readback; later drawing is outside this API 1 Chart.js proof.
