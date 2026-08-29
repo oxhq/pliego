@@ -205,7 +205,6 @@ def main() -> None:
         "memory_current_bytes",
         "memory_peak_bytes",
         "sampled_peak_rss_kib_lower_bound",
-        "sampled_peak_pss_kib_lower_bound",
         "read_bytes",
         "write_bytes",
         "read_operations",
@@ -270,13 +269,14 @@ def main() -> None:
         "partial-null metric 'cpu_system_ms'",
     )
 
-    all_null = deepcopy(artifact)
-    for record in all_null["raw_samples"]:
-        if record["target_id"] == "alpha":
-            record["sample"]["sampled_peak_pss_kib_lower_bound"] = None
-    reseal(all_null)
-    all_null_aggregate = comparison_metrics.aggregate_interleaved_artifact(all_null)
-    assert "sampled_peak_pss_kib_lower_bound" not in all_null_aggregate["targets"][0]["metrics"]
+    partial_pss = deepcopy(artifact)
+    alpha_pss = [record for record in partial_pss["raw_samples"] if record["target_id"] == "alpha"]
+    assert len(alpha_pss) == 100
+    for record in alpha_pss[1:]:
+        record["sample"]["sampled_peak_pss_kib_lower_bound"] = None
+    reseal(partial_pss)
+    partial_pss_aggregate = comparison_metrics.aggregate_interleaved_artifact(partial_pss)
+    assert "sampled_peak_pss_kib_lower_bound" not in partial_pss_aggregate["targets"][0]["metrics"]
 
     partial_dynamic_timing = deepcopy(artifact)
     dynamic_sample = next(record for record in partial_dynamic_timing["raw_samples"] if record["target_id"] == "alpha")[

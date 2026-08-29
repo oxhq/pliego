@@ -666,6 +666,8 @@ def render_markdown(data: dict[str, Any]) -> str:
         f"{data['protocol']['sample_count']} timed cold-process samples per renderer, seed {data['protocol']['seed']}",
         "- Input: identical local `minimal-static` fixture; network namespace contains loopback only for every renderer",
         "- Percentiles: nearest-rank; p99 is backed by 100 timed samples per renderer",
+        "- Memory diagnostics: cgroup `memory.peak` covers every sample; sampled RSS is an aggregated lower bound; "
+        "cadence-dependent PSS remains raw-only and is excluded from comparative aggregates",
         f"- Raw artifact: `{data['interleaved_artifact']['artifact_sha256']}`",
         "",
         "## Latency, CPU, and memory",

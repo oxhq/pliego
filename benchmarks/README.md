@@ -266,12 +266,19 @@ maximum of the old 50-sample short-document population.
 Every target, including Pliego and dompdf, runs in a fresh private network
 namespace containing only loopback. The workflow provisions the existing root
 cgroup-v2 broker and retains exact descendant CPU, `memory.peak`, block-device
-`io.stat`, sampled RSS/PSS lower bounds, engine wall time, sampler-lifecycle
-one-shot wall time, output size,
+`io.stat`, sampled RSS lower bounds, raw cadence-dependent PSS observations,
+engine wall time, sampler-lifecycle one-shot wall time, output size,
 correctness, and PDF-hash variation. It also records the GitHub run and runner
 image, host and pressure snapshots, verified Pliego release metadata, Poppler
 paths/versions/hashes, adapter/runtime paths/versions/hashes, the complete raw
 schedule, and every sample ID.
+
+PSS remains a raw diagnostic rather than a comparative aggregate. Its 250 ms
+sampling cadence can miss a renderer that exits before the first observation,
+so including it would make metric availability depend on VM speed and could
+compute percentiles from a changing subset. The complete comparative memory
+population uses exact cgroup `memory.peak`; sampled RSS remains an explicitly
+lower-bound diagnostic for every timed sample.
 
 Each repeat directory contains `interleaved-run.v1.json`,
 `hosted-comparison.v1.json`, `all-metrics.md`, `verified-release.json`, and
@@ -279,9 +286,9 @@ Each repeat directory contains `interleaved-run.v1.json`,
 set, verifies the release metadata, checksums, and deterministic Markdown, then
 recomputes the schedule, sample hashes, comparison digest, and every aggregate
 from the raw samples. It rejects fewer than 100 samples, correctness failures,
-partial-null metrics, host-network access, cgroup counter inconsistencies,
-renderer identity changes, non-cgroup accounting, or any attempt to mark the
-host as dedicated.
+partial-null comparative metrics, host-network access, cgroup counter
+inconsistencies, renderer identity changes, non-cgroup accounting, or any
+attempt to mark the host as dedicated.
 
 After all three jobs finish, `summarize_comparisons.py` requires repeats 1, 2,
 and 3 from the same workflow run, revision, runner image, fixture, protocol,
@@ -429,7 +436,9 @@ CPU/block-I/O/memory counters before exec.
 
 Periodic `/proc` PID/start-time, summed RSS, and summed PSS observations are
 retained only as sampled lower-bound diagnostics; short-lived processes may be
-missed there without weakening cgroup accounting. As root, with
+missed there without weakening cgroup accounting. PSS is deliberately excluded
+from comparative aggregates because its slower cadence does not cover every
+timed process. As root, with
 `PLIEGO_BENCHMARK_CGROUP_PARENT` exported, run
 `/usr/bin/python3 benchmarks/tools/test_process_tree_sampler.py --live --php-integration`
 inside the delegated `harness` child for the containment, cleanup, counter, and
@@ -465,11 +474,14 @@ throughput, per-page wall time, PDF and artifact bytes, page count, page
 dimensions, required text, link targets, capture status, PDF hash variation,
 and typed failure publication state.
 CPU, cgroup memory, and cgroup block-device I/O from `io.stat` are exact retained
-counters. The I/O counters exclude memory-backed stdout/stderr for every target and the disclosed
-Browsershot-only Node/Chromium tmpfs `TMPDIR`; those pages remain cgroup-memory
-accounted. Sampled summed
-RSS/PSS are explicitly lower bounds. Runtime archive size and deeper document
-checks remain separate audited increments before a signed baseline is published.
+counters. The I/O counters exclude memory-backed stdout/stderr for every target
+and the disclosed Browsershot-only Node/Chromium tmpfs `TMPDIR`; those pages
+remain cgroup-memory accounted. In the hosted comparison, sampled summed RSS is
+an explicitly lower-bound comparative metric while PSS observations remain
+available only in the raw diagnostics. The canonical single-target benchmark
+may retain PSS aggregates when every passing sample has an observation. Runtime
+archive size and deeper document checks remain separate audited increments
+before a signed baseline is published.
 
 ## Fixtures and correctness gates
 

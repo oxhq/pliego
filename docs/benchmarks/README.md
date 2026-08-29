@@ -232,12 +232,14 @@ and retains the contributing sample IDs. Both artifacts remain explicitly
 publish comparative claims.
 
 The hosted lane instead uses `comparison_metrics.py` and `run_comparison.py` to
-aggregate every top-level performance/output metric plus available phase and
-bridge timings from 100 correctness-passing samples per target. Lower-level
-cgroup diagnostics remain in the raw samples. The lane binds those values to
-exact runtime and sample identities and seals three complete repeats without
-selecting a winner. That is real measurement for the named GitHub-hosted run,
-but it does not satisfy or weaken the authoritative gates above.
+aggregate every registered comparative performance/output metric plus available
+phase and bridge timings from 100 correctness-passing samples per target.
+Lower-level cgroup diagnostics and cadence-dependent PSS observations remain in
+the raw samples; PSS is not a comparative aggregate because its sampling cadence
+can miss short-lived processes. The lane binds the comparative values to exact
+runtime and sample identities and seals three complete repeats without selecting
+a winner. That is real measurement for the named GitHub-hosted run, but it does
+not satisfy or weaken the authoritative gates above.
 
 ## Implemented slice and remaining comparative protocol
 
