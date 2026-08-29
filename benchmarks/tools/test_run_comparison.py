@@ -350,7 +350,8 @@ def main() -> None:
     assert "github-hosted-exploratory" in markdown
     assert "Wall p99" in markdown
     assert "Full aggregate table" in markdown
-    assert "`sampled_peak_pss_kib_lower_bound`" in markdown
+    assert "cadence-dependent PSS remains raw-only" in markdown
+    assert "`sampled_peak_pss_kib_lower_bound`" not in markdown
     assert "memory-backed stdout/stderr capture is excluded for all targets" in markdown
     assert "Browsershot's disclosed protected Node/Chrome tmpfs `TMPDIR`" in markdown
     assert "profile/XDG state, artifacts, and PDF remain on measured ext4" in markdown

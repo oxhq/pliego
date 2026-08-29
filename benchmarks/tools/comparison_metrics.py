@@ -35,6 +35,9 @@ class MetricDefinition:
     components: tuple[str, ...] = ()
 
 
+RAW_ONLY_COMPARATIVE_METRICS = frozenset({"sampled_peak_pss_kib_lower_bound"})
+
+
 METRIC_REGISTRY = (
     MetricDefinition("wall_ms", "ms", ("wall_ms",)),
     MetricDefinition("one_shot_wall_ms", "ms", ("one_shot_wall_ms",)),
@@ -48,11 +51,10 @@ METRIC_REGISTRY = (
         "KiB",
         ("sampled_peak_rss_kib_lower_bound",),
     ),
-    MetricDefinition(
-        "sampled_peak_pss_kib_lower_bound",
-        "KiB",
-        ("sampled_peak_pss_kib_lower_bound",),
-    ),
+    # RAW_ONLY_COMPARATIVE_METRICS fields and cadence observations remain in
+    # the raw samples. Their slower cadence can miss short processes, so
+    # aggregating only the observed subset would make availability and
+    # percentiles depend on runner speed.
     MetricDefinition("read_bytes", "bytes", ("read_bytes",)),
     MetricDefinition("write_bytes", "bytes", ("write_bytes",)),
     MetricDefinition("read_operations", "operations", ("read_operations",)),

@@ -47,6 +47,7 @@ CLAIM_BOUNDARY = (
 )
 
 sys.path.insert(0, str(TOOLS))
+import comparison_metrics  # noqa: E402
 import run_benchmark  # noqa: E402
 import run_comparison  # noqa: E402
 import validate_result  # noqa: E402
@@ -318,6 +319,13 @@ def validate_series(data: Any) -> list[validate_result.Violation]:
     run_comparison.validate_target_identities(data["targets"], violations)
     for target_index, target in enumerate(data["summary"]["targets"]):
         for metric_name, metric in target["metrics"].items():
+            if metric_name in comparison_metrics.RAW_ONLY_COMPARATIVE_METRICS:
+                violations.append(
+                    validate_result.Violation(
+                        f"$.summary.targets[{target_index}].metrics.{metric_name}",
+                        "must remain raw-only and cannot appear in comparative aggregates",
+                    )
+                )
             _validate_spread(f"$.summary.targets[{target_index}].metrics.{metric_name}", metric, "p50", violations)
         _validate_spread(
             f"$.summary.targets[{target_index}].serial_throughput",
@@ -399,6 +407,7 @@ def render_markdown(data: dict[str, Any]) -> str:
             "## Per-run p50s and between-run spread",
             "",
             "For `read_bytes` and `write_bytes`, values come from cgroup `io.stat`. Memory-backed stdout/stderr capture is excluded for every target. Browsershot's private tmpfs Node/Chrome `TMPDIR` is also excluded from block I/O but remains charged to cgroup memory; its PHP `TMPDIR`, HOME/XDG roots, explicit Chromium profile, artifacts, and PDF stay on the measured ext4 storage.",
+            "Cgroup `memory.peak` covers every timed sample and sampled RSS is retained as an aggregated lower bound. Cadence-dependent PSS observations remain in each raw repeat artifact only and are excluded from comparative aggregates because short-lived processes may exit before the first PSS sample.",
             "",
             "| Renderer | Metric | Unit | Repeat 1 p50 | Repeat 2 p50 | Repeat 3 p50 | Min | Max | Mean | Relative spread |",
             "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",

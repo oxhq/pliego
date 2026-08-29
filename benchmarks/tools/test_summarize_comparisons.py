@@ -25,11 +25,28 @@ from test_run_comparison import artifact, comparison, reseal, write_bundle
 SCRIPT = Path(__file__).with_name("summarize_comparisons.py")
 
 
+def clear_sample_pss(sample: dict[str, Any]) -> None:
+    sample["sampled_peak_pss_kib_lower_bound"] = None
+    diagnostics = sample["resource_usage"]["sampled_diagnostics"]
+    diagnostics["sampled_peak_summed_pss_kib_lower_bound"] = None
+    for raw_sample in diagnostics["samples"]:
+        raw_sample["sampled_summed_pss_kib_lower_bound"] = None
+        for process in raw_sample["processes"]:
+            process["pss_kib"] = None
+
+
 def artifact_for_repeat(repeat: int) -> dict[str, Any]:
     source = artifact()
     offset = float((repeat - 1) * 10)
     for record in source["raw_samples"]:
         record["sample"]["one_shot_wall_ms"] += offset
+    dompdf = [record for record in source["raw_samples"] if record["target_id"] == "dompdf-3.1.6"]
+    if repeat == 2:
+        for record in dompdf:
+            clear_sample_pss(record["sample"])
+    elif repeat == 3:
+        for record in dompdf[1:]:
+            clear_sample_pss(record["sample"])
     reseal(source)
     return source
 
@@ -107,6 +124,13 @@ def main() -> None:
             run.artifact["artifact_sha256"] for run in runs
         ]
         assert len({run["interleaved_artifact_sha256"] for run in series["runs"]}) == 3
+        for run in runs:
+            dompdf = next(
+                target for target in run.comparison["aggregates"]["targets"] if target["target_id"] == "dompdf-3.1.6"
+            )
+            assert "sampled_peak_pss_kib_lower_bound" not in dompdf["metrics"]
+        for target in series["summary"]["targets"]:
+            assert "sampled_peak_pss_kib_lower_bound" not in target["metrics"]
         for retained, source_run in zip(series["runs"], runs, strict=True):
             assert retained["runner"] == source_run.comparison["runner"]
             assert retained["host"] == source_run.comparison["host"]
@@ -135,6 +159,9 @@ def main() -> None:
             "its PHP `TMPDIR`, HOME/XDG roots, explicit Chromium profile, artifacts, and PDF stay on the measured ext4 storage"
             in markdown
         )
+        assert "Cadence-dependent PSS observations remain in each raw repeat artifact only" in markdown
+        assert "short-lived processes may exit before the first PSS sample" in markdown
+        assert "`sampled_peak_pss_kib_lower_bound`" not in markdown
         for run in series["runs"]:
             assert run["comparison_sha256"] in markdown
             assert run["interleaved_artifact_sha256"] in markdown
@@ -224,6 +251,16 @@ def main() -> None:
         wrong_derived_value["series_sha256"] = summarize_comparisons.series_sha256(wrong_derived_value)
         errors = "\n".join(map(str, summarize_comparisons.validate_series(wrong_derived_value)))
         assert ".mean" in errors
+
+        raw_only_metric = deepcopy(series)
+        for target in raw_only_metric["summary"]["targets"]:
+            pss_metric = deepcopy(target["metrics"]["wall_ms"])
+            pss_metric["unit"] = "KiB"
+            target["metrics"]["sampled_peak_pss_kib_lower_bound"] = pss_metric
+        raw_only_metric["series_sha256"] = summarize_comparisons.series_sha256(raw_only_metric)
+        errors = "\n".join(map(str, summarize_comparisons.validate_series(raw_only_metric)))
+        assert "sampled_peak_pss_kib_lower_bound" in errors
+        assert "must remain raw-only" in errors
 
         source_unbound = deepcopy(series)
         metric = source_unbound["summary"]["targets"][0]["metrics"]["wall_ms"]
