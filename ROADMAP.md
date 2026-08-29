@@ -204,10 +204,12 @@ The active evidence target is:
   queues, and concurrent renders are exercised without fixture-only assumptions; and
 - compatible findings ship as 0.3.x patches with packaged and clean-consumer proof.
 
-The existing public-only Laravel consumer proves one Windows install/doctor/render/
-store/read-stream/typed-failure path. It is release evidence, not three-application
-adoption evidence. That retained run used v0.3.2; a fresh public-only v0.3.3 consumer
-run remains pending, so its result is not yet claimed here.
+A fresh public-only Windows Laravel 13 consumer now proves the v0.3.3
+install/doctor/API 2 render/store/read-stream/typed-failure path in 53 focused
+assertions. The installed PHP and Laravel packages resolve to their published v0.3.3
+GitHub dist references, and the native runtime reports the published v0.3.3 source
+commit. This remains one release-consumer path, not three-application adoption
+evidence; the earlier v0.3.2 run remains useful historical proof.
 
 ### 5. Continuous engineering and comparative evidence
 

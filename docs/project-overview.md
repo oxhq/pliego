@@ -75,10 +75,10 @@ records the public boundary.
   v0.3.3 API 2 scene-encoding gate and are not current product claims.
 - The Laravel package exposes installation, environment diagnosis, rendering, typed
   failures, and retained artifacts for the supported path.
-- A clean public-only Laravel consumer has exercised install, doctor, render,
-  durable storage, stream retrieval, and typed failure against v0.3.2. A fresh
-  public-only v0.3.3 consumer run remains pending, so that proof has not yet been
-  extended to the current recommendation.
+- A fresh public-only Windows Laravel 13 consumer has exercised install, doctor,
+  API 2 render, durable storage, stream retrieval, and typed failure against the
+  exact published v0.3.3 PHP, Laravel, and native revisions. Its focused test passed
+  53 assertions; it remains one release-consumer path rather than adoption evidence.
 
 These are implementation and release-mechanism claims. They are not evidence of
 market adoption, arbitrary-page compatibility, hostile-input isolation, or

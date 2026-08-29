@@ -158,10 +158,14 @@ def verify_current_copy(published_benchmark: bool) -> None:
         "(`immutable: false`)",
     ):
         require(needle in patch_release, f"v0.3.3 notes omit exact release evidence: {needle!r}")
-    require(
-        "fresh public-only v0.3.3 Laravel consumer proof remains\npending" in launch,
-        "launch overview overstates v0.3.3 public-consumer proof",
-    )
+    for needle in (
+        "fresh public-only Windows Laravel 13.29.0 consumer",
+        "passed 53 focused assertions",
+        "9115be57f785d08d1f4b13b7d70ff30bd4d9d052c1c96cc97065d78fcf291ec3",
+        "RESOURCE_DENIED",
+        "not representative adoption",
+    ):
+        require(needle in launch, f"launch overview omits scoped v0.3.3 consumer evidence: {needle!r}")
 
 
 def verified_manifest_path(relative: str) -> Path:
