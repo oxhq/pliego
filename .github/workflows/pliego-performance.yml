@@ -70,7 +70,8 @@ jobs:
           sudo cp -aL "$chrome_root/." "$runtime_root/chrome/"
           sudo chown -R root:root "$runtime_root/chrome"
           sudo chmod -R go-w "$runtime_root/chrome"
-          test -z "$(sudo find "$runtime_root/chrome" -type l -print -quit)"
+          chrome_symlink="$(sudo find "$runtime_root/chrome" -type l -print -quit)"
+          test -z "$chrome_symlink"
           printf 'binary=%s\nnode=%s\nchrome=%s\n' \
             "$runtime_root/pliego" "$runtime_root/node" \
             "$runtime_root/chrome/$(basename "$chrome")" >> "$GITHUB_OUTPUT"
@@ -132,7 +133,8 @@ jobs:
           "${engine_test[@]}" ! -w /usr/lib
           "${engine_test[@]}" -x /usr/lib/pliego-benchmark
           "${engine_test[@]}" ! -w /usr/lib/pliego-benchmark
-          test -z "$("${engine_find[@]}" /usr/lib/pliego-benchmark/chrome -writable -print -quit)"
+          writable_chrome="$("${engine_find[@]}" /usr/lib/pliego-benchmark/chrome -writable -print -quit)"
+          test -z "$writable_chrome"
           (cd / && "${engine_test[@]}" -r "$GITHUB_WORKSPACE/benchmarks/fixtures/minimal-static/comparator.html")
           (cd / && "${engine_test[@]}" ! -w "$GITHUB_WORKSPACE/benchmarks/fixtures/minimal-static/comparator.html")
           (cd / && "${engine_test[@]}" -r "$GITHUB_WORKSPACE/benchmarks/fixtures/minimal-static/Ahem.ttf")

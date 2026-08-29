@@ -93,7 +93,8 @@ jobs:
           sudo cp -aL "$chrome_root/." "$runtime_root/chrome/"
           sudo chown -R root:root "$runtime_root/chrome"
           sudo chmod -R go-w "$runtime_root/chrome"
-          test -z "$(sudo find "$runtime_root/chrome" -type l -print -quit)"
+          chrome_symlink="$(sudo find "$runtime_root/chrome" -type l -print -quit)"
+          test -z "$chrome_symlink"
           printf 'binary=%s\nnode=%s\nchrome=%s\n' \
             "$runtime_root/pliego" "$runtime_root/node" \
             "$runtime_root/chrome/$(basename "$chrome")" >> "$GITHUB_OUTPUT"
@@ -326,7 +327,8 @@ jobs:
                 ip link set lo up
                 test "$(ip -o link show | wc -l)" -eq 1
                 ip link show lo > /dev/null
-                test -z "$(ip route show)"
+                routes="$(ip route show)"
+                test -z "$routes"
                 uid="$1"
                 gid="$2"
                 shift 2
