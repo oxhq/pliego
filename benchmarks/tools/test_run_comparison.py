@@ -140,6 +140,35 @@ def measured_sample(target_id: str, index: int) -> dict[str, Any]:
             },
         }
         temporary_storage["runtime_path_bindings"] = {"pre": snapshot, "post": deepcopy(snapshot)}
+        tmpfs_snapshot = {
+            "root": deepcopy(usage["launch_security"]["output_capture"]["pre"]["root"]),
+            "container": {
+                "path": f"/dev/shm/pliego-bench-shm-{index + 1:032x}",
+                "identity": {"device": 2, "inode": index * 10 + 100},
+                "owner_uid": 0,
+                "owner_gid": 0,
+                "mode": 0o711,
+                "link_count": 3,
+            },
+            "directory": {
+                "path": f"/dev/shm/pliego-bench-shm-{index + 1:032x}/tmp",
+                "identity": {"device": 2, "inode": index * 10 + 101},
+                "owner_uid": usage["launch_security"]["uid"],
+                "owner_gid": usage["launch_security"]["gid"],
+                "mode": 0o700,
+                "link_count": 2,
+            },
+            "container_entries": ["tmp"],
+            "directory_entries": [],
+        }
+        temporary_storage["browser_shared_memory"] = {
+            "contract": "bound-private-tmpfs-browser-shared-memory-v1",
+            "filesystem": "tmpfs",
+            "semantics": "puppeteer-node-chrome-temporary-storage-v1",
+            "pre": tmpfs_snapshot,
+            "post": deepcopy(tmpfs_snapshot),
+        }
+        usage["launch_security"]["launch_context"]["browser_tmpdir"] = tmpfs_snapshot["directory"]["path"]
     sample.update(
         {
             "measurement_method": "linux-cgroup-v2-v1",
@@ -322,10 +351,9 @@ def main() -> None:
     assert "Wall p99" in markdown
     assert "Full aggregate table" in markdown
     assert "`sampled_peak_pss_kib_lower_bound`" in markdown
-    assert (
-        "`read_bytes` and `write_bytes` come from cgroup `io.stat`; memory-backed stdout/stderr capture is excluded."
-        in markdown
-    )
+    assert "memory-backed stdout/stderr capture is excluded for all targets" in markdown
+    assert "Browsershot's disclosed protected Node/Chrome tmpfs `TMPDIR`" in markdown
+    assert "profile/XDG state, artifacts, and PDF remain on measured ext4" in markdown
     assert "not dedicated-host production claims" in markdown
 
     changed_claim = deepcopy(data)

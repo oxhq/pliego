@@ -12,6 +12,10 @@ const PACKAGE_VERSION = '5.4.0';
 const PUPPETEER_VERSION = '25.8.0';
 const BLOCKED_NETWORK_URL_SUBSTRINGS = ['http://', 'https://'];
 const PRIVATE_BROWSER_PROFILE = 'chrome-profile';
+const BROWSER_SHARED_MEMORY_ENV = 'PLIEGO_BENCHMARK_BROWSER_TMPDIR';
+const BROWSER_SHARED_MEMORY_ROOT = '/dev/shm';
+const BROWSER_SHARED_MEMORY_CONTAINER_PREFIX = 'pliego-bench-shm-';
+const BROWSER_SHARED_MEMORY_DIRECTORY = 'tmp';
 const PRIVATE_RUNTIME_DIRECTORIES = [
     'HOME' => 'home',
     'XDG_CACHE_HOME' => 'xdg-cache',
@@ -317,6 +321,135 @@ function private_runtime_root(?callable $environment = null): ?string
     return $root;
 }
 
+function is_browser_shared_memory_path(string $path, string $root = BROWSER_SHARED_MEMORY_ROOT): bool
+{
+    $prefix = $root . '/' . BROWSER_SHARED_MEMORY_CONTAINER_PREFIX;
+    $suffix = '/' . BROWSER_SHARED_MEMORY_DIRECTORY;
+    if (!str_starts_with($path, $prefix) || !str_ends_with($path, $suffix)) {
+        return false;
+    }
+    $nonce = substr($path, strlen($prefix), -strlen($suffix));
+    return preg_match('/^[0-9a-f]{32}$/D', $nonce) === 1;
+}
+
+/** @param null|callable(string): iterable<mixed> $entries */
+function validate_browser_shared_memory_topology(
+    string $container,
+    string $directory,
+    ?callable $entries = null
+): void {
+    $entries ??= static fn (string $path): FilesystemIterator => new FilesystemIterator(
+        $path,
+        FilesystemIterator::SKIP_DOTS
+    );
+    $failure = 'browser shared-memory hierarchy must contain only one empty bound directory';
+    try {
+        $containerEntrySeen = false;
+        foreach ($entries($container) as $entry) {
+            $name = $entry instanceof SplFileInfo ? $entry->getFilename() : (string) $entry;
+            if ($containerEntrySeen || $name !== BROWSER_SHARED_MEMORY_DIRECTORY) {
+                throw new RuntimeException($failure);
+            }
+            $containerEntrySeen = true;
+        }
+        if (!$containerEntrySeen) {
+            throw new RuntimeException($failure);
+        }
+        foreach ($entries($directory) as $_entry) {
+            // Fail on the first entry; never materialize an attacker-sized list.
+            throw new RuntimeException($failure);
+        }
+    } catch (RuntimeException $error) {
+        if ($error->getMessage() === $failure) {
+            throw $error;
+        }
+        throw new RuntimeException('cannot enumerate the browser shared-memory hierarchy', 0, $error);
+    }
+}
+
+function validate_browser_shared_memory_directory(
+    string $configured,
+    int $engineUid,
+    int $engineGid,
+    string $rootPath = BROWSER_SHARED_MEMORY_ROOT,
+    int $brokerUid = 0,
+    int $brokerGid = 0
+): string {
+    $containerValue = dirname($configured);
+    clearstatcache(true, $rootPath);
+    clearstatcache(true, $containerValue);
+    clearstatcache(true, $configured);
+    $root = realpath($rootPath);
+    $container = realpath($containerValue);
+    $directory = realpath($configured);
+    $rootMetadata = @lstat($rootPath);
+    $containerMetadata = @lstat($containerValue);
+    $directoryMetadata = @lstat($configured);
+    if ($root !== $rootPath || $directory !== $configured
+        || $container !== $containerValue || dirname($containerValue) !== $rootPath
+        || !is_browser_shared_memory_path($configured, $rootPath)
+        || !is_array($rootMetadata) || !is_array($containerMetadata) || !is_array($directoryMetadata)
+        || ($rootMetadata['mode'] & 0170000) !== 0040000
+        || ($containerMetadata['mode'] & 0170000) !== 0040000
+        || ($directoryMetadata['mode'] & 0170000) !== 0040000
+        || is_link($rootPath) || is_link($containerValue) || is_link($configured)) {
+        throw new RuntimeException('browser shared-memory path is not a canonical bound directory hierarchy');
+    }
+    $rootDevice = (int) $rootMetadata['dev'];
+    $identities = [
+        $rootDevice . ':' . (int) $rootMetadata['ino'],
+        (int) $containerMetadata['dev'] . ':' . (int) $containerMetadata['ino'],
+        (int) $directoryMetadata['dev'] . ':' . (int) $directoryMetadata['ino'],
+    ];
+    if ((int) $rootMetadata['uid'] !== $brokerUid || (int) $rootMetadata['gid'] !== $brokerGid
+        || ($rootMetadata['mode'] & 07777) !== 01777
+        || (int) $containerMetadata['uid'] !== $brokerUid
+        || (int) $containerMetadata['gid'] !== $brokerGid
+        || ($containerMetadata['mode'] & 07777) !== 0711 || (int) $containerMetadata['nlink'] !== 3
+        || (int) $directoryMetadata['uid'] !== $engineUid
+        || (int) $directoryMetadata['gid'] !== $engineGid
+        || ($directoryMetadata['mode'] & 07777) !== 0700 || (int) $directoryMetadata['nlink'] !== 2
+        || (int) $containerMetadata['dev'] !== $rootDevice
+        || (int) $directoryMetadata['dev'] !== $rootDevice
+        || count(array_unique($identities)) !== 3) {
+        throw new RuntimeException('browser shared-memory hierarchy ownership, mode, links, or device is unsafe');
+    }
+    validate_browser_shared_memory_topology($containerValue, $configured);
+    return $directory;
+}
+
+/** @param null|callable(string): mixed $environment */
+function browser_shared_memory_directory(?string $runtimeRoot, ?callable $environment = null): ?string
+{
+    $environment ??= static fn (string $name): string|false => getenv($name);
+    $configured = $environment(BROWSER_SHARED_MEMORY_ENV);
+    if ($runtimeRoot === null) {
+        if (is_string($configured) && $configured !== '') {
+            throw new RuntimeException('browser shared-memory storage requires the controlled runtime');
+        }
+        return null;
+    }
+    if (!is_string($configured) || $configured === '') {
+        throw new RuntimeException('controlled browser runtime omitted ' . BROWSER_SHARED_MEMORY_ENV);
+    }
+    if (PHP_OS_FAMILY !== 'Linux' || !function_exists('posix_geteuid') || !function_exists('posix_getegid')) {
+        throw new RuntimeException('controlled browser shared-memory storage requires Linux POSIX identity support');
+    }
+    $engineUid = posix_geteuid();
+    $engineGid = posix_getegid();
+    if ($engineUid <= 0 || $engineGid <= 0) {
+        throw new RuntimeException('controlled browser shared-memory storage requires an unprivileged engine identity');
+    }
+    return validate_browser_shared_memory_directory($configured, $engineUid, $engineGid);
+}
+
+function bind_browser_shared_memory_to_node(object $browser, ?string $directory): void
+{
+    if ($directory !== null) {
+        $browser->setNodeEnv(['TMPDIR' => $directory]);
+    }
+}
+
 function create_private_browser_profile(?string $runtimeRoot): ?string
 {
     if ($runtimeRoot === null) {
@@ -440,8 +573,9 @@ function load_dependencies(): array
     if (ltrim((string) $installed, 'v') !== PACKAGE_VERSION) {
         abort_adapter('installed Browsershot version does not match the pinned adapter');
     }
-    if (!method_exists(Spatie\Browsershot\Browsershot::class, 'setUserDataDir')) {
-        abort_adapter('installed Browsershot does not expose controlled profile binding');
+    if (!method_exists(Spatie\Browsershot\Browsershot::class, 'setUserDataDir')
+        || !method_exists(Spatie\Browsershot\Browsershot::class, 'setNodeEnv')) {
+        abort_adapter('installed Browsershot does not expose controlled profile and Node environment binding');
     }
     $puppeteerPath = required_file(__DIR__ . '/node_modules/puppeteer/package.json');
     $puppeteer = json_decode((string) file_get_contents($puppeteerPath), true);
@@ -513,6 +647,7 @@ function render(array $arguments): void
     [$top, $right, $bottom, $left] = page_margins($options['--page-margins']);
     $runtime = load_dependencies();
     $privateRuntimeRoot = private_runtime_root();
+    $browserSharedMemory = browser_shared_memory_directory($privateRuntimeRoot);
     $privateBrowserProfile = create_private_browser_profile($privateRuntimeRoot);
     $temporary = $parent . DIRECTORY_SEPARATOR . '.' . basename($output) . '.tmp-' . bin2hex(random_bytes(8));
 
@@ -548,8 +683,15 @@ function render(array $arguments): void
         // profile before the adapter can flush its file-backed pages.
         $shot->setUserDataDir($privateBrowserProfile);
     }
-    if (($privateRuntimeRoot === null) !== ($privateBrowserProfile === null)) {
-        throw new RuntimeException('controlled browser profile binding is incomplete');
+    if ($browserSharedMemory !== null) {
+        // Keep the adapter's own TMPDIR/XDG/profile hierarchy on the measured
+        // ext4 runtime. Only the Node process and its Chrome child inherit this
+        // sampler-bound memory-backed temporary directory.
+        bind_browser_shared_memory_to_node($shot, $browserSharedMemory);
+    }
+    if (($privateRuntimeRoot === null) !== ($privateBrowserProfile === null)
+        || ($privateRuntimeRoot === null) !== ($browserSharedMemory === null)) {
+        throw new RuntimeException('controlled browser storage binding is incomplete');
     }
     $profileFinalizer = null;
     if ($privateRuntimeRoot !== null && $privateBrowserProfile !== null) {
@@ -604,6 +746,221 @@ if ($mode === 'self-test') {
     }
     if (BLOCKED_NETWORK_URL_SUBSTRINGS !== ['http://', 'https://']) {
         abort_adapter('network block self-test failed', 1);
+    }
+    if (!is_browser_shared_memory_path('/dev/shm/pliego-bench-shm-0123456789abcdef0123456789abcdef/tmp')
+        || is_browser_shared_memory_path('/dev/shm/pliego-bench-shm-/tmp')
+        || is_browser_shared_memory_path('/dev/shm/pliego-bench-shm-a1b2c3/tmp')
+        || is_browser_shared_memory_path('/dev/shm/pliego-bench-shm-A1/tmp')
+        || is_browser_shared_memory_path('/dev/shm/pliego-bench-shm-a1/nested/tmp')
+        || is_browser_shared_memory_path('/tmp/pliego-bench-shm-a1/tmp')) {
+        abort_adapter('browser shared-memory path grammar self-test failed', 1);
+    }
+    $expectRuntimeFailure = static function (callable $operation, string $expected, string $label): void {
+        try {
+            $operation();
+            abort_adapter("{$label} self-test accepted an unsafe binding", 1);
+        } catch (RuntimeException $error) {
+            if ($error->getMessage() !== $expected) {
+                abort_adapter("{$label} self-test returned the wrong failure", 1);
+            }
+        }
+    };
+    $absentEnvironment = static fn (string $_name): false => false;
+    $configuredEnvironment = static fn (string $name): string|false => $name === BROWSER_SHARED_MEMORY_ENV
+        ? '/dev/shm/pliego-bench-shm-0123456789abcdef0123456789abcdef/tmp'
+        : false;
+    if (browser_shared_memory_directory(null, $absentEnvironment) !== null) {
+        abort_adapter('uncontrolled browser shared-memory absence self-test failed', 1);
+    }
+    $expectRuntimeFailure(
+        static fn (): ?string => browser_shared_memory_directory(null, $configuredEnvironment),
+        'browser shared-memory storage requires the controlled runtime',
+        'uncontrolled browser shared-memory presence'
+    );
+    $expectRuntimeFailure(
+        static fn (): ?string => browser_shared_memory_directory('/controlled-runtime', $absentEnvironment),
+        'controlled browser runtime omitted ' . BROWSER_SHARED_MEMORY_ENV,
+        'controlled browser shared-memory absence'
+    );
+    $nodeEnvironmentProbe = new class {
+        /** @var list<array<string, string>> */
+        public array $calls = [];
+
+        public function setNodeEnv(array $environment): static
+        {
+            $this->calls[] = $environment;
+            return $this;
+        }
+    };
+    bind_browser_shared_memory_to_node($nodeEnvironmentProbe, null);
+    bind_browser_shared_memory_to_node(
+        $nodeEnvironmentProbe,
+        '/dev/shm/pliego-bench-shm-0123456789abcdef0123456789abcdef/tmp'
+    );
+    if ($nodeEnvironmentProbe->calls !== [[
+        'TMPDIR' => '/dev/shm/pliego-bench-shm-0123456789abcdef0123456789abcdef/tmp',
+    ]]) {
+        abort_adapter('browser shared-memory Node environment self-test failed', 1);
+    }
+    $boundedEntryVisits = 0;
+    $boundedEntries = static function (string $path) use (&$boundedEntryVisits): Generator {
+        if ($path === '/container') {
+            $boundedEntryVisits++;
+            yield BROWSER_SHARED_MEMORY_DIRECTORY;
+            return;
+        }
+        for ($index = 0; $index < 1_000_000; $index++) {
+            $boundedEntryVisits++;
+            yield "state-{$index}";
+        }
+    };
+    $expectRuntimeFailure(
+        static fn (): null => validate_browser_shared_memory_topology(
+            '/container',
+            '/directory',
+            $boundedEntries
+        ),
+        'browser shared-memory hierarchy must contain only one empty bound directory',
+        'bounded browser shared-memory topology'
+    );
+    if ($boundedEntryVisits !== 2) {
+        abort_adapter('browser shared-memory topology self-test materialized an unbounded inventory', 1);
+    }
+
+    $sharedMemoryTestRoot = null;
+    $sharedMemoryContainer = null;
+    $sharedMemoryDirectory = null;
+    $escapedContainer = null;
+    $escapedDirectory = null;
+    $linkedContainer = null;
+    $linkedDirectory = null;
+    if (PHP_OS_FAMILY === 'Linux' && function_exists('posix_geteuid') && function_exists('posix_getegid')) {
+        $sharedMemoryTestRoot = sys_get_temp_dir() . '/pliego-browser-shared-memory-' . bin2hex(random_bytes(8));
+        $sharedMemoryContainer = $sharedMemoryTestRoot . '/pliego-bench-shm-0123456789abcdef0123456789abcdef';
+        $sharedMemoryDirectory = $sharedMemoryContainer . '/tmp';
+        $escapedContainer = $sharedMemoryTestRoot . '/escaped';
+        $escapedDirectory = $escapedContainer . '/tmp';
+        $linkedContainer = $sharedMemoryTestRoot . '/pliego-bench-shm-fedcba9876543210fedcba9876543210';
+        $linkedDirectory = $linkedContainer . '/tmp';
+        $uid = posix_geteuid();
+        $gid = posix_getegid();
+        if (!mkdir($sharedMemoryTestRoot, 0700) || !chmod($sharedMemoryTestRoot, 01777)
+            || !mkdir($sharedMemoryContainer, 0711) || !chmod($sharedMemoryContainer, 0711)
+            || !mkdir($sharedMemoryDirectory, 0700) || !chmod($sharedMemoryDirectory, 0700)) {
+            abort_adapter('browser shared-memory hierarchy self-test setup failed', 1);
+        }
+        try {
+            if (validate_browser_shared_memory_directory(
+                $sharedMemoryDirectory,
+                $uid,
+                $gid,
+                $sharedMemoryTestRoot,
+                $uid,
+                $gid
+            ) !== $sharedMemoryDirectory) {
+                abort_adapter('browser shared-memory hierarchy self-test failed', 1);
+            }
+            if (!chmod($sharedMemoryDirectory, 0711)) {
+                abort_adapter('browser shared-memory mode self-test setup failed', 1);
+            }
+            $expectRuntimeFailure(
+                static fn (): string => validate_browser_shared_memory_directory(
+                    $sharedMemoryDirectory,
+                    $uid,
+                    $gid,
+                    $sharedMemoryTestRoot,
+                    $uid,
+                    $gid
+                ),
+                'browser shared-memory hierarchy ownership, mode, links, or device is unsafe',
+                'browser shared-memory mode'
+            );
+            if (!chmod($sharedMemoryDirectory, 0700)
+                || file_put_contents($sharedMemoryDirectory . '/state.bin', 'state') === false) {
+                abort_adapter('browser shared-memory topology self-test setup failed', 1);
+            }
+            $expectRuntimeFailure(
+                static fn (): string => validate_browser_shared_memory_directory(
+                    $sharedMemoryDirectory,
+                    $uid,
+                    $gid,
+                    $sharedMemoryTestRoot,
+                    $uid,
+                    $gid
+                ),
+                'browser shared-memory hierarchy must contain only one empty bound directory',
+                'browser shared-memory directory topology'
+            );
+            unlink($sharedMemoryDirectory . '/state.bin');
+            if (file_put_contents($sharedMemoryContainer . '/unexpected.bin', 'state') === false) {
+                abort_adapter('browser shared-memory container topology self-test setup failed', 1);
+            }
+            $expectRuntimeFailure(
+                static fn (): string => validate_browser_shared_memory_directory(
+                    $sharedMemoryDirectory,
+                    $uid,
+                    $gid,
+                    $sharedMemoryTestRoot,
+                    $uid,
+                    $gid
+                ),
+                'browser shared-memory hierarchy must contain only one empty bound directory',
+                'browser shared-memory container topology'
+            );
+            unlink($sharedMemoryContainer . '/unexpected.bin');
+            if (!mkdir($escapedContainer, 0711) || !mkdir($escapedDirectory, 0700)) {
+                abort_adapter('browser shared-memory escaped-path self-test setup failed', 1);
+            }
+            $expectRuntimeFailure(
+                static fn (): string => validate_browser_shared_memory_directory(
+                    $escapedDirectory,
+                    $uid,
+                    $gid,
+                    $sharedMemoryTestRoot,
+                    $uid,
+                    $gid
+                ),
+                'browser shared-memory path is not a canonical bound directory hierarchy',
+                'browser shared-memory escaped path'
+            );
+            if (function_exists('symlink')) {
+                if (!mkdir($linkedContainer, 0711) || !symlink($sharedMemoryDirectory, $linkedDirectory)) {
+                    abort_adapter('browser shared-memory symlink self-test setup failed', 1);
+                }
+                $expectRuntimeFailure(
+                    static fn (): string => validate_browser_shared_memory_directory(
+                        $linkedDirectory,
+                        $uid,
+                        $gid,
+                        $sharedMemoryTestRoot,
+                        $uid,
+                        $gid
+                    ),
+                    'browser shared-memory path is not a canonical bound directory hierarchy',
+                    'browser shared-memory symlink'
+                );
+            }
+            if (validate_browser_shared_memory_directory(
+                $sharedMemoryDirectory,
+                $uid,
+                $gid,
+                $sharedMemoryTestRoot,
+                $uid,
+                $gid
+            ) !== $sharedMemoryDirectory) {
+                abort_adapter('browser shared-memory hierarchy revalidation self-test failed', 1);
+            }
+        } finally {
+            @unlink($linkedDirectory);
+            @rmdir($linkedContainer);
+            @rmdir($escapedDirectory);
+            @rmdir($escapedContainer);
+            @unlink($sharedMemoryDirectory . '/state.bin');
+            @unlink($sharedMemoryContainer . '/unexpected.bin');
+            @rmdir($sharedMemoryDirectory);
+            @rmdir($sharedMemoryContainer);
+            @rmdir($sharedMemoryTestRoot);
+        }
     }
     $finalizerEvents = [];
     try {

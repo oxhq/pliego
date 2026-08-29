@@ -93,6 +93,7 @@ def resource_usage() -> dict:
                 "inode": 2,
             },
             "launch_context": {
+                "browser_tmpdir": None,
                 "cwd": "/var/lib/pliego-benchmark-engine-temp/pliego-bench-api2-fixture/job",
                 "tmpdir": "/var/lib/pliego-benchmark-engine-temp/pliego-bench-api2-fixture/temporary",
             },
@@ -181,6 +182,7 @@ def resource_usage() -> dict:
                     "path": "/nonexistent/pliego-benchmark-engine",
                     "state": "absent",
                 },
+                "browser_shared_memory": None,
                 "directory_sync": "FS_DIRSYNC_FL",
                 "file_sync": "FS_SYNC_FL",
                 "filesystem": "ext4",
@@ -485,6 +487,35 @@ def main() -> None:
         "pre": deepcopy(runtime_bindings),
         "post": deepcopy(runtime_bindings),
     }
+    browser_shared_memory = {
+        "root": deepcopy(browser_launch["output_capture"]["pre"]["root"]),
+        "container": {
+            "path": "/dev/shm/pliego-bench-shm-0123456789abcdef0123456789abcdef",
+            "identity": {"device": 2, "inode": 13},
+            "owner_uid": 0,
+            "owner_gid": 0,
+            "mode": 0o711,
+            "link_count": 3,
+        },
+        "directory": {
+            "path": "/dev/shm/pliego-bench-shm-0123456789abcdef0123456789abcdef/tmp",
+            "identity": {"device": 2, "inode": 14},
+            "owner_uid": 991,
+            "owner_gid": 991,
+            "mode": 0o700,
+            "link_count": 2,
+        },
+        "container_entries": ["tmp"],
+        "directory_entries": [],
+    }
+    browser_launch["temporary_storage"]["browser_shared_memory"] = {
+        "contract": "bound-private-tmpfs-browser-shared-memory-v1",
+        "filesystem": "tmpfs",
+        "semantics": "puppeteer-node-chrome-temporary-storage-v1",
+        "pre": deepcopy(browser_shared_memory),
+        "post": deepcopy(browser_shared_memory),
+    }
+    browser_launch["launch_context"]["browser_tmpdir"] = browser_shared_memory["directory"]["path"]
     browser_schema_violations: list[validate_result.Violation] = []
     validate_result.validate(
         browser_launch["temporary_storage"],
@@ -520,6 +551,64 @@ def main() -> None:
     escaped_violations: list[validate_result.Violation] = []
     validate_result.validate_resource_usage(escaped_browser, "$.sample", escaped_violations)
     assert any("HOME.relative_path" in str(item) for item in escaped_violations)
+    missing_browser_tmpfs = deepcopy(browser_sample)
+    missing_browser_tmpfs["resource_usage"]["launch_security"]["temporary_storage"]["browser_shared_memory"] = None
+    missing_browser_violations: list[validate_result.Violation] = []
+    validate_result.validate_resource_usage(missing_browser_tmpfs, "$.sample", missing_browser_violations)
+    assert any("Browsershot must retain" in str(item) for item in missing_browser_violations)
+    changed_browser_tmpfs = deepcopy(browser_sample)
+    changed_browser_tmpfs["resource_usage"]["launch_security"]["temporary_storage"]["browser_shared_memory"]["post"][
+        "directory"
+    ]["identity"]["inode"] += 1
+    changed_browser_violations: list[validate_result.Violation] = []
+    validate_result.validate_resource_usage(changed_browser_tmpfs, "$.sample", changed_browser_violations)
+    assert any("browser_shared_memory.post" in str(item) for item in changed_browser_violations)
+    escaped_browser_tmpfs = deepcopy(browser_sample)
+    escaped_browser_tmpfs["resource_usage"]["launch_security"]["temporary_storage"]["browser_shared_memory"]["pre"][
+        "container"
+    ]["path"] = "/dev/shm/../tmp/pliego-bench-shm-0123456789abcdef0123456789abcdef"
+    escaped_tmpfs_violations: list[validate_result.Violation] = []
+    validate_result.validate_resource_usage(escaped_browser_tmpfs, "$.sample", escaped_tmpfs_violations)
+    assert any("canonical direct /dev/shm child" in str(item) for item in escaped_tmpfs_violations)
+    short_nonce_browser_tmpfs = deepcopy(browser_sample)
+    short_nonce_browser_tmpfs["resource_usage"]["launch_security"]["temporary_storage"]["browser_shared_memory"]["pre"][
+        "container"
+    ]["path"] = "/dev/shm/pliego-bench-shm-0123456789abcdef"
+    short_nonce_violations: list[validate_result.Violation] = []
+    validate_result.validate_resource_usage(short_nonce_browser_tmpfs, "$.sample", short_nonce_violations)
+    assert any("32-character lowercase-hex nonce" in str(item) for item in short_nonce_violations)
+    noncanonical_browser_tmpfs = deepcopy(browser_sample)
+    noncanonical_browser_tmpfs["resource_usage"]["launch_security"]["temporary_storage"]["browser_shared_memory"][
+        "pre"
+    ]["directory"]["path"] = "/dev/shm/pliego-bench-shm-0123456789abcdef0123456789abcdef/./tmp"
+    noncanonical_tmpfs_violations: list[validate_result.Violation] = []
+    validate_result.validate_resource_usage(
+        noncanonical_browser_tmpfs,
+        "$.sample",
+        noncanonical_tmpfs_violations,
+    )
+    assert any("pre.directory.path" in str(item) for item in noncanonical_tmpfs_violations)
+    mismatched_browser_tmpdir = deepcopy(browser_sample)
+    mismatched_browser_tmpdir["resource_usage"]["launch_security"]["launch_context"]["browser_tmpdir"] = (
+        "/dev/shm/pliego-bench-shm-deadbeefdeadbeefdeadbeefdeadbeef/tmp"
+    )
+    mismatched_tmpdir_violations: list[validate_result.Violation] = []
+    validate_result.validate_resource_usage(mismatched_browser_tmpdir, "$.sample", mismatched_tmpdir_violations)
+    assert any("launch_context.browser_tmpdir" in str(item) for item in mismatched_tmpdir_violations)
+    unsafe_browser_mode = deepcopy(browser_sample)
+    unsafe_browser_mode["resource_usage"]["launch_security"]["temporary_storage"]["browser_shared_memory"]["pre"][
+        "container"
+    ]["mode"] = 0o777
+    unsafe_mode_violations: list[validate_result.Violation] = []
+    validate_result.validate_resource_usage(unsafe_browser_mode, "$.sample", unsafe_mode_violations)
+    assert any("pre.container.mode" in str(item) for item in unsafe_mode_violations)
+    generic_claims_browser_tmpfs = deepcopy(valid["samples"][0])
+    generic_claims_browser_tmpfs["resource_usage"]["launch_security"]["temporary_storage"]["browser_shared_memory"] = (
+        deepcopy(browser_launch["temporary_storage"]["browser_shared_memory"])
+    )
+    generic_tmpfs_violations: list[validate_result.Violation] = []
+    validate_result.validate_resource_usage(generic_claims_browser_tmpfs, "$.sample", generic_tmpfs_violations)
+    assert any("non-browser targets" in str(item) for item in generic_tmpfs_violations)
     assert validate_result.percentile([1, 3], 50) == 1
     assert validate_result.PERCENTILE_METHOD == "nearest-rank-v1"
 

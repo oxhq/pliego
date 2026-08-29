@@ -128,7 +128,11 @@ def main() -> None:
         assert "No best or canonical repeat is selected" in markdown
         assert "Per-repeat hosted environments" in markdown
         assert (
-            "For `read_bytes` and `write_bytes`, values come from cgroup `io.stat`; memory-backed stdout/stderr capture is excluded."
+            "Memory-backed stdout/stderr capture is excluded for every target. Browsershot's private tmpfs Node/Chrome `TMPDIR` is also excluded from block I/O but remains charged to cgroup memory"
+            in markdown
+        )
+        assert (
+            "its PHP `TMPDIR`, HOME/XDG roots, explicit Chromium profile, artifacts, and PDF stay on the measured ext4 storage"
             in markdown
         )
         for run in series["runs"]:

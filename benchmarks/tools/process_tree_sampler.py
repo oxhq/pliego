@@ -19,6 +19,7 @@ import os
 import secrets
 import select
 import signal
+import shutil
 import socket
 import stat
 import struct
@@ -65,6 +66,12 @@ ENGINE_OUTPUT_OPEN_FLAGS = os.O_WRONLY | os.O_TRUNC | os.O_CLOEXEC | getattr(os,
 ENGINE_OUTPUT_CAPTURE_ROOT = Path("/dev/shm")
 ENGINE_OUTPUT_CAPTURE_CONTRACT = "root-bound-tmpfs-engine-output-v1"
 ENGINE_OUTPUT_CAPTURE_MAX_BYTES = 16 * 1024 * 1024
+BROWSER_SHARED_MEMORY_ENV = "PLIEGO_BENCHMARK_BROWSER_TMPDIR"
+BROWSER_SHARED_MEMORY_ROOT = Path("/dev/shm")
+BROWSER_SHARED_MEMORY_CONTAINER_PREFIX = "pliego-bench-shm-"
+BROWSER_SHARED_MEMORY_DIRECTORY = "tmp"
+BROWSER_SHARED_MEMORY_CONTRACT = "bound-private-tmpfs-browser-shared-memory-v1"
+BROWSER_SHARED_MEMORY_SEMANTICS = "puppeteer-node-chrome-temporary-storage-v1"
 FS_IOC_GETFLAGS = 0x80086601
 FS_SYNC_FL = 0x00000008
 FS_NOATIME_FL = 0x00000080
@@ -182,6 +189,55 @@ class ExecutableIdentity:
     sha256: str
     device: int
     inode: int
+
+
+@dataclass
+class BrowserSharedMemoryBinding:
+    root: Path
+    container: Path
+    directory: Path
+    root_fd: int
+    container_fd: int
+    directory_fd: int
+    broker_uid: int
+    broker_gid: int
+    account: EngineAccount
+    pre: dict[str, Any]
+    directory_unlinked: bool = False
+    container_unlinked: bool = False
+    cleaned: bool = False
+
+    def close(self) -> None:
+        for field in ("directory_fd", "container_fd", "root_fd"):
+            descriptor = getattr(self, field)
+            if descriptor >= 0:
+                with contextlib.suppress(OSError):
+                    os.close(descriptor)
+                setattr(self, field, -1)
+
+
+@dataclass
+class BrowserSharedMemoryProvisioning:
+    root: Path
+    container: Path
+    directory: Path
+    root_fd: int = -1
+    container_fd: int = -1
+    directory_fd: int = -1
+    container_identity: dict[str, int] | None = None
+    directory_identity: dict[str, int] | None = None
+    container_created: bool = False
+    directory_created: bool = False
+    directory_unlinked: bool = False
+    container_unlinked: bool = False
+
+    def close(self) -> None:
+        for field in ("directory_fd", "container_fd", "root_fd"):
+            descriptor = getattr(self, field)
+            if descriptor >= 0:
+                with contextlib.suppress(OSError):
+                    os.close(descriptor)
+                setattr(self, field, -1)
 
 
 def require_broker_root(uid: int | None = None, euid: int | None = None) -> None:
@@ -973,6 +1029,759 @@ def mountinfo_filesystem_type(path: Path, mountinfo: str | None = None) -> str |
     return selected[1] if selected is not None else None
 
 
+def browser_shared_memory_path(container: Path) -> Path:
+    return container / BROWSER_SHARED_MEMORY_DIRECTORY
+
+
+def require_browser_shared_memory_entry_names(
+    names: Iterator[str],
+    expected: set[str],
+    label: str,
+) -> None:
+    """Validate exact entries while retaining at most the tiny expected set."""
+
+    seen: set[str] = set()
+    for name in names:
+        if name not in expected or name in seen:
+            raise incomplete(
+                "BROWSER_SHARED_MEMORY_NOT_EMPTY",
+                f"{label} retained an unexpected entry: {name}",
+            )
+        seen.add(name)
+    if seen != expected:
+        raise incomplete(
+            "BROWSER_SHARED_MEMORY_REPLACED",
+            f"{label} omitted its bound entry",
+        )
+
+
+def require_browser_shared_memory_entries(descriptor: int, expected: set[str], label: str) -> None:
+    try:
+        with os.scandir(descriptor) as entries:
+            require_browser_shared_memory_entry_names((entry.name for entry in entries), expected, label)
+    except MeasurementIncomplete:
+        raise
+    except OSError as error:
+        raise incomplete(
+            "BROWSER_SHARED_MEMORY_UNAVAILABLE",
+            f"cannot enumerate {label}: {error}",
+        ) from error
+
+
+def browser_shared_memory_root_binding(path: Path, metadata: os.stat_result) -> dict[str, Any]:
+    return {
+        "path": str(path),
+        "identity": {"device": metadata.st_dev, "inode": metadata.st_ino},
+        "owner_uid": metadata.st_uid,
+        "owner_gid": metadata.st_gid,
+        "mode": stat.S_IMODE(metadata.st_mode),
+    }
+
+
+def browser_shared_memory_directory_binding(path: Path, metadata: os.stat_result) -> dict[str, Any]:
+    return {
+        **browser_shared_memory_root_binding(path, metadata),
+        "link_count": metadata.st_nlink,
+    }
+
+
+def browser_shared_memory_identity(metadata: os.stat_result) -> dict[str, int]:
+    return {"device": metadata.st_dev, "inode": metadata.st_ino}
+
+
+def browser_shared_memory_snapshot(
+    binding: BrowserSharedMemoryBinding,
+    expected: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Rebind the protected tmpfs hierarchy through held directory descriptors."""
+
+    if binding.cleaned or min(binding.root_fd, binding.container_fd, binding.directory_fd) < 0:
+        raise incomplete("BROWSER_SHARED_MEMORY_UNAVAILABLE", "browser shared-memory binding is closed")
+    try:
+        root_fd_metadata = os.fstat(binding.root_fd)
+        container_fd_metadata = os.fstat(binding.container_fd)
+        directory_fd_metadata = os.fstat(binding.directory_fd)
+        root_path_metadata = os.stat(binding.root, follow_symlinks=False)
+        container_edge_metadata = os.stat(
+            binding.container.name,
+            dir_fd=binding.root_fd,
+            follow_symlinks=False,
+        )
+        directory_edge_metadata = os.stat(
+            BROWSER_SHARED_MEMORY_DIRECTORY,
+            dir_fd=binding.container_fd,
+            follow_symlinks=False,
+        )
+    except OSError as error:
+        raise incomplete(
+            "BROWSER_SHARED_MEMORY_REPLACED",
+            f"cannot rebind browser shared-memory hierarchy: {error}",
+        ) from error
+
+    identities = [
+        (root_fd_metadata.st_dev, root_fd_metadata.st_ino),
+        (container_fd_metadata.st_dev, container_fd_metadata.st_ino),
+        (directory_fd_metadata.st_dev, directory_fd_metadata.st_ino),
+    ]
+    if (
+        not stat.S_ISDIR(root_fd_metadata.st_mode)
+        or not stat.S_ISDIR(container_fd_metadata.st_mode)
+        or not stat.S_ISDIR(directory_fd_metadata.st_mode)
+        or (root_path_metadata.st_dev, root_path_metadata.st_ino) != identities[0]
+        or (container_edge_metadata.st_dev, container_edge_metadata.st_ino) != identities[1]
+        or (directory_edge_metadata.st_dev, directory_edge_metadata.st_ino) != identities[2]
+        or len(set(identities)) != 3
+        or len({metadata.st_dev for metadata in (root_fd_metadata, container_fd_metadata, directory_fd_metadata)}) != 1
+    ):
+        raise incomplete(
+            "BROWSER_SHARED_MEMORY_REPLACED",
+            "browser shared-memory hierarchy identity or named topology changed",
+        )
+    if (
+        root_fd_metadata.st_uid != binding.broker_uid
+        or root_fd_metadata.st_gid != binding.broker_gid
+        or stat.S_IMODE(root_fd_metadata.st_mode) != 0o1777
+        or container_fd_metadata.st_uid != binding.broker_uid
+        or container_fd_metadata.st_gid != binding.broker_gid
+        or stat.S_IMODE(container_fd_metadata.st_mode) != 0o711
+        or container_fd_metadata.st_nlink != 3
+        or directory_fd_metadata.st_uid != binding.account.uid
+        or directory_fd_metadata.st_gid != binding.account.gid
+        or stat.S_IMODE(directory_fd_metadata.st_mode) != 0o700
+        or directory_fd_metadata.st_nlink != 2
+    ):
+        raise incomplete(
+            "BROWSER_SHARED_MEMORY_UNSAFE",
+            "browser shared-memory hierarchy ownership, mode, or link count changed",
+        )
+    if identity_can_write(container_fd_metadata, binding.account.uid, binding.account.gid):
+        raise incomplete(
+            "BROWSER_SHARED_MEMORY_UNSAFE",
+            "engine account can write the protected browser shared-memory container",
+        )
+    if child_replaceable(root_fd_metadata, container_fd_metadata, binding.account.uid, binding.account.gid):
+        raise incomplete(
+            "BROWSER_SHARED_MEMORY_UNSAFE",
+            "engine account can replace the browser shared-memory container",
+        )
+    if child_replaceable(container_fd_metadata, directory_fd_metadata, binding.account.uid, binding.account.gid):
+        raise incomplete(
+            "BROWSER_SHARED_MEMORY_UNSAFE",
+            "engine account can replace the browser shared-memory directory",
+        )
+    require_browser_shared_memory_entries(
+        binding.container_fd,
+        {BROWSER_SHARED_MEMORY_DIRECTORY},
+        "browser shared-memory container",
+    )
+    require_browser_shared_memory_entries(
+        binding.directory_fd,
+        set(),
+        "browser shared-memory directory",
+    )
+
+    snapshot = {
+        "root": browser_shared_memory_root_binding(binding.root, root_fd_metadata),
+        "container": browser_shared_memory_directory_binding(binding.container, container_fd_metadata),
+        "directory": browser_shared_memory_directory_binding(binding.directory, directory_fd_metadata),
+        "container_entries": [BROWSER_SHARED_MEMORY_DIRECTORY],
+        "directory_entries": [],
+    }
+    if expected is not None and snapshot != expected:
+        raise incomplete(
+            "BROWSER_SHARED_MEMORY_REPLACED",
+            "browser shared-memory hierarchy metadata changed during execution",
+        )
+    return snapshot
+
+
+def require_browser_shared_memory_provisioning_edge(
+    parent_fd: int,
+    name: str,
+    expected: dict[str, int] | None,
+    label: str,
+) -> os.stat_result:
+    if parent_fd < 0 or expected is None:
+        raise incomplete(
+            "BROWSER_SHARED_MEMORY_REPLACED",
+            f"cannot prove the originally created browser shared-memory {label} edge",
+        )
+    try:
+        metadata = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except OSError as error:
+        raise incomplete(
+            "BROWSER_SHARED_MEMORY_REPLACED",
+            f"cannot rebind the originally created browser shared-memory {label} edge: {error}",
+        ) from error
+    if not stat.S_ISDIR(metadata.st_mode) or (metadata.st_dev, metadata.st_ino) != (
+        expected["device"],
+        expected["inode"],
+    ):
+        raise incomplete(
+            "BROWSER_SHARED_MEMORY_REPLACED",
+            f"browser shared-memory {label} edge was replaced during provisioning cleanup",
+        )
+    return metadata
+
+
+def browser_shared_memory_provisioning_descriptor(
+    provisioning: BrowserSharedMemoryProvisioning,
+    label: str,
+) -> int:
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)
+    if label == "container":
+        parent_fd = provisioning.root_fd
+        name = provisioning.container.name
+        expected = provisioning.container_identity
+        field = "container_fd"
+    elif label == "directory":
+        parent_fd = provisioning.container_fd
+        name = BROWSER_SHARED_MEMORY_DIRECTORY
+        expected = provisioning.directory_identity
+        field = "directory_fd"
+    else:
+        raise ValueError(f"unsupported browser shared-memory provisioning label: {label}")
+
+    require_browser_shared_memory_provisioning_edge(parent_fd, name, expected, label)
+    descriptor = getattr(provisioning, field)
+    opened = False
+    if descriptor < 0:
+        try:
+            descriptor = os.open(name, flags, dir_fd=parent_fd)
+            opened = True
+        except OSError as error:
+            raise incomplete(
+                "BROWSER_SHARED_MEMORY_REPLACED",
+                f"cannot open the originally created browser shared-memory {label}: {error}",
+            ) from error
+    try:
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or expected is None
+            or (metadata.st_dev, metadata.st_ino) != (expected["device"], expected["inode"])
+        ):
+            raise incomplete(
+                "BROWSER_SHARED_MEMORY_REPLACED",
+                f"held browser shared-memory {label} changed during provisioning cleanup",
+            )
+    except BaseException:
+        if opened:
+            with contextlib.suppress(OSError):
+                os.close(descriptor)
+        raise
+    if opened:
+        setattr(provisioning, field, descriptor)
+    return descriptor
+
+
+def require_browser_shared_memory_provisioning_edge_absent(parent_fd: int, name: str, label: str) -> None:
+    try:
+        os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    except OSError as error:
+        raise incomplete(
+            "BROWSER_SHARED_MEMORY_REPLACED",
+            f"cannot prove browser shared-memory {label} removal: {error}",
+        ) from error
+    raise incomplete(
+        "BROWSER_SHARED_MEMORY_REPLACED",
+        f"browser shared-memory {label} named edge remains after provisioning cleanup",
+    )
+
+
+def cleanup_browser_shared_memory_provisioning(provisioning: BrowserSharedMemoryProvisioning) -> None:
+    """Remove only the identities created by an incomplete provisioning attempt."""
+
+    if provisioning.directory_created and not provisioning.directory_unlinked:
+        browser_shared_memory_provisioning_descriptor(provisioning, "directory")
+        require_browser_shared_memory_provisioning_edge(
+            provisioning.container_fd,
+            BROWSER_SHARED_MEMORY_DIRECTORY,
+            provisioning.directory_identity,
+            "directory",
+        )
+        remove_bound_browser_shared_memory_tree(
+            provisioning.container_fd,
+            BROWSER_SHARED_MEMORY_DIRECTORY,
+        )
+        provisioning.directory_unlinked = True
+        require_browser_shared_memory_provisioning_edge_absent(
+            provisioning.container_fd,
+            BROWSER_SHARED_MEMORY_DIRECTORY,
+            "directory",
+        )
+
+    if provisioning.container_created and not provisioning.container_unlinked:
+        browser_shared_memory_provisioning_descriptor(provisioning, "container")
+        require_browser_shared_memory_provisioning_edge(
+            provisioning.root_fd,
+            provisioning.container.name,
+            provisioning.container_identity,
+            "container",
+        )
+        remove_bound_browser_shared_memory_tree(
+            provisioning.root_fd,
+            provisioning.container.name,
+        )
+        provisioning.container_unlinked = True
+        require_browser_shared_memory_provisioning_edge_absent(
+            provisioning.root_fd,
+            provisioning.container.name,
+            "container",
+        )
+
+
+def browser_shared_memory_provisioning_residue_diagnostic(
+    provisioning: BrowserSharedMemoryProvisioning,
+) -> dict[str, Any]:
+    try:
+        return {
+            "container_edge": browser_shared_memory_named_edge_diagnostic(
+                provisioning.root_fd,
+                provisioning.container.name,
+                provisioning.container_identity,
+            ),
+            "directory_edge": browser_shared_memory_named_edge_diagnostic(
+                provisioning.container_fd,
+                BROWSER_SHARED_MEMORY_DIRECTORY,
+                provisioning.directory_identity,
+            ),
+            "container": browser_shared_memory_fd_diagnostic(provisioning.container_fd),
+            "directory": browser_shared_memory_fd_diagnostic(provisioning.directory_fd),
+        }
+    except BaseException as error:
+        return {"status": "unavailable", "error": f"{type(error).__name__}:{getattr(error, 'errno', None)}"}
+
+
+def cleanup_failed_browser_shared_memory_provisioning(
+    provisioning: BrowserSharedMemoryProvisioning,
+    original_failure: BaseException,
+) -> None:
+    try:
+        cleanup_browser_shared_memory_provisioning(provisioning)
+    except BaseException as cleanup_error:
+        residue = browser_shared_memory_provisioning_residue_diagnostic(provisioning)
+        cleanup = bounded_exception_diagnostic(cleanup_error)
+        original = bounded_exception_diagnostic(original_failure)
+        provisioning.close()
+        diagnostic = json.dumps(
+            {"cleanup": cleanup, "original_failure": original, "residue": residue},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        raise incomplete(
+            "BROWSER_SHARED_MEMORY_CLEANUP_FAILED",
+            f"browser shared-memory provisioning cleanup failed; diagnostic={diagnostic}",
+        ) from cleanup_error
+    provisioning.close()
+
+
+def create_browser_shared_memory(
+    account: EngineAccount,
+    root: Path = BROWSER_SHARED_MEMORY_ROOT,
+    broker_uid: int = 0,
+    broker_gid: int = 0,
+    filesystem_type: Callable[[Path], str | None] = mountinfo_filesystem_type,
+) -> BrowserSharedMemoryBinding:
+    """Create one protected, private, memory-backed directory for Node and Chrome."""
+
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)
+    container_name = BROWSER_SHARED_MEMORY_CONTAINER_PREFIX + secrets.token_hex(16)
+    container = root / container_name
+    directory = browser_shared_memory_path(container)
+    provisioning = BrowserSharedMemoryProvisioning(root=root, container=container, directory=directory)
+    try:
+        resolved_root = root.resolve(strict=True)
+        if root != resolved_root:
+            raise incomplete(
+                "BROWSER_SHARED_MEMORY_UNSAFE",
+                "browser shared-memory root must be a canonical directory",
+            )
+        provisioning.root_fd = os.open(root, flags)
+        root_metadata = os.fstat(provisioning.root_fd)
+        if (
+            not stat.S_ISDIR(root_metadata.st_mode)
+            or root_metadata.st_uid != broker_uid
+            or root_metadata.st_gid != broker_gid
+            or stat.S_IMODE(root_metadata.st_mode) != 0o1777
+        ):
+            raise incomplete(
+                "BROWSER_SHARED_MEMORY_UNSAFE",
+                f"browser shared-memory root must be owned by {broker_uid}:{broker_gid} with mode 01777",
+            )
+        if filesystem_type(root) != "tmpfs":
+            raise incomplete(
+                "BROWSER_SHARED_MEMORY_BACKING_UNSAFE",
+                "browser shared-memory root must be backed by tmpfs",
+            )
+        os.mkdir(container_name, 0o711, dir_fd=provisioning.root_fd)
+        provisioning.container_created = True
+        container_metadata = os.stat(container_name, dir_fd=provisioning.root_fd, follow_symlinks=False)
+        if not stat.S_ISDIR(container_metadata.st_mode):
+            raise incomplete(
+                "BROWSER_SHARED_MEMORY_REPLACED",
+                "created browser shared-memory container was replaced before binding",
+            )
+        provisioning.container_identity = browser_shared_memory_identity(container_metadata)
+        provisioning.container_fd = os.open(container_name, flags, dir_fd=provisioning.root_fd)
+        browser_shared_memory_provisioning_descriptor(provisioning, "container")
+        os.fchmod(provisioning.container_fd, 0o711)
+        os.mkdir(BROWSER_SHARED_MEMORY_DIRECTORY, 0o700, dir_fd=provisioning.container_fd)
+        provisioning.directory_created = True
+        directory_metadata = os.stat(
+            BROWSER_SHARED_MEMORY_DIRECTORY,
+            dir_fd=provisioning.container_fd,
+            follow_symlinks=False,
+        )
+        if not stat.S_ISDIR(directory_metadata.st_mode):
+            raise incomplete(
+                "BROWSER_SHARED_MEMORY_REPLACED",
+                "created browser shared-memory directory was replaced before binding",
+            )
+        provisioning.directory_identity = browser_shared_memory_identity(directory_metadata)
+        provisioning.directory_fd = os.open(
+            BROWSER_SHARED_MEMORY_DIRECTORY,
+            flags,
+            dir_fd=provisioning.container_fd,
+        )
+        browser_shared_memory_provisioning_descriptor(provisioning, "directory")
+        os.fchown(provisioning.directory_fd, account.uid, account.gid)
+        os.fchmod(provisioning.directory_fd, 0o700)
+        binding = BrowserSharedMemoryBinding(
+            root=root,
+            container=container,
+            directory=directory,
+            root_fd=provisioning.root_fd,
+            container_fd=provisioning.container_fd,
+            directory_fd=provisioning.directory_fd,
+            broker_uid=broker_uid,
+            broker_gid=broker_gid,
+            account=account,
+            pre={},
+        )
+        binding.pre = browser_shared_memory_snapshot(binding)
+        return binding
+    except BaseException as error:
+        original_failure = (
+            incomplete(
+                "BROWSER_SHARED_MEMORY_UNAVAILABLE",
+                f"cannot provision browser shared-memory hierarchy: {error}",
+            )
+            if isinstance(error, OSError)
+            else error
+        )
+        cleanup_failed_browser_shared_memory_provisioning(provisioning, original_failure)
+        if original_failure is error:
+            raise
+        raise original_failure from error
+
+
+def browser_shared_memory_cleanup_rebind(binding: BrowserSharedMemoryBinding) -> None:
+    """Prove every still-named edge resolves to the held original before deletion."""
+
+    if binding.cleaned or min(binding.root_fd, binding.container_fd, binding.directory_fd) < 0:
+        raise incomplete("BROWSER_SHARED_MEMORY_UNAVAILABLE", "browser shared-memory cleanup binding is closed")
+    expected = binding.pre
+    try:
+        root_metadata = os.fstat(binding.root_fd)
+        container_metadata = os.fstat(binding.container_fd)
+        directory_metadata = os.fstat(binding.directory_fd)
+        root_path_metadata = os.stat(binding.root, follow_symlinks=False)
+    except OSError as error:
+        raise incomplete(
+            "BROWSER_SHARED_MEMORY_REPLACED",
+            f"cannot rebind browser shared-memory cleanup hierarchy: {error}",
+        ) from error
+
+    held = {
+        "root": root_metadata,
+        "container": container_metadata,
+        "directory": directory_metadata,
+    }
+    for label, metadata in held.items():
+        identity = expected[label]["identity"]
+        if not stat.S_ISDIR(metadata.st_mode) or (metadata.st_dev, metadata.st_ino) != (
+            identity["device"],
+            identity["inode"],
+        ):
+            raise incomplete(
+                "BROWSER_SHARED_MEMORY_REPLACED",
+                f"held browser shared-memory {label} identity changed before cleanup",
+            )
+    root_identity = expected["root"]["identity"]
+    if (root_path_metadata.st_dev, root_path_metadata.st_ino) != (
+        root_identity["device"],
+        root_identity["inode"],
+    ):
+        raise incomplete(
+            "BROWSER_SHARED_MEMORY_REPLACED",
+            "browser shared-memory root named edge changed before cleanup",
+        )
+
+    named_edges = (
+        (
+            binding.root_fd,
+            binding.container.name,
+            expected["container"]["identity"],
+            binding.container_unlinked,
+            "container",
+        ),
+        (
+            binding.container_fd,
+            BROWSER_SHARED_MEMORY_DIRECTORY,
+            expected["directory"]["identity"],
+            binding.directory_unlinked,
+            "directory",
+        ),
+    )
+    for parent_fd, name, identity, unlinked, label in named_edges:
+        try:
+            metadata = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            if not unlinked:
+                raise incomplete(
+                    "BROWSER_SHARED_MEMORY_REPLACED",
+                    f"browser shared-memory {label} named edge disappeared before cleanup",
+                ) from None
+            continue
+        except OSError as error:
+            raise incomplete(
+                "BROWSER_SHARED_MEMORY_REPLACED",
+                f"cannot inspect browser shared-memory {label} named edge before cleanup: {error}",
+            ) from error
+        if (
+            unlinked
+            or not stat.S_ISDIR(metadata.st_mode)
+            or (metadata.st_dev, metadata.st_ino)
+            != (
+                identity["device"],
+                identity["inode"],
+            )
+        ):
+            raise incomplete(
+                "BROWSER_SHARED_MEMORY_REPLACED",
+                f"browser shared-memory {label} named edge was replaced before cleanup",
+            )
+
+
+def remove_bound_browser_shared_memory_tree(parent_fd: int, name: str) -> None:
+    """Use Python's fd-based, symlink-resistant recursive removal implementation."""
+
+    if not shutil.rmtree.avoids_symlink_attacks:
+        raise incomplete(
+            "BROWSER_SHARED_MEMORY_CLEANUP_UNAVAILABLE",
+            "browser shared-memory cleanup requires fd-based symlink-resistant shutil.rmtree",
+        )
+    shutil.rmtree(name, dir_fd=parent_fd)
+
+
+def remove_bound_browser_shared_memory_edges(binding: BrowserSharedMemoryBinding) -> None:
+    browser_shared_memory_cleanup_rebind(binding)
+    if not binding.directory_unlinked:
+        require_browser_shared_memory_entries(
+            binding.directory_fd,
+            set(),
+            "browser shared-memory directory during cleanup",
+        )
+        os.rmdir(BROWSER_SHARED_MEMORY_DIRECTORY, dir_fd=binding.container_fd)
+        binding.directory_unlinked = True
+    browser_shared_memory_cleanup_rebind(binding)
+    if not binding.container_unlinked:
+        require_browser_shared_memory_entries(
+            binding.container_fd,
+            set(),
+            "browser shared-memory container during cleanup",
+        )
+        os.rmdir(binding.container.name, dir_fd=binding.root_fd)
+        binding.container_unlinked = True
+    browser_shared_memory_cleanup_rebind(binding)
+    binding.cleaned = True
+    binding.close()
+
+
+def cleanup_browser_shared_memory(binding: BrowserSharedMemoryBinding) -> None:
+    """Strict success cleanup: accept only the unchanged, already-empty proof."""
+
+    if binding.cleaned:
+        return
+    browser_shared_memory_snapshot(binding, expected=binding.pre)
+    try:
+        remove_bound_browser_shared_memory_edges(binding)
+    except MeasurementIncomplete:
+        raise
+    except OSError as error:
+        raise incomplete(
+            "BROWSER_SHARED_MEMORY_CLEANUP_FAILED",
+            f"cannot remove browser shared-memory hierarchy: {error}",
+        ) from error
+
+
+def force_cleanup_browser_shared_memory(binding: BrowserSharedMemoryBinding) -> None:
+    """Failure-only cleanup of the still-bound engine-writable subtree."""
+
+    if binding.cleaned:
+        return
+    try:
+        browser_shared_memory_cleanup_rebind(binding)
+        if not binding.directory_unlinked:
+            remove_bound_browser_shared_memory_tree(
+                binding.container_fd,
+                BROWSER_SHARED_MEMORY_DIRECTORY,
+            )
+            binding.directory_unlinked = True
+        remove_bound_browser_shared_memory_edges(binding)
+    except MeasurementIncomplete:
+        raise
+    except OSError as error:
+        raise incomplete(
+            "BROWSER_SHARED_MEMORY_CLEANUP_FAILED",
+            f"cannot force-remove browser shared-memory hierarchy: {error}",
+        ) from error
+
+
+def browser_shared_memory_fd_diagnostic(
+    descriptor: int,
+    limit: int = 8,
+    scan_limit: int = 64,
+) -> dict[str, Any]:
+    """Retain a bounded top-level inventory through a held directory descriptor."""
+
+    if descriptor < 0:
+        return {"status": "closed"}
+    retained: list[dict[str, Any]] = []
+    examined = 0
+    truncated = False
+    try:
+        metadata = os.fstat(descriptor)
+        with os.scandir(descriptor) as entries:
+            for entry in entries:
+                if examined >= scan_limit:
+                    truncated = True
+                    break
+                examined += 1
+                entry_metadata = entry.stat(follow_symlinks=False)
+                if len(retained) < limit:
+                    name = entry.name if len(entry.name) <= 120 else "..." + entry.name[-117:]
+                    if stat.S_ISDIR(entry_metadata.st_mode):
+                        kind = "directory"
+                    elif stat.S_ISREG(entry_metadata.st_mode):
+                        kind = "file"
+                    elif stat.S_ISLNK(entry_metadata.st_mode):
+                        kind = "symlink"
+                    else:
+                        kind = "other"
+                    retained.append(
+                        {
+                            "name": name,
+                            "kind": kind,
+                            "size": entry_metadata.st_size,
+                            "blocks": entry_metadata.st_blocks,
+                        }
+                    )
+        return {
+            "status": "available",
+            "identity": {"device": metadata.st_dev, "inode": metadata.st_ino},
+            "owner_uid": metadata.st_uid,
+            "owner_gid": metadata.st_gid,
+            "mode": stat.S_IMODE(metadata.st_mode),
+            "link_count": metadata.st_nlink,
+            "entries": retained,
+            "entries_examined": examined,
+            "scan_truncated": truncated,
+        }
+    except OSError as error:
+        return {"status": "unavailable", "error": f"{type(error).__name__}:{error.errno}"}
+
+
+def browser_shared_memory_named_edge_diagnostic(
+    parent_fd: int,
+    name: str,
+    expected: dict[str, int] | None,
+) -> dict[str, Any]:
+    try:
+        metadata = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return {"state": "absent"}
+    except OSError as error:
+        return {"state": "unavailable", "error": f"{type(error).__name__}:{error.errno}"}
+    return {
+        "state": "present",
+        "kind": (
+            "directory" if stat.S_ISDIR(metadata.st_mode) else "symlink" if stat.S_ISLNK(metadata.st_mode) else "other"
+        ),
+        "identity": {"device": metadata.st_dev, "inode": metadata.st_ino},
+        "matches_expected_identity": (
+            None if expected is None else (metadata.st_dev, metadata.st_ino) == (expected["device"], expected["inode"])
+        ),
+    }
+
+
+def browser_shared_memory_residue_diagnostic(binding: BrowserSharedMemoryBinding) -> dict[str, Any]:
+    """Describe residue and replacement state without reopening attacker-selected paths."""
+
+    try:
+        return {
+            "container_edge": browser_shared_memory_named_edge_diagnostic(
+                binding.root_fd,
+                binding.container.name,
+                binding.pre["container"]["identity"],
+            ),
+            "directory_edge": browser_shared_memory_named_edge_diagnostic(
+                binding.container_fd,
+                BROWSER_SHARED_MEMORY_DIRECTORY,
+                binding.pre["directory"]["identity"],
+            ),
+            "container": browser_shared_memory_fd_diagnostic(binding.container_fd),
+            "directory": browser_shared_memory_fd_diagnostic(binding.directory_fd),
+        }
+    except BaseException as error:
+        return {"status": "unavailable", "error": f"{type(error).__name__}:{getattr(error, 'errno', None)}"}
+
+
+def bounded_exception_diagnostic(error: BaseException | None, limit: int = 2048) -> dict[str, Any]:
+    if error is None:
+        return {"type": "none", "message": "no active original failure"}
+    message = str(error)
+    if len(message) > limit:
+        message = message[: limit - 3] + "..."
+    result = {"type": type(error).__name__, "message": message}
+    if isinstance(error, MeasurementIncomplete):
+        result["code"] = error.code
+    return result
+
+
+def cleanup_failed_browser_shared_memory(
+    binding: BrowserSharedMemoryBinding,
+    original_failure: BaseException | None,
+    cleanup_blocker: BaseException | None = None,
+) -> None:
+    """Force cleanup or raise one typed failure retaining both causes and residue."""
+
+    cleanup_error = cleanup_blocker
+    if cleanup_error is None:
+        try:
+            force_cleanup_browser_shared_memory(binding)
+        except BaseException as error:
+            cleanup_error = error
+    if cleanup_error is None:
+        return
+    residue = browser_shared_memory_residue_diagnostic(binding)
+    cleanup = bounded_exception_diagnostic(cleanup_error)
+    original = bounded_exception_diagnostic(original_failure)
+    binding.close()
+    diagnostic = json.dumps(
+        {"cleanup": cleanup, "original_failure": original, "residue": residue},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    raise incomplete(
+        "BROWSER_SHARED_MEMORY_CLEANUP_FAILED",
+        f"failed-sample browser shared-memory cleanup failed; diagnostic={diagnostic}",
+    ) from cleanup_error
+
+
 def output_capture_root_binding(path: Path, metadata: os.stat_result) -> dict[str, Any]:
     return {
         "path": str(path),
@@ -1504,12 +2313,22 @@ def engine_failure_diagnostics(
     stderr_path: Path,
     engine_tmpdir_identity: tuple[int, int],
     native_api2_storage: dict[str, tuple[int, int]] | None,
+    browser_shared_memory: BrowserSharedMemoryBinding | None = None,
 ) -> str:
     """Keep target-neutral storage context bounded after a quiescence failure."""
 
     roots = [("engine-temporary", engine_tmpdir, engine_tmpdir_identity)]
     if native_api2_storage is not None:
         roots.append(("engine-sandbox", cwd.parent, native_api2_storage["sandbox"]))
+    if browser_shared_memory is not None:
+        browser_identity = browser_shared_memory.pre["directory"]["identity"]
+        roots.append(
+            (
+                "browser-shared-memory",
+                browser_shared_memory.directory,
+                (browser_identity["device"], browser_identity["inode"]),
+            )
+        )
     inventories = [directory_diagnostics(path, label, identity) for label, path, identity in roots]
     outputs = {
         "stdout": output_path_metadata(stdout_path),
@@ -1637,6 +2456,7 @@ def engine_environment(
     account: EngineAccount,
     temporary_directory: str = "/tmp",
     runtime_directories: dict[str, str] | None = None,
+    browser_shared_memory_directory: str | None = None,
 ) -> dict[str, str]:
     allowed = {
         "BROWSERSHOT_CHROME_PATH",
@@ -1662,6 +2482,8 @@ def engine_environment(
     )
     if runtime_directories is not None:
         environment.update(runtime_directories)
+    if browser_shared_memory_directory is not None:
+        environment[BROWSER_SHARED_MEMORY_ENV] = browser_shared_memory_directory
     return environment
 
 
@@ -1677,6 +2499,7 @@ def fork_stopped(
     host_network_namespace: str,
     temporary_directory: str,
     runtime_directories: dict[str, str] | None,
+    browser_shared_memory_directory: str | None,
     output_capture_before: dict[str, Any],
 ) -> tuple[int, int]:
     if SYNC_WRITE_FLAG == 0:
@@ -1690,7 +2513,12 @@ def fork_stopped(
             with contextlib.suppress(OSError):
                 os.close(descriptor)
         raise
-    launch_environment = engine_environment(account, temporary_directory, runtime_directories)
+    launch_environment = engine_environment(
+        account,
+        temporary_directory,
+        runtime_directories,
+        browser_shared_memory_directory,
+    )
     try:
         handshake_read, handshake_write = os.pipe2(os.O_CLOEXEC)
     except BaseException:
@@ -1718,6 +2546,7 @@ def fork_stopped(
                     "executable": command[0],
                     "cwd": os.getcwd(),
                     "tmpdir": launch_environment["TMPDIR"],
+                    "browser_tmpdir": launch_environment.get(BROWSER_SHARED_MEMORY_ENV),
                     "identity": {
                         "uid": os.getuid(),
                         "euid": os.geteuid(),
@@ -1850,7 +2679,7 @@ def finish_authority_handshake(
         )
     if handshake.get("executable_writable") is not False:
         raise incomplete("ENGINE_EXECUTABLE_MUTABLE", "engine account can write its executable")
-    launch_context: dict[str, str] = {}
+    launch_context: dict[str, str | None] = {}
     for name in ("cwd", "tmpdir"):
         value = handshake.get(name)
         candidate = Path(value) if isinstance(value, str) else None
@@ -1860,6 +2689,20 @@ def finish_authority_handshake(
                 f"launcher reported a non-canonical {name}: {value!r}",
             )
         launch_context[name] = value
+    browser_tmpdir = handshake.get("browser_tmpdir")
+    if browser_tmpdir is not None:
+        candidate = Path(browser_tmpdir) if isinstance(browser_tmpdir, str) else None
+        if (
+            candidate is None
+            or not candidate.is_absolute()
+            or ".." in candidate.parts
+            or str(candidate) != browser_tmpdir
+        ):
+            raise incomplete(
+                "ENGINE_LAUNCH_CONTEXT_INVALID",
+                f"launcher reported a non-canonical browser_tmpdir: {browser_tmpdir!r}",
+            )
+    launch_context["browser_tmpdir"] = browser_tmpdir
     probes = handshake.get("migration_write_probes")
     if not isinstance(probes, dict) or set(probes) != {"parent", "harness", "staging", "measurement"}:
         raise incomplete("ENGINE_MIGRATION_PROBE_INVALID", "launcher omitted cgroup migration write probes")
@@ -1953,23 +2796,151 @@ def remove_bound_leaf(cgroup: BoundDirectory, parent: BoundDirectory) -> None:
 
 
 def force_cleanup(cgroup: BoundDirectory, parent: BoundDirectory, root_pid: int | None) -> None:
-    with contextlib.suppress(MeasurementIncomplete):
+    deadline = time.monotonic() + KILL_GRACE_MS / 1000.0
+    kill_failure: MeasurementIncomplete | None = None
+    try:
         write_bound(cgroup, "cgroup.kill", "1\n")
-        deadline = time.monotonic() + KILL_GRACE_MS / 1000.0
-        while time.monotonic() < deadline:
-            with contextlib.suppress(MeasurementIncomplete):
-                if cgroup_flat(cgroup, "cgroup.events", {"populated"})["populated"] == 0:
-                    break
-            time.sleep(0.01)
+    except MeasurementIncomplete as error:
+        kill_failure = error
+    root_reaped = root_pid is None
+    root_wait_failure: BaseException | None = None
     if root_pid is not None:
-        with contextlib.suppress(ChildProcessError):
+        try:
             waited, _ = os.waitpid(root_pid, os.WNOHANG)
             if waited == 0:
                 with contextlib.suppress(ProcessLookupError):
                     os.kill(root_pid, signal.SIGKILL)
-                os.waitpid(root_pid, 0)
-    with contextlib.suppress(MeasurementIncomplete, OSError):
-        remove_bound_leaf(cgroup, parent)
+            elif waited == root_pid:
+                root_reaped = True
+            else:
+                root_wait_failure = incomplete(
+                    "ROOT_WAIT_INVALID",
+                    f"waited for unexpected PID {waited} during failed-sample cleanup",
+                )
+        except ChildProcessError:
+            root_reaped = True
+        except OSError as error:
+            root_wait_failure = error
+
+    observation_failure: MeasurementIncomplete | None = None
+    populated: int | None = None
+    while True:
+        if root_pid is not None and not root_reaped:
+            try:
+                waited, _ = os.waitpid(root_pid, os.WNOHANG)
+                if waited == root_pid:
+                    root_reaped = True
+                    root_wait_failure = None
+                elif waited != 0:
+                    root_wait_failure = incomplete(
+                        "ROOT_WAIT_INVALID",
+                        f"waited for unexpected PID {waited} during failed-sample cleanup",
+                    )
+            except ChildProcessError:
+                root_reaped = True
+                root_wait_failure = None
+            except OSError as error:
+                root_wait_failure = error
+        try:
+            populated = cgroup_flat(cgroup, "cgroup.events", {"populated"})["populated"]
+            observation_failure = None
+        except MeasurementIncomplete as error:
+            observation_failure = error
+        if root_reaped and populated == 0 and observation_failure is None:
+            break
+        if time.monotonic() >= deadline:
+            diagnostic = json.dumps(
+                {
+                    "kill": bounded_exception_diagnostic(kill_failure),
+                    "observation": bounded_exception_diagnostic(observation_failure),
+                    "populated": populated,
+                    "root_reaped": root_reaped,
+                    "root_wait": bounded_exception_diagnostic(root_wait_failure),
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            raise incomplete(
+                "CGROUP_CLEANUP_FAILED",
+                f"cannot prove failed-sample cgroup drained; diagnostic={diagnostic}",
+            ) from (root_wait_failure or observation_failure or kill_failure)
+        time.sleep(0.01)
+    remove_bound_leaf(cgroup, parent)
+
+
+def combined_cgroup_cleanup_failure(
+    failures: list[tuple[str, BaseException]],
+    original_failure: BaseException | None,
+) -> MeasurementIncomplete | None:
+    if not failures:
+        return None
+    diagnostic = json.dumps(
+        {
+            "cleanup": [
+                {
+                    "cgroup": label,
+                    "failure": bounded_exception_diagnostic(error),
+                }
+                for label, error in failures
+            ],
+            "original_failure": bounded_exception_diagnostic(original_failure),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return incomplete(
+        "CGROUP_CLEANUP_FAILED",
+        f"one or more failed-sample cgroups could not be safely removed; diagnostic={diagnostic}",
+    )
+
+
+def cleanup_failed_sample_resources(
+    parent: BoundDirectory,
+    child: BoundDirectory | None,
+    staging: BoundDirectory | None,
+    browser_shared_memory: BrowserSharedMemoryBinding | None,
+    root_pid: int | None,
+    root_reaped: bool,
+    root_in_measurement: bool,
+    original_failure: BaseException | None,
+) -> None:
+    """Run every finalizer and prohibit browser purge unless all owning cgroups drain."""
+
+    cgroup_cleanup_failures: list[tuple[str, BaseException]] = []
+    try:
+        if child is not None:
+            try:
+                force_cleanup(child, parent, None if root_reaped or not root_in_measurement else root_pid)
+            except BaseException as error:
+                cgroup_cleanup_failures.append(("measurement", error))
+            finally:
+                with contextlib.suppress(OSError):
+                    child.close()
+        if staging is not None:
+            try:
+                force_cleanup(staging, parent, None if root_reaped or root_in_measurement else root_pid)
+            except BaseException as error:
+                cgroup_cleanup_failures.append(("staging", error))
+            finally:
+                with contextlib.suppress(OSError):
+                    staging.close()
+    finally:
+        cgroup_cleanup_error = combined_cgroup_cleanup_failure(
+            cgroup_cleanup_failures,
+            original_failure,
+        )
+        try:
+            if browser_shared_memory is not None:
+                cleanup_failed_browser_shared_memory(
+                    browser_shared_memory,
+                    original_failure,
+                    cgroup_cleanup_error,
+                )
+            if cgroup_cleanup_error is not None:
+                raise cgroup_cleanup_error
+        finally:
+            with contextlib.suppress(OSError):
+                parent.close()
 
 
 def wait_for_accounting_quiescence(
@@ -2076,9 +3047,12 @@ def sample_command(
     handshake_read: int | None = None
     root_in_measurement = False
     root_reaped = False
+    browser_shared_memory: BrowserSharedMemoryBinding | None = None
     usage_start = resource.getrusage(resource.RUSAGE_SELF)
 
     try:
+        if private_browser_runtime:
+            browser_shared_memory = create_browser_shared_memory(account)
         with exclusive_parent_lock(parent.path, lock_root):
             parent.verify_path_identity()
             child = create_leaf(parent)
@@ -2105,6 +3079,7 @@ def sample_command(
                 host_network_namespace,
                 engine_tmpdir,
                 runtime_directories,
+                str(browser_shared_memory.directory) if browser_shared_memory is not None else None,
                 output_capture_before,
             )
             root_identity = move_stopped_child(root_pid, staging, cgroup_root, proc_root)
@@ -2118,7 +3093,11 @@ def sample_command(
                 proc_root,
             )
             handshake_read = None
-            expected_launch_context = {"cwd": str(Path(cwd)), "tmpdir": engine_tmpdir}
+            expected_launch_context = {
+                "cwd": str(Path(cwd)),
+                "tmpdir": engine_tmpdir,
+                "browser_tmpdir": (str(browser_shared_memory.directory) if browser_shared_memory is not None else None),
+            }
             if launch_security["launch_context"] != expected_launch_context:
                 raise incomplete(
                     "ENGINE_LAUNCH_CONTEXT_INVALID",
@@ -2291,6 +3270,7 @@ def sample_command(
                         Path(stderr_path),
                         engine_tmpdir_identity,
                         native_api2_storage,
+                        browser_shared_memory,
                     )
                     raise incomplete(
                         error.code,
@@ -2338,6 +3318,19 @@ def sample_command(
                         expected_runtime_identities,
                     ),
                 }
+            browser_shared_memory_proof = None
+            if browser_shared_memory is not None:
+                browser_shared_memory_after = browser_shared_memory_snapshot(
+                    browser_shared_memory,
+                    expected=browser_shared_memory.pre,
+                )
+                browser_shared_memory_proof = {
+                    "contract": BROWSER_SHARED_MEMORY_CONTRACT,
+                    "filesystem": "tmpfs",
+                    "semantics": BROWSER_SHARED_MEMORY_SEMANTICS,
+                    "pre": browser_shared_memory.pre,
+                    "post": browser_shared_memory_after,
+                }
             launch_security["temporary_storage"] = {
                 "access_time": "FS_NOATIME_FL",
                 "directory_sync": "FS_DIRSYNC_FL",
@@ -2348,6 +3341,7 @@ def sample_command(
                 "runtime_target": target_classification,
                 "account_home": account_home_after,
                 "runtime_path_bindings": runtime_path_bindings,
+                "browser_shared_memory": browser_shared_memory_proof,
                 "scope": "per-invocation-private",
             }
             launch_security["output_capture"] = {
@@ -2426,18 +3420,25 @@ def sample_command(
             remove_bound_leaf(child, parent)
             child.close()
             child = None
+            if browser_shared_memory is not None:
+                cleanup_browser_shared_memory(browser_shared_memory)
+                browser_shared_memory = None
             return result
     finally:
+        original_failure = sys.exception()
         if handshake_read is not None:
             with contextlib.suppress(OSError):
                 os.close(handshake_read)
-        if child is not None:
-            force_cleanup(child, parent, None if root_reaped or not root_in_measurement else root_pid)
-            child.close()
-        if staging is not None:
-            force_cleanup(staging, parent, None if root_reaped or root_in_measurement else root_pid)
-            staging.close()
-        parent.close()
+        cleanup_failed_sample_resources(
+            parent,
+            child,
+            staging,
+            browser_shared_memory,
+            root_pid,
+            root_reaped,
+            root_in_measurement,
+            original_failure,
+        )
 
 
 def main() -> int:

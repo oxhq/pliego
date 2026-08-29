@@ -106,8 +106,9 @@ sealed into one no-selection series: all repeats, per-metric p50 ranges, and
 repeat-to-repeat spread are retained, so the published report cannot silently
 choose the most favorable VM.
 
-Each target gets a fresh private on-disk `TMPDIR` below the same ext4 scratch
-root. The workflow sets and verifies inherited Linux `FS_NOATIME_FL`,
+Each target's measured engine or PHP adapter gets a fresh private on-disk
+`TMPDIR` below the same ext4 scratch root. The workflow sets and verifies
+inherited Linux `FS_NOATIME_FL`,
 `FS_SYNC_FL`, and `FS_DIRSYNC_FL`, so scratch reads do not create incidental
 atime dirtiness while transient file data and unlink/rmdir metadata are
 synchronous. Scratch stays off tmpfs and its block I/O remains in the retained
@@ -140,6 +141,29 @@ entries while preserving the bound root and HOME/XDG directories, and syncs
 those deletions so neither browser teardown nor dirty file-backed pages escape
 the sample. The sampler independently requires the preserved directories to be
 empty after descendant drain.
+
+Puppeteer 25.8.0 unconditionally launches Chrome with
+`--disable-dev-shm-usage`, which redirects Chromium's anonymous shared-memory
+fallback through the child process's generic temporary directory. For this
+locked Browsershot slice, the sampler therefore provisions a second, private
+tmpfs directory at `/dev/shm/pliego-bench-shm-<32-hex>/tmp` and Browsershot passes
+that path only to Node and Chrome as their `TMPDIR`. The sampler holds
+descriptor-relative bindings for the root-owned mode-0711 container and
+engine-owned mode-0700 inner directory, requires exact emptiness and unchanged
+owner/mode/device/inode/link metadata after all descendants exit, then removes
+the already-proven-empty hierarchy. The PHP adapter's `TMPDIR`, all HOME/XDG
+directories, the explicit Chrome profile, Browsershot temporary options,
+artifacts, and PDF output remain on measured ext4.
+
+This is a disclosed Puppeteer fallback accommodation, not a claim of exact
+production Chrome storage behavior: unclassified Node/Chrome generic temporary
+files or singleton/socket metadata can also use that private tmpfs directory.
+Their CPU and wall cost remain measured and tmpfs/shmem remains charged to the
+render cgroup's memory peak; memory-backed writes correctly do not appear in
+block-device `io.stat`. Provisioning and removal are outside engine wall time
+but inside the retained sampler-lifecycle `one_shot_wall_ms` interval. The
+per-sample `bound-private-tmpfs-browser-shared-memory-v1` proof makes this
+target-specific carve-out visible and rejects it for Pliego or dompdf samples.
 
 After immutable images are pinned, each target uses the same order: one discarded correctness preflight, discarded
 warmups, then cold one-shot timed samples. The adapter root and every descendant

@@ -40,6 +40,8 @@ PERCENTILE_METHOD = "nearest-rank-v1"
 ENGINE_ACCOUNT_HOME = "/nonexistent/pliego-benchmark-engine"
 ENGINE_OUTPUT_CAPTURE_ROOT = PurePosixPath("/dev/shm")
 ENGINE_OUTPUT_CAPTURE_CONTRACT = "root-bound-tmpfs-engine-output-v1"
+BROWSER_SHARED_MEMORY_CONTAINER_PREFIX = "pliego-bench-shm-"
+BROWSER_SHARED_MEMORY_DIRECTORY = "tmp"
 RUNTIME_DIRECTORY_NAMES = {
     "HOME": "home",
     "XDG_CACHE_HOME": "xdg-cache",
@@ -463,6 +465,16 @@ def validate_resource_usage(sample: dict[str, Any], path: str, violations: list[
                     "must be an absolute canonical path",
                 )
             )
+    browser_tmpdir = launch_context["browser_tmpdir"]
+    if browser_tmpdir is not None:
+        candidate = PurePosixPath(browser_tmpdir)
+        if not candidate.is_absolute() or ".." in candidate.parts or str(candidate) != browser_tmpdir:
+            violations.append(
+                Violation(
+                    f"{path}.resource_usage.launch_security.launch_context.browser_tmpdir",
+                    "must be null or an absolute canonical path",
+                )
+            )
     target_classification = runtime_target(launch_argv)
     require_equal(
         f"{path}.resource_usage.launch_security.temporary_storage.runtime_environment",
@@ -626,6 +638,128 @@ def validate_resource_usage(sample: dict[str, Any], path: str, violations: list[
             Violation(
                 f"{path}.resource_usage.launch_security.temporary_storage.runtime_path_bindings",
                 "non-browser targets must not claim private browser runtime roots",
+            )
+        )
+    browser_shared_memory = temporary_storage["browser_shared_memory"]
+    browser_shared_memory_path = f"{path}.resource_usage.launch_security.temporary_storage.browser_shared_memory"
+    if target_classification == BROWSERSHOT_TARGET:
+        if not isinstance(browser_shared_memory, dict):
+            violations.append(
+                Violation(
+                    browser_shared_memory_path,
+                    "Browsershot must retain its protected tmpfs Node/Chrome temporary-storage identities",
+                )
+            )
+        else:
+            pre = browser_shared_memory["pre"]
+            post = browser_shared_memory["post"]
+            require_equal(f"{browser_shared_memory_path}.post", post, pre, violations)
+            root = pre["root"]
+            container = pre["container"]
+            directory = pre["directory"]
+            require_equal(f"{browser_shared_memory_path}.pre.root", root, output_root, violations)
+
+            container_path = PurePosixPath(container["path"])
+            nonce = (
+                container_path.name.removeprefix(BROWSER_SHARED_MEMORY_CONTAINER_PREFIX)
+                if container_path.name.startswith(BROWSER_SHARED_MEMORY_CONTAINER_PREFIX)
+                else ""
+            )
+            if (
+                not container_path.is_absolute()
+                or container_path.parent != ENGINE_OUTPUT_CAPTURE_ROOT
+                or str(container_path) != container["path"]
+                or not nonce
+                or re.fullmatch(r"[0-9a-f]{32}", nonce) is None
+            ):
+                violations.append(
+                    Violation(
+                        f"{browser_shared_memory_path}.pre.container.path",
+                        "must be a canonical direct /dev/shm child with a 32-character lowercase-hex nonce",
+                    )
+                )
+            require_equal(
+                f"{browser_shared_memory_path}.pre.directory.path",
+                directory["path"],
+                str(container_path / BROWSER_SHARED_MEMORY_DIRECTORY),
+                violations,
+            )
+            require_equal(
+                f"{path}.resource_usage.launch_security.launch_context.browser_tmpdir",
+                browser_tmpdir,
+                directory["path"],
+                violations,
+            )
+            require_equal(
+                f"{browser_shared_memory_path}.pre.container_entries",
+                pre["container_entries"],
+                [BROWSER_SHARED_MEMORY_DIRECTORY],
+                violations,
+            )
+            require_equal(
+                f"{browser_shared_memory_path}.pre.directory_entries",
+                pre["directory_entries"],
+                [],
+                violations,
+            )
+            for label, binding, expected in (
+                ("root", root, {"owner_uid": 0, "owner_gid": 0, "mode": 0o1777}),
+                (
+                    "container",
+                    container,
+                    {"owner_uid": 0, "owner_gid": 0, "mode": 0o711, "link_count": 3},
+                ),
+                (
+                    "directory",
+                    directory,
+                    {
+                        "owner_uid": launch["uid"],
+                        "owner_gid": launch["gid"],
+                        "mode": 0o700,
+                        "link_count": 2,
+                    },
+                ),
+            ):
+                for field, expected_value in expected.items():
+                    require_equal(
+                        f"{browser_shared_memory_path}.pre.{label}.{field}",
+                        binding[field],
+                        expected_value,
+                        violations,
+                    )
+            identities = {
+                (binding["identity"]["device"], binding["identity"]["inode"])
+                for binding in (root, container, directory)
+            }
+            devices = {binding["identity"]["device"] for binding in (root, container, directory)}
+            if len(identities) != 3 or len(devices) != 1:
+                violations.append(
+                    Violation(
+                        f"{browser_shared_memory_path}.pre",
+                        "must bind three distinct directory identities on one tmpfs device",
+                    )
+                )
+            for label, binding in (("container", container), ("directory", directory)):
+                identity = (binding["identity"]["device"], binding["identity"]["inode"])
+                if identity in output_identities:
+                    violations.append(
+                        Violation(
+                            f"{browser_shared_memory_path}.pre.{label}.identity",
+                            "must be distinct from bound engine output identities",
+                        )
+                    )
+    elif browser_shared_memory is not None:
+        violations.append(
+            Violation(
+                browser_shared_memory_path,
+                "non-browser targets must not claim Browser-specific tmpfs temporary storage",
+            )
+        )
+    elif browser_tmpdir is not None:
+        violations.append(
+            Violation(
+                f"{path}.resource_usage.launch_security.launch_context.browser_tmpdir",
+                "non-browser targets must not receive a Browser-specific tmpfs temporary directory",
             )
         )
     status = launch["status"]

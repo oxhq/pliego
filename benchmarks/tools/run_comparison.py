@@ -690,7 +690,10 @@ def render_markdown(data: dict[str, Any]) -> str:
             "",
             "## Block-device I/O and output",
             "",
-            "`read_bytes` and `write_bytes` come from cgroup `io.stat`; memory-backed stdout/stderr capture is excluded.",
+            "`read_bytes` and `write_bytes` come from cgroup `io.stat`; memory-backed stdout/stderr capture is "
+            "excluded for all targets. Browsershot's disclosed protected Node/Chrome tmpfs `TMPDIR` is also "
+            "excluded from block I/O but charged to cgroup memory; its PHP `TMPDIR`, profile/XDG state, "
+            "artifacts, and PDF remain on measured ext4.",
             "",
             "| Renderer | Block read p50 (`io.stat`) | Block write p50 (`io.stat`) | PDF bytes p50 | Correct samples | PDF hash variants |",
             "| --- | ---: | ---: | ---: | ---: | ---: |",

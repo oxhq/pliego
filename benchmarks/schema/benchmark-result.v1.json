@@ -497,8 +497,9 @@
         "launch_context": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["cwd", "tmpdir"],
+          "required": ["browser_tmpdir", "cwd", "tmpdir"],
           "properties": {
+            "browser_tmpdir": { "type": ["string", "null"], "minLength": 1 },
             "cwd": { "type": "string", "minLength": 1 },
             "tmpdir": { "type": "string", "minLength": 1 }
           }
@@ -556,10 +557,16 @@
         "temporary_storage": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["access_time", "account_home", "directory_sync", "file_sync", "filesystem", "native_api2_path_bindings", "runtime_environment", "runtime_path_bindings", "runtime_target", "scope"],
+          "required": ["access_time", "account_home", "browser_shared_memory", "directory_sync", "file_sync", "filesystem", "native_api2_path_bindings", "runtime_environment", "runtime_path_bindings", "runtime_target", "scope"],
           "properties": {
             "access_time": { "const": "FS_NOATIME_FL" },
             "account_home": { "$ref": "#/definitions/account_home_proof" },
+            "browser_shared_memory": {
+              "oneOf": [
+                { "type": "null" },
+                { "$ref": "#/definitions/browser_shared_memory_proof" }
+              ]
+            },
             "directory_sync": { "const": "FS_DIRSYNC_FL" },
             "file_sync": { "const": "FS_SYNC_FL" },
             "filesystem": { "const": "ext4" },
@@ -642,6 +649,51 @@
             "stderr": { "$ref": "#/definitions/output_capture_stream_binding" }
           }
         }
+      }
+    },
+    "browser_shared_memory_proof": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract", "filesystem", "semantics", "pre", "post"],
+      "properties": {
+        "contract": { "const": "bound-private-tmpfs-browser-shared-memory-v1" },
+        "filesystem": { "const": "tmpfs" },
+        "semantics": { "const": "puppeteer-node-chrome-temporary-storage-v1" },
+        "pre": { "$ref": "#/definitions/browser_shared_memory_snapshot" },
+        "post": { "$ref": "#/definitions/browser_shared_memory_snapshot" }
+      }
+    },
+    "browser_shared_memory_snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["root", "container", "directory", "container_entries", "directory_entries"],
+      "properties": {
+        "root": { "$ref": "#/definitions/output_capture_root_binding" },
+        "container": { "$ref": "#/definitions/browser_shared_memory_directory_binding" },
+        "directory": { "$ref": "#/definitions/browser_shared_memory_directory_binding" },
+        "container_entries": {
+          "type": "array",
+          "items": { "const": "tmp" },
+          "minItems": 1,
+          "maxItems": 1
+        },
+        "directory_entries": {
+          "type": "array",
+          "maxItems": 0
+        }
+      }
+    },
+    "browser_shared_memory_directory_binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "identity", "owner_uid", "owner_gid", "mode", "link_count"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "identity": { "$ref": "#/definitions/filesystem_identity" },
+        "owner_uid": { "type": "integer", "minimum": 0 },
+        "owner_gid": { "type": "integer", "minimum": 0 },
+        "mode": { "type": "integer", "minimum": 0 },
+        "link_count": { "type": "integer", "minimum": 1 }
       }
     },
     "output_capture_root_binding": {

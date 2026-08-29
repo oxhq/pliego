@@ -95,8 +95,8 @@ output-capture bindings.
   empty root-owned parent. The sampler does not provision the service/account.
 * A dedicated root-owned mode-0711 ext4 directory whose `FS_NOATIME_FL`,
   `FS_SYNC_FL`, and `FS_DIRSYNC_FL` flags are set before any samples. Set
-  `PLIEGO_BENCHMARK_ENGINE_TEMP_ROOT` to that root. Every target receives a
-  fresh mode-0700 child as `TMPDIR`; temporary database writes remain
+  `PLIEGO_BENCHMARK_ENGINE_TEMP_ROOT` to that root. Every measured engine or PHP
+  adapter receives a fresh mode-0700 child as `TMPDIR`; temporary database writes remain
   block-I/O-accounted while inherited no-atime and synchronous file/directory
   updates prevent scratch access or deletion from escaping the zero-dirty gate.
   Every target publishes its PDF below the same inherited-flags storage root,
@@ -122,7 +122,9 @@ output-capture bindings.
   regular-file writes, not durable storage. Output volume remains target/protocol
   work, so these measurements are not renderer-core-only comparisons.
   Browsershot additionally receives fresh private `HOME` and XDG roots below
-  that same measured scratch directory. Pliego and dompdf retain the exact
+  that same measured scratch directory. Its adapter, PHP `TMPDIR`, explicit
+  Chromium profile, artifacts, and PDF therefore remain on ext4 and contribute
+  to block-device `io.stat`. Pliego and dompdf retain the exact
   `/nonexistent/pliego-benchmark-engine` account home and receive no XDG roots.
   The adapter gives Puppeteer an explicit fresh profile inside that tree so its
   normal temporary-profile deletion cannot make dirty file-backed pages
@@ -130,9 +132,19 @@ output-capture bindings.
   the private runtime tree, clears every runtime entry while preserving the
   bound private root and `HOME`/XDG directory identities, and syncs those
   deletions before publishing the PDF. The sampler independently requires those
-  directories to remain bound and empty after the cgroup drains. Browser teardown
-  and all related CPU, wall, and block-device I/O cost stay inside the sample. The sampler
-  never flushes browser state on the adapter's behalf.
+  directories to remain bound and empty after the cgroup drains. Puppeteer 25.8.0
+  unconditionally launches Chromium with `--disable-dev-shm-usage`; to prevent
+  immediately unlinked Chromium shared-memory files from leaving an
+  unobservable ext4 dirty tail, the root sampler also creates one protected
+  private `/dev/shm/pliego-bench-shm-<32-hex>/tmp` directory and supplies it only
+  as the Node/Chromium subprocess `TMPDIR`. The sampler proves the root,
+  container, and empty-directory identities and exact entries before and after
+  execution, then removes the hierarchy. Those shmem pages remain charged to
+  cgroup memory, while their traffic is necessarily absent from block-device
+  `io.stat`. Browser teardown and all CPU and wall cost stay inside the sample;
+  block-I/O totals cover the ext4-backed Browser state listed above, not this
+  disclosed memory-backed carve-out. The sampler never flushes browser state on
+  the adapter's behalf.
   The sampler and both hosted workflows reject any other passwd home and require
   that exact path to be absent or non-writable to the engine account.
   This is a deliberate non-default benchmark condition; its synchronous
@@ -365,15 +377,18 @@ stopped launcher into the clean measurement leaf and starting engine wall time.
 All later descendants, including new sessions, remain contained. The retained
 final `cpu.stat`, `io.stat`, `memory.current`, `memory.peak`, and `pids.peak`
 counters are the accounting source. Engine wall time ends with the root process.
-The sampler also verifies that each private per-invocation temporary directory
-is ext4-backed and carries inherited `FS_NOATIME_FL`, `FS_SYNC_FL`, and
+The sampler also verifies that each private per-invocation file-backed
+temporary directory is ext4-backed and carries inherited `FS_NOATIME_FL`,
+`FS_SYNC_FL`, and
 `FS_DIRSYNC_FL` both before launch and after descendant drain; that storage
 remains on disk, inside the measured process tree, and is not replaced by
 tmpfs. Each sample retains the centrally classified runtime target and
 environment contract. Browsershot evidence additionally binds normalized
 HOME/XDG child paths to unique filesystem device/inode identities before
-launch and revalidates the same identities after descendant drain; non-browser
-samples must not carry that private-browser proof.
+launch and revalidates the same identities after descendant drain. It separately
+retains the protected tmpfs Node/Chromium `TMPDIR` topology and exact empty-entry
+state described above; non-browser samples must not carry either private-browser
+proof.
 Descendant drain and accounting-settle durations are recorded separately. The
 runner also retains a sampler-lifecycle one-shot interval from process open
 through sampler exit; it includes output-capture binding and revalidation but
@@ -433,7 +448,10 @@ This foundation records wall latency (p50/p95/p99/min/max/mean), serial
 throughput, per-page wall time, PDF and artifact bytes, page count, page
 dimensions, required text, link targets, capture status, PDF hash variation,
 and typed failure publication state.
-CPU, cgroup memory, and cgroup block-device I/O from `io.stat` are exact retained counters. Sampled summed
+CPU, cgroup memory, and cgroup block-device I/O from `io.stat` are exact retained
+counters. The I/O counters exclude memory-backed stdout/stderr for every target and the disclosed
+Browsershot-only Node/Chromium tmpfs `TMPDIR`; those pages remain cgroup-memory
+accounted. Sampled summed
 RSS/PSS are explicitly lower bounds. Runtime archive size and deeper document
 checks remain separate audited increments before a signed baseline is published.
 
