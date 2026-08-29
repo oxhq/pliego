@@ -81,7 +81,6 @@ lockfiles = [
     "benchmarks/adapters/browsershot/package-lock.json",
 ]
 identity_keys = ["composer_vendor_sha256", "node_modules_sha256"]
-identity_values = { chromium_enabled_features = "PersistentHistograms:storage/LocalMemory" }
 runtime_identity_contract = "pliego.benchmark-runtime-image.v1"
 runtime_attestation = "unavailable"
 requires_network_isolation = true

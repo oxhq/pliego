@@ -11,7 +11,6 @@ const PACKAGE = 'spatie/browsershot';
 const PACKAGE_VERSION = '5.4.0';
 const PUPPETEER_VERSION = '25.8.0';
 const BLOCKED_NETWORK_URL_SUBSTRINGS = ['http://', 'https://'];
-const ENABLED_CHROMIUM_FEATURES = ['PersistentHistograms:storage/LocalMemory'];
 const PRIVATE_BROWSER_PROFILE = 'chrome-profile';
 const BROWSER_SHARED_MEMORY_ENV = 'PLIEGO_BENCHMARK_BROWSER_TMPDIR';
 const BROWSER_SHARED_MEMORY_ROOT = '/dev/shm';
@@ -136,15 +135,7 @@ function chromium_arguments(): array
         'allow-file-access-from-files',
         'disable-background-networking',
         'disable-component-update',
-        // A file-backed Crashpad metrics mmap can retain dirty pages after its
-        // profile pathname is no longer available to post-exit syncing.
-        'disable-crashpad-metrics',
         'disable-domain-reliability',
-        // Puppeteer enables metrics recording, whose default persistent
-        // histogram allocator uses a writable BrowserMetrics PMA mapping.
-        // Keep the allocator and metrics work, but use its supported in-memory
-        // storage mode so every page stays visible to cgroup accounting.
-        'enable-features' => implode(',', ENABLED_CHROMIUM_FEATURES),
         'disable-sync',
         // The sampler is the benchmark sandbox: fixed UID, no capabilities,
         // no_new_privs, private network namespace, and a sealed filesystem
@@ -623,7 +614,6 @@ function identity(): void
         'package' => PACKAGE,
         'package_version' => PACKAGE_VERSION,
         'puppeteer_version' => PUPPETEER_VERSION,
-        'chromium_enabled_features' => implode(',', ENABLED_CHROMIUM_FEATURES),
         'adapter_path' => $adapter,
         'adapter_sha256' => hash_file('sha256', $adapter),
         'composer_lock_sha256' => hash_file('sha256', required_file(__DIR__ . '/composer.lock')),
@@ -778,15 +768,12 @@ if ($mode === 'self-test') {
         'allow-file-access-from-files',
         'disable-background-networking',
         'disable-component-update',
-        'disable-crashpad-metrics',
         'disable-domain-reliability',
-        'enable-features' => 'PersistentHistograms:storage/LocalMemory',
         'disable-sync',
         'no-sandbox',
         'no-first-run',
     ];
-    if (ENABLED_CHROMIUM_FEATURES !== ['PersistentHistograms:storage/LocalMemory']
-        || chromium_arguments() !== $expectedChromiumArguments) {
+    if (chromium_arguments() !== $expectedChromiumArguments) {
         abort_adapter('Chromium launch policy self-test failed', 1);
     }
     if (!is_browser_shared_memory_path('/dev/shm/pliego-bench-shm-0123456789abcdef0123456789abcdef/tmp')

@@ -33,6 +33,7 @@ import validate_result
 
 SAMPLER = Path(__file__).with_name("process_tree_sampler.py")
 PHP_RUNNER = Path(__file__).resolve().parents[1] / "runners" / "pliego.php"
+DIRTY_CACHE_FILENAME = "fixture-linked-unsynced-cache"
 
 
 def write_proc_stat(proc: Path, pid: int, start_ticks: int) -> None:
@@ -112,6 +113,7 @@ def counter_fixture(cgroup: Path) -> None:
     (cgroup / "io.stat").write_text("8:0 rbytes=0 wbytes=0 rios=0 wios=0\n", encoding="ascii")
     (cgroup / "memory.current").write_text("0\n", encoding="ascii")
     (cgroup / "memory.peak").write_text("0\n", encoding="ascii")
+    (cgroup / "memory.reclaim").write_text("", encoding="ascii")
     (cgroup / "memory.stat").write_text("file_dirty 0\nfile_writeback 0\n", encoding="ascii")
     (cgroup / "pids.peak").write_text("0\n", encoding="ascii")
     (cgroup / "cgroup.events").write_text("populated 0\nfrozen 0\n", encoding="ascii")
@@ -1383,6 +1385,86 @@ def fixture_proofs() -> None:
         snapshot, settle = process_tree_sampler.wait_for_accounting_quiescence(bound, 1.0, 20.0)
         assert snapshot["memory_file_dirty_bytes"] == 0
         assert settle["reads"] == 2 and settle["stable_reads"] == 2
+        assert settle["reclaim"] == {
+            "triggered": False,
+            "requested_bytes": 0,
+            "write_result": "not-needed",
+            "before": {
+                "memory_current_bytes": 0,
+                "memory_file_dirty_bytes": 0,
+                "memory_file_writeback_bytes": 0,
+            },
+            "after": {
+                "memory_current_bytes": 0,
+                "memory_file_dirty_bytes": 0,
+                "memory_file_writeback_bytes": 0,
+            },
+        }
+        dirty = process_tree_sampler.counter_snapshot(bound)
+        dirty.update(
+            memory_current_bytes=8192,
+            memory_peak_bytes=16384,
+            memory_file_dirty_bytes=4096,
+        )
+        clean = dict(dirty)
+        clean.update(memory_current_bytes=4096, memory_file_dirty_bytes=0)
+        clock = [100.0]
+
+        def delayed_reclaim(_cgroup: object, _requested_bytes: int) -> str:
+            clock[0] += 0.007
+            return "under-reclaimed"
+
+        with (
+            mock.patch.object(
+                process_tree_sampler,
+                "counter_snapshot",
+                side_effect=[dirty, clean, clean],
+            ),
+            mock.patch.object(
+                process_tree_sampler,
+                "request_cgroup_reclaim",
+                side_effect=delayed_reclaim,
+            ) as reclaim,
+            mock.patch.object(process_tree_sampler.time, "monotonic", side_effect=lambda: clock[0]),
+            mock.patch.object(
+                process_tree_sampler.time, "sleep", side_effect=lambda seconds: clock.__setitem__(0, clock[0] + seconds)
+            ),
+        ):
+            snapshot, settle = process_tree_sampler.wait_for_accounting_quiescence(bound, 1.0, 20.0)
+        reclaim.assert_called_once_with(bound, 8192)
+        assert snapshot == clean
+        assert settle["reads"] == 3
+        assert settle["duration_ms"] == 8.0
+        assert settle["reclaim"] == {
+            "triggered": True,
+            "requested_bytes": 8192,
+            "write_result": "under-reclaimed",
+            "before": {
+                "memory_current_bytes": 8192,
+                "memory_file_dirty_bytes": 4096,
+                "memory_file_writeback_bytes": 0,
+            },
+            "after": {
+                "memory_current_bytes": 4096,
+                "memory_file_dirty_bytes": 0,
+                "memory_file_writeback_bytes": 0,
+            },
+        }
+        populated = dict(dirty)
+        populated["cgroup_events"] = {"populated": 1, "frozen": 0}
+        with mock.patch.object(process_tree_sampler, "counter_snapshot", return_value=populated):
+            must_be_incomplete(
+                "CGROUP_RECLAIM_UNSAFE",
+                lambda: process_tree_sampler.wait_for_accounting_quiescence(bound, 1.0, 20.0),
+            )
+        with mock.patch.object(os, "write", side_effect=OSError(errno.EAGAIN, "under-reclaimed")):
+            assert process_tree_sampler.request_cgroup_reclaim(bound, 8192) == "under-reclaimed"
+        with mock.patch.object(os, "write", side_effect=OSError(errno.EPERM, "denied")):
+            must_be_incomplete(
+                "CGROUP_RECLAIM_FAILED",
+                lambda: process_tree_sampler.request_cgroup_reclaim(bound, 8192),
+            )
+        (cgroup / "memory.current").write_text("4096\n", encoding="ascii")
         (cgroup / "memory.stat").write_text("file_dirty 1\nfile_writeback 0\n", encoding="ascii")
         must_be_incomplete(
             "CGROUP_ACCOUNTING_NOT_QUIESCENT",
@@ -1519,7 +1601,9 @@ raise SystemExit(allocation[0])
             parent.chmod(0o755)
         engine.write_text(
             f"""#!/usr/bin/env python3
+import array
 import errno
+import fcntl
 import os
 from pathlib import Path
 import subprocess
@@ -1527,6 +1611,10 @@ import sys
 import time
 
 ARGUMENTS = {arguments!r}
+DIRTY_CACHE_FILENAME = {DIRTY_CACHE_FILENAME!r}
+FS_IOC_GETFLAGS = 0x80086601
+FS_IOC_SETFLAGS = 0x40086602
+FS_SYNC_FL = 0x00000008
 
 
 def parent_workload(mebibytes, duration):
@@ -1578,6 +1666,30 @@ def output_workload():
     return 0
 
 
+def dirty_cache_workload():
+    path = Path(os.environ["TMPDIR"]) / DIRTY_CACHE_FILENAME
+    descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_RDWR | os.O_CLOEXEC, 0o600)
+    try:
+        flags = array.array("I", [0])
+        fcntl.ioctl(descriptor, FS_IOC_GETFLAGS, flags, True)
+        flags[0] &= ~FS_SYNC_FL
+        fcntl.ioctl(descriptor, FS_IOC_SETFLAGS, flags)
+        verified = array.array("I", [0])
+        fcntl.ioctl(descriptor, FS_IOC_GETFLAGS, verified, True)
+        assert verified[0] & FS_SYNC_FL == 0
+        chunk = b"x" * (1024 * 1024)
+        for _ in range(16):
+            remaining = memoryview(chunk)
+            while remaining:
+                written = os.write(descriptor, remaining)
+                assert written > 0
+                remaining = remaining[written:]
+    finally:
+        os.close(descriptor)
+    assert path.is_file() and path.stat().st_size == 16 * 1024 * 1024
+    return 0
+
+
 def browser_shared_memory_workload():
     browser_tmpdir = Path(os.environ["PLIEGO_BENCHMARK_BROWSER_TMPDIR"])
     assert browser_tmpdir.is_dir()
@@ -1603,6 +1715,8 @@ def main():
         return migration_attack(ARGUMENTS[1])
     if ARGUMENTS[0] == "--workload-output":
         return output_workload()
+    if ARGUMENTS[0] == "--workload-dirty-cache":
+        return dirty_cache_workload()
     if ARGUMENTS[0] == "--workload-browser-shared-memory":
         return browser_shared_memory_workload()
     if ARGUMENTS[0] == "--workload-browser-shared-memory-residue":
@@ -1652,16 +1766,20 @@ def sampled(
     descendant_grace_ms: float = 1000.0,
     browser_target: bool = False,
     expected_failure_code: str | None = None,
+    expected_linked_temporary_file: str | None = None,
 ) -> dict:
     account = process_tree_sampler.resolve_engine_account()
     temporary_root = os.environ.get("PLIEGO_BENCHMARK_ENGINE_TEMP_ROOT")
     assert temporary_root, "live sampler proof requires PLIEGO_BENCHMARK_ENGINE_TEMP_ROOT"
+    retained_path: Path | None = None
     with tempfile.TemporaryDirectory(dir=temporary_root) as raw:
         sandbox = Path(raw).resolve()
         os.chown(sandbox, account.uid, account.gid)
         sandbox.chmod(0o700)
         job = sandbox / "job"
         temporary = sandbox / "temporary"
+        if expected_linked_temporary_file is not None:
+            retained_path = temporary / expected_linked_temporary_file
         artifacts = sandbox / "artifacts"
         job.mkdir(mode=0o700)
         temporary.mkdir(mode=0o700)
@@ -1706,6 +1824,10 @@ def sampled(
                 text=True,
                 timeout=30,
             )
+        if retained_path is not None:
+            assert retained_path.is_file()
+    if retained_path is not None:
+        assert not retained_path.exists()
     if expected_failure_code is not None:
         assert result.returncode == 2, result.stderr
         assert f"measurement-incomplete[{expected_failure_code}]" in result.stderr, result.stderr
@@ -2024,6 +2146,19 @@ def live_cgroup_proofs() -> dict:
     live_browser_shared_memory_negative_proofs(account)
     with workload_engine() as engine:
         proof = sampled(workload_command(engine))
+    with workload_engine(["--workload-dirty-cache"]) as engine:
+        reclaimed = sampled(
+            workload_command(engine),
+            expected_linked_temporary_file=DIRTY_CACHE_FILENAME,
+        )
+    reclaim = reclaimed["accounting_settle"]["reclaim"]
+    assert reclaim["triggered"] is True, reclaim
+    assert reclaim["requested_bytes"] > 0
+    assert reclaim["requested_bytes"] == reclaim["before"]["memory_current_bytes"]
+    assert reclaim["write_result"] in {"success", "under-reclaimed"}
+    assert reclaim["before"]["memory_file_dirty_bytes"] > 0 or reclaim["before"]["memory_file_writeback_bytes"] > 0
+    assert_exact_counters(reclaimed)
+    assert_validator_accepts(reclaimed, True)
     parent = os.environ["PLIEGO_BENCHMARK_CGROUP_PARENT"]
     with workload_engine(["--workload-migration-attack", parent]) as engine:
         attacked = sampled(workload_command(engine))

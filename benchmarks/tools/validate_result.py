@@ -253,21 +253,6 @@ def require_equal(path: str, actual: Any, expected: Any, violations: list[Violat
         violations.append(Violation(path, f"must equal {expected!r}, got {actual!r}"))
 
 
-def validate_adapter_identity_values(
-    competitors: dict[str, str],
-    target: dict[str, Any],
-    path: str,
-    violations: list[Violation],
-) -> None:
-    for key, expected in target.get("identity_values", {}).items():
-        require_equal(
-            f"{path}.toolchain.competitors.adapter.{key}",
-            competitors.get(f"adapter.{key}"),
-            expected,
-            violations,
-        )
-
-
 def oracle_manifest_pins_complete(manifest: dict[str, Any]) -> bool:
     oracle = manifest.get("oracle", {})
     if oracle.get("contract") != "pliego.pdf-oracle.v1":
@@ -867,6 +852,73 @@ def validate_resource_usage(sample: dict[str, Any], path: str, violations: list[
         require_equal(f"{path}.resource_usage.{field}", usage[field], expected, violations)
 
     settle = usage["accounting_settle"]
+    reclaim = settle["reclaim"]
+    reclaim_before = reclaim["before"]
+    reclaim_after = reclaim["after"]
+    reclaim_needed = (
+        reclaim_before["memory_file_dirty_bytes"] != 0 or reclaim_before["memory_file_writeback_bytes"] != 0
+    )
+    require_equal(
+        f"{path}.resource_usage.accounting_settle.reclaim.triggered",
+        reclaim["triggered"],
+        reclaim_needed,
+        violations,
+    )
+    if reclaim_needed:
+        require_equal(
+            f"{path}.resource_usage.accounting_settle.reclaim.requested_bytes",
+            reclaim["requested_bytes"],
+            reclaim_before["memory_current_bytes"],
+            violations,
+        )
+        if reclaim["requested_bytes"] <= 0:
+            violations.append(
+                Violation(
+                    f"{path}.resource_usage.accounting_settle.reclaim.requested_bytes",
+                    "must be positive when post-drain dirty or writeback memory remains",
+                )
+            )
+        if reclaim["write_result"] not in {"success", "under-reclaimed"}:
+            violations.append(
+                Violation(
+                    f"{path}.resource_usage.accounting_settle.reclaim.write_result",
+                    "must retain the one-shot memory.reclaim write result",
+                )
+            )
+        if settle["reads"] < 3:
+            violations.append(
+                Violation(
+                    f"{path}.resource_usage.accounting_settle.reads",
+                    "must include pre-reclaim, post-reclaim, and stable accounting reads",
+                )
+            )
+    else:
+        require_equal(
+            f"{path}.resource_usage.accounting_settle.reclaim.requested_bytes",
+            reclaim["requested_bytes"],
+            0,
+            violations,
+        )
+        require_equal(
+            f"{path}.resource_usage.accounting_settle.reclaim.write_result",
+            reclaim["write_result"],
+            "not-needed",
+            violations,
+        )
+        require_equal(
+            f"{path}.resource_usage.accounting_settle.reclaim.after",
+            reclaim_after,
+            reclaim_before,
+            violations,
+        )
+    for phase, observation in (("before", reclaim_before), ("after", reclaim_after)):
+        if observation["memory_current_bytes"] > final["memory_peak_bytes"]:
+            violations.append(
+                Violation(
+                    f"{path}.resource_usage.accounting_settle.reclaim.{phase}.memory_current_bytes",
+                    "must not exceed the retained cgroup memory peak",
+                )
+            )
     minimum_one_shot_wall = round(usage["wall_ms"] + usage["drain_ms"] + settle["duration_ms"], 3)
     if sample["one_shot_wall_ms"] + 0.003 < minimum_one_shot_wall:
         violations.append(
@@ -1291,7 +1343,6 @@ def validate_manifest_contract(
             "environment.read_only.adapter_path": "true",
         }.items():
             require_equal(f"{path}.toolchain.competitors.{field}", competitors.get(field), expected, violations)
-        validate_adapter_identity_values(competitors, target, path, violations)
         for lock_name in target.get("lockfiles", []):
             lock = (ROOT / lock_name).resolve()
             key = f"adapter.{lock.name.removesuffix('.json').replace('-', '_').replace('.', '_')}_sha256"

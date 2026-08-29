@@ -143,20 +143,10 @@ output-capture bindings.
   cgroup memory, while their traffic is necessarily absent from block-device
   `io.stat`. Browser teardown and all CPU and wall cost stay inside the sample;
   block-I/O totals cover the ext4-backed Browser state listed above, not this
-  disclosed memory-backed carve-out. The sampler never flushes browser state on
-  the adapter's behalf. Puppeteer also enables Chrome metrics recording by
-  default. Chromium's default `PersistentHistograms` feature stores that
-  non-rendering telemetry in a writable, profile-backed `BrowserMetrics` PMA
-  mapping. A one-shot browser can retire or move that mapping during shutdown;
-  pathname-based post-exit syncing cannot cover an inode once it is no longer
-  enumerable. The locked adapter therefore enables `PersistentHistograms` with
-  its supported `storage=LocalMemory` feature parameter. Metrics recording and
-  the allocator lifecycle remain in place, and the allocated pages remain
-  charged to cgroup memory, but there is no file-backed PMA mapping whose
-  lifecycle must be inferred. Results describe this exact target-specific
-  configuration rather than stock Browsershot defaults. The adapter identity
-  records the exact enabled-feature value and both result validators bind it to
-  the manifest.
+  disclosed memory-backed carve-out. The adapter remains responsible for its
+  explicit file/tree durability sync. The sampler performs no path-based or
+  browser-specific flush; the generic post-exit cgroup reclaim disclosed below
+  applies identically to every target.
   The sampler and both hosted workflows reject any other passwd home and require
   that exact path to be absent or non-writable to the engine account.
   This is a deliberate non-default benchmark condition; its synchronous
@@ -417,11 +407,25 @@ explicit coarse tolerance instead of cropping and rescaling the ink.
 The same expectations apply to all targets.
 
 Publication fails unless `cgroup.events` drains recursively. After it empties,
-`memory.stat` dirty/writeback must reach zero and two interval-separated
-`cpu.stat` and `io.stat` reads must match. A bounded `cgroup.kill` cleans leaked
-descendants, but its use fails a passing sample. Launcher setup and privilege
-removal happen in the staging leaf, so the measurement leaf starts with only
-the stopped unprivileged launcher and zero CPU/block-I/O/memory counters before exec.
+the sampler captures a pre-reclaim accounting snapshot. If cgroup-charged dirty
+or writeback file memory remains, it issues exactly one cgroup-local
+[`memory.reclaim`](https://docs.kernel.org/admin-guide/cgroup-v2.html#memory-reclaim)
+request equal to that snapshot's `memory.current`. The retained
+`accounting_settle.reclaim` evidence records the requested bytes, whether the
+write completed or the kernel reported under-reclaim, and the before/after
+current, dirty, and writeback values. A completed write does not claim that the
+kernel reclaimed exactly the requested amount. There is no retry, global sync,
+or target-specific exception.
+This post-exit step may settle or discard engine-charged file cache while
+preserving the already measured `memory.peak`; writeback caused by reclaim stays
+charged in the final cgroup `io.stat`. Reclaim time is included in both
+`accounting_settle.duration_ms` and the sampler-lifecycle `one_shot_wall_ms`.
+Publication still requires final dirty/writeback zero and two
+interval-separated, identical `cpu.stat` and `io.stat` observations. A bounded
+`cgroup.kill` cleans leaked descendants, but its use fails a passing sample.
+Launcher setup and privilege removal happen in the staging leaf, so the
+measurement leaf starts with only the stopped unprivileged launcher and zero
+CPU/block-I/O/memory counters before exec.
 
 Periodic `/proc` PID/start-time, summed RSS, and summed PSS observations are
 retained only as sampled lower-bound diagnostics; short-lived processes may be

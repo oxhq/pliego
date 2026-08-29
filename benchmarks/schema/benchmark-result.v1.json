@@ -823,6 +823,7 @@
         "duration_ms",
         "reads",
         "stable_reads",
+        "reclaim",
         "stable_observations"
       ],
       "properties": {
@@ -831,11 +832,34 @@
         "duration_ms": { "type": "number", "minimum": 0 },
         "reads": { "type": "integer", "minimum": 2 },
         "stable_reads": { "const": 2 },
+        "reclaim": { "$ref": "#/definitions/accounting_reclaim" },
         "stable_observations": {
           "type": "array",
           "minItems": 2,
           "items": { "$ref": "#/definitions/settle_observation" }
         }
+      }
+    },
+    "accounting_reclaim": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["triggered", "requested_bytes", "write_result", "before", "after"],
+      "properties": {
+        "triggered": { "type": "boolean" },
+        "requested_bytes": { "type": "integer", "minimum": 0 },
+        "write_result": { "enum": ["not-needed", "success", "under-reclaimed"] },
+        "before": { "$ref": "#/definitions/reclaim_memory_snapshot" },
+        "after": { "$ref": "#/definitions/reclaim_memory_snapshot" }
+      }
+    },
+    "reclaim_memory_snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["memory_current_bytes", "memory_file_dirty_bytes", "memory_file_writeback_bytes"],
+      "properties": {
+        "memory_current_bytes": { "type": "integer", "minimum": 0 },
+        "memory_file_dirty_bytes": { "type": "integer", "minimum": 0 },
+        "memory_file_writeback_bytes": { "type": "integer", "minimum": 0 }
       }
     },
     "settle_observation": {

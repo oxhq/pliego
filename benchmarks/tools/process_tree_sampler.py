@@ -820,6 +820,7 @@ def create_leaf(
             "io.stat",
             "memory.current",
             "memory.peak",
+            "memory.reclaim",
             "memory.stat",
             "pids.peak",
         }
@@ -843,7 +844,7 @@ def create_leaf(
             write_bound(child, interface, "0\n")
             if read_bound(child, interface).strip() != "0":
                 raise incomplete("CGROUP_LEAF_DELEGATED", f"cannot prohibit descendants in {child.path}")
-        for interface in ("cgroup.procs", "cgroup.kill"):
+        for interface in ("cgroup.procs", "cgroup.kill", "memory.reclaim"):
             writable = os.open(
                 interface,
                 os.O_WRONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0),
@@ -2987,24 +2988,110 @@ def cleanup_failed_sample_resources(
         raise failure from finalization_failures[-1][1]
 
 
+def request_cgroup_reclaim(cgroup: BoundDirectory, requested_bytes: int) -> str:
+    """Make one bounded proactive-reclaim request and classify EAGAIN."""
+
+    encoded = f"{requested_bytes}\n".encode("ascii")
+    descriptor = -1
+    try:
+        descriptor = os.open(
+            "memory.reclaim",
+            os.O_WRONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=cgroup.fd,
+        )
+        try:
+            written = os.write(descriptor, encoded)
+        except OSError as error:
+            if error.errno == errno.EAGAIN:
+                return "under-reclaimed"
+            raise incomplete(
+                "CGROUP_RECLAIM_FAILED",
+                f"cannot reclaim {requested_bytes} bytes from {cgroup.path}: {error}",
+            ) from error
+        if written != len(encoded):
+            raise incomplete(
+                "CGROUP_RECLAIM_FAILED",
+                f"short memory.reclaim write for {cgroup.path}",
+            )
+        return "success"
+    except MeasurementIncomplete:
+        raise
+    except OSError as error:
+        raise incomplete(
+            "CGROUP_RECLAIM_FAILED",
+            f"cannot open memory.reclaim for {cgroup.path}: {error}",
+        ) from error
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
 def wait_for_accounting_quiescence(
     cgroup: BoundDirectory,
     poll_interval_ms: float,
     timeout_ms: float,
-) -> tuple[dict[str, Any], dict[str, int | float]]:
+) -> tuple[dict[str, Any], dict[str, Any]]:
     started = time.monotonic()
-    previous: dict[str, Any] | None = None
+    before_reclaim = counter_snapshot(cgroup)
+    if before_reclaim["cgroup_events"]["populated"] != 0:
+        raise incomplete(
+            "CGROUP_RECLAIM_UNSAFE",
+            "post-exit memory reclaim requires an unpopulated render cgroup",
+        )
+    reads = 1
+    reclaim_before = {
+        field: before_reclaim[field]
+        for field in (
+            "memory_current_bytes",
+            "memory_file_dirty_bytes",
+            "memory_file_writeback_bytes",
+        )
+    }
+    reclaim_triggered = (
+        before_reclaim["memory_file_dirty_bytes"] != 0 or before_reclaim["memory_file_writeback_bytes"] != 0
+    )
+    requested_bytes = before_reclaim["memory_current_bytes"] if reclaim_triggered else 0
+    write_result = "not-needed"
+    if reclaim_triggered:
+        if requested_bytes <= 0:
+            raise incomplete(
+                "CGROUP_RECLAIM_INVALID",
+                "dirty or writeback memory remained after drain but memory.current was zero",
+            )
+        write_result = request_cgroup_reclaim(cgroup, requested_bytes)
+
+    after_reclaim = counter_snapshot(cgroup) if reclaim_triggered else before_reclaim
+    if reclaim_triggered:
+        reads += 1
+    reclaim_after = {
+        field: after_reclaim[field]
+        for field in (
+            "memory_current_bytes",
+            "memory_file_dirty_bytes",
+            "memory_file_writeback_bytes",
+        )
+    }
+    reclaim = {
+        "triggered": reclaim_triggered,
+        "requested_bytes": requested_bytes,
+        "write_result": write_result,
+        "before": reclaim_before,
+        "after": reclaim_after,
+    }
+    previous: dict[str, Any] = after_reclaim
     snapshot: dict[str, Any] | None = None
-    reads = 0
     while True:
+        if (time.monotonic() - started) * 1000.0 >= timeout_ms:
+            raise incomplete(
+                "CGROUP_ACCOUNTING_NOT_QUIESCENT",
+                "memory writeback did not clear or cpu.stat/io.stat did not stabilize; "
+                f"dirty={previous['memory_file_dirty_bytes']} writeback={previous['memory_file_writeback_bytes']}",
+            )
+        time.sleep(poll_interval_ms / 1000.0)
         snapshot = counter_snapshot(cgroup)
         reads += 1
         clean = snapshot["memory_file_dirty_bytes"] == 0 and snapshot["memory_file_writeback_bytes"] == 0
-        stable = (
-            previous is not None
-            and snapshot["io_stat"] == previous["io_stat"]
-            and snapshot["cpu_stat"] == previous["cpu_stat"]
-        )
+        stable = snapshot["io_stat"] == previous["io_stat"] and snapshot["cpu_stat"] == previous["cpu_stat"]
         if (
             clean
             and stable
@@ -3017,6 +3104,7 @@ def wait_for_accounting_quiescence(
                 "duration_ms": round((time.monotonic() - started) * 1000.0, 3),
                 "reads": reads,
                 "stable_reads": 2,
+                "reclaim": reclaim,
                 "stable_observations": [
                     {
                         "cpu_stat": observation["cpu_stat"],
@@ -3027,14 +3115,7 @@ def wait_for_accounting_quiescence(
                     for observation in (previous, snapshot)
                 ],
             }
-        if (time.monotonic() - started) * 1000.0 >= timeout_ms:
-            raise incomplete(
-                "CGROUP_ACCOUNTING_NOT_QUIESCENT",
-                "memory writeback did not clear or cpu.stat/io.stat did not stabilize; "
-                f"dirty={snapshot['memory_file_dirty_bytes']} writeback={snapshot['memory_file_writeback_bytes']}",
-            )
         previous = snapshot
-        time.sleep(poll_interval_ms / 1000.0)
 
 
 def sample_command(

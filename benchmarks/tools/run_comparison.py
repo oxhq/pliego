@@ -401,7 +401,6 @@ def validate_target_identities(
             lock = (ROOT / lock_name).resolve()
             key = f"{lock.name.removesuffix('.json').replace('-', '_').replace('.', '_')}_sha256"
             expected_runtime[key] = run_benchmark.file_sha256(lock)
-        expected_runtime.update(target.get("identity_values", {}))
         for key, expected in expected_runtime.items():
             validate_result.require_equal(f"{path}.runtime.{key}", runtime.get(key), expected, violations)
         required_hashes = ["composer_vendor_sha256", "php_sha256"]

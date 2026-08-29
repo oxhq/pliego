@@ -235,6 +235,21 @@ def resource_usage() -> dict:
             "duration_ms": 1,
             "reads": 2,
             "stable_reads": 2,
+            "reclaim": {
+                "triggered": False,
+                "requested_bytes": 0,
+                "write_result": "not-needed",
+                "before": {
+                    "memory_current_bytes": 0,
+                    "memory_file_dirty_bytes": 0,
+                    "memory_file_writeback_bytes": 0,
+                },
+                "after": {
+                    "memory_current_bytes": 0,
+                    "memory_file_dirty_bytes": 0,
+                    "memory_file_writeback_bytes": 0,
+                },
+            },
             "stable_observations": [deepcopy(stable), deepcopy(stable)],
         },
         "cleanup": {"kill_used": False, "kill_grace_ms": 1000, "lingering_before_kill": []},
@@ -528,25 +543,6 @@ def main() -> None:
     browser_violations: list[validate_result.Violation] = []
     validate_result.validate_resource_usage(browser_sample, "$.sample", browser_violations)
     assert not browser_violations, browser_violations
-    browser_target = TEST_MANIFEST["targets"]["browsershot-5.4.0-puppeteer-25.8.0"]
-    expected_feature = browser_target["identity_values"]["chromium_enabled_features"]
-    identity_value_violations: list[validate_result.Violation] = []
-    validate_result.validate_adapter_identity_values(
-        {"adapter.chromium_enabled_features": expected_feature},
-        browser_target,
-        "$.result",
-        identity_value_violations,
-    )
-    assert not identity_value_violations
-    validate_result.validate_adapter_identity_values(
-        {"adapter.chromium_enabled_features": "unexpected"},
-        browser_target,
-        "$.result",
-        identity_value_violations,
-    )
-    assert len(identity_value_violations) == 1
-    assert "chromium_enabled_features" in str(identity_value_violations[0])
-    assert "PersistentHistograms:storage/LocalMemory" in str(identity_value_violations[0])
     false_native_browser = deepcopy(browser_sample)
     false_native_browser["resource_usage"]["launch_security"]["temporary_storage"]["native_api2_path_bindings"] = (
         deepcopy(
@@ -976,6 +972,47 @@ def main() -> None:
         valid,
         lambda value: value["samples"][0]["resource_usage"]["accounting_settle"].update(duration_ms=0),
         "interval-separated",
+    )
+    reclaimed = deepcopy(valid)
+    reclaimed_settle = reclaimed["samples"][0]["resource_usage"]["accounting_settle"]
+    reclaimed_settle["reads"] = 3
+    reclaimed_settle["reclaim"] = {
+        "triggered": True,
+        "requested_bytes": 4096,
+        "write_result": "under-reclaimed",
+        "before": {
+            "memory_current_bytes": 4096,
+            "memory_file_dirty_bytes": 4096,
+            "memory_file_writeback_bytes": 0,
+        },
+        "after": {
+            "memory_current_bytes": 0,
+            "memory_file_dirty_bytes": 0,
+            "memory_file_writeback_bytes": 0,
+        },
+    }
+    assert not errors(reclaimed), errors(reclaimed)
+    changed(
+        valid,
+        lambda value: value["samples"][0]["resource_usage"]["accounting_settle"]["reclaim"].update(triggered=True),
+        "reclaim.triggered",
+    )
+    changed(
+        reclaimed,
+        lambda value: value["samples"][0]["resource_usage"]["accounting_settle"]["reclaim"].update(requested_bytes=1),
+        "reclaim.requested_bytes",
+    )
+    changed(
+        reclaimed,
+        lambda value: value["samples"][0]["resource_usage"]["accounting_settle"].update(reads=2),
+        "pre-reclaim, post-reclaim",
+    )
+    changed(
+        valid,
+        lambda value: value["samples"][0]["resource_usage"]["accounting_settle"]["reclaim"]["after"].update(
+            memory_current_bytes=1
+        ),
+        "reclaim.after",
     )
     changed(
         valid,

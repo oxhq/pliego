@@ -700,7 +700,6 @@ def main() -> None:
             "target": "fixture-adapter",
             "package": "fixture/package",
             "package_version": "1.2.3",
-            "launch_policy": "fixture-policy-v1",
             "adapter_path": str(adapter.resolve()),
             "adapter_sha256": benchmark.file_sha256(adapter),
             "composer_lock_sha256": benchmark.file_sha256(lock),
@@ -718,37 +717,10 @@ def main() -> None:
                     "version": "1.2.3",
                     "profile": "locked",
                     "lockfiles": ["composer.lock"],
-                    "identity_values": {"launch_policy": "fixture-policy-v1"},
                 },
             )
         assert engine["binary_sha256"] == identity["adapter_sha256"]
         assert recorded == identity
-
-        changed_policy = {**identity, "launch_policy": "unexpected-policy"}
-        with (
-            patch.object(benchmark, "ROOT", root),
-            patch.object(
-                benchmark,
-                "run",
-                return_value=subprocess.CompletedProcess([], 0, json.dumps(changed_policy), ""),
-            ),
-        ):
-            try:
-                benchmark.adapter_identity(
-                    adapter,
-                    "fixture-adapter",
-                    {
-                        "package": "fixture/package",
-                        "version": "1.2.3",
-                        "profile": "locked",
-                        "lockfiles": ["composer.lock"],
-                        "identity_values": {"launch_policy": "fixture-policy-v1"},
-                    },
-                )
-            except SystemExit as error:
-                assert error.code == 1
-            else:
-                raise AssertionError("changed adapter launch policy was accepted")
 
         with patch.object(benchmark, "ROOT", root), patch.object(benchmark, "run", return_value=completed):
             try:
