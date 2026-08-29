@@ -30,11 +30,26 @@ from collections import Counter
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from benchmark_runtime import BROWSERSHOT_TARGET, runtime_contract, runtime_target
+
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_SCHEMA = ROOT / "benchmarks" / "schema" / "benchmark-result.v1.json"
 MANIFEST = ROOT / "benchmarks" / "manifest.toml"
 PDF_ORACLE = ROOT / "benchmarks" / "tools" / "pdf_oracle.py"
 PERCENTILE_METHOD = "nearest-rank-v1"
+ENGINE_ACCOUNT_HOME = "/nonexistent/pliego-benchmark-engine"
+ENGINE_OUTPUT_CAPTURE_ROOT = PurePosixPath("/dev/shm")
+ENGINE_OUTPUT_CAPTURE_CONTRACT = "root-bound-tmpfs-engine-output-v1"
+BROWSER_SHARED_MEMORY_CONTAINER_PREFIX = "pliego-bench-shm-"
+BROWSER_SHARED_MEMORY_DIRECTORY = "tmp"
+RUNTIME_DIRECTORY_NAMES = {
+    "HOME": "home",
+    "XDG_CACHE_HOME": "xdg-cache",
+    "XDG_CONFIG_HOME": "xdg-config",
+    "XDG_DATA_HOME": "xdg-data",
+    "XDG_RUNTIME_DIR": "xdg-runtime",
+    "XDG_STATE_HOME": "xdg-state",
+}
 POPPLER_TOOLS = ("pdfinfo", "pdftotext", "pdffonts", "pdftoppm")
 ORACLE_IDENTITY_REASON = "manifest does not pin canonical Poppler tool identities"
 ADAPTER_ATTESTATION_REASON = "out-of-process OCI image attestation is unavailable"
@@ -329,6 +344,424 @@ def validate_resource_usage(sample: dict[str, Any], path: str, violations: list[
         require_equal(f"{path}.resource_usage.exit_code", usage["exit_code"], 128 + usage["signal"], violations)
 
     launch = usage["launch_security"]
+    output_capture = launch["output_capture"]
+    for field, expected in {
+        "contract": ENGINE_OUTPUT_CAPTURE_CONTRACT,
+        "filesystem": "tmpfs",
+        "max_bytes_per_stream": 16 * 1024 * 1024,
+        "write_sync": "O_SYNC",
+    }.items():
+        require_equal(
+            f"{path}.resource_usage.launch_security.output_capture.{field}",
+            output_capture[field],
+            expected,
+            violations,
+        )
+    output_pre = output_capture["pre"]
+    output_post = output_capture["post"]
+    require_equal(
+        f"{path}.resource_usage.launch_security.output_capture.post.root",
+        output_post["root"],
+        output_pre["root"],
+        violations,
+    )
+    output_root = output_pre["root"]
+    for field, expected in {
+        "path": str(ENGINE_OUTPUT_CAPTURE_ROOT),
+        "owner_uid": 0,
+        "owner_gid": 0,
+        "mode": 0o1777,
+    }.items():
+        require_equal(
+            f"{path}.resource_usage.launch_security.output_capture.pre.root.{field}",
+            output_root[field],
+            expected,
+            violations,
+        )
+    output_identities: set[tuple[int, int]] = {(output_root["identity"]["device"], output_root["identity"]["inode"])}
+    output_paths: set[PurePosixPath] = set()
+    for label, prefix in (("stdout", "pliego-bench-out-"), ("stderr", "pliego-bench-err-")):
+        binding = output_pre["streams"][label]
+        post_binding = output_post["streams"][label]
+        stable_binding = {key: value for key, value in binding.items() if key != "size_bytes"}
+        stable_post_binding = {key: value for key, value in post_binding.items() if key != "size_bytes"}
+        require_equal(
+            f"{path}.resource_usage.launch_security.output_capture.post.streams.{label}",
+            stable_post_binding,
+            stable_binding,
+            violations,
+        )
+        candidate = PurePosixPath(binding["path"])
+        if (
+            not candidate.is_absolute()
+            or candidate.parent != ENGINE_OUTPUT_CAPTURE_ROOT
+            or not candidate.name.startswith(prefix)
+            or len(candidate.name) == len(prefix)
+            or str(candidate) != binding["path"]
+        ):
+            violations.append(
+                Violation(
+                    f"{path}.resource_usage.launch_security.output_capture.pre.streams.{label}.path",
+                    f"must be a canonical direct child of {ENGINE_OUTPUT_CAPTURE_ROOT} with prefix {prefix!r}",
+                )
+            )
+        for field, expected in {
+            "owner_uid": 0,
+            "owner_gid": 0,
+            "mode": 0o600,
+            "link_count": 1,
+            "size_bytes": 0,
+        }.items():
+            require_equal(
+                f"{path}.resource_usage.launch_security.output_capture.pre.streams.{label}.{field}",
+                binding[field],
+                expected,
+                violations,
+            )
+        if post_binding["size_bytes"] > output_capture["max_bytes_per_stream"]:
+            violations.append(
+                Violation(
+                    f"{path}.resource_usage.launch_security.output_capture.post.streams.{label}.size_bytes",
+                    "must not exceed max_bytes_per_stream",
+                )
+            )
+        require_equal(
+            f"{path}.resource_usage.launch_security.output_capture.pre.streams.{label}.identity.device",
+            binding["identity"]["device"],
+            output_root["identity"]["device"],
+            violations,
+        )
+        output_paths.add(candidate)
+        output_identities.add((binding["identity"]["device"], binding["identity"]["inode"]))
+    if len(output_paths) != 2 or len(output_identities) != 3:
+        violations.append(
+            Violation(
+                f"{path}.resource_usage.launch_security.output_capture.pre.streams",
+                "must bind distinct stdout and stderr files with identities distinct from the tmpfs root",
+            )
+        )
+    temporary_storage = launch["temporary_storage"]
+    for field, expected in {
+        "access_time": "FS_NOATIME_FL",
+        "directory_sync": "FS_DIRSYNC_FL",
+        "file_sync": "FS_SYNC_FL",
+        "filesystem": "ext4",
+        "scope": "per-invocation-private",
+    }.items():
+        require_equal(
+            f"{path}.resource_usage.launch_security.temporary_storage.{field}",
+            temporary_storage[field],
+            expected,
+            violations,
+        )
+    launch_argv = launch["argv"]
+    launch_context = launch["launch_context"]
+    for name in ("cwd", "tmpdir"):
+        candidate = PurePosixPath(launch_context[name])
+        if not candidate.is_absolute() or ".." in candidate.parts or str(candidate) != launch_context[name]:
+            violations.append(
+                Violation(
+                    f"{path}.resource_usage.launch_security.launch_context.{name}",
+                    "must be an absolute canonical path",
+                )
+            )
+    browser_tmpdir = launch_context["browser_tmpdir"]
+    if browser_tmpdir is not None:
+        candidate = PurePosixPath(browser_tmpdir)
+        if not candidate.is_absolute() or ".." in candidate.parts or str(candidate) != browser_tmpdir:
+            violations.append(
+                Violation(
+                    f"{path}.resource_usage.launch_security.launch_context.browser_tmpdir",
+                    "must be null or an absolute canonical path",
+                )
+            )
+    target_classification = runtime_target(launch_argv)
+    require_equal(
+        f"{path}.resource_usage.launch_security.temporary_storage.runtime_environment",
+        temporary_storage["runtime_environment"],
+        runtime_contract(target_classification),
+        violations,
+    )
+    require_equal(
+        f"{path}.resource_usage.launch_security.temporary_storage.runtime_target",
+        temporary_storage["runtime_target"],
+        target_classification,
+        violations,
+    )
+    account_home = temporary_storage["account_home"]
+    require_equal(
+        f"{path}.resource_usage.launch_security.temporary_storage.account_home.path",
+        account_home["path"],
+        ENGINE_ACCOUNT_HOME,
+        violations,
+    )
+    native_bindings_proof = temporary_storage["native_api2_path_bindings"]
+    native_api2 = len(launch_argv) >= 2 and launch_argv[1] == "render-api2"
+    if native_api2:
+        if not isinstance(native_bindings_proof, dict):
+            violations.append(
+                Violation(
+                    f"{path}.resource_usage.launch_security.temporary_storage.native_api2_path_bindings",
+                    "native API 2 must retain job and temporary storage identities",
+                )
+            )
+        else:
+            pre = native_bindings_proof["pre"]
+            post = native_bindings_proof["post"]
+            require_equal(
+                f"{path}.resource_usage.launch_security.temporary_storage.native_api2_path_bindings.post",
+                post,
+                pre,
+                violations,
+            )
+            pre_bindings = pre["bindings"]
+            resolved: dict[str, PurePosixPath] = {}
+            identities: set[tuple[int, int]] = set()
+            devices: set[int] = set()
+            for name in ("controlled_root", "sandbox", "job", "temporary"):
+                binding = pre_bindings[name]
+                candidate = PurePosixPath(binding["path"])
+                if not candidate.is_absolute() or ".." in candidate.parts or str(candidate) != binding["path"]:
+                    violations.append(
+                        Violation(
+                            f"{path}.resource_usage.launch_security.temporary_storage."
+                            f"native_api2_path_bindings.pre.bindings.{name}.path",
+                            "must be an absolute canonical path",
+                        )
+                    )
+                resolved[name] = candidate
+                identity = binding["identity"]
+                devices.add(identity["device"])
+                identities.add((identity["device"], identity["inode"]))
+            if (
+                resolved["job"].name != "job"
+                or resolved["temporary"].name != "temporary"
+                or resolved["job"].parent != resolved["sandbox"]
+                or resolved["temporary"].parent != resolved["sandbox"]
+                or resolved["sandbox"].parent != resolved["controlled_root"]
+            ):
+                violations.append(
+                    Violation(
+                        f"{path}.resource_usage.launch_security.temporary_storage.native_api2_path_bindings.pre",
+                        "must bind job/temporary siblings under a sandbox below the controlled root",
+                    )
+                )
+            require_equal(
+                f"{path}.resource_usage.launch_security.temporary_storage."
+                "native_api2_path_bindings.pre.bindings.job.path",
+                str(resolved["job"]),
+                launch_context["cwd"],
+                violations,
+            )
+            require_equal(
+                f"{path}.resource_usage.launch_security.temporary_storage."
+                "native_api2_path_bindings.pre.bindings.temporary.path",
+                str(resolved["temporary"]),
+                launch_context["tmpdir"],
+                violations,
+            )
+            if len(identities) != 4:
+                violations.append(
+                    Violation(
+                        f"{path}.resource_usage.launch_security.temporary_storage."
+                        "native_api2_path_bindings.pre.bindings",
+                        "must bind four distinct directory identities",
+                    )
+                )
+            if len(devices) != 1:
+                violations.append(
+                    Violation(
+                        f"{path}.resource_usage.launch_security.temporary_storage."
+                        "native_api2_path_bindings.pre.bindings",
+                        "must bind the controlled root, sandbox, job, and temporary directory on one device",
+                    )
+                )
+    elif native_bindings_proof is not None:
+        violations.append(
+            Violation(
+                f"{path}.resource_usage.launch_security.temporary_storage.native_api2_path_bindings",
+                "non-native targets must not claim native API 2 storage identities",
+            )
+        )
+    bindings_proof = temporary_storage["runtime_path_bindings"]
+    if target_classification == BROWSERSHOT_TARGET:
+        if not isinstance(bindings_proof, dict):
+            violations.append(
+                Violation(
+                    f"{path}.resource_usage.launch_security.temporary_storage.runtime_path_bindings",
+                    "Browsershot must retain private runtime path identities",
+                )
+            )
+        else:
+            pre = bindings_proof["pre"]
+            post = bindings_proof["post"]
+            require_equal(
+                f"{path}.resource_usage.launch_security.temporary_storage.runtime_path_bindings.post",
+                post,
+                pre,
+                violations,
+            )
+            root_path = PurePosixPath(pre["temporary_root"]["path"])
+            if (
+                not root_path.is_absolute()
+                or ".." in root_path.parts
+                or str(root_path) != pre["temporary_root"]["path"]
+            ):
+                violations.append(
+                    Violation(
+                        f"{path}.resource_usage.launch_security.temporary_storage.runtime_path_bindings.pre.temporary_root.path",
+                        "must be an absolute canonical path",
+                    )
+                )
+            root_identity_data = pre["temporary_root"]["identity"]
+            root_identity = (root_identity_data["device"], root_identity_data["inode"])
+            identities: set[tuple[int, int]] = set()
+            for variable, relative_path in RUNTIME_DIRECTORY_NAMES.items():
+                binding = pre["bindings"][variable]
+                require_equal(
+                    f"{path}.resource_usage.launch_security.temporary_storage.runtime_path_bindings.pre.bindings.{variable}.relative_path",
+                    binding["relative_path"],
+                    relative_path,
+                    violations,
+                )
+                identity = binding["identity"]
+                identities.add((identity["device"], identity["inode"]))
+            if len(identities) != len(RUNTIME_DIRECTORY_NAMES) or root_identity in identities:
+                violations.append(
+                    Violation(
+                        f"{path}.resource_usage.launch_security.temporary_storage.runtime_path_bindings.pre.bindings",
+                        "must bind unique child directory identities distinct from the temporary root",
+                    )
+                )
+    elif bindings_proof is not None:
+        violations.append(
+            Violation(
+                f"{path}.resource_usage.launch_security.temporary_storage.runtime_path_bindings",
+                "non-browser targets must not claim private browser runtime roots",
+            )
+        )
+    browser_shared_memory = temporary_storage["browser_shared_memory"]
+    browser_shared_memory_path = f"{path}.resource_usage.launch_security.temporary_storage.browser_shared_memory"
+    if target_classification == BROWSERSHOT_TARGET:
+        if not isinstance(browser_shared_memory, dict):
+            violations.append(
+                Violation(
+                    browser_shared_memory_path,
+                    "Browsershot must retain its protected tmpfs Node/Chrome temporary-storage identities",
+                )
+            )
+        else:
+            pre = browser_shared_memory["pre"]
+            post = browser_shared_memory["post"]
+            require_equal(f"{browser_shared_memory_path}.post", post, pre, violations)
+            root = pre["root"]
+            container = pre["container"]
+            directory = pre["directory"]
+            require_equal(f"{browser_shared_memory_path}.pre.root", root, output_root, violations)
+
+            container_path = PurePosixPath(container["path"])
+            nonce = (
+                container_path.name.removeprefix(BROWSER_SHARED_MEMORY_CONTAINER_PREFIX)
+                if container_path.name.startswith(BROWSER_SHARED_MEMORY_CONTAINER_PREFIX)
+                else ""
+            )
+            if (
+                not container_path.is_absolute()
+                or container_path.parent != ENGINE_OUTPUT_CAPTURE_ROOT
+                or str(container_path) != container["path"]
+                or not nonce
+                or re.fullmatch(r"[0-9a-f]{32}", nonce) is None
+            ):
+                violations.append(
+                    Violation(
+                        f"{browser_shared_memory_path}.pre.container.path",
+                        "must be a canonical direct /dev/shm child with a 32-character lowercase-hex nonce",
+                    )
+                )
+            require_equal(
+                f"{browser_shared_memory_path}.pre.directory.path",
+                directory["path"],
+                str(container_path / BROWSER_SHARED_MEMORY_DIRECTORY),
+                violations,
+            )
+            require_equal(
+                f"{path}.resource_usage.launch_security.launch_context.browser_tmpdir",
+                browser_tmpdir,
+                directory["path"],
+                violations,
+            )
+            require_equal(
+                f"{browser_shared_memory_path}.pre.container_entries",
+                pre["container_entries"],
+                [BROWSER_SHARED_MEMORY_DIRECTORY],
+                violations,
+            )
+            require_equal(
+                f"{browser_shared_memory_path}.pre.directory_entries",
+                pre["directory_entries"],
+                [],
+                violations,
+            )
+            for label, binding, expected in (
+                ("root", root, {"owner_uid": 0, "owner_gid": 0, "mode": 0o1777}),
+                (
+                    "container",
+                    container,
+                    {"owner_uid": 0, "owner_gid": 0, "mode": 0o711, "link_count": 3},
+                ),
+                (
+                    "directory",
+                    directory,
+                    {
+                        "owner_uid": launch["uid"],
+                        "owner_gid": launch["gid"],
+                        "mode": 0o700,
+                        "link_count": 2,
+                    },
+                ),
+            ):
+                for field, expected_value in expected.items():
+                    require_equal(
+                        f"{browser_shared_memory_path}.pre.{label}.{field}",
+                        binding[field],
+                        expected_value,
+                        violations,
+                    )
+            identities = {
+                (binding["identity"]["device"], binding["identity"]["inode"])
+                for binding in (root, container, directory)
+            }
+            devices = {binding["identity"]["device"] for binding in (root, container, directory)}
+            if len(identities) != 3 or len(devices) != 1:
+                violations.append(
+                    Violation(
+                        f"{browser_shared_memory_path}.pre",
+                        "must bind three distinct directory identities on one tmpfs device",
+                    )
+                )
+            for label, binding in (("container", container), ("directory", directory)):
+                identity = (binding["identity"]["device"], binding["identity"]["inode"])
+                if identity in output_identities:
+                    violations.append(
+                        Violation(
+                            f"{browser_shared_memory_path}.pre.{label}.identity",
+                            "must be distinct from bound engine output identities",
+                        )
+                    )
+    elif browser_shared_memory is not None:
+        violations.append(
+            Violation(
+                browser_shared_memory_path,
+                "non-browser targets must not claim Browser-specific tmpfs temporary storage",
+            )
+        )
+    elif browser_tmpdir is not None:
+        violations.append(
+            Violation(
+                f"{path}.resource_usage.launch_security.launch_context.browser_tmpdir",
+                "non-browser targets must not receive a Browser-specific tmpfs temporary directory",
+            )
+        )
     status = launch["status"]
     require_equal(f"{path}.resource_usage.launch_security.status.uid", status["uid"], [launch["uid"]] * 4, violations)
     require_equal(f"{path}.resource_usage.launch_security.status.gid", status["gid"], [launch["gid"]] * 4, violations)
@@ -419,6 +852,73 @@ def validate_resource_usage(sample: dict[str, Any], path: str, violations: list[
         require_equal(f"{path}.resource_usage.{field}", usage[field], expected, violations)
 
     settle = usage["accounting_settle"]
+    reclaim = settle["reclaim"]
+    reclaim_before = reclaim["before"]
+    reclaim_after = reclaim["after"]
+    reclaim_needed = (
+        reclaim_before["memory_file_dirty_bytes"] != 0 or reclaim_before["memory_file_writeback_bytes"] != 0
+    )
+    require_equal(
+        f"{path}.resource_usage.accounting_settle.reclaim.triggered",
+        reclaim["triggered"],
+        reclaim_needed,
+        violations,
+    )
+    if reclaim_needed:
+        require_equal(
+            f"{path}.resource_usage.accounting_settle.reclaim.requested_bytes",
+            reclaim["requested_bytes"],
+            reclaim_before["memory_current_bytes"],
+            violations,
+        )
+        if reclaim["requested_bytes"] <= 0:
+            violations.append(
+                Violation(
+                    f"{path}.resource_usage.accounting_settle.reclaim.requested_bytes",
+                    "must be positive when post-drain dirty or writeback memory remains",
+                )
+            )
+        if reclaim["write_result"] not in {"success", "under-reclaimed"}:
+            violations.append(
+                Violation(
+                    f"{path}.resource_usage.accounting_settle.reclaim.write_result",
+                    "must retain the one-shot memory.reclaim write result",
+                )
+            )
+        if settle["reads"] < 3:
+            violations.append(
+                Violation(
+                    f"{path}.resource_usage.accounting_settle.reads",
+                    "must include pre-reclaim, post-reclaim, and stable accounting reads",
+                )
+            )
+    else:
+        require_equal(
+            f"{path}.resource_usage.accounting_settle.reclaim.requested_bytes",
+            reclaim["requested_bytes"],
+            0,
+            violations,
+        )
+        require_equal(
+            f"{path}.resource_usage.accounting_settle.reclaim.write_result",
+            reclaim["write_result"],
+            "not-needed",
+            violations,
+        )
+        require_equal(
+            f"{path}.resource_usage.accounting_settle.reclaim.after",
+            reclaim_after,
+            reclaim_before,
+            violations,
+        )
+    for phase, observation in (("before", reclaim_before), ("after", reclaim_after)):
+        if observation["memory_current_bytes"] > final["memory_peak_bytes"]:
+            violations.append(
+                Violation(
+                    f"{path}.resource_usage.accounting_settle.reclaim.{phase}.memory_current_bytes",
+                    "must not exceed the retained cgroup memory peak",
+                )
+            )
     minimum_one_shot_wall = round(usage["wall_ms"] + usage["drain_ms"] + settle["duration_ms"], 3)
     if sample["one_shot_wall_ms"] + 0.003 < minimum_one_shot_wall:
         violations.append(
@@ -1033,6 +1533,16 @@ def validate_semantics(
                 )
             argv = launch["argv"]
             target_kind = target_manifest.get("kind")
+            expected_runtime_argv = [
+                engine.get("binary_path", ""),
+                "render" if target_kind == "adapter" else "render-api2",
+            ]
+            require_equal(
+                f"{sample_path}.resource_usage.launch_security.temporary_storage.runtime_target",
+                launch["temporary_storage"]["runtime_target"],
+                runtime_target(expected_runtime_argv),
+                violations,
+            )
             if target_kind == "pliego":
                 require_equal(
                     f"{sample_path}.resource_usage.launch_security.argv",

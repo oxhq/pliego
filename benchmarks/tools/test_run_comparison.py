@@ -16,6 +16,7 @@ from typing import Any
 import comparison_metrics
 import run_benchmark
 import run_comparison
+import validate_result
 from test_comparison_metrics import passing_sample
 from test_validate_result import resource_usage
 
@@ -32,7 +33,7 @@ def target_identities() -> list[dict[str, Any]]:
             engine = {
                 "name": "pliego",
                 "version": target["version"],
-                "binary_path": "/opt/pliego-benchmark/pliego",
+                "binary_path": "/usr/lib/pliego-benchmark/pliego",
                 "binary_sha256": target["binary_sha256"],
                 "binary_bytes": target["binary_bytes"],
                 "commit": target["commit"],
@@ -112,9 +113,62 @@ def measured_sample(target_id: str, index: int) -> dict[str, Any]:
         "interfaces": ["lo"],
     }
     identity = IDENTITY_BY_ID[target_id]
-    usage["launch_security"]["argv"] = [identity["engine"]["binary_path"], "render"]
+    usage["launch_security"]["argv"] = [
+        identity["engine"]["binary_path"],
+        "render-api2" if target_id == "pliego-0.3.3" else "render",
+    ]
     usage["launch_security"]["executable"]["path"] = identity["engine"]["binary_path"]
     usage["launch_security"]["executable"]["sha256"] = identity["engine"]["binary_sha256"]
+    temporary_storage = usage["launch_security"]["temporary_storage"]
+    if target_id != "pliego-0.3.3":
+        temporary_storage["native_api2_path_bindings"] = None
+    if target_id == "browsershot-5.4.0-puppeteer-25.8.0":
+        temporary_storage["runtime_environment"] = "fresh-private-home-xdg-v1"
+        temporary_storage["runtime_target"] = "browsershot-adapter-v1"
+        snapshot = {
+            "contract": "runtime-path-bindings-v1",
+            "temporary_root": {
+                "path": f"/var/lib/pliego-benchmark-engine-temp/invocation-{index}",
+                "identity": {"device": 1, "inode": index * 10 + 1},
+            },
+            "bindings": {
+                variable: {
+                    "relative_path": relative,
+                    "identity": {"device": 1, "inode": index * 10 + offset + 2},
+                }
+                for offset, (variable, relative) in enumerate(validate_result.RUNTIME_DIRECTORY_NAMES.items())
+            },
+        }
+        temporary_storage["runtime_path_bindings"] = {"pre": snapshot, "post": deepcopy(snapshot)}
+        tmpfs_snapshot = {
+            "root": deepcopy(usage["launch_security"]["output_capture"]["pre"]["root"]),
+            "container": {
+                "path": f"/dev/shm/pliego-bench-shm-{index + 1:032x}",
+                "identity": {"device": 2, "inode": index * 10 + 100},
+                "owner_uid": 0,
+                "owner_gid": 0,
+                "mode": 0o711,
+                "link_count": 3,
+            },
+            "directory": {
+                "path": f"/dev/shm/pliego-bench-shm-{index + 1:032x}/tmp",
+                "identity": {"device": 2, "inode": index * 10 + 101},
+                "owner_uid": usage["launch_security"]["uid"],
+                "owner_gid": usage["launch_security"]["gid"],
+                "mode": 0o700,
+                "link_count": 2,
+            },
+            "container_entries": ["tmp"],
+            "directory_entries": [],
+        }
+        temporary_storage["browser_shared_memory"] = {
+            "contract": "bound-private-tmpfs-browser-shared-memory-v1",
+            "filesystem": "tmpfs",
+            "semantics": "puppeteer-node-chrome-temporary-storage-v1",
+            "pre": tmpfs_snapshot,
+            "post": deepcopy(tmpfs_snapshot),
+        }
+        usage["launch_security"]["launch_context"]["browser_tmpdir"] = tmpfs_snapshot["directory"]["path"]
     sample.update(
         {
             "measurement_method": "linux-cgroup-v2-v1",
@@ -253,22 +307,22 @@ def reseal(source: dict[str, Any]) -> None:
 
 
 def verified_release(data: dict[str, Any]) -> dict[str, Any]:
-    engine = next(target for target in data["targets"] if target["id"] == "pliego-0.3.2")["engine"]
+    engine = next(target for target in data["targets"] if target["id"] == "pliego-0.3.3")["engine"]
     return {
         "schema": "pliego.verified-release",
         "version": 1,
-        "target": "pliego-0.3.2",
+        "target": "pliego-0.3.3",
         "release_tag": engine["release_tag"],
         "commit": engine["commit"],
         "servo_build": engine["servo_build"],
         "servo_base": engine["servo_base"],
         "platform": "linux-x86_64",
         "profile": engine["profile"],
-        "runtime_manifest": "benchmarks/releases/v0.3.2/runtimes.json",
+        "runtime_manifest": "benchmarks/releases/v0.3.3/runtimes.json",
         "runtime_manifest_bytes": 3290,
-        "runtime_manifest_sha256": "6d48a02bf8b60c3e947a8fd3784593f8a841e79694ba82eb36835532588ab2d9",
-        "archive": "/cache/pliego-0.3.2-linux-x86_64.tar.gz",
-        "binary": "/cache/pliego-0.3.2-linux-x86_64/pliego",
+        "runtime_manifest_sha256": "e4dc42db44d534d857cfb0a2e1c5f442a47ed913b6fcb999accaf50a4335412b",
+        "archive": "/cache/pliego-0.3.3-linux-x86_64.tar.gz",
+        "binary": "/cache/pliego-0.3.3-linux-x86_64/pliego",
         "archive_sha256": engine["bundle_sha256"],
         "archive_bytes": engine["bundle_bytes"],
         "binary_sha256": engine["binary_sha256"],
@@ -297,6 +351,9 @@ def main() -> None:
     assert "Wall p99" in markdown
     assert "Full aggregate table" in markdown
     assert "`sampled_peak_pss_kib_lower_bound`" in markdown
+    assert "memory-backed stdout/stderr capture is excluded for all targets" in markdown
+    assert "Browsershot's disclosed protected Node/Chrome tmpfs `TMPDIR`" in markdown
+    assert "profile/XDG state, artifacts, and PDF remain on measured ext4" in markdown
     assert "not dedicated-host production claims" in markdown
 
     changed_claim = deepcopy(data)

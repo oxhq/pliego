@@ -58,6 +58,11 @@ benchmarks/
 └── reports/                   Comparison reports land here
 ```
 
+These `v1` evidence schemas remain pre-publication contracts until the first
+immutable hosted campaign is released. No earlier public evidence bundle is
+accepted as a compatibility baseline for these required storage and
+output-capture bindings.
+
 ## Prerequisites
 
 * Authoritative baselines require dedicated or self-hosted **Linux x86_64,
@@ -88,6 +93,64 @@ benchmarks/
   `pliego-benchmark-engine`. The broker must run in the parent's sole direct
   child, `harness`; set `PLIEGO_BENCHMARK_CGROUP_PARENT` to the canonical,
   empty root-owned parent. The sampler does not provision the service/account.
+* A dedicated root-owned mode-0711 ext4 directory whose `FS_NOATIME_FL`,
+  `FS_SYNC_FL`, and `FS_DIRSYNC_FL` flags are set before any samples. Set
+  `PLIEGO_BENCHMARK_ENGINE_TEMP_ROOT` to that root. Every measured engine or PHP
+  adapter receives a fresh mode-0700 child as `TMPDIR`; temporary database writes remain
+  block-I/O-accounted while inherited no-atime and synchronous file/directory
+  updates prevent scratch access or deletion from escaping the zero-dirty gate.
+  Every target publishes its PDF below the same inherited-flags storage root,
+  so synchronous publication cost is part of each measured target. Native API
+  2 additionally keeps its job input and publication tree beside `TMPDIR` under
+  one fresh inherited-flags sandbox; the sampler retains and validates those
+  pre/post path identities in each sample. This binding assumes the exact
+  hash-pinned renderer is trusted; it detects path replacement but is not a
+  sandbox against a renderer deliberately attempting inode-reuse attacks.
+  Engine stdout and stderr use a memory-backed approximation of production pipe
+  transport: the root runner creates distinct mode-0600 files directly below
+  canonical root-owned mode-01777 `/dev/shm`, and the sampler requires that mount
+  to be `tmpfs`, opens each path with `O_NOFOLLOW|O_SYNC`, and retains matching
+  owner, mode, device, inode, link-count, and post-run byte-count evidence. A
+  sample is rejected if either stream exceeds 16 MiB; each file remains present
+  until the sampler exits. Capture
+  writes by the measured process tree are included in descendant CPU and the
+  sampler-lifecycle wall interval; writes completed before the root exits are also
+  inside engine wall time. Their shmem pages can contribute to cgroup memory, but
+  their traffic is excluded from block-device `io.stat`. Capture-file creation and
+  post-sampler read/unlink are outside `one_shot_wall_ms`; sampler binding and
+  revalidation are inside it. Here `O_SYNC` describes synchronous tmpfs
+  regular-file writes, not durable storage. Output volume remains target/protocol
+  work, so these measurements are not renderer-core-only comparisons.
+  Browsershot additionally receives fresh private `HOME` and XDG roots below
+  that same measured scratch directory. Its adapter, PHP `TMPDIR`, explicit
+  Chromium profile, artifacts, and PDF therefore remain on ext4 and contribute
+  to block-device `io.stat`. Pliego and dompdf retain the exact
+  `/nonexistent/pliego-benchmark-engine` account home and receive no XDG roots.
+  The adapter gives Puppeteer an explicit fresh profile inside that tree so its
+  normal temporary-profile deletion cannot make dirty file-backed pages
+  unreachable. After Chromium returns, the measured adapter durability-syncs
+  the private runtime tree, clears every runtime entry while preserving the
+  bound private root and `HOME`/XDG directory identities, and syncs those
+  deletions before publishing the PDF. The sampler independently requires those
+  directories to remain bound and empty after the cgroup drains. Puppeteer 25.8.0
+  unconditionally launches Chromium with `--disable-dev-shm-usage`; to prevent
+  immediately unlinked Chromium shared-memory files from leaving an
+  unobservable ext4 dirty tail, the root sampler also creates one protected
+  private `/dev/shm/pliego-bench-shm-<32-hex>/tmp` directory and supplies it only
+  as the Node/Chromium subprocess `TMPDIR`. The sampler proves the root,
+  container, and empty-directory identities and exact entries before and after
+  execution, then removes the hierarchy. Those shmem pages remain charged to
+  cgroup memory, while their traffic is necessarily absent from block-device
+  `io.stat`. Browser teardown and all CPU and wall cost stay inside the sample;
+  block-I/O totals cover the ext4-backed Browser state listed above, not this
+  disclosed memory-backed carve-out. The adapter remains responsible for its
+  explicit file/tree durability sync. The sampler performs no path-based or
+  browser-specific flush; the generic post-exit cgroup reclaim disclosed below
+  applies identically to every target.
+  The sampler and both hosted workflows reject any other passwd home and require
+  that exact path to be absent or non-writable to the engine account.
+  This is a deliberate non-default benchmark condition; its synchronous
+  metadata cost remains included in the retained wall-time and block-device I/O totals.
 * All resources local, network disabled, same fonts and assets for every run.
 
 ## Freezing and generating fixtures
@@ -154,7 +217,7 @@ binary="$(python3 benchmarks/tools/resolve_release.py \
   --cache "$cache" --metadata-out "$cache/verified-release.json")"
 python3 benchmarks/tools/run_benchmark.py \
   --binary "$binary" \
-  --out benchmarks/baselines/pliego-0.3.2-linux-x86_64.json
+  --out benchmarks/baselines/pliego-0.3.3-linux-x86_64.json
 ```
 
 The resolver accepts only the committed Linux x86_64 release name, size,
@@ -202,8 +265,9 @@ maximum of the old 50-sample short-document population.
 
 Every target, including Pliego and dompdf, runs in a fresh private network
 namespace containing only loopback. The workflow provisions the existing root
-cgroup-v2 broker and retains exact descendant CPU, `memory.peak`, I/O, sampled
-RSS/PSS lower bounds, engine wall time, full one-shot wall time, output size,
+cgroup-v2 broker and retains exact descendant CPU, `memory.peak`, block-device
+`io.stat`, sampled RSS/PSS lower bounds, engine wall time, sampler-lifecycle
+one-shot wall time, output size,
 correctness, and PDF-hash variation. It also records the GitHub run and runner
 image, host and pressure snapshots, verified Pliego release metadata, Poppler
 paths/versions/hashes, adapter/runtime paths/versions/hashes, the complete raw
@@ -315,10 +379,24 @@ stopped launcher into the clean measurement leaf and starting engine wall time.
 All later descendants, including new sessions, remain contained. The retained
 final `cpu.stat`, `io.stat`, `memory.current`, `memory.peak`, and `pids.peak`
 counters are the accounting source. Engine wall time ends with the root process.
+The sampler also verifies that each private per-invocation file-backed
+temporary directory is ext4-backed and carries inherited `FS_NOATIME_FL`,
+`FS_SYNC_FL`, and
+`FS_DIRSYNC_FL` both before launch and after descendant drain; that storage
+remains on disk, inside the measured process tree, and is not replaced by
+tmpfs. Each sample retains the centrally classified runtime target and
+environment contract. Browsershot evidence additionally binds normalized
+HOME/XDG child paths to unique filesystem device/inode identities before
+launch and revalidates the same identities after descendant drain. It separately
+retains the protected tmpfs Node/Chromium `TMPDIR` topology and exact empty-entry
+state described above; non-browser samples must not carry either private-browser
+proof.
 Descendant drain and accounting-settle durations are recorded separately. The
-runner also retains a complete one-shot wall interval from process open through
-sampler exit; serial throughput is derived only from that boundary, so leaked or
-slow descendants cannot inflate the rate.
+runner also retains a sampler-lifecycle one-shot interval from process open
+through sampler exit; it includes output-capture binding and revalidation but
+excludes capture-file creation and post-sampler read/unlink. Serial throughput is
+derived only from that boundary, so leaked or slow descendants cannot inflate
+the rate.
 
 The `minimal-static` oracle declares ISO A4 in points and permits at most 0.75
 points of print-grid quantization. All text explicitly uses normal-weight Ahem.
@@ -329,11 +407,25 @@ explicit coarse tolerance instead of cropping and rescaling the ink.
 The same expectations apply to all targets.
 
 Publication fails unless `cgroup.events` drains recursively. After it empties,
-`memory.stat` dirty/writeback must reach zero and two interval-separated
-`cpu.stat` and `io.stat` reads must match. A bounded `cgroup.kill` cleans leaked
-descendants, but its use fails a passing sample. Launcher setup and privilege
-removal happen in the staging leaf, so the measurement leaf starts with only
-the stopped unprivileged launcher and zero CPU/I/O/memory counters before exec.
+the sampler captures a pre-reclaim accounting snapshot. If cgroup-charged dirty
+or writeback file memory remains, it issues exactly one cgroup-local
+[`memory.reclaim`](https://docs.kernel.org/admin-guide/cgroup-v2.html#memory-reclaim)
+request equal to that snapshot's `memory.current`. The retained
+`accounting_settle.reclaim` evidence records the requested bytes, whether the
+write completed or the kernel reported under-reclaim, and the before/after
+current, dirty, and writeback values. A completed write does not claim that the
+kernel reclaimed exactly the requested amount. There is no retry, global sync,
+or target-specific exception.
+This post-exit step may settle or discard engine-charged file cache while
+preserving the already measured `memory.peak`; writeback caused by reclaim stays
+charged in the final cgroup `io.stat`. Reclaim time is included in both
+`accounting_settle.duration_ms` and the sampler-lifecycle `one_shot_wall_ms`.
+Publication still requires final dirty/writeback zero and two
+interval-separated, identical `cpu.stat` and `io.stat` observations. A bounded
+`cgroup.kill` cleans leaked descendants, but its use fails a passing sample.
+Launcher setup and privilege removal happen in the staging leaf, so the
+measurement leaf starts with only the stopped unprivileged launcher and zero
+CPU/block-I/O/memory counters before exec.
 
 Periodic `/proc` PID/start-time, summed RSS, and summed PSS observations are
 retained only as sampled lower-bound diagnostics; short-lived processes may be
@@ -372,7 +464,10 @@ This foundation records wall latency (p50/p95/p99/min/max/mean), serial
 throughput, per-page wall time, PDF and artifact bytes, page count, page
 dimensions, required text, link targets, capture status, PDF hash variation,
 and typed failure publication state.
-CPU, cgroup memory, and cgroup I/O are exact retained counters. Sampled summed
+CPU, cgroup memory, and cgroup block-device I/O from `io.stat` are exact retained
+counters. The I/O counters exclude memory-backed stdout/stderr for every target and the disclosed
+Browsershot-only Node/Chromium tmpfs `TMPDIR`; those pages remain cgroup-memory
+accounted. Sampled summed
 RSS/PSS are explicitly lower bounds. Runtime archive size and deeper document
 checks remain separate audited increments before a signed baseline is published.
 
@@ -382,9 +477,9 @@ Each fixture declares expected correctness in `manifest.toml`. A sample counts
 toward performance only when its checks pass; a wrong result is not "faster".
 Generated-fixture `page_count` targets were originally pinned on Linux v0.1.1
 and revalidated unchanged through the published Linux v0.2.0 renderer. For the
-v0.3.2 API 2 comparator, only `minimal-static` has passed the exact native API 2
+v0.3.3 API 2 comparator, only `minimal-static` has passed the exact native API 2
 and shared-oracle smoke so far. Every other fixture must independently pass its
-declared v0.3.2 API 2 correctness gate before it can contribute a sample.
+declared v0.3.3 API 2 correctness gate before it can contribute a sample.
 
 | Fixture | Category | Purpose | Expected |
 | --- | --- | --- | --- |

@@ -29,7 +29,7 @@ for tool in validate_result.POPPLER_TOOLS:
             f"{tool}_version": f"{tool} 1.0",
         }
     )
-TARGET = TEST_MANIFEST["targets"]["pliego-0.3.2"]
+TARGET = TEST_MANIFEST["targets"]["pliego-0.3.3"]
 FIXTURE = TEST_MANIFEST["fixtures"]["minimal-static"]
 FIXTURE_CORRECTNESS = FIXTURE["correctness"]
 TEXT = FIXTURE_CORRECTNESS["text_equals"]
@@ -92,6 +92,75 @@ def resource_usage() -> dict:
                 "device": 1,
                 "inode": 2,
             },
+            "launch_context": {
+                "browser_tmpdir": None,
+                "cwd": "/var/lib/pliego-benchmark-engine-temp/pliego-bench-api2-fixture/job",
+                "tmpdir": "/var/lib/pliego-benchmark-engine-temp/pliego-bench-api2-fixture/temporary",
+            },
+            "output_capture": {
+                "contract": "root-bound-tmpfs-engine-output-v1",
+                "filesystem": "tmpfs",
+                "max_bytes_per_stream": 16777216,
+                "write_sync": "O_SYNC",
+                "pre": {
+                    "root": {
+                        "path": "/dev/shm",
+                        "identity": {"device": 2, "inode": 10},
+                        "owner_uid": 0,
+                        "owner_gid": 0,
+                        "mode": 0o1777,
+                    },
+                    "streams": {
+                        "stdout": {
+                            "path": "/dev/shm/pliego-bench-out-fixture",
+                            "identity": {"device": 2, "inode": 11},
+                            "owner_uid": 0,
+                            "owner_gid": 0,
+                            "mode": 0o600,
+                            "link_count": 1,
+                            "size_bytes": 0,
+                        },
+                        "stderr": {
+                            "path": "/dev/shm/pliego-bench-err-fixture",
+                            "identity": {"device": 2, "inode": 12},
+                            "owner_uid": 0,
+                            "owner_gid": 0,
+                            "mode": 0o600,
+                            "link_count": 1,
+                            "size_bytes": 0,
+                        },
+                    },
+                },
+                "post": {
+                    "root": {
+                        "path": "/dev/shm",
+                        "identity": {"device": 2, "inode": 10},
+                        "owner_uid": 0,
+                        "owner_gid": 0,
+                        "mode": 0o1777,
+                    },
+                    "streams": {
+                        "stdout": {
+                            "path": "/dev/shm/pliego-bench-out-fixture",
+                            "identity": {"device": 2, "inode": 11},
+                            "owner_uid": 0,
+                            "owner_gid": 0,
+                            "mode": 0o600,
+                            "link_count": 1,
+                            "size_bytes": 100,
+                        },
+                        "stderr": {
+                            "path": "/dev/shm/pliego-bench-err-fixture",
+                            "identity": {"device": 2, "inode": 12},
+                            "owner_uid": 0,
+                            "owner_gid": 0,
+                            "mode": 0o600,
+                            "link_count": 1,
+                            "size_bytes": 10,
+                        },
+                    },
+                },
+            },
             "status": {
                 "uid": [991, 991, 991, 991],
                 "gid": [991, 991, 991, 991],
@@ -106,6 +175,45 @@ def resource_usage() -> dict:
             "migration_write_probes": {
                 label: {"cgroup.procs": "EACCES", "cgroup.threads": "EACCES"}
                 for label in ("parent", "harness", "staging", "measurement")
+            },
+            "temporary_storage": {
+                "access_time": "FS_NOATIME_FL",
+                "account_home": {
+                    "path": "/nonexistent/pliego-benchmark-engine",
+                    "state": "absent",
+                },
+                "browser_shared_memory": None,
+                "directory_sync": "FS_DIRSYNC_FL",
+                "file_sync": "FS_SYNC_FL",
+                "filesystem": "ext4",
+                "native_api2_path_bindings": {
+                    phase: {
+                        "contract": "native-api2-storage-bindings-v1",
+                        "bindings": {
+                            "controlled_root": {
+                                "path": "/var/lib/pliego-benchmark-engine-temp",
+                                "identity": {"device": 1, "inode": 19},
+                            },
+                            "sandbox": {
+                                "path": "/var/lib/pliego-benchmark-engine-temp/pliego-bench-api2-fixture",
+                                "identity": {"device": 1, "inode": 20},
+                            },
+                            "job": {
+                                "path": "/var/lib/pliego-benchmark-engine-temp/pliego-bench-api2-fixture/job",
+                                "identity": {"device": 1, "inode": 21},
+                            },
+                            "temporary": {
+                                "path": "/var/lib/pliego-benchmark-engine-temp/pliego-bench-api2-fixture/temporary",
+                                "identity": {"device": 1, "inode": 22},
+                            },
+                        },
+                    }
+                    for phase in ("pre", "post")
+                },
+                "runtime_environment": "fixed-account-home-v1",
+                "runtime_path_bindings": None,
+                "runtime_target": "generic-benchmark-engine-v1",
+                "scope": "per-invocation-private",
             },
         },
         "wall_ms": 1,
@@ -127,6 +235,21 @@ def resource_usage() -> dict:
             "duration_ms": 1,
             "reads": 2,
             "stable_reads": 2,
+            "reclaim": {
+                "triggered": False,
+                "requested_bytes": 0,
+                "write_result": "not-needed",
+                "before": {
+                    "memory_current_bytes": 0,
+                    "memory_file_dirty_bytes": 0,
+                    "memory_file_writeback_bytes": 0,
+                },
+                "after": {
+                    "memory_current_bytes": 0,
+                    "memory_file_dirty_bytes": 0,
+                    "memory_file_writeback_bytes": 0,
+                },
+            },
             "stable_observations": [deepcopy(stable), deepcopy(stable)],
         },
         "cleanup": {"kill_used": False, "kill_grace_ms": 1000, "lingering_before_kill": []},
@@ -232,7 +355,7 @@ def result() -> dict:
             "measurement_method": "linux-cgroup-v2-v1",
             "percentile_method": "nearest-rank-v1",
         },
-        "target": {"id": "pliego-0.3.2", "label": TARGET["label"]},
+        "target": {"id": "pliego-0.3.3", "label": TARGET["label"]},
         "fixture": {
             "id": "minimal-static",
             "purpose": FIXTURE["purpose"],
@@ -353,6 +476,154 @@ def changed(value: dict, operation: object, expected: str) -> None:
 def main() -> None:
     valid = result()
     assert not errors(valid), errors(valid)
+    browser_sample = deepcopy(valid["samples"][0])
+    browser_launch = browser_sample["resource_usage"]["launch_security"]
+    browser_path = "/repo/benchmarks/adapters/browsershot/adapter.php"
+    browser_launch["argv"] = [browser_path, "render"]
+    browser_launch["executable"]["path"] = browser_path
+    browser_launch["temporary_storage"]["runtime_environment"] = "fresh-private-home-xdg-v1"
+    browser_launch["temporary_storage"]["native_api2_path_bindings"] = None
+    browser_launch["temporary_storage"]["runtime_target"] = "browsershot-adapter-v1"
+    runtime_bindings = {
+        "contract": "runtime-path-bindings-v1",
+        "temporary_root": {
+            "path": "/var/tmp/pliego/invocation",
+            "identity": {"device": 1, "inode": 10},
+        },
+        "bindings": {
+            variable: {
+                "relative_path": relative,
+                "identity": {"device": 1, "inode": index + 11},
+            }
+            for index, (variable, relative) in enumerate(validate_result.RUNTIME_DIRECTORY_NAMES.items())
+        },
+    }
+    browser_launch["temporary_storage"]["runtime_path_bindings"] = {
+        "pre": deepcopy(runtime_bindings),
+        "post": deepcopy(runtime_bindings),
+    }
+    browser_shared_memory = {
+        "root": deepcopy(browser_launch["output_capture"]["pre"]["root"]),
+        "container": {
+            "path": "/dev/shm/pliego-bench-shm-0123456789abcdef0123456789abcdef",
+            "identity": {"device": 2, "inode": 13},
+            "owner_uid": 0,
+            "owner_gid": 0,
+            "mode": 0o711,
+            "link_count": 3,
+        },
+        "directory": {
+            "path": "/dev/shm/pliego-bench-shm-0123456789abcdef0123456789abcdef/tmp",
+            "identity": {"device": 2, "inode": 14},
+            "owner_uid": 991,
+            "owner_gid": 991,
+            "mode": 0o700,
+            "link_count": 2,
+        },
+        "container_entries": ["tmp"],
+        "directory_entries": [],
+    }
+    browser_launch["temporary_storage"]["browser_shared_memory"] = {
+        "contract": "bound-private-tmpfs-browser-shared-memory-v1",
+        "filesystem": "tmpfs",
+        "semantics": "puppeteer-node-chrome-temporary-storage-v1",
+        "pre": deepcopy(browser_shared_memory),
+        "post": deepcopy(browser_shared_memory),
+    }
+    browser_launch["launch_context"]["browser_tmpdir"] = browser_shared_memory["directory"]["path"]
+    browser_schema_violations: list[validate_result.Violation] = []
+    validate_result.validate(
+        browser_launch["temporary_storage"],
+        SCHEMA["definitions"]["launch_security"]["properties"]["temporary_storage"],
+        "$.temporary_storage",
+        browser_schema_violations,
+        SCHEMA,
+    )
+    assert not browser_schema_violations, browser_schema_violations
+    browser_violations: list[validate_result.Violation] = []
+    validate_result.validate_resource_usage(browser_sample, "$.sample", browser_violations)
+    assert not browser_violations, browser_violations
+    false_native_browser = deepcopy(browser_sample)
+    false_native_browser["resource_usage"]["launch_security"]["temporary_storage"]["native_api2_path_bindings"] = (
+        deepcopy(
+            valid["samples"][0]["resource_usage"]["launch_security"]["temporary_storage"]["native_api2_path_bindings"]
+        )
+    )
+    false_native_browser_violations: list[validate_result.Violation] = []
+    validate_result.validate_resource_usage(false_native_browser, "$.sample", false_native_browser_violations)
+    assert any("non-native targets" in str(item) for item in false_native_browser_violations)
+    tampered_browser = deepcopy(browser_sample)
+    tampered_browser["resource_usage"]["launch_security"]["temporary_storage"]["runtime_path_bindings"]["post"][
+        "bindings"
+    ]["HOME"]["identity"]["inode"] += 1
+    tampered_violations: list[validate_result.Violation] = []
+    validate_result.validate_resource_usage(tampered_browser, "$.sample", tampered_violations)
+    assert any("runtime_path_bindings.post" in str(item) for item in tampered_violations)
+    escaped_browser = deepcopy(browser_sample)
+    escaped_browser["resource_usage"]["launch_security"]["temporary_storage"]["runtime_path_bindings"]["pre"][
+        "bindings"
+    ]["HOME"]["relative_path"] = "../home"
+    escaped_violations: list[validate_result.Violation] = []
+    validate_result.validate_resource_usage(escaped_browser, "$.sample", escaped_violations)
+    assert any("HOME.relative_path" in str(item) for item in escaped_violations)
+    missing_browser_tmpfs = deepcopy(browser_sample)
+    missing_browser_tmpfs["resource_usage"]["launch_security"]["temporary_storage"]["browser_shared_memory"] = None
+    missing_browser_violations: list[validate_result.Violation] = []
+    validate_result.validate_resource_usage(missing_browser_tmpfs, "$.sample", missing_browser_violations)
+    assert any("Browsershot must retain" in str(item) for item in missing_browser_violations)
+    changed_browser_tmpfs = deepcopy(browser_sample)
+    changed_browser_tmpfs["resource_usage"]["launch_security"]["temporary_storage"]["browser_shared_memory"]["post"][
+        "directory"
+    ]["identity"]["inode"] += 1
+    changed_browser_violations: list[validate_result.Violation] = []
+    validate_result.validate_resource_usage(changed_browser_tmpfs, "$.sample", changed_browser_violations)
+    assert any("browser_shared_memory.post" in str(item) for item in changed_browser_violations)
+    escaped_browser_tmpfs = deepcopy(browser_sample)
+    escaped_browser_tmpfs["resource_usage"]["launch_security"]["temporary_storage"]["browser_shared_memory"]["pre"][
+        "container"
+    ]["path"] = "/dev/shm/../tmp/pliego-bench-shm-0123456789abcdef0123456789abcdef"
+    escaped_tmpfs_violations: list[validate_result.Violation] = []
+    validate_result.validate_resource_usage(escaped_browser_tmpfs, "$.sample", escaped_tmpfs_violations)
+    assert any("canonical direct /dev/shm child" in str(item) for item in escaped_tmpfs_violations)
+    short_nonce_browser_tmpfs = deepcopy(browser_sample)
+    short_nonce_browser_tmpfs["resource_usage"]["launch_security"]["temporary_storage"]["browser_shared_memory"]["pre"][
+        "container"
+    ]["path"] = "/dev/shm/pliego-bench-shm-0123456789abcdef"
+    short_nonce_violations: list[validate_result.Violation] = []
+    validate_result.validate_resource_usage(short_nonce_browser_tmpfs, "$.sample", short_nonce_violations)
+    assert any("32-character lowercase-hex nonce" in str(item) for item in short_nonce_violations)
+    noncanonical_browser_tmpfs = deepcopy(browser_sample)
+    noncanonical_browser_tmpfs["resource_usage"]["launch_security"]["temporary_storage"]["browser_shared_memory"][
+        "pre"
+    ]["directory"]["path"] = "/dev/shm/pliego-bench-shm-0123456789abcdef0123456789abcdef/./tmp"
+    noncanonical_tmpfs_violations: list[validate_result.Violation] = []
+    validate_result.validate_resource_usage(
+        noncanonical_browser_tmpfs,
+        "$.sample",
+        noncanonical_tmpfs_violations,
+    )
+    assert any("pre.directory.path" in str(item) for item in noncanonical_tmpfs_violations)
+    mismatched_browser_tmpdir = deepcopy(browser_sample)
+    mismatched_browser_tmpdir["resource_usage"]["launch_security"]["launch_context"]["browser_tmpdir"] = (
+        "/dev/shm/pliego-bench-shm-deadbeefdeadbeefdeadbeefdeadbeef/tmp"
+    )
+    mismatched_tmpdir_violations: list[validate_result.Violation] = []
+    validate_result.validate_resource_usage(mismatched_browser_tmpdir, "$.sample", mismatched_tmpdir_violations)
+    assert any("launch_context.browser_tmpdir" in str(item) for item in mismatched_tmpdir_violations)
+    unsafe_browser_mode = deepcopy(browser_sample)
+    unsafe_browser_mode["resource_usage"]["launch_security"]["temporary_storage"]["browser_shared_memory"]["pre"][
+        "container"
+    ]["mode"] = 0o777
+    unsafe_mode_violations: list[validate_result.Violation] = []
+    validate_result.validate_resource_usage(unsafe_browser_mode, "$.sample", unsafe_mode_violations)
+    assert any("pre.container.mode" in str(item) for item in unsafe_mode_violations)
+    generic_claims_browser_tmpfs = deepcopy(valid["samples"][0])
+    generic_claims_browser_tmpfs["resource_usage"]["launch_security"]["temporary_storage"]["browser_shared_memory"] = (
+        deepcopy(browser_launch["temporary_storage"]["browser_shared_memory"])
+    )
+    generic_tmpfs_violations: list[validate_result.Violation] = []
+    validate_result.validate_resource_usage(generic_claims_browser_tmpfs, "$.sample", generic_tmpfs_violations)
+    assert any("non-browser targets" in str(item) for item in generic_tmpfs_violations)
     assert validate_result.percentile([1, 3], 50) == 1
     assert validate_result.PERCENTILE_METHOD == "nearest-rank-v1"
 
@@ -527,6 +798,151 @@ def main() -> None:
     )
     changed(
         valid,
+        lambda value: value["samples"][0]["resource_usage"]["launch_security"].pop("output_capture"),
+        "missing required property 'output_capture'",
+    )
+    changed(
+        valid,
+        lambda value: value["samples"][0]["resource_usage"]["launch_security"]["output_capture"].update(
+            filesystem="ext4"
+        ),
+        "launch_security.output_capture.filesystem",
+    )
+    changed(
+        valid,
+        lambda value: value["samples"][0]["resource_usage"]["launch_security"]["output_capture"]["post"]["streams"][
+            "stdout"
+        ]["identity"].update(inode=99),
+        "launch_security.output_capture.post",
+    )
+    changed(
+        valid,
+        lambda value: value["samples"][0]["resource_usage"]["launch_security"]["output_capture"]["pre"]["root"].update(
+            mode=0o777
+        ),
+        "output_capture.pre.root.mode",
+    )
+    changed(
+        valid,
+        lambda value: value["samples"][0]["resource_usage"]["launch_security"]["output_capture"]["pre"]["streams"][
+            "stdout"
+        ].update(path="/tmp/pliego-bench-out-escaped"),
+        "output_capture.pre.streams.stdout.path",
+    )
+    changed(
+        valid,
+        lambda value: value["samples"][0]["resource_usage"]["launch_security"]["output_capture"]["pre"]["streams"][
+            "stderr"
+        ]["identity"].update(inode=11),
+        "must bind distinct stdout and stderr",
+    )
+    changed(
+        valid,
+        lambda value: value["samples"][0]["resource_usage"]["launch_security"]["output_capture"]["pre"]["streams"][
+            "stdout"
+        ].update(size_bytes=1),
+        "output_capture.pre.streams.stdout.size_bytes",
+    )
+    changed(
+        valid,
+        lambda value: value["samples"][0]["resource_usage"]["launch_security"]["output_capture"]["post"]["streams"][
+            "stdout"
+        ].update(size_bytes=16777217),
+        "must not exceed max_bytes_per_stream",
+    )
+    changed(
+        valid,
+        lambda value: value["samples"][0]["resource_usage"]["launch_security"]["output_capture"]["post"]["streams"][
+            "stdout"
+        ].update(link_count=2),
+        "output_capture.post.streams.stdout",
+    )
+    changed(
+        valid,
+        lambda value: value["samples"][0]["resource_usage"]["launch_security"]["output_capture"]["pre"]["streams"][
+            "stdout"
+        ]["identity"].update(device=3),
+        "output_capture.pre.streams.stdout.identity.device",
+    )
+    changed(
+        valid,
+        lambda value: value["samples"][0]["resource_usage"]["launch_security"]["temporary_storage"].update(
+            filesystem="tmpfs"
+        ),
+        "launch_security.temporary_storage",
+    )
+    changed(
+        valid,
+        lambda value: value["samples"][0]["resource_usage"]["launch_security"]["temporary_storage"].update(
+            file_sync="none"
+        ),
+        "launch_security.temporary_storage",
+    )
+    changed(
+        valid,
+        lambda value: value["samples"][0]["resource_usage"]["launch_security"]["temporary_storage"].update(
+            runtime_environment="host-home"
+        ),
+        "runtime_environment",
+    )
+    changed(
+        valid,
+        lambda value: value["samples"][0]["resource_usage"]["launch_security"]["temporary_storage"].update(
+            runtime_environment="fresh-private-home-xdg-v1"
+        ),
+        "runtime_environment",
+    )
+    changed(
+        valid,
+        lambda value: value["samples"][0]["resource_usage"]["launch_security"]["temporary_storage"].update(
+            access_time="relatime"
+        ),
+        "launch_security.temporary_storage",
+    )
+    changed(
+        valid,
+        lambda value: value["samples"][0]["resource_usage"]["launch_security"]["temporary_storage"].update(
+            native_api2_path_bindings=None
+        ),
+        "native API 2 must retain",
+    )
+    changed(
+        valid,
+        lambda value: value["samples"][0]["resource_usage"]["launch_security"]["temporary_storage"][
+            "native_api2_path_bindings"
+        ]["post"]["bindings"]["job"]["identity"].update(inode=99),
+        "native_api2_path_bindings.post",
+    )
+    changed(
+        valid,
+        lambda value: value["samples"][0]["resource_usage"]["launch_security"]["launch_context"].update(
+            cwd="/var/lib/pliego-benchmark-engine-temp/other/job"
+        ),
+        "bindings.job.path",
+    )
+    changed(
+        valid,
+        lambda value: value["samples"][0]["resource_usage"]["launch_security"]["temporary_storage"][
+            "native_api2_path_bindings"
+        ]["pre"]["bindings"]["job"].update(path="/var/lib/pliego-benchmark-engine-temp/wrong"),
+        "job/temporary siblings",
+    )
+    changed(
+        valid,
+        lambda value: value["samples"][0]["resource_usage"]["launch_security"]["temporary_storage"][
+            "native_api2_path_bindings"
+        ]["pre"]["bindings"]["job"]["identity"].update(inode=20),
+        "four distinct directory identities",
+    )
+    changed(
+        valid,
+        lambda value: value["samples"][0]["resource_usage"]["launch_security"]["temporary_storage"][
+            "native_api2_path_bindings"
+        ]["pre"]["bindings"]["temporary"]["identity"].update(device=2),
+        "on one device",
+    )
+    changed(
+        valid,
         lambda value: value["samples"][0]["resource_usage"].update(
             cgroup_path="/sys/fs/cgroup/pliego/pliego-render-10-0000000000000000/nested"
         ),
@@ -556,6 +972,47 @@ def main() -> None:
         valid,
         lambda value: value["samples"][0]["resource_usage"]["accounting_settle"].update(duration_ms=0),
         "interval-separated",
+    )
+    reclaimed = deepcopy(valid)
+    reclaimed_settle = reclaimed["samples"][0]["resource_usage"]["accounting_settle"]
+    reclaimed_settle["reads"] = 3
+    reclaimed_settle["reclaim"] = {
+        "triggered": True,
+        "requested_bytes": 4096,
+        "write_result": "under-reclaimed",
+        "before": {
+            "memory_current_bytes": 4096,
+            "memory_file_dirty_bytes": 4096,
+            "memory_file_writeback_bytes": 0,
+        },
+        "after": {
+            "memory_current_bytes": 0,
+            "memory_file_dirty_bytes": 0,
+            "memory_file_writeback_bytes": 0,
+        },
+    }
+    assert not errors(reclaimed), errors(reclaimed)
+    changed(
+        valid,
+        lambda value: value["samples"][0]["resource_usage"]["accounting_settle"]["reclaim"].update(triggered=True),
+        "reclaim.triggered",
+    )
+    changed(
+        reclaimed,
+        lambda value: value["samples"][0]["resource_usage"]["accounting_settle"]["reclaim"].update(requested_bytes=1),
+        "reclaim.requested_bytes",
+    )
+    changed(
+        reclaimed,
+        lambda value: value["samples"][0]["resource_usage"]["accounting_settle"].update(reads=2),
+        "pre-reclaim, post-reclaim",
+    )
+    changed(
+        valid,
+        lambda value: value["samples"][0]["resource_usage"]["accounting_settle"]["reclaim"]["after"].update(
+            memory_current_bytes=1
+        ),
+        "reclaim.after",
     )
     changed(
         valid,

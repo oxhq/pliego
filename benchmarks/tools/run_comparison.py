@@ -31,7 +31,7 @@ TOOLS = Path(__file__).resolve().parent
 MANIFEST = ROOT / "benchmarks" / "manifest.toml"
 SCHEMA = ROOT / "benchmarks" / "schema" / "benchmark-hosted-comparison.v1.json"
 TARGET_IDS = (
-    "pliego-0.3.2",
+    "pliego-0.3.3",
     "dompdf-3.1.6",
     "browsershot-5.4.0-puppeteer-25.8.0",
 )
@@ -564,21 +564,21 @@ def validate_verified_release(value: Any, data: dict[str, Any]) -> list[validate
     violations: list[validate_result.Violation] = []
     if not isinstance(value, dict):
         return [validate_result.Violation("$.verified_release", "must be a JSON object")]
-    pliego = next(target for target in data["targets"] if target["id"] == "pliego-0.3.2")
+    pliego = next(target for target in data["targets"] if target["id"] == "pliego-0.3.3")
     engine = pliego["engine"]
     expected = {
         "schema": "pliego.verified-release",
         "version": 1,
-        "target": "pliego-0.3.2",
+        "target": "pliego-0.3.3",
         "release_tag": engine["release_tag"],
         "commit": engine["commit"],
         "servo_build": engine["servo_build"],
         "servo_base": engine["servo_base"],
         "platform": "linux-x86_64",
         "profile": engine["profile"],
-        "runtime_manifest": "benchmarks/releases/v0.3.2/runtimes.json",
+        "runtime_manifest": "benchmarks/releases/v0.3.3/runtimes.json",
         "runtime_manifest_bytes": 3290,
-        "runtime_manifest_sha256": "6d48a02bf8b60c3e947a8fd3784593f8a841e79694ba82eb36835532588ab2d9",
+        "runtime_manifest_sha256": "e4dc42db44d534d857cfb0a2e1c5f442a47ed913b6fcb999accaf50a4335412b",
         "archive_sha256": engine["bundle_sha256"],
         "archive_bytes": engine["bundle_bytes"],
         "binary_sha256": engine["binary_sha256"],
@@ -652,7 +652,7 @@ def finalize_bundle(directory: Path, release_path: Path) -> None:
 def render_markdown(data: dict[str, Any]) -> str:
     metrics = {target["target_id"]: target for target in data["aggregates"]["targets"]}
     lines = [
-        "# Pliego v0.3.2 hosted comparative benchmark",
+        "# Pliego v0.3.3 hosted comparative benchmark",
         "",
         "> Evidence class: `github-hosted-exploratory`. These are measured, correctness-gated",
         "> results from one GitHub-hosted VM, not dedicated-host production claims.",
@@ -688,9 +688,14 @@ def render_markdown(data: dict[str, Any]) -> str:
     lines.extend(
         [
             "",
-            "## I/O and output",
+            "## Block-device I/O and output",
             "",
-            "| Renderer | Read p50 | Write p50 | PDF bytes p50 | Correct samples | PDF hash variants |",
+            "`read_bytes` and `write_bytes` come from cgroup `io.stat`; memory-backed stdout/stderr capture is "
+            "excluded for all targets. Browsershot's disclosed protected Node/Chrome tmpfs `TMPDIR` is also "
+            "excluded from block I/O but charged to cgroup memory; its PHP `TMPDIR`, profile/XDG state, "
+            "artifacts, and PDF remain on measured ext4.",
+            "",
+            "| Renderer | Block read p50 (`io.stat`) | Block write p50 (`io.stat`) | PDF bytes p50 | Correct samples | PDF hash variants |",
             "| --- | ---: | ---: | ---: | ---: | ---: |",
         ]
     )
@@ -760,18 +765,23 @@ def run_comparison(binary: Path, output: Path) -> dict[str, Any]:
 
     def run_phase(target_id: str, phase: str, index: int | None = None) -> dict[str, Any] | None:
         context = contexts[target_id]
-        return run_benchmark.run_runner_phase(
-            Path("/usr/bin/php"),
-            FIXTURE_ID,
-            fixture,
-            context["binary"],
-            phase,
-            index,
-            context["require_scene_report"],
-            fixture_identity,
-            True,
-            context["native_api2"],
-        )
+        try:
+            return run_benchmark.run_runner_phase(
+                Path("/usr/bin/php"),
+                FIXTURE_ID,
+                fixture,
+                context["binary"],
+                phase,
+                index,
+                context["require_scene_report"],
+                fixture_identity,
+                True,
+                context["native_api2"],
+            )
+        except SystemExit:
+            sample = "" if index is None else f" sample={index}"
+            print(f"run_comparison: target={target_id} phase={phase}{sample} failed", file=sys.stderr)
+            raise
 
     artifact = run_benchmark.execute_interleaved_run(
         list(TARGET_IDS),
@@ -865,14 +875,70 @@ def run_comparison(binary: Path, output: Path) -> dict[str, Any]:
     return data
 
 
+def run_preflight_all(binary: Path) -> None:
+    """Exercise every comparison target through the publishable hosted sampler."""
+
+    if sys.platform != "linux" or platform.machine() != "x86_64":
+        fail("hosted comparison preflight requires Linux x86_64")
+    if os.getuid() != 0 or os.geteuid() != 0:
+        fail("hosted comparison preflight requires the root cgroup broker")
+    revision = run_benchmark.harness_revision()
+    if revision is None or not run_benchmark.benchmark_tree_is_clean():
+        fail("hosted comparison preflight requires a clean exact benchmark revision")
+    manifest = tomllib.loads(MANIFEST.read_text(encoding="utf-8"))
+    fixture = manifest["fixtures"][FIXTURE_ID]
+    run_benchmark.check_prep(FIXTURE_ID, fixture)
+    expected_fixture_identity = run_benchmark.fixture_identity(fixture)
+    expected_oracle_identity = run_benchmark.pdf_oracle_identity()
+    contexts, identities = target_contexts(manifest, binary.resolve(strict=True))
+
+    for target_id in TARGET_IDS:
+        context = contexts[target_id]
+        print(f"hosted comparison preflight: {target_id}", flush=True)
+        result = run_benchmark.run_runner_phase(
+            Path("/usr/bin/php"),
+            FIXTURE_ID,
+            fixture,
+            context["binary"],
+            "preflight",
+            require_scene_report=context["require_scene_report"],
+            expected_fixture_identity=expected_fixture_identity,
+            isolate_network=True,
+            native_api2=context["native_api2"],
+        )
+        if result is not None:
+            fail(f"preflight for {target_id} unexpectedly emitted a timed sample")
+
+    if run_benchmark.fixture_identity(fixture) != expected_fixture_identity:
+        fail("fixture changed during hosted comparison preflight")
+    if run_benchmark.pdf_oracle_identity() != expected_oracle_identity:
+        fail("PDF oracle identity changed during hosted comparison preflight")
+    revalidate_target_contexts(manifest, contexts, identities)
+    if not run_benchmark.benchmark_tree_is_clean() or run_benchmark.harness_revision() != revision:
+        fail("benchmark harness changed during hosted comparison preflight")
+    print("all hosted comparison targets passed the exact sampler and correctness preflight")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--binary", type=Path, help="verified published Pliego v0.3.2 binary")
+    parser.add_argument("--binary", type=Path, help="verified published Pliego v0.3.3 binary")
     parser.add_argument("--out", type=Path, help="new output directory")
     parser.add_argument("--validate", type=Path, help="validate an existing hosted comparison directory")
     parser.add_argument("--finalize", type=Path, help="comparison directory to finalize and validate")
     parser.add_argument("--verified-release", type=Path, help="verified release metadata used with --finalize")
+    parser.add_argument(
+        "--preflight-all",
+        action="store_true",
+        help="run one correctness-gated publishable sampler preflight for every comparison target",
+    )
     args = parser.parse_args()
+    if args.preflight_all:
+        if args.binary is None or any(
+            value is not None for value in (args.out, args.validate, args.finalize, args.verified_release)
+        ):
+            parser.error("--preflight-all requires --binary and cannot be combined with other operations")
+        run_preflight_all(args.binary)
+        return 0
     if args.validate is not None:
         if any(value is not None for value in (args.binary, args.out, args.finalize, args.verified_release)):
             parser.error("--validate cannot be combined with generation or finalization arguments")

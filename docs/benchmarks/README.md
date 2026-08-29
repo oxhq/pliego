@@ -41,10 +41,10 @@ binary="$(python3 benchmarks/tools/resolve_release.py \
 python3 benchmarks/tools/run_benchmark.py \
   --binary "$binary" \
   --dedicated \
-  --out benchmarks/baselines/pliego-0.3.2-linux-x86_64.json
+  --out benchmarks/baselines/pliego-0.3.3-linux-x86_64.json
 
 python3 benchmarks/tools/validate_result.py \
-  benchmarks/baselines/pliego-0.3.2-linux-x86_64.json
+  benchmarks/baselines/pliego-0.3.3-linux-x86_64.json
 ```
 
 `resolve_release.py` verifies the release archive and binary against the hashes in
@@ -98,17 +98,90 @@ out-of-process image attestation path exists. The correctness workflow installs
 both locked graphs and directly renders `minimal-static` through Pliego API 2 and
 each adapter, then runs real Poppler checks. A separate manual performance
 workflow runs all three targets in one GitHub-hosted VM with 100 timed, globally
-interleaved samples per target and retains exact cgroup CPU/memory/I/O plus raw
+interleaved samples per target and retains exact cgroup CPU/memory and
+block-device `io.stat` counters plus raw
 sample provenance. Its output is measurement evidence for that exact hosted run,
 but not an authoritative or generalized benchmark. Three independent jobs are
 sealed into one no-selection series: all repeats, per-metric p50 ranges, and
 repeat-to-repeat spread are retained, so the published report cannot silently
 choose the most favorable VM.
 
+Each target's measured engine or PHP adapter gets a fresh private on-disk
+`TMPDIR` below the same ext4 scratch root. The workflow sets and verifies
+inherited Linux `FS_NOATIME_FL`,
+`FS_SYNC_FL`, and `FS_DIRSYNC_FL`, so scratch reads do not create incidental
+atime dirtiness while transient file data and unlink/rmdir metadata are
+synchronous. Scratch stays off tmpfs and its block I/O remains in the retained
+cgroup totals. The sampler binds the scratch inode, revalidates the storage
+contract after descendant drain, and records it in every sample. These are
+deliberate non-default benchmark conditions; synchronous-write cost is included
+in wall and block-device I/O measurements.
+Engine stdout and stderr use a common memory-backed approximation of production
+pipe transport: distinct root-created mode-0600 files under canonical tmpfs-backed
+`/dev/shm`, opened with `O_NOFOLLOW|O_SYNC`, retained until sampler exit, and
+bound by owner, mode, device, inode, and link count before and after execution.
+Samples are rejected if either stream exceeds 16 MiB, and each post-run byte
+count is retained. Capture
+writes by the process tree contribute to descendant CPU, the sampler-lifecycle
+wall interval, and potentially cgroup shmem; writes before root exit also fall
+inside engine wall time. They do not appear in block-device `io.stat`.
+Capture-file creation and post-sampler read/unlink are outside
+`one_shot_wall_ms`; sampler binding and revalidation are inside it. `O_SYNC`
+describes synchronous tmpfs regular-file writes here, not durable storage.
+Output volume remains target/protocol work, so this is not a renderer-core-only
+comparison.
+Browsershot receives fresh private `HOME`, `XDG_CACHE_HOME`, `XDG_CONFIG_HOME`,
+`XDG_DATA_HOME`, `XDG_RUNTIME_DIR`, and `XDG_STATE_HOME` children below that
+same measured scratch root. Pliego and dompdf retain the fixed unprivileged
+account home (nonexistent on the hosted lane) with no XDG roots, so they cannot
+create user caches and browser state cannot escape into a host account.
+Puppeteer's fresh profile is explicitly retained inside the private tree until
+Chromium exits; the measured adapter syncs the private runtime tree, clears all
+entries while preserving the bound root and HOME/XDG directories, and syncs
+those deletions so neither browser teardown nor dirty file-backed pages escape
+the sample. The sampler independently requires the preserved directories to be
+empty after descendant drain.
+
+Puppeteer 25.8.0 unconditionally launches Chrome with
+`--disable-dev-shm-usage`, which redirects Chromium's anonymous shared-memory
+fallback through the child process's generic temporary directory. For this
+locked Browsershot slice, the sampler therefore provisions a second, private
+tmpfs directory at `/dev/shm/pliego-bench-shm-<32-hex>/tmp` and Browsershot passes
+that path only to Node and Chrome as their `TMPDIR`. The sampler holds
+descriptor-relative bindings for the root-owned mode-0711 container and
+engine-owned mode-0700 inner directory, requires exact emptiness and unchanged
+owner/mode/device/inode/link metadata after all descendants exit, then removes
+the already-proven-empty hierarchy. The PHP adapter's `TMPDIR`, all HOME/XDG
+directories, the explicit Chrome profile, Browsershot temporary options,
+artifacts, and PDF output remain on measured ext4.
+
+This is a disclosed Puppeteer fallback accommodation, not a claim of exact
+production Chrome storage behavior: unclassified Node/Chrome generic temporary
+files or singleton/socket metadata can also use that private tmpfs directory.
+Their CPU and wall cost remain measured and tmpfs/shmem remains charged to the
+render cgroup's memory peak; memory-backed writes correctly do not appear in
+block-device `io.stat`. Provisioning and removal are outside engine wall time
+but inside the retained sampler-lifecycle `one_shot_wall_ms` interval. The
+per-sample `bound-private-tmpfs-browser-shared-memory-v1` proof makes this
+target-specific carve-out visible and rejects it for Pliego or dompdf samples.
+
 After immutable images are pinned, each target uses the same order: one discarded correctness preflight, discarded
 warmups, then cold one-shot timed samples. The adapter root and every descendant
 (including PHP, Node, and Chromium) remain in the existing retained cgroup-v2
-accounting subtree. After timing, every output passes the same Poppler-based oracle:
+accounting subtree. Once that subtree is empty, the sampler records its
+pre-reclaim accounting state. If dirty or writeback file memory remains, it
+writes that snapshot's `memory.current` exactly once to the same child cgroup's
+[`memory.reclaim`](https://docs.kernel.org/admin-guide/cgroup-v2.html#memory-reclaim);
+whether that one-shot write completed or the kernel reported under-reclaim and
+the before/after values remain in every sample. A completed write does not claim
+that the kernel reclaimed exactly the requested amount. The generic step
+applies identically to all targets, has no retry or global sync, and may settle
+or discard engine-charged cache after exit without changing the retained memory
+peak. Any resulting writeback remains in final cgroup I/O accounting. Reclaim
+time is part of accounting-settle duration and one-shot wall time, and the
+existing zero-dirty/writeback plus two-read stable CPU/I/O gate remains
+authoritative.
+After timing, every output passes the same Poppler-based oracle:
 PDF envelope/parser acceptance, A4 dimensions, one page, complete normalized
 text, one embedded Ahem family, and a shared normalized raster signature. A target
 is never marked supported unless every timed sample
@@ -170,7 +243,7 @@ but it does not satisfy or weaken the authoritative gates above.
 
 | Target | Runner status | Eligible public claim today |
 | --- | --- | --- |
-| Pliego v0.3.2 API 2 | Implemented and pinned | Published bundle and correctness harness can be reproduced; no committed hosted snapshot yet |
+| Pliego v0.3.3 API 2 | Implemented and pinned | Published bundle and correctness harness can be reproduced; no committed hosted snapshot yet |
 | Pliego candidate | Stable-outcome parity comparator only; arbitrary candidate performance runs are not implemented | Parity can be checked locally; no candidate performance claim |
 | dompdf 3.1.6 | Locked one-shot adapter; configured Ubuntu/Poppler smoke | Authoritative timing N/A pending image attestation and oracle pins; eligible only for exact-run hosted snapshots |
 | Browsershot 5.4.0 + Puppeteer 25.8.0 | Locked one-shot adapter; configured network-isolated Ubuntu/Poppler smoke | Authoritative timing N/A pending image attestation and oracle pins; eligible only for exact-run hosted snapshots |
@@ -200,9 +273,10 @@ published, every target must follow these rules:
 The remaining dedicated-Linux gates are fully attested target contexts, a
 canonical Poppler runtime, a genuine dedicated run artifact, and durable
 retention of that artifact with its validated cells and generated table.
-Single-target serial throughput now uses the retained outer one-shot wall interval
-from runner process open through sampler exit, which includes descendant drain and
-accounting settlement; it is still not an authoritative cross-engine comparison
+Single-target serial throughput now uses the retained sampler-lifecycle one-shot
+interval from runner process open through sampler exit, which includes capture
+binding, descendant drain, and accounting settlement but excludes capture-file
+creation and post-sampler read/unlink; it is still not an authoritative cross-engine comparison
 until the dedicated identity and evidence gates pass.
 
 ## Authoritative publication gate

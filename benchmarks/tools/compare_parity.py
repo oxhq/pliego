@@ -25,7 +25,7 @@ CI can treat it as a hard gate.
 
 Usage:
     python3 benchmarks/tools/compare_parity.py \\
-        --baseline /path/to/pliego-0.3.2 \\
+        --baseline /path/to/pliego-0.3.3 \\
         --candidate /path/to/pliego-new \\
         --fixture minimal-static --fixture invoice-showcase
     python3 benchmarks/tools/compare_parity.py \\

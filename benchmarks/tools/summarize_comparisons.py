@@ -355,7 +355,7 @@ def render_markdown(data: dict[str, Any]) -> str:
 
     labels = {target["id"]: target["label"] for target in data["targets"]}
     lines = [
-        "# Pliego v0.3.2 hosted benchmark series",
+        "# Pliego v0.3.3 hosted benchmark series",
         "",
         "> Evidence class: `github-hosted-exploratory`; publication status: `hosted-series`.",
         "> All three repeats are retained. No best or canonical repeat is selected.",
@@ -397,6 +397,8 @@ def render_markdown(data: dict[str, Any]) -> str:
         [
             "",
             "## Per-run p50s and between-run spread",
+            "",
+            "For `read_bytes` and `write_bytes`, values come from cgroup `io.stat`. Memory-backed stdout/stderr capture is excluded for every target. Browsershot's private tmpfs Node/Chrome `TMPDIR` is also excluded from block I/O but remains charged to cgroup memory; its PHP `TMPDIR`, HOME/XDG roots, explicit Chromium profile, artifacts, and PDF stay on the measured ext4 storage.",
             "",
             "| Renderer | Metric | Unit | Repeat 1 p50 | Repeat 2 p50 | Repeat 3 p50 | Min | Max | Mean | Relative spread |",
             "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",

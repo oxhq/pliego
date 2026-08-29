@@ -60,15 +60,50 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes \
-            ca-certificates libegl1 libfontconfig1 libgl1-mesa-dri \
-            php-xml php-mbstring poppler-utils
+            acl ca-certificates e2fsprogs libegl1 libfontconfig1 libgl1-mesa-dri \
+            php-xml php-mbstring poppler-utils util-linux
           composer install --working-dir=benchmarks/adapters/dompdf \
             --no-dev --no-interaction --prefer-dist --classmap-authoritative
           composer install --working-dir=benchmarks/adapters/browsershot \
             --no-dev --no-interaction --prefer-dist --classmap-authoritative
           npm ci --prefix benchmarks/adapters/browsershot --omit=dev
+          php benchmarks/adapters/dompdf/adapter.php self-test
+          php benchmarks/adapters/browsershot/adapter.php self-test
+
+      - name: Resolve immutable v0.3.3 release and runtimes
+        id: runtime
+        run: |
+          set -euo pipefail
+          binary="$(python3 benchmarks/tools/resolve_release.py \
+            --cache "$RUNNER_TEMP/pliego-release-cache" \
+            --metadata-out "$RUNNER_TEMP/verified-release.json")"
+          node="$(readlink -f "$(command -v node)")"
+          chrome="$(command -v google-chrome-stable || command -v google-chrome || command -v chromium)"
+          chrome="$(readlink -f "$chrome")"
+          chrome_root="$(dirname "$chrome")"
+          case "$chrome_root" in
+            /opt/google/chrome|/usr/lib/chromium|/usr/lib/chromium-browser) ;;
+            *) echo "unsupported hosted Chrome installation root: $chrome_root" >&2; exit 1 ;;
+          esac
+          runtime_root=/usr/lib/pliego-benchmark
+          sudo install -d -o root -g root -m 0555 "$runtime_root"
+          sudo install -o root -g root -m 0555 "$binary" "$runtime_root/pliego"
+          sudo install -o root -g root -m 0555 "$node" "$runtime_root/node"
+          sudo install -d -o root -g root -m 0555 "$runtime_root/chrome"
+          sudo cp -aL "$chrome_root/." "$runtime_root/chrome/"
+          sudo chown -R root:root "$runtime_root/chrome"
+          sudo chmod -R go-w "$runtime_root/chrome"
+          chrome_symlink="$(sudo find "$runtime_root/chrome" -type l -print -quit)"
+          test -z "$chrome_symlink"
+          printf 'binary=%s\nnode=%s\nchrome=%s\n' \
+            "$runtime_root/pliego" "$runtime_root/node" \
+            "$runtime_root/chrome/$(basename "$chrome")" >> "$GITHUB_OUTPUT"
 
       - name: Check hosted delegated-cgroup preflight
+        env:
+          BINARY: ${{ steps.runtime.outputs.binary }}
+          NODE: ${{ steps.runtime.outputs.node }}
+          CHROME: ${{ steps.runtime.outputs.chrome }}
         run: |
           set -euo pipefail
           if ! getent passwd pliego-benchmark-engine >/dev/null; then
@@ -78,8 +113,106 @@ jobs:
           fi
           test "$(id -u pliego-benchmark-engine)" -gt 0
           test "$(id -g pliego-benchmark-engine)" -gt 0
-          sudo -u pliego-benchmark-engine test -r benchmarks/fixtures/minimal-static
-          sudo -u pliego-benchmark-engine test -x benchmarks/fixtures/minimal-static
+          engine_uid="$(id -u pliego-benchmark-engine)"
+          engine_gid="$(id -g pliego-benchmark-engine)"
+          engine_home="$(getent passwd pliego-benchmark-engine | cut -d: -f6)"
+          test "$engine_home" = /nonexistent/pliego-benchmark-engine
+          if [[ -e "$engine_home" ]]; then
+            sudo setpriv --reuid="$engine_uid" --regid="$engine_gid" --clear-groups \
+              --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
+              /usr/bin/test ! -w "$engine_home"
+          fi
+          engine_temp_root=/var/lib/pliego-benchmark-engine-temp
+          test ! -e "$engine_temp_root"
+          sudo install -d -o root -g root -m 0711 "$engine_temp_root"
+          sudo chattr +A +S +D "$engine_temp_root"
+          test "$(findmnt -T "$engine_temp_root" -n -o FSTYPE)" = ext4
+          engine_temp_attributes="$(sudo lsattr -d "$engine_temp_root" | awk '{print $1}')"
+          [[ "$engine_temp_attributes" == *A* && "$engine_temp_attributes" == *S* \
+            && "$engine_temp_attributes" == *D* ]]
+          engine_test=(sudo setpriv --reuid="$engine_uid" --regid="$engine_gid" --clear-groups \
+            --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs /usr/bin/test)
+          engine_find=(sudo setpriv --reuid="$engine_uid" --regid="$engine_gid" --clear-groups \
+            --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs /usr/bin/find)
+          diagnose_engine_path() {
+            local reason="$1"
+            local path="$2"
+            printf 'fixed-account access check failed: %s: %s\n' "$reason" "$path" >&2
+            namei -l "$path" >&2 || true
+          }
+          require_engine_readonly_file() {
+            local path="$1"
+            if ! (cd / && "${engine_test[@]}" -r "$path"); then
+              diagnose_engine_path 'not readable' "$path"
+              return 1
+            fi
+            if (cd / && "${engine_test[@]}" -w "$path"); then
+              diagnose_engine_path 'unexpectedly writable' "$path"
+              return 1
+            fi
+          }
+          require_engine_readonly_executable() {
+            local path="$1"
+            if ! (cd / && "${engine_test[@]}" -x "$path"); then
+              diagnose_engine_path 'not executable' "$path"
+              return 1
+            fi
+            if (cd / && "${engine_test[@]}" -w "$path"); then
+              diagnose_engine_path 'unexpectedly writable' "$path"
+              return 1
+            fi
+          }
+          require_engine_readonly_directory() {
+            local path="$1"
+            if ! (cd / && "${engine_test[@]}" -x "$path"); then
+              diagnose_engine_path 'not traversable' "$path"
+              return 1
+            fi
+            if (cd / && "${engine_test[@]}" -w "$path"); then
+              diagnose_engine_path 'unexpectedly writable' "$path"
+              return 1
+            fi
+          }
+          require_engine_readonly_tree() {
+            local path="$1"
+            local writable
+            require_engine_readonly_directory "$path"
+            writable="$(cd / && "${engine_find[@]}" "$path" -writable -print -quit)"
+            if [[ -n "$writable" ]]; then
+              diagnose_engine_path "tree contains writable entry $writable" "$path"
+              return 1
+            fi
+          }
+          ancestors=()
+          ancestor="$GITHUB_WORKSPACE"
+          while [[ "$ancestor" != / ]]; do
+            ancestors+=("$ancestor")
+            ancestor="$(dirname "$ancestor")"
+          done
+          for ((index=${#ancestors[@]} - 1; index >= 0; index--)); do
+            ancestor="${ancestors[$index]}"
+            if ! (cd / && "${engine_test[@]}" -x "$ancestor"); then
+              sudo setfacl -m u:pliego-benchmark-engine:--x "$ancestor"
+            fi
+          done
+          require_engine_readonly_file "$GITHUB_WORKSPACE/benchmarks/fixtures/minimal-static/comparator.html"
+          require_engine_readonly_file "$GITHUB_WORKSPACE/benchmarks/fixtures/minimal-static/Ahem.ttf"
+          require_engine_readonly_directory "$GITHUB_WORKSPACE/benchmarks/fixtures/minimal-static"
+          require_engine_readonly_executable "$GITHUB_WORKSPACE/benchmarks/adapters/dompdf/adapter.php"
+          require_engine_readonly_file "$GITHUB_WORKSPACE/benchmarks/adapters/dompdf/vendor/autoload.php"
+          require_engine_readonly_executable "$GITHUB_WORKSPACE/benchmarks/adapters/browsershot/adapter.php"
+          require_engine_readonly_file "$GITHUB_WORKSPACE/benchmarks/adapters/browsershot/vendor/autoload.php"
+          require_engine_readonly_file "$GITHUB_WORKSPACE/benchmarks/adapters/browsershot/node_modules/puppeteer/package.json"
+          require_engine_readonly_directory /
+          require_engine_readonly_directory /usr
+          require_engine_readonly_directory /usr/lib
+          require_engine_readonly_directory "$(dirname "$BINARY")"
+          require_engine_readonly_executable "$BINARY"
+          require_engine_readonly_executable "$NODE"
+          require_engine_readonly_executable "$CHROME"
+          require_engine_readonly_tree "$(dirname "$CHROME")"
+          namei -l "$GITHUB_WORKSPACE/benchmarks/adapters/dompdf/adapter.php"
+          namei -l "$GITHUB_WORKSPACE/benchmarks/fixtures/minimal-static"
           sudo systemd-run --quiet --wait --pipe --collect --expand-environment=no \
             -p Type=exec \
             -p Delegate=yes \
@@ -100,9 +233,19 @@ jobs:
               parent="/sys/fs/cgroup${relative%/harness}"
               printf "+cpu +io +memory +pids" > "$parent/cgroup.subtree_control"
               export PLIEGO_BENCHMARK_CGROUP_PARENT="$parent"
+              export PLIEGO_BENCHMARK_ENGINE_TEMP_ROOT="$4"
+              export GIT_OPTIONAL_LOCKS=0
               /usr/bin/python3 -E -s benchmarks/tools/test_process_tree_sampler.py --live --php-integration
               /usr/bin/python3 -E -s benchmarks/tools/process_tree_sampler.py --probe-network-isolation >/dev/null
-            '
+              exec env \
+                BROWSERSHOT_NODE_BINARY="$1" \
+                BROWSERSHOT_CHROME_PATH="$2" \
+                PLIEGO_BENCHMARK_CGROUP_PARENT="$parent" \
+                PLIEGO_BENCHMARK_ENGINE_TEMP_ROOT="$4" \
+                /usr/bin/python3 -E -s benchmarks/tools/run_comparison.py \
+                  --preflight-all \
+                  --binary "$3"
+            ' pliego-hosted-preflight "$NODE" "$CHROME" "$BINARY" "$engine_temp_root"
 
       - name: Check shared PDF oracle
         run: python benchmarks/tools/test_pdf_oracle.py
@@ -113,8 +256,8 @@ jobs:
           set -euo pipefail
           work="$(mktemp -d)"
           trap 'rm -rf "$work"' EXIT
-          mkdir "$work/dom-artifacts" "$work/browser-artifacts" "$work/xdg"
-          chmod 700 "$work/xdg"
+          mkdir "$work/dom-artifacts" "$work/browser-artifacts" "$work/browser-home" "$work/browser-tmp" "$work/xdg"
+          chmod 700 "$work/browser-home" "$work/browser-tmp" "$work/xdg"
           fixture="$GITHUB_WORKSPACE/benchmarks/fixtures/minimal-static"
           expected_text='Minimal Hello, Pliego. This fixture measures pure startup: one small page, one bundled font, no scripts or images.'
           raster='0f9edcf2b796a110d1a68efed00ce684921fec9ff7b52ccdc68bb718d1b93444'
@@ -129,8 +272,8 @@ jobs:
               --entrypoint comparator.html \
               --asset Ahem.ttf \
               --output "$work/pliego.pdf" \
-              --expected-version 0.3.2 \
-              --expected-commit 1c237ed7e1f8247254facfe2284d88acf270185a \
+              --expected-version 0.3.3 \
+              --expected-commit 41c6cf0e9cf1c73f4f70eba9d413fa97063a3154 \
               > "$work/pliego-api2-smoke.json"
 
           (
@@ -179,17 +322,26 @@ jobs:
           PY
           (
             cd "$fixture"
+            # This direct oracle smoke is unmeasured; reject any partial ambient runner XDG map.
             sudo unshare --net -- bash -euo pipefail -c '
                 ip link set lo up
                 test "$(ip -o link show | wc -l)" -eq 1
                 ip link show lo > /dev/null
-                test -z "$(ip route show)"
+                routes="$(ip route show)"
+                test -z "$routes"
                 uid="$1"
                 gid="$2"
                 shift 2
                 exec setpriv --reuid="$uid" --regid="$gid" --init-groups "$@"
               ' _ "$(id -u)" "$(id -g)" \
-                env BROWSERSHOT_NODE_BINARY="$node" BROWSERSHOT_CHROME_PATH="$chrome" \
+                env \
+                -u XDG_CACHE_HOME \
+                -u XDG_CONFIG_HOME \
+                -u XDG_DATA_HOME \
+                -u XDG_RUNTIME_DIR \
+                -u XDG_STATE_HOME \
+                HOME="$work/browser-home" TMPDIR="$work/browser-tmp" \
+                BROWSERSHOT_NODE_BINARY="$node" BROWSERSHOT_CHROME_PATH="$chrome" \
                 "$adapter" render comparator.html \
                   --output "$work/browsershot.pdf" --artifacts "$work/browser-artifacts" \
                   --page-size 793.7008x1122.52 --page-margins 0,0,0,0

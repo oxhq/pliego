@@ -39,7 +39,7 @@ jobs:
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install --yes \
-            ca-certificates iproute2 libegl1 libfontconfig1 libgl1-mesa-dri \
+            acl ca-certificates e2fsprogs iproute2 libegl1 libfontconfig1 libgl1-mesa-dri \
             php-xml php-mbstring poppler-utils util-linux
           composer install --working-dir=benchmarks/adapters/dompdf \
             --no-dev --no-interaction --prefer-dist --classmap-authoritative
@@ -47,7 +47,7 @@ jobs:
             --no-dev --no-interaction --prefer-dist --classmap-authoritative
           npm ci --prefix benchmarks/adapters/browsershot --omit=dev
 
-      - name: Resolve immutable v0.3.2 release and runtimes
+      - name: Resolve immutable v0.3.3 release and runtimes
         id: runtime
         run: |
           set -euo pipefail
@@ -57,10 +57,24 @@ jobs:
           node="$(readlink -f "$(command -v node)")"
           chrome="$(command -v google-chrome-stable || command -v google-chrome || command -v chromium)"
           chrome="$(readlink -f "$chrome")"
-          sudo install -d -o root -g root -m 0555 /opt/pliego-benchmark
-          sudo install -o root -g root -m 0555 "$binary" /opt/pliego-benchmark/pliego
+          chrome_root="$(dirname "$chrome")"
+          case "$chrome_root" in
+            /opt/google/chrome|/usr/lib/chromium|/usr/lib/chromium-browser) ;;
+            *) echo "unsupported hosted Chrome installation root: $chrome_root" >&2; exit 1 ;;
+          esac
+          runtime_root=/usr/lib/pliego-benchmark
+          sudo install -d -o root -g root -m 0555 "$runtime_root"
+          sudo install -o root -g root -m 0555 "$binary" "$runtime_root/pliego"
+          sudo install -o root -g root -m 0555 "$node" "$runtime_root/node"
+          sudo install -d -o root -g root -m 0555 "$runtime_root/chrome"
+          sudo cp -aL "$chrome_root/." "$runtime_root/chrome/"
+          sudo chown -R root:root "$runtime_root/chrome"
+          sudo chmod -R go-w "$runtime_root/chrome"
+          chrome_symlink="$(sudo find "$runtime_root/chrome" -type l -print -quit)"
+          test -z "$chrome_symlink"
           printf 'binary=%s\nnode=%s\nchrome=%s\n' \
-            /opt/pliego-benchmark/pliego "$node" "$chrome" >> "$GITHUB_OUTPUT"
+            "$runtime_root/pliego" "$runtime_root/node" \
+            "$runtime_root/chrome/$(basename "$chrome")" >> "$GITHUB_OUTPUT"
 
       - name: Provision fixed unprivileged engine account
         run: |
@@ -72,22 +86,76 @@ jobs:
           fi
           test "$(id -u pliego-benchmark-engine)" -gt 0
           test "$(id -g pliego-benchmark-engine)" -gt 0
-          sudo -u pliego-benchmark-engine test -x "${{ steps.runtime.outputs.binary }}"
-          sudo -u pliego-benchmark-engine test -x "${{ steps.runtime.outputs.node }}"
-          sudo -u pliego-benchmark-engine test -x "${{ steps.runtime.outputs.chrome }}"
-          sudo -u pliego-benchmark-engine test -r benchmarks/fixtures/minimal-static
-          sudo -u pliego-benchmark-engine test -x benchmarks/fixtures/minimal-static
-          sudo -u pliego-benchmark-engine test -r benchmarks/fixtures/minimal-static/comparator.html
-          sudo -u pliego-benchmark-engine test -x benchmarks/adapters/dompdf/adapter.php
-          sudo -u pliego-benchmark-engine test -x benchmarks/adapters/browsershot/adapter.php
-          sudo -u pliego-benchmark-engine test -r benchmarks/adapters/dompdf/composer.lock
-          sudo -u pliego-benchmark-engine test -r benchmarks/adapters/dompdf/vendor/autoload.php
-          sudo -u pliego-benchmark-engine test -r benchmarks/adapters/browsershot/composer.lock
-          sudo -u pliego-benchmark-engine test -r benchmarks/adapters/browsershot/vendor/autoload.php
-          sudo -u pliego-benchmark-engine test -r benchmarks/adapters/browsershot/package-lock.json
-          sudo -u pliego-benchmark-engine test -r benchmarks/adapters/browsershot/node_modules/puppeteer/package.json
-          sudo -u pliego-benchmark-engine /bin/bash -c \
-            'test ! -w "$1"' _ benchmarks/adapters/dompdf/adapter.php
+          engine_uid="$(id -u pliego-benchmark-engine)"
+          engine_gid="$(id -g pliego-benchmark-engine)"
+          engine_home="$(getent passwd pliego-benchmark-engine | cut -d: -f6)"
+          test "$engine_home" = /nonexistent/pliego-benchmark-engine
+          if [[ -e "$engine_home" ]]; then
+            sudo setpriv --reuid="$engine_uid" --regid="$engine_gid" --clear-groups \
+              --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
+              /usr/bin/test ! -w "$engine_home"
+          fi
+          engine_temp_root=/var/lib/pliego-benchmark-engine-temp
+          test ! -e "$engine_temp_root"
+          sudo install -d -o root -g root -m 0711 "$engine_temp_root"
+          sudo chattr +A +S +D "$engine_temp_root"
+          test "$(findmnt -T "$engine_temp_root" -n -o FSTYPE)" = ext4
+          engine_temp_attributes="$(sudo lsattr -d "$engine_temp_root" | awk '{print $1}')"
+          [[ "$engine_temp_attributes" == *A* && "$engine_temp_attributes" == *S* \
+            && "$engine_temp_attributes" == *D* ]]
+          engine_test=(sudo setpriv --reuid="$engine_uid" --regid="$engine_gid" --clear-groups \
+            --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs /usr/bin/test)
+          engine_find=(sudo setpriv --reuid="$engine_uid" --regid="$engine_gid" --clear-groups \
+            --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs /usr/bin/find)
+          ancestors=()
+          ancestor="$GITHUB_WORKSPACE"
+          while [[ "$ancestor" != / ]]; do
+            ancestors+=("$ancestor")
+            ancestor="$(dirname "$ancestor")"
+          done
+          for ((index=${#ancestors[@]} - 1; index >= 0; index--)); do
+            ancestor="${ancestors[$index]}"
+            if ! (cd / && "${engine_test[@]}" -x "$ancestor"); then
+              sudo setfacl -m u:pliego-benchmark-engine:--x "$ancestor"
+            fi
+          done
+          "${engine_test[@]}" -x "${{ steps.runtime.outputs.binary }}"
+          "${engine_test[@]}" ! -w "${{ steps.runtime.outputs.binary }}"
+          "${engine_test[@]}" -x "${{ steps.runtime.outputs.node }}"
+          "${engine_test[@]}" ! -w "${{ steps.runtime.outputs.node }}"
+          "${engine_test[@]}" -x "${{ steps.runtime.outputs.chrome }}"
+          "${engine_test[@]}" ! -w "${{ steps.runtime.outputs.chrome }}"
+          "${engine_test[@]}" -x /
+          "${engine_test[@]}" ! -w /
+          "${engine_test[@]}" -x /usr
+          "${engine_test[@]}" ! -w /usr
+          "${engine_test[@]}" -x /usr/lib
+          "${engine_test[@]}" ! -w /usr/lib
+          "${engine_test[@]}" -x /usr/lib/pliego-benchmark
+          "${engine_test[@]}" ! -w /usr/lib/pliego-benchmark
+          writable_chrome="$("${engine_find[@]}" /usr/lib/pliego-benchmark/chrome -writable -print -quit)"
+          test -z "$writable_chrome"
+          (cd / && "${engine_test[@]}" -r "$GITHUB_WORKSPACE/benchmarks/fixtures/minimal-static/comparator.html")
+          (cd / && "${engine_test[@]}" ! -w "$GITHUB_WORKSPACE/benchmarks/fixtures/minimal-static/comparator.html")
+          (cd / && "${engine_test[@]}" -r "$GITHUB_WORKSPACE/benchmarks/fixtures/minimal-static/Ahem.ttf")
+          (cd / && "${engine_test[@]}" ! -w "$GITHUB_WORKSPACE/benchmarks/fixtures/minimal-static/Ahem.ttf")
+          (cd / && "${engine_test[@]}" -x "$GITHUB_WORKSPACE/benchmarks/fixtures/minimal-static")
+          (cd / && "${engine_test[@]}" ! -w "$GITHUB_WORKSPACE/benchmarks/fixtures/minimal-static")
+          (cd / && "${engine_test[@]}" -x "$GITHUB_WORKSPACE/benchmarks/adapters/dompdf/adapter.php")
+          (cd / && "${engine_test[@]}" ! -w "$GITHUB_WORKSPACE/benchmarks/adapters/dompdf/adapter.php")
+          (cd / && "${engine_test[@]}" -x "$GITHUB_WORKSPACE/benchmarks/adapters/browsershot/adapter.php")
+          (cd / && "${engine_test[@]}" ! -w "$GITHUB_WORKSPACE/benchmarks/adapters/browsershot/adapter.php")
+          (cd / && "${engine_test[@]}" -r "$GITHUB_WORKSPACE/benchmarks/adapters/dompdf/composer.lock")
+          (cd / && "${engine_test[@]}" -r "$GITHUB_WORKSPACE/benchmarks/adapters/dompdf/vendor/autoload.php")
+          (cd / && "${engine_test[@]}" ! -w "$GITHUB_WORKSPACE/benchmarks/adapters/dompdf/vendor/autoload.php")
+          (cd / && "${engine_test[@]}" -r "$GITHUB_WORKSPACE/benchmarks/adapters/browsershot/composer.lock")
+          (cd / && "${engine_test[@]}" -r "$GITHUB_WORKSPACE/benchmarks/adapters/browsershot/vendor/autoload.php")
+          (cd / && "${engine_test[@]}" ! -w "$GITHUB_WORKSPACE/benchmarks/adapters/browsershot/vendor/autoload.php")
+          (cd / && "${engine_test[@]}" -r "$GITHUB_WORKSPACE/benchmarks/adapters/browsershot/package-lock.json")
+          (cd / && "${engine_test[@]}" -r "$GITHUB_WORKSPACE/benchmarks/adapters/browsershot/node_modules/puppeteer/package.json")
+          (cd / && "${engine_test[@]}" ! -w "$GITHUB_WORKSPACE/benchmarks/adapters/browsershot/node_modules/puppeteer/package.json")
+          namei -l "$GITHUB_WORKSPACE/benchmarks/adapters/dompdf/adapter.php"
+          namei -l "$GITHUB_WORKSPACE/benchmarks/fixtures/minimal-static"
 
       - name: Capture GitHub runner environment for the delegated service
         id: evidence
@@ -129,6 +197,7 @@ jobs:
           CHROME: ${{ steps.runtime.outputs.chrome }}
           OUTPUT: ${{ steps.evidence.outputs.output }}
           ENVIRONMENT_FILE: ${{ steps.evidence.outputs.environment }}
+          ENGINE_TEMP_ROOT: /var/lib/pliego-benchmark-engine-temp
         run: |
           set -euo pipefail
           sudo systemd-run --quiet --wait --pipe --collect --expand-environment=no \
@@ -152,17 +221,20 @@ jobs:
               printf "+cpu +io +memory +pids" > "$parent/cgroup.subtree_control"
               . "$1"
               export PLIEGO_BENCHMARK_CGROUP_PARENT="$parent"
+              export PLIEGO_BENCHMARK_ENGINE_TEMP_ROOT="$6"
+              export GIT_OPTIONAL_LOCKS=0
               /usr/bin/python3 -E -s benchmarks/tools/test_process_tree_sampler.py --live --php-integration >/dev/null
               /usr/bin/python3 -E -s benchmarks/tools/process_tree_sampler.py --probe-network-isolation >/dev/null
               exec env \
                 BROWSERSHOT_NODE_BINARY="$2" \
                 BROWSERSHOT_CHROME_PATH="$3" \
                 PLIEGO_BENCHMARK_CGROUP_PARENT="$parent" \
+                PLIEGO_BENCHMARK_ENGINE_TEMP_ROOT="$6" \
                 /usr/bin/python3 -E -s benchmarks/tools/run_comparison.py \
                   --binary "$4" \
                   --out "$5"
             ' pliego-hosted-comparison \
-              "$ENVIRONMENT_FILE" "$NODE" "$CHROME" "$BINARY" "$OUTPUT"
+              "$ENVIRONMENT_FILE" "$NODE" "$CHROME" "$BINARY" "$OUTPUT" "$ENGINE_TEMP_ROOT"
           sudo chown -R "$(id -u):$(id -g)" "$OUTPUT"
 
       - name: Revalidate retained evidence

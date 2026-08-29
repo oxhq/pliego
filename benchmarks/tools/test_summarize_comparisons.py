@@ -113,7 +113,7 @@ def main() -> None:
             assert retained["ambient"] == source_run.comparison["ambient"]
         assert series["selection_policy"] == "all-repeats-no-selection"
 
-        pliego = next(target for target in series["summary"]["targets"] if target["target_id"] == "pliego-0.3.2")
+        pliego = next(target for target in series["summary"]["targets"] if target["target_id"] == "pliego-0.3.3")
         one_shot = pliego["metrics"]["one_shot_wall_ms"]
         assert [entry["p50"] for entry in one_shot["per_repeat"]] == [2100.0, 2110.0, 2120.0]
         assert one_shot["min"] == 2100.0 and one_shot["max"] == 2120.0 and one_shot["mean"] == 2110.0
@@ -127,6 +127,14 @@ def main() -> None:
         assert "Relative spread" in markdown
         assert "No best or canonical repeat is selected" in markdown
         assert "Per-repeat hosted environments" in markdown
+        assert (
+            "Memory-backed stdout/stderr capture is excluded for every target. Browsershot's private tmpfs Node/Chrome `TMPDIR` is also excluded from block I/O but remains charged to cgroup memory"
+            in markdown
+        )
+        assert (
+            "its PHP `TMPDIR`, HOME/XDG roots, explicit Chromium profile, artifacts, and PDF stay on the measured ext4 storage"
+            in markdown
+        )
         for run in series["runs"]:
             assert run["comparison_sha256"] in markdown
             assert run["interleaved_artifact_sha256"] in markdown

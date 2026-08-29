@@ -9,7 +9,7 @@ spawn, Servo initialization, load, layout, capture, PDF, persistence, publish.
 Expected (see `manifest.toml`): one A4 page, exact normalized document text,
 one embedded Ahem font, and a retained normalized raster signature. Link
 annotations are deliberately absent because they are outside the advertised
-v0.3.2 API 2 profile. Every heading and paragraph uses normal-weight Ahem so a
+v0.3.3 API 2 profile. Every heading and paragraph uses normal-weight Ahem so a
 target cannot pass by substituting its default bold heading face.
 
 The comparator uses `comparator.html`. The pre-existing `input.html` remains the

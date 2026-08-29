@@ -7,7 +7,7 @@
  * Executes one target process per sample and runs the shared PDF oracle after
  * timing. Pliego uses native `render-api2`; competitor adapters retain the
  * benchmark `render INPUT ...` contract. On Linux, cgroup-v2 supplies
- * authoritative CPU, memory, and I/O accounting for the adapter and every
+ * authoritative CPU, memory, and block-device I/O accounting for the adapter and every
  * descendant. One correctness preflight and all warmups are discarded before
  * real samples. Internal phase entrypoints let the Python coordinator execute
  * one preflight, warmup, or indexed timed sample at a time when it owns a
@@ -32,6 +32,17 @@ declare(strict_types=1);
 
 const ENGINE_ACCOUNT = 'pliego-benchmark-engine';
 const SAMPLER_PYTHON = '/usr/bin/python3';
+const ENGINE_TEMP_ROOT_ENV = 'PLIEGO_BENCHMARK_ENGINE_TEMP_ROOT';
+const LINUX_UNIX_SOCKET_PATH_MAX_BYTES = 107;
+const GOOGLE_CHROME_RUNTIME_SOCKET_SUFFIX = '/com.google.Chrome.XXXXXX/SingletonSocket';
+const CHROMIUM_RUNTIME_SOCKET_SUFFIX = '/org.chromium.Chromium.XXXXXX/SingletonSocket';
+const BROWSER_RUNTIME_TEMP_MAX_BYTES = 62;
+const ENGINE_OUTPUT_CAPTURE_MAX_BYTES = 16 * 1024 * 1024;
+const BROWSER_SHARED_MEMORY_ROOT = '/dev/shm';
+const BROWSER_SHARED_MEMORY_CONTAINER_PREFIX = 'pliego-bench-shm-';
+const BROWSER_SHARED_MEMORY_DIRECTORY = 'tmp';
+const BROWSER_SHARED_MEMORY_CONTRACT = 'bound-private-tmpfs-browser-shared-memory-v1';
+const BROWSER_SHARED_MEMORY_SEMANTICS = 'puppeteer-node-chrome-temporary-storage-v1';
 
 const USAGE = <<<EOT
 Usage: php pliego.php --binary <path> --input <file.html> --output <file.pdf> --artifacts <dir>
@@ -176,7 +187,15 @@ if (array_key_exists('self-test', $options)) {
         || is_bare_input_name('..\\input.html') || is_bare_input_name('/input.html')
         || is_bare_input_name('C:\\input.html')
         || !is_windows_absolute_path('C:\\Windows') || !is_windows_absolute_path('D:/tools')
-        || is_windows_absolute_path('/tmp')) {
+        || is_windows_absolute_path('/tmp')
+        || !is_browsershot_adapter_path('/repo/benchmarks/adapters/browsershot/adapter.php')
+        || is_browsershot_adapter_path('/repo/benchmarks/adapters/dompdf/adapter.php')
+        || !browser_runtime_path_within_budget(str_repeat('x', BROWSER_RUNTIME_TEMP_MAX_BYTES))
+        || browser_runtime_path_within_budget(str_repeat('x', BROWSER_RUNTIME_TEMP_MAX_BYTES + 1))
+        || BROWSER_RUNTIME_TEMP_MAX_BYTES + strlen(CHROMIUM_RUNTIME_SOCKET_SUFFIX)
+            !== LINUX_UNIX_SOCKET_PATH_MAX_BYTES
+        || BROWSER_RUNTIME_TEMP_MAX_BYTES + strlen(GOOGLE_CHROME_RUNTIME_SOCKET_SUFFIX)
+            > LINUX_UNIX_SOCKET_PATH_MAX_BYTES) {
         fail('bare input self-test failed', 1);
     }
     $summary = parse_api2_result(
@@ -203,6 +222,84 @@ if (array_key_exists('self-test', $options)) {
             'bytes' => 42,
         ], 'document.pdf', 'application/pdf', 42, str_repeat('a', 64))) {
         fail('API 2 request normalization self-test failed', 1);
+    }
+    $browserContainer = '/dev/shm/pliego-bench-shm-0123456789abcdef0123456789abcdef';
+    $browserDirectory = $browserContainer . '/tmp';
+    $capture = [
+        'root' => [
+            'path' => '/dev/shm',
+            'identity' => ['device' => 17, 'inode' => 100],
+            'owner_uid' => 0,
+            'owner_gid' => 0,
+            'mode' => 01777,
+        ],
+        'streams' => [
+            'stdout' => ['identity' => ['device' => 17, 'inode' => 101]],
+            'stderr' => ['identity' => ['device' => 17, 'inode' => 102]],
+        ],
+    ];
+    $snapshot = [
+        'root' => $capture['root'],
+        'container' => [
+            'path' => $browserContainer,
+            'identity' => ['device' => 17, 'inode' => 103],
+            'owner_uid' => 0,
+            'owner_gid' => 0,
+            'mode' => 0711,
+            'link_count' => 3,
+        ],
+        'directory' => [
+            'path' => $browserDirectory,
+            'identity' => ['device' => 17, 'inode' => 104],
+            'owner_uid' => 1001,
+            'owner_gid' => 1002,
+            'mode' => 0700,
+            'link_count' => 2,
+        ],
+        'container_entries' => ['tmp'],
+        'directory_entries' => [],
+    ];
+    $browserProof = [
+        'contract' => BROWSER_SHARED_MEMORY_CONTRACT,
+        'filesystem' => 'tmpfs',
+        'semantics' => BROWSER_SHARED_MEMORY_SEMANTICS,
+        'pre' => $snapshot,
+        'post' => $snapshot,
+    ];
+    $browserMeasurement = [
+        'launch_security' => [
+            'uid' => 1001,
+            'gid' => 1002,
+            'launch_context' => ['browser_tmpdir' => $browserDirectory],
+            'temporary_storage' => ['browser_shared_memory' => $browserProof],
+        ],
+    ];
+    $genericMeasurement = [
+        'launch_security' => [
+            'uid' => 1001,
+            'gid' => 1002,
+            'launch_context' => ['browser_tmpdir' => null],
+            'temporary_storage' => ['browser_shared_memory' => null],
+        ],
+    ];
+    $browserCommand = ['/repo/benchmarks/adapters/browsershot/adapter.php', 'render'];
+    $genericCommand = ['/repo/benchmarks/adapters/dompdf/adapter.php', 'render'];
+    $missingProof = $browserMeasurement;
+    unset($missingProof['launch_security']['temporary_storage']['browser_shared_memory']);
+    $malformedProof = $browserMeasurement;
+    $malformedProof['launch_security']['temporary_storage']['browser_shared_memory']['pre']['container']['mode'] = 0700;
+    $malformedProof['launch_security']['temporary_storage']['browser_shared_memory']['post']['container']['mode'] = 0700;
+    $malformedEnvelope = $browserMeasurement;
+    $malformedEnvelope['launch_security']['temporary_storage']['browser_shared_memory']['contract'] = 'wrong';
+    $coupledProof = $genericMeasurement;
+    $coupledProof['launch_security']['temporary_storage']['browser_shared_memory'] = $browserProof;
+    if (sampler_browser_shared_memory_proof_error($browserMeasurement, $browserCommand, $capture) !== null
+        || sampler_browser_shared_memory_proof_error($genericMeasurement, $genericCommand, $capture) !== null
+        || sampler_browser_shared_memory_proof_error($missingProof, $browserCommand, $capture) === null
+        || sampler_browser_shared_memory_proof_error($malformedProof, $browserCommand, $capture) === null
+        || sampler_browser_shared_memory_proof_error($malformedEnvelope, $browserCommand, $capture) === null
+        || sampler_browser_shared_memory_proof_error($coupledProof, $genericCommand, $capture) === null) {
+        fail('browser shared-memory sampler proof self-test failed', 1);
     }
     if (PHP_OS_FAMILY === 'Linux' && sampler_interpreter() === null) {
         fail('sampler interpreter self-test failed', 1);
@@ -342,27 +439,335 @@ if (PHP_OS_FAMILY === 'Linux') {
  *     signal: int|null, resource_usage: object|null,
  *     exit_code: int, stdout: string, stderr: string}
  */
-function run_engine(array $command, string $cwd, bool $isolateNetwork, ?string $stdinPath): array
+function engine_output_capture_root(): ?string
+{
+    $candidate = PHP_OS_FAMILY === 'Linux' ? '/dev/shm' : sys_get_temp_dir();
+    $resolved = realpath($candidate);
+    if ($resolved === false || !is_dir($resolved)
+        || (PHP_OS_FAMILY === 'Linux' && ($resolved !== $candidate || is_link($candidate)))) {
+        return null;
+    }
+    return $resolved;
+}
+
+/** @return array{error: string}|array{binding: array<string, mixed>} */
+function engine_output_stream_binding(string $path, int $rootDevice, bool $requireEmpty): array
+{
+    clearstatcache(true, $path);
+    $resolved = realpath($path);
+    $metadata = @lstat($path);
+    if ($resolved === false || $resolved !== $path || dirname($path) !== '/dev/shm'
+        || !is_array($metadata) || ($metadata['mode'] & 0170000) !== 0100000
+        || (int) $metadata['uid'] !== 0 || (int) $metadata['gid'] !== 0
+        || ($metadata['mode'] & 07777) !== 0600 || (int) $metadata['nlink'] !== 1
+        || (int) $metadata['dev'] !== $rootDevice || ($requireEmpty && (int) $metadata['size'] !== 0)) {
+        return ['error' => "unsafe engine output capture path: {$path}"];
+    }
+    return ['binding' => [
+        'path' => $path,
+        'identity' => ['device' => (int) $metadata['dev'], 'inode' => (int) $metadata['ino']],
+        'owner_uid' => (int) $metadata['uid'],
+        'owner_gid' => (int) $metadata['gid'],
+        'mode' => $metadata['mode'] & 07777,
+        'link_count' => (int) $metadata['nlink'],
+        'size_bytes' => (int) $metadata['size'],
+    ]];
+}
+
+/** @return array{error: string}|array{snapshot: array<string, mixed>} */
+function bind_engine_output_capture(string $stdoutPath, string $stderrPath): array
+{
+    $root = engine_output_capture_root();
+    $rootMetadata = $root === null ? false : @lstat($root);
+    if ($root !== '/dev/shm' || !is_array($rootMetadata)
+        || ($rootMetadata['mode'] & 0170000) !== 0040000
+        || (int) $rootMetadata['uid'] !== 0 || (int) $rootMetadata['gid'] !== 0
+        || ($rootMetadata['mode'] & 07777) !== 01777) {
+        return ['error' => 'engine output capture root must be canonical root-owned mode-01777 /dev/shm'];
+    }
+    $rootDevice = (int) $rootMetadata['dev'];
+    $stdout = engine_output_stream_binding($stdoutPath, $rootDevice, true);
+    $stderr = engine_output_stream_binding($stderrPath, $rootDevice, true);
+    if (isset($stdout['error']) || isset($stderr['error'])) {
+        return ['error' => (string) ($stdout['error'] ?? $stderr['error'])];
+    }
+    $stdoutBinding = $stdout['binding'];
+    $stderrBinding = $stderr['binding'];
+    if (!str_starts_with(basename($stdoutPath), 'pliego-bench-out-')
+        || !str_starts_with(basename($stderrPath), 'pliego-bench-err-')
+        || $stdoutBinding['identity'] === $stderrBinding['identity']) {
+        return ['error' => 'engine stdout and stderr captures must be distinct prefixed files'];
+    }
+    return ['snapshot' => [
+        'root' => [
+            'path' => $root,
+            'identity' => ['device' => $rootDevice, 'inode' => (int) $rootMetadata['ino']],
+            'owner_uid' => (int) $rootMetadata['uid'],
+            'owner_gid' => (int) $rootMetadata['gid'],
+            'mode' => $rootMetadata['mode'] & 07777,
+        ],
+        'streams' => ['stdout' => $stdoutBinding, 'stderr' => $stderrBinding],
+    ]];
+}
+
+/** @param array<string, mixed> $binding */
+function stable_engine_output_binding(array $binding): array
+{
+    unset($binding['size_bytes']);
+    return $binding;
+}
+
+/** @param list<string> $expected */
+function has_exact_sampler_object_keys(mixed $value, array $expected): bool
+{
+    if (!is_array($value)) {
+        return false;
+    }
+    $actual = array_keys($value);
+    sort($actual, SORT_STRING);
+    sort($expected, SORT_STRING);
+    return $actual === $expected;
+}
+
+function browser_shared_memory_identity_is_valid(mixed $identity): bool
+{
+    return has_exact_sampler_object_keys($identity, ['device', 'inode'])
+        && is_int($identity['device']) && $identity['device'] >= 0
+        && is_int($identity['inode']) && $identity['inode'] >= 1;
+}
+
+function browser_shared_memory_binding_is_valid(mixed $binding, bool $withLinkCount): bool
+{
+    $keys = ['path', 'identity', 'owner_uid', 'owner_gid', 'mode'];
+    if ($withLinkCount) {
+        $keys[] = 'link_count';
+    }
+    return has_exact_sampler_object_keys($binding, $keys)
+        && is_string($binding['path']) && $binding['path'] !== ''
+        && browser_shared_memory_identity_is_valid($binding['identity'])
+        && is_int($binding['owner_uid']) && $binding['owner_uid'] >= 0
+        && is_int($binding['owner_gid']) && $binding['owner_gid'] >= 0
+        && is_int($binding['mode']) && $binding['mode'] >= 0
+        && (!$withLinkCount || (is_int($binding['link_count']) && $binding['link_count'] >= 1));
+}
+
+/**
+ * @param array<string, mixed> $measurement
+ * @param list<string> $command
+ * @param array<string, mixed> $expectedOutputCapture
+ */
+function sampler_browser_shared_memory_proof_error(
+    array $measurement,
+    array $command,
+    array $expectedOutputCapture
+): ?string {
+    $launch = $measurement['launch_security'] ?? null;
+    $launchContext = is_array($launch) ? ($launch['launch_context'] ?? null) : null;
+    $temporaryStorage = is_array($launch) ? ($launch['temporary_storage'] ?? null) : null;
+    if (!is_array($launch) || !is_array($launchContext) || !is_array($temporaryStorage)
+        || !array_key_exists('browser_tmpdir', $launchContext)
+        || !array_key_exists('browser_shared_memory', $temporaryStorage)) {
+        return 'cgroup-v2 sampler omitted browser shared-memory proof coupling fields';
+    }
+
+    $browserTmpdir = $launchContext['browser_tmpdir'];
+    $proof = $temporaryStorage['browser_shared_memory'];
+    $expectsBrowserProof = isset($command[0]) && is_string($command[0])
+        && is_browsershot_adapter_path($command[0]);
+    if (!$expectsBrowserProof) {
+        return $proof === null && $browserTmpdir === null
+            ? null
+            : 'cgroup-v2 sampler attached browser shared-memory storage to a non-Browsershot target';
+    }
+    if (!is_string($browserTmpdir) || $browserTmpdir === '' || !is_array($proof)) {
+        return 'cgroup-v2 sampler omitted Browsershot shared-memory storage';
+    }
+    if (!has_exact_sampler_object_keys($proof, ['contract', 'filesystem', 'semantics', 'pre', 'post'])
+        || $proof['contract'] !== BROWSER_SHARED_MEMORY_CONTRACT
+        || $proof['filesystem'] !== 'tmpfs'
+        || $proof['semantics'] !== BROWSER_SHARED_MEMORY_SEMANTICS
+        || !is_array($proof['pre']) || !is_array($proof['post'])
+        || $proof['pre'] !== $proof['post']) {
+        return 'cgroup-v2 sampler returned invalid browser shared-memory proof envelope';
+    }
+
+    $snapshot = $proof['pre'];
+    if (!has_exact_sampler_object_keys(
+        $snapshot,
+        ['root', 'container', 'directory', 'container_entries', 'directory_entries']
+    ) || !browser_shared_memory_binding_is_valid($snapshot['root'] ?? null, false)
+        || !browser_shared_memory_binding_is_valid($snapshot['container'] ?? null, true)
+        || !browser_shared_memory_binding_is_valid($snapshot['directory'] ?? null, true)) {
+        return 'cgroup-v2 sampler returned invalid browser shared-memory binding shape';
+    }
+    $root = $snapshot['root'];
+    $container = $snapshot['container'];
+    $directory = $snapshot['directory'];
+    $expectedRoot = $expectedOutputCapture['root'] ?? null;
+    $engineUid = $launch['uid'] ?? null;
+    $engineGid = $launch['gid'] ?? null;
+    if (!is_array($expectedRoot) || $root !== $expectedRoot
+        || $root['path'] !== BROWSER_SHARED_MEMORY_ROOT
+        || $root['owner_uid'] !== 0 || $root['owner_gid'] !== 0 || $root['mode'] !== 01777
+        || !is_int($engineUid) || $engineUid <= 0 || !is_int($engineGid) || $engineGid <= 0
+        || $container['owner_uid'] !== 0 || $container['owner_gid'] !== 0
+        || $container['mode'] !== 0711 || $container['link_count'] !== 3
+        || $directory['owner_uid'] !== $engineUid || $directory['owner_gid'] !== $engineGid
+        || $directory['mode'] !== 0700 || $directory['link_count'] !== 2) {
+        return 'cgroup-v2 sampler returned unsafe browser shared-memory ownership, mode, or links';
+    }
+
+    $containerPath = $container['path'];
+    $directoryPath = $directory['path'];
+    if (preg_match(
+        '~\A/dev/shm/pliego-bench-shm-[0-9a-f]{32}\z~',
+        $containerPath
+    ) !== 1 || $directoryPath !== $containerPath . '/' . BROWSER_SHARED_MEMORY_DIRECTORY
+        || $browserTmpdir !== $directoryPath
+        || $snapshot['container_entries'] !== [BROWSER_SHARED_MEMORY_DIRECTORY]
+        || $snapshot['directory_entries'] !== []) {
+        return 'cgroup-v2 sampler returned invalid browser shared-memory paths or topology';
+    }
+
+    $bindings = [$root, $container, $directory];
+    $devices = [];
+    $identities = [];
+    foreach ($bindings as $binding) {
+        $identity = $binding['identity'];
+        $devices[] = $identity['device'];
+        $identities[] = $identity['device'] . ':' . $identity['inode'];
+    }
+    if (count(array_unique($devices, SORT_REGULAR)) !== 1
+        || count(array_unique($identities, SORT_STRING)) !== 3) {
+        return 'cgroup-v2 sampler returned invalid browser shared-memory device or identities';
+    }
+    foreach (['stdout', 'stderr'] as $stream) {
+        $outputIdentity = $expectedOutputCapture['streams'][$stream]['identity'] ?? null;
+        if (!browser_shared_memory_identity_is_valid($outputIdentity)) {
+            return 'runner output-capture binding is incomplete for browser shared-memory validation';
+        }
+        $key = $outputIdentity['device'] . ':' . $outputIdentity['inode'];
+        if (in_array($key, $identities, true)) {
+            return 'cgroup-v2 sampler reused an engine output identity for browser shared-memory storage';
+        }
+    }
+    return null;
+}
+
+/** @param array<string, mixed> $expected
+ *  @return array{error: string}|array{content: string, binding: array<string, mixed>}
+ */
+function read_bound_engine_output_capture(string $path, array $expected, int $rootDevice): array
+{
+    $observed = engine_output_stream_binding($path, $rootDevice, false);
+    if (isset($observed['error'])) {
+        return ['error' => $observed['error']];
+    }
+    $binding = $observed['binding'];
+    if (stable_engine_output_binding($binding) !== stable_engine_output_binding($expected)) {
+        return ['error' => "engine output capture identity changed before read: {$path}"];
+    }
+    if ($binding['size_bytes'] > ENGINE_OUTPUT_CAPTURE_MAX_BYTES) {
+        return ['error' => "engine output capture exceeded the per-stream byte limit: {$path}"];
+    }
+    $content = @file_get_contents($path, false, null, 0, ENGINE_OUTPUT_CAPTURE_MAX_BYTES + 1);
+    if (!is_string($content) || strlen($content) !== $binding['size_bytes']
+        || strlen($content) > ENGINE_OUTPUT_CAPTURE_MAX_BYTES) {
+        return ['error' => "engine output capture changed or exceeded its limit during read: {$path}"];
+    }
+    return ['content' => $content, 'binding' => $binding];
+}
+
+/** @param array<string, mixed> $snapshot */
+function cleanup_bound_engine_output_capture(array $snapshot): ?string
+{
+    $rootDevice = (int) $snapshot['root']['identity']['device'];
+    $errors = [];
+    foreach ($snapshot['streams'] as $label => $expected) {
+        $path = (string) $expected['path'];
+        $observed = engine_output_stream_binding($path, $rootDevice, false);
+        if (isset($observed['error'])
+            || stable_engine_output_binding($observed['binding'] ?? []) !== stable_engine_output_binding($expected)
+            || !@unlink($path)) {
+            $errors[] = "cannot remove bound engine {$label} capture";
+            continue;
+        }
+        clearstatcache(true, $path);
+        if (@lstat($path) !== false) {
+            $errors[] = "bound engine {$label} capture remained after removal";
+        }
+    }
+    return $errors === [] ? null : implode('; ', $errors);
+}
+
+/** @param array<string, mixed>|null $snapshot */
+function cleanup_engine_output_capture_files(mixed $stdoutPath, mixed $stderrPath, ?array $snapshot): ?string
+{
+    if ($snapshot !== null) {
+        return cleanup_bound_engine_output_capture($snapshot);
+    }
+    $errors = [];
+    foreach ([$stdoutPath, $stderrPath] as $path) {
+        if (!is_string($path) || @lstat($path) === false) {
+            continue;
+        }
+        if (!@unlink($path)) {
+            $errors[] = "cannot remove engine output capture: {$path}";
+            continue;
+        }
+        clearstatcache(true, $path);
+        if (@lstat($path) !== false) {
+            $errors[] = "engine output capture remained after removal: {$path}";
+        }
+    }
+    return $errors === [] ? null : implode('; ', $errors);
+}
+
+function run_engine(
+    array $command,
+    string $cwd,
+    bool $isolateNetwork,
+    ?string $stdinPath,
+    ?string $temporaryDirectory = null
+): array
 {
     $nullDevice = PHP_OS_FAMILY === 'Windows' ? 'NUL' : '/dev/null';
-    $stdoutTmp = tempnam(sys_get_temp_dir(), 'pliego-bench-out-');
-    $stderrTmp = tempnam(sys_get_temp_dir(), 'pliego-bench-err-');
-    if ($stdoutTmp === false || $stderrTmp === false) {
-        return ['error' => 'cannot create engine output files'];
-    }
     $linux = PHP_OS_FAMILY === 'Linux';
+    $captureRoot = engine_output_capture_root();
+    if ($captureRoot === null) {
+        return ['error' => 'cannot resolve engine output capture root'];
+    }
+    $stdoutTmp = @tempnam($captureRoot, 'pliego-bench-out-');
+    $stderrTmp = @tempnam($captureRoot, 'pliego-bench-err-');
+    if ($stdoutTmp === false || $stderrTmp === false
+        || realpath($stdoutTmp) !== $stdoutTmp || realpath($stderrTmp) !== $stderrTmp
+        || dirname($stdoutTmp) !== $captureRoot || dirname($stderrTmp) !== $captureRoot
+        || !is_file($stdoutTmp) || !is_file($stderrTmp)
+        || is_link($stdoutTmp) || is_link($stderrTmp) || $stdoutTmp === $stderrTmp) {
+        $cleanupError = cleanup_engine_output_capture_files($stdoutTmp, $stderrTmp, null);
+        return ['error' => 'cannot create bound engine output capture files'
+            . ($cleanupError === null ? '' : "; {$cleanupError}")];
+    }
+    $captureBefore = null;
+    if ($linux) {
+        $captureBinding = bind_engine_output_capture($stdoutTmp, $stderrTmp);
+        if (isset($captureBinding['error'])) {
+            $cleanupError = cleanup_engine_output_capture_files($stdoutTmp, $stderrTmp, null);
+            return ['error' => $captureBinding['error'] . ($cleanupError === null ? '' : "; {$cleanupError}")];
+        }
+        $captureBefore = $captureBinding['snapshot'];
+    }
     $samplerResultTmp = $linux ? tempnam(sys_get_temp_dir(), 'pliego-bench-cgroup-') : null;
     $samplerErrorTmp = $linux ? tempnam(sys_get_temp_dir(), 'pliego-bench-cgroup-err-') : null;
     if ($linux && ($samplerResultTmp === false || $samplerErrorTmp === false)) {
-        @unlink($stdoutTmp);
-        @unlink($stderrTmp);
+        $cleanupError = cleanup_engine_output_capture_files($stdoutTmp, $stderrTmp, $captureBefore);
         if (is_string($samplerResultTmp)) {
             @unlink($samplerResultTmp);
         }
         if (is_string($samplerErrorTmp)) {
             @unlink($samplerErrorTmp);
         }
-        return ['error' => 'cannot create sampler output files'];
+        return ['error' => 'cannot create sampler output files' . ($cleanupError === null ? '' : "; {$cleanupError}")];
     }
 
     $launchedCommand = $command;
@@ -370,23 +775,23 @@ function run_engine(array $command, string $cwd, bool $isolateNetwork, ?string $
     if ($linux) {
         $sampler = dirname(__DIR__) . '/tools/process_tree_sampler.py';
         if (!is_file($sampler)) {
-            @unlink($stdoutTmp);
-            @unlink($stderrTmp);
+            $cleanupError = cleanup_engine_output_capture_files($stdoutTmp, $stderrTmp, $captureBefore);
             @unlink($samplerResultTmp);
             @unlink($samplerErrorTmp);
-            return ['error' => "cgroup-v2 sampler not found: {$sampler}"];
+            return ['error' => "cgroup-v2 sampler not found: {$sampler}" . ($cleanupError === null ? '' : "; {$cleanupError}")];
         }
         $interpreter = sampler_interpreter();
         if ($interpreter === null) {
-            @unlink($stdoutTmp);
-            @unlink($stderrTmp);
+            $cleanupError = cleanup_engine_output_capture_files($stdoutTmp, $stderrTmp, $captureBefore);
             @unlink($samplerResultTmp);
             @unlink($samplerErrorTmp);
-            return ['error' => 'sampler interpreter is not a canonical root-owned, non-writable executable: ' . SAMPLER_PYTHON];
+            return ['error' => 'sampler interpreter is not a canonical root-owned, non-writable executable: '
+                . SAMPLER_PYTHON . ($cleanupError === null ? '' : "; {$cleanupError}")];
         }
         $launchedCommand = [
             $interpreter, '-I', $sampler,
             '--cwd', $cwd,
+            ...($temporaryDirectory !== null ? ['--temporary-directory', $temporaryDirectory] : []),
             '--stdout', $stdoutTmp,
             '--stderr', $stderrTmp,
             ...($stdinPath !== null ? ['--stdin', $stdinPath] : []),
@@ -413,23 +818,63 @@ function run_engine(array $command, string $cwd, bool $isolateNetwork, ?string $
     $wallStart = microtime(true);
     $process = proc_open($launchedCommand, $descriptors, $pipes, $cwd, $processEnvironment);
     if (!is_resource($process)) {
-        @unlink($stdoutTmp);
-        @unlink($stderrTmp);
+        $cleanupError = cleanup_engine_output_capture_files($stdoutTmp, $stderrTmp, $captureBefore);
         if (is_string($samplerResultTmp)) {
             @unlink($samplerResultTmp);
         }
         if (is_string($samplerErrorTmp)) {
             @unlink($samplerErrorTmp);
         }
-        return ['error' => 'proc_open failed for engine command'];
+        return ['error' => 'proc_open failed for engine command' . ($cleanupError === null ? '' : "; {$cleanupError}")];
     }
 
     $launcherExitCode = proc_close($process);
     $wallMs = (microtime(true) - $wallStart) * 1000.0;
-    $stdout = (string) file_get_contents($stdoutTmp);
-    $stderr = (string) file_get_contents($stderrTmp);
-    @unlink($stdoutTmp);
-    @unlink($stderrTmp);
+    $captureAfter = null;
+    $readError = null;
+    if ($linux) {
+        $rootDevice = (int) $captureBefore['root']['identity']['device'];
+        $stdoutRead = read_bound_engine_output_capture(
+            $stdoutTmp,
+            $captureBefore['streams']['stdout'],
+            $rootDevice
+        );
+        $stderrRead = read_bound_engine_output_capture(
+            $stderrTmp,
+            $captureBefore['streams']['stderr'],
+            $rootDevice
+        );
+        $readError = $stdoutRead['error'] ?? $stderrRead['error'] ?? null;
+        $stdout = isset($stdoutRead['content']) ? $stdoutRead['content'] : '';
+        $stderr = isset($stderrRead['content']) ? $stderrRead['content'] : '';
+        if ($readError === null) {
+            $captureAfter = [
+                'root' => $captureBefore['root'],
+                'streams' => [
+                    'stdout' => $stdoutRead['binding'],
+                    'stderr' => $stderrRead['binding'],
+                ],
+            ];
+        }
+    } else {
+        $stdoutRead = @file_get_contents($stdoutTmp, false, null, 0, ENGINE_OUTPUT_CAPTURE_MAX_BYTES + 1);
+        $stderrRead = @file_get_contents($stderrTmp, false, null, 0, ENGINE_OUTPUT_CAPTURE_MAX_BYTES + 1);
+        if (!is_string($stdoutRead) || !is_string($stderrRead)
+            || strlen($stdoutRead) > ENGINE_OUTPUT_CAPTURE_MAX_BYTES
+            || strlen($stderrRead) > ENGINE_OUTPUT_CAPTURE_MAX_BYTES) {
+            $readError = 'cannot read bounded engine output capture';
+        }
+        $stdout = is_string($stdoutRead) ? $stdoutRead : '';
+        $stderr = is_string($stderrRead) ? $stderrRead : '';
+    }
+    $cleanupError = cleanup_engine_output_capture_files($stdoutTmp, $stderrTmp, $captureBefore);
+    if ($readError !== null || $cleanupError !== null) {
+        if ($linux) {
+            @unlink($samplerResultTmp);
+            @unlink($samplerErrorTmp);
+        }
+        return ['error' => implode('; ', array_filter([$readError, $cleanupError]))];
+    }
 
     if ($linux) {
         $measurementJson = (string) file_get_contents($samplerResultTmp);
@@ -450,15 +895,35 @@ function run_engine(array $command, string $cwd, bool $isolateNetwork, ?string $
                 return ['error' => "cgroup-v2 sampler omitted {$field}"];
             }
         }
+        $captureProof = $measurement['launch_security']['output_capture'] ?? null;
+        $expectedCaptureProof = [
+            'contract' => 'root-bound-tmpfs-engine-output-v1',
+            'filesystem' => 'tmpfs',
+            'max_bytes_per_stream' => ENGINE_OUTPUT_CAPTURE_MAX_BYTES,
+            'write_sync' => 'O_SYNC',
+            'pre' => $captureBefore,
+            'post' => $captureAfter,
+        ];
+        if (!is_array($captureProof) || $captureProof !== $expectedCaptureProof) {
+            return ['error' => 'cgroup-v2 sampler returned invalid engine output capture proof'];
+        }
+        $browserProofError = sampler_browser_shared_memory_proof_error(
+            $measurement,
+            $command,
+            $captureBefore
+        );
+        if ($browserProofError !== null) {
+            return ['error' => $browserProofError];
+        }
         $diagnostics = $measurement['sampled_diagnostics'];
         if (!is_array($diagnostics)) {
             return ['error' => 'cgroup-v2 sampler returned invalid sampled_diagnostics'];
         }
         return [
             'wall_ms' => (float) $measurement['wall_ms'],
-            // Unlike engine wall time, this includes sampler launch, descendant
-            // drain, retained-counter settlement, and sampler exit. Serial
-            // throughput must use this complete one-shot boundary.
+            // Unlike engine wall time, this includes sampler launch, capture
+            // validation, descendant drain, retained-counter settlement, and
+            // sampler exit. Serial throughput uses this sampler-lifecycle boundary.
             'one_shot_wall_ms' => round($wallMs, 3),
             'user_ms' => (float) $measurement['cpu_user_ms'],
             'sys_ms' => (float) $measurement['cpu_sys_ms'],
@@ -829,22 +1294,101 @@ function harden_windows_job_root(string $path): void
     }
 }
 
-/** @return array{root: string, request: string, pdf: string, scene: string, bundle: string} */
+function sync_benchmark_path(string $path, bool $directory): void
+{
+    if (!function_exists('fsync')) {
+        fail('PHP fsync support is required to seal benchmark staging');
+    }
+    $stream = @fopen($path, $directory ? 'rb' : 'r+b');
+    if ($stream === false) {
+        fail("cannot durably seal benchmark staging path: {$path}");
+    }
+    if (!$directory) {
+        while (!feof($stream)) {
+            $bytes = fread($stream, 1_048_576);
+            if ($bytes === false || ($bytes === '' && !feof($stream))) {
+                fclose($stream);
+                fail("cannot pre-read benchmark staging path: {$path}");
+            }
+        }
+    }
+    if (!fsync($stream)) {
+        if (is_resource($stream)) {
+            fclose($stream);
+        }
+        fail("cannot durably seal benchmark staging path: {$path}");
+    }
+    fclose($stream);
+}
+
+function verify_staged_bytes(string $path, string $expected, string $label): void
+{
+    $actual = file_get_contents($path);
+    if (!is_string($actual) || $actual !== $expected) {
+        fail("staged benchmark {$label} differs from its canonical bytes");
+    }
+}
+
+function seal_benchmark_tree(string $path): void
+{
+    $root = realpath($path);
+    if ($root === false || !is_dir($root) || is_link($path)) {
+        fail("benchmark staging root is unavailable or unsafe: {$path}");
+    }
+    $files = [];
+    $directories = [$root];
+    $iterator = new RecursiveIteratorIterator(
+        new RecursiveDirectoryIterator($root, FilesystemIterator::SKIP_DOTS),
+        RecursiveIteratorIterator::CHILD_FIRST
+    );
+    foreach ($iterator as $entry) {
+        $entryPath = $entry->getPathname();
+        if ($entry->isLink()) {
+            fail("benchmark staging tree contains a symbolic link: {$entryPath}");
+        }
+        if ($entry->isFile()) {
+            $files[] = $entryPath;
+        } elseif ($entry->isDir()) {
+            $directories[] = $entryPath;
+        } else {
+            fail("benchmark staging tree contains a special file: {$entryPath}");
+        }
+    }
+    sort($files, SORT_STRING);
+    usort($directories, static function (string $left, string $right): int {
+        $depth = substr_count($right, DIRECTORY_SEPARATOR) <=> substr_count($left, DIRECTORY_SEPARATOR);
+        return $depth !== 0 ? $depth : strcmp($left, $right);
+    });
+    foreach ($files as $file) {
+        sync_benchmark_path($file, false);
+    }
+    foreach ($directories as $directory) {
+        sync_benchmark_path($directory, true);
+    }
+}
+
+/** @return array{sandbox: string, root: string, temporary: string, request: string, pdf: string, scene: string, bundle: string} */
 function stage_api2_job(array $state): array
 {
-    $jobRoot = sys_get_temp_dir() . '/pliego-bench-api2-' . bin2hex(random_bytes(8));
+    $sandboxRoot = PHP_OS_FAMILY === 'Linux'
+        ? benchmark_engine_temporary_path('pliego-bench-api2-')
+        : sys_get_temp_dir() . '/pliego-bench-api2-' . bin2hex(random_bytes(8));
+    $jobRoot = $sandboxRoot . DIRECTORY_SEPARATOR . 'job';
+    $temporaryRoot = $sandboxRoot . DIRECTORY_SEPARATOR . 'temporary';
     if (PHP_OS_FAMILY === 'Linux') {
-        prepare_engine_directory($jobRoot, $state['engineUid'], $state['engineGid']);
-    } elseif (!mkdir($jobRoot, 0700) || !chmod($jobRoot, 0700)) {
-        fail("cannot create private API 2 job root: {$jobRoot}");
+        prepare_engine_directory($sandboxRoot, $state['engineUid'], $state['engineGid']);
+    } elseif (!mkdir($sandboxRoot, 0700) || !chmod($sandboxRoot, 0700)) {
+        fail("cannot create private API 2 sandbox root: {$sandboxRoot}");
     }
     if (PHP_OS_FAMILY === 'Windows') {
-        harden_windows_job_root($jobRoot);
+        harden_windows_job_root($sandboxRoot);
     }
 
     $inputRoot = $jobRoot . DIRECTORY_SEPARATOR . 'input';
-    if (!mkdir($inputRoot, 0700)) {
-        fail("cannot create API 2 input directory: {$inputRoot}");
+    if (!mkdir($jobRoot, 0700) || !mkdir($inputRoot, 0700)
+        || (PHP_OS_FAMILY !== 'Linux' && !mkdir($temporaryRoot, 0700))) {
+        rrmdir($sandboxRoot);
+        fail("cannot create private API 2 sandbox directories below: {$sandboxRoot}");
     }
     $paths = [$state['input'], ...$state['fixtureAssets']];
     sort($paths, SORT_STRING);
@@ -914,10 +1458,13 @@ function stage_api2_job(array $state): array
         || !chmod($manifestPath, 0600)) {
         fail('cannot write canonical API 2 input manifest');
     }
+    // Verify the canonical bytes here; seal_benchmark_tree performs a second,
+    // complete read after the final ownership/mode changes and then fsyncs it.
+    verify_staged_bytes($manifestPath, $manifest, 'input manifest');
 
     if (PHP_OS_FAMILY !== 'Windows') {
         $iterator = new RecursiveIteratorIterator(
-            new RecursiveDirectoryIterator($jobRoot, FilesystemIterator::SKIP_DOTS),
+            new RecursiveDirectoryIterator($sandboxRoot, FilesystemIterator::SKIP_DOTS),
             RecursiveIteratorIterator::SELF_FIRST
         );
         foreach ($iterator as $entry) {
@@ -931,6 +1478,7 @@ function stage_api2_job(array $state): array
                 fail("cannot delegate API 2 job node: {$entry->getPathname()}");
             }
         }
+        seal_benchmark_tree($sandboxRoot);
     }
 
     $locale = $state['locale'] ?? 'en-US';
@@ -993,9 +1541,10 @@ function stage_api2_job(array $state): array
     if (strlen($request) > 1_048_576) {
         fail('canonical API 2 render request exceeds 1 MiB');
     }
-
     return [
+        'sandbox' => $sandboxRoot,
         'root' => $jobRoot,
+        'temporary' => $temporaryRoot,
         'request' => $request,
         'pdf' => $jobRoot . DIRECTORY_SEPARATOR . 'delivery' . DIRECTORY_SEPARATOR . 'document.pdf',
         'scene' => $jobRoot . DIRECTORY_SEPARATOR . 'delivery' . DIRECTORY_SEPARATOR . 'scene.json',
@@ -1005,17 +1554,26 @@ function stage_api2_job(array $state): array
 
 function api2_request_file(string $request): string
 {
-    $path = tempnam(sys_get_temp_dir(), 'pliego-bench-api2-request-');
-    if ($path === false || file_put_contents($path, $request, LOCK_EX) !== strlen($request)
+    $root = sys_get_temp_dir() . '/pliego-bench-api2-request-' . bin2hex(random_bytes(8));
+    if (!mkdir($root, 0700) || !chmod($root, 0700)) {
+        fail('cannot create private API 2 stdin root');
+    }
+    if (PHP_OS_FAMILY === 'Windows') {
+        harden_windows_job_root($root);
+    }
+    $path = $root . DIRECTORY_SEPARATOR . 'request.json';
+    if (file_put_contents($path, $request, LOCK_EX) !== strlen($request)
         || (PHP_OS_FAMILY === 'Linux' && !chmod($path, 0400))) {
-        if (is_string($path)) {
-            @unlink($path);
-        }
+        rrmdir($root);
         fail('cannot create immutable API 2 stdin request');
+    }
+    verify_staged_bytes($path, $request, 'stdin request');
+    if (PHP_OS_FAMILY === 'Linux') {
+        seal_benchmark_tree($root);
     }
     $resolved = realpath($path);
     if ($resolved === false || $resolved !== $path) {
-        @unlink($path);
+        rrmdir($root);
         fail('API 2 stdin request path is not canonical');
     }
     return $resolved;
@@ -1140,6 +1698,42 @@ function prepare_engine_directory(string $path, int $uid, int $gid): void
     }
 }
 
+function benchmark_engine_temporary_path(string $prefix): string
+{
+    if (PHP_OS_FAMILY !== 'Linux') {
+        return sys_get_temp_dir() . DIRECTORY_SEPARATOR . $prefix . bin2hex(random_bytes(8));
+    }
+    $configured = getenv(ENGINE_TEMP_ROOT_ENV);
+    $root = is_string($configured) && $configured !== '' ? realpath($configured) : false;
+    $metadata = $root !== false ? lstat($root) : false;
+    if ($root === false || $root !== $configured || !is_dir($root) || is_link($root)
+        || !is_array($metadata) || (int) ($metadata['uid'] ?? -1) !== 0
+        || (int) ($metadata['gid'] ?? -1) !== 0 || ((int) $metadata['mode'] & 07777) !== 0711) {
+        fail(ENGINE_TEMP_ROOT_ENV . ' must name a canonical root-owned directory with mode 0711');
+    }
+    return $root . DIRECTORY_SEPARATOR . $prefix . bin2hex(random_bytes(8));
+}
+
+function is_browsershot_adapter_path(string $path): bool
+{
+    $normalized = str_replace('\\', '/', $path);
+    return str_ends_with($normalized, '/benchmarks/adapters/browsershot/adapter.php');
+}
+
+function browser_runtime_path_within_budget(string $path): bool
+{
+    return strlen($path) <= BROWSER_RUNTIME_TEMP_MAX_BYTES;
+}
+
+function benchmark_adapter_temporary_path(string $binary): string
+{
+    $path = benchmark_engine_temporary_path('r-');
+    if (is_browsershot_adapter_path($binary) && !browser_runtime_path_within_budget($path)) {
+        fail(ENGINE_TEMP_ROOT_ENV . ' is too long for Chromium runtime sockets');
+    }
+    return $path;
+}
+
 /** @return array{index: int, ok: bool, exit_code: int, wall_ms: float, one_shot_wall_ms: float,
  *     user_ms: float|null, sys_ms: float|null, memory_current_bytes: int|null,
  *     memory_peak_bytes: int|null, read_bytes: int|null, write_bytes: int|null,
@@ -1151,10 +1745,18 @@ function prepare_engine_directory(string $path, int $uid, int $gid): void
 function run_adapter_sample(array $state, int $index): array
 {
     assert_fixture_identity($state);
-    $artifactsDir = sys_get_temp_dir() . '/pliego-bench-' . bin2hex(random_bytes(8));
-    $outDir = sys_get_temp_dir() . '/pliego-bench-out-' . bin2hex(random_bytes(8));
+    $artifactsDir = benchmark_engine_temporary_path('pliego-bench-');
+    $temporaryDir = PHP_OS_FAMILY === 'Linux'
+        // Chromium appends its branded temp directory and SingletonSocket to
+        // TMPDIR; keep both Chrome and Chromium below Linux's 108-byte ceiling.
+        ? benchmark_adapter_temporary_path($state['binary'])
+        : null;
+    $outDir = PHP_OS_FAMILY === 'Linux'
+        ? benchmark_engine_temporary_path('pliego-bench-out-')
+        : sys_get_temp_dir() . '/pliego-bench-out-' . bin2hex(random_bytes(8));
     if (PHP_OS_FAMILY === 'Linux') {
         prepare_engine_directory($outDir, $state['engineUid'], $state['engineGid']);
+        prepare_engine_directory($temporaryDir, $state['engineUid'], $state['engineGid']);
         if (!$state['requireSceneReport']) {
             prepare_engine_directory($artifactsDir, $state['engineUid'], $state['engineGid']);
         }
@@ -1189,7 +1791,13 @@ function run_adapter_sample(array $state, int $index): array
         array_push($command, '--timezone', $state['timezone']);
     }
 
-    $exec = run_engine($command, $state['cwd'], $state['isolateNetwork'], null);
+    try {
+        $exec = run_engine($command, $state['cwd'], $state['isolateNetwork'], null, $temporaryDir);
+    } finally {
+        if ($temporaryDir !== null) {
+            rrmdir($temporaryDir);
+        }
+    }
     if (isset($exec['error'])) {
         rrmdir($artifactsDir);
         rrmdir($outDir);
@@ -1230,6 +1838,13 @@ function run_adapter_sample(array $state, int $index): array
     } elseif (is_array($summary) && is_array($summary['error'] ?? null)) {
         $failureCode = $summary['error']['code'] ?? null;
         $failureMessage = $summary['error']['message'] ?? null;
+    }
+    if ($exec['exit_code'] !== 0 && $failureMessage === null) {
+        $stderr = trim($exec['stderr']);
+        if ($stderr !== '') {
+            $failureCode ??= 'engine_stderr';
+            $failureMessage = substr($stderr, -4096);
+        }
     }
 
     $artifactBytes = 0;
@@ -1388,18 +2003,23 @@ function run_api2_sample(array $state, int $index): array
     assert_fixture_identity($state);
     $job = stage_api2_job($state);
     $requestPath = api2_request_file($job['request']);
+    if (PHP_OS_FAMILY === 'Linux') {
+        prepare_engine_directory($job['temporary'], $state['engineUid'], $state['engineGid']);
+    }
     try {
         $exec = run_engine(
             [$state['binary'], 'render-api2'],
             $job['root'],
             $state['isolateNetwork'],
-            $requestPath
+            $requestPath,
+            $job['temporary']
         );
     } finally {
-        @unlink($requestPath);
+        rrmdir(dirname($requestPath));
+        rrmdir($job['temporary']);
     }
     if (isset($exec['error'])) {
-        rrmdir($job['root']);
+        rrmdir($job['sandbox']);
         fail("engine run failed: {$exec['error']}");
     }
     assert_fixture_identity($state);
@@ -1754,7 +2374,7 @@ function run_api2_sample(array $state, int $index): array
     ];
 
     if ($pass) {
-        rrmdir($job['root']);
+        rrmdir($job['sandbox']);
     } else {
         $sample['retained'] = [
             'artifacts_dir' => $job['root'],
@@ -1783,6 +2403,17 @@ function failed_correctness_checks(array $sample): string
             $failure['detail'] = (string) $check['detail'];
         }
         $failures[] = $failure;
+    }
+    $engineFailure = $sample['failure'] ?? null;
+    if (is_array($engineFailure)
+        && (($engineFailure['code'] ?? null) !== null || ($engineFailure['message'] ?? null) !== null)) {
+        $failures[] = [
+            'name' => 'engine_failure',
+            'detail' => json_encode([
+                'code' => $engineFailure['code'] ?? null,
+                'message' => $engineFailure['message'] ?? null,
+            ], JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE),
+        ];
     }
     $encoded = json_encode($failures, JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE);
     return is_string($encoded) ? $encoded : '[{"name":"(encoding-failed)"}]';
