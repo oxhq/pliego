@@ -2012,6 +2012,7 @@ def sample_command(
             next_sample = started + interval_ms / 1000.0
             status_value: int | None = None
             root_ended = started
+            root_exit_observation: dict[str, Any] | None = None
             try:
                 while status_value is None:
                     timeout = max(0.0, next_sample - time.monotonic())
@@ -2025,6 +2026,18 @@ def sample_command(
                         root_ended = now
                     if now >= next_sample or ready:
                         take_sample(started, now)
+                        if ready:
+                            root_exit_processes = samples[-1]["processes"]
+                            root_exit_observation = {
+                                "member_count": len(root_exit_processes),
+                                "members": [
+                                    {
+                                        "pid": int(member["pid"]),
+                                        "start_ticks": int(member["start_ticks"]),
+                                    }
+                                    for member in root_exit_processes[:16]
+                                ],
+                            }
                         while next_sample <= now:
                             next_sample += interval_ms / 1000.0
             finally:
@@ -2067,6 +2080,7 @@ def sample_command(
                             "populated": failure_counters["cgroup_events"]["populated"],
                             "member_count": len(failure_members),
                         },
+                        "root_exit_observation": root_exit_observation,
                         "root_exit_code": exit_code,
                         "root_signal": child_signal,
                         "engine_wall_ms": round((root_ended - started) * 1000.0, 3),
