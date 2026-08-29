@@ -224,7 +224,11 @@ def fixture_proofs() -> None:
         newer.write_bytes(b"newest")
         os.utime(older, ns=(1_000_000_000, 1_000_000_000))
         os.utime(newer, ns=(2_000_000_000, 2_000_000_000))
-        diagnostics = process_tree_sampler.runtime_directory_diagnostics(runtime_root, limit=1)
+        runtime_metadata = runtime_root.stat()
+        runtime_identity = (runtime_metadata.st_dev, runtime_metadata.st_ino)
+        diagnostics = process_tree_sampler.runtime_directory_diagnostics(
+            runtime_root, runtime_identity, limit=1
+        )
     assert "xdg-cache/newer.bin:file:size=6" in diagnostics
     assert "home/older.bin" not in diagnostics
     assert "browser-runtime-file-count=2" in diagnostics
@@ -232,9 +236,20 @@ def fixture_proofs() -> None:
         exact_root = Path(raw).resolve()
         for index in range(3):
             (exact_root / f"exact-{index}").write_text("fixture", encoding="ascii")
-        exact_inventory = process_tree_sampler.runtime_directory_diagnostics(exact_root, scan_limit=3)
+        exact_metadata = exact_root.stat()
+        exact_identity = (exact_metadata.st_dev, exact_metadata.st_ino)
+        exact_inventory = process_tree_sampler.runtime_directory_diagnostics(
+            exact_root, exact_identity, scan_limit=3
+        )
         (exact_root / "overflow").write_text("fixture", encoding="ascii")
-        truncated_inventory = process_tree_sampler.runtime_directory_diagnostics(exact_root, scan_limit=3)
+        with mock.patch.object(
+            process_tree_sampler.os,
+            "listdir",
+            side_effect=AssertionError("bounded diagnostics must stream directory entries"),
+        ):
+            truncated_inventory = process_tree_sampler.runtime_directory_diagnostics(
+                exact_root, exact_identity, scan_limit=3
+            )
     assert "browser-runtime-entries-examined=3" in exact_inventory
     assert "browser-runtime-scan-truncated=false" in exact_inventory
     assert "browser-runtime-scan-truncated=true" in truncated_inventory
@@ -242,7 +257,7 @@ def fixture_proofs() -> None:
     with mock.patch.object(
         process_tree_sampler, "runtime_directory_diagnostics", side_effect=RuntimeError("must not escape")
     ):
-        unavailable = process_tree_sampler.browser_failure_diagnostics(Path("/fixture"))
+        unavailable = process_tree_sampler.browser_failure_diagnostics(Path("/fixture"), (1, 2))
     assert unavailable == "browser-runtime-inventory-unavailable=RuntimeError:unknown"
     assert "must not escape" not in unavailable
     with tempfile.TemporaryDirectory() as raw:
@@ -266,13 +281,62 @@ def fixture_proofs() -> None:
         (cwd / "delivery.json").write_text("fixture", encoding="ascii")
         stdout = Path(raw) / "engine.stdout"
         stdout.write_text("result", encoding="ascii")
-        failure = process_tree_sampler.engine_failure_diagnostics(cwd, temporary, stdout, output, True)
+        temporary_metadata = temporary.stat()
+        sandbox_metadata = sandbox.stat()
+        failure = process_tree_sampler.engine_failure_diagnostics(
+            cwd,
+            temporary,
+            stdout,
+            output,
+            (temporary_metadata.st_dev, temporary_metadata.st_ino),
+            {"sandbox": (sandbox_metadata.st_dev, sandbox_metadata.st_ino)},
+        )
         assert "engine-temporary-file-count=0" in failure
         assert "engine-sandbox-files-newest=" in failure
         assert "job/delivery.json:file:size=7" in failure
         assert 'engine-output-metadata={"stderr":{"blocks":' in failure
         assert '"stdout":{"blocks":' in failure
         assert 'engine-stderr-tail="prefix\\n' in failure
+    if sys.platform == "linux":
+        with tempfile.TemporaryDirectory() as raw:
+            controlled = Path(raw).resolve()
+            temporary = controlled / "temporary"
+            outside = controlled / "outside"
+            temporary.mkdir()
+            outside.mkdir()
+            (outside / "must-not-leak").write_text("sentinel", encoding="ascii")
+            temporary_metadata = temporary.stat()
+            expected_identity = (temporary_metadata.st_dev, temporary_metadata.st_ino)
+            temporary.rmdir()
+            temporary.symlink_to(outside, target_is_directory=True)
+            replaced = process_tree_sampler.directory_diagnostics(
+                temporary, "engine-temporary", expected_identity
+            )
+        assert replaced.startswith("engine-temporary-inventory-unavailable=")
+        assert "must-not-leak" not in replaced
+        with tempfile.TemporaryDirectory() as raw:
+            diagnostic_root = Path(raw).resolve()
+            (diagnostic_root / "nested").mkdir()
+            root_metadata = diagnostic_root.stat()
+            root_identity = (root_metadata.st_dev, root_metadata.st_ino)
+            real_fstat = process_tree_sampler.os.fstat
+
+            def fail_child_fstat(descriptor: int) -> os.stat_result:
+                metadata = real_fstat(descriptor)
+                if (metadata.st_dev, metadata.st_ino) != root_identity:
+                    raise OSError(5, "injected child fstat failure")
+                return metadata
+
+            descriptors_before = len(list(Path("/proc/self/fd").iterdir()))
+            with mock.patch.object(
+                process_tree_sampler.os, "fstat", side_effect=fail_child_fstat
+            ):
+                unavailable_child = process_tree_sampler.directory_diagnostics(
+                    diagnostic_root, "engine-temporary", root_identity
+                )
+            descriptors_after = len(list(Path("/proc/self/fd").iterdir()))
+        assert unavailable_child == "engine-temporary-inventory-unavailable=OSError:5"
+        assert descriptors_after == descriptors_before
     if sys.platform == "linux":
         with tempfile.TemporaryDirectory(prefix="pliego mount ") as raw:
             root = Path(raw).resolve()
@@ -471,6 +535,24 @@ def fixture_proofs() -> None:
                 )
                 == runtime_binding
             )
+            late_runtime_file = Path(runtime_environment["XDG_CACHE_HOME"]) / "late-state.bin"
+            late_runtime_file.write_bytes(b"late")
+            must_be_incomplete(
+                "ENGINE_RUNTIME_DIRECTORY_NOT_EMPTY",
+                lambda: process_tree_sampler.runtime_directory_bindings(
+                    temporary, root_identity, runtime_environment, current_account, expected_identities
+                ),
+            )
+            late_runtime_file.unlink()
+            unexpected_root_entry = temporary / "late-root-state.bin"
+            unexpected_root_entry.write_bytes(b"late")
+            must_be_incomplete(
+                "ENGINE_RUNTIME_DIRECTORY_NOT_EMPTY",
+                lambda: process_tree_sampler.runtime_directory_bindings(
+                    temporary, root_identity, runtime_environment, current_account, expected_identities
+                ),
+            )
+            unexpected_root_entry.unlink()
             escaped = dict(runtime_environment)
             escaped["HOME"] = str(root)
             must_be_incomplete(

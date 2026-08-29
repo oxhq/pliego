@@ -206,6 +206,73 @@ function remove_synced_tree(string $path, ?callable $sync = null): void
     }
 }
 
+function clear_synced_runtime_root(string $path, ?callable $sync = null): void
+{
+    $root = realpath($path);
+    if ($root === false || !is_dir($root) || is_link($path)) {
+        throw new RuntimeException("private runtime root is unavailable or unsafe: {$path}");
+    }
+    $rootMetadata = lstat($root);
+    if ($rootMetadata === false) {
+        throw new RuntimeException("cannot identify private runtime root: {$root}");
+    }
+    $preserved = [
+        $root => [(int) $rootMetadata['dev'], (int) $rootMetadata['ino']],
+    ];
+    $expectedRootEntries = [];
+    foreach (PRIVATE_RUNTIME_DIRECTORIES as $_variable => $relative) {
+        $expected = $root . DIRECTORY_SEPARATOR . $relative;
+        $resolved = realpath($expected);
+        if ($resolved === false || $resolved !== $expected || !is_dir($resolved) || is_link($expected)) {
+            throw new RuntimeException("private runtime directory is unavailable or unsafe: {$expected}");
+        }
+        $metadata = lstat($resolved);
+        if ($metadata === false) {
+            throw new RuntimeException("cannot identify private runtime directory: {$resolved}");
+        }
+        $preserved[$resolved] = [(int) $metadata['dev'], (int) $metadata['ino']];
+        $expectedRootEntries[] = $relative;
+    }
+    $plan = durability_sync_plan($root);
+    $sync ??= static function (string $entry, bool $directory): void {
+        sync_path($entry, $directory);
+    };
+    foreach ($plan['files'] as $file) {
+        $sync($file, false);
+        if (!unlink($file)) {
+            throw new RuntimeException("cannot remove synced private runtime file: {$file}");
+        }
+    }
+    foreach ($plan['directories'] as $directory) {
+        $sync($directory, true);
+        if (!isset($preserved[$directory]) && !rmdir($directory)) {
+            throw new RuntimeException("cannot remove synced private runtime directory: {$directory}");
+        }
+    }
+    sort($expectedRootEntries, SORT_STRING);
+    foreach ($preserved as $directory => $identity) {
+        clearstatcache(true, $directory);
+        $metadata = lstat($directory);
+        if ($metadata === false || !is_dir($directory) || is_link($directory)
+            || [(int) $metadata['dev'], (int) $metadata['ino']] !== $identity) {
+            throw new RuntimeException("private runtime directory identity changed during teardown: {$directory}");
+        }
+        $expectedEntries = array_fill_keys($directory === $root ? $expectedRootEntries : [], true);
+        $seen = [];
+        $entries = new FilesystemIterator($directory, FilesystemIterator::SKIP_DOTS);
+        foreach ($entries as $entry) {
+            $name = $entry->getFilename();
+            if (!isset($expectedEntries[$name]) || isset($seen[$name])) {
+                throw new RuntimeException("private runtime directory is not empty after teardown: {$directory}");
+            }
+            $seen[$name] = true;
+        }
+        if (count($seen) !== count($expectedEntries)) {
+            throw new RuntimeException("private runtime directory lost a bound entry during teardown: {$directory}");
+        }
+    }
+}
+
 /** @param null|callable(string): mixed $environment */
 function private_runtime_root(?callable $environment = null): ?string
 {
@@ -488,13 +555,14 @@ function render(array $arguments): void
     if ($privateRuntimeRoot !== null && $privateBrowserProfile !== null) {
         $profileFinalizer = static function () use ($privateRuntimeRoot, $privateBrowserProfile): void {
             // savePdf waits for Node and Chrome to exit. Flush all retained
-            // state before deleting the explicit profile, then durably record
-            // that deletion. Teardown remains inside the measured cgroup and
-            // also runs after a browser failure so diagnostics are not masked
-            // by unreachable dirty pages.
-            sync_tree($privateRuntimeRoot);
-            remove_synced_tree($privateBrowserProfile);
-            sync_path($privateRuntimeRoot, true);
+            // state before removing every per-invocation cache/profile entry.
+            // The bound top-level runtime directories retain their identities.
+            // Teardown remains inside the measured cgroup and also runs after a
+            // browser failure so diagnostics are not masked by dirty pages.
+            clear_synced_runtime_root($privateRuntimeRoot);
+            if (file_exists($privateBrowserProfile) || is_link($privateBrowserProfile)) {
+                throw new RuntimeException('private browser profile survived runtime teardown');
+            }
         };
     }
     run_browser_with_finalizer(
@@ -683,6 +751,59 @@ if ($mode === 'self-test') {
         $runtimeProfile = null;
         $runtimeProfileNested = null;
         $runtimeProfileState = null;
+        $transientDirectory = $runtimeRoot . DIRECTORY_SEPARATOR . 'transient' . DIRECTORY_SEPARATOR . 'nested';
+        $transientFile = $transientDirectory . DIRECTORY_SEPARATOR . 'state.bin';
+        if (!mkdir($transientDirectory, 0700, true)
+            || file_put_contents($transientFile, 'transient-state') === false) {
+            abort_adapter('private runtime teardown self-test setup failed', 1);
+        }
+        $clearEvents = [];
+        clear_synced_runtime_root(
+            $runtimeRoot,
+            static function (string $path, bool $directory) use (&$clearEvents): void {
+                $clearEvents[] = [$path, $directory];
+                if (PHP_OS_FAMILY !== 'Windows') {
+                    sync_path($path, $directory);
+                }
+            }
+        );
+        $directorySeen = false;
+        foreach ($clearEvents as [$path, $directory]) {
+            if (!$directory && $directorySeen) {
+                abort_adapter("private runtime teardown synced a file after a directory: {$path}", 1);
+            }
+            $directorySeen = $directorySeen || $directory;
+        }
+        foreach (PRIVATE_RUNTIME_DIRECTORIES as $variable => $_relative) {
+            $entries = scandir($runtimeEnvironment[$variable]);
+            if ($entries !== ['.', '..']) {
+                abort_adapter("private runtime teardown did not empty {$variable}", 1);
+            }
+        }
+        if (file_exists($runtimeCache) || file_exists($transientDirectory)
+            || $clearEvents === [] || $clearEvents[count($clearEvents) - 1] !== [$runtimeRoot, true]) {
+            abort_adapter('private runtime teardown self-test failed', 1);
+        }
+        $runtimeCache = null;
+        $lateRuntimeFile = $runtimeEnvironment['XDG_CACHE_HOME'] . DIRECTORY_SEPARATOR . 'late-state.bin';
+        try {
+            clear_synced_runtime_root(
+                $runtimeRoot,
+                static function (string $path, bool $directory) use ($runtimeRoot, $lateRuntimeFile): void {
+                    if ($directory && $path === $runtimeRoot
+                        && file_put_contents($lateRuntimeFile, 'late-state') === false) {
+                        throw new RuntimeException('cannot inject late private runtime state');
+                    }
+                }
+            );
+            abort_adapter('private runtime teardown accepted a late cache entry', 1);
+        } catch (RuntimeException $error) {
+            if (!str_contains($error->getMessage(), 'is not empty after teardown')) {
+                abort_adapter('private runtime teardown did not type a late cache entry', 1);
+            }
+        } finally {
+            @unlink($lateRuntimeFile);
+        }
         $blockedProfile = $runtimeRoot . DIRECTORY_SEPARATOR . PRIVATE_BROWSER_PROFILE;
         if (file_put_contents($blockedProfile, 'not-a-directory') === false) {
             abort_adapter('private browser profile collision self-test setup failed', 1);

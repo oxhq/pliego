@@ -1182,41 +1182,74 @@ def prepare_runtime_directories(root: Path, account: EngineAccount) -> dict[str,
 def directory_diagnostics(
     root: Path,
     label: str,
-    limit: int = 12,
+    expected_identity: tuple[int, int],
+    limit: int = 6,
     scan_limit: int = RUNTIME_INVENTORY_SCAN_LIMIT,
 ) -> str:
-    """Describe a bounded sample of the newest files after failure."""
+    """Describe bounded failure state without following a replaced root."""
 
     files: list[tuple[int, str]] = []
     entries_examined = 0
     truncated = False
-    pending = [root]
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
+    root_descriptor: int | None = None
+    pending: list[tuple[int, str]] = []
     try:
+        root_descriptor = os.open(root, flags)
+        root_metadata = os.fstat(root_descriptor)
+        if (root_metadata.st_dev, root_metadata.st_ino) != expected_identity:
+            return f"{label}-inventory-unavailable=identity-mismatch"
+        pending.append((root_descriptor, ""))
+        root_descriptor = None
         while pending and not truncated:
-            current = pending.pop()
-            with os.scandir(current) as entries:
-                for entry in entries:
-                    if entries_examined >= scan_limit:
-                        truncated = True
-                        break
-                    entries_examined += 1
-                    metadata = entry.stat(follow_symlinks=False)
-                    path = Path(entry.path)
-                    if stat.S_ISDIR(metadata.st_mode):
-                        pending.append(path)
-                        continue
-                    kind = "file" if stat.S_ISREG(metadata.st_mode) else "other"
-                    relative = path.relative_to(root).as_posix()
-                    if len(relative) > 120:
-                        relative = "..." + relative[-117:]
-                    files.append(
-                        (
-                            metadata.st_mtime_ns,
-                            f"{relative}:{kind}:size={metadata.st_size}:blocks={metadata.st_blocks}",
+            current_descriptor, prefix = pending.pop()
+            try:
+                with os.scandir(current_descriptor) as entries:
+                    for entry in entries:
+                        name = entry.name
+                        if entries_examined >= scan_limit:
+                            truncated = True
+                            break
+                        entries_examined += 1
+                        metadata = entry.stat(follow_symlinks=False)
+                        relative = f"{prefix}/{name}" if prefix else name
+                        if stat.S_ISDIR(metadata.st_mode):
+                            child_descriptor: int | None = os.open(
+                                name, flags, dir_fd=current_descriptor
+                            )
+                            try:
+                                child_metadata = os.fstat(child_descriptor)
+                                if (child_metadata.st_dev, child_metadata.st_ino) != (
+                                    metadata.st_dev,
+                                    metadata.st_ino,
+                                ):
+                                    return f"{label}-inventory-unavailable=descendant-identity-mismatch"
+                                pending.append((child_descriptor, relative))
+                                child_descriptor = None
+                            finally:
+                                if child_descriptor is not None:
+                                    os.close(child_descriptor)
+                            continue
+                        kind = "file" if stat.S_ISREG(metadata.st_mode) else "other"
+                        if len(relative) > 120:
+                            relative = "..." + relative[-117:]
+                        files.append(
+                            (
+                                metadata.st_mtime_ns,
+                                f"{relative}:{kind}:size={metadata.st_size}:blocks={metadata.st_blocks}",
+                            )
                         )
-                    )
+            finally:
+                os.close(current_descriptor)
     except OSError as error:
         return f"{label}-inventory-unavailable={type(error).__name__}:{error.errno}"
+    finally:
+        if root_descriptor is not None:
+            with contextlib.suppress(OSError):
+                os.close(root_descriptor)
+        for descriptor, _prefix in pending:
+            with contextlib.suppress(OSError):
+                os.close(descriptor)
     files.sort(key=lambda item: (-item[0], item[1]))
     retained = [description for _, description in files[:limit]]
     return (
@@ -1225,17 +1258,22 @@ def directory_diagnostics(
     )
 
 
-def runtime_directory_diagnostics(root: Path, limit: int = 12, scan_limit: int = RUNTIME_INVENTORY_SCAN_LIMIT) -> str:
+def runtime_directory_diagnostics(
+    root: Path,
+    expected_identity: tuple[int, int],
+    limit: int = 6,
+    scan_limit: int = RUNTIME_INVENTORY_SCAN_LIMIT,
+) -> str:
     """Describe a bounded sample of the newest browser-runtime files after failure."""
 
-    return directory_diagnostics(root, "browser-runtime", limit, scan_limit)
+    return directory_diagnostics(root, "browser-runtime", expected_identity, limit, scan_limit)
 
 
-def browser_failure_diagnostics(root: Path) -> str:
+def browser_failure_diagnostics(root: Path, expected_identity: tuple[int, int]) -> str:
     """Keep browser failure context bounded without replacing the original failure."""
 
     try:
-        return runtime_directory_diagnostics(root)
+        return runtime_directory_diagnostics(root, expected_identity)
     except Exception as error:
         error_number = getattr(error, "errno", None)
         suffix = str(error_number) if isinstance(error_number, int) else "unknown"
@@ -1280,14 +1318,15 @@ def engine_failure_diagnostics(
     engine_tmpdir: Path,
     stdout_path: Path,
     stderr_path: Path,
-    native_api2: bool,
+    engine_tmpdir_identity: tuple[int, int],
+    native_api2_storage: dict[str, tuple[int, int]] | None,
 ) -> str:
     """Keep target-neutral storage context bounded after a quiescence failure."""
 
-    roots = [("engine-temporary", engine_tmpdir)]
-    if native_api2:
-        roots.append(("engine-sandbox", cwd.parent))
-    inventories = [directory_diagnostics(path, label) for label, path in roots]
+    roots = [("engine-temporary", engine_tmpdir, engine_tmpdir_identity)]
+    if native_api2_storage is not None:
+        roots.append(("engine-sandbox", cwd.parent, native_api2_storage["sandbox"]))
+    inventories = [directory_diagnostics(path, label, identity) for label, path, identity in roots]
     outputs = {
         "stdout": output_path_metadata(stdout_path),
         "stderr": output_path_metadata(stderr_path),
@@ -1295,6 +1334,50 @@ def engine_failure_diagnostics(
     inventories.append(f"engine-output-metadata={json.dumps(outputs, sort_keys=True, separators=(',', ':'))}")
     inventories.append(f"engine-stderr-tail={bounded_output_tail(stderr_path)}")
     return "; ".join(inventories)
+
+
+def require_bound_directory_entries(
+    path: Path,
+    expected_identity: tuple[int, int],
+    expected_entries: set[str],
+) -> None:
+    """Fail closed if a bound runtime directory gained or lost an entry."""
+
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(path, flags)
+        metadata = os.fstat(descriptor)
+        if (metadata.st_dev, metadata.st_ino) != expected_identity:
+            raise incomplete(
+                "ENGINE_RUNTIME_DIRECTORY_REPLACED",
+                f"private runtime directory identity changed: {path}",
+            )
+        seen: set[str] = set()
+        with os.scandir(descriptor) as entries:
+            for entry in entries:
+                if entry.name not in expected_entries or entry.name in seen:
+                    raise incomplete(
+                        "ENGINE_RUNTIME_DIRECTORY_NOT_EMPTY",
+                        f"private runtime directory retained an unexpected entry: {path / entry.name}",
+                    )
+                seen.add(entry.name)
+        if seen != expected_entries:
+            raise incomplete(
+                "ENGINE_RUNTIME_DIRECTORY_REPLACED",
+                f"private runtime directory omitted a bound entry: {path}",
+            )
+    except MeasurementIncomplete:
+        raise
+    except OSError as error:
+        raise incomplete(
+            "ENGINE_RUNTIME_DIRECTORY_UNAVAILABLE",
+            f"cannot inspect private runtime directory {path}: {error}",
+        ) from error
+    finally:
+        if descriptor is not None:
+            with contextlib.suppress(OSError):
+                os.close(descriptor)
 
 
 def runtime_directory_bindings(
@@ -1322,6 +1405,10 @@ def runtime_directory_bindings(
     identities = {(item["identity"]["device"], item["identity"]["inode"]) for item in bindings.values()}
     if len(identities) != len(bindings) or root_identity in identities:
         raise incomplete("ENGINE_RUNTIME_DIRECTORY_UNSAFE", "private runtime directories do not have unique identities")
+    require_bound_directory_entries(root, root_identity, set(RUNTIME_DIRECTORY_NAMES.values()))
+    for variable, binding in bindings.items():
+        identity = (binding["identity"]["device"], binding["identity"]["inode"])
+        require_bound_directory_entries(Path(environment[variable]), identity, set())
     return {
         "contract": "runtime-path-bindings-v1",
         "temporary_root": {
@@ -1794,7 +1881,6 @@ def sample_command(
     handshake_read: int | None = None
     root_in_measurement = False
     root_reaped = False
-    root_exit_state: dict[str, Any] | None = None
     usage_start = resource.getrusage(resource.RUSAGE_SELF)
 
     try:
@@ -1937,24 +2023,6 @@ def sample_command(
                             raise incomplete("ROOT_WAIT_INVALID", f"waited for unexpected PID {waited}")
                         root_reaped = True
                         root_ended = now
-                        root_exit_counters = counter_snapshot(child)
-                        root_exit_members = scan_cgroup(child, False, root_identity, proc_root)
-                        root_exit_state = {
-                            "dirty": root_exit_counters["memory_file_dirty_bytes"],
-                            "writeback": root_exit_counters["memory_file_writeback_bytes"],
-                            "populated": root_exit_counters["cgroup_events"]["populated"],
-                            "member_count": len(root_exit_members),
-                            "members": [
-                                {
-                                    "pid": int(member["pid"]),
-                                    "ppid": int(member["ppid"]),
-                                    "process_group": int(member["process_group"]),
-                                    "session": int(member["session"]),
-                                    "start_ticks": int(member["start_ticks"]),
-                                }
-                                for member in root_exit_members[:32]
-                            ],
-                        }
                     if now >= next_sample or ready:
                         take_sample(started, now)
                         while next_sample <= now:
@@ -1990,8 +2058,15 @@ def sample_command(
             except MeasurementIncomplete as error:
                 if error.code == "CGROUP_ACCOUNTING_NOT_QUIESCENT":
                     exit_code, child_signal = exit_fields(status_value)
+                    failure_counters = counter_snapshot(child)
+                    failure_members = scan_cgroup(child, False, root_identity, proc_root)
                     lifecycle = {
-                        "root_exit": root_exit_state,
+                        "accounting_failure": {
+                            "dirty": failure_counters["memory_file_dirty_bytes"],
+                            "writeback": failure_counters["memory_file_writeback_bytes"],
+                            "populated": failure_counters["cgroup_events"]["populated"],
+                            "member_count": len(failure_members),
+                        },
                         "root_exit_code": exit_code,
                         "root_signal": child_signal,
                         "engine_wall_ms": round((root_ended - started) * 1000.0, 3),
@@ -2004,17 +2079,13 @@ def sample_command(
                         Path(engine_tmpdir),
                         Path(stdout_path),
                         Path(stderr_path),
-                        native_api2_storage is not None,
-                    )
-                    browser = (
-                        f"; {browser_failure_diagnostics(Path(engine_tmpdir))}"
-                        if private_browser_runtime
-                        else ""
+                        engine_tmpdir_identity,
+                        native_api2_storage,
                     )
                     raise incomplete(
                         error.code,
                         f"{error}; engine-lifecycle={json.dumps(lifecycle, sort_keys=True, separators=(',', ':'))}; "
-                        f"{diagnostics}{browser}",
+                        f"{diagnostics}",
                     ) from error
                 raise
             if final["cgroup_events"]["populated"] != 0:
