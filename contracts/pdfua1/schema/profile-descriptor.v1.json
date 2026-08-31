@@ -1,0 +1,215 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://pliego.dev/schema/pdfua1/profile-descriptor.v1.json",
+  "title": "Pliego PDF/UA-1 profile descriptor",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "version",
+    "target",
+    "authority",
+    "inventory",
+    "request",
+    "result",
+    "bindings",
+    "compatibility",
+    "activation"
+  ],
+  "properties": {
+    "schema": { "const": "pliego.profile.pdfua-1" },
+    "version": { "const": 1 },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "standard", "edition", "base_standard", "pdf_version"],
+      "properties": {
+        "name": { "const": "PDF/UA-1" },
+        "standard": { "const": "ISO 14289-1:2014" },
+        "edition": { "const": 2 },
+        "base_standard": { "const": "ISO 32000-1:2008" },
+        "pdf_version": { "const": "1.7" }
+      }
+    },
+    "authority": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["order", "conflict_policy", "lock"],
+      "properties": {
+        "order": {
+          "const": [
+            "normative-pdfua-standard",
+            "normative-base-pdf-standard",
+            "test-protocol",
+            "implementation-guidance",
+            "reference-suite",
+            "machine-validator"
+          ]
+        },
+        "conflict_policy": { "const": "earlier-authority-wins" },
+        "lock": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["schema", "version", "media_type"],
+          "properties": {
+            "schema": { "const": "pliego.pdfua-validation-lock" },
+            "version": { "const": 1 },
+            "media_type": { "const": "application/vnd.pliego.pdfua-validation-lock+json" }
+          }
+        }
+      }
+    },
+    "inventory": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol",
+        "checkpoints",
+        "failure_conditions",
+        "machine",
+        "human",
+        "no_specific_test"
+      ],
+      "properties": {
+        "protocol": { "const": "Matterhorn Protocol 1.1" },
+        "checkpoints": { "const": 31 },
+        "failure_conditions": { "const": 136 },
+        "machine": { "const": 87 },
+        "human": { "const": 47 },
+        "no_specific_test": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^[0-9]{2}-[0-9]{3}$" }
+        }
+      }
+    },
+    "request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["profile", "selection", "unsupported", "author_assurance"],
+      "properties": {
+        "profile": { "$ref": "common.v1.json#/definitions/profile_ref" },
+        "selection": { "const": "explicit" },
+        "unsupported": { "const": "reject-before-render" },
+        "author_assurance": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["schema", "version", "path", "media_type", "addressing"],
+          "properties": {
+            "schema": { "const": "pliego.author-assurance.pdfua-1" },
+            "version": { "const": 1 },
+            "path": { "const": "pliego/author-assurance.json" },
+            "media_type": { "const": "application/vnd.pliego.author-assurance+json" },
+            "addressing": { "const": "input-manifest-entry-sha256" }
+          }
+        }
+      }
+    },
+    "result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["evidence", "gates", "satisfaction"],
+      "properties": {
+        "evidence": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["schema", "version", "media_type"],
+          "properties": {
+            "schema": { "const": "pliego.conformance-evidence.pdfua-1" },
+            "version": { "const": 1 },
+            "media_type": { "const": "application/vnd.pliego.conformance-evidence+json" }
+          }
+        },
+        "gates": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "enum": [
+              "per-render-machine",
+              "release-corpus",
+              "author-assurance",
+              "assistive-technology"
+            ]
+          }
+        },
+        "satisfaction": { "const": "all-four-gates-pass" }
+      }
+    },
+    "bindings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["render_identity", "semantic_layer", "pdf_metadata", "evidence"],
+      "properties": {
+        "render_identity": { "const": "exact-profile-ref" },
+        "semantic_layer": { "const": "exact-profile-ref" },
+        "pdf_metadata": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["standard_identification", "exact_revision_binding", "unavailable"],
+          "properties": {
+            "standard_identification": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["property", "value", "absent_properties"],
+              "properties": {
+                "property": { "const": "pdfuaid:part" },
+                "value": { "const": 1 },
+                "absent_properties": {
+                  "const": ["pdfuaid:amd", "pdfuaid:corr", "pdfuaid:rev"]
+                }
+              }
+            },
+            "exact_revision_binding": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["kind", "namespace_uri", "property", "value"],
+              "properties": {
+                "kind": { "const": "pliego-owned-xmp-scalar-not-iso-identifier" },
+                "namespace_uri": { "const": "https://pliego.dev/ns/pdfua-profile/1.0/" },
+                "property": { "const": "standardRevision" },
+                "value": {
+                  "const": "https://pliego.dev/profile/pdfua-1/v1#iso-14289-1-2014-ed2"
+                }
+              }
+            },
+            "unavailable": { "const": "reject-profile-before-render" }
+          }
+        },
+        "evidence": { "const": "exact-profile-ref" }
+      }
+    },
+    "compatibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["profile_match", "unknown_version", "tagged_pdf", "untagged_pdf", "pdfua2"],
+      "properties": {
+        "profile_match": { "const": "exact-schema-and-version" },
+        "unknown_version": { "const": "unsupported" },
+        "tagged_pdf": { "const": "not-conforming-without-evidence" },
+        "untagged_pdf": { "const": "not-conforming" },
+        "pdfua2": { "const": "separate-profile" }
+      }
+    },
+    "activation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "gate",
+        "runtime_advertisement",
+        "satisfied_evidence",
+        "descriptor_is_support_claim"
+      ],
+      "properties": {
+        "gate": { "const": "r3.5-final" },
+        "runtime_advertisement": { "const": "required-before-acceptance" },
+        "satisfied_evidence": { "const": "blocked-until-resolved-proof-closure" },
+        "descriptor_is_support_claim": { "const": false }
+      }
+    }
+  }
+}
