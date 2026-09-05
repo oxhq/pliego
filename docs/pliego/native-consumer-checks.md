@@ -30,6 +30,9 @@ The fault disks receive a validated PDF stream, and the stream must close even
 when storage fails. Application success records are created only after storage
 returns successfully. Native render evidence is retained after storage failure;
 successful native rendering and failed durable delivery are distinct states.
+The initial successful case also uses Laravel's fluent exact app-unit page and
+margin settings and requires those integers in the native scene; recovery uses
+the unchanged default geometry.
 
 The local path includes spaces and a non-ASCII character. The obstructing file
 must remain unchanged. This is not an OS ACL test or a remote partial-write

@@ -158,7 +158,11 @@ try {
     nativeStorageExpect($report['contract']['engine']['runtime']['binary_sha256'] === $report['binary_sha256'], 'native contract binary hash mismatch');
     $factory = $app->make(DocumentFactory::class);
     $store = static function (string $case, string $disk, string $path, string $view = 'invoice') use ($factory, $font, $root): StoredDocument {
-        $stored = $factory->view($view, ['number' => $case])->asset('proof.woff2', $font)->store($path, $disk, ['visibility' => 'private']);
+        $pending = $factory->view($view, ['number' => $case])->asset('proof.woff2', $font);
+        if ($case === 'initial') {
+            $pending->pageSize('67351x47622au')->margins('2268,2268,5669,2268au');
+        }
+        $stored = $pending->store($path, $disk, ['visibility' => 'private']);
         // Application records are committed only after the actual store returns.
         nativeStorageJson($root.'/records/'.$case.'.json', ['disk' => $stored->disk, 'path' => $stored->path, 'delivery_identity' => $stored->renderResult->deliveryIdentity]);
 
@@ -184,6 +188,16 @@ try {
             $storedPath = $app->make('filesystem')->disk($disk)->path($path);
             nativeStorageExpect(hash_file('sha256', $storedPath) === hash_file('sha256', $pdf->pdfPath), 'stored bytes differ');
             nativeStorageExpect(nativeStorageSceneText($pdf->scenePath) === 'PLIEGO STORAGE '.$case, 'real Blade/scene text mismatch');
+            if ($case === 'initial') {
+                $scene = json_decode((string) file_get_contents($pdf->scenePath), true, flags: JSON_THROW_ON_ERROR);
+                nativeStorageExpect(count($scene['pages']) === 1, 'landscape storage fixture changed page count');
+                $page = $scene['pages'][0];
+                nativeStorageExpect($page['style_source'] === 'request-defaults'
+                    && $page['size_app_units'] === ['width' => 67_351, 'height' => 47_622]
+                    && $page['margins_app_units'] === ['top' => 2_268, 'right' => 2_268, 'bottom' => 5_669, 'left' => 2_268],
+                    'Laravel exact app-unit geometry differs from native scene authority');
+                $record['exact_page'] = ['size_app_units' => $page['size_app_units'], 'margins_app_units' => $page['margins_app_units']];
+            }
             nativeStorageExpect(trim((string) file_get_contents($pdf->jobPath.'/'.JobRetention::STATUS_FILE)) === 'success', 'success job state missing');
             $record += ['status' => 'stored', 'pdf_sha256' => hash_file('sha256', $storedPath), 'pdf_bytes' => filesize($storedPath), 'job_path' => $pdf->jobPath];
         } else {

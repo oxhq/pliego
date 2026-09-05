@@ -387,38 +387,40 @@ final class DocumentEngine
         if ($pageSize === 'A4') {
             return ['name' => 'A4'];
         }
-        if (preg_match('/^([1-9][0-9]*)x([1-9][0-9]*)$/D', $pageSize, $match) !== 1) {
-            throw new InvalidArgumentException('API 2 pageSize must be A4 or integer WIDTHxHEIGHT CSS pixels');
+        if (preg_match('/^([1-9][0-9]*)x([1-9][0-9]*)(au)?$/D', $pageSize, $match) !== 1) {
+            throw new InvalidArgumentException('API 2 pageSize must be A4, integer WIDTHxHEIGHT CSS pixels, or WIDTHxHEIGHTau');
         }
+        $scale = isset($match[3]) ? 1 : 60;
 
         return [
-            'width_app_units' => $this->cssPixelsToAppUnits($match[1], 'page width'),
-            'height_app_units' => $this->cssPixelsToAppUnits($match[2], 'page height'),
+            'width_app_units' => $this->integerToAppUnits($match[1], 'page width', $scale),
+            'height_app_units' => $this->integerToAppUnits($match[2], 'page height', $scale),
         ];
     }
 
     /** @return array{top: int, right: int, bottom: int, left: int} */
     private function pageMargins(string $pageMargins): array
     {
-        if (preg_match('/^([0-9]+),([0-9]+),([0-9]+),([0-9]+)$/D', $pageMargins, $match) !== 1) {
+        if (preg_match('/^([0-9]+),([0-9]+),([0-9]+),([0-9]+)(au)?$/D', $pageMargins, $match) !== 1) {
             throw new InvalidArgumentException(
-                'API 2 pageMargins must be four comma-separated nonnegative integer CSS pixels',
+                'API 2 pageMargins must be four comma-separated nonnegative integers; suffix the whole tuple with au for exact app units',
             );
         }
+        $scale = isset($match[5]) ? 1 : 60;
 
         return [
-            'top' => $this->cssPixelsToAppUnits($match[1], 'top margin', allowZero: true),
-            'right' => $this->cssPixelsToAppUnits($match[2], 'right margin', allowZero: true),
-            'bottom' => $this->cssPixelsToAppUnits($match[3], 'bottom margin', allowZero: true),
-            'left' => $this->cssPixelsToAppUnits($match[4], 'left margin', allowZero: true),
+            'top' => $this->integerToAppUnits($match[1], 'top margin', $scale, allowZero: true),
+            'right' => $this->integerToAppUnits($match[2], 'right margin', $scale, allowZero: true),
+            'bottom' => $this->integerToAppUnits($match[3], 'bottom margin', $scale, allowZero: true),
+            'left' => $this->integerToAppUnits($match[4], 'left margin', $scale, allowZero: true),
         ];
     }
 
-    private function cssPixelsToAppUnits(string $value, string $label, bool $allowZero = false): int
+    private function integerToAppUnits(string $value, string $label, int $scale, bool $allowZero = false): int
     {
         $normalized = ltrim($value, '0');
         $normalized = $normalized === '' ? '0' : $normalized;
-        if (strlen($normalized) > 10 || (int) $normalized > intdiv(2_147_483_647, 60)) {
+        if (strlen($normalized) > 10 || (int) $normalized > intdiv(2_147_483_647, $scale)) {
             throw new InvalidArgumentException("API 2 {$label} exceeds signed app-unit range");
         }
         $integer = (int) $normalized;
@@ -426,7 +428,7 @@ final class DocumentEngine
             throw new InvalidArgumentException("API 2 {$label} must be positive");
         }
 
-        return $integer * 60;
+        return $integer * $scale;
     }
 
     /**

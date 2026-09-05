@@ -54,6 +54,16 @@ the SDK converts it to exact 60-app-unit geometry. `pageSize: 'A4'` selects name
 timezones are `UTC` and `America/Tijuana`; `PST8PDT` is accepted as a deprecated input alias and
 normalized to `America/Tijuana` in the request.
 
+Development toward 0.4 also accepts exact API 2 app-unit geometry: append `au`
+to the whole size or margin tuple. For example,
+`new RenderOptions(pageSize: '67351x47622au', pageMargins: '2268,2268,5669,2268au')`
+requests A4 landscape with 1 cm top/right/left and 2.5 cm bottom margins,
+quantized once to the engine's 60 app units per CSS pixel. Integer values pass
+through unchanged; unqualified tuples retain their existing CSS-pixel meaning.
+This adds no new protocol fields or CSS `@page` interpretation: page authority
+remains `request-only-v1`. The application must explicitly map its document
+geometry into the request. This form is API 2 only and is not in released 0.3.3.
+
 Successful results expose:
 
 - `pdfPath`, `scenePath`, `bundlePath`, and `deliveryPath`;
