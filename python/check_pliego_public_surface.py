@@ -35,6 +35,7 @@ PUBLIC_MARKDOWN = (
     ROOT / "docs" / "pliego" / "nonpainting-content.md",
     ROOT / "docs" / "pliego" / "native-consumer-checks.md",
     ROOT / "docs" / "security" / "threat-model.md",
+    ROOT / "docs" / "security" / "dependency-advisories.md",
     ROOT / "docs" / "funding" / "2026.md",
     ROOT / "docs" / "benchmarks" / "README.md",
     ROOT / "sdk" / "laravel" / "README.md",
@@ -204,6 +205,15 @@ def verify_candidate_copy() -> None:
     require("unreleased 0.4.0 package" in php, "PHP source guide misstates candidate publication")
     require("unreleased 0.4.0 source candidate supports Laravel 12/13" in laravel, "Laravel candidate range is unclear")
     require("not yet available through Packagist" in laravel, "Laravel guide implies premature publication")
+    advisories = read(ROOT / "docs" / "security" / "dependency-advisories.md")
+    for needle in (
+        "RUSTSEC-2023-0071",
+        "the engine does not enforce this prohibition",
+        "not an advisory-free",
+        "wnaf-0.14.0-review.md",
+    ):
+        require(needle in advisories, f"native advisory assessment omits a security boundary: {needle!r}")
+    require("../security/dependency-advisories.md" in notes, "candidate notes omit dependency advisory status")
 
 
 def verified_manifest_path(relative: str) -> Path:
