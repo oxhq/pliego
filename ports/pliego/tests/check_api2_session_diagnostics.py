@@ -7,7 +7,7 @@
 """Development-only session failure census, NOT a release gate or benchmark.
 
 Run the existing unsafe-javascript link fixture and href-only HTTPS/no-href
-controls, three interleaved times each. No activation, warmup, budget changes,
+controls, three interleaved times each. No activation, warmup,
 retry-on-failure, or successful-render timing claim. The API 2 result/closure
 and private failure-only stderr are checked independently. Empty stderr on a
 success or artifact rejection does not imply any unobserved session milestone.
@@ -17,6 +17,14 @@ subprocess.run reaps its direct child, but descendant cleanup is not proven.
 The optional package-order census runs the exact link and table-background
 fixture lists in their original order three times. It observes session outcomes,
 not their PDF geometry or the intervening package suites; no result is retried.
+
+The gradient-pairs modes run three rotated orders of a HTTPS control or an
+original gradient fixture followed immediately by the same no-href probe.
+The primary mode preserves 10s engine / 30s outer budgets. The separately
+selected default-budget counterfactual changes only host_wall_ms to the API 2
+default 60s, with a 65s outer bound; it is not a release waiver, automatic retry,
+or runtime policy change. An interrupted census retains only an incomplete
+prefix, never a complete comparison.
 """
 
 from __future__ import annotations
@@ -70,8 +78,14 @@ HOST_MS = 10000
 MAX_LINE = 8192
 REPEATS = 3
 NAMES = ("unsafe-javascript", "https-control", "no-href-control")
-MODES = ("matched-controls", "package-order")
+PAIR_MODES = ("gradient-pairs", "gradient-pairs-default-budget")
+MODES = ("matched-controls", "package-order", *PAIR_MODES)
 PACKAGE_CASES = {"links": CASES, "table-backgrounds": TABLE_BACKGROUND_CASES}
+PREDECESSORS = (
+    (None, "https-control"),
+    ("links", "unsupported-background-gradient"),
+    ("table-backgrounds", "row-image-layer"),
+)
 UNSAFE = next(case for case in CASES if case["name"] == NAMES[0])
 TIMEOUT_CLASSES = {"SETTLEMENT_TIMEOUT", "READINESS_TIMEOUT", "CONTROLLED_CAPTURE_TIMEOUT"}
 REJECTIONS = {"event-loop-unavailable", "target-changed", "advance-state-changed", "timer-rejected", "other-rejection"}
@@ -203,7 +217,8 @@ def validate_observation(value: Any) -> None:
         require(all(isinstance(item, str) and item in READINESS for item in blockers), "unknown readiness blocker")
 
 
-def validate_diagnostic(raw: bytes) -> dict[str, Any] | None:
+def validate_diagnostic(raw: bytes, *, host_ms: int = HOST_MS) -> dict[str, Any] | None:
+    require(type(host_ms) is int and host_ms in (HOST_MS, 60000), "unknown diagnostic budget")
     if not raw:
         return None
     require(
@@ -225,7 +240,7 @@ def validate_diagnostic(raw: bytes) -> dict[str, Any] | None:
         require(value["timeout_site"] is None, "non-timeout carries timeout site")
     for key in ("host_elapsed_ms", "host_limit_ms"):
         milliseconds(value[key], key)
-    require(value["host_limit_ms"] == HOST_MS, "session budget changed")
+    require(value["host_limit_ms"] == host_ms, "session budget changed")
     exact(value["startup_ms"], set(STARTUP), "startup")
     previous, missing = 0.0, False
     for key in STARTUP:
@@ -386,8 +401,8 @@ def validate_result(raw: bytes, code: int, payload: bytes, probe: dict[str, Any]
     return {"valid": True, **facts}
 
 
-def diagnostic_facts(raw: bytes, protocol: dict[str, Any]) -> dict[str, Any]:
-    record = validate_diagnostic(raw)
+def diagnostic_facts(raw: bytes, protocol: dict[str, Any], *, host_ms: int = HOST_MS) -> dict[str, Any]:
+    record = validate_diagnostic(raw, host_ms=host_ms)
     codes = protocol.get("codes", [])
     if record is None:
         require(not TIMEOUT_CLASSES.intersection(codes), "session timeout omitted opt-in diagnostic")
@@ -417,6 +432,14 @@ def case_for(name: str, suite: str | None = None) -> dict[str, Any]:
 
 def schedule(mode: str = "matched-controls") -> list[dict[str, Any]]:
     require(mode in MODES, "unknown census mode")
+    if mode in PAIR_MODES:
+        entries = []
+        for repeat in range(REPEATS):
+            for suite, predecessor in PREDECESSORS[repeat:] + PREDECESSORS[:repeat]:
+                pair = {"repeat": repeat + 1, "pair": predecessor}
+                entries.append({**pair, "suite": suite, "name": predecessor, "pair_role": "predecessor"})
+                entries.append({**pair, "name": "no-href-control", "pair_role": "probe"})
+        return entries
     if mode == "package-order":
         return [
             {"repeat": repeat + 1, "suite": suite, "name": case["name"]}
@@ -428,6 +451,22 @@ def schedule(mode: str = "matched-controls") -> list[dict[str, Any]]:
     return [
         {"repeat": repeat + 1, "name": name} for repeat in range(REPEATS) for name in NAMES[repeat:] + NAMES[:repeat]
     ]
+
+
+def budgets(mode: str) -> tuple[int, int]:
+    require(mode in MODES, "unknown census mode")
+    return (60000, 65) if mode == "gradient-pairs-default-budget" else (HOST_MS, OUTER_SECONDS)
+
+
+def build_census_fixture(output: Path, item: dict[str, Any], mode: str) -> tuple[bytes, Path]:
+    host_ms, _ = budgets(mode)
+    payload, source = build_fixture(REPOSITORY, output, case_for(item["name"], item.get("suite")))
+    request = strict_json(payload)
+    require(request["settlement"]["limits"]["host_wall_ms"] == HOST_MS, "original fixture budget changed")
+    if host_ms != HOST_MS:
+        request["settlement"]["limits"]["host_wall_ms"] = host_ms
+        payload = canonical_json(request)
+    return payload, source
 
 
 def execute(
@@ -480,9 +519,11 @@ def execute(
 CHECK_ERRORS = (AssertionError, ValueError, TypeError, KeyError, OSError)
 
 
-def run_attempt(binary: Path, output: Path, item: dict[str, Any], probe: dict[str, Any]) -> dict[str, Any]:
-    payload, source = build_fixture(REPOSITORY, output, case_for(item["name"], item.get("suite")))
-    require(strict_json(payload)["settlement"]["limits"]["host_wall_ms"] == HOST_MS, "fixture budget changed")
+def run_attempt(
+    binary: Path, output: Path, item: dict[str, Any], probe: dict[str, Any], mode: str = "matched-controls"
+) -> dict[str, Any]:
+    host_ms, outer_seconds = budgets(mode)
+    payload, source = build_census_fixture(output, item, mode)
     (output / "request.json").write_bytes(payload)
     job = output / "job"
     create_private_job_root(job)
@@ -491,7 +532,7 @@ def run_attempt(binary: Path, output: Path, item: dict[str, Any], probe: dict[st
     validate_input(payload, source)
     validate_input(payload, job)
     raw, stderr, code = execute(
-        binary, ["render-api2"], output, cwd=job, payload=payload, timeout=OUTER_SECONDS, diagnostics=True
+        binary, ["render-api2"], output, cwd=job, payload=payload, timeout=outer_seconds, diagnostics=True
     )
     try:
         validate_input(payload, job)
@@ -502,9 +543,9 @@ def run_attempt(binary: Path, output: Path, item: dict[str, Any], probe: dict[st
         # Parse even when stdout is invalid, retaining diagnostic-only evidence
         # without pretending it is bound to a valid terminal result.
         if protocol["valid"]:
-            private = diagnostic_facts(stderr, protocol)
+            private = diagnostic_facts(stderr, protocol, host_ms=host_ms)
         else:
-            record = validate_diagnostic(stderr)
+            record = validate_diagnostic(stderr, host_ms=host_ms)
             private = {
                 "valid": True,
                 "available": record is not None,
@@ -526,7 +567,7 @@ def run_census(binary: Path, output: Path, probe: dict[str, Any], report: dict[s
     for index, item in enumerate(report["schedule"], 1):
         target = output / f"{index:02}-{item['name']}"
         try:
-            row = run_attempt(binary, target, item, probe)
+            row = run_attempt(binary, target, item, probe, report.get("census_mode", "matched-controls"))
         except OuterTimeout as error:
             report["attempts"].append({**item, "fatal": str(error), "process_path": f"{target.name}/process.json"})
             report["census_status"] = "aborted-outer-timeout"
@@ -569,6 +610,7 @@ def main() -> None:
     output.mkdir(parents=True, exist_ok=False)
     probe_dir = output / "probe"
     probe_dir.mkdir()
+    host_ms, outer_seconds = budgets(args.census)
     report = {
         "schema": "pliego.session-diagnostic-census",
         "version": 1,
@@ -576,9 +618,10 @@ def main() -> None:
         "release_acceptance": False,
         "benchmark_qualified": False,
         "activation_performed": False,
-        "host_wall_ms": HOST_MS,
-        "outer_process_seconds": OUTER_SECONDS,
+        "host_wall_ms": host_ms,
+        "outer_process_seconds": outer_seconds,
         "census_mode": args.census,
+        "budget_counterfactual": args.census == "gradient-pairs-default-budget",
         "schedule": schedule(args.census),
         "attempts": [],
         "census_status": "probing",
@@ -833,6 +876,102 @@ class SelfTest(unittest.TestCase):
             case_for("unsafe-javascript", "unknown")
         with self.assertRaises(AssertionError):
             case_for("unknown", "links")
+
+    def test_gradient_pairs_have_fixed_rotations_and_identical_probe(self) -> None:
+        entries = schedule(PAIR_MODES[0])
+        self.assertEqual(entries, schedule(PAIR_MODES[1]))
+        self.assertEqual(len(entries), 18)
+        self.assertEqual(
+            [row["pair"] for row in entries[::2]],
+            [
+                "https-control",
+                "unsupported-background-gradient",
+                "row-image-layer",
+                "unsupported-background-gradient",
+                "row-image-layer",
+                "https-control",
+                "row-image-layer",
+                "https-control",
+                "unsupported-background-gradient",
+            ],
+        )
+        for index in range(0, len(entries), 2):
+            predecessor, probe = entries[index : index + 2]
+            self.assertEqual(predecessor["repeat"], index // 6 + 1)
+            self.assertEqual(predecessor["pair_role"], "predecessor")
+            self.assertEqual(predecessor["pair"], predecessor["name"])
+            self.assertEqual(
+                probe,
+                {
+                    "repeat": predecessor["repeat"],
+                    "pair": predecessor["name"],
+                    "name": "no-href-control",
+                    "pair_role": "probe",
+                },
+            )
+        with tempfile.TemporaryDirectory() as temp:
+            root, probe_payloads = Path(temp), []
+            for index, item in enumerate(entries):
+                primary, source = build_census_fixture(root / f"primary-{index}", item, PAIR_MODES[0])
+                other, other_source = build_census_fixture(root / f"counterfactual-{index}", item, PAIR_MODES[1])
+                original, original_source = build_fixture(
+                    REPOSITORY, root / f"original-{index}", case_for(item["name"], item.get("suite"))
+                )
+                self.assertEqual(primary, original)
+                validate_input(primary, source)
+                validate_input(other, other_source)
+                request = strict_json(other)
+                self.assertEqual(request["settlement"]["limits"]["host_wall_ms"], 60000)
+                request["settlement"]["limits"]["host_wall_ms"] = HOST_MS
+                self.assertEqual(canonical_json(request), primary)
+                # No resource, manifest, page, or non-wall settlement change.
+                for file in ("input-manifest.json", "input/document.html", "input/styles.css", "input/font.ttf"):
+                    self.assertEqual((source / file).read_bytes(), (original_source / file).read_bytes())
+                    self.assertEqual((source / file).read_bytes(), (other_source / file).read_bytes())
+                if item["pair_role"] == "probe":
+                    probe_payloads.append(primary)
+            self.assertEqual(len(probe_payloads), 9)
+            self.assertEqual(len(set(probe_payloads)), 1)
+
+    def test_diagnostic_binds_exact_selected_budget(self) -> None:
+        for mode in MODES:
+            self.assertEqual(budgets(mode), (60000, 65) if mode == PAIR_MODES[1] else (10000, 30))
+        with self.assertRaises(CHECK_ERRORS):
+            budgets("retry-with-more-time")
+        default_request = strict_json(
+            (REPOSITORY / "contracts/api2/goldens/accepted/render-request.a4.json").read_bytes()
+        )
+        self.assertEqual(default_request["settlement"]["limits"]["host_wall_ms"], budgets(PAIR_MODES[1])[0])
+        failure = {"status": "failed", "codes": ["SETTLEMENT_TIMEOUT"]}
+        for host_ms in (HOST_MS, 60000):
+            diagnostic = self.diagnostic()
+            diagnostic.update(host_limit_ms=host_ms, host_elapsed_ms=host_ms + 1.5)
+            raw = canonical_json(diagnostic)
+            self.assertTrue(diagnostic_facts(raw, failure, host_ms=host_ms)["available"])
+            for incorrect in (True, float(host_ms), 30000, 60000 if host_ms == HOST_MS else HOST_MS):
+                with self.subTest(expected=host_ms, incorrect=incorrect), self.assertRaises(CHECK_ERRORS):
+                    diagnostic_facts(raw, failure, host_ms=incorrect)
+
+    def test_counterfactual_executes_once_with_declared_budgets(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            item = schedule(PAIR_MODES[1])[1]
+            diagnostic = self.diagnostic()
+            diagnostic.update(host_limit_ms=60000, host_elapsed_ms=60001.5)
+            protocol = {"valid": True, "status": "failed", "codes": ["SETTLEMENT_TIMEOUT"]}
+            with (
+                patch(
+                    __name__ + ".execute", return_value=(b"retained-stdout", canonical_json(diagnostic), 1)
+                ) as execute_mock,
+                patch(__name__ + ".validate_result", return_value=protocol),
+            ):
+                row = run_attempt(Path("dummy"), Path(temp) / "attempt", item, {}, PAIR_MODES[1])
+            self.assertEqual(execute_mock.call_count, 1)
+            self.assertEqual(execute_mock.call_args.kwargs["timeout"], 65)
+            self.assertTrue(execute_mock.call_args.kwargs["diagnostics"])
+            request = strict_json(execute_mock.call_args.kwargs["payload"])
+            self.assertEqual(request["settlement"]["limits"]["host_wall_ms"], 60000)
+            self.assertEqual(row["protocol"]["status"], "failed")
+            self.assertTrue(row["session_diagnostic"]["available"])
 
     def test_successful_closure_and_corruptions(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
