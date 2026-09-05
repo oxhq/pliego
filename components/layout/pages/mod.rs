@@ -20,7 +20,8 @@ use layout_api::{
     LayoutDebugContinuation, LayoutDebugPage, LayoutDebugPageAppUnits, LayoutDebugPageContinuation,
     LayoutDebugPageSequence, LayoutDebugPageStyleSource, LayoutDebugPageWarning,
     LayoutDebugTableBreak, LayoutDebugTableCellContinuation, LayoutDebugTableConstraint,
-    LayoutDebugTableGroupRepeat, LayoutDebugTableGroupUnsupportedReason,
+    LayoutDebugTableGroupRepeat, LayoutDebugTableGroupRepeatAppUnits,
+    LayoutDebugTableGroupUnsupportedReason,
 };
 use log::warn;
 use parking_lot::Mutex;
@@ -2017,6 +2018,11 @@ impl PageSequence {
                     source_block_start: repeat.source_block_start.to_f32_px(),
                     target_block_start: repeat.target_block_start.to_f32_px(),
                     block_size: repeat.block_size.to_f32_px(),
+                    app_units: Some(LayoutDebugTableGroupRepeatAppUnits {
+                        source_block_start: repeat.source_block_start.0,
+                        target_block_start: repeat.target_block_start.0,
+                        block_size: repeat.block_size.0,
+                    }),
                 })
                 .collect(),
             warnings: self
@@ -2415,6 +2421,57 @@ mod tests {
         );
         assert_ne!(Au::from_f32_px(definition.width()).0, exact.width);
         assert_ne!(Au::from_f32_px(definition.height()).0, exact.height);
+    }
+
+    #[test]
+    fn table_repeat_debug_geometry_retains_original_app_units() {
+        let repeat = TableGroupRepeatDecision {
+            page_index: 1,
+            table_node: Some(7),
+            header_tag_id: 11,
+            row_group_index: 0,
+            source_block_start: Au(100_000_001),
+            target_block_start: Au(100_000_019),
+            block_size: Au(601),
+        };
+        let sequence = PageSequence {
+            pages: Vec::new(),
+            table_breaks: Vec::new(),
+            table_cell_continuations: Vec::new(),
+            table_group_repeats: vec![repeat],
+            warnings: Vec::new(),
+        };
+        let debug = sequence.debug_snapshot();
+        let [retained] = debug.table_group_repeats.as_slice() else {
+            panic!("the original repeat must be retained exactly once");
+        };
+        let exact = LayoutDebugTableGroupRepeatAppUnits {
+            source_block_start: 100_000_001,
+            target_block_start: 100_000_019,
+            block_size: 601,
+        };
+        assert_eq!(retained.app_units, Some(exact));
+        assert_eq!(retained.page_index, repeat.page_index);
+        assert_eq!(retained.table_node, repeat.table_node);
+        assert_eq!(retained.header_tag_id, repeat.header_tag_id);
+        assert_eq!(retained.row_group_index, repeat.row_group_index);
+        assert_eq!(
+            retained.source_block_start,
+            repeat.source_block_start.to_f32_px()
+        );
+        assert_eq!(
+            retained.target_block_start,
+            repeat.target_block_start.to_f32_px()
+        );
+        assert_eq!(retained.block_size, repeat.block_size.to_f32_px());
+        assert_ne!(
+            Au::from_f32_px(retained.source_block_start).0,
+            exact.source_block_start
+        );
+        assert_ne!(
+            Au::from_f32_px(retained.target_block_start).0,
+            exact.target_block_start
+        );
     }
 
     #[test]

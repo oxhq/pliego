@@ -1849,7 +1849,8 @@ fn distribute_operations(
             repeat.page_index >= pages.len() ||
             !nonnegative_finite(repeat.source_block_start) ||
             !nonnegative_finite(repeat.target_block_start) ||
-            !positive_finite(repeat.block_size)
+            !positive_finite(repeat.block_size) ||
+            !repeat.app_unit_authority_matches()
         {
             return Err(CaptureError::InvalidTableGroupRepeat {
                 page_index: repeat.page_index,
@@ -1881,10 +1882,16 @@ fn distribute_operations(
                 });
             }
             let mut repeated = operation.clone();
-            // Repeat placement is currently retained in f32 block coordinates. Until that
-            // transform has its own app-unit source authority, the repeated operation must not
-            // inherit the source operation's exact coordinates.
-            repeated.authority = None;
+            // Use the layout-owned integer transform, never recover coordinates
+            // from compatibility floats. Missing or overflowing authority stays
+            // absent, and operation_page may still discard it after clipping.
+            repeated.authority = repeated.authority.take().and_then(|authority| {
+                let exact = repeat.app_units?;
+                translate_operation_authority_y(
+                    authority,
+                    i64::from(exact.source_block_start) - i64::from(exact.target_block_start),
+                )
+            });
             repeated.bounds.y += translation;
             translate_operation_y(&mut repeated.operation, -translation, repeated.sequence)?;
             let (page_index, page_origin) = operation_page(pages, &mut repeated)?;
@@ -1893,7 +1900,11 @@ fn distribute_operations(
                     page_index: repeat.page_index,
                 });
             }
-            translate_operation_y(&mut repeated.operation, page_origin, repeated.sequence)?;
+            translate_positioned_operation_to_page(
+                &mut repeated,
+                page_origin,
+                page_origin_app_units(pages, page_index),
+            )?;
             mark_repeated_table_header(&mut repeated.operation);
             repeated_operations[page_index].push(repeated);
         }
@@ -1957,7 +1968,11 @@ fn translate_operation_authority_y(
     authority: CapturedOperationAuthority,
     page_origin: i64,
 ) -> Option<CapturedOperationAuthority> {
-    let translate_y = |value: i32| i32::try_from(i64::from(value) - page_origin).ok();
+    let translate_y = |value: i32| {
+        i64::from(value)
+            .checked_sub(page_origin)
+            .and_then(|value| i32::try_from(value).ok())
+    };
     let translate_rect = |mut bounds: CapturedRectAppUnits| {
         bounds.y = translate_y(bounds.y)?;
         Some(bounds)
@@ -2961,6 +2976,29 @@ struct CaptureTableGroupRepeat {
     source_block_start: f32,
     target_block_start: f32,
     block_size: f32,
+    #[serde(default)]
+    app_units: Option<CaptureTableGroupRepeatAppUnits>,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CaptureTableGroupRepeatAppUnits {
+    source_block_start: i32,
+    target_block_start: i32,
+    block_size: i32,
+}
+
+impl CaptureTableGroupRepeat {
+    fn app_unit_authority_matches(&self) -> bool {
+        self.app_units.is_none_or(|exact| {
+            exact.source_block_start >= 0 &&
+                exact.target_block_start >= 0 &&
+                exact.block_size > 0 &&
+                app_units_to_f32_px(exact.source_block_start) == self.source_block_start &&
+                app_units_to_f32_px(exact.target_block_start) == self.target_block_start &&
+                app_units_to_f32_px(exact.block_size) == self.block_size
+        })
+    }
 }
 
 #[derive(Clone, Copy, Deserialize)]
@@ -4217,8 +4255,11 @@ mod tests {
         assert_eq!(data, "M10 20h20v2h-20z");
     }
 
-    #[test]
-    fn repeated_header_prepending_cannot_inherit_source_authority() {
+    fn repeated_header_distribution(
+        target: f32,
+        exact: Option<CaptureTableGroupRepeatAppUnits>,
+        rectangle: bool,
+    ) -> Result<DistributedOperations, CaptureError> {
         let page = |index| CapturePage {
             index,
             style_source: Some(CapturedPageStyleSource::RequestDefaults),
@@ -4253,7 +4294,7 @@ mod tests {
             width: 20.0,
             height: 10.0,
         };
-        let operations = vec![
+        let mut operations = vec![
             PositionedOperation {
                 sequence: 0,
                 structural_fragment_index: None,
@@ -4300,6 +4341,30 @@ mod tests {
                 },
             },
         ];
+        if rectangle {
+            let bounds = operations[0].bounds.clone();
+            operations[0].authority =
+                Some(CapturedOperationAuthority::Bounds(CapturedRectAppUnits {
+                    x: 600,
+                    y: 1_200,
+                    width: 1_200,
+                    height: 600,
+                }));
+            operations[0].operation = Operation::Path {
+                data: rectangle_path_data(&bounds),
+                bounds,
+                fill: Some(Color::default()),
+                fill_rule: FillRule::NonZero,
+                stroke: None,
+                meta: OperationMeta {
+                    semantics: Some(Semantics {
+                        role: "artifact".into(),
+                        label: Some("table-border".into()),
+                    }),
+                    source: None,
+                },
+            };
+        }
         let paint_events = vec![
             CapturePaintEvent {
                 sequence: 0,
@@ -4328,8 +4393,9 @@ mod tests {
             header_tag_id: 9,
             _row_group_index: 0,
             source_block_start: 20.0,
-            target_block_start: 120.0,
+            target_block_start: target,
             block_size: 10.0,
+            app_units: exact,
         }];
         let repeated_fragments = HashMap::from([(
             9,
@@ -4339,14 +4405,18 @@ mod tests {
             },
         )]);
 
-        let distributed = distribute_operations(
+        distribute_operations(
             &[page(0), page(1)],
             operations,
             &paint_events,
             &repeats,
             &repeated_fragments,
         )
-        .unwrap();
+    }
+
+    #[test]
+    fn repeated_header_prepending_cannot_inherit_source_authority() {
+        let distributed = repeated_header_distribution(120.0, None, false).unwrap();
 
         assert_eq!(
             distributed.page_operations,
@@ -4378,6 +4448,127 @@ mod tests {
             distributed.pages[1].operations[1],
             Operation::Image { .. }
         ));
+    }
+
+    #[test]
+    fn repeated_header_translates_exact_text_and_rectangle_authority() {
+        let exact = Some(CaptureTableGroupRepeatAppUnits {
+            source_block_start: 1_200,
+            target_block_start: 7_380,
+            block_size: 600,
+        });
+        for rectangle in [false, true] {
+            let distributed = repeated_header_distribution(123.0, exact, rectangle).unwrap();
+            let expected = if rectangle {
+                CapturedOperationAuthority::Bounds(CapturedRectAppUnits {
+                    x: 600,
+                    y: 1_380,
+                    width: 1_200,
+                    height: 600,
+                })
+            } else {
+                CapturedOperationAuthority::Text {
+                    font_size_app_units: 720,
+                    glyphs: vec![CapturedGlyphAppUnits {
+                        x: 600,
+                        y: 1_980,
+                        advance: 420,
+                    }],
+                }
+            };
+            assert_eq!(distributed.page_operations[1][0], Some(expected));
+            assert_eq!(distributed.pages[1].operations.len(), 2);
+            assert!(matches!(
+                distributed.pages[1].operations[1],
+                Operation::Image { .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn repeated_header_rejects_mismatched_authority_and_does_not_restore_clipped_geometry() {
+        let exact = CaptureTableGroupRepeatAppUnits {
+            source_block_start: 1_200,
+            target_block_start: 7_380,
+            block_size: 600,
+        };
+        assert!(matches!(
+            repeated_header_distribution(120.0, Some(exact), false),
+            Err(CaptureError::InvalidTableGroupRepeat { page_index: 1 })
+        ));
+        let clipped = repeated_header_distribution(
+            195.0,
+            Some(CaptureTableGroupRepeatAppUnits {
+                target_block_start: 11_700,
+                ..exact
+            }),
+            true,
+        )
+        .unwrap();
+        assert!(clipped.page_operations[1][0].is_none());
+        let Operation::Path { bounds, .. } = &clipped.pages[1].operations[0] else {
+            unreachable!()
+        };
+        assert_eq!(bounds.y, 95.0);
+        assert_eq!(bounds.height, 5.0);
+    }
+
+    #[test]
+    fn repeat_authority_preserves_large_integers_and_checks_overflow() {
+        let repeat: CaptureTableGroupRepeat = serde_json::from_value(serde_json::json!({
+            "page_index": 1, "table_node": 1, "header_tag_id": 9, "row_group_index": 0,
+            "source_block_start": app_units_to_f32_px(100_000_001),
+            "target_block_start": app_units_to_f32_px(100_000_019),
+            "block_size": app_units_to_f32_px(601),
+            "app_units": { "source_block_start": 100_000_001,
+                "target_block_start": 100_000_019, "block_size": 601 }
+        }))
+        .unwrap();
+        assert!(repeat.app_unit_authority_matches());
+        let exact = repeat.app_units.unwrap();
+        let authority = CapturedOperationAuthority::Bounds(CapturedRectAppUnits {
+            x: 0,
+            y: 100_000_001,
+            width: 60,
+            height: 601,
+        });
+        let translated = translate_operation_authority_y(
+            authority.clone(),
+            i64::from(exact.source_block_start) - i64::from(exact.target_block_start),
+        )
+        .unwrap();
+        assert_eq!(
+            translated,
+            CapturedOperationAuthority::Bounds(CapturedRectAppUnits {
+                x: 0,
+                y: 100_000_019,
+                width: 60,
+                height: 601,
+            })
+        );
+        for invalid_offset in [i64::MIN, i64::MAX, i64::from(i32::MIN)] {
+            assert!(translate_operation_authority_y(authority.clone(), invalid_offset).is_none());
+        }
+        for invalid in [
+            CaptureTableGroupRepeatAppUnits {
+                source_block_start: -1,
+                ..exact
+            },
+            CaptureTableGroupRepeatAppUnits {
+                target_block_start: -1,
+                ..exact
+            },
+            CaptureTableGroupRepeatAppUnits {
+                block_size: 0,
+                ..exact
+            },
+        ] {
+            let invalid = CaptureTableGroupRepeat {
+                app_units: Some(invalid),
+                ..repeat.clone()
+            };
+            assert!(!invalid.app_unit_authority_matches());
+        }
     }
 
     #[test]

@@ -9,7 +9,8 @@
 This is a narrow geometry/text regression, not a business-document visual oracle.
 Every render uses a closed input manifest and the committed Ahem font. Unsupported
 border styles, mixed colors, rowspan, and headerless pagination remain explicit
-rejection cases. Headed multi-page API 2 fixed-point authority is a separate gate.
+rejection cases. Headed pagination must preserve the exact geometry of repeated
+headers, row text, and every grid edge through the public scene and PDF.
 """
 
 from __future__ import annotations
@@ -41,6 +42,7 @@ from check_api2_contract import (
 CASES = (
     {"name": "header-one-page", "rows": 2, "header": True},
     {"name": "headerless-one-page", "rows": 2, "header": False},
+    {"name": "header-multi-page", "rows": 90, "header": True},
     {"name": "reject-headerless-multi-page", "rows": 90, "header": False, "reject": "pagination"},
     {"name": "reject-mixed-color", "rows": 2, "header": False, "reject": "mixed-color"},
     {"name": "reject-dashed", "rows": 2, "header": False, "reject": "dashed"},
@@ -256,7 +258,7 @@ def run_case(binary: Path, repository: Path, root: Path, case: dict[str, Any], p
 
 
 def self_test() -> None:
-    require(len(CASES) == 6 and sum(bool(case.get("reject")) for case in CASES) == 4, "case inventory changed")
+    require(len(CASES) == 7 and sum(bool(case.get("reject")) for case in CASES) == 4, "case inventory changed")
     case = CASES[1]
     paths = [
         {
