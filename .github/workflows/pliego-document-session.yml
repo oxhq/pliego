@@ -48,7 +48,9 @@ env:
 jobs:
   production-session:
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    # The measured debug prefix took 90m; a prior full feature/runtime tail took 17m.
+    # Bound the complete CI job with runner headroom; native/caller limits stay unchanged.
+    timeout-minutes: 150
 
     steps:
       - name: Check out Pliego

@@ -68,6 +68,7 @@
 mod construct;
 mod layout;
 
+use std::cmp::Ordering;
 use std::ops::Range;
 
 use app_units::Au;
@@ -461,7 +462,7 @@ impl SpecificTableGridInfo {
                 .to_color_space(ColorSpace::Srgb);
             if first.width <= Au::zero() ||
                 first.style_color.style != BorderStyle::Solid ||
-                !(color.alpha > 0.0) ||
+                color.alpha.partial_cmp(&0.0) != Some(Ordering::Greater) ||
                 line.iter().any(|border| {
                     // A positive-width invisible winner can alter a join;
                     // only authored/resolved zero-width holes are admitted.
@@ -576,6 +577,30 @@ mod collapsed_border_profile_tests {
         assert!(info.has_solid_horizontal_borders());
         assert!(!info.has_no_visible_borders());
         assert!(info.uniform_solid_visible_border().is_none());
+    }
+
+    #[test]
+    fn horizontal_rules_require_ordered_positive_alpha() {
+        for (alpha, expected) in [
+            (f32::NAN, false),
+            (-0.5, false),
+            (-0.0, false),
+            (0.0, false),
+            (0.5, true),
+            (1.0, true),
+        ] {
+            let mut info = horizontal_grid();
+            for line in &mut info.collapsed_borders.y[1..] {
+                for border in line {
+                    border.style_color.color.alpha = alpha;
+                }
+            }
+            assert_eq!(
+                info.has_solid_horizontal_borders(),
+                expected,
+                "alpha = {alpha:?}"
+            );
+        }
     }
 
     #[test]
