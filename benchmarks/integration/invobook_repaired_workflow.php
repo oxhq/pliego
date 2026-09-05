@@ -105,7 +105,7 @@ try {
         'businessAction' => 'unchanged App\\Actions\\GenerateInvoicePdf in HTML mode; CreateInvoice currency line repaired for both providers',
         'deliveryAdaptation' => 'returned Blade view delivered in-process; original URL, browser authentication and Livewire preview are not exercised',
         'storage' => 'isolated Laravel local disk; database commit only after stored bytes match render bytes',
-        'sdk' => 'PHP SDK development source; Laravel SDK requires Illuminate ^13 while this app locks Laravel 11.31.0; no constraint bypass',
+        'sdk' => 'PHP SDK development source; candidate Laravel SDK targets Illuminate 12/13 while this app locks Laravel 11.31.0; no constraint bypass',
         'correctness' => 'storage integrity and database facts only; PDF facts and visual acceptance remain separate gates',
         'queue' => 'synchronous command; no queue-worker proof',
     ];

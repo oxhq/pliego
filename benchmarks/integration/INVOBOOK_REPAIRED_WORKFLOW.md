@@ -26,7 +26,9 @@ selection into the actual UI remains a migration step. The original `elegant`
 template expects an Eloquent/Livewire context and is retained as a failure in this
 HTML-action track, not replaced with a different invoice template.
 
-Invobook locks Laravel 11.31.0; the current Laravel SDK requires Illuminate 13.
+Invobook locks Laravel 11.31.0; the candidate Laravel SDK targets Illuminate 12/13.
+The published v0.3.3 SDK still requires Illuminate 13; candidate framework checks
+do not change that public package's support claim.
 This runner does **not** manually autoload that SDK or bypass Composer constraints.
 It exercises the PHP SDK plus Illuminate filesystem. Laravel SDK `store()`,
 public-package installation, queue workers, and supported-version compatibility
