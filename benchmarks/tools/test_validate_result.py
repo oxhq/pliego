@@ -476,6 +476,35 @@ def changed(value: dict, operation: object, expected: str) -> None:
 def main() -> None:
     valid = result()
     assert not errors(valid), errors(valid)
+    assert "root_wall_deadline" not in valid["samples"][0]["resource_usage"]
+    bounded = deepcopy(valid)
+    deadline = {
+        "limit_ms": 65000.0,
+        "outcome": "root-exited",
+        "boundary": "root-SIGCONT-through-pidfd-observed-exit",
+    }
+    bounded["samples"][0]["resource_usage"]["root_wall_deadline"] = deadline
+    assert not errors(bounded), errors(bounded)
+    # Both schema and semantic entrypoints reject malformed opt-in metadata.
+    # The absent-field historical fixture remains byte-for-byte untouched.
+    bad_deadlines = [None, [], {}, {**deadline, "extra": True}]
+    bad_deadlines += [{**deadline, "limit_ms": value} for value in (True, "65000", 0, -1, float("nan"), float("inf"))]
+    bad_deadlines += [
+        {**deadline, "outcome": "ROOT_WALL_TIMEOUT"},
+        {**deadline, "boundary": "sampler-start-through-exit"},
+        {**deadline, "limit_ms": 0.5},
+    ]
+    for malformed in bad_deadlines:
+        bad = deepcopy(bounded)
+        bad["samples"][0]["resource_usage"]["root_wall_deadline"] = malformed
+        must_fail(bad, "resource_usage")
+        violations = []
+        validate_result.validate_resource_usage(bad["samples"][0], "$.sample", violations)
+        assert any("root_wall_deadline" in str(error) for error in violations), violations
+    rounded = deepcopy(bounded)
+    rounded["samples"][0]["resource_usage"]["root_wall_deadline"]["limit_ms"] = rounded["samples"][0]["wall_ms"]
+    assert not errors(rounded), errors(rounded)
+    assert valid == result()
     browser_sample = deepcopy(valid["samples"][0])
     browser_launch = browser_sample["resource_usage"]["launch_security"]
     browser_path = "/repo/benchmarks/adapters/browsershot/adapter.php"

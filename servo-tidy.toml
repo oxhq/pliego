@@ -13,6 +13,26 @@ disallowed-coauthors = [
 [ignore]
 # Files that are ignored for all tidy and lint checks.
 files = [
+    # Frozen external-application evidence: preserve original whitespace/CR bytes.
+    # Exact corpus manifests and document/font oracles validate these inputs;
+    # first-party benchmark code and all other files remain under normal Tidy.
+    "./benchmarks/integration/real_documents/fixtures/invobook/input.html",
+    "./benchmarks/integration/real_documents/fixtures/invobook/reference-observation.json",
+    "./benchmarks/integration/real_documents/fixtures/manufacturing/document.blade.html",
+    "./benchmarks/integration/real_documents/fixtures/manufacturing/font-closure.json",
+    "./benchmarks/integration/real_documents/fixtures/manufacturing/original-capture008.html",
+    "./benchmarks/integration/real_documents/fixtures/manufacturing/reference-observation.json",
+    "./benchmarks/integration/real_documents/fixtures/manufacturing/source-action-facts.json",
+    "./benchmarks/integration/real_documents/fixtures/manufacturing/synthetic-input.json",
+    "./benchmarks/integration/real_documents/fixtures/manufacturing/workflow-facts.json",
+    "./benchmarks/integration/real_documents/ledger/closure.json",
+    "./benchmarks/integration/real_documents/ledger/document.blade.html",
+    "./benchmarks/integration/real_documents/ledger/font-closure.json",
+    "./benchmarks/integration/real_documents/ledger/primary-account.json",
+    "./benchmarks/integration/real_documents/ledger/provenance.json",
+    "./benchmarks/integration/real_documents/ledger/report-data.json",
+    "./benchmarks/integration/real_documents/ledger/source-action-facts.json",
+    "./benchmarks/integration/real_documents/ledger/synthetic-input.json",
     "./components/shared/net/tests/parsable_mime/text",
     "./components/default-resources/resources/hsts_preload.fstmap",
     "./tests/wpt/meta/MANIFEST.json",

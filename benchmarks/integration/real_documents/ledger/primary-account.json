@@ -1,0 +1,10 @@
+{
+    "id": 27,
+    "code": "400000",
+    "name": "Product Sales",
+    "accountType": "income",
+    "companyId": 1,
+    "currencyId": 1,
+    "initialMoveLines": 0,
+    "selection": "Unmodified seeded account resolved from configured company default income; posting applies this same product-account resolution."
+}

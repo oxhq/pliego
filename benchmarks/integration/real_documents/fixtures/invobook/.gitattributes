@@ -1,0 +1,2 @@
+# Frozen fixture byte identities must not undergo checkout line conversion.
+* -text

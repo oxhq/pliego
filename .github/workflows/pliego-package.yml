@@ -65,6 +65,7 @@ jobs:
         run: |
           python python/check_pliego_version.py --self-test
           python python/check_pliego_release_archive.py --self-test --check-source-assets .
+          python ports/pliego/tests/check_api2_headerless_tables.py --self-test
 
   package:
     name: ${{ matrix.name }}
@@ -121,6 +122,12 @@ jobs:
       - name: Fail fast on the Windows private job-root contract
         if: runner.os == 'Windows'
         run: python ports/pliego/tests/check_api2_contract.py --self-test
+
+      - name: Install and check the pinned PDF annotation oracle
+        run: |
+          python -m pip install --require-hashes --only-binary=:all: --no-deps -r ports/pliego/tests/requirements-api2-links.txt
+          python ports/pliego/tests/check_api2_links.py --self-test --pypdf-version 6.16.2
+          python ports/pliego/tests/check_api2_table_backgrounds.py --self-test
 
       - name: Set up uv
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
@@ -341,6 +348,19 @@ jobs:
           $hash = (Get-FileHash "dist/$archive" -Algorithm SHA256).Hash.ToLowerInvariant()
           "$hash  $archive" | Set-Content "dist/$archive.sha256" -Encoding ascii
 
+      # Keep exact built bytes available to diagnose a later acceptance failure.
+      # Artifact existence is not release readiness: promotion still requires
+      # this entire matrix to succeed on an eligible release-proof push.
+      - name: Upload Pliego bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: pliego-${{ matrix.bundle }}
+          path: |
+            dist/pliego-*.${{ matrix.archive_ext }}
+            dist/pliego-*.${{ matrix.archive_ext }}.sha256
+          if-no-files-found: error
+          retention-days: 7
+
       - name: Prove the packaged API 2 executable closure
         shell: bash
         run: |
@@ -371,12 +391,122 @@ jobs:
             --archive "$archive" \
             --bundle-version-file "$unpacked/$bundle/VERSION.txt" \
             --proof-output "$proof"
+          # macOS Bash 3 treats an empty array as unbound under nounset.
+          set --
+          if [[ '${{ runner.os }}' == 'Linux' ]]; then
+            set -- --require-pdf-text
+          fi
+          table_status=0
+          python ports/pliego/tests/check_api2_headerless_tables.py \
+            --binary "$binary" \
+            --source-commit "$source_commit" \
+            --proof-directory "$PWD/dist/api2-headerless-tables-${{ matrix.bundle }}" \
+            "$@" || table_status=$?
+          link_status=0
+          python ports/pliego/tests/check_api2_links.py \
+            --binary "$binary" --source-commit "$source_commit" \
+            --pypdf-version 6.16.2 \
+            --proof-directory "$PWD/dist/api2-links-${{ matrix.bundle }}" || link_status=$?
+          background_status=0
+          python ports/pliego/tests/check_api2_table_backgrounds.py \
+            --binary "$binary" --source-commit "$source_commit" \
+            --proof-directory "$PWD/dist/api2-table-backgrounds-${{ matrix.bundle }}" || background_status=$?
+          python ports/pliego/tests/check_api2_fixed_content.py --self-test
+          fixed_status=0
+          python ports/pliego/tests/check_api2_fixed_content.py \
+            --binary "$binary" --source-commit "$source_commit" \
+            --proof-directory "$PWD/dist/api2-fixed-content-${{ matrix.bundle }}" \
+            "$@" || fixed_status=$?
+          python ports/pliego/tests/check_api2_nonpainting_content.py --self-test
+          nonpainting_status=0
+          python ports/pliego/tests/check_api2_nonpainting_content.py \
+            --binary "$binary" --source-commit "$source_commit" \
+            --proof-directory "$PWD/dist/api2-nonpainting-content-${{ matrix.bundle }}" \
+            "$@" || nonpainting_status=$?
+          python ports/pliego/tests/check_webcrypto_policy.py --self-test
+          crypto_status=0
+          set -- python ports/pliego/tests/check_webcrypto_policy.py \
+            --binary "$binary" --source-commit "$source_commit" \
+            --proof-directory "$PWD/dist/webcrypto-policy-${{ matrix.bundle }}"
+          if [[ '${{ runner.os }}' == 'Linux' ]]; then
+            xvfb-run --auto-servernum "$@" || crypto_status=$?
+          else
+            "$@" || crypto_status=$?
+          fi
+          test "$table_status" -eq 0 && test "$link_status" -eq 0 && test "$background_status" -eq 0 && test "$fixed_status" -eq 0 && test "$nonpainting_status" -eq 0 && test "$crypto_status" -eq 0
+
+      - name: Set up PHP for the packaged Linux consumer boundary
+        if: runner.os == 'Linux'
+        uses: shivammathur/setup-php@b604ade2a87db23f8871b7182e69ec5e75effb45 # v2
+        with:
+          php-version: '8.4'
+          coverage: none
+          extensions: mbstring, dom, xml, fileinfo, pdo_sqlite, pcntl, zip
+
+      - name: Prove packaged Linux deadlines, cancellation, storage and queues
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          proof="$PWD/dist/api2-native-consumer-${{ matrix.bundle }}"
+          binary="$RUNNER_TEMP/pliego-packaged-api2-${{ matrix.bundle }}/pliego-${PLIEGO_VERSION}-${{ matrix.bundle }}/${{ matrix.executable }}"
+          test -f "$binary"
+          test ! -e "$proof"
+          mkdir "$proof"
+          php --version | tee "$proof/php-version.txt"
+          composer --version | tee "$proof/composer-version.txt"
+          # Resolve the existing pinned full-framework fixture without booting
+          # its app or executing its scripts. SDK classes come from this source.
+          composer --no-interaction --no-plugins --no-scripts --working-dir=sdk/php \
+            install --prefer-dist --no-progress 2>&1 | tee "$proof/php-install.log"
+          composer --no-interaction --no-plugins --no-scripts --working-dir=tests/pliego/laravel-invoice \
+            install --prefer-dist --no-progress 2>&1 | tee "$proof/framework-install.log"
+          composer --no-interaction --no-plugins --working-dir=tests/pliego/laravel-invoice \
+            check-platform-reqs --format=json | tee "$proof/platform-requirements.json"
+          composer --no-interaction --no-plugins --working-dir=tests/pliego/laravel-invoice \
+            audit --format=json | tee "$proof/audit.json"
+          cp tests/pliego/laravel-invoice/composer.json "$proof/consumer-composer.json"
+          cp tests/pliego/laravel-invoice/composer.lock "$proof/consumer-composer.lock"
+          python -m unittest discover -s sdk/php/tests -p test_production_cancellation.py -v
+          # The 1s caller test requires an optimized packaged executable: a
+          # multi-GB unoptimized debug self-hash is not this deployment recipe.
+          deadline_status=0
+          timeout --kill-after=5s 45s php sdk/php/tests/production_deadline_test.php \
+            "$binary" "$proof/caller-deadline" 1 \
+            2>&1 | tee "$proof/caller-deadline.log" || deadline_status=$?
+          storage_status=0
+          PLIEGO_TEST_AUTOLOAD="$PWD/tests/pliego/laravel-invoice/vendor/autoload.php" \
+            timeout --kill-after=5s 90s php sdk/laravel/tests/production_storage_test.php \
+            "$binary" "$proof/laravel-storage" \
+            2>&1 | tee "$proof/laravel-storage.log" || storage_status=$?
+          queue_status=0
+          PLIEGO_TEST_AUTOLOAD="$PWD/tests/pliego/laravel-invoice/vendor/autoload.php" \
+            timeout --kill-after=5s 120s php sdk/laravel/tests/production_queue_test.php \
+            "$binary" "$proof/laravel-queue" \
+            2>&1 | tee "$proof/laravel-queue.log" || queue_status=$?
+          cancellation_status=0
+          timeout --kill-after=15s 200s python sdk/php/tests/check_production_cancellation.py \
+            --php "$(command -v php)" --binary "$binary" --output "$proof/caller-cancellation" \
+            2>&1 | tee "$proof/caller-cancellation.log" || cancellation_status=$?
+          test "$deadline_status" -eq 0 && test "$storage_status" -eq 0 && test "$queue_status" -eq 0 && test "$cancellation_status" -eq 0
 
       - name: Upload packaged API 2 executable proof
+        if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: pliego-${{ matrix.bundle }}-api2-executable-proof
-          path: dist/api2-executable-proof-${{ matrix.bundle }}.json
+          # These directories contain only synthetic proof inputs and outputs.
+          # Retain job states and failed publication staging evidence as well.
+          include-hidden-files: true
+          path: |
+            dist/api2-executable-proof-${{ matrix.bundle }}.json
+            dist/api2-headerless-tables-${{ matrix.bundle }}
+            dist/api2-links-${{ matrix.bundle }}
+            dist/api2-table-backgrounds-${{ matrix.bundle }}
+            dist/api2-fixed-content-${{ matrix.bundle }}
+            dist/api2-nonpainting-content-${{ matrix.bundle }}
+            dist/api2-native-consumer-${{ matrix.bundle }}
+            dist/webcrypto-policy-${{ matrix.bundle }}
           if-no-files-found: error
           retention-days: 30
 
@@ -443,16 +573,6 @@ jobs:
         with:
           name: pliego-linux-x86_64-controlled-capture-proof
           path: dist/controlled-capture-proof
-          if-no-files-found: error
-          retention-days: 7
-
-      - name: Upload Pliego bundle
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: pliego-${{ matrix.bundle }}
-          path: |
-            dist/pliego-*.${{ matrix.archive_ext }}
-            dist/pliego-*.${{ matrix.archive_ext }}.sha256
           if-no-files-found: error
           retention-days: 7
 

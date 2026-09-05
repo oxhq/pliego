@@ -14,6 +14,9 @@ use crate::geom::PhysicalRect;
 #[derive(Default, MallocSizeOf)]
 pub(crate) struct HoistedSharedFragment {
     pub fragment: Option<Fragment>,
+    /// Independently laid out later pages of page-root fixed content. Paint
+    /// these at the original placeholder's stacking slot, not as new DOM nodes.
+    pub page_replicas: Vec<Fragment>,
     /// The original "static-position rect" of this absolutely positioned box. This is
     /// defined by the layout mode from which the box originates. As this fragment is
     /// hoisted up the tree this rectangle will be adjusted by the offsets of all
@@ -28,6 +31,7 @@ impl HoistedSharedFragment {
     pub(crate) fn new(original_static_position_rect: PhysicalRect<Au>) -> Self {
         Self {
             fragment: Default::default(),
+            page_replicas: Vec::new(),
             original_static_position_rect,
         }
     }

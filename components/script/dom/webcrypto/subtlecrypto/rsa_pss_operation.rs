@@ -28,6 +28,8 @@ pub(crate) fn sign(
     key: &CryptoKey,
     message: &[u8],
 ) -> Result<Vec<u8>, Error> {
+    rsa_common::require_private_operations_enabled()?;
+
     // Step 1. If the [[type]] internal slot of key is not "private", then throw an
     // InvalidAccessError.
     if key.Type() != KeyType::Private {

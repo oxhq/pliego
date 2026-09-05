@@ -4,7 +4,11 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-"""Verify the files and source pointer in a packaged Pliego archive."""
+"""Verify the exact runtime inventory and source pointer in a Pliego archive.
+
+Source-only benchmark corpora are not runtime contents. This inventory contract
+does not determine the licensing of arbitrary file contents or source archives.
+"""
 
 from __future__ import annotations
 
@@ -225,6 +229,8 @@ def check_archive(
     for relative in sorted(required & sizes.keys()):
         if sizes[relative] == 0:
             errors.append(f"required file is empty: {relative}")
+    for relative in sorted(sizes.keys() - required):
+        errors.append(f"unexpected runtime file: {relative}")
 
     expected_text = {
         "SOURCE.txt": _source_text(repository_url, version),
@@ -288,12 +294,15 @@ def check_source_assets(source_root: Path) -> list[str]:
         if hashlib.sha256(payload).hexdigest() != expected:
             errors.append(f"pinned source asset changed: {relative}")
 
-    cargo_path = source_root / "ports/pliego/Cargo.toml"
     report_path = source_root / "resources/resource_protocol/license.html"
-    if cargo_path.is_file() and report_path.is_file():
-        version = tomllib.loads(cargo_path.read_text(encoding="utf-8"))["package"]["version"]
-        if f">pliego {version}<".encode() not in report_path.read_bytes():
-            errors.append(f"Cargo license report does not identify pliego {version}")
+    if report_path.is_file():
+        report = report_path.read_bytes()
+        for package in ("pliego", "pliego-core-benchmark"):
+            cargo_path = source_root / "ports" / package / "Cargo.toml"
+            if cargo_path.is_file():
+                version = tomllib.loads(cargo_path.read_text(encoding="utf-8"))["package"]["version"]
+                if f">{package} {version}<".encode() not in report:
+                    errors.append(f"Cargo license report does not identify {package} {version}")
     return errors
 
 
@@ -348,7 +357,39 @@ def self_test() -> None:
     }
     with tempfile.TemporaryDirectory() as temporary:
         directory = Path(temporary)
-        for bundle, extension in (("linux-x86_64", ".tar.gz"), ("windows-x86_64", ".zip")):
+        # Isolate the two local report-version checks; other intentionally absent
+        # notice files must retain their exact errors, not become accepted assets.
+        source = directory / "source"
+        report_path = source / "resources/resource_protocol/license.html"
+        report_path.parent.mkdir(parents=True)
+        for package in ("pliego", "pliego-core-benchmark"):
+            cargo_path = source / "ports" / package / "Cargo.toml"
+            cargo_path.parent.mkdir(parents=True)
+            cargo_path.write_text('[package]\nversion = "0.4.0"\n', encoding="utf-8")
+        missing_assets = [
+            f"missing source asset: {relative}"
+            for relative in SOURCE_ASSETS
+            if relative != "resources/resource_protocol/license.html"
+        ]
+        for engine_version, benchmark_version, stale in (
+            ("0.4.0", "0.4.0", []),
+            ("0.3.3", "0.4.0", ["pliego"]),
+            ("0.4.0", "0.3.3", ["pliego-core-benchmark"]),
+            ("0.3.3", "0.3.3", ["pliego", "pliego-core-benchmark"]),
+        ):
+            report_path.write_bytes(
+                b" ".join(REPORT_COMPONENTS)
+                + f">pliego {engine_version}<>pliego-core-benchmark {benchmark_version}<".encode()
+            )
+            assert check_source_assets(source) == missing_assets + [
+                f"Cargo license report does not identify {package} 0.4.0" for package in stale
+            ]
+        for bundle, extension in (
+            ("linux-x86_64", ".tar.gz"),
+            ("windows-x86_64", ".zip"),
+            ("macos-x86_64", ".tar.gz"),
+            ("macos-aarch64", ".tar.gz"),
+        ):
             root = f"pliego-{version}-{bundle}"
             archive = directory / f"{root}{extension}"
             files = _fixture_files(version, bundle, repository_url, **identity)
@@ -360,6 +401,20 @@ def self_test() -> None:
                 repository_url=repository_url,
                 **identity,
             )
+            for extra in (
+                "benchmarks/integration/real_documents/fixtures/invobook/input.html",
+                "source/simple.repaired.blade.php",
+                "fonts/DejaVuSans.ttf",
+                "runtime.json",
+            ):
+                _write_fixture(archive, root, {**files, extra: b"source-only fixture\n"})
+                assert check_archive(
+                    archive,
+                    version=version,
+                    bundle=bundle,
+                    repository_url=repository_url,
+                    **identity,
+                ) == [f"unexpected runtime file: {extra}"]
 
         root = f"pliego-{version}-windows-x86_64"
         archive = directory / f"{root}.zip"

@@ -40,6 +40,10 @@ pub(crate) struct AbsolutelyPositionedBox {
     pub context: IndependentFormattingContext,
 }
 
+fn paged_fixed_writing_modes_supported(style: WritingMode, containing_block: WritingMode) -> bool {
+    style.is_horizontal() && containing_block.is_horizontal()
+}
+
 #[derive(Clone, MallocSizeOf)]
 pub(crate) struct HoistedAbsolutelyPositionedBox {
     absolutely_positioned_box: ArcRefCell<AbsolutelyPositionedBox>,
@@ -67,6 +71,8 @@ pub(crate) struct HoistedAbsolutelyPositionedBox {
     /// static positioning. If the writing mode is right-to-left or bottom-to-top, the static
     /// offset needs to be adjusted by the absolutely positioned element's inline size.
     pub original_parent_writing_mode: WritingMode,
+    /// Only independently realized page-root fixed subtrees may claim paged capture.
+    paged_fixed_realization: bool,
 }
 
 impl AbsolutelyPositionedBox {
@@ -105,6 +111,7 @@ impl AbsolutelyPositionedBox {
             adjusted_static_position_rect: None,
             resolved_alignment,
             original_parent_writing_mode,
+            paged_fixed_realization: false,
             absolutely_positioned_box,
         }
     }
@@ -349,19 +356,43 @@ impl PositioningContext {
         initial_containing_block: &DefiniteContainingBlock,
         fragments: &mut Vec<Fragment>,
     ) {
+        let fixed_pages = layout_context.block_pagination.fixed_page_layout();
         // Laying out a `position: absolute` child (which only establishes a containing block for
         // `position: absolute` descendants) can result in more `position: fixed` descendants
         // collecting in `self.absolutes`. We need to loop here in order to keep laying them out. We
         // know there aren't any more when `self.absolutes` is empty.
         while !self.absolutes.is_empty() {
-            HoistedAbsolutelyPositionedBox::layout_many(
-                layout_context,
-                mem::take(&mut self.absolutes),
-                fragments,
-                &mut self.absolutes,
-                initial_containing_block,
-                Default::default(),
-            )
+            let boxes = mem::take(&mut self.absolutes);
+            if let Some((page_count, stride)) = fixed_pages {
+                for mut hoisted in boxes {
+                    if hoisted.position() == Position::Fixed &&
+                        hoisted.layout_on_pages(
+                            layout_context,
+                            initial_containing_block,
+                            page_count,
+                            stride,
+                            fragments,
+                        )
+                    {
+                        continue;
+                    }
+                    fragments.push(hoisted.layout(
+                        layout_context,
+                        &mut self.absolutes,
+                        initial_containing_block,
+                        Default::default(),
+                    ));
+                }
+            } else {
+                HoistedAbsolutelyPositionedBox::layout_many(
+                    layout_context,
+                    boxes,
+                    fragments,
+                    &mut self.absolutes,
+                    initial_containing_block,
+                    Default::default(),
+                );
+            }
         }
     }
 
@@ -459,6 +490,18 @@ impl HoistedAbsolutelyPositionedBox {
         containing_block: &DefiniteContainingBlock,
         containing_block_padding: PhysicalSides<Au>,
     ) -> Fragment {
+        if self.position() == Position::Fixed && layout_context.block_pagination.is_active() {
+            self.absolutely_positioned_box
+                .borrow_mut()
+                .context
+                .base
+                .base_fragment_info
+                .flags
+                .set(
+                    FragmentFlags::UNSUPPORTED_PAGED_FIXED,
+                    !self.paged_fixed_realization,
+                );
+        }
         // The static position rect was calculated assuming that the containing block would be
         // established by the content box of some ancestor, but the actual containing block is
         // established by the padding box. So we need to translate the rect by the padding of
@@ -526,6 +569,101 @@ impl HoistedAbsolutelyPositionedBox {
         });
 
         fragment
+    }
+
+    /// Lay out fresh Flow/inline content for each frozen page. Neither shaped
+    /// content, layout caches nor hoisted-fragment cells are shared between pages.
+    /// Install the complete result at the original paint placeholder only after
+    /// all pages have succeeded; unsupported subtrees keep a fail-closed marker.
+    fn layout_on_pages(
+        &mut self,
+        layout_context: &LayoutContext,
+        containing_block: &DefiniteContainingBlock,
+        page_count: usize,
+        stride: Au,
+        fragments: &mut Vec<Fragment>,
+    ) -> bool {
+        self.fragment.borrow_mut().page_replicas.clear();
+        let source = self.absolutely_positioned_box.borrow();
+        let style = &source.context.base.style;
+        if page_count == 0 ||
+            !paged_fixed_writing_modes_supported(
+                style.writing_mode,
+                containing_block.style.writing_mode,
+            ) ||
+            !style
+                .box_offsets(containing_block.style.writing_mode)
+                .block_sides()
+                .percentages_relative_to(containing_block.size.block)
+                .either_specified()
+        {
+            return false;
+        }
+        let mut pages = Vec::with_capacity(page_count);
+        for page_index in 1..=page_count {
+            let Some(translation) = i32::try_from(page_index - 1)
+                .ok()
+                .and_then(|index| stride.0.checked_mul(index))
+            else {
+                return false;
+            };
+            let Some(context) = source
+                .context
+                .for_page(layout_context, page_index, page_count)
+            else {
+                return false;
+            };
+            let mut fresh = Self {
+                absolutely_positioned_box: ArcRefCell::new(AbsolutelyPositionedBox::new(context)),
+                fragment: ArcRefCell::new(HoistedSharedFragment::new(
+                    self.fragment.borrow().original_static_position_rect,
+                )),
+                adjusted_static_position_rect: self.adjusted_static_position_rect,
+                resolved_alignment: self.resolved_alignment,
+                original_parent_writing_mode: self.original_parent_writing_mode,
+                paged_fixed_realization: true,
+            };
+            let mut escaped = Vec::new();
+            fresh.layout(
+                layout_context,
+                &mut escaped,
+                containing_block,
+                Default::default(),
+            );
+            if !escaped.is_empty() {
+                return false;
+            }
+            let Some(fragment) = fresh.fragment.borrow().fragment.clone() else {
+                return false;
+            };
+            let Some(base) = fragment.base() else {
+                return false;
+            };
+            let Some(y) = base.rect().origin.y.0.checked_add(translation) else {
+                return false;
+            };
+            base.set_rect_origin(PhysicalPoint::new(base.rect().origin.x, Au(y)));
+            drop(base);
+            pages.push(fragment);
+        }
+        let mut pages = pages.into_iter();
+        let Some(first) = pages.next() else {
+            return false;
+        };
+        let replicas = pages.collect::<Vec<_>>();
+        source.context.base.clear_fragments();
+        source.context.base.add_fragment(first.clone());
+        for replica in &replicas {
+            source.context.base.add_fragment(replica.clone());
+        }
+        let mut shared = self.fragment.borrow_mut();
+        shared.fragment = Some(first);
+        shared.page_replicas = replicas.clone();
+        fragments.push(Fragment::LayoutRoot(LayoutRootFragment {
+            fragment: self.fragment.clone(),
+        }));
+        fragments.extend(replicas);
+        true
     }
 
     fn static_position_rect(&self) -> PhysicalRect<Au> {
@@ -1101,5 +1239,39 @@ impl LayoutRootLayoutInputs {
 
         shared_fragment.borrow_mut().fragment = Some(Fragment::Box(box_fragment));
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod paged_fixed_tests {
+    use style::logical_geometry::WritingMode;
+
+    use super::paged_fixed_writing_modes_supported;
+
+    #[test]
+    fn computed_vertical_writing_modes_are_rejected() {
+        let horizontal = WritingMode::WRITING_MODE_HORIZONTAL_TB;
+        let horizontal_rtl = horizontal | WritingMode::RTL | WritingMode::INLINE_REVERSED;
+        assert!(paged_fixed_writing_modes_supported(horizontal, horizontal));
+        assert!(paged_fixed_writing_modes_supported(
+            horizontal_rtl,
+            horizontal
+        ));
+        assert!(paged_fixed_writing_modes_supported(
+            horizontal,
+            horizontal_rtl
+        ));
+        // Author CSS cannot exercise this guard while Stylo's writing-mode
+        // preference is disabled. Test the actual computed-mode predicate.
+        for vertical in [
+            WritingMode::WRITING_MODE_VERTICAL_RL,
+            WritingMode::WRITING_MODE_VERTICAL_LR,
+            WritingMode::WRITING_MODE_SIDEWAYS_RL,
+            WritingMode::WRITING_MODE_SIDEWAYS_LR,
+        ] {
+            assert!(!paged_fixed_writing_modes_supported(vertical, horizontal));
+            assert!(!paged_fixed_writing_modes_supported(horizontal, vertical));
+            assert!(!paged_fixed_writing_modes_supported(vertical, vertical));
+        }
     }
 }

@@ -1,0 +1,36 @@
+{
+    "outcome": "shared_font_delivery_prepared",
+    "sourceCapture": "v04-aureus-manufacturing-smoke-008",
+    "sourceHtmlSha256": "2cc2b3e25874fd11971d95b3d3799d56bc14d267de74c83ed356b6038975cc8e",
+    "closedHtmlSha256": "a08f2e7250be77df689e62768b5929bed7a41ed9d4ae1783a0e297fc709f2c3c",
+    "cssSha256": "2cef6f47fa1a45d713936d474af9761d69adbf78e1a4a60497ae927b32cb6da2",
+    "fontFacesAdded": 2,
+    "fonts": [
+        {
+            "style": "normal",
+            "file": "DejaVuSans.ttf",
+            "sha256": "7da195a74c55bef988d0d48f9508bd5d849425c1770dba5d7bfc6ce9ed848954",
+            "bytes": 757076
+        },
+        {
+            "style": "bold",
+            "file": "DejaVuSans-Bold.ttf",
+            "sha256": "e6476c1b80502924294eed40894c5b18e06c181444ca953e5334262df9c27724",
+            "bytes": 705684
+        }
+    ],
+    "allOriginalDeclarationsPreserved": true,
+    "fixedCaptureRowOrderPreserved": true,
+    "sourceAppRegenerationByteIdentical": false,
+    "requestGeometry": {
+        "pageSize": "47622x67351au",
+        "pageMargins": "2721,2721,2721,2721au",
+        "authority": "request-only-v1",
+        "source": "Original action A4 portrait, dompdf UA html.css:17 margin1.2cm, authored body margin0 and no @page.",
+        "uaStylesheetSha256": "a2ff4a84942f8a9fc7d80e34f6efe34e8d2cd7412b728130049db6ddb70df3c9",
+        "rounding": "Nearest whole Au, once: millimeters * (96 CSS px / 25.4mm) * 60 Au/CSSpx.",
+        "unroundedMarginAu": 2721.259842519685,
+        "marginErrorPoints": -0.0032480314960636747,
+        "candidateGeometryQualified": false
+    }
+}

@@ -100,6 +100,32 @@ impl Baselines {
 }
 
 impl IndependentFormattingContext {
+    /// Only fresh Flow/inline subtrees are admitted for page-root fixed content.
+    /// This intentionally does not clone tables, floats, replaced or positioned
+    /// descendants and cannot retain a prior page's mutable layout results.
+    pub(crate) fn for_page(
+        &self,
+        context: &LayoutContext,
+        page_index: usize,
+        page_count: usize,
+    ) -> Option<Self> {
+        let IndependentFormattingContextContents::Flow(flow) = &self.contents else {
+            return None;
+        };
+        if flow.contains_floats {
+            return None;
+        }
+        let contents = flow.contents.for_page(context, page_index, page_count)?;
+        Some(Self::new(
+            self.base.fresh_for_page(),
+            IndependentFormattingContextContents::Flow(BlockFormattingContext {
+                contents,
+                contains_floats: false,
+            }),
+            self.propagated_data,
+        ))
+    }
+
     pub(crate) fn new(
         base: LayoutBoxBase,
         contents: IndependentFormattingContextContents,

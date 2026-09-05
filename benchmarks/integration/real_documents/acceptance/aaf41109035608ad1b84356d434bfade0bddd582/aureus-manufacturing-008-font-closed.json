@@ -1,0 +1,28 @@
+{
+  "schema": "pliego.real-document-visual-acceptance.v1",
+  "identity_sha256": "bf312cf93cb28b8553c5d6f1bedceed195f25911bd3d97daa6f03ffdd5635491",
+  "targets": {
+    "pliego-candidate": {
+      "reviewed": true,
+      "notes": "All work-order quantities, ordered operations, three independently decoded Code128 barcodes and strict font/resource checks pass. Main reviewed both complete actual pages: legible metadata and tables, intact barcode regions, unobstructed footer, no clipping/overlap. One-page work order, not a long report; compact native spacing is accepted, not pixel parity.",
+      "layout_fingerprints": [
+        "2c338660ad4a81ddb793b7da744e321bf1ee1165a9ab075dd39eeb8cdf4afb61"
+      ],
+      "pdf_sha256": [
+        "b056e1de3ef78740f1641ddf42817be454f705220322d2dc09aad3b81300d64a"
+      ],
+      "evidence": "https://github.com/oxhq/pliego/actions/runs/33973963254; exact retained proof and actual PDF review in benchmarks/integration/real_documents/acceptance/aaf41109035608ad1b84356d434bfade0bddd582/review.md"
+    },
+    "aureus-dompdf-3.1.6": {
+      "reviewed": true,
+      "notes": "All work-order quantities, ordered operations, three independently decoded Code128 barcodes and strict font/resource checks pass. Main reviewed both complete actual pages: legible metadata and tables, intact barcode regions, unobstructed footer, no clipping/overlap. One-page work order, not a long report; compact native spacing is accepted, not pixel parity.",
+      "layout_fingerprints": [
+        "bc70c36390a471f2e5105d90c34534b8d49dddf24d779e7d1b7d065a9aa74639"
+      ],
+      "pdf_sha256": [
+        "7494521db079602039cfacefaff746304ed4bfcbcf4721dff023df47cdee9620"
+      ],
+      "evidence": "https://github.com/oxhq/pliego/actions/runs/33973963254; exact retained proof and actual PDF review in benchmarks/integration/real_documents/acceptance/aaf41109035608ad1b84356d434bfade0bddd582/review.md"
+    }
+  }
+}

@@ -18,6 +18,7 @@ use style::Zero;
 use style::color::ColorSpace;
 use style::computed_values::caption_side::T as CaptionSide;
 use style::computed_values::clear::T as StyleClear;
+use style::computed_values::position::T as Position;
 use style::context::SharedStyleContext;
 use style::logical_geometry::Direction;
 use style::properties::ComputedValues;
@@ -80,6 +81,47 @@ pub(crate) enum BlockContainer {
 }
 
 impl BlockContainer {
+    pub(crate) fn for_page(
+        &self,
+        context: &LayoutContext,
+        page_index: usize,
+        page_count: usize,
+    ) -> Option<Self> {
+        match self {
+            Self::InlineFormattingContext(inline) => Some(Self::InlineFormattingContext(
+                inline.for_page(context, page_index, page_count)?,
+            )),
+            Self::BlockLevelBoxes(boxes) => {
+                let mut fresh = Vec::with_capacity(boxes.len());
+                for child in boxes {
+                    let child = child.borrow();
+                    if child.with_base(|base| base.style.clone_position() != Position::Static) {
+                        return None;
+                    }
+                    let child = match &*child {
+                        BlockLevelBox::SameFormattingContextBlock(block)
+                            if !block.contains_floats =>
+                        {
+                            BlockLevelBox::SameFormattingContextBlock(
+                                SameFormattingContextBlock::new(
+                                    block.base.fresh_for_page(),
+                                    block.contents.for_page(context, page_index, page_count)?,
+                                    false,
+                                ),
+                            )
+                        },
+                        BlockLevelBox::Independent(independent) => BlockLevelBox::Independent(
+                            independent.for_page(context, page_index, page_count)?,
+                        ),
+                        _ => return None,
+                    };
+                    fresh.push(ArcRefCell::new(child));
+                }
+                Some(Self::BlockLevelBoxes(fresh))
+            },
+        }
+    }
+
     fn contains_floats(&self) -> bool {
         match self {
             BlockContainer::BlockLevelBoxes(boxes) => boxes
@@ -768,19 +810,32 @@ fn layout_block_level_children(
 ) -> IndependentFormattingContextLayoutResult {
     let mut placement_state =
         PlacementState::new(collapsible_with_parent_start_margin, containing_block);
-    let supports_simple_block_pagination = child_boxes
-        .iter()
-        .all(|child_box| is_simple_normal_flow_child(&child_box.borrow()));
-    let supports_single_fragmentable_child = child_boxes.len() == 1 &&
-        match &*child_boxes[0].borrow() {
+    // Fixed children do not participate in normal flow. In particular, adding
+    // a page footer must neither consume the pagination claim of a single
+    // wrapper nor disable pagination of its in-flow siblings. Their placeholder
+    // still receives its ordinary static position below; page placement does
+    // not assign it a contribution or honor its break properties.
+    let mut flow_child_count = 0;
+    let mut supports_simple_block_pagination = true;
+    let mut supports_single_fragmentable_child = false;
+    for child_box in child_boxes {
+        let child = child_box.borrow();
+        if is_fixed_positioned_child(&child) {
+            continue;
+        }
+        flow_child_count += 1;
+        supports_simple_block_pagination &= is_simple_normal_flow_child(&child);
+        supports_single_fragmentable_child = match &*child {
             BlockLevelBox::SameFormattingContextBlock(block) => {
                 matches!(&block.contents, BlockContainer::InlineFormattingContext(_))
             },
             BlockLevelBox::Independent(context) => context.is_table(),
             _ => false,
         };
+    }
+    supports_single_fragmentable_child &= flow_child_count == 1;
     let mut page_builder = layout_context.block_pagination.claim(
-        child_boxes.len(),
+        flow_child_count,
         supports_simple_block_pagination,
         supports_single_fragmentable_child,
     );
@@ -836,6 +891,11 @@ fn is_simple_normal_flow_child(child: &BlockLevelBox) -> bool {
         child,
         BlockLevelBox::Independent(_) | BlockLevelBox::SameFormattingContextBlock(_)
     ) && !child.contains_floats()
+}
+
+fn is_fixed_positioned_child(child: &BlockLevelBox) -> bool {
+    matches!(child, BlockLevelBox::OutOfFlowAbsolutelyPositionedBox(_)) &&
+        child.with_base(|base| base.style.clone_position() == Position::Fixed)
 }
 
 fn layout_block_level_children_in_parallel(
@@ -968,6 +1028,14 @@ fn prepare_fragmentainer_boundary(
     let Some(page_builder) = page_builder else {
         return;
     };
+    if is_fixed_positioned_child(child_box) {
+        debug_assert!(matches!(
+            fragment,
+            Fragment::AbsoluteOrFixedPositionedPlaceholder(_)
+        ));
+        page_builder.skip_out_of_flow_child(child_index);
+        return;
+    }
     let metrics = placement_state
         .block_boundary_metrics(fragment)
         .expect("simple normal-flow children must produce block fragments");
@@ -1020,6 +1088,27 @@ fn prepare_fragmentainer_boundary(
                 breaks,
             ) {
                 TableChildPlacementOutcome::Placed(placement) => {
+                    // A continued headerless grid needs a new top border on each
+                    // page. Until that ownership is represented, keep its capture
+                    // fail-closed while allowing an intact table (including one
+                    // shifted as a whole onto the next page).
+                    if table.has_borders &&
+                        !table
+                            .groups
+                            .iter()
+                            .any(|group| group.kind == TableRowGroupKind::Header) &&
+                        placement
+                            .row_translations
+                            .windows(2)
+                            .any(|pair| pair[0] != pair[1])
+                    {
+                        page_builder.warn_unsupported_table_group_pagination(
+                            child_index,
+                            node,
+                            TableGroupUnsupportedReason::CollapsedBorders,
+                        );
+                        set_table_border_capture_suppressed(fragment, true);
+                    }
                     table.apply(
                         placement,
                         placement_state.containing_block.style.writing_mode,
@@ -1351,11 +1440,15 @@ fn retained_table_rows<'a>(
             else {
                 unreachable!();
             };
-            if table_info.uniform_solid_visible_border().is_none() {
+            let no_visible_borders = table_info.has_no_visible_borders();
+            if !no_visible_borders &&
+                table_info.uniform_solid_visible_border().is_none() &&
+                !table_info.has_solid_horizontal_borders()
+            {
                 return Err(TableGroupUnsupportedReason::CollapsedBorders);
             }
             collapsed_grid = true;
-            has_borders = true;
+            has_borders |= !no_visible_borders;
         } else if child.is_table_grid() {
             has_borders |= separate_table_border_profile(child)
                 .ok_or(TableGroupUnsupportedReason::UnsupportedLayout)?;
@@ -1544,7 +1637,9 @@ fn retained_table_rows<'a>(
     {
         return Err(TableGroupUnsupportedReason::UnsupportedLayout);
     }
-    if collapsed_grid && (headers.len() != 1 || rows.iter().any(|row| row.has_rowspan)) {
+    // An intact border grid does not need a repeating header. Continuation
+    // capture is checked after placement, when row translations are known.
+    if collapsed_grid && rows.iter().any(|row| row.has_rowspan) {
         return Err(TableGroupUnsupportedReason::CollapsedBorders);
     }
     if has_borders && !collapsed_grid {

@@ -1,0 +1,5 @@
+--- a/app/Actions/GenerateInvoicePdf.php
++++ b/app/Actions/GenerateInvoicePdf.php
+@@ -77 +77,2 @@
+                     ->pricePerUnit($item->rate_in_cents / 100)
++                    ->quantity($item->total_duration / 3600)

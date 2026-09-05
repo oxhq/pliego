@@ -1,0 +1,86 @@
+{
+    "outcome": "original_manufacturing_action_succeeded",
+    "sourcePin": "d7e0ad85ae8fdea91d1cb1895a81000c332e830c",
+    "action": "manufacturing.operations.print.manufacturing-order",
+    "actionInvocation": "Original Filament action with original Eloquent Order; not HTTP/UI authorization proof.",
+    "instrumentation": "Original dompdf wrapper constructor/methods; loadHTML only records bytes before unchanged parent delegation.",
+    "pages": 1,
+    "paperPoints": [
+        0,
+        0,
+        595.28,
+        841.89
+    ],
+    "pdfBytes": 880567,
+    "pdfSha256": "95c77b5bc6be40ecebaa46c1b898549ad2941cb0b377037c5aa87770bdb8963d",
+    "htmlSha256": "2cc2b3e25874fd11971d95b3d3799d56bc14d267de74c83ed356b6038975cc8e",
+    "bladeHtmlSha256": "2cc2b3e25874fd11971d95b3d3799d56bc14d267de74c83ed356b6038975cc8e",
+    "storedReadbackSha256": "95c77b5bc6be40ecebaa46c1b898549ad2941cb0b377037c5aa87770bdb8963d",
+    "storage": "Explicit added Laravel local stream store/readback; original action is download-only.",
+    "expectedBarcodes": [
+        "V04/MO/001",
+        "Cutting",
+        "Assembly"
+    ],
+    "fonts": [
+        {
+            "style": "normal",
+            "file": "DejaVuSans.ttf",
+            "sha256": "7da195a74c55bef988d0d48f9508bd5d849425c1770dba5d7bfc6ce9ed848954",
+            "bytes": 757076
+        },
+        {
+            "style": "bold",
+            "file": "DejaVuSans-Bold.ttf",
+            "sha256": "e6476c1b80502924294eed40894c5b18e06c181444ca953e5334262df9c27724",
+            "bytes": 705684
+        }
+    ],
+    "sources": [
+        {
+            "source": "plugins/webkul/manufacturing/src/Filament/Clusters/Operations/Actions/Print/PrintMOAction.php",
+            "file": "PrintMOAction.php",
+            "sha256": "b6040676d6d5764c45df5441aa539435aec9025ca212603940cbf28ca167bc11"
+        },
+        {
+            "source": "plugins/webkul/manufacturing/resources/views/filament/clusters/operations/actions/print/print-mo.blade.php",
+            "file": "print-mo.blade.php",
+            "sha256": "9fab633118c300158fe43819ebff1996d7fef29ac6fc01fcc01b594dae815ed1"
+        },
+        {
+            "source": "plugins/webkul/manufacturing/tests/Helpers/ManufacturingHelper.php",
+            "file": "ManufacturingHelper.php",
+            "sha256": "cd0adc4fa46e51ad48d8ef83ed40f6bb2e063a91e3db51bca24a8bbb2217d9a5"
+        },
+        {
+            "source": "plugins/webkul/manufacturing/tests/Feature/Workflows/WorkOrderTest.php",
+            "file": "WorkOrderTest.php",
+            "sha256": "0491008fc15dddf346e7b0b7896d1b06bc690c8ace601e1d31d8e2aa48af4773"
+        },
+        {
+            "source": "composer.lock",
+            "file": "composer.lock",
+            "sha256": "82133507ad710cc2748d95cba0ea3dfe5d375728c0d8d3587303e91d027c5fae"
+        },
+        {
+            "source": "LICENSE",
+            "file": "LICENSE",
+            "sha256": "c6dca3b0db5b68fd5971277605cf8e50ba151ffba6abdd508d0c42c9cfade7da"
+        },
+        {
+            "source": "vendor/dompdf/dompdf/LICENSE.LGPL",
+            "file": "dompdf-LICENSE.LGPL",
+            "sha256": "a90fe41057cac85869176942a0bca3da94a49e277ee5f8c5284be1aeaa59497e"
+        },
+        {
+            "source": "vendor/milon/barcode/LICENSE.TXT",
+            "file": "barcode-LICENSE.TXT",
+            "sha256": "ae233d50413c1edc34785fffbb3058646aad3aebb5c16e4b5d7f478b3d41a49f"
+        }
+    ],
+    "dpi": 96,
+    "remoteEnabled": false,
+    "visualQualified": false,
+    "barcodeQualified": false,
+    "benchmarkQualified": false
+}

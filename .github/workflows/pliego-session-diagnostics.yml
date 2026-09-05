@@ -1,0 +1,112 @@
+name: Pliego macOS Intel development session diagnostics
+
+on:
+  workflow_dispatch:
+    inputs:
+      artifact_id:
+        description: Exact retained macOS Intel package artifact ID (development only)
+        type: string
+        required: true
+      source_sha:
+        description: Exact 40-character package source SHA with opt-in session diagnostics
+        type: string
+        required: true
+      census:
+        description: Fixed diagnostic census; default-budget pairs are a counterfactual, not a release waiver
+        type: choice
+        required: true
+        default: matched-controls
+        options:
+          - matched-controls
+          - package-order
+          - gradient-pairs
+          - gradient-pairs-default-budget
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: pliego-session-diagnostics-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  diagnostics:
+    runs-on: macos-15-intel
+    timeout-minutes: ${{ (inputs.census == 'package-order' || inputs.census == 'gradient-pairs-default-budget') && 25 || 15 }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - name: Record development host and run pure checker tests
+        run: |
+          set -euo pipefail
+          setup="$RUNNER_TEMP/session-diagnostic-setup"
+          mkdir "$setup"
+          uname -a > "$setup/uname.txt"
+          sw_vers > "$setup/macos-version.txt"
+          git rev-parse HEAD > "$setup/checker-source-sha.txt"
+          python - <<'PY' > "$setup/host.json"
+          import json, os, platform, sys
+          keys = ('GITHUB_ACTIONS', 'GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT', 'GITHUB_SHA',
+                  'GITHUB_WORKFLOW_REF', 'GITHUB_REPOSITORY', 'GITHUB_SERVER_URL', 'ImageOS', 'ImageVersion')
+          print(json.dumps({'python': sys.version, 'platform': platform.platform(),
+                            'environment': {key: os.environ.get(key) for key in keys}}, sort_keys=True))
+          PY
+          python -m venv "$RUNNER_TEMP/session-diagnostic-python"
+          python="$RUNNER_TEMP/session-diagnostic-python/bin/python"
+          "$python" -m pip install --require-hashes --only-binary=:all: --no-deps \
+            -r ports/pliego/tests/requirements-api2-links.txt --report "$setup/pip-report.json"
+          "$python" -m pip freeze > "$setup/python-packages.txt"
+          "$python" benchmarks/integration/resolve_development_candidate.py --self-test 2>&1 | tee "$setup/resolver-self-test.log"
+          "$python" ports/pliego/tests/check_api2_session_diagnostics.py --self-test 2>&1 | tee "$setup/checker-self-test.log"
+          "$python" -O ports/pliego/tests/check_api2_session_diagnostics.py --self-test 2>&1 | tee "$setup/checker-optimized-self-test.log"
+      - name: Verify exact retained macOS Intel development bundle
+        id: runtime
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ inputs.artifact_id }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          python="$RUNNER_TEMP/session-diagnostic-python/bin/python"
+          binary="$("$python" benchmarks/integration/resolve_development_candidate.py \
+            --artifact-id "$ARTIFACT_ID" --source-sha "$SOURCE_SHA" --bundle macos-x86_64 \
+            --out "$RUNNER_TEMP/session-diagnostic-candidate")"
+          printf 'binary=%s\n' "$binary" >> "$GITHUB_OUTPUT"
+      - name: Run selected fixed diagnostic census, never a release waiver
+        env:
+          BINARY: ${{ steps.runtime.outputs.binary }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          CENSUS_MODE: ${{ inputs.census }}
+        run: |
+          set -euo pipefail
+          # The checker enables its private flag only for render-api2 children.
+          # No action/JS activation, warmup or retries. Primary modes retain 10s/30s.
+          # The explicit default-budget counterfactual uses 60s/65s for the same
+          # 18 inputs, not a changed release gate or automatic retry of a failure.
+          # An outer timeout aborts; a job cap can leave only an incomplete prefix.
+          "$RUNNER_TEMP/session-diagnostic-python/bin/python" ports/pliego/tests/check_api2_session_diagnostics.py \
+            --binary "$BINARY" --source-commit "$SOURCE_SHA" \
+            --census "$CENSUS_MODE" \
+            --proof-directory "$RUNNER_TEMP/session-diagnostic-census" \
+            2>&1 | tee "$RUNNER_TEMP/session-diagnostic-setup/census.log"
+      - name: Retain all outcomes and provenance, excluding the large executable
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: pliego-session-diagnostics-macos-x86_64-${{ github.sha }}-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/session-diagnostic-census/
+            ${{ runner.temp }}/session-diagnostic-setup/
+            ${{ runner.temp }}/session-diagnostic-candidate/candidate-identity.json
+            ${{ runner.temp }}/session-diagnostic-candidate/artifact.json
+            ${{ runner.temp }}/session-diagnostic-candidate/run.json
+          if-no-files-found: error
+          overwrite: false
+          include-hidden-files: true
+          retention-days: 30

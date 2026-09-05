@@ -163,6 +163,9 @@ pub struct Preferences {
     pub dom_credential_management_enabled: bool,
     // feature: WebCrypto API | #40687 | Web/API/Web_Crypto_API
     pub dom_crypto_subtle_enabled: bool,
+    /// Host policy for RSA signing and decryption, including RSA-OAEP unwrap.
+    /// Disabling this does not disable public operations or private-key handling.
+    pub dom_crypto_rsa_private_operations_enabled: bool,
     pub dom_document_dblclick_timeout: i64,
     pub dom_document_dblclick_dist: i64,
     // feature: File and Directory Entries API | #45653 | Web/API/File_and_Directory_Entries_API
@@ -411,6 +414,9 @@ pub struct Preferences {
     /// Whether to run accessibility tree integrity checks, and any other expensive checks.
     /// This should only be true in tests.
     pub expensive_accessibility_test_assertions_enabled: bool,
+    /// Allows exposure of the internal JS API, including on privileged `about:` pages.
+    /// Document hosts can disable this before constructing any page globals.
+    pub servo_internals_enabled: bool,
     /// Exposes internal JS API functions that are usually restricted to `about:...` pages
     /// Useful if you want to get memory report or force GC in a test page
     pub expose_servointernals_globally: bool,
@@ -439,6 +445,7 @@ impl Preferences {
             dom_cookiestore_enabled: false,
             dom_credential_management_enabled: false,
             dom_crypto_subtle_enabled: true,
+            dom_crypto_rsa_private_operations_enabled: true,
             dom_document_dblclick_dist: 1,
             dom_document_dblclick_timeout: 300,
             dom_entries_api_enabled: false,
@@ -595,6 +602,7 @@ impl Preferences {
             webgl_testing_context_creation_error: false,
             user_agent: String::new(),
             viewport_meta_enabled: false,
+            servo_internals_enabled: true,
             expose_servointernals_globally: false,
         }
     }
@@ -636,6 +644,18 @@ pub enum UserAgentPlatform {
     Android,
     OpenHarmony,
     Ios,
+}
+
+#[cfg(test)]
+mod host_policy_tests {
+    #[test]
+    fn ordinary_servo_keeps_private_rsa_and_internal_pages_enabled() {
+        let preferences = super::Preferences::default();
+        assert!(preferences.dom_crypto_subtle_enabled);
+        assert!(preferences.dom_crypto_rsa_private_operations_enabled);
+        assert!(preferences.servo_internals_enabled);
+        assert!(!preferences.expose_servointernals_globally);
+    }
 }
 
 impl UserAgentPlatform {

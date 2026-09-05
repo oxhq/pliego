@@ -11,7 +11,7 @@
 
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::BTreeMap;
-use std::io::Cursor;
+use std::io::{Cursor, Write};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 #[cfg(test)]
@@ -24,8 +24,9 @@ use dpi::PhysicalSize;
 use embedder_traits::{
     DocumentCaptureCommit, DocumentCaptureConsumeRequest, DocumentCapturePrecondition,
     DocumentCaptureSurfaceFingerprint, DocumentClockConfiguration, DocumentPaintPresentationTicket,
-    DocumentTimeControlAction, DocumentTimeControlCommand, DocumentTimeControlOutcome,
-    DocumentTimeControlReceiveOutcome, DocumentTimeControlTryReceiveOutcome,
+    DocumentTimeControlAction, DocumentTimeControlCommand, DocumentTimeControlError,
+    DocumentTimeControlObservation, DocumentTimeControlOutcome, DocumentTimeControlReceiveOutcome,
+    DocumentTimeControlTryReceiveOutcome,
 };
 use http::header::CONTENT_TYPE;
 use http::{HeaderMap, HeaderValue};
@@ -72,6 +73,177 @@ const MAX_CONSOLE_BYTES: u64 = 1024 * 1024;
 
 const TIMEOUT: Duration = Duration::from_secs(30);
 const FROZEN_INPUT_URL_ROOT: &str = "pliego-input:///";
+const SESSION_DIAGNOSTICS_ENV: &str = "PLIEGO_SESSION_DIAGNOSTICS";
+const MAX_SESSION_DIAGNOSTIC_BYTES: usize = 8_192;
+const MAX_SESSION_DIAGNOSTIC_ITEMS: usize = 8;
+
+/// Private failure-only instrumentation. Never serialize raw outcomes: transport errors, capture
+/// commits, resource URLs and authored console/readiness payloads may contain arbitrary content.
+/// The opt-in state keeps only counters and the last bounded metadata snapshot, not a journal.
+#[derive(Default)]
+struct SessionDiagnostics {
+    startup_ms: [Option<f64>; 3],
+    phase: &'static str,
+    commands: u64,
+    response_count: u64,
+    rejections: u64,
+    generation_reobservations: u64,
+    last_command: Option<ControlledSettlementStep>,
+    last_outcome: Option<&'static str>,
+    last_rejection: Option<&'static str>,
+    last_observation: Option<serde_json::Value>,
+    last_observation_response: Option<u64>,
+    emitted: bool,
+}
+
+impl SessionDiagnostics {
+    fn settlement_timeout(state: Option<&RefCell<Self>>, site: &'static str) -> SessionError {
+        if let Some(state) = state {
+            state.borrow_mut().phase = site;
+        }
+        SessionError::new(
+            "SETTLEMENT_TIMEOUT",
+            "controlled settlement exceeded the normalized host-wall limit",
+        )
+    }
+
+    fn enabled(value: Option<&std::ffi::OsStr>, controlled: bool) -> bool {
+        controlled && value == Some(std::ffi::OsStr::new("1"))
+    }
+
+    fn command(&mut self, command: &DocumentTimeControlCommand) {
+        self.commands = self.commands.saturating_add(1);
+        self.last_command = Some(controlled_settlement_step(command));
+    }
+
+    fn outcome(&mut self, outcome: &DocumentTimeControlReceiveOutcome) {
+        self.response_count = self.response_count.saturating_add(1);
+        self.last_outcome = Some(match outcome {
+            DocumentTimeControlReceiveOutcome::CommandOutcome(outcome) => match outcome {
+                DocumentTimeControlOutcome::Completed(observation) => {
+                    self.last_observation = Some(session_observation_diagnostic(observation));
+                    self.last_observation_response = Some(self.response_count);
+                    "completed"
+                },
+                DocumentTimeControlOutcome::Rejected(error) => {
+                    self.rejections = self.rejections.saturating_add(1);
+                    let rejection = match error {
+                        DocumentTimeControlError::EventLoopUnavailable => "event-loop-unavailable",
+                        DocumentTimeControlError::TargetChanged { .. } => "target-changed",
+                        DocumentTimeControlError::AdvanceInputChanged { .. } |
+                        DocumentTimeControlError::AdvanceClockChanged { .. } |
+                        DocumentTimeControlError::AdvanceProducerChanged { .. } => {
+                            "advance-state-changed"
+                        },
+                        DocumentTimeControlError::Timer(_) => "timer-rejected",
+                        _ => "other-rejection",
+                    };
+                    self.last_rejection = Some(rejection);
+                    rejection
+                },
+                _ => "indeterminate",
+            },
+            _ => "transport-failure-or-indeterminate",
+        });
+    }
+
+    fn failure_line(
+        &self,
+        deadline: SessionHostDeadline,
+        error: &SessionError,
+        delegate: Option<&DocumentDelegate>,
+    ) -> Vec<u8> {
+        let resources = delegate.map(|delegate| delegate.resources.borrow());
+        let resource_entries = resources
+            .as_ref()
+            .map_or(&[][..], |log| log.entries.as_slice());
+        let record = serde_json::json!({
+            "diagnostic": "pliego-session-diagnostics-v1",
+            "timeout_site": matches!(error.code.as_str(), "SETTLEMENT_TIMEOUT" | "READINESS_TIMEOUT").then_some(self.phase),
+            "failure_class": match error.code.as_str() {
+                "SETTLEMENT_TIMEOUT" => "SETTLEMENT_TIMEOUT",
+                "READINESS_TIMEOUT" => "READINESS_TIMEOUT",
+                "CONTROLLED_CAPTURE_TIMEOUT" => "CONTROLLED_CAPTURE_TIMEOUT",
+                _ => "OTHER_SESSION_FAILURE",
+            },
+            "host_elapsed_ms": deadline.elapsed_ms(),
+            "host_limit_ms": deadline.deadline.duration_since(deadline.started).as_secs_f64() * 1000.0,
+            "startup_ms": {"render_context_ready": self.startup_ms[0],
+                "servo_ready": self.startup_ms[1], "webview_ready": self.startup_ms[2]},
+            "commands": self.commands,
+            "responses": self.response_count, "rejections": self.rejections,
+            "generation_reobservations": self.generation_reobservations,
+            "last_command": self.last_command.map(|command| format!("{command:?}")),
+            "last_outcome": self.last_outcome, "last_observation": self.last_observation,
+            "last_rejection": self.last_rejection,
+            "last_observation_response": self.last_observation_response,
+            "load_complete": delegate.map(|delegate| delegate.load_complete.get()),
+            "resource_events": resources.as_ref().map(|log| log.observed_events),
+            "resource_entries": resource_entries.len(),
+            "resource_loaded": resource_entries.iter().filter(|resource| resource.status == "loaded").count(),
+            "resource_destinations": resource_entries.iter().take(MAX_SESSION_DIAGNOSTIC_ITEMS)
+                .map(|resource| match resource.request.destination.as_str() {
+                    value @ ("Document" | "Style" | "Font" | "Image" | "Script" | "Empty") => value,
+                    _ => "other",
+                }).collect::<Vec<_>>(),
+        });
+        let mut bytes = serde_json::to_vec(&record).unwrap_or_default();
+        if bytes.is_empty() || bytes.len() >= MAX_SESSION_DIAGNOSTIC_BYTES {
+            bytes = br#"{"diagnostic":"pliego-session-diagnostics-v1","encoding_failed":true}"#
+                .to_vec();
+        }
+        bytes.push(b'\n');
+        bytes
+    }
+
+    fn emit_failure(
+        &mut self,
+        deadline: SessionHostDeadline,
+        error: &SessionError,
+        delegate: Option<&DocumentDelegate>,
+    ) {
+        if self.emitted {
+            return;
+        }
+        self.emitted = true;
+        // Best-effort stderr only, before Servo shutdown. A broken diagnostic sink must not replace
+        // the original typed product error. There are no per-turn writes or public artifact files.
+        let _ = std::io::stderr()
+            .lock()
+            .write_all(&self.failure_line(deadline, error, delegate));
+    }
+}
+
+fn session_observation_diagnostic(
+    observation: &DocumentTimeControlObservation,
+) -> serde_json::Value {
+    let producer_pending_by_kind = [
+        timers::DocumentProducerKind::Task,
+        timers::DocumentProducerKind::Resource,
+        timers::DocumentProducerKind::Font,
+        timers::DocumentProducerKind::Image,
+        timers::DocumentProducerKind::ExternalCallback,
+    ]
+    .map(|kind| {
+        serde_json::json!({"kind": kind,
+        "pending": observation.producers.snapshot.for_kind(kind).pending()})
+    });
+    serde_json::json!({
+        "virtual_time_ns": observation.now.as_nanos().to_string(),
+        "top_level_epoch": observation.target.webview_epoch.0,
+        "fully_active_pipelines": observation.target.fully_active_pipelines.len(),
+        "pending_events": observation.pending_events,
+        "input_batch_saturated": observation.input_batch_saturated,
+        "has_next_deadline": observation.next_deadline.is_some(),
+        "producer_stability": observation.producers.stability,
+        "producer_pending": observation.producers.snapshot.pending(),
+        "producer_pending_by_kind": producer_pending_by_kind,
+        "documents": observation.documents.len(),
+        "first_document_readiness": observation.documents.first().map(|document|
+            document.readiness_blockers.iter().take(MAX_SESSION_DIAGNOSTIC_ITEMS).collect::<Vec<_>>()),
+        "first_document_readiness_total": observation.documents.first().map(|document| document.readiness_blockers.len()),
+    })
+}
 
 /// An exclusive, host-path-free authority over one fully resolved API 2 input closure.
 struct FrozenInputAuthority {
@@ -645,6 +817,7 @@ pub(crate) struct DocumentSession {
     environment: RenderEnvironment,
     allow_host_fonts: bool,
     host_deadline: SessionHostDeadline,
+    diagnostics: Option<RefCell<SessionDiagnostics>>,
     _canvas_retention: servo_canvas::retained_canvas::CanvasRetentionGuard,
     rendering_context: Rc<SoftwareRenderingContext>,
 }
@@ -866,6 +1039,9 @@ impl PreparedDocumentCaptureCandidate {
                 ticket.clone(),
             ),
         ));
+        self.session
+            .session
+            .diagnostic(|diagnostics| diagnostics.command(&command));
         let response_waker = self.session.waker.clone();
         let receiver = self
             .session
@@ -989,6 +1165,18 @@ impl PreparedDocumentCaptureCandidate {
 }
 
 impl DocumentSession {
+    fn diagnostic(&self, update: impl FnOnce(&mut SessionDiagnostics)) {
+        if let Some(diagnostics) = &self.diagnostics {
+            update(&mut diagnostics.borrow_mut());
+        }
+    }
+
+    fn emit_diagnostic_failure(&self, error: &SessionError) {
+        self.diagnostic(|diagnostics| {
+            diagnostics.emit_failure(self.host_deadline, error, Some(&self.delegate));
+        });
+    }
+
     pub(crate) fn new(
         input: impl AsRef<Path>,
         environment: RenderEnvironment,
@@ -1281,6 +1469,24 @@ impl DocumentSession {
         apply_timezone(environment.timezone)
             .map_err(|error| SessionError::new("ENVIRONMENT_CONFIGURATION_FAILED", error))?;
         let host_deadline = SessionHostDeadline::start(session_host_timeout)?;
+        let diagnostics = SessionDiagnostics::enabled(
+            std::env::var_os(SESSION_DIAGNOSTICS_ENV).as_deref(),
+            matches!(&runtime, DocumentSessionRuntime::Controlled { .. }),
+        )
+        .then(|| {
+            RefCell::new(SessionDiagnostics {
+                phase: "startup-render-context",
+                ..Default::default()
+            })
+        });
+        let startup_error = |error: SessionError| {
+            if let Some(diagnostics) = &diagnostics {
+                diagnostics
+                    .borrow_mut()
+                    .emit_failure(host_deadline, &error, None);
+            }
+            error
+        };
 
         let rendering_context = Rc::new(
             SoftwareRenderingContext::new(PhysicalSize::new(
@@ -1288,26 +1494,37 @@ impl DocumentSession {
                 surface_size.height,
             ))
             .map_err(|error| {
-                SessionError::new(
+                startup_error(SessionError::new(
                     "RENDER_CONTEXT_FAILED",
                     format!("cannot create software rendering context: {error:?}"),
-                )
+                ))
             })?,
         );
         rendering_context.make_current().map_err(|error| {
-            SessionError::new(
+            startup_error(SessionError::new(
                 "RENDER_CONTEXT_FAILED",
                 format!("cannot activate software rendering context: {error:?}"),
-            )
+            ))
         })?;
         page_reservation.commit().map_err(|_| {
-            SessionError::new(
+            startup_error(SessionError::new(
                 "LAYOUT_CONFIGURATION_FAILED",
                 "paged layout was already configured for this process",
-            )
+            ))
         })?;
+        if let Some(diagnostics) = &diagnostics {
+            let mut diagnostics = diagnostics.borrow_mut();
+            diagnostics.startup_ms[0] = Some(host_deadline.elapsed_ms());
+            diagnostics.phase = "startup-servo";
+        }
 
         let mut preferences = Preferences::default();
+        // No request, HTML or CLI preference override can enable private RSA
+        // arithmetic in a production document session (RUSTSEC-2023-0071).
+        preferences.dom_crypto_rsa_private_operations_enabled = false;
+        // In particular, about:srcdoc must not expose setBoolPreference and
+        // allow authored content to change the host policy above.
+        preferences.servo_internals_enabled = false;
         preferences.fonts_host_enabled = allow_host_fonts;
         preferences.intl_locale_override = environment.locale.into();
         preferences.network_http_proxy_uri.clear();
@@ -1328,10 +1545,15 @@ impl DocumentSession {
             ),
         };
         let servo = servo_builder.preferences(preferences).build();
-        let resource_store = RefCell::new(owned_resource_store_for_session(
-            &resource_policy,
-            frozen_input_authority.as_ref(),
-        )?);
+        if let Some(diagnostics) = &diagnostics {
+            let mut diagnostics = diagnostics.borrow_mut();
+            diagnostics.startup_ms[1] = Some(host_deadline.elapsed_ms());
+            diagnostics.phase = "startup-webview";
+        }
+        let resource_store = RefCell::new(
+            owned_resource_store_for_session(&resource_policy, frozen_input_authority.as_ref())
+                .map_err(startup_error)?,
+        );
         let delegate = Rc::new(DocumentDelegate {
             bundle_root,
             resource_policy,
@@ -1354,6 +1576,11 @@ impl DocumentSession {
             webview_builder = webview_builder.document_clock(document_clock);
         }
         let webview = webview_builder.build();
+        if let Some(diagnostics) = &diagnostics {
+            let mut diagnostics = diagnostics.borrow_mut();
+            diagnostics.startup_ms[2] = Some(host_deadline.elapsed_ms());
+            diagnostics.phase = "webview-ready";
+        }
 
         Ok(Self {
             webview,
@@ -1362,6 +1589,7 @@ impl DocumentSession {
             environment,
             allow_host_fonts,
             host_deadline,
+            diagnostics,
             _canvas_retention: canvas_retention,
             rendering_context,
         })
@@ -1408,7 +1636,10 @@ impl DocumentSession {
             host_timeout,
             servo_canvas::retained_canvas::start_retaining_canvas_commands,
         )?;
-        let surface = session.controlled_capture_surface()?;
+        let surface = session.controlled_capture_surface().map_err(|error| {
+            session.emit_diagnostic_failure(&error);
+            error
+        })?;
         Ok(Api2Execution {
             controlled: ControlledDocumentSession {
                 session,
@@ -1735,11 +1966,16 @@ impl DocumentSession {
 }
 
 impl ControlledDocumentSession {
+    fn settlement_timeout(&self, site: &'static str) -> SessionError {
+        SessionDiagnostics::settlement_timeout(self.session.diagnostics.as_ref(), site)
+    }
+
     fn enrich_error_evidence(&self, mut error: SessionError) -> SessionError {
         error
             .capture_evidence
             .controlled_runtime_ms
             .get_or_insert(self.session.host_deadline.elapsed_ms());
+        self.session.emit_diagnostic_failure(&error);
         error.with_evidence(
             std::mem::take(&mut self.session.delegate.resources.borrow_mut().entries),
             self.session.delegate.resource_store.take(),
@@ -1872,6 +2108,8 @@ impl ControlledDocumentSession {
                         }));
                 },
                 Readiness::Pending if self.session.host_deadline.is_elapsed() => {
+                    self.session
+                        .diagnostic(|diagnostics| diagnostics.phase = "readiness-pending-deadline");
                     return Err(SessionError::new(
                         "READINESS_TIMEOUT",
                         "document readiness did not settle before the host deadline",
@@ -1914,12 +2152,11 @@ impl ControlledDocumentSession {
                 ControlledSettlementProgress::Command(command) => {
                     self.session.check_failure("controlled settlement")?;
                     if self.session.host_deadline.is_elapsed() {
-                        return Err(SessionError::new(
-                            "SETTLEMENT_TIMEOUT",
-                            "controlled settlement exceeded the normalized host-wall limit",
-                        ));
+                        return Err(self.settlement_timeout("settlement-before-command"));
                     }
                     trace.push(controlled_settlement_step(&command));
+                    self.session
+                        .diagnostic(|diagnostics| diagnostics.command(&command));
                     let command_generation = self.waker.generation();
                     let response_waker = self.waker.clone();
                     let receiver = self
@@ -1939,6 +2176,10 @@ impl ControlledDocumentSession {
                         .consume_receive_outcome(outcome)
                         .map_err(settlement_transition_error)?;
                     if completion_generation.event_loop_changed_since(command_generation) {
+                        self.session.diagnostic(|diagnostics| {
+                            diagnostics.generation_reobservations =
+                                diagnostics.generation_reobservations.saturating_add(1);
+                        });
                         coordinator.discard_progress();
                         wait_generation = None;
                         ControlledSettlementProgress::Command(DocumentTimeControlCommand::Observe)
@@ -1951,10 +2192,7 @@ impl ControlledDocumentSession {
                     trace.push(ControlledSettlementStep::WaitForWake);
                     self.session.check_failure("controlled settlement")?;
                     if self.session.host_deadline.is_elapsed() {
-                        return Err(SessionError::new(
-                            "SETTLEMENT_TIMEOUT",
-                            "controlled settlement exceeded the normalized host-wall limit",
-                        ));
+                        return Err(self.settlement_timeout("producer-wait-before-check"));
                     }
                     let observed = wait_generation
                         .take()
@@ -1970,10 +2208,7 @@ impl ControlledDocumentSession {
                             self.session.servo.spin_event_loop();
                             self.session.check_failure("controlled settlement")?;
                             if self.session.host_deadline.is_elapsed() {
-                                return Err(SessionError::new(
-                                    "SETTLEMENT_TIMEOUT",
-                                    "controlled settlement exceeded the normalized host-wall limit",
-                                ));
+                                return Err(self.settlement_timeout("producer-owner-after-spin"));
                             }
                             Ok(())
                         },
@@ -1986,10 +2221,7 @@ impl ControlledDocumentSession {
                             )
                         },
                         EventLoopWakeWaitOutcome::DeadlineReached(_) => {
-                            return Err(SessionError::new(
-                                "SETTLEMENT_TIMEOUT",
-                                "controlled settlement exceeded the normalized host-wall limit",
-                            ));
+                            return Err(self.settlement_timeout("producer-wake-deadline"));
                         },
                         EventLoopWakeWaitOutcome::GenerationExhausted(_) => {
                             return Err(SessionError::new(
@@ -2019,25 +2251,22 @@ impl ControlledDocumentSession {
         loop {
             self.session.check_failure("controlled settlement")?;
             if self.session.host_deadline.is_elapsed() {
-                return Err(SessionError::new(
-                    "SETTLEMENT_TIMEOUT",
-                    "controlled settlement exceeded the normalized host-wall limit",
-                ));
+                return Err(self.settlement_timeout("response-before-spin"));
             }
 
             let before_spin = self.waker.generation();
             self.session.servo.spin_event_loop();
             self.session.check_failure("controlled settlement")?;
             if self.session.host_deadline.is_elapsed() {
-                return Err(SessionError::new(
-                    "SETTLEMENT_TIMEOUT",
-                    "controlled settlement exceeded the normalized host-wall limit",
-                ));
+                return Err(self.settlement_timeout("response-after-spin"));
             }
 
             match receiver.try_recv() {
                 DocumentTimeControlTryReceiveOutcome::Complete(outcome) => {
-                    return Ok((outcome, self.waker.generation()));
+                    let generation = self.waker.generation();
+                    self.session
+                        .diagnostic(|diagnostics| diagnostics.outcome(&outcome));
+                    return Ok((outcome, generation));
                 },
                 DocumentTimeControlTryReceiveOutcome::Pending(pending) => receiver = pending,
             }
@@ -2048,10 +2277,7 @@ impl ControlledDocumentSession {
             {
                 EventLoopWakeWaitOutcome::Woken(_) => {},
                 EventLoopWakeWaitOutcome::DeadlineReached(_) => {
-                    return Err(SessionError::new(
-                        "SETTLEMENT_TIMEOUT",
-                        "controlled settlement exceeded the normalized host-wall limit",
-                    ));
+                    return Err(self.settlement_timeout("response-wake-deadline"));
                 },
                 EventLoopWakeWaitOutcome::GenerationExhausted(_) => {
                     return Err(SessionError::new(
@@ -2669,10 +2895,10 @@ mod tests {
     use super::super::session::LocalDocument;
     use super::{
         Api2Execution, ConsoleEvidenceLog, ConsoleLogLevel, ControlledSettlementStep,
-        DocumentSession, FROZEN_INPUT_URL_ROOT, JSValue, MAX_CONSOLE_BYTES, MAX_CONSOLE_EVENTS,
-        PaintTicketAbortGuard, RESOURCE_EVIDENCE_ENTRY_OVERHEAD_BYTES, ReadinessPolicy,
-        RenderEnvironment, ResourceEvidenceLog, ResourcePolicyConfig, SessionCaptureEvidence,
-        SessionError, SessionHostDeadline, console_log_level_name,
+        DocumentOutcome, DocumentSession, FROZEN_INPUT_URL_ROOT, JSValue, MAX_CONSOLE_BYTES,
+        MAX_CONSOLE_EVENTS, PaintTicketAbortGuard, RESOURCE_EVIDENCE_ENTRY_OVERHEAD_BYTES,
+        ReadinessPolicy, RenderEnvironment, ResourceEvidenceLog, ResourcePolicyConfig,
+        SessionCaptureEvidence, SessionError, SessionHostDeadline, console_log_level_name,
         controlled_readiness_handshake_counts, session_host_timeout, validate_host_font_policy,
         validate_resolved_resource_policy, validate_resource_policy,
         with_current_readiness_evidence, with_readiness_evaluation_evidence,
@@ -2682,6 +2908,8 @@ mod tests {
     const PLIEGO_INPUT_CASE_ENV: &str = "PLIEGO_DOCUMENT_SESSION_PLIEGO_INPUT_FIXTURE";
     const CHARTJS_INPUT_ENV: &str = "PLIEGO_DOCUMENT_SESSION_CHARTJS_INPUT";
     const HTTP_BASE_ENV: &str = "PLIEGO_DOCUMENT_SESSION_HTTP_BASE";
+    const INVOICE_ORACLE_EVIDENCE_ENV: &str = "PLIEGO_INVOICE_ORACLE_EVIDENCE_ROOT";
+    const CHARTJS_ORACLE_EVIDENCE_ENV: &str = "PLIEGO_CHARTJS_ORACLE_EVIDENCE_ROOT";
     const ISOLATED_TEST: &str = "document_session::tests::isolated_resource_and_readiness_fixture";
     const PLIEGO_INPUT_ISOLATED_TEST: &str =
         "document_session::tests::isolated_pliego_input_url_fixture";
@@ -2706,6 +2934,272 @@ mod tests {
         assert!(evaluations > 0);
         assert_eq!(callbacks, evaluations);
         assert_eq!(freshness, evaluations);
+    }
+
+    fn diagnostic_observation() -> embedder_traits::DocumentTimeControlObservation {
+        use embedder_traits::{
+            DocumentProducerStability, DocumentTimeControlAction, DocumentTimeControlTarget,
+            DocumentTimeDocumentObservation, DocumentTimeProducerObservation,
+        };
+        use servo_base::id::{TEST_PIPELINE_ID, TEST_SCRIPT_EVENT_LOOP_ID, TEST_WEBVIEW_ID};
+        use timers::{DocumentProducerCheckpoint, DocumentProducerFence, DocumentTime};
+
+        let fence = DocumentProducerFence::with_execution_ledger(None);
+        embedder_traits::DocumentTimeControlObservation {
+            target: DocumentTimeControlTarget {
+                webview_id: TEST_WEBVIEW_ID,
+                event_loop_id: TEST_SCRIPT_EVENT_LOOP_ID,
+                webview_epoch: Default::default(),
+                pipelines: vec![TEST_PIPELINE_ID],
+                fully_active_pipelines: vec![TEST_PIPELINE_ID],
+            },
+            now: DocumentTime::from_nanos(u128::MAX),
+            next_deadline: None,
+            advance_token: None,
+            pending_events: 3,
+            input_batch_saturated: true,
+            action: DocumentTimeControlAction::Observed,
+            producers: DocumentTimeProducerObservation {
+                fence_id: fence.id(),
+                checkpoint: DocumentProducerCheckpoint::ZERO,
+                snapshot: fence.snapshot(),
+                stability: DocumentProducerStability::NotCheckpointed,
+            },
+            documents: vec![
+                DocumentTimeDocumentObservation {
+                    pipeline_id: TEST_PIPELINE_ID,
+                    script_rendering_epoch: None,
+                    readiness_blockers: vec![
+                        embedder_traits::DocumentTimeReadinessBlocker::Loading;
+                        20
+                    ],
+                };
+                20
+            ],
+            execution: None,
+            capture_preparation: None,
+            capture_commit: None,
+        }
+    }
+
+    #[test]
+    fn session_diagnostics_requires_exact_opt_in_and_controlled_mode() {
+        use std::ffi::OsStr;
+
+        use super::SessionDiagnostics;
+
+        assert!(SessionDiagnostics::enabled(Some(OsStr::new("1")), true));
+        assert!(!SessionDiagnostics::enabled(Some(OsStr::new("1")), false));
+        for value in [
+            None,
+            Some(""),
+            Some("0"),
+            Some("true"),
+            Some("yes"),
+            Some(" 1"),
+        ] {
+            assert!(!SessionDiagnostics::enabled(value.map(OsStr::new), true));
+        }
+    }
+
+    #[test]
+    fn session_diagnostics_keeps_bounded_actual_observation_and_rejection() {
+        use embedder_traits::{
+            DocumentTimeControlCommand, DocumentTimeControlError, DocumentTimeControlOutcome,
+            DocumentTimeControlReceiveOutcome,
+        };
+
+        use super::SessionDiagnostics;
+
+        let mut diagnostic = SessionDiagnostics::default();
+        diagnostic.command(&DocumentTimeControlCommand::Observe);
+        diagnostic.outcome(&DocumentTimeControlReceiveOutcome::CommandOutcome(
+            DocumentTimeControlOutcome::Completed(Box::new(diagnostic_observation())),
+        ));
+        diagnostic.outcome(&DocumentTimeControlReceiveOutcome::CommandOutcome(
+            DocumentTimeControlOutcome::Rejected(DocumentTimeControlError::EventLoopUnavailable),
+        ));
+        assert_eq!(diagnostic.commands, 1);
+        assert_eq!(diagnostic.response_count, 2);
+        assert_eq!(diagnostic.rejections, 1);
+        assert_eq!(diagnostic.last_outcome, Some("event-loop-unavailable"));
+        assert_eq!(diagnostic.last_observation_response, Some(1));
+        let observation = diagnostic.last_observation.as_ref().unwrap();
+        assert_eq!(observation["virtual_time_ns"], u128::MAX.to_string());
+        assert_eq!(observation["pending_events"], 3);
+        assert_eq!(observation["documents"], 20);
+        assert_eq!(
+            observation["first_document_readiness"]
+                .as_array()
+                .unwrap()
+                .len(),
+            8
+        );
+        assert_eq!(observation["first_document_readiness_total"], 20);
+        assert!(observation.get("capture_commit").is_none());
+        diagnostic.commands = u64::MAX;
+        diagnostic.command(&DocumentTimeControlCommand::Observe);
+        assert_eq!(diagnostic.commands, u64::MAX);
+    }
+
+    #[test]
+    fn session_diagnostics_redacts_payloads_and_bounds_resource_details() {
+        use embedder_traits::{
+            DocumentTimeControlReceiveOutcome, DocumentTimeControlTransportFailure,
+        };
+
+        use super::{DocumentDelegate, MAX_SESSION_DIAGNOSTIC_BYTES, SessionDiagnostics};
+
+        const SECRET: &str = "PRIVATE-DOCUMENT-PAYLOAD";
+        let request = ResourceRequest {
+            method: SECRET.into(),
+            url: url::Url::parse(&format!("https://secret.test/{SECRET}")).unwrap(),
+            destination: SECRET.into(),
+            load_role: WebResourceLoadRole::DocumentMetadata,
+            referrer_url: Some(
+                url::Url::parse(&format!("https://referrer.test/{SECRET}")).unwrap(),
+            ),
+            is_for_main_frame: true,
+            is_redirect: false,
+        };
+        let mut resource = ResourceEvidence::loaded(
+            request,
+            ResourceSource::VirtualResource,
+            SECRET,
+            SECRET.as_bytes(),
+        );
+        resource.sha256 = Some(SECRET.into());
+        let delegate = DocumentDelegate::default();
+        delegate.resources.borrow_mut().entries = vec![resource; 20];
+        delegate.resources.borrow_mut().observed_events = 20;
+        delegate
+            .console
+            .borrow_mut()
+            .push("error".into(), SECRET.into());
+        delegate.load_complete.set(true);
+        let mut diagnostic = SessionDiagnostics::default();
+        diagnostic.outcome(&DocumentTimeControlReceiveOutcome::ObserveTransportFailure(
+            DocumentTimeControlTransportFailure::DeserializationFailed(SECRET.repeat(1000)),
+        ));
+        let mut error = SessionError::new(SECRET, SECRET);
+        error.capture_evidence.readiness = Some(serde_json::json!({"payload": SECRET}));
+        let line = diagnostic.failure_line(
+            SessionHostDeadline::start(Duration::from_secs(10)).unwrap(),
+            &error,
+            Some(&delegate),
+        );
+        assert!(line.len() <= MAX_SESSION_DIAGNOSTIC_BYTES);
+        assert_eq!(line.iter().filter(|byte| **byte == b'\n').count(), 1);
+        assert!(!String::from_utf8_lossy(&line).contains(SECRET));
+        let value: serde_json::Value = serde_json::from_slice(&line).unwrap();
+        assert_eq!(value["failure_class"], "OTHER_SESSION_FAILURE");
+        assert_eq!(value["last_outcome"], "transport-failure-or-indeterminate");
+        assert_eq!(value["load_complete"], true);
+        assert_eq!(value["resource_destinations"].as_array().unwrap().len(), 8);
+        assert_eq!(value["resource_destinations"][0], "other");
+        assert_eq!(value["resource_entries"], 20);
+        assert_eq!(value["resource_loaded"], 20);
+        assert!(value["last_observation"].is_null());
+        assert!(value["startup_ms"]["servo_ready"].is_null());
+        diagnostic.last_observation =
+            Some(serde_json::json!({"oversized_internal_detail": "x".repeat(20_000)}));
+        let line = diagnostic.failure_line(
+            SessionHostDeadline::start(Duration::from_secs(10)).unwrap(),
+            &error,
+            Some(&delegate),
+        );
+        assert!(line.len() <= MAX_SESSION_DIAGNOSTIC_BYTES);
+        let value: serde_json::Value = serde_json::from_slice(&line).unwrap();
+        assert_eq!(value["encoding_failed"], true);
+    }
+
+    #[test]
+    fn session_diagnostics_timeout_sites_and_startup_are_private_metadata() {
+        for phase in [
+            "settlement-before-command",
+            "producer-wait-before-check",
+            "producer-owner-after-spin",
+            "producer-wake-deadline",
+            "response-before-spin",
+            "response-after-spin",
+            "response-wake-deadline",
+        ] {
+            let diagnostic = std::cell::RefCell::new(super::SessionDiagnostics {
+                startup_ms: [Some(10.0), Some(20.0), Some(30.0)],
+                ..Default::default()
+            });
+            let error = super::SessionDiagnostics::settlement_timeout(Some(&diagnostic), phase);
+            let disabled = super::SessionDiagnostics::settlement_timeout(None, phase);
+            assert_eq!(error, disabled);
+            let line = diagnostic.borrow().failure_line(
+                SessionHostDeadline::start(Duration::from_secs(10)).unwrap(),
+                &error,
+                None,
+            );
+            let value: serde_json::Value = serde_json::from_slice(&line).unwrap();
+            assert_eq!(value["timeout_site"], phase);
+            assert_eq!(value["failure_class"], "SETTLEMENT_TIMEOUT");
+            assert_eq!(value["startup_ms"]["webview_ready"], 30.0);
+            assert_eq!(value["host_limit_ms"], 10_000.0);
+            assert_eq!(error.code, "SETTLEMENT_TIMEOUT");
+            assert_eq!(
+                error.message,
+                "controlled settlement exceeded the normalized host-wall limit"
+            );
+            assert!(value["load_complete"].is_null());
+        }
+    }
+
+    #[test]
+    fn session_diagnostics_stderr_only() {
+        use super::{SESSION_DIAGNOSTICS_ENV, SessionDiagnostics};
+        const CHILD: &str = "PLIEGO_SESSION_DIAGNOSTICS_TEST_CHILD";
+        const MARKER: &str = "pliego-session-diagnostics-v1";
+        if std::env::var_os(CHILD).as_deref() == Some(std::ffi::OsStr::new("1")) {
+            if SessionDiagnostics::enabled(
+                std::env::var_os(SESSION_DIAGNOSTICS_ENV).as_deref(),
+                true,
+            ) {
+                let mut diagnostic = SessionDiagnostics {
+                    phase: "test-failure",
+                    ..Default::default()
+                };
+                let deadline = SessionHostDeadline::start(Duration::from_secs(10)).unwrap();
+                let error = SessionError::new("SETTLEMENT_TIMEOUT", "unchanged product failure");
+                diagnostic.emit_failure(deadline, &error, None);
+                diagnostic.emit_failure(deadline, &error, None);
+            }
+            println!("SESSION_DIAGNOSTIC_STDOUT_SENTINEL");
+            return;
+        }
+        for activation in [None, Some("0"), Some("1")] {
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--exact",
+                    "document_session::tests::session_diagnostics_stderr_only",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env_remove(SESSION_DIAGNOSTICS_ENV);
+            if let Some(value) = activation {
+                command.env(SESSION_DIAGNOSTICS_ENV, value);
+            }
+            let output = command.output().unwrap();
+            assert!(output.status.success(), "{output:?}");
+            let stdout = String::from_utf8(output.stdout).unwrap();
+            assert!(stdout.contains("SESSION_DIAGNOSTIC_STDOUT_SENTINEL"));
+            assert!(!stdout.contains(MARKER));
+            if activation == Some("1") {
+                let stderr = String::from_utf8(output.stderr).unwrap();
+                assert_eq!(stderr.lines().count(), 1);
+                let value: serde_json::Value = serde_json::from_str(stderr.trim()).unwrap();
+                assert_eq!(value["diagnostic"], MARKER);
+                assert_eq!(value["timeout_site"], "test-failure");
+            } else {
+                assert!(output.stderr.is_empty());
+            }
+        }
     }
 
     #[test]
@@ -2836,10 +3330,12 @@ mod tests {
     const CHARTJS_INPUT: &str =
         "sha256:2c5d37327bbde05b8369fcb5ea75cfec7fba437b1232848f1c2e20d5f2978995";
     const CHARTJS_UMD: &str = "ecc3cd1eeb8c34d2178e3f59fd63ec5a3d84358c11730af0b9958dc886d7652a";
-    const PRE_SESSION_CHARTJS_SCENE: &str =
-        "sha256:7649335813f3638eecfb8836e04374f98d5b62bfcea530c1787bfdee60964fde";
-    const PRE_SESSION_CHARTJS_PDF: &str =
-        "sha256:c6f00765c85aace6cc6f2eacbb7c314ea579a4de66b6c2fe43793fc3ef546c9f";
+    // Reviewed original-Au projection snapshot, not unchanged pre-session bytes.
+    // See docs/pliego/chartjs-regression-snapshot.md for full differential provenance.
+    const CHARTJS_SCENE: &str =
+        "sha256:5711745bb1adb142493dd487b81ece7f521eea35df5873bd13baef15bb0b55bf";
+    const CHARTJS_PDF: &str =
+        "sha256:790dde4a113267ca3816bd048f3dd9ed68f98917b30dae44c587f094c44ed65e";
     const PRE_SESSION_CHARTJS_CANVAS: &str =
         "sha256:3625ec653c27b9e1c8d0fa969acbd88cc161804eeea4cd3046795d411e8118c9";
 
@@ -3044,10 +3540,136 @@ mod tests {
 
     const INVOICE_INPUT: &str =
         "sha256:b0fa2d0b18e845e84c1229408622bd85e092ecf4d78b0878939006fb26926dce";
-    const PRE_SESSION_INVOICE_SCENE: &str =
-        "sha256:c1874a92a71ecde580f15075fe7d07ad6e5739ec794ad79291c9ba5b9bce1681";
-    const PRE_SESSION_INVOICE_PDF: &str =
-        "sha256:401e756f43adad12a137478cf36abe8273e89405e998b9d537ab62056d2face9";
+    // Current snapshot after reviewed paint-order and original-Au projection changes.
+    // Historical hashes and same-input differential proof remain documented in
+    // docs/pliego/invoice-regression-snapshot.md; these are not unchanged shell bytes.
+    const INVOICE_SCENE: &str =
+        "sha256:97997f0c5863c1ff27cf0511d7a96c22121216d6ca3320191ad369146af790c5";
+    const INVOICE_PDF: &str =
+        "sha256:952988f08a5be37dd7cc262326d2a50c592ff0a329c84ae82b9c1d5381f5f96e";
+
+    fn retain_oracle_evidence(case: &str, input: &Path, outcome: &DocumentOutcome, scene: &[u8]) {
+        let (environment, expected_input, expected_scene, expected_pdf, expected_pages, font_name) =
+            match case {
+                "invoice-oracle" => (
+                    INVOICE_ORACLE_EVIDENCE_ENV,
+                    INVOICE_INPUT,
+                    INVOICE_SCENE,
+                    INVOICE_PDF,
+                    2,
+                    "Ahem.ttf",
+                ),
+                "chartjs-report" => (
+                    CHARTJS_ORACLE_EVIDENCE_ENV,
+                    CHARTJS_INPUT,
+                    CHARTJS_SCENE,
+                    CHARTJS_PDF,
+                    1,
+                    "ReportSans.ttf",
+                ),
+                _ => panic!("unsupported retained oracle case: {case}"),
+            };
+        let Some(root) = std::env::var_os(environment) else {
+            return;
+        };
+        let root = PathBuf::from(root);
+        assert!(root.is_absolute(), "oracle evidence root must be absolute");
+        fs::create_dir_all(&root).expect("create opt-in oracle evidence root");
+        let directory = root.join(format!("{case}-{}", std::process::id()));
+        fs::create_dir(&directory).expect("oracle evidence leaf must be fresh");
+        let input_bytes = fs::read(input).expect("read exact oracle input");
+        let font = fs::read(input.with_file_name(font_name)).expect("read original oracle font");
+        let capture = serde_json::to_vec_pretty(&outcome.capture).unwrap();
+        // SceneCapture's public JSON deliberately omits this internal ledger.
+        // Preserve its original integer values separately without changing that contract.
+        let authority = format!("{:#?}\n", outcome.capture.fixed_point_authority);
+        let mut artifacts = Vec::new();
+        let mut retain = |name: &str, bytes: &[u8]| {
+            assert!(
+                bytes.len() <= 16 * 1024 * 1024,
+                "oracle evidence artifact exceeds 16 MiB: {name}"
+            );
+            fs::write(directory.join(name), bytes).expect("write exact oracle evidence");
+            artifacts.push(serde_json::json!({
+                "path": name, "bytes": bytes.len(), "sha256": content_address(bytes),
+            }));
+        };
+        for (name, bytes) in [
+            ("input.html", input_bytes.as_slice()),
+            (font_name, font.as_slice()),
+            ("scene.json", scene),
+            ("document.pdf", outcome.pdf.as_slice()),
+            ("capture.json", capture.as_slice()),
+            ("fixed-point-authority.txt", authority.as_bytes()),
+        ] {
+            retain(name, bytes);
+        }
+        if case == "chartjs-report" {
+            let root = input.parent().expect("Chart.js fixture has a bundle root");
+            for (source, retained) in [
+                ("package.json", "package.json"),
+                ("package-lock.json", "package-lock.json"),
+                ("node_modules/chart.js/dist/chart.umd.js", "chart.umd.js"),
+            ] {
+                retain(
+                    retained,
+                    &fs::read(root.join(source)).expect("read locked Chart.js fixture asset"),
+                );
+            }
+            for (index, resource) in outcome.capture.canvas_resources.iter().enumerate() {
+                retain(&format!("canvas-{index}.png"), &resource.png);
+            }
+            retain(
+                "resources.txt",
+                format!("{:#?}\n", outcome.resources).as_bytes(),
+            );
+            retain(
+                "session-evidence.json",
+                &serde_json::to_vec_pretty(&serde_json::json!({
+                    "readiness": &outcome.readiness,
+                    "resource_accounting": {
+                        "requests": outcome.resource_accounting.requests,
+                        "loaded": outcome.resource_accounting.loaded,
+                        "delegated": outcome.resource_accounting.delegated,
+                        "failed": outcome.resource_accounting.failed,
+                        "body_bytes": outcome.resource_accounting.body_bytes,
+                        "unavailable_bodies": outcome.resource_accounting.unavailable_bodies,
+                    },
+                }))
+                .unwrap(),
+            );
+        }
+        let input_hash = content_address(&input_bytes);
+        let scene_hash = content_address(scene);
+        let pdf_hash = content_address(&outcome.pdf);
+        let manifest = serde_json::json!({
+            "schema": if case == "invoice-oracle" { "pliego.invoice-oracle-diagnostic" } else { "pliego.chartjs-oracle-diagnostic" }, "version": 1,
+            "test": ISOLATED_TEST, "case": case,
+            "source_commit": env!("PLIEGO_SOURCE_COMMIT"),
+            "target": env!("PLIEGO_BUILD_TARGET"),
+            "expected": {"input_sha256": expected_input, "scene_sha256": expected_scene,
+                "pdf_sha256": expected_pdf, "pages": expected_pages},
+            "actual": {"input_sha256": input_hash, "scene_sha256": scene_hash,
+                "pdf_sha256": pdf_hash, "pages": outcome.capture.scene.pages.len()},
+            "matches": {"input": input_hash == expected_input,
+                "scene": scene_hash == expected_scene,
+                "pdf": pdf_hash == expected_pdf,
+                "pages": outcome.capture.scene.pages.len() == expected_pages},
+            "canvas": if case == "chartjs-report" { Some(serde_json::json!({
+                "expected": PRE_SESSION_CHARTJS_CANVAS,
+                "actual": outcome.capture.canvas_resources.iter().map(|resource| content_address(&resource.png)).collect::<Vec<_>>(),
+                "chartjs_umd_expected_sha256": CHARTJS_UMD,
+            })) } else { None },
+            "artifacts": artifacts,
+            "scope": "Original SceneCapture and emitted bytes; no raw layout snapshot is retained by DocumentOutcome",
+        });
+        fs::write(
+            directory.join("manifest.json"),
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .expect("write oracle mismatch manifest before assertions");
+        eprintln!("{case} evidence retained at {}", directory.display());
+    }
 
     struct TempBundle(PathBuf);
 
@@ -3664,6 +4286,7 @@ window.pliego?.defer();
             "canvas-missing-snapshot",
             "state-seed",
             "state-clean",
+            "webcrypto-policy",
         ] {
             let output = run_isolated(case, &server.base_url);
             let stdout = String::from_utf8_lossy(&output.stdout);
@@ -4124,7 +4747,7 @@ document.fonts.ready
 
     #[test]
     #[ignore = "requires the lockfile-installed Chart.js fixture input"]
-    fn installed_chartjs_fixture_matches_the_legacy_oracle_twice() {
+    fn installed_chartjs_fixture_matches_the_reviewed_snapshot_twice() {
         let input = std::env::var(CHARTJS_INPUT_ENV)
             .expect("PLIEGO_DOCUMENT_SESSION_CHARTJS_INPUT should name the installed fixture");
         assert!(Path::new(&input).is_file());
@@ -4155,6 +4778,7 @@ document.fonts.ready
                 "metadata-denied-non-icon" | "same-url-role-split" | "metadata-allowed-icon" => {
                     10_000
                 },
+                "webcrypto-policy" => 30_000,
                 _ => 1_000,
             },
             wait_for_fonts: false,
@@ -4441,6 +5065,16 @@ document.fonts.ready.then(() => {
                 if case == "http-timeout" {
                     resources.timeout_ms = 25;
                 }
+                _bundle = Some(bundle);
+                input
+            },
+            "webcrypto-policy" => {
+                let body = include_str!("../tests/fixtures/webcrypto-policy/index.html")
+                    .replace("__EXPECT_PRIVATE_RSA_BLOCKED__", "true")
+                    .replace("__EXPECT_SECURE_CONTEXT__", "true")
+                    .replace("__CHECK_SRCDOC__", "true");
+                let bundle = TempBundle::new(case.as_str());
+                let input = bundle.write("input.html", body);
                 _bundle = Some(bundle);
                 input
             },
@@ -5525,6 +6159,8 @@ document.fonts.ready.then(() => {
             },
             "invoice-oracle" => {
                 let outcome = result.expect("invoice oracle fixture should render");
+                let scene = outcome.capture.scene.normalized_json().unwrap();
+                retain_oracle_evidence("invoice-oracle", &input, &outcome, &scene);
                 assert_eq!(
                     content_address(&fs::read(&input).unwrap()),
                     INVOICE_INPUT,
@@ -5532,14 +6168,14 @@ document.fonts.ready.then(() => {
                 );
                 assert_eq!(outcome.capture.scene.pages.len(), 2);
                 assert_eq!(
-                    content_address(&outcome.capture.scene.normalized_json().unwrap()),
-                    PRE_SESSION_INVOICE_SCENE,
-                    "direct invoice scene differs from the exact pre-session servoshell oracle"
+                    content_address(&scene),
+                    INVOICE_SCENE,
+                    "direct invoice scene differs from the reviewed current regression snapshot"
                 );
                 assert_eq!(
                     content_address(&outcome.pdf),
-                    PRE_SESSION_INVOICE_PDF,
-                    "direct invoice PDF differs from the exact pre-session servoshell oracle"
+                    INVOICE_PDF,
+                    "direct invoice PDF differs from the reviewed current regression snapshot"
                 );
                 assert_eq!(outcome.environment, RenderEnvironment::default());
                 assert!(!outcome.allow_host_fonts);
@@ -5659,6 +6295,8 @@ document.fonts.ready.then(() => {
             },
             "chartjs-report" => {
                 let outcome = result.expect("Chart.js fixture should render");
+                let scene = outcome.capture.scene.normalized_json().unwrap();
+                retain_oracle_evidence("chartjs-report", &input, &outcome, &scene);
                 assert_eq!(content_address(&fs::read(&input).unwrap()), CHARTJS_INPUT);
                 assert_eq!(outcome.readiness["payload"]["fixture"], "chartjs-report");
                 assert_eq!(outcome.readiness["payload"]["chartVersion"], "4.5.1");
@@ -5701,11 +6339,8 @@ document.fonts.ready.then(() => {
                     250
                 );
                 assert_eq!(resource.resource, PRE_SESSION_CHARTJS_CANVAS);
-                assert_eq!(
-                    content_address(&outcome.capture.scene.normalized_json().unwrap()),
-                    PRE_SESSION_CHARTJS_SCENE
-                );
-                assert_eq!(content_address(&outcome.pdf), PRE_SESSION_CHARTJS_PDF);
+                assert_eq!(content_address(&scene), CHARTJS_SCENE);
+                assert_eq!(content_address(&outcome.pdf), CHARTJS_PDF);
                 let chartjs = outcome
                     .resources
                     .iter()
@@ -5714,6 +6349,30 @@ document.fonts.ready.then(() => {
                 assert_eq!(chartjs.status, "loaded");
                 assert_eq!(chartjs.sha256.as_deref(), Some(CHARTJS_UMD));
                 assert_eq!(outcome.resource_accounting.failed, 0);
+            },
+            "webcrypto-policy" => {
+                let outcome = result.expect("the realtime crypto-policy fixture should render");
+                let payload = &outcome.readiness["payload"];
+                assert_eq!(payload["fixture"], "webcrypto-policy-v1");
+                assert_eq!(payload["secureContext"], true);
+                assert_eq!(payload["privateRsaBlocked"], true);
+                assert_eq!(payload["supportsAvailable"], true);
+                let checks = payload["checks"].as_array().unwrap();
+                assert_eq!(checks.len(), 29);
+                for expected in [
+                    "servo-internals-inaccessible-in-srcdoc",
+                    "oaep-decrypt-generated",
+                    "oaep-unwrap-cloned",
+                    "pkcs1-sign-imported",
+                    "pss-sign-cloned",
+                    "supports-unwrap-overloads",
+                    "public-rsa-pkcs1-verify",
+                    "public-rsa-pss-verify",
+                    "aes-gcm-roundtrip",
+                ] {
+                    assert!(checks.iter().any(|value| value == expected));
+                }
+                println!("realtime-webcrypto-policy: {payload}");
             },
             "state-seed" => {
                 let outcome = result.expect("state seed fixture should render");

@@ -74,6 +74,11 @@ jobs:
         run: |
           sudo apt update
           ./mach bootstrap --yes --skip-nextest
+      - name: Check the exact Pliego wnaf yank exception
+        run: |
+          python python/check_pliego_wnaf_exception.py
+          python python/test_pliego_wnaf_exception.py
+          python -O python/test_pliego_wnaf_exception.py
       - name: Clippy
         run: |
           ./mach clippy --locked --github-annotations -- -- --deny warnings

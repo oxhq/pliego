@@ -7,6 +7,7 @@ use std::borrow::Cow;
 use layout_api::{
     LayoutElement, LayoutElementType, LayoutNode, LayoutNodeType, PseudoElementChain,
 };
+use malloc_size_of_derive::MallocSizeOf;
 use script::layout_dom::ServoLayoutNode;
 use servo_arc::Arc as ServoArc;
 use style::dom::NodeInfo;
@@ -30,11 +31,17 @@ use crate::style_ext::{Display, DisplayGeneratingBox, DisplayInside, DisplayOuts
 pub(crate) struct NodeAndStyleInfo<'dom> {
     pub node: ServoLayoutNode<'dom>,
     pub style: ServoArc<ComputedValues>,
+    /// Transient metadata for generated content; never inferred from literal text.
+    pub page_counter: Option<PageCounterKind>,
 }
 
 impl<'dom> NodeAndStyleInfo<'dom> {
     pub(crate) fn new(node: ServoLayoutNode<'dom>, style: ServoArc<ComputedValues>) -> Self {
-        Self { node, style }
+        Self {
+            node,
+            style,
+            page_counter: None,
+        }
     }
 
     pub(crate) fn pseudo_element_chain(&self) -> PseudoElementChain {
@@ -51,6 +58,7 @@ impl<'dom> NodeAndStyleInfo<'dom> {
         Some(NodeAndStyleInfo {
             node: element.as_node(),
             style,
+            page_counter: None,
         })
     }
 }
@@ -82,6 +90,14 @@ pub(super) enum NonReplacedContents {
 pub(super) enum PseudoElementContentItem {
     Text(String),
     Replaced(ReplacedContents),
+    PageCounter(PageCounterKind, String),
+}
+
+#[derive(Clone, Copy, Debug, MallocSizeOf, PartialEq)]
+pub(crate) enum PageCounterKind {
+    Page,
+    Pages,
+    Unsupported,
 }
 
 pub(super) trait TraversalHandler<'dom> {
@@ -217,6 +233,11 @@ fn traverse_pseudo_element_contents<'dom>(
     for item in items {
         match item {
             PseudoElementContentItem::Text(text) => handler.handle_text(info, text.into()),
+            PseudoElementContentItem::PageCounter(kind, placeholder) => {
+                let mut counter_info = info.clone();
+                counter_info.page_counter = Some(kind);
+                handler.handle_text(&counter_info, placeholder.into());
+            },
             PseudoElementContentItem::Replaced(contents) => {
                 let anonymous_info = anonymous_info.get_or_insert_with(|| {
                     info.with_pseudo_element(context, PseudoElement::ServoAnonymousBox)
@@ -384,10 +405,29 @@ pub(crate) fn generate_pseudo_element_content(
                         }
                     },
                     ContentItem::Counter(_, style) | ContentItem::Counters(_, _, style) => {
-                        // TODO: Add support for counters, this assumes a value of 0.
-                        vec.push(PseudoElementContentItem::Text(
-                            generate_counter_representation(style).to_string(),
-                        ));
+                        if crate::pages::has_paged_document_configuration() {
+                            let kind = match item {
+                                ContentItem::Counter(
+                                    name,
+                                    style::counter_style::CounterStyle::Name(counter_style),
+                                ) if counter_style.0.as_ref() == "decimal" => {
+                                    match name.0.as_ref() {
+                                        "page" => PageCounterKind::Page,
+                                        "pages" => PageCounterKind::Pages,
+                                        _ => PageCounterKind::Unsupported,
+                                    }
+                                },
+                                _ => PageCounterKind::Unsupported,
+                            };
+                            // Even unsupported forms retain an observable unresolved token.
+                            // This placeholder is not successful generated content.
+                            vec.push(PseudoElementContentItem::PageCounter(kind, "0".into()));
+                        } else {
+                            // Preserve Servo's existing continuous-layout counter behavior.
+                            vec.push(PseudoElementContentItem::Text(
+                                generate_counter_representation(style).to_string(),
+                            ));
+                        }
                     },
                     ContentItem::NoOpenQuote | ContentItem::NoCloseQuote => {},
                 }

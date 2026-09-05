@@ -10,6 +10,7 @@ Chromium, Node.js, or Java with an application.
 | Item | Current public boundary |
 | --- | --- |
 | Source release line | v0.3.x API 2 base-engine line; v0.3.3 is the current recommended build |
+| Unreleased source candidate | 0.4.0 business-document compatibility; final package, comparison and publication gates remain open |
 | Publication status | GitHub Releases is authoritative for the latest exact tag and native assets |
 | Engine protocol | API 2 profile-null tuple; API 1 compatibility commands retained temporarily |
 | Supported input trust | Application-owned HTML and assets |
@@ -82,9 +83,16 @@ records the public boundary.
 
 These are implementation and release-mechanism claims. They are not evidence of
 market adoption, arbitrary-page compatibility, hostile-input isolation, or
-performance leadership. The repository now contains a pinned three-target comparator
-and one shared correctness slice, but still has no publishable comparative
-performance results; see the [benchmark methodology](benchmarks/README.md).
+performance leadership. The published v0.3.3 minimal-static series retains three
+repeats and 900 passing timed PDFs. It is historical GitHub-hosted exploratory
+evidence, not a measurement of the 0.4.0 candidate. Real-document comparisons keep
+each application's actual legacy provider, shared-input adaptations and correctness
+gates separate; see the [benchmark methodology](benchmarks/README.md).
+
+The [unreleased 0.4.0 candidate](releases/v0.4.0.md) adds a bounded exact-paint,
+URI-link, collapsed-table and page-footer path while keeping the same API 2 tuple.
+Those source changes must pass their real-document and final packaged-consumer
+gates before the public recommendation changes.
 
 ## Governance and upstream relationship
 

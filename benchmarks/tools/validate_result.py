@@ -309,6 +309,33 @@ def validate_resource_usage(sample: dict[str, Any], path: str, violations: list[
         violations.append(Violation(f"{path}.resource_usage", "cgroup-v2 samples require retained resource usage"))
         return
 
+    if "root_wall_deadline" in usage:
+        deadline = usage["root_wall_deadline"]
+        deadline_path = f"{path}.resource_usage.root_wall_deadline"
+        if not isinstance(deadline, dict) or set(deadline) != {"limit_ms", "outcome", "boundary"}:
+            violations.append(Violation(deadline_path, "must contain exactly limit_ms, outcome and boundary"))
+        else:
+            limit = deadline["limit_ms"]
+            finite_positive = type(limit) in (int, float) and (type(limit) is int or math.isfinite(limit)) and limit > 0
+            if not finite_positive:
+                violations.append(Violation(f"{deadline_path}.limit_ms", "must be a finite positive number"))
+            require_equal(f"{deadline_path}.outcome", deadline["outcome"], "root-exited", violations)
+            require_equal(
+                f"{deadline_path}.boundary",
+                deadline["boundary"],
+                "root-SIGCONT-through-pidfd-observed-exit",
+                violations,
+            )
+            wall = usage.get("wall_ms")
+            # The sampler compares unrounded time before returning a completed
+            # sample. Its recorded milliseconds can round up to the exact limit.
+            if finite_positive and (
+                type(wall) not in (int, float)
+                or (type(wall) is float and not math.isfinite(wall))
+                or not 0 <= wall <= limit
+            ):
+                violations.append(Violation(deadline_path, "completed root wall time must not exceed the deadline"))
+
     exact_fields = {
         "exit_code": "exit_code",
         "signal": "signal",

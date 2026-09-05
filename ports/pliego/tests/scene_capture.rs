@@ -1196,6 +1196,32 @@ fn converts_dense_paint_order_without_leaking_capture_local_ids() {
 }
 
 #[test]
+fn retains_typed_paged_fixed_and_counter_exclusions() {
+    let mut snapshot: Value = serde_json::from_slice(&snapshot(10, 1000)).unwrap();
+    let events = snapshot["paint_events"].as_array_mut().unwrap();
+    let first = events.len();
+    for kind in ["paged-fixed-content", "unresolved-page-counter"] {
+        events.push(json!({
+            "sequence": events.len(),
+            "kind": kind,
+            "spatial_node_id": 0
+        }));
+    }
+    let capture = convert(&serde_json::to_vec(&snapshot).unwrap());
+    for (sequence, kind) in [
+        (first, UnsupportedPaintKind::PagedFixedContent),
+        (first + 1, UnsupportedPaintKind::UnresolvedPageCounter),
+    ] {
+        assert!(
+            capture
+                .unsupported_events
+                .contains(&UnsupportedPaintEvent { sequence, kind })
+        );
+        assert_eq!(serde_json::to_value(kind).unwrap(), kind.as_str());
+    }
+}
+
+#[test]
 fn converts_two_pages_to_page_local_operations_with_shared_resources() {
     let capture = two_page_snapshot(10, 1000);
     let captured = convert(&serde_json::to_vec(&capture).unwrap());

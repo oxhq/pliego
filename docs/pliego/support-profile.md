@@ -1,9 +1,57 @@
-# Pliego v0.3 support profile
+# Pliego support profiles
 
-This page defines the supported behavior of the Pliego v0.3 source line. Publication
-status comes from the exact tags and assets on GitHub Releases, not from a branch.
+This page separates the published v0.3.3 behavior from the unreleased 0.4.0
+candidate below. Publication status comes from the exact tags and assets on
+GitHub Releases, not from a branch.
 Behavior outside this profile is not implied by Servo or by successful rendering of
 a different document.
+
+## Unreleased 0.4.0 candidate
+
+The source candidate keeps API 2, profile-null, the existing schema versions,
+offline resources and request-only page authority. API 1 remains deprecated,
+not removed. No semantic/accessibility profile or API 2 Chart.js capability is
+advertised. The additions are bounded by these source and regression contracts:
+
+| Candidate addition | Exact boundary |
+| --- | --- |
+| URI links | Canonical HTTP, HTTPS and mailto destinations; axis-aligned, unclipped owner rectangles with original app-unit authority. Includes supported descendant boxes, wrapped lines and links on later pages, with duplicate owner suppression. Internal destinations, unsafe URI schemes, text decoration and cross-page owner rectangles remain excluded. |
+| Collapsed tables | Entirely nonpainting borders; uniform solid visible borders on one page, including headerless tables; repeated-header paged tables; and full or partial horizontal rules with zero-width vertical edges. Headerless multipage visible borders, rowspans in this collapsed-grid path and arbitrary mixed styles/colors remain excluded. See [the exact table boundary](paged-table-compatibility.md). |
+| Solid paint | Ordinary radius-free, untransformed/unclipped solid border-box colors and uniform-color sharp ordinary borders preserve original integer geometry. Resolved page-canvas colors cover the actual page areas. Table row/row-group/column/column-group solid colors retain each owning cell's exact rectangle and paint order; this does not admit image layers or arbitrary track layout. |
+| Fixed page text | Page-root Flow text with explicit top or bottom placement, fresh per-page layout and decimal physical `counter(page)`/`counter(pages)`. Authors reserve footer space. No general CSS counter engine, positioned/replaced descendants or arbitrary fixed layout is implied; see [fixed-content exclusions](paged-fixed-content.md). |
+| Nonpainting barcode markup | Exact zero-area ordinary backgrounds and actual zero-font-size text emit no ink while positive-size descendants remain. See [nonpainting-content capture](nonpainting-content.md); this alone is not barcode decoding evidence. |
+| SDK compatibility | Maintained Laravel 12/13 dependency ranges and exact integer `au` page/margin tuples using the existing request schema. Published 0.3.3 remains Laravel 13-only and lacks the `au` input syntax. |
+| Document crypto policy | RSA-OAEP decryption/unwrapping and RSA-PSS/RSASSA-PKCS1-v1_5 signing are disabled at the native operation boundary. Public RSA operations, key generation/import/export and unrelated crypto remain available where the Web Platform exposes them. See the security boundary below. |
+
+These are candidate implementation boundaries, not a completed four-platform
+release or a promise that every document using these features passes. The
+[candidate notes](../releases/v0.4.0.md) list the outstanding corpus, comparison
+and packaged-consumer gates. Everything below describes the published v0.3.3
+baseline unless it explicitly names the candidate.
+
+### Candidate WebCrypto security boundary
+
+The candidate restricts private RSA operations because the bundled `rsa`
+dependency is affected by [RUSTSEC-2023-0071](https://rustsec.org/advisories/RUSTSEC-2023-0071.html).
+The advisory has no patched version as of 2026-09-05. This is an exposure
+restriction, not a dependency fix or a general security guarantee. Attempts to
+sign with RSA or decrypt/unwrap with RSA-OAEP reject with `NotSupportedError`;
+`SubtleCrypto.supports()` reflects the restriction. The common document startup
+also disables `navigator.servo`, including privileged `about:` pages, so authored
+content cannot change the host preferences through that internal API.
+
+API 1 file documents are secure contexts and can exercise these guarded
+operations. API 2's `pliego-input:///` documents currently are not secure contexts:
+`crypto.subtle` and `crypto.randomUUID` are absent; `getRandomValues` remains
+available. That absence is a separate exposure boundary, not evidence that an
+RSA operation was rejected. No new secure-context scheme is introduced here.
+
+The package test runs generated, imported and cloned synthetic keys through both
+API 1 compatibility commands, and checks API 2's existing exposure separately.
+A native realtime-session test checks `srcdoc` internal-API exposure; this is not
+a supported nested-frame claim for the controlled product runtime. Ordinary
+Servo keeps its default preferences. These checks still require successful
+execution on the new source; previous candidate packages do not prove the policy.
 
 ## Intended documents
 
@@ -201,7 +249,8 @@ at that readback; later drawing is outside this API 1 Chart.js proof.
 | Resource connection | 10 seconds by default; configurable from 1 to 60,000 ms. |
 | Whole render | The PHP bridge has a configurable wall-clock timeout, terminates the child on timeout, and publishes no partial PDF. |
 | Document length | Regression coverage includes a 100-page statement; this is not an arbitrary-length guarantee. |
-| HTML size and memory | No engine-wide hard cap is defined. Deployments must set their own request and process limits. |
+| API 2 input size | Request JSON is limited to 1 MiB, its input manifest to 16 MiB, and aggregate HTML plus supplied asset bytes to 64 MiB, with entry/depth bounds. These are not decoded-memory or layout-complexity limits. |
+| Whole-process memory and execution | No engine-wide memory or CPU cap is defined, and one running JavaScript turn is not preempted by the controlled ledger. Deployments must impose process/resource limits and an outer deadline. API 1 input limits are not the API 2 input contract. |
 | Retained jobs | Successful jobs default to one day and failed jobs to seven days; `pliego:prune` applies configurable retention. |
 
 Invalid requests, denied resources, timeouts, and engine failures are typed. A failed

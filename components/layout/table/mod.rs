@@ -68,6 +68,7 @@
 mod construct;
 mod layout;
 
+use std::cmp::Ordering;
 use std::ops::Range;
 
 use app_units::Au;
@@ -393,6 +394,23 @@ pub(crate) struct CollapsedBorder {
     pub width: Au,
 }
 
+impl CollapsedBorder {
+    pub(crate) fn is_invisible(&self) -> bool {
+        self.width >= Au::zero() &&
+            (self.width.is_zero() ||
+                matches!(
+                    self.style_color.style,
+                    BorderStyle::None | BorderStyle::Hidden
+                ) ||
+                self.style_color
+                    .color
+                    .clone()
+                    .to_color_space(ColorSpace::Srgb)
+                    .alpha <=
+                    0.0)
+    }
+}
+
 /// Represents a piecewise sequence of collapsed borders along a line.
 pub(crate) type CollapsedBorderLine = Vec<CollapsedBorder>;
 
@@ -403,6 +421,71 @@ pub(crate) struct SpecificTableGridInfo {
 }
 
 impl SpecificTableGridInfo {
+    // Inspect the resolved edges, not authored styles: an invisible winner can
+    // still reserve border width, but must not produce synthetic border paint.
+    pub(crate) fn has_no_visible_borders(&self) -> bool {
+        let mut borders = self
+            .collapsed_borders
+            .x
+            .iter()
+            .chain(&self.collapsed_borders.y)
+            .flat_map(|line| line.iter())
+            .peekable();
+        borders.peek().is_some() && borders.all(CollapsedBorder::is_invisible)
+    }
+
+    // This profile captures solid row-rule runs separated by zero-width gaps,
+    // not arbitrary collapsed grids. Even transparent vertical edges must have
+    // zero width: WebRender uses their widths for segment bounds and joins.
+    pub(crate) fn has_solid_horizontal_borders(&self) -> bool {
+        if self.collapsed_borders.x.is_empty() ||
+            self.collapsed_borders
+                .x
+                .iter()
+                .any(|line| line.is_empty() || line.iter().any(|border| !border.width.is_zero()))
+        {
+            return false;
+        }
+
+        let mut has_visible_line = false;
+        for line in &self.collapsed_borders.y {
+            if line.is_empty() {
+                return false;
+            }
+            let Some(first) = line.iter().find(|border| !border.is_invisible()) else {
+                continue;
+            };
+            let color = first
+                .style_color
+                .color
+                .clone()
+                .to_color_space(ColorSpace::Srgb);
+            if first.width <= Au::zero() ||
+                first.style_color.style != BorderStyle::Solid ||
+                color.alpha.partial_cmp(&0.0) != Some(Ordering::Greater) ||
+                line.iter().any(|border| {
+                    // A positive-width invisible winner can alter a join;
+                    // only authored/resolved zero-width holes are admitted.
+                    if border.is_invisible() {
+                        return !border.width.is_zero();
+                    }
+                    border.width != first.width ||
+                        border.style_color.style != BorderStyle::Solid ||
+                        border
+                            .style_color
+                            .color
+                            .clone()
+                            .to_color_space(ColorSpace::Srgb) !=
+                            color
+                })
+            {
+                return false;
+            }
+            has_visible_line = true;
+        }
+        has_visible_line
+    }
+
     pub(crate) fn uniform_solid_visible_border(&self) -> Option<&CollapsedBorder> {
         let mut borders = self
             .collapsed_borders
@@ -447,6 +530,192 @@ mod collapsed_border_profile_tests {
             ),
             width: Au::from_px(width),
         }
+    }
+
+    fn one_cell_grid(border: CollapsedBorder) -> SpecificTableGridInfo {
+        SpecificTableGridInfo {
+            collapsed_borders: PhysicalVec::new(
+                vec![vec![border.clone()], vec![border.clone()]],
+                vec![vec![border.clone()], vec![border]],
+            ),
+            track_sizes: PhysicalVec::new(vec![Au::from_px(10)], vec![Au::from_px(10)]),
+        }
+    }
+
+    fn invisible_borders() -> [CollapsedBorder; 4] {
+        let mut none = border(3, 0.5);
+        none.style_color.style = BorderStyle::None;
+        let mut hidden = border(3, 0.5);
+        hidden.style_color.style = BorderStyle::Hidden;
+        let transparent = CollapsedBorder {
+            style_color: BorderStyleColor::new(
+                BorderStyle::Dashed,
+                AbsoluteColor::new(ColorSpace::Srgb, 0.5, 0.0, 0.0, 0.0),
+            ),
+            width: Au::from_px(4),
+        };
+        [border(0, 0.5), none, hidden, transparent]
+    }
+
+    fn horizontal_grid() -> SpecificTableGridInfo {
+        SpecificTableGridInfo {
+            collapsed_borders: PhysicalVec::new(
+                vec![vec![border(0, 0.0); 2]; 3],
+                vec![
+                    vec![border(0, 0.0); 2],
+                    vec![border(2, 0.5); 2],
+                    vec![border(1, 0.75); 2],
+                ],
+            ),
+            track_sizes: PhysicalVec::new(vec![Au::from_px(10); 2], vec![Au::from_px(10); 2]),
+        }
+    }
+
+    #[test]
+    fn accepts_full_width_horizontal_rules_with_distinct_header_and_body_values() {
+        let info = horizontal_grid();
+        assert!(info.has_solid_horizontal_borders());
+        assert!(!info.has_no_visible_borders());
+        assert!(info.uniform_solid_visible_border().is_none());
+    }
+
+    #[test]
+    fn horizontal_rules_require_ordered_positive_alpha() {
+        for (alpha, expected) in [
+            (f32::NAN, false),
+            (-0.5, false),
+            (-0.0, false),
+            (0.0, false),
+            (0.5, true),
+            (1.0, true),
+        ] {
+            let mut info = horizontal_grid();
+            for line in &mut info.collapsed_borders.y[1..] {
+                for border in line {
+                    border.style_color.color.alpha = alpha;
+                }
+            }
+            assert_eq!(
+                info.has_solid_horizontal_borders(),
+                expected,
+                "alpha = {alpha:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_entirely_invisible_horizontal_boundaries_without_paint() {
+        for invisible in invisible_borders() {
+            let mut info = horizontal_grid();
+            info.collapsed_borders.y[0][0] = invisible;
+            assert!(info.has_solid_horizontal_borders());
+        }
+        let mut info = horizontal_grid();
+        for line in &mut info.collapsed_borders.y {
+            line.fill(border(0, 0.0));
+        }
+        assert!(!info.has_solid_horizontal_borders());
+        assert!(info.has_no_visible_borders());
+    }
+
+    #[test]
+    fn horizontal_rules_reject_visible_or_nonzero_invisible_vertical_edges() {
+        let mut info = horizontal_grid();
+        info.collapsed_borders.x[1][0] = border(1, 0.5);
+        assert!(!info.has_solid_horizontal_borders());
+        for invisible in invisible_borders().into_iter().skip(1) {
+            info.collapsed_borders.x[1][0] = invisible;
+            assert!(!info.has_solid_horizontal_borders());
+        }
+    }
+
+    #[test]
+    fn horizontal_rules_accept_zero_width_gaps_in_either_column() {
+        for column in 0..2 {
+            let mut info = horizontal_grid();
+            info.collapsed_borders.y[1][column] = border(0, 0.0);
+            assert!(info.has_solid_horizontal_borders());
+            assert!(!info.has_no_visible_borders());
+        }
+    }
+
+    #[test]
+    fn horizontal_rules_reject_dashed_nonzero_invisible_and_nonuniform_lines() {
+        let mut info = horizontal_grid();
+        info.collapsed_borders.y[1][0].style_color.style = BorderStyle::Dashed;
+        assert!(!info.has_solid_horizontal_borders());
+        for invisible in invisible_borders().into_iter().skip(1) {
+            for column in 0..2 {
+                let mut info = horizontal_grid();
+                info.collapsed_borders.y[1][column] = invisible.clone();
+                assert!(!info.has_solid_horizontal_borders());
+            }
+        }
+        for different in [border(1, 0.5), border(2, 0.75)] {
+            let mut info = horizontal_grid();
+            info.collapsed_borders.y[1][1] = different;
+            assert!(!info.has_solid_horizontal_borders());
+        }
+    }
+
+    #[test]
+    fn horizontal_rules_reject_negative_widths_and_empty_edges() {
+        for horizontal in [false, true] {
+            let mut info = horizontal_grid();
+            if horizontal {
+                info.collapsed_borders.y[0][0].width = Au(-1);
+            } else {
+                info.collapsed_borders.x[0][0].width = Au(-1);
+            }
+            assert!(!info.has_solid_horizontal_borders());
+        }
+        let mut info = horizontal_grid();
+        info.collapsed_borders.x.clear();
+        assert!(!info.has_solid_horizontal_borders());
+        let mut info = horizontal_grid();
+        info.collapsed_borders.y[1].clear();
+        assert!(!info.has_solid_horizontal_borders());
+    }
+
+    #[test]
+    fn accepts_only_entirely_invisible_resolved_borders() {
+        for invisible in invisible_borders() {
+            let info = one_cell_grid(invisible);
+            assert!(info.has_no_visible_borders());
+            assert!(info.uniform_solid_visible_border().is_none());
+        }
+
+        let [zero, none, hidden, transparent] = invisible_borders();
+        let mut info = one_cell_grid(zero);
+        info.collapsed_borders.x[1][0] = none;
+        info.collapsed_borders.y[0][0] = hidden;
+        info.collapsed_borders.y[1][0] = transparent;
+        assert!(info.has_no_visible_borders());
+        assert!(info.uniform_solid_visible_border().is_none());
+    }
+
+    #[test]
+    fn rejects_mixed_visible_and_invisible_resolved_borders() {
+        assert!(!one_cell_grid(border(2, 0.5)).has_no_visible_borders());
+        for invisible in invisible_borders() {
+            let mut info = one_cell_grid(border(2, 0.5));
+            info.collapsed_borders.y[1][0] = invisible;
+            assert!(!info.has_no_visible_borders());
+            assert!(info.uniform_solid_visible_border().is_none());
+        }
+    }
+
+    #[test]
+    fn invisible_borders_do_not_accept_negative_widths_or_empty_edges() {
+        for mut invisible in invisible_borders() {
+            invisible.width = Au(-1);
+            assert!(!one_cell_grid(invisible).has_no_visible_borders());
+        }
+        let mut empty = one_cell_grid(border(0, 0.5));
+        empty.collapsed_borders.x.clear();
+        empty.collapsed_borders.y.clear();
+        assert!(!empty.has_no_visible_borders());
+        assert!(empty.uniform_solid_visible_border().is_none());
     }
 
     #[test]

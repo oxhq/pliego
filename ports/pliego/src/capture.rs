@@ -213,6 +213,8 @@ pub enum UnsupportedPaintKind {
     Iframe,
     TextEffects,
     ContentGeometry,
+    PagedFixedContent,
+    UnresolvedPageCounter,
     SvgAnimation,
     SvgCompositing,
     SvgStroke,
@@ -220,6 +222,29 @@ pub enum UnsupportedPaintKind {
     SvgImage,
     SvgText,
     SvgInvalidPath,
+}
+
+impl UnsupportedPaintKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Box => "box",
+            Self::RootBackground => "root-background",
+            Self::Outline => "outline",
+            Self::CollapsedTableBorders => "collapsed-table-borders",
+            Self::Iframe => "iframe",
+            Self::TextEffects => "text-effects",
+            Self::ContentGeometry => "content-geometry",
+            Self::PagedFixedContent => "paged-fixed-content",
+            Self::UnresolvedPageCounter => "unresolved-page-counter",
+            Self::SvgAnimation => "svg-animation",
+            Self::SvgCompositing => "svg-compositing",
+            Self::SvgStroke => "svg-stroke",
+            Self::SvgPaint => "svg-paint",
+            Self::SvgImage => "svg-image",
+            Self::SvgText => "svg-text",
+            Self::SvgInvalidPath => "svg-invalid-path",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1358,6 +1383,8 @@ fn capture_layout_with_canvas_limits(
             "collapsed-table-borders" |
             "iframe" |
             "text-effects" |
+            "paged-fixed-content" |
+            "unresolved-page-counter" |
             "content-geometry") => {
                 unsupported_events.push(UnsupportedPaintEvent {
                     sequence: event.sequence,
@@ -1369,6 +1396,8 @@ fn capture_layout_with_canvas_limits(
                         "iframe" => UnsupportedPaintKind::Iframe,
                         "text-effects" => UnsupportedPaintKind::TextEffects,
                         "content-geometry" => UnsupportedPaintKind::ContentGeometry,
+                        "paged-fixed-content" => UnsupportedPaintKind::PagedFixedContent,
+                        "unresolved-page-counter" => UnsupportedPaintKind::UnresolvedPageCounter,
                         _ => {
                             return Err(CaptureError::UnknownPaintEvent {
                                 sequence: event.sequence,
@@ -1828,7 +1857,8 @@ fn distribute_operations(
             repeat.page_index >= pages.len() ||
             !nonnegative_finite(repeat.source_block_start) ||
             !nonnegative_finite(repeat.target_block_start) ||
-            !positive_finite(repeat.block_size)
+            !positive_finite(repeat.block_size) ||
+            !repeat.app_unit_authority_matches()
         {
             return Err(CaptureError::InvalidTableGroupRepeat {
                 page_index: repeat.page_index,
@@ -1860,10 +1890,16 @@ fn distribute_operations(
                 });
             }
             let mut repeated = operation.clone();
-            // Repeat placement is currently retained in f32 block coordinates. Until that
-            // transform has its own app-unit source authority, the repeated operation must not
-            // inherit the source operation's exact coordinates.
-            repeated.authority = None;
+            // Use the layout-owned integer transform, never recover coordinates
+            // from compatibility floats. Missing or overflowing authority stays
+            // absent, and operation_page may still discard it after clipping.
+            repeated.authority = repeated.authority.take().and_then(|authority| {
+                let exact = repeat.app_units?;
+                translate_operation_authority_y(
+                    authority,
+                    i64::from(exact.source_block_start) - i64::from(exact.target_block_start),
+                )
+            });
             repeated.bounds.y += translation;
             translate_operation_y(&mut repeated.operation, -translation, repeated.sequence)?;
             let (page_index, page_origin) = operation_page(pages, &mut repeated)?;
@@ -1872,7 +1908,11 @@ fn distribute_operations(
                     page_index: repeat.page_index,
                 });
             }
-            translate_operation_y(&mut repeated.operation, page_origin, repeated.sequence)?;
+            translate_positioned_operation_to_page(
+                &mut repeated,
+                page_origin,
+                page_origin_app_units(pages, page_index),
+            )?;
             mark_repeated_table_header(&mut repeated.operation);
             repeated_operations[page_index].push(repeated);
         }
@@ -1894,6 +1934,11 @@ fn distribute_operations(
         pages.iter().zip(positioned_pages).zip(repeated_operations)
     {
         repeated.append(&mut positioned);
+        // Captured events have dense, increasing sequence numbers. Copies keep their source
+        // sequence so the canvas and ancestor backgrounds still paint below the repeated header.
+        // The stable sort preserves rectangle/link order within one event and keeps a repeated
+        // copy before a same-sequence positioned operation, matching the previous tie behavior.
+        repeated.sort_by_key(|operation| operation.sequence);
         let (operations, authority) = repeated
             .into_iter()
             .map(|positioned| (positioned.operation, positioned.authority))
@@ -1929,6 +1974,14 @@ fn translate_positioned_operation_to_page(
         positioned.authority = page_origin_app_units
             .and_then(|origin| translate_operation_authority_y(authority, origin));
     }
+    if is_splittable_rect_path(&positioned.operation) &&
+        let Some(CapturedOperationAuthority::Bounds(exact)) = positioned.authority.as_ref()
+    {
+        // Compatibility geometry follows the translated integers, not a sum of
+        // rounded page heights. No authority is created here.
+        let exact = *exact;
+        set_positioned_rect_app_units(positioned, exact);
+    }
     Ok(())
 }
 
@@ -1936,7 +1989,11 @@ fn translate_operation_authority_y(
     authority: CapturedOperationAuthority,
     page_origin: i64,
 ) -> Option<CapturedOperationAuthority> {
-    let translate_y = |value: i32| i32::try_from(i64::from(value) - page_origin).ok();
+    let translate_y = |value: i32| {
+        i64::from(value)
+            .checked_sub(page_origin)
+            .and_then(|value| i32::try_from(value).ok())
+    };
     let translate_rect = |mut bounds: CapturedRectAppUnits| {
         bounds.y = translate_y(bounds.y)?;
         Some(bounds)
@@ -1962,14 +2019,134 @@ fn translate_operation_authority_y(
     }
 }
 
+fn rect_from_app_units(exact: CapturedRectAppUnits) -> Rect {
+    Rect {
+        x: f64::from(app_units_to_f32_px(exact.x)),
+        y: f64::from(app_units_to_f32_px(exact.y)),
+        width: f64::from(app_units_to_f32_px(exact.width)),
+        height: f64::from(app_units_to_f32_px(exact.height)),
+    }
+}
+
+fn set_positioned_rect_app_units(
+    positioned: &mut PositionedOperation,
+    exact: CapturedRectAppUnits,
+) {
+    let Operation::Path { bounds, data, .. } = &mut positioned.operation else {
+        unreachable!("exact rectangle placement requires a path")
+    };
+    *bounds = rect_from_app_units(exact);
+    *data = rectangle_path_data(bounds);
+    positioned.bounds = bounds.clone();
+}
+
+fn solid_rect_app_unit_authority(
+    positioned: &PositionedOperation,
+) -> Result<Option<CapturedRectAppUnits>, CaptureError> {
+    if !is_splittable_rect_path(&positioned.operation) {
+        return Ok(None);
+    }
+    let exact = match &positioned.authority {
+        None => return Ok(None),
+        Some(CapturedOperationAuthority::Bounds(exact)) => *exact,
+        Some(_) => {
+            return Err(CaptureError::InvalidScene(
+                "solid rectangle has non-bounds authority",
+            ));
+        },
+    };
+    if !matches!(&positioned.operation,
+        Operation::Path { bounds, data, fill: Some(_), stroke: None, .. }
+        if bounds == &positioned.bounds && data == &rectangle_path_data(bounds)) ||
+        exact.x < 0 ||
+        exact.y < 0 ||
+        exact.width <= 0 ||
+        exact.height <= 0 ||
+        exact.x.checked_add(exact.width).is_none() ||
+        exact.y.checked_add(exact.height).is_none()
+    {
+        return Err(CaptureError::InvalidScene(
+            "invalid exact solid rectangle authority",
+        ));
+    }
+    Ok(Some(exact))
+}
+
+fn exact_page_heights(pages: &[CapturePage]) -> Result<Option<Vec<i32>>, CaptureError> {
+    let Some(exact_pages) = pages
+        .iter()
+        .map(|page| page.app_units)
+        .collect::<Option<Vec<_>>>()
+    else {
+        return Ok(None);
+    };
+    if !pages.iter().zip(&exact_pages).all(|(page, exact)| {
+        page.style_source == Some(CapturedPageStyleSource::RequestDefaults) &&
+            valid_page_app_unit_authority(page, *exact)
+    }) {
+        return Err(CaptureError::InvalidPageGeometryAuthority);
+    }
+    Ok(Some(
+        exact_pages.into_iter().map(|page| page.height).collect(),
+    ))
+}
+
 fn split_solid_rect_operations(
     pages: &[CapturePage],
     operations: Vec<PositionedOperation>,
 ) -> Result<Vec<PositionedOperation>, CaptureError> {
+    let exact_heights = exact_page_heights(pages)?;
     let mut split = Vec::with_capacity(operations.len());
     for operation in operations {
+        let exact = solid_rect_app_unit_authority(&operation)?;
+        if exact.is_some_and(|exact| operation.bounds != rect_from_app_units(exact)) {
+            return Err(CaptureError::InvalidScene(
+                "solid rectangle differs from source app-unit authority",
+            ));
+        }
         if !is_page_spanning_rect_path(&operation.operation) || operation.bounds.height == 0.0 {
+            // Table edges retain their owning row's page; do not duplicate the
+            // centered overhang on the next page. Validate their original
+            // integer geometry here before repeat/page translations instead.
             split.push(operation);
+            continue;
+        }
+        if let (Some(exact), Some(heights)) = (exact, exact_heights.as_ref()) {
+            let top = i64::from(exact.y);
+            let bottom = top
+                .checked_add(i64::from(exact.height))
+                .ok_or(CaptureError::InvalidPageGeometryAuthority)?;
+            let mut origin = 0_i64;
+            let mut covered = 0_i64;
+            for height in heights {
+                let end = origin
+                    .checked_add(i64::from(*height))
+                    .ok_or(CaptureError::InvalidPageGeometryAuthority)?;
+                let intersection_top = top.max(origin);
+                let intersection_bottom = bottom.min(end);
+                if intersection_top < intersection_bottom {
+                    let mut part = operation.clone();
+                    let part_exact = CapturedRectAppUnits {
+                        y: i32::try_from(intersection_top)
+                            .map_err(|_| CaptureError::InvalidPageGeometryAuthority)?,
+                        height: i32::try_from(intersection_bottom - intersection_top)
+                            .map_err(|_| CaptureError::InvalidPageGeometryAuthority)?,
+                        ..exact
+                    };
+                    set_positioned_rect_app_units(&mut part, part_exact);
+                    part.authority = Some(CapturedOperationAuthority::Bounds(part_exact));
+                    covered = covered
+                        .checked_add(i64::from(part_exact.height))
+                        .ok_or(CaptureError::InvalidPageGeometryAuthority)?;
+                    split.push(part);
+                }
+                origin = end;
+            }
+            if covered != i64::from(exact.height) {
+                return Err(CaptureError::OperationOutsidePageSequence {
+                    sequence: operation.sequence,
+                });
+            }
             continue;
         }
 
@@ -2033,6 +2210,55 @@ fn operation_page(
     pages: &[CapturePage],
     operation: &mut PositionedOperation,
 ) -> Result<(usize, f64), CaptureError> {
+    if let Some(exact) = solid_rect_app_unit_authority(operation)? &&
+        let Some(heights) = exact_page_heights(pages)?
+    {
+        // Source compatibility is checked before splitting. A repeated header
+        // can subsequently translate these integers and its compatibility
+        // floats independently; page ownership must follow only the integers.
+        let top = i64::from(exact.y);
+        let bottom = top
+            .checked_add(i64::from(exact.height))
+            .ok_or(CaptureError::InvalidPageGeometryAuthority)?;
+        let mut origin = 0_i64;
+        let mut compatibility_origin = 0.0;
+        for (page_index, (page, height)) in pages.iter().zip(heights).enumerate() {
+            let end = origin
+                .checked_add(i64::from(height))
+                .ok_or(CaptureError::InvalidPageGeometryAuthority)?;
+            if top >= origin && top < end {
+                if bottom > end {
+                    // Collapsed table edges are centered on a row boundary.
+                    // Preserve the existing owning-page clamp, using the
+                    // captured integers rather than dropping authority after
+                    // an f64 intersection. Backgrounds/borders must already
+                    // have been split and cannot take this table-only path.
+                    let maximum_centered_edge_overrun = i64::from(exact.width.min(exact.height));
+                    if is_page_spanning_rect_path(&operation.operation) ||
+                        bottom - end > maximum_centered_edge_overrun
+                    {
+                        return Err(CaptureError::OperationCrossesPageBoundary {
+                            sequence: operation.sequence,
+                            page_index,
+                        });
+                    }
+                    let clipped = CapturedRectAppUnits {
+                        height: i32::try_from(end - top)
+                            .map_err(|_| CaptureError::InvalidPageGeometryAuthority)?,
+                        ..exact
+                    };
+                    set_positioned_rect_app_units(operation, clipped);
+                    operation.authority = Some(CapturedOperationAuthority::Bounds(clipped));
+                }
+                return Ok((page_index, compatibility_origin));
+            }
+            origin = end;
+            compatibility_origin += f64::from(page.height);
+        }
+        return Err(CaptureError::OperationOutsidePageSequence {
+            sequence: operation.sequence,
+        });
+    }
     let top = operation.bounds.y;
     let bottom = top + operation.bounds.height;
     let mut origin = 0.0;
@@ -2309,6 +2535,7 @@ fn collect_links(links: Vec<CaptureLink>) -> Result<HashMap<u64, String>, Captur
 struct BoxLinkPlacement {
     fragment_index: usize,
     bounds: Rect,
+    app_units: Option<CapturedRectAppUnits>,
     target: String,
 }
 
@@ -2338,6 +2565,8 @@ fn collect_box_link_placements(
                     "collapsed-table-borders" |
                     "iframe" |
                     "text-effects" |
+                    "paged-fixed-content" |
+                    "unresolved-page-counter" |
                     "content-geometry"
             )
         })
@@ -2377,17 +2606,17 @@ fn collect_box_link_placements(
         let Some(sequence) = sequence else {
             continue;
         };
-        let bounds = fragment
+        let rect = fragment
             .rect
             .as_ref()
-            .ok_or(CaptureError::MissingLinkRect { sequence })?
-            .into_scene_rect();
+            .ok_or(CaptureError::MissingLinkRect { sequence })?;
         by_sequence
             .entry(sequence)
             .or_default()
             .push(BoxLinkPlacement {
                 fragment_index,
-                bounds,
+                bounds: rect.into_scene_rect(),
+                app_units: rect.app_units,
                 target: target.clone(),
             });
     }
@@ -2482,7 +2711,8 @@ fn append_box_links(
             sequence,
             structural_fragment_index: Some(placement.fragment_index),
             bounds: placement.bounds.clone(),
-            authority: None,
+            // The unpainted anchor owns this rectangle, not its painted descendant.
+            authority: placement.app_units.map(CapturedOperationAuthority::Bounds),
             operation: Operation::Link {
                 bounds: placement.bounds.clone(),
                 target: placement.target.clone(),
@@ -2940,6 +3170,29 @@ struct CaptureTableGroupRepeat {
     source_block_start: f32,
     target_block_start: f32,
     block_size: f32,
+    #[serde(default)]
+    app_units: Option<CaptureTableGroupRepeatAppUnits>,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CaptureTableGroupRepeatAppUnits {
+    source_block_start: i32,
+    target_block_start: i32,
+    block_size: i32,
+}
+
+impl CaptureTableGroupRepeat {
+    fn app_unit_authority_matches(&self) -> bool {
+        self.app_units.is_none_or(|exact| {
+            exact.source_block_start >= 0 &&
+                exact.target_block_start >= 0 &&
+                exact.block_size > 0 &&
+                app_units_to_f32_px(exact.source_block_start) == self.source_block_start &&
+                app_units_to_f32_px(exact.target_block_start) == self.target_block_start &&
+                app_units_to_f32_px(exact.block_size) == self.block_size
+        })
+    }
 }
 
 #[derive(Clone, Copy, Deserialize)]
@@ -3968,6 +4221,37 @@ mod tests {
         })
     }
 
+    fn exact_box_link_layout() -> serde_json::Value {
+        let mut layout = exact_text_link_layout();
+        layout["fragments"][0]["depth"] = serde_json::json!(1);
+        layout["fragments"][0]["tag_id"] = serde_json::json!(8);
+        layout["paint_events"][0]["tag_id"] = serde_json::json!(8);
+        layout["fragments"].as_array_mut().unwrap().insert(
+            0,
+            serde_json::json!({
+                "depth": 0,
+                "kind": "box",
+                "rect": {
+                    "x": app_units_to_f32_px(100_000_003),
+                    "y": 1.0,
+                    "width": 3.0,
+                    "height": 3.0,
+                    "app_units": {
+                        "x": 100_000_003,
+                        "y": 60,
+                        "width": 180,
+                        "height": 180
+                    }
+                },
+                "tag_id": 7,
+                "paint_fragment_id": null,
+                "text_run": null,
+                "image_url": null
+            }),
+        );
+        layout
+    }
+
     #[test]
     fn exact_paint_authority_preserves_event_operation_order() {
         let capture = capture_document_scene(
@@ -4062,6 +4346,130 @@ mod tests {
                     height: 120,
                 })),
             ]]
+        );
+    }
+
+    #[test]
+    fn unpainted_box_link_keeps_owner_rect_exact_authority() {
+        let capture = capture_document_scene(
+            &serde_json::to_vec(&exact_box_link_layout()).unwrap(),
+            |_| None,
+        )
+        .unwrap();
+
+        assert_eq!(capture.scene.pages[0].operations.len(), 2);
+        assert!(matches!(
+            capture.scene.pages[0].operations[0],
+            Operation::Text { .. }
+        ));
+        let Operation::Link { bounds, target, .. } = &capture.scene.pages[0].operations[1] else {
+            panic!("painted descendant must retain its unpainted anchor link");
+        };
+        assert_eq!(bounds.width, 3.0);
+        assert_eq!(bounds.height, 3.0);
+        assert_eq!(target, "https://example.test/exact");
+        assert_ne!((bounds.x * 60.0).round() as i32, 100_000_003);
+        assert_eq!(
+            capture.fixed_point_authority.page_operations[0][1],
+            Some(CapturedOperationAuthority::Bounds(CapturedRectAppUnits {
+                x: 100_000_003,
+                y: 60,
+                width: 180,
+                height: 180,
+            }))
+        );
+    }
+
+    #[test]
+    fn legacy_unpainted_box_link_does_not_invent_exact_authority() {
+        let mut layout = exact_box_link_layout();
+        layout["fragments"][0]["rect"]
+            .as_object_mut()
+            .unwrap()
+            .remove("app_units");
+        let capture =
+            capture_document_scene(&serde_json::to_vec(&layout).unwrap(), |_| None).unwrap();
+
+        assert_eq!(capture.scene.pages[0].operations.len(), 2);
+        assert!(matches!(
+            capture.scene.pages[0].operations[1],
+            Operation::Link { .. }
+        ));
+        // API 1 may retain float-only links; API 2 must still see missing authority.
+        assert_eq!(capture.fixed_point_authority.page_operations[0][1], None);
+    }
+
+    #[test]
+    fn directly_painted_link_does_not_gain_duplicate_owner_box_link() {
+        let mut layout = exact_box_link_layout();
+        layout["fragments"][1]["tag_id"] = serde_json::json!(7);
+        layout["paint_events"][0]["tag_id"] = serde_json::json!(7);
+        let capture =
+            capture_document_scene(&serde_json::to_vec(&layout).unwrap(), |_| None).unwrap();
+
+        assert_eq!(capture.scene.pages[0].operations.len(), 2);
+        assert!(matches!(
+            capture.scene.pages[0].operations[1],
+            Operation::Link { .. }
+        ));
+        assert_eq!(
+            capture.fixed_point_authority.page_operations[0][1],
+            Some(CapturedOperationAuthority::Bounds(CapturedRectAppUnits {
+                x: 100_000_001,
+                y: 60,
+                width: 120,
+                height: 120,
+            }))
+        );
+    }
+
+    #[test]
+    fn unpainted_box_link_page_translation_keeps_integer_authority() {
+        let mut layout = exact_box_link_layout();
+        let mut second_page = layout["page_sequence"]["pages"][0].clone();
+        second_page["index"] = serde_json::json!(1);
+        layout["page_sequence"]["pages"]
+            .as_array_mut()
+            .unwrap()
+            .push(second_page);
+        for fragment in layout["fragments"].as_array_mut().unwrap() {
+            let rect = &mut fragment["rect"];
+            let y = rect["app_units"]["y"].as_i64().unwrap() as i32 + 6001;
+            rect["y"] = serde_json::json!(app_units_to_f32_px(y));
+            rect["app_units"]["y"] = serde_json::json!(y);
+        }
+        let glyph = &mut layout["fragments"][1]["text_run"]["glyphs"][0];
+        glyph["y"] = serde_json::json!(app_units_to_f32_px(6121));
+        glyph["app_units"]["y"] = serde_json::json!(6121);
+        layout["paint_content_height"] = serde_json::json!(200.0);
+        let capture =
+            capture_document_scene(&serde_json::to_vec(&layout).unwrap(), |_| None).unwrap();
+
+        assert!(capture.scene.pages[0].operations.is_empty());
+        assert_eq!(capture.scene.pages[1].operations.len(), 2);
+        assert!(matches!(
+            capture.scene.pages[1].operations[1],
+            Operation::Link { .. }
+        ));
+        assert_eq!(
+            capture.fixed_point_authority.page_operations[1][1],
+            Some(CapturedOperationAuthority::Bounds(CapturedRectAppUnits {
+                x: 100_000_003,
+                y: 61,
+                width: 180,
+                height: 180,
+            }))
+        );
+    }
+
+    #[test]
+    fn unpainted_box_link_rejects_mismatched_owner_rect_authority() {
+        let mut layout = exact_box_link_layout();
+        layout["fragments"][0]["rect"]["app_units"]["width"] = serde_json::json!(240);
+
+        assert_eq!(
+            capture_document_scene(&serde_json::to_vec(&layout).unwrap(), |_| None),
+            Err(CaptureError::InvalidPaintGeometryAuthority)
         );
     }
 
@@ -4196,8 +4604,11 @@ mod tests {
         assert_eq!(data, "M10 20h20v2h-20z");
     }
 
-    #[test]
-    fn repeated_header_prepending_cannot_inherit_source_authority() {
+    fn repeated_header_distribution(
+        target: f32,
+        exact: Option<CaptureTableGroupRepeatAppUnits>,
+        rectangle: bool,
+    ) -> Result<DistributedOperations, CaptureError> {
         let page = |index| CapturePage {
             index,
             style_source: Some(CapturedPageStyleSource::RequestDefaults),
@@ -4232,7 +4643,7 @@ mod tests {
             width: 20.0,
             height: 10.0,
         };
-        let operations = vec![
+        let mut operations = vec![
             PositionedOperation {
                 sequence: 0,
                 structural_fragment_index: None,
@@ -4279,6 +4690,30 @@ mod tests {
                 },
             },
         ];
+        if rectangle {
+            let bounds = operations[0].bounds.clone();
+            operations[0].authority =
+                Some(CapturedOperationAuthority::Bounds(CapturedRectAppUnits {
+                    x: 600,
+                    y: 1_200,
+                    width: 1_200,
+                    height: 600,
+                }));
+            operations[0].operation = Operation::Path {
+                data: rectangle_path_data(&bounds),
+                bounds,
+                fill: Some(Color::default()),
+                fill_rule: FillRule::NonZero,
+                stroke: None,
+                meta: OperationMeta {
+                    semantics: Some(Semantics {
+                        role: "artifact".into(),
+                        label: Some("table-border".into()),
+                    }),
+                    source: None,
+                },
+            };
+        }
         let paint_events = vec![
             CapturePaintEvent {
                 sequence: 0,
@@ -4307,8 +4742,9 @@ mod tests {
             header_tag_id: 9,
             _row_group_index: 0,
             source_block_start: 20.0,
-            target_block_start: 120.0,
+            target_block_start: target,
             block_size: 10.0,
+            app_units: exact,
         }];
         let repeated_fragments = HashMap::from([(
             9,
@@ -4318,14 +4754,18 @@ mod tests {
             },
         )]);
 
-        let distributed = distribute_operations(
+        distribute_operations(
             &[page(0), page(1)],
             operations,
             &paint_events,
             &repeats,
             &repeated_fragments,
         )
-        .unwrap();
+    }
+
+    #[test]
+    fn repeated_header_prepending_cannot_inherit_source_authority() {
+        let distributed = repeated_header_distribution(120.0, None, false).unwrap();
 
         assert_eq!(
             distributed.page_operations,
@@ -4356,6 +4796,723 @@ mod tests {
         assert!(matches!(
             distributed.pages[1].operations[1],
             Operation::Image { .. }
+        ));
+    }
+
+    #[test]
+    fn repeated_header_translates_exact_text_and_rectangle_authority() {
+        let exact = Some(CaptureTableGroupRepeatAppUnits {
+            source_block_start: 1_200,
+            target_block_start: 7_380,
+            block_size: 600,
+        });
+        for rectangle in [false, true] {
+            let distributed = repeated_header_distribution(123.0, exact, rectangle).unwrap();
+            let expected = if rectangle {
+                CapturedOperationAuthority::Bounds(CapturedRectAppUnits {
+                    x: 600,
+                    y: 1_380,
+                    width: 1_200,
+                    height: 600,
+                })
+            } else {
+                CapturedOperationAuthority::Text {
+                    font_size_app_units: 720,
+                    glyphs: vec![CapturedGlyphAppUnits {
+                        x: 600,
+                        y: 1_980,
+                        advance: 420,
+                    }],
+                }
+            };
+            assert_eq!(distributed.page_operations[1][0], Some(expected));
+            assert_eq!(distributed.pages[1].operations.len(), 2);
+            assert!(matches!(
+                distributed.pages[1].operations[1],
+                Operation::Image { .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn repeated_header_rejects_mismatched_authority_and_preserves_exact_edge_clipping() {
+        let exact = CaptureTableGroupRepeatAppUnits {
+            source_block_start: 1_200,
+            target_block_start: 7_380,
+            block_size: 600,
+        };
+        assert!(matches!(
+            repeated_header_distribution(120.0, Some(exact), false),
+            Err(CaptureError::InvalidTableGroupRepeat { page_index: 1 })
+        ));
+        let clipped = repeated_header_distribution(
+            195.0,
+            Some(CaptureTableGroupRepeatAppUnits {
+                target_block_start: 11_700,
+                ..exact
+            }),
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            clipped.page_operations[1][0],
+            Some(CapturedOperationAuthority::Bounds(CapturedRectAppUnits {
+                x: 600,
+                y: 5700,
+                width: 1200,
+                height: 300,
+            }))
+        );
+        let Operation::Path { bounds, .. } = &clipped.pages[1].operations[0] else {
+            unreachable!()
+        };
+        assert_eq!(bounds.y, 95.0);
+        assert_eq!(bounds.height, 5.0);
+        let missing_repeat_authority = repeated_header_distribution(195.0, None, true).unwrap();
+        assert!(missing_repeat_authority.page_operations[1][0].is_none());
+    }
+
+    #[test]
+    fn repeat_authority_preserves_large_integers_and_checks_overflow() {
+        let repeat: CaptureTableGroupRepeat = serde_json::from_value(serde_json::json!({
+            "page_index": 1, "table_node": 1, "header_tag_id": 9, "row_group_index": 0,
+            "source_block_start": app_units_to_f32_px(100_000_001),
+            "target_block_start": app_units_to_f32_px(100_000_019),
+            "block_size": app_units_to_f32_px(601),
+            "app_units": { "source_block_start": 100_000_001,
+                "target_block_start": 100_000_019, "block_size": 601 }
+        }))
+        .unwrap();
+        assert!(repeat.app_unit_authority_matches());
+        let exact = repeat.app_units.unwrap();
+        let authority = CapturedOperationAuthority::Bounds(CapturedRectAppUnits {
+            x: 0,
+            y: 100_000_001,
+            width: 60,
+            height: 601,
+        });
+        let translated = translate_operation_authority_y(
+            authority.clone(),
+            i64::from(exact.source_block_start) - i64::from(exact.target_block_start),
+        )
+        .unwrap();
+        assert_eq!(
+            translated,
+            CapturedOperationAuthority::Bounds(CapturedRectAppUnits {
+                x: 0,
+                y: 100_000_019,
+                width: 60,
+                height: 601,
+            })
+        );
+        for invalid_offset in [i64::MIN, i64::MAX, i64::from(i32::MIN)] {
+            assert!(translate_operation_authority_y(authority.clone(), invalid_offset).is_none());
+        }
+        for invalid in [
+            CaptureTableGroupRepeatAppUnits {
+                source_block_start: -1,
+                ..exact
+            },
+            CaptureTableGroupRepeatAppUnits {
+                target_block_start: -1,
+                ..exact
+            },
+            CaptureTableGroupRepeatAppUnits {
+                block_size: 0,
+                ..exact
+            },
+        ] {
+            let invalid = CaptureTableGroupRepeat {
+                app_units: Some(invalid),
+                ..repeat.clone()
+            };
+            assert!(!invalid.app_unit_authority_matches());
+        }
+    }
+
+    fn exact_split_page(index: usize, width: i32, height: i32) -> CapturePage {
+        CapturePage {
+            index,
+            style_source: Some(CapturedPageStyleSource::RequestDefaults),
+            app_units: Some(CapturedPageAppUnits {
+                width,
+                height,
+                margin_top: 0,
+                margin_right: 0,
+                margin_bottom: 0,
+                margin_left: 0,
+                available_inline_size: width,
+                available_block_size: height,
+            }),
+            width: app_units_to_f32_px(width),
+            height: app_units_to_f32_px(height),
+            margin_top: 0.0,
+            margin_right: 0.0,
+            margin_bottom: 0.0,
+            margin_left: 0.0,
+            available_inline_size: app_units_to_f32_px(width),
+            available_block_size: app_units_to_f32_px(height),
+        }
+    }
+
+    fn exact_split_rectangle(exact: CapturedRectAppUnits) -> PositionedOperation {
+        let bounds = rect_from_app_units(exact);
+        PositionedOperation {
+            sequence: 4,
+            structural_fragment_index: None,
+            bounds: bounds.clone(),
+            authority: Some(CapturedOperationAuthority::Bounds(exact)),
+            operation: Operation::Path {
+                data: rectangle_path_data(&bounds),
+                bounds,
+                fill: Some(Color::default()),
+                fill_rule: FillRule::NonZero,
+                stroke: None,
+                meta: OperationMeta {
+                    semantics: Some(Semantics {
+                        role: "artifact".into(),
+                        label: Some("background".into()),
+                    }),
+                    source: None,
+                },
+            },
+        }
+    }
+
+    fn exact_table_edge(exact: CapturedRectAppUnits) -> PositionedOperation {
+        let mut operation = exact_split_rectangle(exact);
+        let Operation::Path { meta, .. } = &mut operation.operation else {
+            unreachable!()
+        };
+        meta.semantics.as_mut().unwrap().label = Some("table-border".into());
+        operation
+    }
+
+    #[test]
+    fn exact_table_edges_keep_centered_page_clamps_without_duplicate_overhangs() {
+        let pages = [
+            exact_split_page(0, 47_622, 67_351),
+            exact_split_page(1, 47_622, 67_351),
+        ];
+        let source = CapturedRectAppUnits {
+            x: 123,
+            y: 67_321,
+            width: 25_200,
+            height: 60,
+        };
+        let distributed = distribute_operations(
+            &pages,
+            vec![exact_table_edge(source)],
+            &[],
+            &[],
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert_eq!(distributed.pages[0].operations.len(), 1);
+        assert!(distributed.pages[1].operations.is_empty());
+        let clipped = CapturedRectAppUnits {
+            height: 30,
+            ..source
+        };
+        assert_eq!(
+            distributed.page_operations[0],
+            vec![Some(CapturedOperationAuthority::Bounds(clipped))]
+        );
+        let Operation::Path { bounds, data, .. } = &distributed.pages[0].operations[0] else {
+            unreachable!()
+        };
+        assert_eq!(*bounds, rect_from_app_units(clipped));
+        assert_eq!(*data, rectangle_path_data(bounds));
+    }
+
+    #[test]
+    fn exact_table_edges_use_original_au_for_page_four_and_large_intersections() {
+        let pages = (0..5)
+            .map(|index| exact_split_page(index, 47_622, 67_351))
+            .collect::<Vec<_>>();
+        let source = CapturedRectAppUnits {
+            x: 123,
+            y: 3 * 67_351,
+            width: 601,
+            height: 60,
+        };
+        assert!(f64::from(app_units_to_f32_px(source.y)) < 3.0 * f64::from(pages[0].height));
+        let distributed = distribute_operations(
+            &pages,
+            vec![exact_table_edge(source)],
+            &[],
+            &[],
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            distributed
+                .pages
+                .iter()
+                .map(|page| page.operations.len())
+                .collect::<Vec<_>>(),
+            vec![0, 0, 0, 1, 0]
+        );
+        assert_eq!(
+            distributed.page_operations[3],
+            vec![Some(CapturedOperationAuthority::Bounds(
+                CapturedRectAppUnits { y: 0, ..source }
+            ))]
+        );
+        let Operation::Path { bounds, .. } = &distributed.pages[3].operations[0] else {
+            unreachable!()
+        };
+        assert_eq!(bounds.y, 0.0);
+
+        let large = CapturedRectAppUnits {
+            x: 100_000_001,
+            y: 100_000_019,
+            width: 601,
+            height: 60,
+        };
+        let operation = exact_table_edge(large);
+        assert_ne!((operation.bounds.y * 60.0).round() as i32, large.y);
+        let distributed = distribute_operations(
+            &[exact_split_page(0, 200_000_000, 100_000_050)],
+            vec![operation],
+            &[],
+            &[],
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            distributed.page_operations[0],
+            vec![Some(CapturedOperationAuthority::Bounds(
+                CapturedRectAppUnits {
+                    height: 31,
+                    ..large
+                }
+            ))]
+        );
+    }
+
+    #[test]
+    fn table_edge_page_clipping_never_invents_missing_authority() {
+        let source = CapturedRectAppUnits {
+            x: 0,
+            y: 5970,
+            width: 3000,
+            height: 60,
+        };
+        for missing_page in [false, true] {
+            let mut page = exact_split_page(0, 6000, 6000);
+            let mut operation = exact_table_edge(source);
+            if missing_page {
+                page.app_units = None;
+                page.style_source = None;
+            } else {
+                operation.authority = None;
+            }
+            let distributed =
+                distribute_operations(&[page], vec![operation], &[], &[], &HashMap::new()).unwrap();
+            assert_eq!(distributed.page_operations[0], vec![None]);
+        }
+    }
+
+    #[test]
+    fn exact_table_edges_reject_invalid_authority_and_excessive_crossings() {
+        let pages = [exact_split_page(0, 6000, 6000)];
+        let source = CapturedRectAppUnits {
+            x: 0,
+            y: 5970,
+            width: 3000,
+            height: 60,
+        };
+        let mut mismatched = exact_table_edge(source);
+        mismatched.authority = Some(CapturedOperationAuthority::Bounds(CapturedRectAppUnits {
+            width: 3001,
+            ..source
+        }));
+        assert!(split_solid_rect_operations(&pages, vec![mismatched]).is_err());
+        let mut arbitrary = exact_table_edge(source);
+        let Operation::Path { data, .. } = &mut arbitrary.operation else {
+            unreachable!()
+        };
+        *data = "M0 0L1 1Z".into();
+        assert!(split_solid_rect_operations(&pages, vec![arbitrary]).is_err());
+        assert!(
+            split_solid_rect_operations(
+                &pages,
+                vec![exact_table_edge(CapturedRectAppUnits {
+                    x: i32::MAX,
+                    ..source
+                })]
+            )
+            .is_err()
+        );
+        assert!(matches!(
+            distribute_operations(
+                &pages,
+                vec![exact_table_edge(CapturedRectAppUnits {
+                    y: 5000,
+                    width: 60,
+                    height: 3000,
+                    ..source
+                })],
+                &[],
+                &[],
+                &HashMap::new(),
+            ),
+            Err(CaptureError::OperationCrossesPageBoundary {
+                sequence: 4,
+                page_index: 0
+            })
+        ));
+    }
+
+    #[test]
+    fn repeated_header_paint_order_keeps_opaque_canvas_below_text_and_same_event_borders() {
+        let pages = [
+            exact_split_page(0, 6000, 6000),
+            exact_split_page(1, 6000, 6000),
+        ];
+        let text_operation = |sequence, top, text: &str| {
+            let exact = CapturedGlyphAppUnits {
+                x: 600,
+                y: top + 600,
+                advance: 420,
+            };
+            PositionedOperation {
+                sequence,
+                structural_fragment_index: None,
+                bounds: rect_from_app_units(CapturedRectAppUnits {
+                    x: 600,
+                    y: top,
+                    width: 1200,
+                    height: 600,
+                }),
+                authority: Some(CapturedOperationAuthority::Text {
+                    font_size_app_units: 720,
+                    glyphs: vec![exact],
+                }),
+                operation: Operation::Text {
+                    text: text.into(),
+                    font: "font".into(),
+                    font_size: 12.0,
+                    color: Color::default(),
+                    glyphs: vec![Glyph {
+                        id: 1,
+                        x: f64::from(app_units_to_f32_px(exact.x)),
+                        y: f64::from(app_units_to_f32_px(exact.y)),
+                        advance: f64::from(app_units_to_f32_px(exact.advance)),
+                        text_range: None,
+                    }],
+                    meta: OperationMeta::default(),
+                },
+            }
+        };
+        let mut canvas = exact_split_rectangle(CapturedRectAppUnits {
+            x: 0,
+            y: 0,
+            width: 6000,
+            height: 12000,
+        });
+        canvas.sequence = 0;
+        let Operation::Path { fill, .. } = &mut canvas.operation else {
+            unreachable!()
+        };
+        *fill = Some(Color {
+            r: 1.0,
+            g: 1.0,
+            b: 1.0,
+            a: 1.0,
+        });
+        let borders = [600, 1200].map(|x| {
+            let mut border = exact_split_rectangle(CapturedRectAppUnits {
+                x,
+                y: 1860,
+                width: 600,
+                height: 60,
+            });
+            border.sequence = 2;
+            let Operation::Path { meta, .. } = &mut border.operation else {
+                unreachable!()
+            };
+            meta.semantics.as_mut().unwrap().label = Some("border".into());
+            border
+        });
+        let mut operations = vec![canvas, text_operation(1, 1200, "header")];
+        operations.extend(borders);
+        operations.push(text_operation(3, 9000, "body"));
+        let paint_events = [1, 5, 6, 7]
+            .into_iter()
+            .enumerate()
+            .map(|(sequence, fragment_id)| CapturePaintEvent {
+                sequence,
+                kind: "paint-rect".into(),
+                fragment_id: Some(fragment_id),
+                tag_id: None,
+                _spatial_node_id: 0,
+                _clip_id: None,
+                table_borders: Vec::new(),
+                paint_rects: Vec::new(),
+            })
+            .collect::<Vec<_>>();
+        let repeats = [CaptureTableGroupRepeat {
+            page_index: 1,
+            _table_node: Some(1),
+            header_tag_id: 9,
+            _row_group_index: 0,
+            source_block_start: 20.0,
+            target_block_start: 120.0,
+            block_size: 12.0,
+            app_units: Some(CaptureTableGroupRepeatAppUnits {
+                source_block_start: 1200,
+                target_block_start: 7200,
+                block_size: 720,
+            }),
+        }];
+        let repeated_fragments = HashMap::from([(
+            9,
+            RepeatedTableHeaderFragments {
+                fragment_indices: 0..0,
+                paint_fragment_ids: HashSet::from([5, 6]),
+            },
+        )]);
+        let distributed = distribute_operations(
+            &pages,
+            operations,
+            &paint_events,
+            &repeats,
+            &repeated_fragments,
+        )
+        .unwrap();
+        let second_page = &distributed.pages[1].operations;
+        assert_eq!(second_page.len(), 5);
+        assert!(
+            matches!(&second_page[0], Operation::Path { fill: Some(color), .. }
+            if *color == Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 })
+        );
+        assert!(matches!(&second_page[1], Operation::Text { text, .. } if text == "header"));
+        for (operation, x) in second_page[2..4].iter().zip([10.0, 20.0]) {
+            assert!(matches!(operation, Operation::Path { bounds, meta, .. }
+                if bounds.x == x && meta.semantics.as_ref().unwrap().label.as_deref()
+                    == Some("repeated-table-header")));
+        }
+        assert!(matches!(&second_page[4], Operation::Text { text, .. } if text == "body"));
+        assert_eq!(
+            distributed.page_operations[1],
+            vec![
+                Some(CapturedOperationAuthority::Bounds(CapturedRectAppUnits {
+                    x: 0,
+                    y: 0,
+                    width: 6000,
+                    height: 6000,
+                })),
+                Some(CapturedOperationAuthority::Text {
+                    font_size_app_units: 720,
+                    glyphs: vec![CapturedGlyphAppUnits {
+                        x: 600,
+                        y: 1800,
+                        advance: 420
+                    }],
+                }),
+                Some(CapturedOperationAuthority::Bounds(CapturedRectAppUnits {
+                    x: 600,
+                    y: 1860,
+                    width: 600,
+                    height: 60,
+                })),
+                Some(CapturedOperationAuthority::Bounds(CapturedRectAppUnits {
+                    x: 1200,
+                    y: 1860,
+                    width: 600,
+                    height: 60,
+                })),
+                Some(CapturedOperationAuthority::Text {
+                    font_size_app_units: 720,
+                    glyphs: vec![CapturedGlyphAppUnits {
+                        x: 600,
+                        y: 3600,
+                        advance: 420
+                    }],
+                }),
+            ]
+        );
+    }
+
+    #[test]
+    fn exact_background_split_preserves_intact_rectangles_and_a4_page_ownership() {
+        let intact = CapturedRectAppUnits {
+            x: 123,
+            y: 234,
+            width: 601,
+            height: 121,
+        };
+        let parts = split_solid_rect_operations(
+            &[exact_split_page(0, 2000, 2000)],
+            vec![exact_split_rectangle(intact)],
+        )
+        .unwrap();
+        assert_eq!(parts.len(), 1);
+        assert_eq!(
+            parts[0].authority,
+            Some(CapturedOperationAuthority::Bounds(intact))
+        );
+
+        let pages = (0..5)
+            .map(|index| exact_split_page(index, 47_622, 67_351))
+            .collect::<Vec<_>>();
+        let full = CapturedRectAppUnits {
+            x: 0,
+            y: 0,
+            width: 47_622,
+            height: 5 * 67_351,
+        };
+        // Page four exposes accumulated f32-origin drift; integer ownership must win.
+        assert!(f64::from(app_units_to_f32_px(3 * 67_351)) < 3.0 * f64::from(pages[0].height));
+        let distributed = distribute_operations(
+            &pages,
+            vec![exact_split_rectangle(full)],
+            &[],
+            &[],
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert_eq!(distributed.pages.len(), 5);
+        for (page, authority) in distributed.pages.iter().zip(&distributed.page_operations) {
+            assert_eq!(page.operations.len(), 1);
+            assert_eq!(
+                *authority,
+                vec![Some(CapturedOperationAuthority::Bounds(
+                    CapturedRectAppUnits {
+                        x: 0,
+                        y: 0,
+                        width: 47_622,
+                        height: 67_351,
+                    }
+                ))]
+            );
+            let Operation::Path { bounds, .. } = &page.operations[0] else {
+                unreachable!()
+            };
+            assert_eq!(bounds.y, 0.0);
+        }
+    }
+
+    #[test]
+    fn exact_background_intersections_do_not_round_trip_large_source_integers() {
+        let source = CapturedRectAppUnits {
+            x: 100_000_001,
+            y: 100_000_019,
+            width: 601,
+            height: 121,
+        };
+        let pages = [
+            exact_split_page(0, 200_000_000, 100_000_050),
+            exact_split_page(1, 200_000_000, 100_000_050),
+        ];
+        let operation = exact_split_rectangle(source);
+        assert_ne!((operation.bounds.y * 60.0).round() as i32, source.y);
+        let distributed =
+            distribute_operations(&pages, vec![operation], &[], &[], &HashMap::new()).unwrap();
+        assert_eq!(
+            distributed.page_operations,
+            vec![
+                vec![Some(CapturedOperationAuthority::Bounds(
+                    CapturedRectAppUnits {
+                        height: 31,
+                        ..source
+                    }
+                ))],
+                vec![Some(CapturedOperationAuthority::Bounds(
+                    CapturedRectAppUnits {
+                        y: 0,
+                        height: 90,
+                        ..source
+                    }
+                ))],
+            ]
+        );
+    }
+
+    #[test]
+    fn background_splitting_never_invents_missing_authority() {
+        let source = CapturedRectAppUnits {
+            x: 0,
+            y: 3000,
+            width: 3000,
+            height: 6000,
+        };
+        let mut pages = [
+            exact_split_page(0, 6000, 6000),
+            exact_split_page(1, 6000, 6000),
+        ];
+        let mut missing_operation = exact_split_rectangle(source);
+        missing_operation.authority = None;
+        let parts = split_solid_rect_operations(&pages, vec![missing_operation]).unwrap();
+        assert_eq!(parts.len(), 2);
+        assert!(parts.iter().all(|part| part.authority.is_none()));
+
+        pages[1].app_units = None;
+        pages[1].style_source = None;
+        let parts =
+            split_solid_rect_operations(&pages, vec![exact_split_rectangle(source)]).unwrap();
+        assert_eq!(parts.len(), 2);
+        assert!(parts.iter().all(|part| part.authority.is_none()));
+    }
+
+    #[test]
+    fn exact_background_splitting_rejects_incomplete_coverage_and_invalid_authority() {
+        let pages = [
+            exact_split_page(0, 6000, 6000),
+            exact_split_page(1, 6000, 6000),
+        ];
+        let source = CapturedRectAppUnits {
+            x: 0,
+            y: 0,
+            width: 3000,
+            height: 6000,
+        };
+        assert!(matches!(
+            split_solid_rect_operations(
+                &pages,
+                vec![exact_split_rectangle(CapturedRectAppUnits {
+                    height: 12001,
+                    ..source
+                })]
+            ),
+            Err(CaptureError::OperationOutsidePageSequence { sequence: 4 })
+        ));
+        for invalid in [
+            CapturedRectAppUnits { x: -1, ..source },
+            CapturedRectAppUnits {
+                x: i32::MAX,
+                width: 1,
+                ..source
+            },
+            CapturedRectAppUnits {
+                y: i32::MAX,
+                height: 1,
+                ..source
+            },
+        ] {
+            assert!(
+                split_solid_rect_operations(&pages, vec![exact_split_rectangle(invalid)]).is_err()
+            );
+        }
+        let mut mismatched = exact_split_rectangle(source);
+        mismatched.authority = Some(CapturedOperationAuthority::Bounds(CapturedRectAppUnits {
+            width: 3001,
+            ..source
+        }));
+        assert!(split_solid_rect_operations(&pages, vec![mismatched]).is_err());
+        let mut arbitrary = exact_split_rectangle(source);
+        let Operation::Path { data, .. } = &mut arbitrary.operation else {
+            unreachable!()
+        };
+        *data = "M0 0L1 1Z".into();
+        assert!(split_solid_rect_operations(&pages, vec![arbitrary]).is_err());
+        let mut wrong_page = pages;
+        wrong_page[1].app_units.as_mut().unwrap().height += 1;
+        assert!(matches!(
+            split_solid_rect_operations(&wrong_page, vec![exact_split_rectangle(source)]),
+            Err(CaptureError::InvalidPageGeometryAuthority)
         ));
     }
 

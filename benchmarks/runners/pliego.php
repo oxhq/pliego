@@ -24,6 +24,9 @@
  * It launches the engine as the fixed unprivileged account in a fresh root-owned
  * leaf and treats procfs RSS/PSS polling only as lower-bound diagnostics.
  * Non-Linux runs retain wall/exit data but are not publishable.
+ * wall_ms ends at root exit; resource_usage.drain_ms extends it to subtree
+ * drain. one_shot_wall_ms includes sampler startup, drain, accounting settle
+ * and exit. Optional evidence copying and PDF oracles are outside all three.
  *
  * Publishable host contract: Linux x86_64, released `checked-release` bundle.
  */
@@ -52,7 +55,8 @@ Usage: php pliego.php --binary <path> --input <file.html> --output <file.pdf> --
   [--dimension-tolerance-points N] [--require-scene-report]
   --fixture-input-sha256 HASH --fixture-bundle-sha256 HASH [--fixture-asset PATH]...
   [--native-api2] [--isolate-network]
-  [--expect-failure] [--expected-code CODE] [--page-size WxH] [--page-margins T,R,B,L]
+  [--expect-failure] [--expected-code CODE] [--page-size WxH[au]] [--page-margins T,R,B,L[au]]
+  [--retain-root FRESH_DIRECTORY] [--root-wall-timeout-ms N (Linux only)]
   [--locale X] [--timezone Y] [--cwd DIR]
   [--runner-phase full|preflight|warmup|timed] [--sample-index N] [--self-test]
 EOT;
@@ -162,6 +166,11 @@ function sampler_interpreter(): ?string
     return $resolved;
 }
 
+// Focused helper tests load declarations without executing a benchmark.
+if (defined('PLIEGO_BENCHMARK_RUNNER_LIBRARY_ONLY') && PLIEGO_BENCHMARK_RUNNER_LIBRARY_ONLY) {
+    return;
+}
+
 $options = getopt('', [
     'binary:', 'input:', 'output:', 'artifacts:', 'samples:', 'warmup:',
     'page-count:', 'text-contains:', 'text-equals:', 'font-family:', 'raster-sha256:',
@@ -171,6 +180,7 @@ $options = getopt('', [
     'page-size:', 'page-margins:', 'locale:', 'timezone:', 'cwd:',
     'fixture-input-sha256:', 'fixture-bundle-sha256:', 'fixture-asset:',
     'native-api2', 'isolate-network', 'runner-phase:', 'sample-index:',
+    'retain-root:', 'root-wall-timeout-ms:',
     'self-test',
 ]);
 if ($options === false) {
@@ -365,6 +375,11 @@ $fixtureBundleSha256 = option($options, 'fixture-bundle-sha256') ?? fail('--fixt
 $fixtureAssets = text_contains_options($options['fixture-asset'] ?? []);
 $nativeApi2 = array_key_exists('native-api2', $options);
 $isolateNetwork = array_key_exists('isolate-network', $options);
+$retainRoot = option($options, 'retain-root');
+$rootWallTimeoutMs = root_wall_timeout_option(option($options, 'root-wall-timeout-ms'));
+if ($rootWallTimeoutMs !== null && PHP_OS_FAMILY !== 'Linux') {
+    fail('--root-wall-timeout-ms requires the Linux cgroup sampler');
+}
 
 if (!is_file($binary)) {
     fail("binary not found: {$binary}");
@@ -728,7 +743,8 @@ function run_engine(
     string $cwd,
     bool $isolateNetwork,
     ?string $stdinPath,
-    ?string $temporaryDirectory = null
+    ?string $temporaryDirectory = null,
+    ?float $rootWallTimeoutMs = null
 ): array
 {
     $nullDevice = PHP_OS_FAMILY === 'Windows' ? 'NUL' : '/dev/null';
@@ -795,6 +811,7 @@ function run_engine(
             '--stdout', $stdoutTmp,
             '--stderr', $stderrTmp,
             ...($stdinPath !== null ? ['--stdin', $stdinPath] : []),
+            ...($rootWallTimeoutMs !== null ? ['--root-wall-timeout-ms', (string) $rootWallTimeoutMs] : []),
             ...($isolateNetwork ? ['--isolate-network'] : []),
             '--',
             ...$command,
@@ -884,7 +901,14 @@ function run_engine(
         @unlink($samplerResultTmp);
         @unlink($samplerErrorTmp);
         if ($launcherExitCode !== 0 || !is_array($measurement) || !is_object($resourceUsage)) {
-            return ['error' => 'cgroup-v2 sampler failed: ' . ($samplerError ?: "exit {$launcherExitCode}")];
+            return [
+                'error' => 'cgroup-v2 sampler failed: ' . ($samplerError ?: "exit {$launcherExitCode}"),
+                'stdout' => $stdout,
+                'stderr' => $stderr,
+                'sampler_stdout' => $measurementJson,
+                'sampler_stderr' => $samplerError,
+                'one_shot_wall_ms' => round($wallMs, 3),
+            ];
         }
         foreach ([
             'wall_ms', 'cpu_user_ms', 'cpu_sys_ms', 'memory_current_bytes', 'memory_peak_bytes',
@@ -920,6 +944,8 @@ function run_engine(
             return ['error' => 'cgroup-v2 sampler returned invalid sampled_diagnostics'];
         }
         return [
+            'sampler_stdout' => $measurementJson,
+            'sampler_stderr' => $samplerError,
             'wall_ms' => (float) $measurement['wall_ms'],
             // Unlike engine wall time, this includes sampler launch, capture
             // validation, descendant drain, retained-counter settlement, and
@@ -1219,12 +1245,17 @@ function api2_page_size(?string $value): array
         return ['name' => 'A4'];
     }
     $value ??= '816x1056';
-    if (preg_match('/^([^x]+)x([^x]+)$/D', $value, $match) !== 1) {
-        fail('--page-size must be A4 or WIDTHxHEIGHT in CSS pixels');
+    $exact = str_ends_with($value, 'au');
+    if ($exact) {
+        $value = substr($value, 0, -2);
     }
+    if (preg_match('/^([^x]+)x([^x]+)$/D', $value, $match) !== 1) {
+        fail('--page-size must be A4, WIDTHxHEIGHT in CSS pixels, or WIDTHxHEIGHTau');
+    }
+    $convert = $exact ? 'exact_app_units' : 'css_number_to_app_units';
     return [
-        'width_app_units' => css_number_to_app_units($match[1], 'page width'),
-        'height_app_units' => css_number_to_app_units($match[2], 'page height'),
+        'width_app_units' => $convert($match[1], 'page width'),
+        'height_app_units' => $convert($match[2], 'page height'),
     ];
 }
 
@@ -1232,16 +1263,200 @@ function api2_page_size(?string $value): array
 function api2_page_margins(?string $value): array
 {
     $value ??= '48,48,48,48';
+    $exact = str_ends_with($value, 'au');
+    if ($exact) {
+        $value = substr($value, 0, -2);
+    }
     $parts = explode(',', $value);
     if (count($parts) !== 4) {
-        fail('--page-margins must contain TOP,RIGHT,BOTTOM,LEFT CSS-pixel values');
+        fail('--page-margins must contain TOP,RIGHT,BOTTOM,LEFT CSS pixels or an integer tuple ending in au');
     }
+    $convert = $exact ? 'exact_app_units' : 'css_number_to_app_units';
     return [
-        'top' => css_number_to_app_units($parts[0], 'top margin', true),
-        'right' => css_number_to_app_units($parts[1], 'right margin', true),
-        'bottom' => css_number_to_app_units($parts[2], 'bottom margin', true),
-        'left' => css_number_to_app_units($parts[3], 'left margin', true),
+        'top' => $convert($parts[0], 'top margin', true),
+        'right' => $convert($parts[1], 'right margin', true),
+        'bottom' => $convert($parts[2], 'bottom margin', true),
+        'left' => $convert($parts[3], 'left margin', true),
     ];
+}
+
+function exact_app_units(string $value, string $label, bool $allowZero = false): int
+{
+    if (preg_match('/^(0|[1-9][0-9]*)$/D', $value) !== 1
+        || strlen($value) > 10 || (int) $value > 2_147_483_647
+        || (!$allowZero && $value === '0')) {
+        fail("{$label} must be a canonical " . ($allowZero ? 'nonnegative' : 'positive') . ' i32 app-unit integer');
+    }
+    return (int) $value;
+}
+
+function root_wall_timeout_option(?string $value): ?float
+{
+    if ($value === null) {
+        return null;
+    }
+    if (preg_match('/^(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$/D', $value) !== 1
+        || !is_finite((float) $value) || (float) $value <= 0) {
+        fail('--root-wall-timeout-ms must be a finite positive number');
+    }
+    return (float) $value;
+}
+
+function prepare_retention_root(string $path, string $fixtureCwd): string
+{
+    $parent = realpath(dirname($path));
+    $name = basename($path);
+    if ((!str_starts_with($path, DIRECTORY_SEPARATOR) && !is_windows_absolute_path($path))
+        || $parent === false || !is_dir($parent) || !is_bare_input_name($name)
+        || file_exists($path) || is_link($path)) {
+        throw new RuntimeException('--retain-root must be a fresh absolute directory with an existing parent');
+    }
+    $resolved = $parent . DIRECTORY_SEPARATOR . $name;
+    $comparison = PHP_OS_FAMILY === 'Windows' ? strtolower($resolved) : $resolved;
+    $fixture = PHP_OS_FAMILY === 'Windows' ? strtolower($fixtureCwd) : $fixtureCwd;
+    if ($comparison === $fixture || str_starts_with($comparison, $fixture . DIRECTORY_SEPARATOR)) {
+        throw new RuntimeException('--retain-root must be outside the frozen fixture cwd');
+    }
+    if (!mkdir($resolved, 0700)) {
+        throw new RuntimeException('cannot exclusively create retention root');
+    }
+    return $resolved;
+}
+
+/** Wall intervals, not CPU accounting scopes; null means no complete measurement. */
+function benchmark_timing_boundaries(array $exec): array
+{
+    $usage = $exec['resource_usage'] ?? null;
+    $root = isset($exec['wall_ms']) ? (float) $exec['wall_ms'] : null;
+    $drain = is_object($usage) && isset($usage->drain_ms) ? (float) $usage->drain_ms : null;
+    return [
+        'root_wall_ms' => $root,
+        'tree_wall_ms' => $root !== null && $drain !== null ? round($root + $drain, 3) : null,
+        'sampler_lifecycle_wall_ms' => $exec['one_shot_wall_ms'] ?? null,
+        'semantics' => [
+            'root_wall_ms' => 'Linux: measured root SIGCONT through pidfd-observed root exit; non-Linux: proc_open through proc_close',
+            'tree_wall_ms' => 'Linux: root wall plus observed descendant drain, excluding accounting settle; unavailable elsewhere',
+            'sampler_lifecycle_wall_ms' => 'PHP proc_open through proc_close, including Linux sampler startup, drain, accounting settle and exit',
+            'excluded' => 'input staging, PDF correctness oracles, retained evidence copying, application storage',
+        ],
+    ];
+}
+
+/** Copy post-execution regular files only. Failure leaves both original and partial proof intact. */
+function retain_sample_evidence(array $state, int $index, array $sample, array $exec, array $directories): string
+{
+    $root = $state['retainRoot'] . DIRECTORY_SEPARATOR . 'sample-' . $index;
+    if (!@mkdir($root, 0700)) {
+        throw new RuntimeException("retained sample already exists or cannot be created: {$root}");
+    }
+    $inventory = [];
+    $totalBytes = 0;
+    $write = static function (string $relative, string $bytes) use ($root, &$inventory, &$totalBytes): void {
+        if (strlen($bytes) > 64 * 1024 * 1024 || $totalBytes + strlen($bytes) > 512 * 1024 * 1024
+            || count($inventory) >= 8192 || !is_safe_fixture_path($relative)) {
+            throw new RuntimeException('retained evidence exceeds file, byte, or path bounds');
+        }
+        $target = $root . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $relative);
+        $parent = dirname($target);
+        if (!is_dir($parent) && !mkdir($parent, 0700, true)) {
+            throw new RuntimeException('cannot create retained evidence subdirectory');
+        }
+        $stream = fopen($target, 'xb');
+        if ($stream === false) {
+            throw new RuntimeException('cannot exclusively create retained evidence file');
+        }
+        try {
+            if (fwrite($stream, $bytes) !== strlen($bytes)) {
+                throw new RuntimeException('short retained evidence write');
+            }
+        } finally {
+            fclose($stream);
+        }
+        $hash = hash('sha256', $bytes);
+        if (hash_file('sha256', $target) !== $hash) {
+            throw new RuntimeException('retained evidence readback mismatch');
+        }
+        $inventory[$relative] = ['bytes' => strlen($bytes), 'sha256' => $hash];
+        $totalBytes += strlen($bytes);
+    };
+    foreach ($directories as $name => $directory) {
+        if (!file_exists($directory)) {
+            continue;
+        }
+        $source = realpath($directory);
+        if ($source === false || is_link($directory) || !is_dir($source) || !is_bare_input_name($name)) {
+            throw new RuntimeException('unsafe retained evidence source directory');
+        }
+        if (str_starts_with($root, $source . DIRECTORY_SEPARATOR)
+            || str_starts_with($source, $root . DIRECTORY_SEPARATOR) || $root === $source) {
+            throw new RuntimeException('retained evidence source and destination overlap');
+        }
+        if (!mkdir($root . DIRECTORY_SEPARATOR . $name, 0700)) {
+            throw new RuntimeException('cannot create retained source directory');
+        }
+        $iterator = new RecursiveIteratorIterator(
+            new RecursiveDirectoryIterator($source, FilesystemIterator::SKIP_DOTS),
+            RecursiveIteratorIterator::SELF_FIRST
+        );
+        foreach ($iterator as $entry) {
+            $path = $entry->getPathname();
+            $resolved = realpath($path);
+            if ($entry->isLink() || $resolved === false || !str_starts_with($resolved, $source . DIRECTORY_SEPARATOR)) {
+                throw new RuntimeException('retained evidence source contains a link or escaped path');
+            }
+            if ($entry->isDir()) {
+                continue;
+            }
+            $metadata = lstat($path);
+            if (!$entry->isFile() || $metadata === false || ($metadata['nlink'] ?? 0) !== 1
+                || $entry->getSize() > 64 * 1024 * 1024) {
+                throw new RuntimeException('retained evidence source must contain bounded non-hardlinked regular files');
+            }
+            $bytes = file_get_contents($path, false, null, 0, 64 * 1024 * 1024 + 1);
+            if (!is_string($bytes)) {
+                throw new RuntimeException('cannot read retained evidence source');
+            }
+            $write($name . '/' . str_replace('\\', '/', substr($path, strlen($source) + 1)), $bytes);
+            if (hash_file('sha256', $path) !== hash('sha256', $bytes)) {
+                throw new RuntimeException('retained evidence source changed during copy');
+            }
+        }
+    }
+    foreach (['stdout', 'stderr', 'sampler_stdout', 'sampler_stderr', 'request'] as $name) {
+        if (isset($exec[$name]) && is_string($exec[$name])) {
+            $write($name === 'request' ? 'request.json' : $name . '.txt', $exec[$name]);
+        }
+    }
+    $write('sample.json', json_encode($sample, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE | JSON_THROW_ON_ERROR) . "\n");
+    ksort($inventory, SORT_STRING);
+    $manifest = [
+        'schema' => 'pliego.benchmark-retained-sample.v1',
+        'index' => $index,
+        'phase' => $index === -1000000 ? 'preflight' : ($index < 0 ? 'warmup' : 'timed'),
+        'binary' => $state['binary'],
+        'binary_sha256' => $state['binarySha256'],
+        'fixture_input_sha256' => $state['fixtureInputSha256'],
+        'fixture_bundle_sha256' => $state['fixtureBundleSha256'],
+        'root_wall_timeout_ms' => $state['rootWallTimeoutMs'],
+        'timing' => benchmark_timing_boundaries($exec),
+        'files' => $inventory,
+    ];
+    $write('manifest.json', json_encode($manifest, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n");
+    return $root;
+}
+
+function retain_benchmark_attempt(array $state, int $index, array $sample, array $exec, array $directories): array
+{
+    if ($state['retainRoot'] === null) {
+        return $sample;
+    }
+    $root = $state['retainRoot'] . DIRECTORY_SEPARATOR . 'sample-' . $index;
+    $sample['retained'] = [
+        'artifacts_dir' => $root . DIRECTORY_SEPARATOR . (isset($directories['job']) ? 'job' : 'artifacts'),
+        'output_dir' => $root . DIRECTORY_SEPARATOR . (isset($directories['job']) ? 'job/delivery' : 'output'),
+    ];
+    retain_sample_evidence($state, $index, $sample, $exec, $directories);
+    return $sample;
 }
 
 /** @param list<string> $command */
@@ -1717,7 +1932,8 @@ function benchmark_engine_temporary_path(string $prefix): string
 function is_browsershot_adapter_path(string $path): bool
 {
     $normalized = str_replace('\\', '/', $path);
-    return str_ends_with($normalized, '/benchmarks/adapters/browsershot/adapter.php');
+    return str_ends_with($normalized, '/benchmarks/adapters/browsershot/adapter.php')
+        || str_ends_with($normalized, '/benchmarks/adapters/invobook-browsershot/adapter.php');
 }
 
 function browser_runtime_path_within_budget(string $path): bool
@@ -1792,13 +2008,15 @@ function run_adapter_sample(array $state, int $index): array
     }
 
     try {
-        $exec = run_engine($command, $state['cwd'], $state['isolateNetwork'], null, $temporaryDir);
+        $exec = run_engine($command, $state['cwd'], $state['isolateNetwork'], null, $temporaryDir, $state['rootWallTimeoutMs']);
     } finally {
         if ($temporaryDir !== null) {
             rrmdir($temporaryDir);
         }
     }
     if (isset($exec['error'])) {
+        retain_benchmark_attempt($state, $index, ['index' => $index, 'ok' => false, 'error' => $exec['error']], $exec,
+            ['artifacts' => $artifactsDir, 'output' => $outDir]);
         rrmdir($artifactsDir);
         rrmdir($outDir);
         fail("engine run failed: {$exec['error']}");
@@ -1988,10 +2206,12 @@ function run_adapter_sample(array $state, int $index): array
         'summary' => $summary,
     ];
 
+    $sample = retain_benchmark_attempt($state, $index, $sample, $exec,
+        ['artifacts' => $artifactsDir, 'output' => $outDir]);
     if ($pass) {
         rrmdir($outDir);
         rrmdir($artifactsDir);
-    } else {
+    } elseif ($state['retainRoot'] === null) {
         $sample['retained'] = ['artifacts_dir' => $artifactsDir, 'output_dir' => $outDir];
     }
     return $sample;
@@ -2012,13 +2232,17 @@ function run_api2_sample(array $state, int $index): array
             $job['root'],
             $state['isolateNetwork'],
             $requestPath,
-            $job['temporary']
+            $job['temporary'],
+            $state['rootWallTimeoutMs']
         );
     } finally {
         rrmdir(dirname($requestPath));
         rrmdir($job['temporary']);
     }
+    $exec['request'] = $job['request'];
     if (isset($exec['error'])) {
+        retain_benchmark_attempt($state, $index, ['index' => $index, 'ok' => false, 'error' => $exec['error']], $exec,
+            ['job' => $job['root']]);
         rrmdir($job['sandbox']);
         fail("engine run failed: {$exec['error']}");
     }
@@ -2373,9 +2597,10 @@ function run_api2_sample(array $state, int $index): array
         'summary' => $summary,
     ];
 
+    $sample = retain_benchmark_attempt($state, $index, $sample, $exec, ['job' => $job['root']]);
     if ($pass) {
         rrmdir($job['sandbox']);
-    } else {
+    } elseif ($state['retainRoot'] === null) {
         $sample['retained'] = [
             'artifacts_dir' => $job['root'],
             'output_dir' => $job['root'] . DIRECTORY_SEPARATOR . 'delivery',
@@ -2419,6 +2644,14 @@ function failed_correctness_checks(array $sample): string
     return is_string($encoded) ? $encoded : '[{"name":"(encoding-failed)"}]';
 }
 
+if ($retainRoot !== null) {
+    try {
+        $retainRoot = prepare_retention_root($retainRoot, $cwd);
+    } catch (RuntimeException $error) {
+        fail($error->getMessage());
+    }
+}
+
 $state = [
     'binary' => $binary,
     'binarySha256' => $binarySha256,
@@ -2448,6 +2681,8 @@ $state = [
     'fixtureAssets' => $fixtureAssets,
     'nativeApi2' => $nativeApi2,
     'isolateNetwork' => $isolateNetwork,
+    'retainRoot' => $retainRoot,
+    'rootWallTimeoutMs' => $rootWallTimeoutMs,
 ];
 
 assert_fixture_identity($state);

@@ -1,0 +1,101 @@
+{
+  "schema": "pliego.real-document-closure.v1",
+  "track": "aureus-ledger-300-repaired",
+  "entries": [
+    {
+      "path": ".gitattributes",
+      "bytes": 86,
+      "sha256": "ea5bce3d08684ebf3410c06219122489a3e42ff5d22d049b2527e775798cbf5b"
+    },
+    {
+      "path": "delivery-fonts.css",
+      "bytes": 699,
+      "sha256": "b86bf848b83221303287cb97e64027037a0184efec59f9e5240d1261fb0f1201"
+    },
+    {
+      "path": "document.blade.html",
+      "bytes": 147635,
+      "sha256": "ccb11d4c713a66d71fe7798e03bfbeb3b7fe90b74229790c7e9c1a512a7aa105"
+    },
+    {
+      "path": "font-closure.json",
+      "bytes": 1522,
+      "sha256": "1bd5fb66a199d7b8c0add4f9bceafd21e3f50bde28cdee5184f8586a9a0c38a2"
+    },
+    {
+      "path": "primary-account.json",
+      "bytes": 315,
+      "sha256": "e3b4bacf94d084922522c6f75cd39de36edc9025f2bb596064f3ddf722b2f4ef"
+    },
+    {
+      "path": "provenance.json",
+      "bytes": 2493,
+      "sha256": "51b82b39edb92e9772abc4e604e22de33d0743fbc3623647d52105f8c14e7362"
+    },
+    {
+      "path": "report-data.json",
+      "bytes": 627609,
+      "sha256": "8b132e5dbaab3e711bab785507109652098f3814c998cf7dbb89372a730e1d65"
+    },
+    {
+      "path": "resources/DejaVu-LICENSE.txt",
+      "bytes": 4862,
+      "sha256": "fc84e7cce6244e861666c5928c3891a25071dbbc3524848c6c56105fdcda4273"
+    },
+    {
+      "path": "resources/DejaVuSans-Bold.ttf",
+      "bytes": 705684,
+      "sha256": "e6476c1b80502924294eed40894c5b18e06c181444ca953e5334262df9c27724"
+    },
+    {
+      "path": "resources/DejaVuSans-BoldOblique.ttf",
+      "bytes": 643292,
+      "sha256": "eb436dca0c2594b73d8b603b892e374fdfd8d885d25ffb4f18df4c4c0b49e50f"
+    },
+    {
+      "path": "resources/DejaVuSans-Oblique.ttf",
+      "bytes": 635416,
+      "sha256": "4af75fa16ee6d3ad43e1ecec41862c24954af26a55c6bb1ebb27bd486a50f5f4"
+    },
+    {
+      "path": "resources/DejaVuSans.ttf",
+      "bytes": 757076,
+      "sha256": "7da195a74c55bef988d0d48f9508bd5d849425c1770dba5d7bfc6ce9ed848954"
+    },
+    {
+      "path": "source/dompdf-LICENSE.LGPL",
+      "bytes": 24352,
+      "sha256": "a90fe41057cac85869176942a0bca3da94a49e277ee5f8c5284be1aeaa59497e"
+    },
+    {
+      "path": "source/general-ledger.blade.php",
+      "bytes": 7632,
+      "sha256": "fb57d3cadd3bc8fef2a4486c49f30677bc7fb7cbe86a69f761e64c4b06d95ac5"
+    },
+    {
+      "path": "source/GeneralLedger.php",
+      "bytes": 12453,
+      "sha256": "430c7f4663a94d3eb51e10119930fd05f56048a313c5fa68e2cc75ee96de2664"
+    },
+    {
+      "path": "source/LICENSE",
+      "bytes": 1077,
+      "sha256": "c6dca3b0db5b68fd5971277605cf8e50ba151ffba6abdd508d0c42c9cfade7da"
+    },
+    {
+      "path": "source/shared-footer-space.patch",
+      "bytes": 744,
+      "sha256": "3817dd66b37d828d3426d1ed450a4b91176b05f5e38179734bc84d2a7b0ac742"
+    },
+    {
+      "path": "source-action-facts.json",
+      "bytes": 5627,
+      "sha256": "5eae13574d65a2d818312d773d8b20727aed33c5740a943f33761e8c55028f92"
+    },
+    {
+      "path": "synthetic-input.json",
+      "bytes": 90143,
+      "sha256": "b96df3fb5314f2ab09fa57d53bafebd121d33112218a4a4576783af8231041bd"
+    }
+  ]
+}

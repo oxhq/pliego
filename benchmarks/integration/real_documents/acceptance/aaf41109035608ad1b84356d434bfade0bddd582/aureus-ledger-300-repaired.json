@@ -1,0 +1,28 @@
+{
+  "schema": "pliego.real-document-visual-acceptance.v1",
+  "identity_sha256": "426bc225033cd719962a1931c9f9483cbc2ff4cc17fec604bc39b6cfeca50a38",
+  "targets": {
+    "aureus-dompdf-3.1.6": {
+      "reviewed": true,
+      "notes": "All 300 ordered entries, recomputed amounts, numeric columns, repeated headings, page counters and strict font/resource checks pass. Main reviewed actual native pages 1/7/13 and dompdf 1/8/15: readable, aligned, clear footer space, no clipping or missing glyphs. Functional layout accepted: 13 versus 15 pages, not pixel parity.",
+      "layout_fingerprints": [
+        "970255c32ddf9c3d35c678b578d9ced271cb8dc0286bdf7a4dbf20a8fef972be"
+      ],
+      "pdf_sha256": [
+        "003e1d4a12eb62f957487a9fe3b43f6c2ba3127936d2e48bf3619839dc130759"
+      ],
+      "evidence": "https://github.com/oxhq/pliego/actions/runs/33973963254; exact retained proof and actual PDF review in benchmarks/integration/real_documents/acceptance/aaf41109035608ad1b84356d434bfade0bddd582/review.md"
+    },
+    "pliego-candidate": {
+      "reviewed": true,
+      "notes": "All 300 ordered entries, recomputed amounts, numeric columns, repeated headings, page counters and strict font/resource checks pass. Main reviewed actual native pages 1/7/13 and dompdf 1/8/15: readable, aligned, clear footer space, no clipping or missing glyphs. Functional layout accepted: 13 versus 15 pages, not pixel parity.",
+      "layout_fingerprints": [
+        "de09110a7adac7c518336900a1896542007935b2943204a7c1b41a3024da880f"
+      ],
+      "pdf_sha256": [
+        "88c06f30f90c67c533f3263f961eb0087769d98d6cc3d6c5a34cf440a1cb835e"
+      ],
+      "evidence": "https://github.com/oxhq/pliego/actions/runs/33973963254; exact retained proof and actual PDF review in benchmarks/integration/real_documents/acceptance/aaf41109035608ad1b84356d434bfade0bddd582/review.md"
+    }
+  }
+}

@@ -1,0 +1,167 @@
+{
+  "schema": "pliego.real-document.manufacturing-corpus.v1",
+  "track": "aureus-manufacturing-008-font-closed",
+  "source": {
+    "repository": "https://github.com/aureuserp/aureuserp",
+    "commit": "d7e0ad85ae8fdea91d1cb1895a81000c332e830c",
+    "license": "MIT",
+    "repairedComposerLockSha256": "82133507ad710cc2748d95cba0ea3dfe5d375728c0d8d3587303e91d027c5fae",
+    "repairs": {
+      "guzzlehttp/guzzle": "7.15.2",
+      "league/commonmark": "2.10.0",
+      "livewire/livewire": "4.4.3"
+    },
+    "action": "plugins/webkul/manufacturing/src/Filament/Clusters/Operations/Actions/Print/PrintMOAction.php",
+    "view": "plugins/webkul/manufacturing/resources/views/filament/clusters/operations/actions/print/print-mo.blade.php",
+    "originalCapture": "008",
+    "data": "Synthetic original application manufacturing workflow, rolled back after original print action.",
+    "regenerationByteIdentity": false
+  },
+  "legacy": {
+    "provider": "dompdf",
+    "version": "3.1.6",
+    "laravelWrapper": "barryvdh/laravel-dompdf",
+    "laravelWrapperVersion": "3.1.2",
+    "barcode": "milon/barcode",
+    "barcodeVersion": "v13.1",
+    "dompdfSourceReference": "6d4b4eb8500f7a786da8868ba463a71b725a4005",
+    "laravelWrapperSourceReference": "ee3b72b19ccdf57d0243116ecb2b90261344dedc",
+    "barcodeSourceReference": "ce84b0ba0d9c0f19f1ef058cd39187bd9468dfc8",
+    "originalLaravelDompdfConfigSha256": "4d22df6fb0728d4a4020c8fe435263cb2e2bb81c7a675ea4f30e2a78537df10b",
+    "dpi": 96,
+    "remoteEnabled": false,
+    "fontSubsetting": false
+  },
+  "input": "document.blade.html",
+  "expectedFacts": "synthetic-input.json",
+  "originalInput": "original-capture008.html",
+  "adaptation": "Exactly two original DejaVu @font-face declarations; no other HTML/CSS or row-order change.",
+  "request": {
+    "pageSize": "47622x67351au",
+    "pageMargins": "2721,2721,2721,2721au",
+    "authority": "request-only-v1",
+    "source": "A4 portrait; dompdf original UA margin 1.2cm; authored body margin 0; nearest Au once."
+  },
+  "expectedComponentOrder": [
+    "V04 Frame",
+    "V04 Fastener",
+    "V04 Compound"
+  ],
+  "fonts": [
+    {
+      "path": "resources/DejaVuSans.ttf",
+      "postscriptName": "DejaVuSans",
+      "weight": 400
+    },
+    {
+      "path": "resources/DejaVuSans-Bold.ttf",
+      "postscriptName": "DejaVuSans-Bold",
+      "weight": 700
+    }
+  ],
+  "qualification": {
+    "legacyWindowsFrozenPdf": "machine and visual qualified in retained local evidence",
+    "candidate": "pending exact packaged candidate, font/artifact closure and visual review",
+    "hostedLinux": "not yet executed",
+    "benchmarkQualified": false
+  },
+  "files": [
+    {
+      "path": ".gitattributes",
+      "bytes": 78,
+      "sha256": "234f5fbb6dcdd11c9ef379778b43e49a913ff25a7159e3c7cc07ddabab676833"
+    },
+    {
+      "path": "delivery-fonts.css",
+      "bytes": 383,
+      "sha256": "2cef6f47fa1a45d713936d474af9761d69adbf78e1a4a60497ae927b32cb6da2"
+    },
+    {
+      "path": "document.blade.html",
+      "bytes": 21637,
+      "sha256": "a08f2e7250be77df689e62768b5929bed7a41ed9d4ae1783a0e297fc709f2c3c"
+    },
+    {
+      "path": "dompdf-original-ua.css",
+      "bytes": 7482,
+      "sha256": "a2ff4a84942f8a9fc7d80e34f6efe34e8d2cd7412b728130049db6ddb70df3c9"
+    },
+    {
+      "path": "font-closure.json",
+      "bytes": 1601,
+      "sha256": "ded8c0bc9b78ca1cfbc5241faa541e86e06ad8a03769762f083b39d1f2123c10"
+    },
+    {
+      "path": "licenses/Aureus-MIT.txt",
+      "bytes": 1077,
+      "sha256": "c6dca3b0db5b68fd5971277605cf8e50ba151ffba6abdd508d0c42c9cfade7da"
+    },
+    {
+      "path": "licenses/dompdf-LGPL.txt",
+      "bytes": 24352,
+      "sha256": "a90fe41057cac85869176942a0bca3da94a49e277ee5f8c5284be1aeaa59497e"
+    },
+    {
+      "path": "licenses/milon-barcode-LGPL.txt",
+      "bytes": 43636,
+      "sha256": "ae233d50413c1edc34785fffbb3058646aad3aebb5c16e4b5d7f478b3d41a49f"
+    },
+    {
+      "path": "original-capture008.html",
+      "bytes": 21254,
+      "sha256": "2cc2b3e25874fd11971d95b3d3799d56bc14d267de74c83ed356b6038975cc8e"
+    },
+    {
+      "path": "reference-observation.json",
+      "bytes": 11924,
+      "sha256": "5b45758b05bb4c233a5cd2890fa82093062bd70fda3a427e20877e85d4932c17"
+    },
+    {
+      "path": "resources/DejaVu-LICENSE.txt",
+      "bytes": 4862,
+      "sha256": "fc84e7cce6244e861666c5928c3891a25071dbbc3524848c6c56105fdcda4273"
+    },
+    {
+      "path": "resources/DejaVuSans-Bold.ttf",
+      "bytes": 705684,
+      "sha256": "e6476c1b80502924294eed40894c5b18e06c181444ca953e5334262df9c27724"
+    },
+    {
+      "path": "resources/DejaVuSans.ttf",
+      "bytes": 757076,
+      "sha256": "7da195a74c55bef988d0d48f9508bd5d849425c1770dba5d7bfc6ce9ed848954"
+    },
+    {
+      "path": "source-action-facts.json",
+      "bytes": 3550,
+      "sha256": "9cad0ff419eff8680cfb047acd2f51cdc8aeae1cff1ba609153657d522f36623"
+    },
+    {
+      "path": "source/print-mo.blade.php",
+      "bytes": 9268,
+      "sha256": "9fab633118c300158fe43819ebff1996d7fef29ac6fc01fcc01b594dae815ed1"
+    },
+    {
+      "path": "source/PrintMOAction.php",
+      "bytes": 1396,
+      "sha256": "b6040676d6d5764c45df5441aa539435aec9025ca212603940cbf28ca167bc11"
+    },
+    {
+      "path": "synthetic-input.json",
+      "bytes": 1038,
+      "sha256": "6eb005d4762d7aa13ba01b0c1cd67501d7efe2f07cb51b6cd5821f5316e79b8d"
+    },
+    {
+      "path": "workflow-facts.json",
+      "bytes": 1577,
+      "sha256": "fd31a0e76c7c4c4d033286f5a45f80238a209f848482e9f59fac07b5c921021d"
+    }
+  ],
+  "referenceObservation": {
+    "provider": "dompdf 3.1.6",
+    "pdfSha256": "19608c009c557aab393c5eeff20cf23a93e21f4acd0dda87ba22ff4b11de85d2",
+    "popplerVersion": "26.07.0",
+    "zxingVersion": "2.3.0",
+    "role": "Pure unit-test reference; not used to accept an actual PDF."
+  }
+}
