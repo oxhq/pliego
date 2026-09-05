@@ -4,7 +4,11 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-"""Verify the files and source pointer in a packaged Pliego archive."""
+"""Verify the exact runtime inventory and source pointer in a Pliego archive.
+
+Source-only benchmark corpora are not runtime contents. This inventory contract
+does not determine the licensing of arbitrary file contents or source archives.
+"""
 
 from __future__ import annotations
 
@@ -225,6 +229,8 @@ def check_archive(
     for relative in sorted(required & sizes.keys()):
         if sizes[relative] == 0:
             errors.append(f"required file is empty: {relative}")
+    for relative in sorted(sizes.keys() - required):
+        errors.append(f"unexpected runtime file: {relative}")
 
     expected_text = {
         "SOURCE.txt": _source_text(repository_url, version),
@@ -348,7 +354,12 @@ def self_test() -> None:
     }
     with tempfile.TemporaryDirectory() as temporary:
         directory = Path(temporary)
-        for bundle, extension in (("linux-x86_64", ".tar.gz"), ("windows-x86_64", ".zip")):
+        for bundle, extension in (
+            ("linux-x86_64", ".tar.gz"),
+            ("windows-x86_64", ".zip"),
+            ("macos-x86_64", ".tar.gz"),
+            ("macos-aarch64", ".tar.gz"),
+        ):
             root = f"pliego-{version}-{bundle}"
             archive = directory / f"{root}{extension}"
             files = _fixture_files(version, bundle, repository_url, **identity)
@@ -360,6 +371,20 @@ def self_test() -> None:
                 repository_url=repository_url,
                 **identity,
             )
+            for extra in (
+                "benchmarks/integration/real_documents/fixtures/invobook/input.html",
+                "source/simple.repaired.blade.php",
+                "fonts/DejaVuSans.ttf",
+                "runtime.json",
+            ):
+                _write_fixture(archive, root, {**files, extra: b"source-only fixture\n"})
+                assert check_archive(
+                    archive,
+                    version=version,
+                    bundle=bundle,
+                    repository_url=repository_url,
+                    **identity,
+                ) == [f"unexpected runtime file: {extra}"]
 
         root = f"pliego-{version}-windows-x86_64"
         archive = directory / f"{root}.zip"
