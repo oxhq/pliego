@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+
+# SPDX-License-Identifier: MIT
+# xfail-license: The Pliego PHP SDK is MIT-licensed; see ../LICENSE.
+
 """Linux-only real API 2 forced-cancellation proof. No PID/name-based signal fallback."""
 
 from __future__ import annotations

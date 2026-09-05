@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# xfail-license: The Pliego PHP SDK is MIT-licensed; see ../LICENSE.
+
 """Portable parser/guard units. These do not execute Linux cancellation or native Pliego."""
 
 from dataclasses import replace
