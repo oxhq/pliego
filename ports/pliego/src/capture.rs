@@ -2345,6 +2345,7 @@ fn collect_links(links: Vec<CaptureLink>) -> Result<HashMap<u64, String>, Captur
 struct BoxLinkPlacement {
     fragment_index: usize,
     bounds: Rect,
+    app_units: Option<CapturedRectAppUnits>,
     target: String,
 }
 
@@ -2413,17 +2414,17 @@ fn collect_box_link_placements(
         let Some(sequence) = sequence else {
             continue;
         };
-        let bounds = fragment
+        let rect = fragment
             .rect
             .as_ref()
-            .ok_or(CaptureError::MissingLinkRect { sequence })?
-            .into_scene_rect();
+            .ok_or(CaptureError::MissingLinkRect { sequence })?;
         by_sequence
             .entry(sequence)
             .or_default()
             .push(BoxLinkPlacement {
                 fragment_index,
-                bounds,
+                bounds: rect.into_scene_rect(),
+                app_units: rect.app_units,
                 target: target.clone(),
             });
     }
@@ -2518,7 +2519,8 @@ fn append_box_links(
             sequence,
             structural_fragment_index: Some(placement.fragment_index),
             bounds: placement.bounds.clone(),
-            authority: None,
+            // The unpainted anchor owns this rectangle, not its painted descendant.
+            authority: placement.app_units.map(CapturedOperationAuthority::Bounds),
             operation: Operation::Link {
                 bounds: placement.bounds.clone(),
                 target: placement.target.clone(),
@@ -4027,6 +4029,37 @@ mod tests {
         })
     }
 
+    fn exact_box_link_layout() -> serde_json::Value {
+        let mut layout = exact_text_link_layout();
+        layout["fragments"][0]["depth"] = serde_json::json!(1);
+        layout["fragments"][0]["tag_id"] = serde_json::json!(8);
+        layout["paint_events"][0]["tag_id"] = serde_json::json!(8);
+        layout["fragments"].as_array_mut().unwrap().insert(
+            0,
+            serde_json::json!({
+                "depth": 0,
+                "kind": "box",
+                "rect": {
+                    "x": app_units_to_f32_px(100_000_003),
+                    "y": 1.0,
+                    "width": 3.0,
+                    "height": 3.0,
+                    "app_units": {
+                        "x": 100_000_003,
+                        "y": 60,
+                        "width": 180,
+                        "height": 180
+                    }
+                },
+                "tag_id": 7,
+                "paint_fragment_id": null,
+                "text_run": null,
+                "image_url": null
+            }),
+        );
+        layout
+    }
+
     #[test]
     fn exact_paint_authority_preserves_event_operation_order() {
         let capture = capture_document_scene(
@@ -4121,6 +4154,130 @@ mod tests {
                     height: 120,
                 })),
             ]]
+        );
+    }
+
+    #[test]
+    fn unpainted_box_link_keeps_owner_rect_exact_authority() {
+        let capture = capture_document_scene(
+            &serde_json::to_vec(&exact_box_link_layout()).unwrap(),
+            |_| None,
+        )
+        .unwrap();
+
+        assert_eq!(capture.scene.pages[0].operations.len(), 2);
+        assert!(matches!(
+            capture.scene.pages[0].operations[0],
+            Operation::Text { .. }
+        ));
+        let Operation::Link { bounds, target, .. } = &capture.scene.pages[0].operations[1] else {
+            panic!("painted descendant must retain its unpainted anchor link");
+        };
+        assert_eq!(bounds.width, 3.0);
+        assert_eq!(bounds.height, 3.0);
+        assert_eq!(target, "https://example.test/exact");
+        assert_ne!((bounds.x * 60.0).round() as i32, 100_000_003);
+        assert_eq!(
+            capture.fixed_point_authority.page_operations[0][1],
+            Some(CapturedOperationAuthority::Bounds(CapturedRectAppUnits {
+                x: 100_000_003,
+                y: 60,
+                width: 180,
+                height: 180,
+            }))
+        );
+    }
+
+    #[test]
+    fn legacy_unpainted_box_link_does_not_invent_exact_authority() {
+        let mut layout = exact_box_link_layout();
+        layout["fragments"][0]["rect"]
+            .as_object_mut()
+            .unwrap()
+            .remove("app_units");
+        let capture =
+            capture_document_scene(&serde_json::to_vec(&layout).unwrap(), |_| None).unwrap();
+
+        assert_eq!(capture.scene.pages[0].operations.len(), 2);
+        assert!(matches!(
+            capture.scene.pages[0].operations[1],
+            Operation::Link { .. }
+        ));
+        // API 1 may retain float-only links; API 2 must still see missing authority.
+        assert_eq!(capture.fixed_point_authority.page_operations[0][1], None);
+    }
+
+    #[test]
+    fn directly_painted_link_does_not_gain_duplicate_owner_box_link() {
+        let mut layout = exact_box_link_layout();
+        layout["fragments"][1]["tag_id"] = serde_json::json!(7);
+        layout["paint_events"][0]["tag_id"] = serde_json::json!(7);
+        let capture =
+            capture_document_scene(&serde_json::to_vec(&layout).unwrap(), |_| None).unwrap();
+
+        assert_eq!(capture.scene.pages[0].operations.len(), 2);
+        assert!(matches!(
+            capture.scene.pages[0].operations[1],
+            Operation::Link { .. }
+        ));
+        assert_eq!(
+            capture.fixed_point_authority.page_operations[0][1],
+            Some(CapturedOperationAuthority::Bounds(CapturedRectAppUnits {
+                x: 100_000_001,
+                y: 60,
+                width: 120,
+                height: 120,
+            }))
+        );
+    }
+
+    #[test]
+    fn unpainted_box_link_page_translation_keeps_integer_authority() {
+        let mut layout = exact_box_link_layout();
+        let mut second_page = layout["page_sequence"]["pages"][0].clone();
+        second_page["index"] = serde_json::json!(1);
+        layout["page_sequence"]["pages"]
+            .as_array_mut()
+            .unwrap()
+            .push(second_page);
+        for fragment in layout["fragments"].as_array_mut().unwrap() {
+            let rect = &mut fragment["rect"];
+            let y = rect["app_units"]["y"].as_i64().unwrap() as i32 + 6001;
+            rect["y"] = serde_json::json!(app_units_to_f32_px(y));
+            rect["app_units"]["y"] = serde_json::json!(y);
+        }
+        let glyph = &mut layout["fragments"][1]["text_run"]["glyphs"][0];
+        glyph["y"] = serde_json::json!(app_units_to_f32_px(6121));
+        glyph["app_units"]["y"] = serde_json::json!(6121);
+        layout["paint_content_height"] = serde_json::json!(200.0);
+        let capture =
+            capture_document_scene(&serde_json::to_vec(&layout).unwrap(), |_| None).unwrap();
+
+        assert!(capture.scene.pages[0].operations.is_empty());
+        assert_eq!(capture.scene.pages[1].operations.len(), 2);
+        assert!(matches!(
+            capture.scene.pages[1].operations[1],
+            Operation::Link { .. }
+        ));
+        assert_eq!(
+            capture.fixed_point_authority.page_operations[1][1],
+            Some(CapturedOperationAuthority::Bounds(CapturedRectAppUnits {
+                x: 100_000_003,
+                y: 61,
+                width: 180,
+                height: 180,
+            }))
+        );
+    }
+
+    #[test]
+    fn unpainted_box_link_rejects_mismatched_owner_rect_authority() {
+        let mut layout = exact_box_link_layout();
+        layout["fragments"][0]["rect"]["app_units"]["width"] = serde_json::json!(240);
+
+        assert_eq!(
+            capture_document_scene(&serde_json::to_vec(&layout).unwrap(), |_| None),
+            Err(CaptureError::InvalidPaintGeometryAuthority)
         );
     }
 
