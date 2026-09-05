@@ -109,12 +109,11 @@ def text_bounds(operations: list[dict[str, Any]]) -> tuple[int, int, int]:
     return min(glyph["x"] for glyph in glyphs), max(glyph["x"] + glyph["advance"] for glyph in glyphs), ys.pop()
 
 
-def check_scene(scene: dict[str, Any], case: dict[str, Any]) -> dict[str, Any]:
+def check_scene(scene: dict[str, Any], case: dict[str, Any], font_resource: str) -> dict[str, Any]:
     require(scene.get("schema") == "pliego.document-scene" and scene.get("version") == 2, "not Scene v2")
     require(scene.get("app_units_per_css_px") == 60, "scene app-unit scale changed")
     pages = scene.get("pages", [])
     require(len(pages) == case["pages"], "fixed content altered the forced normal-flow page count")
-    font_resource = sha256_file(FONT_PATH)
     footer_geometry = []
     for index, page in enumerate(pages, 1):
         require(page.get("number") == index, "page numbering is missing, duplicated, or out of order")
@@ -130,8 +129,12 @@ def check_scene(scene: dict[str, Any], case: dict[str, Any]) -> dict[str, Any]:
         )
         require(all(op.get("font_size_app_units") == FONT_SIZE for op in operations), "fixture font size changed")
         require(
-            all(op.get("font", {}).get("resource") == font_resource for op in operations),
-            "fixture text did not use the exact supplied Ahem resource",
+            all(
+                op.get("font")
+                == {"resource": font_resource, "face_index": 0, "variations": [], "synthetic_bold": False}
+                for op in operations
+            ),
+            "fixture text did not use the exact resolved Ahem resource/face without synthesis",
         )
         body = [op for op in operations if BODY_TOKEN.search(op.get("text", ""))]
         footer = [op for op in operations if op not in body]
@@ -203,6 +206,47 @@ def check_pdf_text(text: str, case: dict[str, Any]) -> None:
             remainder == ("" if case.get("plain") else footer_text(case, index)),
             "PDF footer text differs from its page",
         )
+
+
+def font_tables(data: bytes) -> dict[bytes, bytes]:
+    require(len(data) >= 12 and data[:4] == b"\x00\x01\x00\x00", "expected a TrueType sfnt font")
+    count = struct.unpack_from(">H", data, 4)[0]
+    require(1 <= count <= 64 and 12 + 16 * count <= len(data), "invalid font table directory")
+    tables = {}
+    for index in range(count):
+        tag, _, offset, length = struct.unpack_from(">4sIII", data, 12 + index * 16)
+        require(
+            tag not in tables and offset >= 12 + 16 * count and offset + length <= len(data),
+            "font table bounds/identity invalid",
+        )
+        tables[tag] = data[offset : offset + length]
+    return tables
+
+
+def resolve_font_resource(delivery: Path, bundle: dict[str, Any]) -> dict[str, Any]:
+    # OTS may sanitize/repack the supplied font, changing its complete digest.
+    # Bind the oracle to the independently verified bundle entry, not to a hash
+    # chosen from scene operations; compare identifying/metric sfnt tables with
+    # the source Ahem. Glyph encoding/cmap/loca/head bytes need not be identical.
+    entries = [item for item in bundle["entries"] if item["path"].startswith("resources/")]
+    require(len(entries) == 1, "fixture must publish exactly one font resource")
+    entry = entries[0]
+    require(entry["media_type"] == "application/octet-stream", "fixture resource is not a font artifact")
+    require(entry["path"] == "resources/" + entry["sha256"].removeprefix("sha256:"), "font resource name/hash differs")
+    path = verify_artifact(delivery, entry)
+    raw, resolved = font_tables(FONT_PATH.read_bytes()), font_tables(path.read_bytes())
+    compared = (b"name", b"hhea", b"hmtx", b"maxp", b"OS/2")
+    require(
+        all(tag in raw and raw[tag] == resolved.get(tag) for tag in compared),
+        "resolved font does not preserve source Ahem identity/metrics",
+    )
+    return {
+        "raw_input_sha256": sha256_file(FONT_PATH),
+        "resolved_sha256": entry["sha256"],
+        "resolved_bytes": entry["bytes"],
+        "path": entry["path"],
+        "preserved_tables": [tag.decode("ascii") for tag in compared],
+    }
 
 
 def one_pixel_png() -> bytes:
@@ -392,7 +436,9 @@ def run_case(
         verify_artifact(delivery, item)
     pdf = delivery / "document.pdf"
     require(pdf.read_bytes().startswith(b"%PDF-"), "no PDF header")
-    evidence = check_scene(json.loads((delivery / "scene.json").read_bytes()), case)
+    font_binding = resolve_font_resource(delivery, bundle)
+    evidence = check_scene(json.loads((delivery / "scene.json").read_bytes()), case, font_binding["resolved_sha256"])
+    evidence["font_binding"] = font_binding
     text_tool = shutil.which("pdftotext")
     if text_tool:
         extracted = subprocess.run(
@@ -420,7 +466,7 @@ def fake_scene(case: dict[str, Any]) -> dict[str, Any]:
             "type": "text",
             "text": value,
             "font_size_app_units": FONT_SIZE,
-            "font": {"resource": font_resource},
+            "font": {"resource": font_resource, "face_index": 0, "variations": [], "synthetic_bold": False},
             "glyphs": [{"x": x + index * FONT_SIZE, "y": y, "advance": FONT_SIZE} for index in range(len(value))],
         }
 
@@ -450,6 +496,7 @@ def fake_scene(case: dict[str, Any]) -> dict[str, Any]:
 def self_test() -> None:
     require(len(CASES) == 23 and sum(bool(case.get("reject")) for case in CASES) == 14, "case inventory changed")
     font = FONT_PATH.read_bytes()
+    font_resource = sha256_file(FONT_PATH)
     tables = {
         tag: offset
         for tag, _, offset, _ in (
@@ -463,7 +510,7 @@ def self_test() -> None:
     )
     for case in CASES:
         if not case.get("reject"):
-            check_scene(fake_scene(case), case)
+            check_scene(fake_scene(case), case, font_resource)
             text = (
                 "\f".join(
                     f"BODY{page:02}\nTAIL{page:02}\n" + ("" if case.get("plain") else footer_text(case, page))
@@ -531,7 +578,7 @@ def self_test() -> None:
         else:
             page["number"] = 1
         try:
-            check_scene(invalid, case)
+            check_scene(invalid, case, font_resource)
         except AssertionError:
             pass
         else:
@@ -539,7 +586,7 @@ def self_test() -> None:
     literal = fake_scene(CASES[8])
     literal["pages"][9]["operations"][-1]["text"] = footer_text(CASES[8], 10).replace("Literal 0", "Literal 10")
     try:
-        check_scene(literal, CASES[8])
+        check_scene(literal, CASES[8], font_resource)
     except AssertionError:
         pass
     else:
