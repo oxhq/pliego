@@ -5,14 +5,14 @@
     "license": "MIT",
     "require": {
         "php": "^8.3",
-        "illuminate/console": "^13.0",
-        "illuminate/contracts": "^13.0",
-        "illuminate/http": "^13.0",
-        "illuminate/support": "^13.0",
-        "illuminate/view": "^13.0",
+        "illuminate/console": "^12.0 || ^13.0",
+        "illuminate/contracts": "^12.0 || ^13.0",
+        "illuminate/http": "^12.0 || ^13.0",
+        "illuminate/support": "^12.0 || ^13.0",
+        "illuminate/view": "^12.0 || ^13.0",
         "league/flysystem": "^3.25.1",
         "oxhq/pliego-php": "0.3.3",
-        "symfony/http-foundation": "^7.4 || ^8.0"
+        "symfony/http-foundation": "^7.2 || ^8.0"
     },
     "require-dev": {
         "laravel/pint": "^1.0"
@@ -28,6 +28,7 @@
         "test:quickstart": "@php tests/quickstart_test.php",
         "test:timings": "@php tests/bridge_timings_test.php",
         "test:storage": "@php tests/storage_test.php",
+        "test:framework": "@php tests/framework_compatibility_test.php",
         "test": ["@test:runtime", "@test:quickstart", "@test:timings", "@test:storage"]
     },
     "extra": {

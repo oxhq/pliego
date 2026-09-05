@@ -255,6 +255,135 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  framework-compatibility:
+    name: Laravel ${{ matrix.framework }} / PHP ${{ matrix.php }} integration
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - framework: '12'
+            php: '8.3'
+          - framework: '13'
+            php: '8.4'
+    env:
+      FRAMEWORK_MAJOR: ${{ matrix.framework }}
+      EXPECTED_PHP: ${{ matrix.php }}
+    steps:
+      - name: Check out exact candidate source
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+
+      - name: Set up the declared PHP floor
+        uses: shivammathur/setup-php@b604ade2a87db23f8871b7182e69ec5e75effb45 # v2
+        with:
+          php-version: ${{ matrix.php }}
+          coverage: none
+          extensions: mbstring, dom, xml, fileinfo, pdo_sqlite, zip
+
+      - name: Prepare an isolated full-framework Composer consumer
+        run: |
+          python3 <<'PY'
+          import json
+          import os
+          import pathlib
+          import subprocess
+
+          source = pathlib.Path(os.environ["GITHUB_WORKSPACE"])
+          consumer = pathlib.Path(os.environ["RUNNER_TEMP"]) / ("pliego-framework-" + os.environ["FRAMEWORK_MAJOR"])
+          consumer.mkdir()
+          (consumer / "proof").mkdir()
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as environment:
+              environment.write("CONSUMER=" + str(consumer) + "\n")
+              environment.write("PLIEGO_TEST_AUTOLOAD=" + str(consumer / "vendor/autoload.php") + "\n")
+          versions = {
+              name: (source / "sdk" / name / "VERSION").read_text(encoding="ascii").strip()
+              for name in ("php", "laravel")
+          }
+          manifest = {
+              "name": "pliego-proof/framework-" + os.environ["FRAMEWORK_MAJOR"],
+              "type": "project",
+              "require": {
+                  "php": "^8.3",
+                  "laravel/framework": "^" + os.environ["FRAMEWORK_MAJOR"] + ".0",
+                  "oxhq/pliego-laravel": versions["laravel"],
+              },
+              "repositories": [
+                  {"type": "path", "url": str(source / "sdk" / name),
+                   "options": {"symlink": False, "versions": {"oxhq/pliego-" + name: versions[name]}}}
+                  for name in ("php", "laravel")
+              ],
+          }
+          (consumer / "composer.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+          revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source).decode("ascii")
+          (consumer / "proof/source-commit.txt").write_text(revision, encoding="ascii")
+          PY
+
+      - name: Resolve maintained framework dependencies without policy bypasses
+        run: |
+          set -euo pipefail
+          php --version | tee "$CONSUMER/proof/php-version.txt"
+          composer --version | tee "$CONSUMER/proof/composer-version.txt"
+          composer --no-interaction --no-plugins --no-scripts --working-dir="$CONSUMER" \
+            install --prefer-dist --no-progress 2>&1 | tee "$CONSUMER/proof/install.log"
+          composer --no-interaction --no-plugins --working-dir="$CONSUMER" \
+            check-platform-reqs --format=json | tee "$CONSUMER/proof/platform-requirements.json"
+          composer --no-interaction --no-plugins --working-dir="$CONSUMER" \
+            audit --format=json | tee "$CONSUMER/proof/audit.json"
+
+      - name: Exercise the resolved framework and installed candidate SDKs
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          import os
+          import pathlib
+
+          consumer = pathlib.Path(os.environ["CONSUMER"])
+          for name in ("php", "laravel"):
+              package = consumer / "vendor/oxhq" / ("pliego-" + name)
+              assert package.is_dir() and not package.is_symlink(), "candidate package must be a Composer mirror"
+              (package / "vendor").mkdir(exist_ok=True)
+              # Test-entry-point forwarding only: dependencies and class maps
+              # come from the real, already resolved consumer autoloader.
+              (package / "vendor/autoload.php").write_text(
+                  "<?php return require dirname(__DIR__, 3).'/autoload.php';\n", encoding="utf-8"
+              )
+          PY
+          php "$CONSUMER/vendor/oxhq/pliego-laravel/tests/framework_compatibility_test.php" \
+            | tee "$CONSUMER/proof/framework.json"
+          composer --no-interaction --no-plugins --working-dir="$CONSUMER/vendor/oxhq/pliego-laravel" \
+            test 2>&1 | tee "$CONSUMER/proof/laravel-tests.log"
+          composer --no-interaction --no-plugins --working-dir="$CONSUMER/vendor/oxhq/pliego-php" \
+            test 2>&1 | tee "$CONSUMER/proof/php-tests.log"
+          python3 <<'PY'
+          import json
+          import os
+          import pathlib
+
+          proof = pathlib.Path(os.environ["CONSUMER"]) / "proof"
+          result = json.loads((proof / "framework.json").read_text(encoding="utf-8"))
+          assert result["outcome"] == "passed" and result["assertions"] >= 15, result
+          assert result["native"] == "fake-api2-process", result
+          assert result["framework"].split(".")[0] == os.environ["FRAMEWORK_MAJOR"], result
+          assert result["php"].startswith(os.environ["EXPECTED_PHP"] + "."), result
+          PY
+          echo 'Real Composer/framework integration with candidate source packages and a fake API 2 process. No native PDF, public-package, or release proof.' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Retain resolved framework evidence and exact dependency lock
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: pliego-framework-${{ matrix.framework }}-php-${{ matrix.php }}-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/pliego-framework-${{ matrix.framework }}/composer.json
+            ${{ runner.temp }}/pliego-framework-${{ matrix.framework }}/composer.lock
+            ${{ runner.temp }}/pliego-framework-${{ matrix.framework }}/proof/
+          if-no-files-found: error
+          retention-days: 30
+
   windows-private-job-root:
     name: Windows private API 2 job root
     runs-on: windows-2022
