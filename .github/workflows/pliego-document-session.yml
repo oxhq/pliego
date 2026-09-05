@@ -102,7 +102,18 @@ jobs:
           done
 
       - name: Test the production document session and build identity helpers
+        env:
+          PLIEGO_INVOICE_ORACLE_EVIDENCE_ROOT: ${{ runner.temp }}/pliego-invoice-oracle
         run: cargo test -p pliego --test document_session --test build_script --locked
+
+      - name: Retain exact invoice reference scene and PDF
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: pliego-direct-invoice-oracle
+          path: ${{ runner.temp }}/pliego-invoice-oracle
+          if-no-files-found: warn
+          retention-days: 30
 
       - name: Test Canvas retention and capture accounting
         run: |

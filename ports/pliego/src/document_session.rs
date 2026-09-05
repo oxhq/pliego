@@ -2669,10 +2669,10 @@ mod tests {
     use super::super::session::LocalDocument;
     use super::{
         Api2Execution, ConsoleEvidenceLog, ConsoleLogLevel, ControlledSettlementStep,
-        DocumentSession, FROZEN_INPUT_URL_ROOT, JSValue, MAX_CONSOLE_BYTES, MAX_CONSOLE_EVENTS,
-        PaintTicketAbortGuard, RESOURCE_EVIDENCE_ENTRY_OVERHEAD_BYTES, ReadinessPolicy,
-        RenderEnvironment, ResourceEvidenceLog, ResourcePolicyConfig, SessionCaptureEvidence,
-        SessionError, SessionHostDeadline, console_log_level_name,
+        DocumentOutcome, DocumentSession, FROZEN_INPUT_URL_ROOT, JSValue, MAX_CONSOLE_BYTES,
+        MAX_CONSOLE_EVENTS, PaintTicketAbortGuard, RESOURCE_EVIDENCE_ENTRY_OVERHEAD_BYTES,
+        ReadinessPolicy, RenderEnvironment, ResourceEvidenceLog, ResourcePolicyConfig,
+        SessionCaptureEvidence, SessionError, SessionHostDeadline, console_log_level_name,
         controlled_readiness_handshake_counts, session_host_timeout, validate_host_font_policy,
         validate_resolved_resource_policy, validate_resource_policy,
         with_current_readiness_evidence, with_readiness_evaluation_evidence,
@@ -2682,6 +2682,7 @@ mod tests {
     const PLIEGO_INPUT_CASE_ENV: &str = "PLIEGO_DOCUMENT_SESSION_PLIEGO_INPUT_FIXTURE";
     const CHARTJS_INPUT_ENV: &str = "PLIEGO_DOCUMENT_SESSION_CHARTJS_INPUT";
     const HTTP_BASE_ENV: &str = "PLIEGO_DOCUMENT_SESSION_HTTP_BASE";
+    const INVOICE_ORACLE_EVIDENCE_ENV: &str = "PLIEGO_INVOICE_ORACLE_EVIDENCE_ROOT";
     const ISOLATED_TEST: &str = "document_session::tests::isolated_resource_and_readiness_fixture";
     const PLIEGO_INPUT_ISOLATED_TEST: &str =
         "document_session::tests::isolated_pliego_input_url_fixture";
@@ -3048,6 +3049,72 @@ mod tests {
         "sha256:c1874a92a71ecde580f15075fe7d07ad6e5739ec794ad79291c9ba5b9bce1681";
     const PRE_SESSION_INVOICE_PDF: &str =
         "sha256:401e756f43adad12a137478cf36abe8273e89405e998b9d537ab62056d2face9";
+
+    fn retain_invoice_oracle_evidence(input: &Path, outcome: &DocumentOutcome, scene: &[u8]) {
+        let Some(root) = std::env::var_os(INVOICE_ORACLE_EVIDENCE_ENV) else {
+            return;
+        };
+        let root = PathBuf::from(root);
+        assert!(
+            root.is_absolute(),
+            "invoice oracle evidence root must be absolute"
+        );
+        fs::create_dir_all(&root).expect("create opt-in invoice oracle evidence root");
+        let directory = root.join(format!("invoice-oracle-{}", std::process::id()));
+        fs::create_dir(&directory).expect("invoice oracle evidence leaf must be fresh");
+        let input_bytes = fs::read(input).expect("read exact invoice oracle input");
+        let font = fs::read(input.with_file_name("Ahem.ttf")).expect("read original invoice font");
+        let capture = serde_json::to_vec_pretty(&outcome.capture).unwrap();
+        // SceneCapture's public JSON deliberately omits this internal ledger.
+        // Preserve its original integer values separately without changing that contract.
+        let authority = format!("{:#?}\n", outcome.capture.fixed_point_authority);
+        let mut artifacts = Vec::new();
+        for (name, bytes) in [
+            ("input.html", input_bytes.as_slice()),
+            ("Ahem.ttf", font.as_slice()),
+            ("scene.json", scene),
+            ("document.pdf", outcome.pdf.as_slice()),
+            ("capture.json", capture.as_slice()),
+            ("fixed-point-authority.txt", authority.as_bytes()),
+        ] {
+            assert!(
+                bytes.len() <= 16 * 1024 * 1024,
+                "invoice evidence artifact exceeds 16 MiB: {name}"
+            );
+            fs::write(directory.join(name), bytes).expect("write exact invoice oracle evidence");
+            artifacts.push(serde_json::json!({
+                "path": name, "bytes": bytes.len(), "sha256": content_address(bytes),
+            }));
+        }
+        let input_hash = content_address(&input_bytes);
+        let scene_hash = content_address(scene);
+        let pdf_hash = content_address(&outcome.pdf);
+        let manifest = serde_json::json!({
+            "schema": "pliego.invoice-oracle-diagnostic", "version": 1,
+            "test": ISOLATED_TEST, "case": "invoice-oracle",
+            "source_commit": env!("PLIEGO_SOURCE_COMMIT"),
+            "target": env!("PLIEGO_BUILD_TARGET"),
+            "expected": {"input_sha256": INVOICE_INPUT, "scene_sha256": PRE_SESSION_INVOICE_SCENE,
+                "pdf_sha256": PRE_SESSION_INVOICE_PDF, "pages": 2},
+            "actual": {"input_sha256": input_hash, "scene_sha256": scene_hash,
+                "pdf_sha256": pdf_hash, "pages": outcome.capture.scene.pages.len()},
+            "matches": {"input": input_hash == INVOICE_INPUT,
+                "scene": scene_hash == PRE_SESSION_INVOICE_SCENE,
+                "pdf": pdf_hash == PRE_SESSION_INVOICE_PDF,
+                "pages": outcome.capture.scene.pages.len() == 2},
+            "artifacts": artifacts,
+            "scope": "Original SceneCapture and emitted bytes; no raw layout snapshot is retained by DocumentOutcome",
+        });
+        fs::write(
+            directory.join("manifest.json"),
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .expect("write invoice oracle mismatch manifest before assertions");
+        eprintln!(
+            "invoice oracle evidence retained at {}",
+            directory.display()
+        );
+    }
 
     struct TempBundle(PathBuf);
 
@@ -5525,6 +5592,8 @@ document.fonts.ready.then(() => {
             },
             "invoice-oracle" => {
                 let outcome = result.expect("invoice oracle fixture should render");
+                let scene = outcome.capture.scene.normalized_json().unwrap();
+                retain_invoice_oracle_evidence(&input, &outcome, &scene);
                 assert_eq!(
                     content_address(&fs::read(&input).unwrap()),
                     INVOICE_INPUT,
@@ -5532,7 +5601,7 @@ document.fonts.ready.then(() => {
                 );
                 assert_eq!(outcome.capture.scene.pages.len(), 2);
                 assert_eq!(
-                    content_address(&outcome.capture.scene.normalized_json().unwrap()),
+                    content_address(&scene),
                     PRE_SESSION_INVOICE_SCENE,
                     "direct invoice scene differs from the exact pre-session servoshell oracle"
                 );
