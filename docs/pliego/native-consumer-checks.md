@@ -36,6 +36,44 @@ must remain unchanged. This is not an OS ACL test or a remote partial-write
 guarantee. Queue execution, concurrency, caller cancellation, independent
 adoption and public-package installation require separate evidence.
 
+## Laravel database queues and concurrent storage
+
+`sdk/laravel/tests/production_queue_test.php` uses the same native executable,
+framework dependencies and isolated application pattern. It requires PHP 8.4+
+and SQLite with Laravel's `IMMEDIATE` transactions, WAL journaling, `FULL`
+synchronization and a 15-second busy timeout. The test creates only a fresh
+proof-owned database; it never loads a consumer `.env` or migrates an existing
+application database.
+
+```sh
+PLIEGO_TEST_AUTOLOAD=/consumer/vendor/autoload.php \
+  timeout --kill-after=5s 120s php sdk/laravel/tests/production_queue_test.php \
+  /runtime/pliego /evidence/fresh-queue-proof
+```
+
+Six jobs are serialized into the actual Laravel database queue before two
+standard `queue:work` command processes start. Each named queue contains a valid
+render, a missing-resource failure and a recovery render. A pipe handshake
+releases the first two reserved jobs together; a positive measured overlap of
+the actual `store()` calls is required, not merely two process IDs.
+
+The result must retain six dequeue events, four validated stored/readback PDFs
+and application records, two typed resource failures persisted by Laravel in
+`failed_jobs`, and an empty pending queue. Every UUID, input, native job and
+storage target must be distinct and tied back to its initial durable payload.
+Both workers must recover after their own failed job and exit successfully.
+
+The declared limits are 60 seconds for the engine, 65 for the SDK, 75 per worker
+job, 90 for worker maximum runtime, 100 per worker process and 120 for queue
+`retry_after`. An outer 120-second watchdog with a five-second kill grace bounds
+the whole test. Windows has no `pcntl` worker alarm; its SDK and parent-process
+bounds remain active. The Linux package recipe enables `pcntl` explicitly.
+
+This proves concurrent native storage calls through two named queues sharing a
+database, job root and local disk. It does not prove shared-queue contention,
+crash/retry exactly-once delivery, descendant cancellation, independent
+application adoption, public-package installation or a performance comparison.
+
 ## Caller deadline
 
 `sdk/php/tests/production_deadline_test.php` uses a real synchronous infinite
@@ -54,7 +92,7 @@ This script's publication callback is local PHP stream-copy logic, not the
 Laravel storage check above. It does not prove descendant cancellation. Its
 durations are failure-containment measurements, not rendering benchmarks.
 
-The package matrix runs both checks against the unpacked optimized Linux
+The package matrix runs all three checks against the unpacked optimized Linux
 bundle and retains their evidence inside its existing API 2 proof artifact.
 The pinned framework fixture is installed without application scripts solely
 to supply dependencies; that source-path installation is not public registry

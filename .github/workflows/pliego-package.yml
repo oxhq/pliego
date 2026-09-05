@@ -414,9 +414,9 @@ jobs:
         with:
           php-version: '8.4'
           coverage: none
-          extensions: mbstring, dom, xml, fileinfo, pdo_sqlite, zip
+          extensions: mbstring, dom, xml, fileinfo, pdo_sqlite, pcntl, zip
 
-      - name: Prove packaged Linux caller deadline and Laravel storage
+      - name: Prove packaged Linux caller deadline, storage and queues
         if: runner.os == 'Linux'
         shell: bash
         run: |
@@ -451,7 +451,12 @@ jobs:
             timeout --kill-after=5s 90s php sdk/laravel/tests/production_storage_test.php \
             "$binary" "$proof/laravel-storage" \
             2>&1 | tee "$proof/laravel-storage.log" || storage_status=$?
-          test "$deadline_status" -eq 0 && test "$storage_status" -eq 0
+          queue_status=0
+          PLIEGO_TEST_AUTOLOAD="$PWD/tests/pliego/laravel-invoice/vendor/autoload.php" \
+            timeout --kill-after=5s 120s php sdk/laravel/tests/production_queue_test.php \
+            "$binary" "$proof/laravel-queue" \
+            2>&1 | tee "$proof/laravel-queue.log" || queue_status=$?
+          test "$deadline_status" -eq 0 && test "$storage_status" -eq 0 && test "$queue_status" -eq 0
 
       - name: Upload packaged API 2 executable proof
         if: always()
