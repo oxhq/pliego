@@ -131,6 +131,8 @@ jobs:
           node-version: 24
 
       - name: Test unmodified Chart.js twice in fresh sessions
+        env:
+          PLIEGO_CHARTJS_ORACLE_EVIDENCE_ROOT: ${{ runner.temp }}/pliego-chartjs-oracle
         run: |
           source_fixture="$PWD/ports/pliego/tests/fixtures/chartjs-report"
           fixture="$RUNNER_TEMP/pliego-document-session-chartjs"
@@ -143,6 +145,15 @@ jobs:
             cargo test -p pliego --test document_session --locked \
               document_session::tests::installed_chartjs_fixture_matches_the_legacy_oracle_twice \
               -- --exact --ignored --nocapture
+
+      - name: Retain exact Chart.js reference scene and PDF
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: pliego-direct-chartjs-oracle
+          path: ${{ runner.temp }}/pliego-chartjs-oracle
+          if-no-files-found: warn
+          retention-days: 30
 
       - name: Test the shared resource policy
         run: |

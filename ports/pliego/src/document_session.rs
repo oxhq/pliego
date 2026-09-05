@@ -2683,6 +2683,7 @@ mod tests {
     const CHARTJS_INPUT_ENV: &str = "PLIEGO_DOCUMENT_SESSION_CHARTJS_INPUT";
     const HTTP_BASE_ENV: &str = "PLIEGO_DOCUMENT_SESSION_HTTP_BASE";
     const INVOICE_ORACLE_EVIDENCE_ENV: &str = "PLIEGO_INVOICE_ORACLE_EVIDENCE_ROOT";
+    const CHARTJS_ORACLE_EVIDENCE_ENV: &str = "PLIEGO_CHARTJS_ORACLE_EVIDENCE_ROOT";
     const ISOLATED_TEST: &str = "document_session::tests::isolated_resource_and_readiness_fixture";
     const PLIEGO_INPUT_ISOLATED_TEST: &str =
         "document_session::tests::isolated_pliego_input_url_fixture";
@@ -3053,58 +3054,118 @@ mod tests {
     const INVOICE_PDF: &str =
         "sha256:952988f08a5be37dd7cc262326d2a50c592ff0a329c84ae82b9c1d5381f5f96e";
 
-    fn retain_invoice_oracle_evidence(input: &Path, outcome: &DocumentOutcome, scene: &[u8]) {
-        let Some(root) = std::env::var_os(INVOICE_ORACLE_EVIDENCE_ENV) else {
+    fn retain_oracle_evidence(case: &str, input: &Path, outcome: &DocumentOutcome, scene: &[u8]) {
+        let (environment, expected_input, expected_scene, expected_pdf, expected_pages, font_name) =
+            match case {
+                "invoice-oracle" => (
+                    INVOICE_ORACLE_EVIDENCE_ENV,
+                    INVOICE_INPUT,
+                    INVOICE_SCENE,
+                    INVOICE_PDF,
+                    2,
+                    "Ahem.ttf",
+                ),
+                "chartjs-report" => (
+                    CHARTJS_ORACLE_EVIDENCE_ENV,
+                    CHARTJS_INPUT,
+                    PRE_SESSION_CHARTJS_SCENE,
+                    PRE_SESSION_CHARTJS_PDF,
+                    1,
+                    "ReportSans.ttf",
+                ),
+                _ => panic!("unsupported retained oracle case: {case}"),
+            };
+        let Some(root) = std::env::var_os(environment) else {
             return;
         };
         let root = PathBuf::from(root);
-        assert!(
-            root.is_absolute(),
-            "invoice oracle evidence root must be absolute"
-        );
-        fs::create_dir_all(&root).expect("create opt-in invoice oracle evidence root");
-        let directory = root.join(format!("invoice-oracle-{}", std::process::id()));
-        fs::create_dir(&directory).expect("invoice oracle evidence leaf must be fresh");
-        let input_bytes = fs::read(input).expect("read exact invoice oracle input");
-        let font = fs::read(input.with_file_name("Ahem.ttf")).expect("read original invoice font");
+        assert!(root.is_absolute(), "oracle evidence root must be absolute");
+        fs::create_dir_all(&root).expect("create opt-in oracle evidence root");
+        let directory = root.join(format!("{case}-{}", std::process::id()));
+        fs::create_dir(&directory).expect("oracle evidence leaf must be fresh");
+        let input_bytes = fs::read(input).expect("read exact oracle input");
+        let font = fs::read(input.with_file_name(font_name)).expect("read original oracle font");
         let capture = serde_json::to_vec_pretty(&outcome.capture).unwrap();
         // SceneCapture's public JSON deliberately omits this internal ledger.
         // Preserve its original integer values separately without changing that contract.
         let authority = format!("{:#?}\n", outcome.capture.fixed_point_authority);
         let mut artifacts = Vec::new();
+        let mut retain = |name: &str, bytes: &[u8]| {
+            assert!(
+                bytes.len() <= 16 * 1024 * 1024,
+                "oracle evidence artifact exceeds 16 MiB: {name}"
+            );
+            fs::write(directory.join(name), bytes).expect("write exact oracle evidence");
+            artifacts.push(serde_json::json!({
+                "path": name, "bytes": bytes.len(), "sha256": content_address(bytes),
+            }));
+        };
         for (name, bytes) in [
             ("input.html", input_bytes.as_slice()),
-            ("Ahem.ttf", font.as_slice()),
+            (font_name, font.as_slice()),
             ("scene.json", scene),
             ("document.pdf", outcome.pdf.as_slice()),
             ("capture.json", capture.as_slice()),
             ("fixed-point-authority.txt", authority.as_bytes()),
         ] {
-            assert!(
-                bytes.len() <= 16 * 1024 * 1024,
-                "invoice evidence artifact exceeds 16 MiB: {name}"
+            retain(name, bytes);
+        }
+        if case == "chartjs-report" {
+            let root = input.parent().expect("Chart.js fixture has a bundle root");
+            for (source, retained) in [
+                ("package.json", "package.json"),
+                ("package-lock.json", "package-lock.json"),
+                ("node_modules/chart.js/dist/chart.umd.js", "chart.umd.js"),
+            ] {
+                retain(
+                    retained,
+                    &fs::read(root.join(source)).expect("read locked Chart.js fixture asset"),
+                );
+            }
+            for (index, resource) in outcome.capture.canvas_resources.iter().enumerate() {
+                retain(&format!("canvas-{index}.png"), &resource.png);
+            }
+            retain(
+                "resources.txt",
+                format!("{:#?}\n", outcome.resources).as_bytes(),
             );
-            fs::write(directory.join(name), bytes).expect("write exact invoice oracle evidence");
-            artifacts.push(serde_json::json!({
-                "path": name, "bytes": bytes.len(), "sha256": content_address(bytes),
-            }));
+            retain(
+                "session-evidence.json",
+                &serde_json::to_vec_pretty(&serde_json::json!({
+                    "readiness": &outcome.readiness,
+                    "resource_accounting": {
+                        "requests": outcome.resource_accounting.requests,
+                        "loaded": outcome.resource_accounting.loaded,
+                        "delegated": outcome.resource_accounting.delegated,
+                        "failed": outcome.resource_accounting.failed,
+                        "body_bytes": outcome.resource_accounting.body_bytes,
+                        "unavailable_bodies": outcome.resource_accounting.unavailable_bodies,
+                    },
+                }))
+                .unwrap(),
+            );
         }
         let input_hash = content_address(&input_bytes);
         let scene_hash = content_address(scene);
         let pdf_hash = content_address(&outcome.pdf);
         let manifest = serde_json::json!({
-            "schema": "pliego.invoice-oracle-diagnostic", "version": 1,
-            "test": ISOLATED_TEST, "case": "invoice-oracle",
+            "schema": if case == "invoice-oracle" { "pliego.invoice-oracle-diagnostic" } else { "pliego.chartjs-oracle-diagnostic" }, "version": 1,
+            "test": ISOLATED_TEST, "case": case,
             "source_commit": env!("PLIEGO_SOURCE_COMMIT"),
             "target": env!("PLIEGO_BUILD_TARGET"),
-            "expected": {"input_sha256": INVOICE_INPUT, "scene_sha256": INVOICE_SCENE,
-                "pdf_sha256": INVOICE_PDF, "pages": 2},
+            "expected": {"input_sha256": expected_input, "scene_sha256": expected_scene,
+                "pdf_sha256": expected_pdf, "pages": expected_pages},
             "actual": {"input_sha256": input_hash, "scene_sha256": scene_hash,
                 "pdf_sha256": pdf_hash, "pages": outcome.capture.scene.pages.len()},
-            "matches": {"input": input_hash == INVOICE_INPUT,
-                "scene": scene_hash == INVOICE_SCENE,
-                "pdf": pdf_hash == INVOICE_PDF,
-                "pages": outcome.capture.scene.pages.len() == 2},
+            "matches": {"input": input_hash == expected_input,
+                "scene": scene_hash == expected_scene,
+                "pdf": pdf_hash == expected_pdf,
+                "pages": outcome.capture.scene.pages.len() == expected_pages},
+            "canvas": if case == "chartjs-report" { Some(serde_json::json!({
+                "expected": PRE_SESSION_CHARTJS_CANVAS,
+                "actual": outcome.capture.canvas_resources.iter().map(|resource| content_address(&resource.png)).collect::<Vec<_>>(),
+                "chartjs_umd_expected_sha256": CHARTJS_UMD,
+            })) } else { None },
             "artifacts": artifacts,
             "scope": "Original SceneCapture and emitted bytes; no raw layout snapshot is retained by DocumentOutcome",
         });
@@ -3112,11 +3173,8 @@ mod tests {
             directory.join("manifest.json"),
             serde_json::to_vec_pretty(&manifest).unwrap(),
         )
-        .expect("write invoice oracle mismatch manifest before assertions");
-        eprintln!(
-            "invoice oracle evidence retained at {}",
-            directory.display()
-        );
+        .expect("write oracle mismatch manifest before assertions");
+        eprintln!("{case} evidence retained at {}", directory.display());
     }
 
     struct TempBundle(PathBuf);
@@ -5596,7 +5654,7 @@ document.fonts.ready.then(() => {
             "invoice-oracle" => {
                 let outcome = result.expect("invoice oracle fixture should render");
                 let scene = outcome.capture.scene.normalized_json().unwrap();
-                retain_invoice_oracle_evidence(&input, &outcome, &scene);
+                retain_oracle_evidence("invoice-oracle", &input, &outcome, &scene);
                 assert_eq!(
                     content_address(&fs::read(&input).unwrap()),
                     INVOICE_INPUT,
@@ -5731,6 +5789,8 @@ document.fonts.ready.then(() => {
             },
             "chartjs-report" => {
                 let outcome = result.expect("Chart.js fixture should render");
+                let scene = outcome.capture.scene.normalized_json().unwrap();
+                retain_oracle_evidence("chartjs-report", &input, &outcome, &scene);
                 assert_eq!(content_address(&fs::read(&input).unwrap()), CHARTJS_INPUT);
                 assert_eq!(outcome.readiness["payload"]["fixture"], "chartjs-report");
                 assert_eq!(outcome.readiness["payload"]["chartVersion"], "4.5.1");
@@ -5773,10 +5833,7 @@ document.fonts.ready.then(() => {
                     250
                 );
                 assert_eq!(resource.resource, PRE_SESSION_CHARTJS_CANVAS);
-                assert_eq!(
-                    content_address(&outcome.capture.scene.normalized_json().unwrap()),
-                    PRE_SESSION_CHARTJS_SCENE
-                );
+                assert_eq!(content_address(&scene), PRE_SESSION_CHARTJS_SCENE);
                 assert_eq!(content_address(&outcome.pdf), PRE_SESSION_CHARTJS_PDF);
                 let chartjs = outcome
                     .resources
