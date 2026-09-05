@@ -1,305 +1,403 @@
-name: Pliego hosted performance snapshot
+name: Pliego real-document development comparison
 
 on:
   workflow_dispatch:
+    inputs:
+      artifact_id:
+        description: Exact Linux package artifact ID (development only)
+        type: string
+        required: true
+      source_sha:
+        description: Exact 40-character package source SHA
+        type: string
+        required: true
+      mode:
+        description: Timed requires an exact reviewed acceptance file committed in this checkout
+        type: choice
+        required: true
+        default: preflight
+        options:
+          - preflight
+          - timed
+      repeat:
+        description: One independent repeat per job; timed runs keep 100 samples per provider
+        type: choice
+        required: true
+        default: '1'
+        options:
+          - '1'
+          - '2'
+          - '3'
+      tracks:
+        description: Timed requires one named track; preflight may select a group. Original lock audits remain required.
+        type: choice
+        required: true
+        default: aureus
+        options:
+          - aureus
+          - all
+          - invobook-simple-repaired
+          - aureus-ledger-300-repaired
+          - aureus-manufacturing-008-font-closed
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
-  group: pliego-hosted-performance-${{ github.ref }}
+  group: pliego-real-document-preflight-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  hosted-snapshot:
-    name: Hosted snapshot ${{ matrix.repeat }}
+  preflight:
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: ${{ inputs.mode == 'timed' && 120 || 45 }}
     strategy:
       fail-fast: false
       matrix:
-        repeat: [1, 2, 3]
-
+        track: ${{ fromJSON(inputs.tracks == 'aureus' && '["aureus-ledger-300-repaired","aureus-manufacturing-008-font-closed"]' || inputs.tracks == 'all' && '["invobook-simple-repaired","aureus-ledger-300-repaired","aureus-manufacturing-008-font-closed"]' || format('["{0}"]', inputs.tracks)) }}
     steps:
-      - name: Require the reviewed main workflow
-        run: |
-          test "$GITHUB_REF" = refs/heads/main
-          test "$GITHUB_EVENT_NAME" = workflow_dispatch
-          test "$GITHUB_WORKFLOW_REF" = oxhq/pliego/.github/workflows/pliego-performance.yml@refs/heads/main
-
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           persist-credentials: false
           ref: ${{ github.sha }}
-
-      - name: Install locked comparison dependencies
+      - name: Validate fixed campaign controls and reviewed acceptance path
+        id: controls
         env:
-          PUPPETEER_SKIP_DOWNLOAD: "1"
+          REQUEST_MODE: ${{ inputs.mode }}
+          REQUEST_REPEAT: ${{ inputs.repeat }}
+          REQUEST_TRACKS: ${{ inputs.tracks }}
+          TRACK: ${{ matrix.track }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          ARTIFACT_ID: ${{ inputs.artifact_id }}
         run: |
           set -euo pipefail
+          python3 - <<'PY'
+          import hashlib, json, os, re, stat, subprocess
+          from pathlib import Path
+
+          def require(condition, message):
+              if not condition:
+                  raise SystemExit(message)
+
+          tracks = {
+              'invobook-simple-repaired': 'invobook-browsershot-5.0.5-puppeteer-25.8.0',
+              'aureus-ledger-300-repaired': 'aureus-dompdf-3.1.6',
+              'aureus-manufacturing-008-font-closed': 'aureus-dompdf-3.1.6',
+          }
+          mode, repeat = os.environ['REQUEST_MODE'], os.environ['REQUEST_REPEAT']
+          selected, track = os.environ['REQUEST_TRACKS'], os.environ['TRACK']
+          source, artifact = os.environ['SOURCE_SHA'], os.environ['ARTIFACT_ID']
+          require(mode in {'preflight', 'timed'}, 'Unknown campaign mode')
+          require(repeat in {'1', '2', '3'}, 'Repeat must be 1, 2 or 3')
+          require(selected in {*tracks, 'aureus', 'all'} and track in tracks, 'Unknown track')
+          expected = set(tracks) if selected == 'all' else ({t for t in tracks if t.startswith('aureus-')} if selected == 'aureus' else {selected})
+          require(track in expected, 'Matrix track differs from selected input')
+          require(mode != 'timed' or selected == track, 'Timed mode requires one named track')
+          require(re.fullmatch(r'[0-9a-f]{40}', source), 'Exact source SHA required')
+          require(re.fullmatch(r'[1-9][0-9]{0,19}', artifact), 'Positive artifact ID required')
+          acceptance_relative, acceptance_sha256 = '', None
+          if mode == 'timed':
+              # No free-form acceptance path and no current-run generated acceptance.
+              acceptance_relative = f'benchmarks/integration/real_documents/acceptance/{source}/{track}.json'
+              path = Path.cwd()
+              for part in acceptance_relative.split('/'):
+                  path = path / part
+                  require(not path.is_symlink(), 'Acceptance path contains a symlink')
+              require(path.is_file(), 'Missing committed reviewed acceptance')
+              info = path.stat()
+              require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and 0 < info.st_size <= 65536, 'Unbounded or non-regular acceptance')
+              raw = path.read_bytes()
+              committed = subprocess.run(['git', 'show', f'HEAD:{acceptance_relative}'], capture_output=True, timeout=10)
+              require(committed.returncode == 0 and committed.stdout == raw, 'Acceptance must match committed checkout bytes')
+              value = json.loads(raw)
+              require(value.get('schema') == 'pliego.real-document-visual-acceptance.v1', 'Wrong acceptance schema')
+              require(isinstance(value.get('identity_sha256'), str) and re.fullmatch(r'[0-9a-f]{64}', value['identity_sha256']), 'Missing exact accepted identity')
+              require(isinstance(value.get('targets'), dict) and set(value['targets']) == {'pliego-candidate', tracks[track]}, 'Wrong accepted providers')
+              for target in value['targets'].values():
+                  require(isinstance(target, dict) and target.get('reviewed') is True, 'Actual PDF review required')
+                  require(all(isinstance(target.get(key), str) and target[key].strip() for key in ('notes', 'evidence')), 'Review notes and evidence required')
+                  for key in ('layout_fingerprints', 'pdf_sha256'):
+                      hashes = target.get(key)
+                      require(isinstance(hashes, list) and hashes and all(isinstance(h, str) and re.fullmatch(r'[0-9a-f]{64}', h) for h in hashes), 'Missing reviewed PDF/layout hashes')
+              acceptance_sha256 = hashlib.sha256(raw).hexdigest()
+          # These are whole-campaign caps, not changes to any render/oracle deadline.
+          service_seconds = 90 * 60 if mode == 'timed' else 15 * 60
+          controls = {'mode': mode, 'repeat': int(repeat), 'track': track, 'source_sha': source,
+                      'artifact_id': int(artifact), 'acceptance_relative': acceptance_relative,
+                      'acceptance_sha256': acceptance_sha256, 'service_seconds': service_seconds,
+                      'job_minutes': 120 if mode == 'timed' else 45,
+                      'scheduled_attempts': 2 * (1 + 10 + 100) if mode == 'timed' else 2,
+                      'sample_root_wall_deadline_ms': 65000,
+                      'interruption_boundary': 'Raw prefix may remain; a missing final inventory/report is not a complete verifiable or qualified campaign.'}
+          setup = Path(os.environ['RUNNER_TEMP']) / 'real-document-setup'
+          setup.mkdir()
+          (setup / 'campaign-controls.json').write_text(json.dumps(controls, sort_keys=True) + '\n')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              for key, value in {'mode': mode, 'repeat': repeat, 'acceptance_relative': acceptance_relative, 'service_seconds': service_seconds}.items():
+                  output.write(f'{key}={value}\n')
+          PY
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - uses: shivammathur/setup-php@b604ade2a87db23f8871b7182e69ec5e75effb45 # v2
+        with:
+          php-version: '8.4'
+          extensions: mbstring, xml, dom, gd, intl, bcmath, zip, pdo_sqlite
+          tools: composer:2.10.1
+          coverage: none
+      - name: Install pinned oracle and application dependencies without booting apps
+        env:
+          PUPPETEER_SKIP_DOWNLOAD: '1'
+          TRACK: ${{ matrix.track }}
+        run: |
+          set -euo pipefail
+          setup="$RUNNER_TEMP/real-document-setup"
+          test -d "$setup"
+          # Never inherit a Composer home, plugin configuration or credentials.
+          export COMPOSER_HOME="$RUNNER_TEMP/real-document-composer-home"
+          export COMPOSER_CACHE_DIR="$RUNNER_TEMP/real-document-composer-cache"
+          mkdir "$COMPOSER_HOME" "$COMPOSER_CACHE_DIR"
+          unset COMPOSER_AUTH COMPOSER COMPOSER_IGNORE_PLATFORM_REQS COMPOSER_IGNORE_PLATFORM_REQ
+          unset COMPOSER_NO_AUDIT COMPOSER_NO_SECURITY_BLOCKING
           sudo apt-get update
-          sudo apt-get install --yes \
-            acl ca-certificates e2fsprogs iproute2 libegl1 libfontconfig1 libgl1-mesa-dri \
-            php-xml php-mbstring poppler-utils util-linux
-          composer install --working-dir=benchmarks/adapters/dompdf \
-            --no-dev --no-interaction --prefer-dist --classmap-authoritative
-          composer install --working-dir=benchmarks/adapters/browsershot \
-            --no-dev --no-interaction --prefer-dist --classmap-authoritative
-          npm ci --prefix benchmarks/adapters/browsershot --omit=dev
-
-      - name: Resolve immutable v0.3.3 release and runtimes
+          sudo apt-get install --yes acl ca-certificates e2fsprogs iproute2 libegl1 libfontconfig1 libgl1-mesa-dri poppler-utils util-linux
+          python -m venv "$RUNNER_TEMP/real-document-python"
+          "$RUNNER_TEMP/real-document-python/bin/python" -m pip install --require-hashes \
+            -r benchmarks/integration/real_document_requirements.txt --report "$setup/pip-report.json"
+          "$RUNNER_TEMP/real-document-python/bin/python" -m pip --version > "$setup/pip-version.txt"
+          dpkg-query -W > "$setup/dpkg-packages.txt"
+          apps="$RUNNER_TEMP/real-document-apps"
+          mkdir "$apps"
+          if [[ "$TRACK" == invobook-* ]]; then
+            app=invobook
+            git clone --filter=blob:none --no-checkout https://github.com/Hasnayeen/invobook.git "$apps/$app"
+            git -C "$apps/$app" checkout --detach e5f666cef63543beffadfcc045f6af673408a02e
+            lock=24f563534a57775144db27b746011117b8db209aa39dee35f5c0ba01ed96ca74
+          else
+            app=aureus
+            git clone --filter=blob:none --no-checkout https://github.com/aureuserp/aureuserp.git "$apps/$app"
+            git -C "$apps/$app" checkout --detach d7e0ad85ae8fdea91d1cb1895a81000c332e830c
+            git -C "$apps/$app" apply "$GITHUB_WORKSPACE/benchmarks/integration/runtime-inputs/aureus-composer-lock.patch"
+            lock=82133507ad710cc2748d95cba0ea3dfe5d375728c0d8d3587303e91d027c5fae
+          fi
+          printf '%s  %s\n' "$lock" "$apps/$app/composer.lock" | sha256sum --check
+          git -C "$apps/$app" rev-parse HEAD > "$setup/$app-source-sha.txt"
+          git -C "$apps/$app" diff --binary > "$setup/$app-shared-dependency-repair.patch"
+          sha256sum "$apps/$app/composer.json" "$apps/$app/composer.lock" > "$setup/$app-composer-before.sha256"
+          audit_status=0
+          composer --working-dir="$apps/$app" --no-scripts --no-plugins audit --locked --format=json --no-interaction > "$setup/$app-locked-audit.json" 2> "$setup/$app-locked-audit.stderr" || audit_status=$?
+          printf '%s\n' "$audit_status" > "$setup/$app-locked-audit.exit"
+          # No install, lock update, advisory ignore or alternate provider follows
+          # a failed original/approved-repair audit for the selected application.
+          test "$audit_status" -eq 0
+          composer --working-dir="$apps/$app" install --no-scripts --no-plugins --no-interaction --prefer-dist --no-progress 2>&1 | tee "$setup/$app-install.log"
+          sha256sum --check "$setup/$app-composer-before.sha256"
+          composer --working-dir="$apps/$app" --no-scripts --no-plugins check-platform-reqs --no-interaction > "$setup/$app-platform.txt"
+          composer --working-dir="$apps/$app" --no-scripts --no-plugins audit --format=json --no-interaction > "$setup/$app-audit.json"
+          if [[ "$app" == invobook ]]; then
+            npm audit --prefix benchmarks/adapters/browsershot --omit=dev --json > "$setup/puppeteer-locked-audit.json"
+            npm ci --prefix benchmarks/adapters/browsershot --omit=dev --ignore-scripts 2>&1 | tee "$setup/puppeteer-install.log"
+          fi
+          php benchmarks/tools/test_real_document_adapters.php aureus-dompdf
+          php benchmarks/tools/test_real_document_adapters.php invobook-browsershot
+          "$RUNNER_TEMP/real-document-python/bin/python" benchmarks/integration/test_real_document_comparison.py
+      - name: Verify exact development bundle and prepare read-only engine closure
         id: runtime
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ inputs.artifact_id }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          TRACK: ${{ matrix.track }}
         run: |
           set -euo pipefail
-          binary="$(python3 benchmarks/tools/resolve_release.py \
-            --cache "$RUNNER_TEMP/pliego-release-cache" \
-            --metadata-out "$RUNNER_TEMP/verified-release.json")"
-          node="$(readlink -f "$(command -v node)")"
-          chrome="$(command -v google-chrome-stable || command -v google-chrome || command -v chromium)"
-          chrome="$(readlink -f "$chrome")"
-          chrome_root="$(dirname "$chrome")"
-          case "$chrome_root" in
-            /opt/google/chrome|/usr/lib/chromium|/usr/lib/chromium-browser) ;;
-            *) echo "unsupported hosted Chrome installation root: $chrome_root" >&2; exit 1 ;;
-          esac
-          runtime_root=/usr/lib/pliego-benchmark
-          sudo install -d -o root -g root -m 0555 "$runtime_root"
-          sudo install -o root -g root -m 0555 "$binary" "$runtime_root/pliego"
-          sudo install -o root -g root -m 0555 "$node" "$runtime_root/node"
-          sudo install -d -o root -g root -m 0555 "$runtime_root/chrome"
-          sudo cp -aL "$chrome_root/." "$runtime_root/chrome/"
-          sudo chown -R root:root "$runtime_root/chrome"
-          sudo chmod -R go-w "$runtime_root/chrome"
-          chrome_symlink="$(sudo find "$runtime_root/chrome" -type l -print -quit)"
-          test -z "$chrome_symlink"
-          printf 'binary=%s\nnode=%s\nchrome=%s\n' \
-            "$runtime_root/pliego" "$runtime_root/node" \
-            "$runtime_root/chrome/$(basename "$chrome")" >> "$GITHUB_OUTPUT"
-
-      - name: Provision fixed unprivileged engine account
-        run: |
-          set -euo pipefail
+          binary="$(python benchmarks/integration/resolve_development_candidate.py \
+            --artifact-id "$ARTIFACT_ID" --source-sha "$SOURCE_SHA" --out "$RUNNER_TEMP/real-document-candidate")"
+          runtime=/usr/lib/pliego-benchmark
+          test ! -e "$runtime"
+          sudo install -d -o root -g root -m 0555 "$runtime"
+          sudo install -o root -g root -m 0555 "$binary" "$runtime/pliego"
+          if [[ "$TRACK" == invobook-* ]]; then
+            sudo install -o root -g root -m 0555 "$(readlink -f "$(command -v node)")" "$runtime/node"
+            chrome="$(readlink -f "$(command -v google-chrome-stable || command -v google-chrome || command -v chromium)")"
+            chrome_root="$(dirname "$chrome")"
+            case "$chrome_root" in /opt/google/chrome|/usr/lib/chromium|/usr/lib/chromium-browser) ;; *) exit 1 ;; esac
+            if [[ "$chrome_root" == /opt/google/chrome ]]; then
+              chrome="$chrome_root/chrome"
+            fi
+            python - "$chrome" <<'PY'
+          import sys
+          from pathlib import Path
+          with Path(sys.argv[1]).open('rb') as stream:
+              if stream.read(4) != b'\x7fELF':
+                  raise SystemExit('Chrome identity must bind the actual ELF, not its launcher')
+          PY
+            sudo install -d -o root -g root -m 0555 "$runtime/chrome"
+            sudo cp -aL "$chrome_root/." "$runtime/chrome/"
+            sudo chown -R root:root "$runtime/chrome"
+            sudo chmod -R go-w "$runtime/chrome"
+            test -z "$(sudo find "$runtime/chrome" -type l -print -quit)"
+            export RD_CHROME="$runtime/chrome/$(basename "$chrome")"
+          fi
+          export RD_APPS="$RUNNER_TEMP/real-document-apps"
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          root = Path.cwd()
+          for adapter, app in [('aureus-dompdf', 'aureus'), ('invobook-browsershot', 'invobook')]:
+              if not (Path(os.environ['RD_APPS'])/app).is_dir():
+                  continue
+              config = {'schema': 'pliego.real-document-runtime.v1', 'app_root': os.environ['RD_APPS'] + '/' + app}
+              if app == 'invobook':
+                  config.update(node_path='/usr/lib/pliego-benchmark/node', chrome_path=os.environ['RD_CHROME'], node_modules=str(root/'benchmarks/adapters/browsershot/node_modules'))
+              path = root/'benchmarks/adapters'/adapter/'runtime.json'
+              with path.open('x') as stream:
+                  json.dump(config, stream, sort_keys=True)
+          PY
+          if [[ "$TRACK" == invobook-* ]]; then
+            php benchmarks/tools/test_real_document_adapters.php invobook-browsershot --actual-symfony
+          fi
           if ! getent passwd pliego-benchmark-engine >/dev/null; then
-            sudo useradd --system --no-create-home \
-              --home-dir /nonexistent/pliego-benchmark-engine \
-              --shell /usr/sbin/nologin pliego-benchmark-engine
+            sudo useradd --system --no-create-home --home-dir /nonexistent/pliego-benchmark-engine --shell /usr/sbin/nologin pliego-benchmark-engine
           fi
           test "$(id -u pliego-benchmark-engine)" -gt 0
           test "$(id -g pliego-benchmark-engine)" -gt 0
-          engine_uid="$(id -u pliego-benchmark-engine)"
-          engine_gid="$(id -g pliego-benchmark-engine)"
-          engine_home="$(getent passwd pliego-benchmark-engine | cut -d: -f6)"
-          test "$engine_home" = /nonexistent/pliego-benchmark-engine
-          if [[ -e "$engine_home" ]]; then
-            sudo setpriv --reuid="$engine_uid" --regid="$engine_gid" --clear-groups \
-              --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
-              /usr/bin/test ! -w "$engine_home"
+          test "$(getent passwd pliego-benchmark-engine | cut -d: -f6)" = /nonexistent/pliego-benchmark-engine
+          test ! -e /nonexistent/pliego-benchmark-engine
+          engine_temp=/var/lib/pliego-benchmark-engine-temp
+          test ! -e "$engine_temp"
+          sudo install -d -o root -g root -m 0711 "$engine_temp"
+          sudo chattr +A +S +D "$engine_temp"
+          test "$(findmnt -T "$engine_temp" -n -o FSTYPE)" = ext4
+          attributes="$(sudo lsattr -d "$engine_temp" | awk '{print $1}')"
+          [[ "$attributes" == *A* && "$attributes" == *S* && "$attributes" == *D* ]]
+          engine=(sudo setpriv --reuid="$(id -u pliego-benchmark-engine)" --regid="$(id -g pliego-benchmark-engine)" --clear-groups --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs)
+          sudo chown -R root:root "$RD_APPS" "$GITHUB_WORKSPACE/benchmarks"
+          sudo chmod -R a+rX,go-w "$RD_APPS" "$GITHUB_WORKSPACE/benchmarks"
+          for leaf in "$GITHUB_WORKSPACE" "$RD_APPS"; do
+            ancestors=()
+            ancestor="$leaf"
+            while [[ "$ancestor" != / ]]; do
+              ancestors+=("$ancestor")
+              ancestor="$(dirname "$ancestor")"
+            done
+            # Fix traversal root-to-leaf: otherwise an inaccessible parent makes
+            # an already-readable leaf appear inaccessible and --x shadows r-x.
+            for ((index=${#ancestors[@]} - 1; index >= 0; index--)); do
+              ancestor="${ancestors[$index]}"
+              if ! (cd / && "${engine[@]}" /usr/bin/test -x "$ancestor"); then
+                sudo setfacl -m u:pliego-benchmark-engine:--x "$ancestor"
+              fi
+            done
+          done
+          for closure in "$RD_APPS" "$runtime" "$GITHUB_WORKSPACE/benchmarks"; do
+            "${engine[@]}" /usr/bin/test -r "$closure"
+            "${engine[@]}" /usr/bin/test -x "$closure"
+            test -z "$("${engine[@]}" /usr/bin/find "$closure" -writable -print -quit)"
+          done
+          "${engine[@]}" /usr/bin/test -x "$runtime/pliego"
+          if [[ "$TRACK" == invobook-* ]]; then
+            "${engine[@]}" /usr/bin/test -x "$runtime/node"
+            "${engine[@]}" /usr/bin/test -x "$RD_CHROME"
+            app=invobook
+          else
+            app=aureus
           fi
-          engine_temp_root=/var/lib/pliego-benchmark-engine-temp
-          test ! -e "$engine_temp_root"
-          sudo install -d -o root -g root -m 0711 "$engine_temp_root"
-          sudo chattr +A +S +D "$engine_temp_root"
-          test "$(findmnt -T "$engine_temp_root" -n -o FSTYPE)" = ext4
-          engine_temp_attributes="$(sudo lsattr -d "$engine_temp_root" | awk '{print $1}')"
-          [[ "$engine_temp_attributes" == *A* && "$engine_temp_attributes" == *S* \
-            && "$engine_temp_attributes" == *D* ]]
-          engine_test=(sudo setpriv --reuid="$engine_uid" --regid="$engine_gid" --clear-groups \
-            --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs /usr/bin/test)
-          engine_find=(sudo setpriv --reuid="$engine_uid" --regid="$engine_gid" --clear-groups \
-            --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs /usr/bin/find)
-          ancestors=()
-          ancestor="$GITHUB_WORKSPACE"
-          while [[ "$ancestor" != / ]]; do
-            ancestors+=("$ancestor")
-            ancestor="$(dirname "$ancestor")"
-          done
-          for ((index=${#ancestors[@]} - 1; index >= 0; index--)); do
-            ancestor="${ancestors[$index]}"
-            if ! (cd / && "${engine_test[@]}" -x "$ancestor"); then
-              sudo setfacl -m u:pliego-benchmark-engine:--x "$ancestor"
-            fi
-          done
-          "${engine_test[@]}" -x "${{ steps.runtime.outputs.binary }}"
-          "${engine_test[@]}" ! -w "${{ steps.runtime.outputs.binary }}"
-          "${engine_test[@]}" -x "${{ steps.runtime.outputs.node }}"
-          "${engine_test[@]}" ! -w "${{ steps.runtime.outputs.node }}"
-          "${engine_test[@]}" -x "${{ steps.runtime.outputs.chrome }}"
-          "${engine_test[@]}" ! -w "${{ steps.runtime.outputs.chrome }}"
-          "${engine_test[@]}" -x /
-          "${engine_test[@]}" ! -w /
-          "${engine_test[@]}" -x /usr
-          "${engine_test[@]}" ! -w /usr
-          "${engine_test[@]}" -x /usr/lib
-          "${engine_test[@]}" ! -w /usr/lib
-          "${engine_test[@]}" -x /usr/lib/pliego-benchmark
-          "${engine_test[@]}" ! -w /usr/lib/pliego-benchmark
-          writable_chrome="$("${engine_find[@]}" /usr/lib/pliego-benchmark/chrome -writable -print -quit)"
-          test -z "$writable_chrome"
-          (cd / && "${engine_test[@]}" -r "$GITHUB_WORKSPACE/benchmarks/fixtures/minimal-static/comparator.html")
-          (cd / && "${engine_test[@]}" ! -w "$GITHUB_WORKSPACE/benchmarks/fixtures/minimal-static/comparator.html")
-          (cd / && "${engine_test[@]}" -r "$GITHUB_WORKSPACE/benchmarks/fixtures/minimal-static/Ahem.ttf")
-          (cd / && "${engine_test[@]}" ! -w "$GITHUB_WORKSPACE/benchmarks/fixtures/minimal-static/Ahem.ttf")
-          (cd / && "${engine_test[@]}" -x "$GITHUB_WORKSPACE/benchmarks/fixtures/minimal-static")
-          (cd / && "${engine_test[@]}" ! -w "$GITHUB_WORKSPACE/benchmarks/fixtures/minimal-static")
-          (cd / && "${engine_test[@]}" -x "$GITHUB_WORKSPACE/benchmarks/adapters/dompdf/adapter.php")
-          (cd / && "${engine_test[@]}" ! -w "$GITHUB_WORKSPACE/benchmarks/adapters/dompdf/adapter.php")
-          (cd / && "${engine_test[@]}" -x "$GITHUB_WORKSPACE/benchmarks/adapters/browsershot/adapter.php")
-          (cd / && "${engine_test[@]}" ! -w "$GITHUB_WORKSPACE/benchmarks/adapters/browsershot/adapter.php")
-          (cd / && "${engine_test[@]}" -r "$GITHUB_WORKSPACE/benchmarks/adapters/dompdf/composer.lock")
-          (cd / && "${engine_test[@]}" -r "$GITHUB_WORKSPACE/benchmarks/adapters/dompdf/vendor/autoload.php")
-          (cd / && "${engine_test[@]}" ! -w "$GITHUB_WORKSPACE/benchmarks/adapters/dompdf/vendor/autoload.php")
-          (cd / && "${engine_test[@]}" -r "$GITHUB_WORKSPACE/benchmarks/adapters/browsershot/composer.lock")
-          (cd / && "${engine_test[@]}" -r "$GITHUB_WORKSPACE/benchmarks/adapters/browsershot/vendor/autoload.php")
-          (cd / && "${engine_test[@]}" ! -w "$GITHUB_WORKSPACE/benchmarks/adapters/browsershot/vendor/autoload.php")
-          (cd / && "${engine_test[@]}" -r "$GITHUB_WORKSPACE/benchmarks/adapters/browsershot/package-lock.json")
-          (cd / && "${engine_test[@]}" -r "$GITHUB_WORKSPACE/benchmarks/adapters/browsershot/node_modules/puppeteer/package.json")
-          (cd / && "${engine_test[@]}" ! -w "$GITHUB_WORKSPACE/benchmarks/adapters/browsershot/node_modules/puppeteer/package.json")
-          namei -l "$GITHUB_WORKSPACE/benchmarks/adapters/dompdf/adapter.php"
-          namei -l "$GITHUB_WORKSPACE/benchmarks/fixtures/minimal-static"
-
-      - name: Capture GitHub runner environment for the delegated service
-        id: evidence
-        env:
-          PLIEGO_RUNNER_ENVIRONMENT: ${{ runner.environment }}
-          PLIEGO_SNAPSHOT_REPEAT: ${{ matrix.repeat }}
-          SNAPSHOT_REPEAT: ${{ matrix.repeat }}
-        run: |
-          set -euo pipefail
-          output="$RUNNER_TEMP/pliego-hosted-snapshot-$SNAPSHOT_REPEAT"
-          environment="$RUNNER_TEMP/pliego-hosted-environment-$SNAPSHOT_REPEAT.sh"
-          python3 - "$environment" <<'PY'
-          import os
-          import pathlib
-          import shlex
-          import sys
-
-          names = (
-              "GITHUB_ACTIONS", "GITHUB_EVENT_NAME", "GITHUB_JOB", "GITHUB_REF",
-              "GITHUB_REPOSITORY", "GITHUB_RUN_ATTEMPT", "GITHUB_RUN_ID", "GITHUB_SERVER_URL",
-              "GITHUB_SHA", "GITHUB_WORKFLOW", "GITHUB_WORKFLOW_REF", "ImageOS", "ImageVersion",
-              "PLIEGO_RUNNER_ENVIRONMENT", "PLIEGO_SNAPSHOT_REPEAT",
-              "RUNNER_ARCH", "RUNNER_NAME", "RUNNER_OS",
-          )
-          path = pathlib.Path(sys.argv[1])
-          path.write_text(
-              "".join(f"export {name}={shlex.quote(os.environ.get(name, ''))}\n" for name in names),
-              encoding="utf-8",
-          )
-          PY
-          sudo chown root:root "$environment"
-          sudo chmod 0400 "$environment"
-          printf 'output=%s\nenvironment=%s\n' "$output" "$environment" >> "$GITHUB_OUTPUT"
-
-      - name: Run 100-sample interleaved comparison under delegated cgroup v2
+          "${engine[@]}" /usr/bin/test -r "$RD_APPS/$app/vendor/autoload.php"
+          printf 'binary=%s\npython=%s\nphp=%s\n' "$runtime/pliego" "$RUNNER_TEMP/real-document-python/bin/python" "$(readlink -f "$(command -v php)")" >> "$GITHUB_OUTPUT"
+      - name: Run reviewed campaign under bounded delegated cgroup service
         env:
           BINARY: ${{ steps.runtime.outputs.binary }}
-          NODE: ${{ steps.runtime.outputs.node }}
-          CHROME: ${{ steps.runtime.outputs.chrome }}
-          OUTPUT: ${{ steps.evidence.outputs.output }}
-          ENVIRONMENT_FILE: ${{ steps.evidence.outputs.environment }}
-          ENGINE_TEMP_ROOT: /var/lib/pliego-benchmark-engine-temp
+          PYTHON: ${{ steps.runtime.outputs.python }}
+          PHP: ${{ steps.runtime.outputs.php }}
+          TRACK: ${{ matrix.track }}
+          MODE: ${{ steps.controls.outputs.mode }}
+          REPEAT: ${{ steps.controls.outputs.repeat }}
+          ACCEPTANCE_RELATIVE: ${{ steps.controls.outputs.acceptance_relative }}
+          SERVICE_SECONDS: ${{ steps.controls.outputs.service_seconds }}
         run: |
           set -euo pipefail
-          sudo systemd-run --quiet --wait --pipe --collect --expand-environment=no \
-            -p Type=exec \
-            -p Delegate=yes \
-            -p DelegateSubgroup=harness \
-            -p KillMode=control-group \
-            -p TimeoutStopSec=10s \
-            -p RuntimeMaxSec=80min \
+          output="$RUNNER_TEMP/real-document-preflight"
+          setup="$RUNNER_TEMP/real-document-setup"
+          unit="pliego-real-document-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${TRACK}.service"
+          test "$(sudo systemctl show "$unit" --property=LoadState --value)" = not-found
+          printf '%s\n' "$unit" > "$setup/service-unit.txt"
+          # systemd services do not inherit the step environment. Forward only
+          # public provenance, never github.token/GH_TOKEN or the whole env.
+          metadata=()
+          for name in GITHUB_ACTIONS GITHUB_RUN_ID GITHUB_RUN_ATTEMPT GITHUB_SHA GITHUB_WORKFLOW_REF GITHUB_REPOSITORY GITHUB_SERVER_URL ImageOS ImageVersion; do
+            if [[ -v "$name" ]]; then
+              metadata+=("--setenv=$name=${!name}")
+            fi
+          done
+          test "$GITHUB_ACTIONS" = true
+          service_status=0
+          sudo systemd-run --quiet --wait --pipe --collect --expand-environment=no --unit="$unit" \
+            "${metadata[@]}" \
+            -p Type=exec -p Delegate=yes -p DelegateSubgroup=harness \
+            -p KillMode=control-group -p TimeoutStopSec=10s -p "RuntimeMaxSec=${SERVICE_SECONDS}s" \
             -p "WorkingDirectory=$GITHUB_WORKSPACE" \
             /bin/bash -c '
               set -euo pipefail
-              unified_line="$(grep -E "^0::/" /proc/self/cgroup)"
+              unified="$(grep -E "^0::/" /proc/self/cgroup)"
               test "$(grep -Ec "^0::/" /proc/self/cgroup)" -eq 1
-              relative="${unified_line#0::}"
-              case "$relative" in
-                */harness) ;;
-                *) echo "unexpected delegated cgroup: $relative" >&2; exit 1 ;;
-              esac
+              relative="${unified#0::}"
+              case "$relative" in */harness) ;; *) exit 1 ;; esac
               parent="/sys/fs/cgroup${relative%/harness}"
               printf "+cpu +io +memory +pids" > "$parent/cgroup.subtree_control"
-              . "$1"
               export PLIEGO_BENCHMARK_CGROUP_PARENT="$parent"
-              export PLIEGO_BENCHMARK_ENGINE_TEMP_ROOT="$6"
+              export PLIEGO_BENCHMARK_ENGINE_TEMP_ROOT=/var/lib/pliego-benchmark-engine-temp
               export GIT_OPTIONAL_LOCKS=0
-              /usr/bin/python3 -E -s benchmarks/tools/test_process_tree_sampler.py --live --php-integration >/dev/null
-              /usr/bin/python3 -E -s benchmarks/tools/process_tree_sampler.py --probe-network-isolation >/dev/null
-              exec env \
-                BROWSERSHOT_NODE_BINARY="$2" \
-                BROWSERSHOT_CHROME_PATH="$3" \
-                PLIEGO_BENCHMARK_CGROUP_PARENT="$parent" \
-                PLIEGO_BENCHMARK_ENGINE_TEMP_ROOT="$6" \
-                /usr/bin/python3 -E -s benchmarks/tools/run_comparison.py \
-                  --binary "$4" \
-                  --out "$5"
-            ' pliego-hosted-comparison \
-              "$ENVIRONMENT_FILE" "$NODE" "$CHROME" "$BINARY" "$OUTPUT" "$ENGINE_TEMP_ROOT"
-          sudo chown -R "$(id -u):$(id -g)" "$OUTPUT"
-
-      - name: Revalidate retained evidence
+              /usr/bin/python3 -E -s benchmarks/tools/test_process_tree_sampler.py --root-deadline
+              /usr/bin/python3 -E -s benchmarks/tools/process_tree_sampler.py --probe-network-isolation
+              acceptance=()
+              if [[ "$7" == timed ]]; then
+                acceptance=(--acceptance "$9")
+              fi
+              exec "$1" benchmarks/integration/run_real_document_comparison.py \
+                --mode "$7" --repeat "$8" --track "$2" --candidate-binary "$3" \
+                --candidate-identity "$4" --php "$5" --poppler-dir /usr/bin --out "$6" "${acceptance[@]}"
+            ' pliego-real-document "$PYTHON" "$TRACK" "$BINARY" \
+              "$RUNNER_TEMP/real-document-candidate/candidate-identity.json" "$PHP" "$output" \
+              "$MODE" "$REPEAT" "$GITHUB_WORKSPACE/$ACCEPTANCE_RELATIVE" \
+              2>&1 | tee "$setup/service.log" || service_status=$?
+          printf '%s\n' "$service_status" > "$setup/service.exit"
+          exit "$service_status"
+      - name: Stop only this job's owned service and make retained evidence readable
+        if: always()
         env:
-          OUTPUT: ${{ steps.evidence.outputs.output }}
+          TRACK: ${{ matrix.track }}
         run: |
           set -euo pipefail
-          python3 -E -s benchmarks/tools/run_comparison.py \
-            --finalize "$OUTPUT" \
-            --verified-release "$RUNNER_TEMP/verified-release.json"
-          python3 -E -s benchmarks/tools/run_comparison.py --validate "$OUTPUT"
-          (cd "$OUTPUT" && sha256sum --check SHA256SUMS)
-
-      - name: Upload exact raw samples and all metrics
+          unit="pliego-real-document-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${TRACK}.service"
+          # This also bounds children if the preceding action was interrupted.
+          # No broad process kills or reuse of another job's service/data.
+          if [[ "$(sudo systemctl show "$unit" --property=LoadState --value)" != not-found ]]; then
+            sudo systemctl stop "$unit"
+          fi
+          state="$(sudo systemctl show "$unit" --property=ActiveState --value)"
+          [[ "$state" == inactive || "$state" == failed ]]
+          if [[ -d "$RUNNER_TEMP/real-document-setup" && ! -L "$RUNNER_TEMP/real-document-setup" ]]; then
+            printf 'unit=%s\nactive_state=%s\n' "$unit" "$state" > "$RUNNER_TEMP/real-document-setup/service-cleanup.txt"
+          fi
+          for name in real-document-preflight real-document-setup real-document-candidate; do
+            path="$RUNNER_TEMP/$name"
+            if [[ -d "$path" && ! -L "$path" ]]; then
+              sudo chown -R "$(id -u):$(id -g)" "$path"
+            fi
+          done
+      - name: Retain all outcomes, setup and exact input runtime provenance
+        if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: pliego-hosted-performance-${{ matrix.repeat }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ steps.evidence.outputs.output }}/
-          if-no-files-found: error
-          overwrite: false
-          retention-days: 90
-
-  hosted-series:
-    name: Seal all hosted repeats
-    needs: hosted-snapshot
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-
-    steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-        with:
-          persist-credentials: false
-          ref: ${{ github.sha }}
-
-      - name: Download all three exact comparison bundles
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          pattern: pliego-hosted-performance-*-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/pliego-hosted-performance-inputs
-
-      - name: Build the no-selection series
-        id: series
-        env:
-          INPUT_ROOT: ${{ runner.temp }}/pliego-hosted-performance-inputs
-          OUTPUT: ${{ runner.temp }}/pliego-hosted-performance-series
-        run: |
-          set -euo pipefail
-          mapfile -t comparisons < <(find "$INPUT_ROOT" -mindepth 1 -maxdepth 1 -type d -print | sort)
-          test "${#comparisons[@]}" -eq 3
-          python3 -E -s benchmarks/tools/summarize_comparisons.py \
-            "${comparisons[0]}" "${comparisons[1]}" "${comparisons[2]}" \
-            --out "$OUTPUT"
-          python3 -E -s benchmarks/tools/summarize_comparisons.py \
-            "${comparisons[0]}" "${comparisons[1]}" "${comparisons[2]}" \
-            --validate "$OUTPUT"
-          (cd "$OUTPUT" && sha256sum --check SHA256SUMS)
-          printf 'output=%s\n' "$OUTPUT" >> "$GITHUB_OUTPUT"
-
-      - name: Upload the sealed three-repeat series
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: pliego-hosted-performance-series-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: pliego-real-document-${{ inputs.mode }}-${{ matrix.track }}-repeat-${{ inputs.repeat }}-${{ github.sha }}-${{ github.run_id }}
           path: |
-            ${{ steps.series.outputs.output }}/
-            ${{ runner.temp }}/pliego-hosted-performance-inputs/
+            ${{ runner.temp }}/real-document-preflight/
+            ${{ runner.temp }}/real-document-setup/
+            ${{ runner.temp }}/real-document-candidate/candidate-identity.json
+            ${{ runner.temp }}/real-document-candidate/artifact.json
+            ${{ runner.temp }}/real-document-candidate/run.json
           if-no-files-found: error
           overwrite: false
-          retention-days: 90
+          include-hidden-files: true
+          retention-days: 30
