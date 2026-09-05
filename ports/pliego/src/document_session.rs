@@ -217,6 +217,17 @@ impl SessionDiagnostics {
 fn session_observation_diagnostic(
     observation: &DocumentTimeControlObservation,
 ) -> serde_json::Value {
+    let producer_pending_by_kind = [
+        timers::DocumentProducerKind::Task,
+        timers::DocumentProducerKind::Resource,
+        timers::DocumentProducerKind::Font,
+        timers::DocumentProducerKind::Image,
+        timers::DocumentProducerKind::ExternalCallback,
+    ]
+    .map(|kind| {
+        serde_json::json!({"kind": kind,
+        "pending": observation.producers.snapshot.for_kind(kind).pending()})
+    });
     serde_json::json!({
         "virtual_time_ns": observation.now.as_nanos().to_string(),
         "top_level_epoch": observation.target.webview_epoch.0,
@@ -226,14 +237,7 @@ fn session_observation_diagnostic(
         "has_next_deadline": observation.next_deadline.is_some(),
         "producer_stability": observation.producers.stability,
         "producer_pending": observation.producers.snapshot.pending(),
-        "producer_pending_by_kind": [
-            timers::DocumentProducerKind::Task,
-            timers::DocumentProducerKind::Resource,
-            timers::DocumentProducerKind::Font,
-            timers::DocumentProducerKind::Image,
-            timers::DocumentProducerKind::ExternalCallback,
-        ].map(|kind| serde_json::json!({"kind": kind,
-            "pending": observation.producers.snapshot.for_kind(kind).pending()})),
+        "producer_pending_by_kind": producer_pending_by_kind,
         "documents": observation.documents.len(),
         "first_document_readiness": observation.documents.first().map(|document|
             document.readiness_blockers.iter().take(MAX_SESSION_DIAGNOSTIC_ITEMS).collect::<Vec<_>>()),
