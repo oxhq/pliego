@@ -47,6 +47,7 @@ CASES = (
     {"name": "header-one-page", "rows": 2, "header": True},
     {"name": "headerless-one-page", "rows": 2, "header": False},
     {"name": "header-multi-page", "rows": 90, "header": True},
+    {"name": "header-multi-page-white-canvas", "rows": 90, "header": True, "white_canvas": True},
     {"name": "borderless-one-page", "rows": 2, "header": False, "borders": "none"},
     {"name": "borderless-multi-page", "rows": 90, "header": False, "borders": "none"},
     {"name": "transparent-one-page", "rows": 2, "header": False, "borders": "transparent"},
@@ -176,6 +177,16 @@ def check_scene(scene: dict[str, Any], case: dict[str, Any]) -> dict[str, Any]:
         require(page.get("number") == index + 1, "page numbering is not sequential")
         operations = page.get("operations", [])
         paths = [operation for operation in operations if operation.get("type") == "path"]
+        if case.get("white_canvas"):
+            require(bool(operations) and bool(paths), "opaque page canvas is missing")
+            canvas = operations[0]
+            require(canvas is paths[0], "opaque canvas would cover previously painted repeated header content")
+            require(canvas.get("fill") == dict.fromkeys(("r", "g", "b", "a"), 255), "page canvas is not opaque white")
+            require(
+                canvas.get("bounds") == {"x": 2880, "y": 2880, "width": 41862, "height": 61591},
+                "opaque canvas does not cover the exact A4 page area",
+            )
+            paths = paths[1:]
         text = " ".join(operation["text"] for operation in operations if operation.get("type") == "text")
         tokens = TOKEN.findall(text)
         body = [token for token in tokens if token.startswith("R")]
@@ -226,6 +237,8 @@ def build_fixture(repository: Path, root: Path, case: dict[str, Any]) -> tuple[b
         "table{border-collapse:collapse;width:420px}"
         f"td,th{{border:1px solid #222;padding:{CELL_PADDING_PX}px;font-weight:normal;text-align:left}}"
     )
+    if case.get("white_canvas"):
+        css += "body{background-color:#fff}"
     if case.get("reject") == "mixed-color":
         css += "td:first-child{border-color:#d00}"
     elif case.get("reject") == "dashed":
@@ -338,7 +351,7 @@ def run_case(binary: Path, repository: Path, root: Path, case: dict[str, Any], p
 
 
 def self_test() -> None:
-    require(len(CASES) == 15 and sum(bool(case.get("reject")) for case in CASES) == 6, "case inventory changed")
+    require(len(CASES) == 16 and sum(bool(case.get("reject")) for case in CASES) == 6, "case inventory changed")
     case = CASES[1]
     paths = [
         {
@@ -369,6 +382,34 @@ def self_test() -> None:
         ],
     }
     check_scene(scene, case)
+    canvas_scene = copy.deepcopy(scene)
+    canvas_scene["pages"][0]["operations"].insert(
+        0,
+        {
+            "type": "path",
+            "bounds": {"x": 2880, "y": 2880, "width": 41862, "height": 61591},
+            "fill": dict.fromkeys(("r", "g", "b", "a"), 255),
+        },
+    )
+    canvas_case = {**case, "white_canvas": True}
+    check_scene(canvas_scene, canvas_case)
+    for change in ("paint-order", "extent", "missing", "translucent"):
+        invalid = copy.deepcopy(canvas_scene)
+        operations = invalid["pages"][0]["operations"]
+        if change == "paint-order":
+            operations.append(operations.pop(0))
+        elif change == "extent":
+            operations[0]["bounds"]["height"] -= 60
+        elif change == "missing":
+            operations.pop(0)
+        else:
+            operations[0]["fill"]["a"] = 254
+        try:
+            check_scene(invalid, canvas_case)
+        except AssertionError:
+            pass
+        else:
+            raise AssertionError(f"canvas/table oracle accepted {change} corruption")
     for change in ("duplicate", "missing", "border", "missing-top-border", "border-gap", "header", "clipped", "page"):
         invalid = copy.deepcopy(scene)
         operations = invalid["pages"][0]["operations"]

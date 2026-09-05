@@ -10,9 +10,9 @@ This is an annotation/geometry oracle, not a general visual or accessible-PDF
 qualification. Negative cases retain their actual typed failure, or explicitly
 report an unsafe/internal URL ignored as a nonlink; neither counts as link support.
 PDF coordinates permit 0.02pt writer rounding. No PDF metadata determinism claim.
-Inline background paint still lacks exact authority and is an explicit excluded
-case, not functional link qualification. Positive duplicate suppression uses two
-text descendants inside one unpainted owner; Rust units cover direct-owner dedup.
+Plain solid backgrounds require authored scene geometry and color as well as
+the link annotation proof. Rounded, fixed, clipped and image-layer backgrounds
+remain excluded. This does not replace visual document qualification.
 """
 
 from __future__ import annotations
@@ -102,12 +102,57 @@ CASES = (
         "exact_rects": [[HTTPS, [2880, 3060, 7920, 720]]],
     },
     {
-        "name": "unsupported-inline-background",
+        "name": "solid-inline-background",
         "body": f'<a href="{HTTPS}">DEDUP</a>',
-        "exclude": "inline-background-authority",
-        "failure": ["artifact", "SCENE_ENCODING_FAILED"],
         "css": "a{background-color:#eee}",
+        "links": {HTTPS: 1},
+        "text": ["DEDUP"],
+        "exact_rects": [[HTTPS, [2880, 3060, 3600, 720]]],
+        "backgrounds": [[[[2880, 3060, 3600, 720], [238, 238, 238, 255]]]],
     },
+    {
+        "name": "solid-descendant-background",
+        "body": f'<a class="box" href="{HTTPS}"><span>BOX</span></a>',
+        "css": ".box{display:block;width:120px;height:40px;background-color:#eee}",
+        "links": {HTTPS: 1},
+        "text": ["BOX"],
+        "exact_rects": [[HTTPS, [2880, 2880, 7200, 2400]]],
+        "backgrounds": [[[[2880, 2880, 7200, 2400], [238, 238, 238, 255]]]],
+    },
+    *(
+        {
+            "name": f"solid-{owner}-background-{pages}-pages",
+            "body": "".join(f'<p class="next">PAGE{page}</p>' for page in range(1, pages + 1)),
+            "css": f"{owner}{{background-color:{color}}}p+p{{break-before:page}}",
+            "links": {},
+            "text": [f"PAGE{page}" for page in range(1, pages + 1)],
+            "pages": pages,
+            "exact_rects": [],
+            # Request-owned page area, not the old scrolling-overflow union:
+            # 48px margins on exact 47622 x 67351 Au A4 pages. Page five also
+            # catches accumulated f32 page-origin drift in the capture path.
+            "backgrounds": [[[[2880, 2880, 41862, 61591], rgba]] for _ in range(pages)],
+        }
+        for owner, color, rgba in (("body", "#fff", [255, 255, 255, 255]), ("html", "#369", [51, 102, 153, 255]))
+        for pages in (1, 5)
+    ),
+    *(
+        {
+            "name": f"unsupported-background-{name}",
+            "body": f'<a class="box" href="{HTTPS}">EXCLUDED</a>',
+            "css": ".box{display:block;width:120px;height:40px;background-color:#eee;" + css + "}",
+            "exclude": f"background-{name}",
+            "failure": ["capture", "SCENE_CAPTURE_FAILED"]
+            if name == "fixed"
+            else ["artifact", "SCENE_ENCODING_FAILED"],
+        }
+        for name, css in (
+            ("rounded", "border-radius:4px"),
+            ("fixed", "background-attachment:fixed"),
+            ("padding-clip", "background-clip:padding-box;padding:4px"),
+            ("gradient", "background-image:linear-gradient(#eee,#ddd)"),
+        )
+    ),
     {
         "name": "unsafe-javascript",
         "body": '<a href="javascript:alert(1)">UNSAFE</a>',
@@ -221,6 +266,17 @@ def scene_links(scene: dict[str, Any], case: dict[str, Any]) -> list[list[dict[s
             # scene and PDF from passing a merely self-consistent comparison.
             expected_rects = case["exact_rects"] if index + 1 == case.get("link_page", 1) else []
             require(exact_rects == expected_rects, "link placement differs from the authored fixture geometry")
+        if "backgrounds" in case:
+            backgrounds = []
+            for operation in page["operations"]:
+                if operation["type"] != "path":
+                    continue
+                bounds, fill = operation["bounds"], operation["fill"]
+                rect = [bounds[key] for key in ("x", "y", "width", "height")]
+                rgba = [fill[key] for key in ("r", "g", "b", "a")]
+                require(all(type(value) is int for value in rect + rgba), "background authority is not integer")
+                backgrounds.append([rect, rgba])
+            require(backgrounds == case["backgrounds"][index], "solid background geometry/color changed")
         keys = [(link["uri"], tuple(link["rect"])) for link in links]
         require(len(keys) == len(set(keys)), "scene emitted a duplicate link rectangle")
         links_by_page.append(links)
@@ -422,6 +478,35 @@ def self_test() -> None:
     expected = scene_links(scene, case)
     require(expected == [[{"uri": HTTPS, "rect": [10, 170, 40, 180]}], []], "Au/PDF axis transform changed")
     check_pdf(synthetic_pdf(expected), scene, expected)
+    painted_scene = copy.deepcopy(scene)
+    painted_scene["pages"][0]["operations"].append(
+        {
+            "type": "path",
+            "bounds": {"x": 800, "y": 1600, "width": 2400, "height": 800},
+            "fill": {"r": 238, "g": 238, "b": 238, "a": 255},
+        }
+    )
+    painted_case = {**case, "backgrounds": [[[[800, 1600, 2400, 800], [238, 238, 238, 255]]], []]}
+    scene_links(painted_scene, painted_case)
+    for corruption in ("position", "color", "missing", "duplicate", "float"):
+        wrong = copy.deepcopy(painted_scene)
+        operations = wrong["pages"][0]["operations"]
+        if corruption == "position":
+            operations[-1]["bounds"]["y"] += 60
+        elif corruption == "color":
+            operations[-1]["fill"]["r"] = 0
+        elif corruption == "missing":
+            operations.pop()
+        elif corruption == "duplicate":
+            operations.append(copy.deepcopy(operations[-1]))
+        else:
+            operations[-1]["bounds"]["x"] = 800.0
+        try:
+            scene_links(wrong, painted_case)
+        except AssertionError:
+            pass
+        else:
+            raise AssertionError(f"background oracle accepted {corruption} corruption")
     for corruption in ("uri", "missing", "duplicate", "rect", "page", "page-count"):
         wrong = copy.deepcopy(expected)
         if corruption == "uri":
