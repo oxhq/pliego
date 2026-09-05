@@ -372,15 +372,16 @@ jobs:
             --archive "$archive" \
             --bundle-version-file "$unpacked/$bundle/VERSION.txt" \
             --proof-output "$proof"
-          text_args=()
+          # macOS Bash 3 treats an empty array as unbound under nounset.
+          set --
           if [[ '${{ runner.os }}' == 'Linux' ]]; then
-            text_args+=(--require-pdf-text)
+            set -- --require-pdf-text
           fi
           python ports/pliego/tests/check_api2_headerless_tables.py \
             --binary "$binary" \
             --source-commit "$source_commit" \
             --proof-directory "$PWD/dist/api2-headerless-tables-${{ matrix.bundle }}" \
-            "${text_args[@]}"
+            "$@"
 
       - name: Upload packaged API 2 executable proof
         if: always()
