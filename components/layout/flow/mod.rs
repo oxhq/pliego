@@ -1020,6 +1020,27 @@ fn prepare_fragmentainer_boundary(
                 breaks,
             ) {
                 TableChildPlacementOutcome::Placed(placement) => {
+                    // A continued headerless grid needs a new top border on each
+                    // page. Until that ownership is represented, keep its capture
+                    // fail-closed while allowing an intact table (including one
+                    // shifted as a whole onto the next page).
+                    if table.has_borders &&
+                        !table
+                            .groups
+                            .iter()
+                            .any(|group| group.kind == TableRowGroupKind::Header) &&
+                        placement
+                            .row_translations
+                            .windows(2)
+                            .any(|pair| pair[0] != pair[1])
+                    {
+                        page_builder.warn_unsupported_table_group_pagination(
+                            child_index,
+                            node,
+                            TableGroupUnsupportedReason::CollapsedBorders,
+                        );
+                        set_table_border_capture_suppressed(fragment, true);
+                    }
                     table.apply(
                         placement,
                         placement_state.containing_block.style.writing_mode,
@@ -1544,7 +1565,9 @@ fn retained_table_rows<'a>(
     {
         return Err(TableGroupUnsupportedReason::UnsupportedLayout);
     }
-    if collapsed_grid && (headers.len() != 1 || rows.iter().any(|row| row.has_rowspan)) {
+    // An intact border grid does not need a repeating header. Continuation
+    // capture is checked after placement, when row translations are known.
+    if collapsed_grid && rows.iter().any(|row| row.has_rowspan) {
         return Err(TableGroupUnsupportedReason::CollapsedBorders);
     }
     if has_borders && !collapsed_grid {

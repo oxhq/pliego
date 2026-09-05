@@ -65,6 +65,7 @@ jobs:
         run: |
           python python/check_pliego_version.py --self-test
           python python/check_pliego_release_archive.py --self-test --check-source-assets .
+          python ports/pliego/tests/check_api2_headerless_tables.py --self-test
 
   package:
     name: ${{ matrix.name }}
@@ -371,12 +372,24 @@ jobs:
             --archive "$archive" \
             --bundle-version-file "$unpacked/$bundle/VERSION.txt" \
             --proof-output "$proof"
+          text_args=()
+          if [[ '${{ runner.os }}' == 'Linux' ]]; then
+            text_args+=(--require-pdf-text)
+          fi
+          python ports/pliego/tests/check_api2_headerless_tables.py \
+            --binary "$binary" \
+            --source-commit "$source_commit" \
+            --proof-directory "$PWD/dist/api2-headerless-tables-${{ matrix.bundle }}" \
+            "${text_args[@]}"
 
       - name: Upload packaged API 2 executable proof
+        if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: pliego-${{ matrix.bundle }}-api2-executable-proof
-          path: dist/api2-executable-proof-${{ matrix.bundle }}.json
+          path: |
+            dist/api2-executable-proof-${{ matrix.bundle }}.json
+            dist/api2-headerless-tables-${{ matrix.bundle }}
           if-no-files-found: error
           retention-days: 30
 

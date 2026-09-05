@@ -194,7 +194,17 @@ jobs:
             "$PWD/target/debug/pliego" \
             "$RUNNER_TEMP/pliego-controlled-chartjs"
 
+      - name: Prove API 2 intact headerless table borders and fail-closed exclusions
+        run: |
+          python ports/pliego/tests/check_api2_headerless_tables.py --self-test
+          python ports/pliego/tests/check_api2_headerless_tables.py \
+            --binary "$PWD/target/debug/pliego" \
+            --source-commit "$(git rev-parse HEAD)" \
+            --proof-directory "$RUNNER_TEMP/pliego-controlled-capture/api2-headerless-tables" \
+            --require-pdf-text
+
       - name: Upload direct controlled-capture proof
+        if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: pliego-direct-controlled-capture-proof
