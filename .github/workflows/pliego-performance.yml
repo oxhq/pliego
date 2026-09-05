@@ -1,305 +1,482 @@
-name: Pliego hosted performance snapshot
+name: Pliego native regression
 
 on:
   workflow_dispatch:
+    inputs:
+      mode:
+        description: Preflight by default; timed requires committed owner-reviewed eligibility
+        type: choice
+        options: [preflight, timed]
+        default: preflight
+        required: true
+      repeat:
+        description: Planned repeat number (separate hosts are never pooled)
+        type: choice
+        options: ['1', '2', '3']
+        default: '1'
+        required: true
+      artifact_id:
+        description: Exact Linux x86_64 candidate package artifact ID
+        type: string
+        required: true
+      source_sha:
+        description: Exact 40-character candidate package source SHA
+        type: string
+        required: true
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
-  group: pliego-hosted-performance-${{ github.ref }}
+  group: pliego-native-regression-${{ github.ref }}-${{ inputs.source_sha }}-${{ inputs.mode }}-${{ inputs.repeat }}
   cancel-in-progress: false
 
 jobs:
-  hosted-snapshot:
-    name: Hosted snapshot ${{ matrix.repeat }}
+  preflight:
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
-    strategy:
-      fail-fast: false
-      matrix:
-        repeat: [1, 2, 3]
-
+    timeout-minutes: ${{ inputs.mode == 'timed' && 120 || 35 }}
     steps:
-      - name: Require the reviewed main workflow
-        run: |
-          test "$GITHUB_REF" = refs/heads/main
-          test "$GITHUB_EVENT_NAME" = workflow_dispatch
-          test "$GITHUB_WORKFLOW_REF" = oxhq/pliego/.github/workflows/pliego-performance.yml@refs/heads/main
-
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           persist-credentials: false
           ref: ${{ github.sha }}
-
-      - name: Install locked comparison dependencies
+      - name: Validate finite preflight or reviewed timed controls
+        id: controls
         env:
-          PUPPETEER_SKIP_DOWNLOAD: "1"
+          ARTIFACT_ID: ${{ inputs.artifact_id }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          MODE: ${{ inputs.mode }}
+          REPEAT: ${{ inputs.repeat }}
         run: |
           set -euo pipefail
+          python3 - <<'PY'
+          import json, os, re
+          from pathlib import Path
+          source, artifact = os.environ['SOURCE_SHA'], os.environ['ARTIFACT_ID']
+          if not re.fullmatch(r'[0-9a-f]{40}', source) or not re.fullmatch(r'[1-9][0-9]{0,19}', artifact):
+              raise SystemExit('Exact source SHA and positive artifact ID required')
+          mode, repeat = os.environ['MODE'], os.environ['REPEAT']
+          if mode not in ('preflight', 'timed') or repeat not in ('1', '2', '3'):
+              raise SystemExit('Expected preflight/timed and repeat 1/2/3')
+          timed = mode == 'timed'
+          setup = Path(os.environ['RUNNER_TEMP']) / 'native-regression-setup'
+          setup.mkdir()
+          controls = {'mode': mode, 'repeat': int(repeat), 'source_sha': source, 'artifact_id': int(artifact),
+                      'observations': 334 if timed else 4, 'pdfs': 446 if timed else 6,
+                      'timed_observations': 300 if timed else 0, 'timed_pdfs': 400 if timed else 0,
+                      'timed_per_target': {'serial': 100, 'fixed_two_batches': 50} if timed else None,
+                      'planned_repeats': [1, 2, 3], 'sample_root_wall_deadline_ms': 65000,
+                      'service_seconds': 5400 if timed else 900, 'job_minutes': 120 if timed else 35,
+                      'applications_booted': 0, 'rust_build': False,
+                      'synthetic_lifecycle_controls': 6,
+                      'interruption_boundary': 'Raw prefix is not a complete qualified campaign.'}
+          (setup / 'controls.json').write_text(json.dumps(controls, sort_keys=True) + '\n')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f"service_seconds={controls['service_seconds']}\n")
+          PY
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - uses: shivammathur/setup-php@b604ade2a87db23f8871b7182e69ec5e75effb45 # v2
+        with:
+          php-version: '8.4'
+          coverage: none
+          tools: none
+      - name: Install pinned PDF oracle and run portable source tests
+        run: |
+          set -euo pipefail
+          setup="$RUNNER_TEMP/native-regression-setup"
           sudo apt-get update
-          sudo apt-get install --yes \
-            acl ca-certificates e2fsprogs iproute2 libegl1 libfontconfig1 libgl1-mesa-dri \
-            php-xml php-mbstring poppler-utils util-linux
-          composer install --working-dir=benchmarks/adapters/dompdf \
-            --no-dev --no-interaction --prefer-dist --classmap-authoritative
-          composer install --working-dir=benchmarks/adapters/browsershot \
-            --no-dev --no-interaction --prefer-dist --classmap-authoritative
-          npm ci --prefix benchmarks/adapters/browsershot --omit=dev
-
-      - name: Resolve immutable v0.3.3 release and runtimes
+          sudo apt-get install --yes acl ca-certificates e2fsprogs iproute2 libegl1 libfontconfig1 libgl1-mesa-dri poppler-utils util-linux
+          python -m venv "$RUNNER_TEMP/native-regression-python"
+          py="$RUNNER_TEMP/native-regression-python/bin/python"
+          "$py" -m pip install --require-hashes -r benchmarks/integration/real_document_requirements.txt --report "$setup/pip-report.json"
+          "$py" -m pip --version > "$setup/pip-version.txt"
+          dpkg-query -W > "$setup/dpkg-packages.txt"
+          php --version > "$setup/php-version.txt"
+          "$py" benchmarks/integration/test_native_regression.py 2>&1 | tee "$setup/source-tests.log"
+          "$py" -O benchmarks/integration/test_native_regression.py 2>&1 | tee "$setup/optimized-guard-tests.log"
+          "$py" benchmarks/integration/test_native_batch_lifecycle.py --self-test 2>&1 | tee "$setup/lifecycle-source-tests.log"
+          php -l benchmarks/integration/native_batch_broker.php > "$setup/broker-lint.txt"
+      - name: Retrieve only the committed reviewed preflight for timed mode
+        if: inputs.mode == 'timed'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          py="$RUNNER_TEMP/native-regression-python/bin/python"
+          "$py" - <<'PY' 2>&1 | tee "$RUNNER_TEMP/native-regression-setup/acceptance-retrieval.log"
+          import hashlib, json, os, re, selectors, stat, subprocess, time
+          from pathlib import Path
+          def require(ok, message):
+              if not ok:
+                  raise SystemExit(message)
+          def pairs(items):
+              value = {}
+              for key, item in items:
+                  require(key not in value, 'Duplicate JSON key')
+                  value[key] = item
+              return value
+          def decode(raw):
+              return json.loads(raw, object_pairs_hook=pairs, parse_constant=lambda _: require(False, 'Nonfinite JSON'))
+          workspace = Path(os.environ['GITHUB_WORKSPACE'])
+          source = os.environ['SOURCE_SHA']
+          proof = Path(os.environ['RUNNER_TEMP']) / 'native-regression-acceptance-source'
+          proof.mkdir(mode=0o700)
+          def committed(name):
+              relative = f'benchmarks/integration/native_regression_acceptance/{source}/{name}'
+              path = workspace
+              for part in Path(relative).parts:
+                  path /= part
+                  require(not path.is_symlink(), 'Linked committed review path')
+              info = path.stat()
+              require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and 0 < info.st_size <= 65536,
+                      'Review must be a bounded ordinary committed file')
+              raw = path.read_bytes()
+              stored = subprocess.run(['git', 'show', f"{os.environ['GITHUB_SHA']}:{relative}"],
+                                      check=True, capture_output=True, timeout=30).stdout
+              require(raw == stored, 'Review bytes differ from the selected commit')
+              (proof / name).write_bytes(raw)
+              return decode(raw)
+          acceptance, origin = committed('acceptance.json'), committed('origin.json')
+          require(set(acceptance) == {'schema', 'identity_sha256', 'preflight_directory',
+                  'preflight_manifest_sha256', 'reviewed', 'linux_lifecycle_controls_reviewed', 'evidence'},
+                  'Unexpected acceptance fields')
+          require(acceptance['schema'] == 'pliego.native-regression.v1.acceptance'
+                  and acceptance['reviewed'] is True and acceptance['linux_lifecycle_controls_reviewed'] is True
+                  and isinstance(acceptance['evidence'], str) and acceptance['evidence'].strip()
+                  and acceptance['preflight_directory'] == '/var/lib/pliego-native-regression-acceptance/preflight'
+                  and all(isinstance(acceptance[key], str) and re.fullmatch(r'[0-9a-f]{64}', acceptance[key])
+                          for key in ('identity_sha256', 'preflight_manifest_sha256')), 'Unreviewed or invalid acceptance')
+          require(set(origin) == {'schema', 'repository', 'repository_id', 'native_source_sha', 'run_id',
+                  'run_attempt', 'head_sha', 'artifact_id', 'artifact_name', 'zip_bytes', 'zip_sha256'},
+                  'Unexpected origin fields')
+          require(origin['schema'] == 'pliego.native-regression-preflight-origin.v1'
+                  and origin['repository'] == 'oxhq/pliego' and type(origin['repository_id']) is int
+                  and origin['repository_id'] == 1301051584 and origin['native_source_sha'] == source
+                  and all(type(origin[key]) is int and 0 < origin[key] < 10**20
+                          for key in ('run_id', 'run_attempt', 'artifact_id', 'zip_bytes'))
+                  and origin['zip_bytes'] <= 32 * 1024 * 1024
+                  and isinstance(origin['head_sha'], str) and re.fullmatch(r'[0-9a-f]{40}', origin['head_sha'])
+                  and isinstance(origin['zip_sha256'], str) and re.fullmatch(r'[0-9a-f]{64}', origin['zip_sha256'])
+                  and origin['artifact_name'] == f"pliego-native-preflight-{source}-{origin['run_id']}",
+                  'Invalid exact public preflight origin')
+          def api(route, name):
+              result = subprocess.run(['gh', 'api', f'repos/oxhq/pliego/{route}'], capture_output=True, timeout=30)
+              require(len(result.stdout) <= 65536 and len(result.stderr) <= 65536, 'Oversized GitHub metadata')
+              (proof / (name + '.stdout')).write_bytes(result.stdout)
+              (proof / (name + '.stderr')).write_bytes(result.stderr)
+              require(result.returncode == 0, 'GitHub metadata retrieval failed')
+              value = decode(result.stdout)
+              (proof / (name + '.json')).write_text(json.dumps(value, sort_keys=True) + '\n')
+              return value
+          run = api(f"actions/runs/{origin['run_id']}", 'run')
+          artifact = api(f"actions/artifacts/{origin['artifact_id']}", 'artifact')
+          require(run['id'] == origin['run_id'] and run['run_attempt'] == origin['run_attempt']
+                  and run['head_sha'] == origin['head_sha'] and run['status'] == 'completed'
+                  and run['conclusion'] == 'success' and run['event'] == 'workflow_dispatch'
+                  and run['path'] in ('.github/workflows/pliego-performance.yml', '.github/workflows/pliego-native-regression.yml')
+                  and all(run[key]['id'] == 1301051584 and run[key]['full_name'] == 'oxhq/pliego'
+                          and run[key]['private'] is False for key in ('repository', 'head_repository')),
+                  'Origin is not the exact successful public preflight workflow run')
+          linked = artifact['workflow_run']
+          require(artifact['id'] == origin['artifact_id'] and artifact['name'] == origin['artifact_name']
+                  and artifact['size_in_bytes'] == origin['zip_bytes'] and artifact['expired'] is False
+                  and artifact['digest'] == 'sha256:' + origin['zip_sha256']
+                  and linked['id'] == origin['run_id'] and linked['head_sha'] == origin['head_sha']
+                  and linked['repository_id'] == linked['head_repository_id'] == 1301051584
+                  and run['run_started_at'] <= artifact['created_at'] <= run['updated_at'],
+                  'Artifact is expired, changed, or not from the reviewed successful attempt')
+          command = ['gh', 'api', f"repos/oxhq/pliego/actions/artifacts/{origin['artifact_id']}/zip"]
+          (proof / 'download.command.json').write_text(json.dumps(command) + '\n')
+          process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+          selector = selectors.DefaultSelector()
+          selector.register(process.stdout, selectors.EVENT_READ, 'zip')
+          selector.register(process.stderr, selectors.EVENT_READ, 'stderr')
+          counts, digest, deadline = {'zip': 0, 'stderr': 0}, hashlib.sha256(), time.monotonic() + 120
+          try:
+              with (proof / 'preflight.zip').open('xb') as output, (proof / 'download.stderr').open('xb') as errors:
+                  while selector.get_map():
+                      require(time.monotonic() < deadline, 'Preflight download deadline exceeded')
+                      for key, _ in selector.select(min(1, max(0, deadline - time.monotonic()))):
+                          data = os.read(key.fileobj.fileno(), 65536)
+                          if not data:
+                              selector.unregister(key.fileobj)
+                              continue
+                          counts[key.data] += len(data)
+                          limit = origin['zip_bytes'] if key.data == 'zip' else 65536
+                          require(counts[key.data] <= limit, 'Preflight transport exceeded its bound')
+                          (output if key.data == 'zip' else errors).write(data)
+                          if key.data == 'zip':
+                              digest.update(data)
+              code = process.wait(timeout=max(0.01, deadline - time.monotonic()))
+              require(code == 0 and counts['zip'] == origin['zip_bytes'] and digest.hexdigest() == origin['zip_sha256'],
+                      'Preflight transport exit, exact size or digest differs')
+              (proof / 'transport.json').write_text(json.dumps({'exit_code': code, 'bytes': counts['zip'],
+                      'sha256': digest.hexdigest(), 'verified': True}, sort_keys=True) + '\n')
+          finally:
+              selector.close()
+              if process.poll() is None:
+                  process.kill()
+              process.wait(timeout=10)
+              process.stdout.close()
+              process.stderr.close()
+          PY
+          # sudo does not forward GH_TOKEN. The reviewed archive remains outside
+          # the measured tree, root-owned and inaccessible to the engine user.
+          sudo "$py" - "$GITHUB_WORKSPACE" "$RUNNER_TEMP/native-regression-acceptance-source" <<'PY' 2>&1 | tee "$RUNNER_TEMP/native-regression-setup/acceptance-verification.log"
+          import hashlib, json, os, re, stat, sys, zipfile
+          from pathlib import Path
+          workspace, proof = map(Path, sys.argv[1:])
+          def require(ok, message):
+              if not ok:
+                  raise SystemExit(message)
+          require('GH_TOKEN' not in os.environ and sys.flags.optimize == 0, 'Unexpected credentials or optimized verifier')
+          origin = json.loads((proof / 'origin.json').read_bytes())
+          archive = proof / 'preflight.zip'
+          require(archive.stat().st_size == origin['zip_bytes'] <= 32 * 1024 * 1024
+                  and hashlib.sha256(archive.read_bytes()).hexdigest() == origin['zip_sha256'], 'Changed downloaded archive')
+          root = Path('/var/lib/pliego-native-regression-acceptance')
+          for ancestor in reversed(root.parents):
+              info = ancestor.lstat()
+              require(stat.S_ISDIR(info.st_mode) and info.st_uid == 0 and not info.st_mode & 0o022,
+                      'Unsafe preflight parent')
+          require(not os.path.lexists(root), 'Preflight extraction root must be absent')
+          inventory, seen, spellings, expanded = [], {}, {}, 0
+          allowed = {'native-regression-preflight', 'native-regression-lifecycle',
+                     'native-regression-setup', 'native-regression-candidate'}
+          with zipfile.ZipFile(archive) as zipped:
+              entries = zipped.infolist()
+              require(0 < len(entries) <= 1024, 'Preflight archive member count exceeds cap')
+              for entry in entries:
+                  name = entry.orig_filename
+                  directory = entry.is_dir()
+                  raw = name[:-1] if directory else name
+                  parts = raw.split('/')
+                  require(name == entry.filename and raw and not raw.startswith('/') and '\\' not in raw
+                          and all(part not in ('', '.', '..') and re.fullmatch(r'[A-Za-z0-9_.-]+', part)
+                                  and not part.endswith(('.', ' '))
+                                  and not re.fullmatch(r'(?i:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?', part)
+                                  for part in parts), 'Nonportable or traversing ZIP member')
+                  require(parts[0] in allowed and (directory or len(parts) > 1), 'Unexpected artifact root')
+                  if parts[0] == 'native-regression-candidate' and not directory:
+                      require(len(parts) == 2 and parts[1] in ('candidate-identity.json', 'artifact.json', 'run.json'),
+                              'Native payload is not eligible preflight evidence')
+                  mode = entry.external_attr >> 16
+                  require(stat.S_IFMT(mode) in (0, stat.S_IFDIR if directory else stat.S_IFREG)
+                          and not mode & 0o7000
+                          and not entry.flag_bits & 1 and entry.compress_type in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED)
+                          and 0 <= entry.file_size <= 16 * 1024 * 1024
+                          and (not directory or entry.file_size == 0), 'Linked, special, encrypted or oversized ZIP member')
+                  folded = raw.casefold()
+                  require(folded not in seen, 'Duplicate ZIP member')
+                  for count in range(1, len(parts) + 1):
+                      prefix = '/'.join(parts[:count])
+                      key = prefix.casefold()
+                      require(key not in spellings or spellings[key] == prefix, 'Case-aliased ZIP path')
+                      require(count == len(parts) or seen.get(key) is not False, 'ZIP parent is a file')
+                      spellings[key] = prefix
+                  require(directory or not any(key.startswith(folded + '/') for key in spellings), 'ZIP file shadows a directory')
+                  seen[folded] = directory
+                  expanded += entry.file_size
+                  require(expanded <= 64 * 1024 * 1024, 'Preflight expanded-size cap exceeded')
+              require(all('native-regression-preflight/' + name in seen for name in ('manifest.json', 'summary.json', 'identity.json')),
+                      'Missing exact preflight directory')
+              root.mkdir(mode=0o700)
+              for entry in entries:
+                  path = root / 'source' / entry.filename
+                  if entry.is_dir():
+                      path.mkdir(parents=True, exist_ok=True, mode=0o700)
+                      continue
+                  path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                  digest, count = hashlib.sha256(), 0
+                  with zipped.open(entry) as source, path.open('xb') as output:
+                      while data := source.read(65536):
+                          count += len(data)
+                          require(count <= entry.file_size, 'Expanded member exceeds declared size')
+                          output.write(data)
+                          digest.update(data)
+                  require(count == entry.file_size, 'Truncated preflight member')
+                  path.chmod(0o400)
+                  inventory.append({'path': entry.filename, 'bytes': count, 'sha256': digest.hexdigest()})
+          preflight = root / 'preflight'
+          (root / 'source/native-regression-preflight').rename(preflight)
+          (proof / 'inventory.json').write_text(json.dumps(inventory, sort_keys=True) + '\n')
+          sys.path.insert(0, str(workspace / 'benchmarks/integration'))
+          import run_native_regression as native
+          acceptance = json.loads((proof / 'acceptance.json').read_bytes())
+          # verify_acceptance invokes strict verify(): exact manifest, source
+          # closure, complete preflight, all six PDFs, and native overlap proof.
+          native.verify_acceptance(acceptance, acceptance['identity_sha256'], preflight)
+          identity = native.read(preflight / 'identity.json')
+          require(identity['targets']['candidate']['source_sha'] == origin['native_source_sha'],
+                  'Reviewed preflight used another native source')
+          (proof / 'verification.json').write_text(json.dumps({'verified': True,
+                  'identity_sha256': acceptance['identity_sha256'],
+                  'preflight_manifest_sha256': acceptance['preflight_manifest_sha256'],
+                  'native_source_sha': origin['native_source_sha'], 'root': str(preflight)}, sort_keys=True) + '\n')
+          PY
+      - name: Verify candidate and published v0.3.3; prepare immutable execution closure
         id: runtime
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ inputs.artifact_id }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
         run: |
           set -euo pipefail
-          binary="$(python3 benchmarks/tools/resolve_release.py \
-            --cache "$RUNNER_TEMP/pliego-release-cache" \
-            --metadata-out "$RUNNER_TEMP/verified-release.json")"
-          node="$(readlink -f "$(command -v node)")"
-          chrome="$(command -v google-chrome-stable || command -v google-chrome || command -v chromium)"
-          chrome="$(readlink -f "$chrome")"
-          chrome_root="$(dirname "$chrome")"
-          case "$chrome_root" in
-            /opt/google/chrome|/usr/lib/chromium|/usr/lib/chromium-browser) ;;
-            *) echo "unsupported hosted Chrome installation root: $chrome_root" >&2; exit 1 ;;
-          esac
-          runtime_root=/usr/lib/pliego-benchmark
-          sudo install -d -o root -g root -m 0555 "$runtime_root"
-          sudo install -o root -g root -m 0555 "$binary" "$runtime_root/pliego"
-          sudo install -o root -g root -m 0555 "$node" "$runtime_root/node"
-          sudo install -d -o root -g root -m 0555 "$runtime_root/chrome"
-          sudo cp -aL "$chrome_root/." "$runtime_root/chrome/"
-          sudo chown -R root:root "$runtime_root/chrome"
-          sudo chmod -R go-w "$runtime_root/chrome"
-          chrome_symlink="$(sudo find "$runtime_root/chrome" -type l -print -quit)"
-          test -z "$chrome_symlink"
-          printf 'binary=%s\nnode=%s\nchrome=%s\n' \
-            "$runtime_root/pliego" "$runtime_root/node" \
-            "$runtime_root/chrome/$(basename "$chrome")" >> "$GITHUB_OUTPUT"
-
-      - name: Provision fixed unprivileged engine account
-        run: |
-          set -euo pipefail
+          candidate="$(python benchmarks/integration/resolve_development_candidate.py \
+            --artifact-id "$ARTIFACT_ID" --source-sha "$SOURCE_SHA" --out "$RUNNER_TEMP/native-regression-candidate")"
+          baseline="$(python benchmarks/tools/resolve_release.py --target pliego-0.3.3 \
+            --cache "$RUNNER_TEMP/native-regression-v033-cache" --metadata-out "$RUNNER_TEMP/native-regression-setup/v033-identity.json")"
+          runtime=/usr/lib/pliego-native-regression
+          test ! -e "$runtime"
+          sudo install -d -o root -g root -m 0555 "$runtime"
+          sudo install -o root -g root -m 0555 "$candidate" "$runtime/candidate"
+          sudo install -o root -g root -m 0555 "$baseline" "$runtime/baseline"
+          cmp -- "$candidate" "$runtime/candidate"
+          cmp -- "$baseline" "$runtime/baseline"
+          sha256sum "$runtime/candidate" "$runtime/baseline" > "$RUNNER_TEMP/native-regression-setup/installed-binaries.sha256"
           if ! getent passwd pliego-benchmark-engine >/dev/null; then
-            sudo useradd --system --no-create-home \
-              --home-dir /nonexistent/pliego-benchmark-engine \
-              --shell /usr/sbin/nologin pliego-benchmark-engine
+            sudo useradd --system --no-create-home --home-dir /nonexistent/pliego-benchmark-engine --shell /usr/sbin/nologin pliego-benchmark-engine
           fi
           test "$(id -u pliego-benchmark-engine)" -gt 0
           test "$(id -g pliego-benchmark-engine)" -gt 0
-          engine_uid="$(id -u pliego-benchmark-engine)"
-          engine_gid="$(id -g pliego-benchmark-engine)"
-          engine_home="$(getent passwd pliego-benchmark-engine | cut -d: -f6)"
-          test "$engine_home" = /nonexistent/pliego-benchmark-engine
-          if [[ -e "$engine_home" ]]; then
-            sudo setpriv --reuid="$engine_uid" --regid="$engine_gid" --clear-groups \
-              --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
-              /usr/bin/test ! -w "$engine_home"
-          fi
-          engine_temp_root=/var/lib/pliego-benchmark-engine-temp
-          test ! -e "$engine_temp_root"
-          sudo install -d -o root -g root -m 0711 "$engine_temp_root"
-          sudo chattr +A +S +D "$engine_temp_root"
-          test "$(findmnt -T "$engine_temp_root" -n -o FSTYPE)" = ext4
-          engine_temp_attributes="$(sudo lsattr -d "$engine_temp_root" | awk '{print $1}')"
-          [[ "$engine_temp_attributes" == *A* && "$engine_temp_attributes" == *S* \
-            && "$engine_temp_attributes" == *D* ]]
-          engine_test=(sudo setpriv --reuid="$engine_uid" --regid="$engine_gid" --clear-groups \
-            --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs /usr/bin/test)
-          engine_find=(sudo setpriv --reuid="$engine_uid" --regid="$engine_gid" --clear-groups \
-            --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs /usr/bin/find)
+          test "$(getent passwd pliego-benchmark-engine | cut -d: -f6)" = /nonexistent/pliego-benchmark-engine
+          test ! -e /nonexistent/pliego-benchmark-engine
+          engine_temp=/var/lib/pliego-benchmark-engine-temp
+          test ! -e "$engine_temp"
+          sudo install -d -o root -g root -m 0711 "$engine_temp"
+          sudo chattr +A +S +D "$engine_temp"
+          test "$(findmnt -T "$engine_temp" -n -o FSTYPE)" = ext4
+          attributes="$(sudo lsattr -d "$engine_temp" | awk '{print $1}')"
+          [[ "$attributes" == *A* && "$attributes" == *S* && "$attributes" == *D* ]]
+          engine=(sudo setpriv --reuid="$(id -u pliego-benchmark-engine)" --regid="$(id -g pliego-benchmark-engine)" --clear-groups --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs)
+          sudo chown -R root:root "$GITHUB_WORKSPACE/benchmarks" "$GITHUB_WORKSPACE/contracts" "$GITHUB_WORKSPACE/ports/pliego/tests"
+          sudo chmod -R a+rX,go-w "$GITHUB_WORKSPACE/benchmarks" "$GITHUB_WORKSPACE/contracts" "$GITHUB_WORKSPACE/ports/pliego/tests"
+          sudo chmod 0755 "$GITHUB_WORKSPACE/benchmarks/integration/native_batch_launcher.py"
           ancestors=()
           ancestor="$GITHUB_WORKSPACE"
           while [[ "$ancestor" != / ]]; do
             ancestors+=("$ancestor")
             ancestor="$(dirname "$ancestor")"
           done
+          # Root-to-leaf traversal avoids accidentally shadowing readable leaves
+          # with an execute-only ACL when an earlier ancestor was inaccessible.
           for ((index=${#ancestors[@]} - 1; index >= 0; index--)); do
             ancestor="${ancestors[$index]}"
-            if ! (cd / && "${engine_test[@]}" -x "$ancestor"); then
+            if ! (cd / && "${engine[@]}" /usr/bin/test -x "$ancestor"); then
               sudo setfacl -m u:pliego-benchmark-engine:--x "$ancestor"
             fi
           done
-          "${engine_test[@]}" -x "${{ steps.runtime.outputs.binary }}"
-          "${engine_test[@]}" ! -w "${{ steps.runtime.outputs.binary }}"
-          "${engine_test[@]}" -x "${{ steps.runtime.outputs.node }}"
-          "${engine_test[@]}" ! -w "${{ steps.runtime.outputs.node }}"
-          "${engine_test[@]}" -x "${{ steps.runtime.outputs.chrome }}"
-          "${engine_test[@]}" ! -w "${{ steps.runtime.outputs.chrome }}"
-          "${engine_test[@]}" -x /
-          "${engine_test[@]}" ! -w /
-          "${engine_test[@]}" -x /usr
-          "${engine_test[@]}" ! -w /usr
-          "${engine_test[@]}" -x /usr/lib
-          "${engine_test[@]}" ! -w /usr/lib
-          "${engine_test[@]}" -x /usr/lib/pliego-benchmark
-          "${engine_test[@]}" ! -w /usr/lib/pliego-benchmark
-          writable_chrome="$("${engine_find[@]}" /usr/lib/pliego-benchmark/chrome -writable -print -quit)"
-          test -z "$writable_chrome"
-          (cd / && "${engine_test[@]}" -r "$GITHUB_WORKSPACE/benchmarks/fixtures/minimal-static/comparator.html")
-          (cd / && "${engine_test[@]}" ! -w "$GITHUB_WORKSPACE/benchmarks/fixtures/minimal-static/comparator.html")
-          (cd / && "${engine_test[@]}" -r "$GITHUB_WORKSPACE/benchmarks/fixtures/minimal-static/Ahem.ttf")
-          (cd / && "${engine_test[@]}" ! -w "$GITHUB_WORKSPACE/benchmarks/fixtures/minimal-static/Ahem.ttf")
-          (cd / && "${engine_test[@]}" -x "$GITHUB_WORKSPACE/benchmarks/fixtures/minimal-static")
-          (cd / && "${engine_test[@]}" ! -w "$GITHUB_WORKSPACE/benchmarks/fixtures/minimal-static")
-          (cd / && "${engine_test[@]}" -x "$GITHUB_WORKSPACE/benchmarks/adapters/dompdf/adapter.php")
-          (cd / && "${engine_test[@]}" ! -w "$GITHUB_WORKSPACE/benchmarks/adapters/dompdf/adapter.php")
-          (cd / && "${engine_test[@]}" -x "$GITHUB_WORKSPACE/benchmarks/adapters/browsershot/adapter.php")
-          (cd / && "${engine_test[@]}" ! -w "$GITHUB_WORKSPACE/benchmarks/adapters/browsershot/adapter.php")
-          (cd / && "${engine_test[@]}" -r "$GITHUB_WORKSPACE/benchmarks/adapters/dompdf/composer.lock")
-          (cd / && "${engine_test[@]}" -r "$GITHUB_WORKSPACE/benchmarks/adapters/dompdf/vendor/autoload.php")
-          (cd / && "${engine_test[@]}" ! -w "$GITHUB_WORKSPACE/benchmarks/adapters/dompdf/vendor/autoload.php")
-          (cd / && "${engine_test[@]}" -r "$GITHUB_WORKSPACE/benchmarks/adapters/browsershot/composer.lock")
-          (cd / && "${engine_test[@]}" -r "$GITHUB_WORKSPACE/benchmarks/adapters/browsershot/vendor/autoload.php")
-          (cd / && "${engine_test[@]}" ! -w "$GITHUB_WORKSPACE/benchmarks/adapters/browsershot/vendor/autoload.php")
-          (cd / && "${engine_test[@]}" -r "$GITHUB_WORKSPACE/benchmarks/adapters/browsershot/package-lock.json")
-          (cd / && "${engine_test[@]}" -r "$GITHUB_WORKSPACE/benchmarks/adapters/browsershot/node_modules/puppeteer/package.json")
-          (cd / && "${engine_test[@]}" ! -w "$GITHUB_WORKSPACE/benchmarks/adapters/browsershot/node_modules/puppeteer/package.json")
-          namei -l "$GITHUB_WORKSPACE/benchmarks/adapters/dompdf/adapter.php"
-          namei -l "$GITHUB_WORKSPACE/benchmarks/fixtures/minimal-static"
-
-      - name: Capture GitHub runner environment for the delegated service
-        id: evidence
+          for closure in "$runtime" "$GITHUB_WORKSPACE/benchmarks" "$GITHUB_WORKSPACE/contracts" "$GITHUB_WORKSPACE/ports/pliego/tests"; do
+            "${engine[@]}" /usr/bin/test -r "$closure"
+            "${engine[@]}" /usr/bin/test -x "$closure"
+            test -z "$("${engine[@]}" /usr/bin/find "$closure" -writable -print -quit)"
+          done
+          "${engine[@]}" /usr/bin/test -x "$runtime/candidate"
+          "${engine[@]}" /usr/bin/test -x "$runtime/baseline"
+          "${engine[@]}" /usr/bin/test -x "$GITHUB_WORKSPACE/benchmarks/integration/native_batch_launcher.py"
+          printf 'candidate=%s\nbaseline=%s\npython=%s\nphp=%s\n' "$runtime/candidate" "$runtime/baseline" \
+            "$RUNNER_TEMP/native-regression-python/bin/python" "$(readlink -f "$(command -v php)")" >> "$GITHUB_OUTPUT"
+      - name: Run finite lifecycle controls and selected campaign; verify every retained PDF
         env:
-          PLIEGO_RUNNER_ENVIRONMENT: ${{ runner.environment }}
-          PLIEGO_SNAPSHOT_REPEAT: ${{ matrix.repeat }}
-          SNAPSHOT_REPEAT: ${{ matrix.repeat }}
+          CANDIDATE: ${{ steps.runtime.outputs.candidate }}
+          BASELINE: ${{ steps.runtime.outputs.baseline }}
+          PYTHON: ${{ steps.runtime.outputs.python }}
+          PHP: ${{ steps.runtime.outputs.php }}
+          MODE: ${{ inputs.mode }}
+          REPEAT: ${{ inputs.repeat }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          SERVICE_SECONDS: ${{ steps.controls.outputs.service_seconds }}
         run: |
           set -euo pipefail
-          output="$RUNNER_TEMP/pliego-hosted-snapshot-$SNAPSHOT_REPEAT"
-          environment="$RUNNER_TEMP/pliego-hosted-environment-$SNAPSHOT_REPEAT.sh"
-          python3 - "$environment" <<'PY'
-          import os
-          import pathlib
-          import shlex
-          import sys
-
-          names = (
-              "GITHUB_ACTIONS", "GITHUB_EVENT_NAME", "GITHUB_JOB", "GITHUB_REF",
-              "GITHUB_REPOSITORY", "GITHUB_RUN_ATTEMPT", "GITHUB_RUN_ID", "GITHUB_SERVER_URL",
-              "GITHUB_SHA", "GITHUB_WORKFLOW", "GITHUB_WORKFLOW_REF", "ImageOS", "ImageVersion",
-              "PLIEGO_RUNNER_ENVIRONMENT", "PLIEGO_SNAPSHOT_REPEAT",
-              "RUNNER_ARCH", "RUNNER_NAME", "RUNNER_OS",
-          )
-          path = pathlib.Path(sys.argv[1])
-          path.write_text(
-              "".join(f"export {name}={shlex.quote(os.environ.get(name, ''))}\n" for name in names),
-              encoding="utf-8",
-          )
-          PY
-          sudo chown root:root "$environment"
-          sudo chmod 0400 "$environment"
-          printf 'output=%s\nenvironment=%s\n' "$output" "$environment" >> "$GITHUB_OUTPUT"
-
-      - name: Run 100-sample interleaved comparison under delegated cgroup v2
-        env:
-          BINARY: ${{ steps.runtime.outputs.binary }}
-          NODE: ${{ steps.runtime.outputs.node }}
-          CHROME: ${{ steps.runtime.outputs.chrome }}
-          OUTPUT: ${{ steps.evidence.outputs.output }}
-          ENVIRONMENT_FILE: ${{ steps.evidence.outputs.environment }}
-          ENGINE_TEMP_ROOT: /var/lib/pliego-benchmark-engine-temp
-        run: |
-          set -euo pipefail
-          sudo systemd-run --quiet --wait --pipe --collect --expand-environment=no \
-            -p Type=exec \
-            -p Delegate=yes \
-            -p DelegateSubgroup=harness \
-            -p KillMode=control-group \
-            -p TimeoutStopSec=10s \
-            -p RuntimeMaxSec=80min \
+          setup="$RUNNER_TEMP/native-regression-setup"
+          unit="pliego-native-regression-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.service"
+          test "$(sudo systemctl show "$unit" --property=LoadState --value)" = not-found
+          printf '%s\n' "$unit" > "$setup/service-unit.txt"
+          # Services inherit only public host provenance, never GH_TOKEN or a
+          # whole workflow environment. No network credentials enter the engine.
+          metadata=()
+          for name in GITHUB_ACTIONS GITHUB_RUN_ID GITHUB_RUN_ATTEMPT GITHUB_SHA GITHUB_WORKFLOW_REF GITHUB_REPOSITORY GITHUB_SERVER_URL ImageOS ImageVersion; do
+            if [[ -v "$name" ]]; then
+              metadata+=("--setenv=$name=${!name}")
+            fi
+          done
+          test "$GITHUB_ACTIONS" = true
+          acceptance=''
+          if [[ "$MODE" == timed ]]; then
+            acceptance="$GITHUB_WORKSPACE/benchmarks/integration/native_regression_acceptance/$SOURCE_SHA/acceptance.json"
+            test -f "$RUNNER_TEMP/native-regression-acceptance-source/verification.json"
+            test -f "$acceptance"
+          fi
+          service_status=0
+          sudo systemd-run --quiet --wait --pipe --collect --expand-environment=no --unit="$unit" \
+            "${metadata[@]}" -p Type=exec -p Delegate=yes -p DelegateSubgroup=harness \
+            -p KillMode=control-group -p TimeoutStopSec=10s -p "RuntimeMaxSec=${SERVICE_SECONDS}s" \
             -p "WorkingDirectory=$GITHUB_WORKSPACE" \
             /bin/bash -c '
               set -euo pipefail
-              unified_line="$(grep -E "^0::/" /proc/self/cgroup)"
+              unified="$(grep -E "^0::/" /proc/self/cgroup)"
               test "$(grep -Ec "^0::/" /proc/self/cgroup)" -eq 1
-              relative="${unified_line#0::}"
-              case "$relative" in
-                */harness) ;;
-                *) echo "unexpected delegated cgroup: $relative" >&2; exit 1 ;;
-              esac
+              relative="${unified#0::}"
+              case "$relative" in */harness) ;; *) exit 1 ;; esac
               parent="/sys/fs/cgroup${relative%/harness}"
               printf "+cpu +io +memory +pids" > "$parent/cgroup.subtree_control"
-              . "$1"
               export PLIEGO_BENCHMARK_CGROUP_PARENT="$parent"
-              export PLIEGO_BENCHMARK_ENGINE_TEMP_ROOT="$6"
+              export PLIEGO_BENCHMARK_ENGINE_TEMP_ROOT=/var/lib/pliego-benchmark-engine-temp
               export GIT_OPTIONAL_LOCKS=0
-              /usr/bin/python3 -E -s benchmarks/tools/test_process_tree_sampler.py --live --php-integration >/dev/null
-              /usr/bin/python3 -E -s benchmarks/tools/process_tree_sampler.py --probe-network-isolation >/dev/null
-              exec env \
-                BROWSERSHOT_NODE_BINARY="$2" \
-                BROWSERSHOT_CHROME_PATH="$3" \
-                PLIEGO_BENCHMARK_CGROUP_PARENT="$parent" \
-                PLIEGO_BENCHMARK_ENGINE_TEMP_ROOT="$6" \
-                /usr/bin/python3 -E -s benchmarks/tools/run_comparison.py \
-                  --binary "$4" \
-                  --out "$5"
-            ' pliego-hosted-comparison \
-              "$ENVIRONMENT_FILE" "$NODE" "$CHROME" "$BINARY" "$OUTPUT" "$ENGINE_TEMP_ROOT"
-          sudo chown -R "$(id -u):$(id -g)" "$OUTPUT"
-
-      - name: Revalidate retained evidence
-        env:
-          OUTPUT: ${{ steps.evidence.outputs.output }}
+              /usr/bin/python3 -E -s benchmarks/tools/process_tree_sampler.py --probe-network-isolation
+              "$1" benchmarks/integration/test_native_batch_lifecycle.py --php "$2" --out "$8"
+              eligibility=()
+              if [[ "$9" == timed ]]; then
+                eligibility=(--acceptance "${11}")
+              fi
+              "$1" benchmarks/integration/run_native_regression.py --mode "$9" --repeat "${10}" "${eligibility[@]}" \
+                --candidate "$3" --candidate-metadata "$4" --baseline "$5" --baseline-metadata "$6" \
+                --php "$2" --out "$7"
+              exec "$1" benchmarks/integration/run_native_regression.py --verify "$7"
+            ' pliego-native-regression "$PYTHON" "$PHP" "$CANDIDATE" \
+              "$RUNNER_TEMP/native-regression-candidate/candidate-identity.json" "$BASELINE" \
+              "$setup/v033-identity.json" "$RUNNER_TEMP/native-regression-preflight" \
+              "$RUNNER_TEMP/native-regression-lifecycle" "$MODE" "$REPEAT" "$acceptance" \
+              2>&1 | tee "$setup/service.log" || service_status=$?
+          printf '%s\n' "$service_status" > "$setup/service.exit"
+          exit "$service_status"
+      - name: Stop only the owned service and expose retained small proof
+        if: always()
         run: |
           set -euo pipefail
-          python3 -E -s benchmarks/tools/run_comparison.py \
-            --finalize "$OUTPUT" \
-            --verified-release "$RUNNER_TEMP/verified-release.json"
-          python3 -E -s benchmarks/tools/run_comparison.py --validate "$OUTPUT"
-          (cd "$OUTPUT" && sha256sum --check SHA256SUMS)
-
-      - name: Upload exact raw samples and all metrics
+          unit="pliego-native-regression-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.service"
+          if [[ "$(sudo systemctl show "$unit" --property=LoadState --value)" != not-found ]]; then
+            sudo systemctl stop "$unit"
+          fi
+          state="$(sudo systemctl show "$unit" --property=ActiveState --value)"
+          [[ "$state" == inactive || "$state" == failed ]]
+          if [[ -d "$RUNNER_TEMP/native-regression-setup" && ! -L "$RUNNER_TEMP/native-regression-setup" ]]; then
+            printf 'unit=%s\nactive_state=%s\n' "$unit" "$state" > "$RUNNER_TEMP/native-regression-setup/service-cleanup.txt"
+          fi
+          for name in native-regression-preflight native-regression-lifecycle native-regression-setup native-regression-acceptance-source; do
+            path="$RUNNER_TEMP/$name"
+            if [[ -d "$path" && ! -L "$path" ]]; then
+              sudo chown -R "$(id -u):$(id -g)" "$path"
+            fi
+          done
+      - name: Retain every outcome and reviewed proof ZIP, never native archives
+        if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: pliego-hosted-performance-${{ matrix.repeat }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ steps.evidence.outputs.output }}/
-          if-no-files-found: error
-          overwrite: false
-          retention-days: 90
-
-  hosted-series:
-    name: Seal all hosted repeats
-    needs: hosted-snapshot
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-
-    steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-        with:
-          persist-credentials: false
-          ref: ${{ github.sha }}
-
-      - name: Download all three exact comparison bundles
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          pattern: pliego-hosted-performance-*-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/pliego-hosted-performance-inputs
-
-      - name: Build the no-selection series
-        id: series
-        env:
-          INPUT_ROOT: ${{ runner.temp }}/pliego-hosted-performance-inputs
-          OUTPUT: ${{ runner.temp }}/pliego-hosted-performance-series
-        run: |
-          set -euo pipefail
-          mapfile -t comparisons < <(find "$INPUT_ROOT" -mindepth 1 -maxdepth 1 -type d -print | sort)
-          test "${#comparisons[@]}" -eq 3
-          python3 -E -s benchmarks/tools/summarize_comparisons.py \
-            "${comparisons[0]}" "${comparisons[1]}" "${comparisons[2]}" \
-            --out "$OUTPUT"
-          python3 -E -s benchmarks/tools/summarize_comparisons.py \
-            "${comparisons[0]}" "${comparisons[1]}" "${comparisons[2]}" \
-            --validate "$OUTPUT"
-          (cd "$OUTPUT" && sha256sum --check SHA256SUMS)
-          printf 'output=%s\n' "$OUTPUT" >> "$GITHUB_OUTPUT"
-
-      - name: Upload the sealed three-repeat series
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: pliego-hosted-performance-series-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: ${{ inputs.mode == 'timed' && format('pliego-native-timed-{0}-repeat-{1}-{2}', inputs.source_sha, inputs.repeat, github.run_id) || format('pliego-native-preflight-{0}-{1}', inputs.source_sha, github.run_id) }}
           path: |
-            ${{ steps.series.outputs.output }}/
-            ${{ runner.temp }}/pliego-hosted-performance-inputs/
+            ${{ runner.temp }}/native-regression-preflight/
+            ${{ runner.temp }}/native-regression-lifecycle/
+            ${{ runner.temp }}/native-regression-setup/
+            ${{ runner.temp }}/native-regression-acceptance-source/
+            ${{ runner.temp }}/native-regression-candidate/candidate-identity.json
+            ${{ runner.temp }}/native-regression-candidate/artifact.json
+            ${{ runner.temp }}/native-regression-candidate/run.json
           if-no-files-found: error
           overwrite: false
-          retention-days: 90
+          include-hidden-files: true
+          retention-days: 30
