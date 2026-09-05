@@ -87,6 +87,16 @@ Runtime qualification and archive verification explicitly reject Python `-O`;
 optimized portable tests check fail-closed entry guards, not optimized evidence
 qualification through dependencies whose assertions may be required.
 
+Native stderr is retained byte-for-byte. Successful PDF qualification admits
+empty stderr or the exact observed pair of unset-XDG-runtime/shader-cache-disabled
+diagnostics from the immutable-home Linux recipe. It records those diagnostic
+identifiers; extra, repeated, altered or unrelated stderr remains a failure.
+This does not alter the sampler environment, enable a writable cache, or permit
+warnings to substitute for protocol, PDF and process-cleanup checks. The original
+preflight that rejected these diagnostics remains failed. Offline verification
+validates canonical probe order from retained wire bytes, not the key-sorted
+identity copy; neither representation is rewritten during verification.
+
 Before timed execution, independently review final-candidate correctness and
 the Linux lifecycle controls: one child failure, one hung child, early launcher
 exit/remaining descendant, bounded-output overflow, scoped cleanup, and the
