@@ -318,7 +318,13 @@ jobs:
             --source-commit "$(git rev-parse HEAD)" --pypdf-version 6.16.2 \
             --process-timeout-seconds 180 \
             --proof-directory "$RUNNER_TEMP/pliego-controlled-capture/api2-links" || link_status=$?
-          test "$table_status" -eq 0 && test "$link_status" -eq 0
+          python ports/pliego/tests/check_api2_table_backgrounds.py --self-test
+          background_status=0
+          python ports/pliego/tests/check_api2_table_backgrounds.py \
+            --binary "$PWD/target/debug/pliego" \
+            --source-commit "$(git rev-parse HEAD)" --process-timeout-seconds 180 \
+            --proof-directory "$RUNNER_TEMP/pliego-controlled-capture/api2-table-backgrounds" || background_status=$?
+          test "$table_status" -eq 0 && test "$link_status" -eq 0 && test "$background_status" -eq 0
 
       - name: Upload direct controlled-capture proof
         if: always()

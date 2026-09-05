@@ -4120,7 +4120,15 @@ mod debug_capture_tests {
         painter.painting_area_override = Some(builder.border_rect);
         assert!(painter.solid_color_area_app_units(&builder, 0).is_none());
         painter.painting_area_override = None;
-        painter.positioning_area_override = Some(builder.border_rect);
+        // A table row/column positions images in its track rectangle, but its
+        // solid color covers each cell's border box. Never use the track's
+        // floating rectangle to reconstruct that cell's exact coverage.
+        painter.positioning_area_override = Some(LayoutRect::new(
+            LayoutPoint::new(-300.25, -200.75),
+            LayoutPoint::new(5000.5, 4000.25),
+        ));
+        assert_eq!(painter.solid_color_area_app_units(&builder, 0), Some(rect));
+        painter.painting_area_override = Some(builder.border_rect);
         assert!(painter.solid_color_area_app_units(&builder, 0).is_none());
     }
 

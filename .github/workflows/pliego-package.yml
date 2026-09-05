@@ -127,6 +127,7 @@ jobs:
         run: |
           python -m pip install --require-hashes --only-binary=:all: --no-deps -r ports/pliego/tests/requirements-api2-links.txt
           python ports/pliego/tests/check_api2_links.py --self-test --pypdf-version 6.16.2
+          python ports/pliego/tests/check_api2_table_backgrounds.py --self-test
 
       - name: Set up uv
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
@@ -406,6 +407,10 @@ jobs:
             --binary "$binary" --source-commit "$source_commit" \
             --pypdf-version 6.16.2 \
             --proof-directory "$PWD/dist/api2-links-${{ matrix.bundle }}" || link_status=$?
+          background_status=0
+          python ports/pliego/tests/check_api2_table_backgrounds.py \
+            --binary "$binary" --source-commit "$source_commit" \
+            --proof-directory "$PWD/dist/api2-table-backgrounds-${{ matrix.bundle }}" || background_status=$?
           python ports/pliego/tests/check_api2_fixed_content.py --self-test
           fixed_status=0
           python ports/pliego/tests/check_api2_fixed_content.py \
@@ -418,7 +423,7 @@ jobs:
             --binary "$binary" --source-commit "$source_commit" \
             --proof-directory "$PWD/dist/api2-nonpainting-content-${{ matrix.bundle }}" \
             "$@" || nonpainting_status=$?
-          test "$table_status" -eq 0 && test "$link_status" -eq 0 && test "$fixed_status" -eq 0 && test "$nonpainting_status" -eq 0
+          test "$table_status" -eq 0 && test "$link_status" -eq 0 && test "$background_status" -eq 0 && test "$fixed_status" -eq 0 && test "$nonpainting_status" -eq 0
 
       - name: Set up PHP for the packaged Linux consumer boundary
         if: runner.os == 'Linux'
@@ -487,6 +492,7 @@ jobs:
             dist/api2-executable-proof-${{ matrix.bundle }}.json
             dist/api2-headerless-tables-${{ matrix.bundle }}
             dist/api2-links-${{ matrix.bundle }}
+            dist/api2-table-backgrounds-${{ matrix.bundle }}
             dist/api2-fixed-content-${{ matrix.bundle }}
             dist/api2-nonpainting-content-${{ matrix.bundle }}
             dist/api2-native-consumer-${{ matrix.bundle }}

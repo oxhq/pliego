@@ -66,15 +66,16 @@ pub(super) struct BackgroundPainter<'a> {
 }
 
 impl<'a> BackgroundPainter<'a> {
-    /// Retain the source rectangle only for the ordinary solid-color path.
-    /// Overrides, fixed backgrounds and other clip modes need their own authority.
+    /// Retain the owning cell/box rectangle for an unlayered solid color.
+    /// Table track backgrounds override image positioning, not color coverage:
+    /// `painting_area()` still paints the cell's border box in that branch.
+    /// Painting overrides, fixed backgrounds and other clip modes stay excluded.
     pub(super) fn solid_color_area_app_units(
         &self,
         fragment_builder: &super::BuilderForBoxFragment,
         layer_index: usize,
     ) -> Option<PhysicalRect<Au>> {
         if self.painting_area_override.is_some() ||
-            self.positioning_area_override.is_some() ||
             !solid_color_uses_border_box(self.style, layer_index)
         {
             return None;
