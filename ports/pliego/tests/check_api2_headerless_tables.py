@@ -48,11 +48,14 @@ CASES = (
     {"name": "borderless-multi-page", "rows": 90, "header": False, "borders": "none"},
     {"name": "transparent-one-page", "rows": 2, "header": False, "borders": "transparent"},
     {"name": "hidden-one-page", "rows": 2, "header": False, "borders": "hidden"},
+    {"name": "horizontal-one-page", "rows": 2, "header": True, "borders": "horizontal"},
+    {"name": "horizontal-multi-page", "rows": 90, "header": True, "borders": "horizontal"},
     {"name": "reject-headerless-multi-page", "rows": 90, "header": False, "reject": "pagination"},
     {"name": "reject-mixed-color", "rows": 2, "header": False, "reject": "mixed-color"},
     {"name": "reject-dashed", "rows": 2, "header": False, "reject": "dashed"},
     {"name": "reject-rowspan", "rows": 2, "header": False, "reject": "rowspan"},
     {"name": "reject-partially-visible", "rows": 2, "header": False, "reject": "partially-visible"},
+    {"name": "reject-partial-horizontal", "rows": 2, "header": True, "reject": "partial-horizontal"},
 )
 TOKEN = re.compile(r"R[0-9]{3}C[01]|HDR[LR]")
 BORDER_COLOR = {"r": 34, "g": 34, "b": 34, "a": 255}
@@ -111,6 +114,19 @@ def check_borders(paths: list[dict[str, Any]], rows: int) -> None:
         check_coverage(intervals, top, bottom)
 
 
+def check_horizontal_borders(paths: list[dict[str, Any]], body_rows: int) -> None:
+    require(len(paths) == body_rows + 1, "horizontal invoice rules lost or duplicated a row boundary")
+    ordered = sorted(paths, key=lambda path: path["bounds"]["y"])
+    last_bottom = -1
+    for index, path in enumerate(ordered):
+        bounds = path["bounds"]
+        require(path.get("fill") == BORDER_COLOR and bool(path.get("data")), "invoice rule paint differs")
+        require(bounds["x"] == 0 and bounds["width"] == 420 * 60, "invoice rule does not span the exact grid width")
+        require(bounds["height"] == (120 if index == 0 else 60), "header/body invoice rule width differs")
+        require(bounds["y"] > last_bottom, "invoice rules overlap or are out of order")
+        last_bottom = bounds["y"] + bounds["height"]
+
+
 def check_scene(scene: dict[str, Any], case: dict[str, Any]) -> dict[str, Any]:
     require(scene.get("schema") == "pliego.document-scene" and scene.get("version") == 2, "not Scene v2")
     pages = scene.get("pages", [])
@@ -134,6 +150,8 @@ def check_scene(scene: dict[str, Any], case: dict[str, Any]) -> dict[str, Any]:
         require(headers == (["HDRL", "HDRR"] if case["header"] else []), "implicit or missing page header")
         if case.get("borders") in ("none", "transparent", "hidden"):
             require(not paths, "invisible collapsed borders emitted artificial paths")
+        elif case.get("borders") == "horizontal":
+            check_horizontal_borders(paths, len(body) // 2)
         else:
             check_borders(paths, len(body) // 2 + int(case["header"]))
         for operation in operations:
@@ -182,6 +200,10 @@ def build_fixture(repository: Path, root: Path, case: dict[str, Any]) -> tuple[b
         css += "td,th{border-color:transparent}"
     elif case.get("borders") == "hidden":
         css += "td,th{border-style:hidden}"
+    elif case.get("borders") == "horizontal" or case.get("reject") == "partial-horizontal":
+        css += "td,th{border:0}td{border-bottom:1px solid #222}th{border-bottom:2px solid #222}"
+        if case.get("reject") == "partial-horizontal":
+            css += "td:last-child{border-bottom:0}"
     (source / "input/document.html").write_text(html, encoding="utf-8", newline="\n")
     (source / "input/styles.css").write_text(css + "\n", encoding="utf-8", newline="\n")
     manifest = json.loads((source / "input-manifest.json").read_bytes())
@@ -192,6 +214,9 @@ def build_fixture(repository: Path, root: Path, case: dict[str, Any]) -> tuple[b
     (source / "input-manifest.json").write_bytes(manifest_bytes)
     request = json.loads(payload)
     request["input"]["manifest"].update(sha256=sha256_bytes(manifest_bytes), bytes=len(manifest_bytes))
+    if case.get("borders") == "horizontal" or case.get("reject") == "partial-horizontal":
+        # Match the invoice minimizer's zero-margin page, so grid x=0 is exact.
+        request["page"]["margins_app_units"] = dict.fromkeys(("top", "right", "bottom", "left"), 0)
     request["settlement"]["limits"]["host_wall_ms"] = 10000
     return canonical_json(request), source
 
@@ -275,7 +300,7 @@ def run_case(binary: Path, repository: Path, root: Path, case: dict[str, Any], p
 
 
 def self_test() -> None:
-    require(len(CASES) == 12 and sum(bool(case.get("reject")) for case in CASES) == 5, "case inventory changed")
+    require(len(CASES) == 15 and sum(bool(case.get("reject")) for case in CASES) == 6, "case inventory changed")
     case = CASES[1]
     paths = [
         {
@@ -344,6 +369,29 @@ def self_test() -> None:
             pass
         else:
             raise AssertionError(f"self-test accepted artificial {border_kind} borders")
+    horizontal = [
+        {"bounds": {"x": 0, "y": y, "width": 25200, "height": height}, "fill": BORDER_COLOR, "data": "M 0 0 Z"}
+        for y, height in ((600, 120), (1200, 60), (1800, 60))
+    ]
+    check_horizontal_borders(horizontal, 2)
+    for change in ("width", "missing", "duplicate", "header-thickness", "overlap"):
+        invalid = copy.deepcopy(horizontal)
+        if change == "width":
+            invalid[1]["bounds"]["width"] -= 60
+        elif change == "missing":
+            invalid.pop()
+        elif change == "duplicate":
+            invalid.append(copy.deepcopy(invalid[-1]))
+        elif change == "header-thickness":
+            invalid[0]["bounds"]["height"] = 60
+        else:
+            invalid[1]["bounds"]["y"] = 610
+        try:
+            check_horizontal_borders(invalid, 2)
+        except AssertionError:
+            pass
+        else:
+            raise AssertionError(f"self-test accepted horizontal rule {change} corruption")
     with tempfile.TemporaryDirectory(prefix="pliego-headerless-self-test-") as temporary:
         first, source = build_fixture(Path(__file__).resolve().parents[3], Path(temporary) / "first", case)
         second, _ = build_fixture(Path(__file__).resolve().parents[3], Path(temporary) / "second", case)

@@ -1373,7 +1373,10 @@ fn retained_table_rows<'a>(
                 unreachable!();
             };
             let no_visible_borders = table_info.has_no_visible_borders();
-            if !no_visible_borders && table_info.uniform_solid_visible_border().is_none() {
+            if !no_visible_borders &&
+                table_info.uniform_solid_visible_border().is_none() &&
+                !table_info.has_solid_horizontal_borders()
+            {
                 return Err(TableGroupUnsupportedReason::CollapsedBorders);
             }
             collapsed_grid = true;

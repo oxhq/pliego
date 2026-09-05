@@ -3050,7 +3050,8 @@ fn collapsed_table_border_rows(
             .iter()
             .any(|line| line.len() != column_count) ||
         (!table_info.has_no_visible_borders() &&
-            table_info.uniform_solid_visible_border().is_none())
+            table_info.uniform_solid_visible_border().is_none() &&
+            !table_info.has_solid_horizontal_borders())
     {
         return None;
     }
@@ -3135,6 +3136,18 @@ fn append_collapsed_table_row<'a>(
         rows.push((row, Vec::new()));
         return Some(());
     }
+    if table_info.has_solid_horizontal_borders() {
+        rows.push((
+            row,
+            horizontal_collapsed_table_row_borders(
+                table_info,
+                row_index,
+                row_rect,
+                grid_inline_start,
+            )?,
+        ));
+        return Some(());
+    }
     let border = table_info.uniform_solid_visible_border()?;
     let border_width = border.width;
     let half_border_width = border_width / 2;
@@ -3200,6 +3213,44 @@ fn append_collapsed_table_row<'a>(
     }
     rows.push((row, borders));
     Some(())
+}
+
+fn horizontal_collapsed_table_row_borders(
+    table_info: &crate::table::SpecificTableGridInfo,
+    row_index: usize,
+    row_rect: PhysicalRect<Au>,
+    grid_inline_start: Au,
+) -> Option<Vec<LayoutDebugTableBorder>> {
+    let width = table_info.track_sizes.x.iter().sum::<Au>();
+    let mut borders = Vec::with_capacity(2);
+    // Match WebRender ownership: only row zero paints its top edge, and each
+    // row owns its bottom edge. Keep asymmetric odd-Au half-width rounding.
+    for (boundary, y, top) in [
+        (row_index, row_rect.origin.y, true),
+        (row_index + 1, row_rect.max_y(), false),
+    ] {
+        if top && row_index != 0 {
+            continue;
+        }
+        let border = table_info.collapsed_borders.y.get(boundary)?.first()?;
+        if border.is_invisible() {
+            continue;
+        }
+        let y = if top {
+            y - border.width / 2
+        } else {
+            y + border.width / 2 - border.width
+        };
+        append_solid_table_border(
+            &mut borders,
+            PhysicalRect::new(
+                PhysicalPoint::new(grid_inline_start, y),
+                PhysicalSize::new(width, border.width),
+            ),
+            &border.style_color,
+        );
+    }
+    Some(borders)
 }
 
 fn append_solid_table_border(
@@ -3512,6 +3563,76 @@ impl BaseFragment {
 #[cfg(test)]
 mod debug_capture_tests {
     use super::*;
+    use crate::geom::PhysicalVec;
+
+    #[test]
+    fn horizontal_table_rules_retain_exact_geometry_and_row_ownership() {
+        let border = |width| crate::table::CollapsedBorder {
+            width: Au(width),
+            style_color: BorderStyleColor::new(
+                BorderStyle::Solid,
+                AbsoluteColor::new(ColorSpace::Srgb, 0.5, 0.25, 0.0, 1.0),
+            ),
+        };
+        let mut info = crate::table::SpecificTableGridInfo {
+            collapsed_borders: PhysicalVec::new(
+                vec![vec![border(0); 2]; 3],
+                vec![
+                    vec![border(61); 2],
+                    vec![border(121); 2],
+                    vec![border(61); 2],
+                ],
+            ),
+            track_sizes: PhysicalVec::new(vec![Au(10003), Au(15197)], vec![Au(1200), Au(1800)]),
+        };
+        assert!(info.has_solid_horizontal_borders());
+        let first_row = PhysicalRect::new(
+            PhysicalPoint::new(Au(300), Au(120)),
+            PhysicalSize::new(Au(25200), Au(1200)),
+        );
+        let first = horizontal_collapsed_table_row_borders(&info, 0, first_row, Au(300)).unwrap();
+        let second = horizontal_collapsed_table_row_borders(
+            &info,
+            1,
+            PhysicalRect::new(
+                PhysicalPoint::new(Au(300), Au(1320)),
+                PhysicalSize::new(Au(25200), Au(1800)),
+            ),
+            Au(300),
+        )
+        .unwrap();
+        let rects = |borders: &[LayoutDebugTableBorder]| {
+            borders
+                .iter()
+                .map(|border| {
+                    let rect = border.rect.app_units.as_ref().unwrap();
+                    (rect.x, rect.y, rect.width, rect.height)
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            rects(&first),
+            vec![(300, 90, 25200, 61), (300, 1259, 25200, 121)]
+        );
+        assert_eq!(rects(&second), vec![(300, 3089, 25200, 61)]);
+
+        // An invisible top boundary reserves its layout width but adds no paint.
+        for border in &mut info.collapsed_borders.y[0] {
+            border.style_color.style = BorderStyle::Hidden;
+        }
+        assert!(info.has_solid_horizontal_borders());
+        let first = horizontal_collapsed_table_row_borders(&info, 0, first_row, Au(300)).unwrap();
+        assert_eq!(rects(&first), vec![(300, 1259, 25200, 121)]);
+        for border in &mut info.collapsed_borders.y[1] {
+            border.style_color.style = BorderStyle::Hidden;
+        }
+        assert!(info.has_solid_horizontal_borders());
+        assert!(
+            horizontal_collapsed_table_row_borders(&info, 0, first_row, Au(300))
+                .unwrap()
+                .is_empty()
+        );
+    }
 
     #[test]
     fn retained_paint_events_match_order_and_fragment_join_fixture() {

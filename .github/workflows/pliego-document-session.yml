@@ -199,11 +199,14 @@ jobs:
           set -euo pipefail
           selected="$(cargo test -p servo-layout --lib --locked -- --list)"
           printf '%s\n' "$selected" | grep -Fx 'pages::tests::table_repeat_debug_geometry_retains_original_app_units: test'
+          printf '%s\n' "$selected" | grep -Fx 'display_list::debug_capture_tests::horizontal_table_rules_retain_exact_geometry_and_row_ownership: test'
           count="$(printf '%s\n' "$selected" | grep -c '^table::collapsed_border_profile_tests::.*: test$')"
           test "$count" -ge 4
           cargo test -p servo-layout --lib --locked \
             pages::tests::table_repeat_debug_geometry_retains_original_app_units -- --exact
           cargo test -p servo-layout --lib --locked table::collapsed_border_profile_tests::
+          cargo test -p servo-layout --lib --locked \
+            display_list::debug_capture_tests::horizontal_table_rules_retain_exact_geometry_and_row_ownership -- --exact
 
       - name: Prove API 2 collapsed tables, repeated headers and fail-closed exclusions
         run: |
