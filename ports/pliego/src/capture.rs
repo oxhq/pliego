@@ -1961,6 +1961,14 @@ fn translate_positioned_operation_to_page(
         positioned.authority = page_origin_app_units
             .and_then(|origin| translate_operation_authority_y(authority, origin));
     }
+    if is_page_spanning_rect_path(&positioned.operation) &&
+        let Some(CapturedOperationAuthority::Bounds(exact)) = positioned.authority.as_ref()
+    {
+        // Compatibility geometry follows the translated integers, not a sum of
+        // rounded page heights. No authority is created here.
+        let exact = *exact;
+        set_positioned_rect_app_units(positioned, exact);
+    }
     Ok(())
 }
 
@@ -1998,14 +2006,132 @@ fn translate_operation_authority_y(
     }
 }
 
+fn rect_from_app_units(exact: CapturedRectAppUnits) -> Rect {
+    Rect {
+        x: f64::from(app_units_to_f32_px(exact.x)),
+        y: f64::from(app_units_to_f32_px(exact.y)),
+        width: f64::from(app_units_to_f32_px(exact.width)),
+        height: f64::from(app_units_to_f32_px(exact.height)),
+    }
+}
+
+fn set_positioned_rect_app_units(
+    positioned: &mut PositionedOperation,
+    exact: CapturedRectAppUnits,
+) {
+    let Operation::Path { bounds, data, .. } = &mut positioned.operation else {
+        unreachable!("exact rectangle placement requires a path")
+    };
+    *bounds = rect_from_app_units(exact);
+    *data = rectangle_path_data(bounds);
+    positioned.bounds = bounds.clone();
+}
+
+fn solid_rect_app_unit_authority(
+    positioned: &PositionedOperation,
+) -> Result<Option<CapturedRectAppUnits>, CaptureError> {
+    if !is_page_spanning_rect_path(&positioned.operation) {
+        return Ok(None);
+    }
+    let exact = match &positioned.authority {
+        None => return Ok(None),
+        Some(CapturedOperationAuthority::Bounds(exact)) => *exact,
+        Some(_) => {
+            return Err(CaptureError::InvalidScene(
+                "solid rectangle has non-bounds authority",
+            ));
+        },
+    };
+    if !matches!(&positioned.operation,
+        Operation::Path { bounds, data, fill: Some(_), stroke: None, .. }
+        if bounds == &positioned.bounds && data == &rectangle_path_data(bounds)) ||
+        exact.x < 0 ||
+        exact.y < 0 ||
+        exact.width <= 0 ||
+        exact.height <= 0 ||
+        exact.x.checked_add(exact.width).is_none() ||
+        exact.y.checked_add(exact.height).is_none()
+    {
+        return Err(CaptureError::InvalidScene(
+            "invalid exact solid rectangle authority",
+        ));
+    }
+    Ok(Some(exact))
+}
+
+fn exact_page_heights(pages: &[CapturePage]) -> Result<Option<Vec<i32>>, CaptureError> {
+    let Some(exact_pages) = pages
+        .iter()
+        .map(|page| page.app_units)
+        .collect::<Option<Vec<_>>>()
+    else {
+        return Ok(None);
+    };
+    if !pages.iter().zip(&exact_pages).all(|(page, exact)| {
+        page.style_source == Some(CapturedPageStyleSource::RequestDefaults) &&
+            valid_page_app_unit_authority(page, *exact)
+    }) {
+        return Err(CaptureError::InvalidPageGeometryAuthority);
+    }
+    Ok(Some(
+        exact_pages.into_iter().map(|page| page.height).collect(),
+    ))
+}
+
 fn split_solid_rect_operations(
     pages: &[CapturePage],
     operations: Vec<PositionedOperation>,
 ) -> Result<Vec<PositionedOperation>, CaptureError> {
+    let exact_heights = exact_page_heights(pages)?;
     let mut split = Vec::with_capacity(operations.len());
     for operation in operations {
         if !is_page_spanning_rect_path(&operation.operation) || operation.bounds.height == 0.0 {
             split.push(operation);
+            continue;
+        }
+
+        let exact = solid_rect_app_unit_authority(&operation)?;
+        if exact.is_some_and(|exact| operation.bounds != rect_from_app_units(exact)) {
+            return Err(CaptureError::InvalidScene(
+                "solid rectangle differs from source app-unit authority",
+            ));
+        }
+        if let (Some(exact), Some(heights)) = (exact, exact_heights.as_ref()) {
+            let top = i64::from(exact.y);
+            let bottom = top
+                .checked_add(i64::from(exact.height))
+                .ok_or(CaptureError::InvalidPageGeometryAuthority)?;
+            let mut origin = 0_i64;
+            let mut covered = 0_i64;
+            for height in heights {
+                let end = origin
+                    .checked_add(i64::from(*height))
+                    .ok_or(CaptureError::InvalidPageGeometryAuthority)?;
+                let intersection_top = top.max(origin);
+                let intersection_bottom = bottom.min(end);
+                if intersection_top < intersection_bottom {
+                    let mut part = operation.clone();
+                    let part_exact = CapturedRectAppUnits {
+                        y: i32::try_from(intersection_top)
+                            .map_err(|_| CaptureError::InvalidPageGeometryAuthority)?,
+                        height: i32::try_from(intersection_bottom - intersection_top)
+                            .map_err(|_| CaptureError::InvalidPageGeometryAuthority)?,
+                        ..exact
+                    };
+                    set_positioned_rect_app_units(&mut part, part_exact);
+                    part.authority = Some(CapturedOperationAuthority::Bounds(part_exact));
+                    covered = covered
+                        .checked_add(i64::from(part_exact.height))
+                        .ok_or(CaptureError::InvalidPageGeometryAuthority)?;
+                    split.push(part);
+                }
+                origin = end;
+            }
+            if covered != i64::from(exact.height) {
+                return Err(CaptureError::OperationOutsidePageSequence {
+                    sequence: operation.sequence,
+                });
+            }
             continue;
         }
 
@@ -2069,6 +2195,38 @@ fn operation_page(
     pages: &[CapturePage],
     operation: &mut PositionedOperation,
 ) -> Result<(usize, f64), CaptureError> {
+    if let Some(exact) = solid_rect_app_unit_authority(operation)? &&
+        let Some(heights) = exact_page_heights(pages)?
+    {
+        // Source compatibility is checked before splitting. A repeated header
+        // can subsequently translate these integers and its compatibility
+        // floats independently; page ownership must follow only the integers.
+        let top = i64::from(exact.y);
+        let bottom = top
+            .checked_add(i64::from(exact.height))
+            .ok_or(CaptureError::InvalidPageGeometryAuthority)?;
+        let mut origin = 0_i64;
+        let mut compatibility_origin = 0.0;
+        for (page_index, (page, height)) in pages.iter().zip(heights).enumerate() {
+            let end = origin
+                .checked_add(i64::from(height))
+                .ok_or(CaptureError::InvalidPageGeometryAuthority)?;
+            if top >= origin && top < end {
+                if bottom > end {
+                    return Err(CaptureError::OperationCrossesPageBoundary {
+                        sequence: operation.sequence,
+                        page_index,
+                    });
+                }
+                return Ok((page_index, compatibility_origin));
+            }
+            origin = end;
+            compatibility_origin += f64::from(page.height);
+        }
+        return Err(CaptureError::OperationOutsidePageSequence {
+            sequence: operation.sequence,
+        });
+    }
     let top = operation.bounds.y;
     let bottom = top + operation.bounds.height;
     let mut origin = 0.0;
@@ -4726,6 +4884,235 @@ mod tests {
             };
             assert!(!invalid.app_unit_authority_matches());
         }
+    }
+
+    fn exact_split_page(index: usize, width: i32, height: i32) -> CapturePage {
+        CapturePage {
+            index,
+            style_source: Some(CapturedPageStyleSource::RequestDefaults),
+            app_units: Some(CapturedPageAppUnits {
+                width,
+                height,
+                margin_top: 0,
+                margin_right: 0,
+                margin_bottom: 0,
+                margin_left: 0,
+                available_inline_size: width,
+                available_block_size: height,
+            }),
+            width: app_units_to_f32_px(width),
+            height: app_units_to_f32_px(height),
+            margin_top: 0.0,
+            margin_right: 0.0,
+            margin_bottom: 0.0,
+            margin_left: 0.0,
+            available_inline_size: app_units_to_f32_px(width),
+            available_block_size: app_units_to_f32_px(height),
+        }
+    }
+
+    fn exact_split_rectangle(exact: CapturedRectAppUnits) -> PositionedOperation {
+        let bounds = rect_from_app_units(exact);
+        PositionedOperation {
+            sequence: 4,
+            structural_fragment_index: None,
+            bounds: bounds.clone(),
+            authority: Some(CapturedOperationAuthority::Bounds(exact)),
+            operation: Operation::Path {
+                data: rectangle_path_data(&bounds),
+                bounds,
+                fill: Some(Color::default()),
+                fill_rule: FillRule::NonZero,
+                stroke: None,
+                meta: OperationMeta {
+                    semantics: Some(Semantics {
+                        role: "artifact".into(),
+                        label: Some("background".into()),
+                    }),
+                    source: None,
+                },
+            },
+        }
+    }
+
+    #[test]
+    fn exact_background_split_preserves_intact_rectangles_and_a4_page_ownership() {
+        let intact = CapturedRectAppUnits {
+            x: 123,
+            y: 234,
+            width: 601,
+            height: 121,
+        };
+        let parts = split_solid_rect_operations(
+            &[exact_split_page(0, 2000, 2000)],
+            vec![exact_split_rectangle(intact)],
+        )
+        .unwrap();
+        assert_eq!(parts.len(), 1);
+        assert_eq!(
+            parts[0].authority,
+            Some(CapturedOperationAuthority::Bounds(intact))
+        );
+
+        let pages = (0..5)
+            .map(|index| exact_split_page(index, 47_622, 67_351))
+            .collect::<Vec<_>>();
+        let full = CapturedRectAppUnits {
+            x: 0,
+            y: 0,
+            width: 47_622,
+            height: 5 * 67_351,
+        };
+        // Page four exposes accumulated f32-origin drift; integer ownership must win.
+        assert!(f64::from(app_units_to_f32_px(3 * 67_351)) < 3.0 * f64::from(pages[0].height));
+        let distributed = distribute_operations(
+            &pages,
+            vec![exact_split_rectangle(full)],
+            &[],
+            &[],
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert_eq!(distributed.pages.len(), 5);
+        for (page, authority) in distributed.pages.iter().zip(&distributed.page_operations) {
+            assert_eq!(page.operations.len(), 1);
+            assert_eq!(
+                *authority,
+                vec![Some(CapturedOperationAuthority::Bounds(
+                    CapturedRectAppUnits {
+                        x: 0,
+                        y: 0,
+                        width: 47_622,
+                        height: 67_351,
+                    }
+                ))]
+            );
+            let Operation::Path { bounds, .. } = &page.operations[0] else {
+                unreachable!()
+            };
+            assert_eq!(bounds.y, 0.0);
+        }
+    }
+
+    #[test]
+    fn exact_background_intersections_do_not_round_trip_large_source_integers() {
+        let source = CapturedRectAppUnits {
+            x: 100_000_001,
+            y: 100_000_019,
+            width: 601,
+            height: 121,
+        };
+        let pages = [
+            exact_split_page(0, 200_000_000, 100_000_050),
+            exact_split_page(1, 200_000_000, 100_000_050),
+        ];
+        let operation = exact_split_rectangle(source);
+        assert_ne!((operation.bounds.y * 60.0).round() as i32, source.y);
+        let distributed =
+            distribute_operations(&pages, vec![operation], &[], &[], &HashMap::new()).unwrap();
+        assert_eq!(
+            distributed.page_operations,
+            vec![
+                vec![Some(CapturedOperationAuthority::Bounds(
+                    CapturedRectAppUnits {
+                        height: 31,
+                        ..source
+                    }
+                ))],
+                vec![Some(CapturedOperationAuthority::Bounds(
+                    CapturedRectAppUnits {
+                        y: 0,
+                        height: 90,
+                        ..source
+                    }
+                ))],
+            ]
+        );
+    }
+
+    #[test]
+    fn background_splitting_never_invents_missing_authority() {
+        let source = CapturedRectAppUnits {
+            x: 0,
+            y: 3000,
+            width: 3000,
+            height: 6000,
+        };
+        let mut pages = [
+            exact_split_page(0, 6000, 6000),
+            exact_split_page(1, 6000, 6000),
+        ];
+        let mut missing_operation = exact_split_rectangle(source);
+        missing_operation.authority = None;
+        let parts = split_solid_rect_operations(&pages, vec![missing_operation]).unwrap();
+        assert_eq!(parts.len(), 2);
+        assert!(parts.iter().all(|part| part.authority.is_none()));
+
+        pages[1].app_units = None;
+        pages[1].style_source = None;
+        let parts =
+            split_solid_rect_operations(&pages, vec![exact_split_rectangle(source)]).unwrap();
+        assert_eq!(parts.len(), 2);
+        assert!(parts.iter().all(|part| part.authority.is_none()));
+    }
+
+    #[test]
+    fn exact_background_splitting_rejects_incomplete_coverage_and_invalid_authority() {
+        let pages = [
+            exact_split_page(0, 6000, 6000),
+            exact_split_page(1, 6000, 6000),
+        ];
+        let source = CapturedRectAppUnits {
+            x: 0,
+            y: 0,
+            width: 3000,
+            height: 6000,
+        };
+        assert!(matches!(
+            split_solid_rect_operations(
+                &pages,
+                vec![exact_split_rectangle(CapturedRectAppUnits {
+                    height: 12001,
+                    ..source
+                })]
+            ),
+            Err(CaptureError::OperationOutsidePageSequence { sequence: 4 })
+        ));
+        for invalid in [
+            CapturedRectAppUnits { x: -1, ..source },
+            CapturedRectAppUnits {
+                x: i32::MAX,
+                width: 1,
+                ..source
+            },
+            CapturedRectAppUnits {
+                y: i32::MAX,
+                height: 1,
+                ..source
+            },
+        ] {
+            assert!(
+                split_solid_rect_operations(&pages, vec![exact_split_rectangle(invalid)]).is_err()
+            );
+        }
+        let mut mismatched = exact_split_rectangle(source);
+        mismatched.authority = Some(CapturedOperationAuthority::Bounds(CapturedRectAppUnits {
+            width: 3001,
+            ..source
+        }));
+        assert!(split_solid_rect_operations(&pages, vec![mismatched]).is_err());
+        let mut arbitrary = exact_split_rectangle(source);
+        let Operation::Path { data, .. } = &mut arbitrary.operation else {
+            unreachable!()
+        };
+        *data = "M0 0L1 1Z".into();
+        assert!(split_solid_rect_operations(&pages, vec![arbitrary]).is_err());
+        let mut wrong_page = pages;
+        wrong_page[1].app_units.as_mut().unwrap().height += 1;
+        assert!(matches!(
+            split_solid_rect_operations(&wrong_page, vec![exact_split_rectangle(source)]),
+            Err(CaptureError::InvalidPageGeometryAuthority)
+        ));
     }
 
     #[test]
