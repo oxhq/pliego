@@ -1,0 +1,42 @@
+{
+  "schema": "aureus.frozen-render.v1",
+  "mode": "prepare",
+  "databaseBooted": false,
+  "benchmarkQualified": false,
+  "visualQualified": false,
+  "outcome": "closed_input_prepared",
+  "sourceHtmlSha256": "58303937ba0162d9d9e2cb0a69a9bc1b26c315b7b61efc39b2be5752654f94cf",
+  "closedHtmlSha256": "ccb11d4c713a66d71fe7798e03bfbeb3b7fe90b74229790c7e9c1a512a7aa105",
+  "fontFaces": 4,
+  "footerCssAndCounterUnchanged": true,
+  "assets": [
+    {
+      "style": "normal",
+      "source": "$APP/vendor/dompdf/dompdf/lib/fonts/DejaVuSans.ttf",
+      "file": "DejaVuSans.ttf",
+      "sha256": "7da195a74c55bef988d0d48f9508bd5d849425c1770dba5d7bfc6ce9ed848954",
+      "bytes": 757076
+    },
+    {
+      "style": "bold",
+      "source": "$APP/vendor/dompdf/dompdf/lib/fonts/DejaVuSans-Bold.ttf",
+      "file": "DejaVuSans-Bold.ttf",
+      "sha256": "e6476c1b80502924294eed40894c5b18e06c181444ca953e5334262df9c27724",
+      "bytes": 705684
+    },
+    {
+      "style": "italic",
+      "source": "$APP/vendor/dompdf/dompdf/lib/fonts/DejaVuSans-Oblique.ttf",
+      "file": "DejaVuSans-Oblique.ttf",
+      "sha256": "4af75fa16ee6d3ad43e1ecec41862c24954af26a55c6bb1ebb27bd486a50f5f4",
+      "bytes": 635416
+    },
+    {
+      "style": "bold_italic",
+      "source": "$APP/vendor/dompdf/dompdf/lib/fonts/DejaVuSans-BoldOblique.ttf",
+      "file": "DejaVuSans-BoldOblique.ttf",
+      "sha256": "eb436dca0c2594b73d8b603b892e374fdfd8d885d25ffb4f18df4c4c0b49e50f",
+      "bytes": 643292
+    }
+  ]
+}

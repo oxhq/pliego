@@ -143,6 +143,8 @@ try {
             $identity += [$name.'_path' => $path, $name.'_sha256' => hash_file('sha256', $path), $name.'_version' => $version];
         }
         $identity += [
+            'chrome_runtime_path' => dirname($runtime['chrome_path']),
+            'chrome_runtime_sha256' => tree_sha256(dirname($runtime['chrome_path'])),
             'node_modules_path' => $runtime['node_modules'], 'node_modules_sha256' => tree_sha256($runtime['node_modules']),
             'package_lock_sha256' => hash_file('sha256', required_file(dirname($runtime['node_modules']).'/package-lock.json')),
             'puppeteer_version' => '25.8.0', 'puppeteer_provenance' => 'harness dependency; not locked by upstream Invobook',

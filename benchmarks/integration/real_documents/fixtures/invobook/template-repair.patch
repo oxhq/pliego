@@ -1,0 +1,7 @@
+--- a/resources/views/vendor/invoices/templates/simple.blade.php
++++ b/resources/views/vendor/invoices/templates/simple.blade.php
+@@ -7 +7,3 @@
+-        <style type="text/css" media="screen">
++        <style type="text/css" media="all">
++            @font-face { font-family: "DejaVu Sans"; font-style: normal; font-weight: 400; src: url("fonts/DejaVuSans.ttf") format("truetype"); }
++            @font-face { font-family: "DejaVu Sans"; font-style: normal; font-weight: 700; src: url("fonts/DejaVuSans-Bold.ttf") format("truetype"); }

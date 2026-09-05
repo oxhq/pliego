@@ -1,0 +1,42 @@
+{
+  "schema": "pliego.real-document-tracks.v1",
+  "boundary": "Frozen shared-repaired application HTML; cold renderer processes, not Laravel request or storage latency. No independent-adoption claim.",
+  "tracks": {
+    "invobook-simple-repaired": {
+      "family": "invobook",
+      "corpus": "real_documents/fixtures/invobook",
+      "input": "input.html",
+      "input_sha256": "afd286bca202309923fd66bee1f71e732bdd340d1b05a2307094feb535fa7195",
+      "assets": ["fonts/DejaVuSans.ttf", "fonts/DejaVuSans-Bold.ttf"],
+      "page_size": "47622x67351au",
+      "page_margins": "0,0,0,0au",
+      "legacy": "invobook-browsershot-5.0.5-puppeteer-25.8.0",
+      "adapter": "benchmarks/adapters/invobook-browsershot/adapter.php",
+      "correctness": {"page_count": 1, "text_contains": ["450.00", "EUR"]}
+    },
+    "aureus-ledger-300-repaired": {
+      "family": "ledger",
+      "corpus": "real_documents/ledger",
+      "input": "document.blade.html",
+      "input_sha256": "ccb11d4c713a66d71fe7798e03bfbeb3b7fe90b74229790c7e9c1a512a7aa105",
+      "assets": ["resources/DejaVuSans.ttf", "resources/DejaVuSans-Bold.ttf", "resources/DejaVuSans-Oblique.ttf", "resources/DejaVuSans-BoldOblique.ttf"],
+      "page_size": "67351x47622au",
+      "page_margins": "2268,2268,5669,2268au",
+      "legacy": "aureus-dompdf-3.1.6",
+      "adapter": "benchmarks/adapters/aureus-dompdf/adapter.php",
+      "correctness": {"text_contains": ["GL300-0001", "GL300-0300"]}
+    },
+    "aureus-manufacturing-008-font-closed": {
+      "family": "manufacturing",
+      "corpus": "real_documents/fixtures/manufacturing",
+      "input": "document.blade.html",
+      "input_sha256": "a08f2e7250be77df689e62768b5929bed7a41ed9d4ae1783a0e297fc709f2c3c",
+      "assets": ["resources/DejaVuSans.ttf", "resources/DejaVuSans-Bold.ttf"],
+      "page_size": "47622x67351au",
+      "page_margins": "2721,2721,2721,2721au",
+      "legacy": "aureus-dompdf-3.1.6",
+      "adapter": "benchmarks/adapters/aureus-dompdf/adapter.php",
+      "correctness": {"page_count": 1, "text_contains": ["V04/MO/001", "Cutting", "Assembly"]}
+    }
+  }
+}

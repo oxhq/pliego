@@ -1452,7 +1452,6 @@ function retain_benchmark_attempt(array $state, int $index, array $sample, array
     }
     $root = $state['retainRoot'] . DIRECTORY_SEPARATOR . 'sample-' . $index;
     $sample['retained'] = [
-        'evidence_dir' => $root,
         'artifacts_dir' => $root . DIRECTORY_SEPARATOR . (isset($directories['job']) ? 'job' : 'artifacts'),
         'output_dir' => $root . DIRECTORY_SEPARATOR . (isset($directories['job']) ? 'job/delivery' : 'output'),
     ];

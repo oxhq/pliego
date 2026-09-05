@@ -87,8 +87,9 @@ try {
         'stdout' => "result\n", 'stderr' => '', 'sampler_stdout' => "{}\n", 'sampler_stderr' => '', 'request' => "{}\n"];
     check(retain_benchmark_attempt(array_replace($state, ['retainRoot' => null]), 0, $sample, $exec, []) === $sample, 'disabled retention changed sample');
     $copied = retain_benchmark_attempt($state, 0, $sample, $exec, ['output' => $source]);
+    check(array_keys($copied['retained']) === ['artifacts_dir', 'output_dir'], 'retention broke the existing sample schema');
     check($copied['ok'] === true && is_file($source . '/document.pdf'), 'retention changed outcome or source');
-    $root = $copied['retained']['evidence_dir'];
+    $root = dirname($copied['retained']['artifacts_dir']);
     $manifest = json_decode(file_get_contents($root . '/manifest.json'), true, flags: JSON_THROW_ON_ERROR);
     check($manifest['phase'] === 'timed' && $manifest['timing']['tree_wall_ms'] === 102.375, 'timing boundary lost');
     check($manifest['timing']['sampler_lifecycle_wall_ms'] === 210.5, 'sampler boundary changed');
@@ -99,7 +100,7 @@ try {
     check(json_decode(file_get_contents($root . '/sample.json'), true)['retained'] === $copied['retained'], 'sample path closure mismatch');
     rejects(fn () => retain_benchmark_attempt($state, 0, $sample, $exec, ['output' => $source]));
     $failure = retain_benchmark_attempt($state, -1000000, ['ok' => false, 'error' => 'ROOT_WALL_TIMEOUT'], ['stderr' => 'timeout'], ['job' => $source]);
-    $failedManifest = json_decode(file_get_contents($failure['retained']['evidence_dir'] . '/manifest.json'), true);
+    $failedManifest = json_decode(file_get_contents(dirname($failure['retained']['artifacts_dir']) . '/manifest.json'), true);
     check($failedManifest['phase'] === 'preflight' && $failedManifest['timing']['root_wall_ms'] === null
         && $failedManifest['timing']['tree_wall_ms'] === null && $failure['ok'] === false, 'failure fabricated measured success');
     check(benchmark_timing_boundaries(['wall_ms' => 1, 'one_shot_wall_ms' => 1])['tree_wall_ms'] === null, 'unavailable tree metric fabricated');
