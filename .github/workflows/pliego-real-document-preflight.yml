@@ -45,7 +45,9 @@ permissions:
   actions: read
 
 concurrency:
-  group: pliego-real-document-preflight-${{ github.ref }}
+  # Each independent population must survive dispatch of the other repeats.
+  # A single branch-wide group retains only one pending run by default.
+  group: pliego-docs-${{ github.ref }}-${{ inputs.source_sha }}-${{ inputs.tracks }}-${{ inputs.mode }}-${{ inputs.repeat }}
   cancel-in-progress: false
 
 jobs:
