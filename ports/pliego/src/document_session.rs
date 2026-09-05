@@ -11,7 +11,7 @@
 
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::BTreeMap;
-use std::io::Cursor;
+use std::io::{Cursor, Write};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 #[cfg(test)]
@@ -24,8 +24,9 @@ use dpi::PhysicalSize;
 use embedder_traits::{
     DocumentCaptureCommit, DocumentCaptureConsumeRequest, DocumentCapturePrecondition,
     DocumentCaptureSurfaceFingerprint, DocumentClockConfiguration, DocumentPaintPresentationTicket,
-    DocumentTimeControlAction, DocumentTimeControlCommand, DocumentTimeControlOutcome,
-    DocumentTimeControlReceiveOutcome, DocumentTimeControlTryReceiveOutcome,
+    DocumentTimeControlAction, DocumentTimeControlCommand, DocumentTimeControlError,
+    DocumentTimeControlObservation, DocumentTimeControlOutcome, DocumentTimeControlReceiveOutcome,
+    DocumentTimeControlTryReceiveOutcome,
 };
 use http::header::CONTENT_TYPE;
 use http::{HeaderMap, HeaderValue};
@@ -72,6 +73,173 @@ const MAX_CONSOLE_BYTES: u64 = 1024 * 1024;
 
 const TIMEOUT: Duration = Duration::from_secs(30);
 const FROZEN_INPUT_URL_ROOT: &str = "pliego-input:///";
+const SESSION_DIAGNOSTICS_ENV: &str = "PLIEGO_SESSION_DIAGNOSTICS";
+const MAX_SESSION_DIAGNOSTIC_BYTES: usize = 8_192;
+const MAX_SESSION_DIAGNOSTIC_ITEMS: usize = 8;
+
+/// Private failure-only instrumentation. Never serialize raw outcomes: transport errors, capture
+/// commits, resource URLs and authored console/readiness payloads may contain arbitrary content.
+/// The opt-in state keeps only counters and the last bounded metadata snapshot, not a journal.
+#[derive(Default)]
+struct SessionDiagnostics {
+    startup_ms: [Option<f64>; 3],
+    phase: &'static str,
+    commands: u64,
+    response_count: u64,
+    rejections: u64,
+    generation_reobservations: u64,
+    last_command: Option<ControlledSettlementStep>,
+    last_outcome: Option<&'static str>,
+    last_rejection: Option<&'static str>,
+    last_observation: Option<serde_json::Value>,
+    last_observation_response: Option<u64>,
+    emitted: bool,
+}
+
+impl SessionDiagnostics {
+    fn settlement_timeout(state: Option<&RefCell<Self>>, site: &'static str) -> SessionError {
+        if let Some(state) = state {
+            state.borrow_mut().phase = site;
+        }
+        SessionError::new(
+            "SETTLEMENT_TIMEOUT",
+            "controlled settlement exceeded the normalized host-wall limit",
+        )
+    }
+
+    fn enabled(value: Option<&std::ffi::OsStr>, controlled: bool) -> bool {
+        controlled && value == Some(std::ffi::OsStr::new("1"))
+    }
+
+    fn command(&mut self, command: &DocumentTimeControlCommand) {
+        self.commands = self.commands.saturating_add(1);
+        self.last_command = Some(controlled_settlement_step(command));
+    }
+
+    fn outcome(&mut self, outcome: &DocumentTimeControlReceiveOutcome) {
+        self.response_count = self.response_count.saturating_add(1);
+        self.last_outcome = Some(match outcome {
+            DocumentTimeControlReceiveOutcome::CommandOutcome(outcome) => match outcome {
+                DocumentTimeControlOutcome::Completed(observation) => {
+                    self.last_observation = Some(session_observation_diagnostic(observation));
+                    self.last_observation_response = Some(self.response_count);
+                    "completed"
+                },
+                DocumentTimeControlOutcome::Rejected(error) => {
+                    self.rejections = self.rejections.saturating_add(1);
+                    let rejection = match error {
+                        DocumentTimeControlError::EventLoopUnavailable => "event-loop-unavailable",
+                        DocumentTimeControlError::TargetChanged { .. } => "target-changed",
+                        DocumentTimeControlError::AdvanceInputChanged { .. } |
+                        DocumentTimeControlError::AdvanceClockChanged { .. } |
+                        DocumentTimeControlError::AdvanceProducerChanged { .. } => {
+                            "advance-state-changed"
+                        },
+                        DocumentTimeControlError::Timer(_) => "timer-rejected",
+                        _ => "other-rejection",
+                    };
+                    self.last_rejection = Some(rejection);
+                    rejection
+                },
+                _ => "indeterminate",
+            },
+            _ => "transport-failure-or-indeterminate",
+        });
+    }
+
+    fn failure_line(
+        &self,
+        deadline: SessionHostDeadline,
+        error: &SessionError,
+        delegate: Option<&DocumentDelegate>,
+    ) -> Vec<u8> {
+        let resources = delegate.map(|delegate| delegate.resources.borrow());
+        let resource_entries = resources
+            .as_ref()
+            .map_or(&[][..], |log| log.entries.as_slice());
+        let record = serde_json::json!({
+            "diagnostic": "pliego-session-diagnostics-v1",
+            "timeout_site": matches!(error.code.as_str(), "SETTLEMENT_TIMEOUT" | "READINESS_TIMEOUT").then_some(self.phase),
+            "failure_class": match error.code.as_str() {
+                "SETTLEMENT_TIMEOUT" => "SETTLEMENT_TIMEOUT",
+                "READINESS_TIMEOUT" => "READINESS_TIMEOUT",
+                "CONTROLLED_CAPTURE_TIMEOUT" => "CONTROLLED_CAPTURE_TIMEOUT",
+                _ => "OTHER_SESSION_FAILURE",
+            },
+            "host_elapsed_ms": deadline.elapsed_ms(),
+            "host_limit_ms": deadline.deadline.duration_since(deadline.started).as_secs_f64() * 1000.0,
+            "startup_ms": {"render_context_ready": self.startup_ms[0],
+                "servo_ready": self.startup_ms[1], "webview_ready": self.startup_ms[2]},
+            "commands": self.commands,
+            "responses": self.response_count, "rejections": self.rejections,
+            "generation_reobservations": self.generation_reobservations,
+            "last_command": self.last_command.map(|command| format!("{command:?}")),
+            "last_outcome": self.last_outcome, "last_observation": self.last_observation,
+            "last_rejection": self.last_rejection,
+            "last_observation_response": self.last_observation_response,
+            "load_complete": delegate.map(|delegate| delegate.load_complete.get()),
+            "resource_events": resources.as_ref().map(|log| log.observed_events),
+            "resource_entries": resource_entries.len(),
+            "resource_loaded": resource_entries.iter().filter(|resource| resource.status == "loaded").count(),
+            "resource_destinations": resource_entries.iter().take(MAX_SESSION_DIAGNOSTIC_ITEMS)
+                .map(|resource| match resource.request.destination.as_str() {
+                    value @ ("Document" | "Style" | "Font" | "Image" | "Script" | "Empty") => value,
+                    _ => "other",
+                }).collect::<Vec<_>>(),
+        });
+        let mut bytes = serde_json::to_vec(&record).unwrap_or_default();
+        if bytes.is_empty() || bytes.len() >= MAX_SESSION_DIAGNOSTIC_BYTES {
+            bytes = br#"{"diagnostic":"pliego-session-diagnostics-v1","encoding_failed":true}"#
+                .to_vec();
+        }
+        bytes.push(b'\n');
+        bytes
+    }
+
+    fn emit_failure(
+        &mut self,
+        deadline: SessionHostDeadline,
+        error: &SessionError,
+        delegate: Option<&DocumentDelegate>,
+    ) {
+        if self.emitted {
+            return;
+        }
+        self.emitted = true;
+        // Best-effort stderr only, before Servo shutdown. A broken diagnostic sink must not replace
+        // the original typed product error. There are no per-turn writes or public artifact files.
+        let _ = std::io::stderr()
+            .lock()
+            .write_all(&self.failure_line(deadline, error, delegate));
+    }
+}
+
+fn session_observation_diagnostic(
+    observation: &DocumentTimeControlObservation,
+) -> serde_json::Value {
+    serde_json::json!({
+        "virtual_time_ns": observation.now.as_nanos().to_string(),
+        "top_level_epoch": observation.target.webview_epoch.0,
+        "fully_active_pipelines": observation.target.fully_active_pipelines.len(),
+        "pending_events": observation.pending_events,
+        "input_batch_saturated": observation.input_batch_saturated,
+        "has_next_deadline": observation.next_deadline.is_some(),
+        "producer_stability": observation.producers.stability,
+        "producer_pending": observation.producers.snapshot.pending(),
+        "producer_pending_by_kind": [
+            timers::DocumentProducerKind::Task,
+            timers::DocumentProducerKind::Resource,
+            timers::DocumentProducerKind::Font,
+            timers::DocumentProducerKind::Image,
+            timers::DocumentProducerKind::ExternalCallback,
+        ].map(|kind| serde_json::json!({"kind": kind,
+            "pending": observation.producers.snapshot.for_kind(kind).pending()})),
+        "documents": observation.documents.len(),
+        "first_document_readiness": observation.documents.first().map(|document|
+            document.readiness_blockers.iter().take(MAX_SESSION_DIAGNOSTIC_ITEMS).collect::<Vec<_>>()),
+        "first_document_readiness_total": observation.documents.first().map(|document| document.readiness_blockers.len()),
+    })
+}
 
 /// An exclusive, host-path-free authority over one fully resolved API 2 input closure.
 struct FrozenInputAuthority {
@@ -645,6 +813,7 @@ pub(crate) struct DocumentSession {
     environment: RenderEnvironment,
     allow_host_fonts: bool,
     host_deadline: SessionHostDeadline,
+    diagnostics: Option<RefCell<SessionDiagnostics>>,
     _canvas_retention: servo_canvas::retained_canvas::CanvasRetentionGuard,
     rendering_context: Rc<SoftwareRenderingContext>,
 }
@@ -866,6 +1035,9 @@ impl PreparedDocumentCaptureCandidate {
                 ticket.clone(),
             ),
         ));
+        self.session
+            .session
+            .diagnostic(|diagnostics| diagnostics.command(&command));
         let response_waker = self.session.waker.clone();
         let receiver = self
             .session
@@ -989,6 +1161,18 @@ impl PreparedDocumentCaptureCandidate {
 }
 
 impl DocumentSession {
+    fn diagnostic(&self, update: impl FnOnce(&mut SessionDiagnostics)) {
+        if let Some(diagnostics) = &self.diagnostics {
+            update(&mut diagnostics.borrow_mut());
+        }
+    }
+
+    fn emit_diagnostic_failure(&self, error: &SessionError) {
+        self.diagnostic(|diagnostics| {
+            diagnostics.emit_failure(self.host_deadline, error, Some(&self.delegate));
+        });
+    }
+
     pub(crate) fn new(
         input: impl AsRef<Path>,
         environment: RenderEnvironment,
@@ -1281,6 +1465,24 @@ impl DocumentSession {
         apply_timezone(environment.timezone)
             .map_err(|error| SessionError::new("ENVIRONMENT_CONFIGURATION_FAILED", error))?;
         let host_deadline = SessionHostDeadline::start(session_host_timeout)?;
+        let diagnostics = SessionDiagnostics::enabled(
+            std::env::var_os(SESSION_DIAGNOSTICS_ENV).as_deref(),
+            matches!(&runtime, DocumentSessionRuntime::Controlled { .. }),
+        )
+        .then(|| {
+            RefCell::new(SessionDiagnostics {
+                phase: "startup-render-context",
+                ..Default::default()
+            })
+        });
+        let startup_error = |error: SessionError| {
+            if let Some(diagnostics) = &diagnostics {
+                diagnostics
+                    .borrow_mut()
+                    .emit_failure(host_deadline, &error, None);
+            }
+            error
+        };
 
         let rendering_context = Rc::new(
             SoftwareRenderingContext::new(PhysicalSize::new(
@@ -1288,24 +1490,29 @@ impl DocumentSession {
                 surface_size.height,
             ))
             .map_err(|error| {
-                SessionError::new(
+                startup_error(SessionError::new(
                     "RENDER_CONTEXT_FAILED",
                     format!("cannot create software rendering context: {error:?}"),
-                )
+                ))
             })?,
         );
         rendering_context.make_current().map_err(|error| {
-            SessionError::new(
+            startup_error(SessionError::new(
                 "RENDER_CONTEXT_FAILED",
                 format!("cannot activate software rendering context: {error:?}"),
-            )
+            ))
         })?;
         page_reservation.commit().map_err(|_| {
-            SessionError::new(
+            startup_error(SessionError::new(
                 "LAYOUT_CONFIGURATION_FAILED",
                 "paged layout was already configured for this process",
-            )
+            ))
         })?;
+        if let Some(diagnostics) = &diagnostics {
+            let mut diagnostics = diagnostics.borrow_mut();
+            diagnostics.startup_ms[0] = Some(host_deadline.elapsed_ms());
+            diagnostics.phase = "startup-servo";
+        }
 
         let mut preferences = Preferences::default();
         preferences.fonts_host_enabled = allow_host_fonts;
@@ -1328,10 +1535,15 @@ impl DocumentSession {
             ),
         };
         let servo = servo_builder.preferences(preferences).build();
-        let resource_store = RefCell::new(owned_resource_store_for_session(
-            &resource_policy,
-            frozen_input_authority.as_ref(),
-        )?);
+        if let Some(diagnostics) = &diagnostics {
+            let mut diagnostics = diagnostics.borrow_mut();
+            diagnostics.startup_ms[1] = Some(host_deadline.elapsed_ms());
+            diagnostics.phase = "startup-webview";
+        }
+        let resource_store = RefCell::new(
+            owned_resource_store_for_session(&resource_policy, frozen_input_authority.as_ref())
+                .map_err(startup_error)?,
+        );
         let delegate = Rc::new(DocumentDelegate {
             bundle_root,
             resource_policy,
@@ -1354,6 +1566,11 @@ impl DocumentSession {
             webview_builder = webview_builder.document_clock(document_clock);
         }
         let webview = webview_builder.build();
+        if let Some(diagnostics) = &diagnostics {
+            let mut diagnostics = diagnostics.borrow_mut();
+            diagnostics.startup_ms[2] = Some(host_deadline.elapsed_ms());
+            diagnostics.phase = "webview-ready";
+        }
 
         Ok(Self {
             webview,
@@ -1362,6 +1579,7 @@ impl DocumentSession {
             environment,
             allow_host_fonts,
             host_deadline,
+            diagnostics,
             _canvas_retention: canvas_retention,
             rendering_context,
         })
@@ -1408,7 +1626,10 @@ impl DocumentSession {
             host_timeout,
             servo_canvas::retained_canvas::start_retaining_canvas_commands,
         )?;
-        let surface = session.controlled_capture_surface()?;
+        let surface = session.controlled_capture_surface().map_err(|error| {
+            session.emit_diagnostic_failure(&error);
+            error
+        })?;
         Ok(Api2Execution {
             controlled: ControlledDocumentSession {
                 session,
@@ -1735,11 +1956,16 @@ impl DocumentSession {
 }
 
 impl ControlledDocumentSession {
+    fn settlement_timeout(&self, site: &'static str) -> SessionError {
+        SessionDiagnostics::settlement_timeout(self.session.diagnostics.as_ref(), site)
+    }
+
     fn enrich_error_evidence(&self, mut error: SessionError) -> SessionError {
         error
             .capture_evidence
             .controlled_runtime_ms
             .get_or_insert(self.session.host_deadline.elapsed_ms());
+        self.session.emit_diagnostic_failure(&error);
         error.with_evidence(
             std::mem::take(&mut self.session.delegate.resources.borrow_mut().entries),
             self.session.delegate.resource_store.take(),
@@ -1872,6 +2098,8 @@ impl ControlledDocumentSession {
                         }));
                 },
                 Readiness::Pending if self.session.host_deadline.is_elapsed() => {
+                    self.session
+                        .diagnostic(|diagnostics| diagnostics.phase = "readiness-pending-deadline");
                     return Err(SessionError::new(
                         "READINESS_TIMEOUT",
                         "document readiness did not settle before the host deadline",
@@ -1914,12 +2142,11 @@ impl ControlledDocumentSession {
                 ControlledSettlementProgress::Command(command) => {
                     self.session.check_failure("controlled settlement")?;
                     if self.session.host_deadline.is_elapsed() {
-                        return Err(SessionError::new(
-                            "SETTLEMENT_TIMEOUT",
-                            "controlled settlement exceeded the normalized host-wall limit",
-                        ));
+                        return Err(self.settlement_timeout("settlement-before-command"));
                     }
                     trace.push(controlled_settlement_step(&command));
+                    self.session
+                        .diagnostic(|diagnostics| diagnostics.command(&command));
                     let command_generation = self.waker.generation();
                     let response_waker = self.waker.clone();
                     let receiver = self
@@ -1939,6 +2166,10 @@ impl ControlledDocumentSession {
                         .consume_receive_outcome(outcome)
                         .map_err(settlement_transition_error)?;
                     if completion_generation.event_loop_changed_since(command_generation) {
+                        self.session.diagnostic(|diagnostics| {
+                            diagnostics.generation_reobservations =
+                                diagnostics.generation_reobservations.saturating_add(1);
+                        });
                         coordinator.discard_progress();
                         wait_generation = None;
                         ControlledSettlementProgress::Command(DocumentTimeControlCommand::Observe)
@@ -1951,10 +2182,7 @@ impl ControlledDocumentSession {
                     trace.push(ControlledSettlementStep::WaitForWake);
                     self.session.check_failure("controlled settlement")?;
                     if self.session.host_deadline.is_elapsed() {
-                        return Err(SessionError::new(
-                            "SETTLEMENT_TIMEOUT",
-                            "controlled settlement exceeded the normalized host-wall limit",
-                        ));
+                        return Err(self.settlement_timeout("producer-wait-before-check"));
                     }
                     let observed = wait_generation
                         .take()
@@ -1970,10 +2198,7 @@ impl ControlledDocumentSession {
                             self.session.servo.spin_event_loop();
                             self.session.check_failure("controlled settlement")?;
                             if self.session.host_deadline.is_elapsed() {
-                                return Err(SessionError::new(
-                                    "SETTLEMENT_TIMEOUT",
-                                    "controlled settlement exceeded the normalized host-wall limit",
-                                ));
+                                return Err(self.settlement_timeout("producer-owner-after-spin"));
                             }
                             Ok(())
                         },
@@ -1986,10 +2211,7 @@ impl ControlledDocumentSession {
                             )
                         },
                         EventLoopWakeWaitOutcome::DeadlineReached(_) => {
-                            return Err(SessionError::new(
-                                "SETTLEMENT_TIMEOUT",
-                                "controlled settlement exceeded the normalized host-wall limit",
-                            ));
+                            return Err(self.settlement_timeout("producer-wake-deadline"));
                         },
                         EventLoopWakeWaitOutcome::GenerationExhausted(_) => {
                             return Err(SessionError::new(
@@ -2019,25 +2241,22 @@ impl ControlledDocumentSession {
         loop {
             self.session.check_failure("controlled settlement")?;
             if self.session.host_deadline.is_elapsed() {
-                return Err(SessionError::new(
-                    "SETTLEMENT_TIMEOUT",
-                    "controlled settlement exceeded the normalized host-wall limit",
-                ));
+                return Err(self.settlement_timeout("response-before-spin"));
             }
 
             let before_spin = self.waker.generation();
             self.session.servo.spin_event_loop();
             self.session.check_failure("controlled settlement")?;
             if self.session.host_deadline.is_elapsed() {
-                return Err(SessionError::new(
-                    "SETTLEMENT_TIMEOUT",
-                    "controlled settlement exceeded the normalized host-wall limit",
-                ));
+                return Err(self.settlement_timeout("response-after-spin"));
             }
 
             match receiver.try_recv() {
                 DocumentTimeControlTryReceiveOutcome::Complete(outcome) => {
-                    return Ok((outcome, self.waker.generation()));
+                    let generation = self.waker.generation();
+                    self.session
+                        .diagnostic(|diagnostics| diagnostics.outcome(&outcome));
+                    return Ok((outcome, generation));
                 },
                 DocumentTimeControlTryReceiveOutcome::Pending(pending) => receiver = pending,
             }
@@ -2048,10 +2267,7 @@ impl ControlledDocumentSession {
             {
                 EventLoopWakeWaitOutcome::Woken(_) => {},
                 EventLoopWakeWaitOutcome::DeadlineReached(_) => {
-                    return Err(SessionError::new(
-                        "SETTLEMENT_TIMEOUT",
-                        "controlled settlement exceeded the normalized host-wall limit",
-                    ));
+                    return Err(self.settlement_timeout("response-wake-deadline"));
                 },
                 EventLoopWakeWaitOutcome::GenerationExhausted(_) => {
                     return Err(SessionError::new(
@@ -2708,6 +2924,272 @@ mod tests {
         assert!(evaluations > 0);
         assert_eq!(callbacks, evaluations);
         assert_eq!(freshness, evaluations);
+    }
+
+    fn diagnostic_observation() -> embedder_traits::DocumentTimeControlObservation {
+        use embedder_traits::{
+            DocumentProducerStability, DocumentTimeControlAction, DocumentTimeControlTarget,
+            DocumentTimeDocumentObservation, DocumentTimeProducerObservation,
+        };
+        use servo_base::id::{TEST_PIPELINE_ID, TEST_SCRIPT_EVENT_LOOP_ID, TEST_WEBVIEW_ID};
+        use timers::{DocumentProducerCheckpoint, DocumentProducerFence, DocumentTime};
+
+        let fence = DocumentProducerFence::with_execution_ledger(None);
+        embedder_traits::DocumentTimeControlObservation {
+            target: DocumentTimeControlTarget {
+                webview_id: TEST_WEBVIEW_ID,
+                event_loop_id: TEST_SCRIPT_EVENT_LOOP_ID,
+                webview_epoch: Default::default(),
+                pipelines: vec![TEST_PIPELINE_ID],
+                fully_active_pipelines: vec![TEST_PIPELINE_ID],
+            },
+            now: DocumentTime::from_nanos(u128::MAX),
+            next_deadline: None,
+            advance_token: None,
+            pending_events: 3,
+            input_batch_saturated: true,
+            action: DocumentTimeControlAction::Observed,
+            producers: DocumentTimeProducerObservation {
+                fence_id: fence.id(),
+                checkpoint: DocumentProducerCheckpoint::ZERO,
+                snapshot: fence.snapshot(),
+                stability: DocumentProducerStability::NotCheckpointed,
+            },
+            documents: vec![
+                DocumentTimeDocumentObservation {
+                    pipeline_id: TEST_PIPELINE_ID,
+                    script_rendering_epoch: None,
+                    readiness_blockers: vec![
+                        embedder_traits::DocumentTimeReadinessBlocker::Loading;
+                        20
+                    ],
+                };
+                20
+            ],
+            execution: None,
+            capture_preparation: None,
+            capture_commit: None,
+        }
+    }
+
+    #[test]
+    fn session_diagnostics_requires_exact_opt_in_and_controlled_mode() {
+        use std::ffi::OsStr;
+
+        use super::SessionDiagnostics;
+
+        assert!(SessionDiagnostics::enabled(Some(OsStr::new("1")), true));
+        assert!(!SessionDiagnostics::enabled(Some(OsStr::new("1")), false));
+        for value in [
+            None,
+            Some(""),
+            Some("0"),
+            Some("true"),
+            Some("yes"),
+            Some(" 1"),
+        ] {
+            assert!(!SessionDiagnostics::enabled(value.map(OsStr::new), true));
+        }
+    }
+
+    #[test]
+    fn session_diagnostics_keeps_bounded_actual_observation_and_rejection() {
+        use embedder_traits::{
+            DocumentTimeControlCommand, DocumentTimeControlError, DocumentTimeControlOutcome,
+            DocumentTimeControlReceiveOutcome,
+        };
+
+        use super::SessionDiagnostics;
+
+        let mut diagnostic = SessionDiagnostics::default();
+        diagnostic.command(&DocumentTimeControlCommand::Observe);
+        diagnostic.outcome(&DocumentTimeControlReceiveOutcome::CommandOutcome(
+            DocumentTimeControlOutcome::Completed(Box::new(diagnostic_observation())),
+        ));
+        diagnostic.outcome(&DocumentTimeControlReceiveOutcome::CommandOutcome(
+            DocumentTimeControlOutcome::Rejected(DocumentTimeControlError::EventLoopUnavailable),
+        ));
+        assert_eq!(diagnostic.commands, 1);
+        assert_eq!(diagnostic.response_count, 2);
+        assert_eq!(diagnostic.rejections, 1);
+        assert_eq!(diagnostic.last_outcome, Some("event-loop-unavailable"));
+        assert_eq!(diagnostic.last_observation_response, Some(1));
+        let observation = diagnostic.last_observation.as_ref().unwrap();
+        assert_eq!(observation["virtual_time_ns"], u128::MAX.to_string());
+        assert_eq!(observation["pending_events"], 3);
+        assert_eq!(observation["documents"], 20);
+        assert_eq!(
+            observation["first_document_readiness"]
+                .as_array()
+                .unwrap()
+                .len(),
+            8
+        );
+        assert_eq!(observation["first_document_readiness_total"], 20);
+        assert!(observation.get("capture_commit").is_none());
+        diagnostic.commands = u64::MAX;
+        diagnostic.command(&DocumentTimeControlCommand::Observe);
+        assert_eq!(diagnostic.commands, u64::MAX);
+    }
+
+    #[test]
+    fn session_diagnostics_redacts_payloads_and_bounds_resource_details() {
+        use embedder_traits::{
+            DocumentTimeControlReceiveOutcome, DocumentTimeControlTransportFailure,
+        };
+
+        use super::{DocumentDelegate, MAX_SESSION_DIAGNOSTIC_BYTES, SessionDiagnostics};
+
+        const SECRET: &str = "PRIVATE-DOCUMENT-PAYLOAD";
+        let request = ResourceRequest {
+            method: SECRET.into(),
+            url: url::Url::parse(&format!("https://secret.test/{SECRET}")).unwrap(),
+            destination: SECRET.into(),
+            load_role: WebResourceLoadRole::DocumentMetadata,
+            referrer_url: Some(
+                url::Url::parse(&format!("https://referrer.test/{SECRET}")).unwrap(),
+            ),
+            is_for_main_frame: true,
+            is_redirect: false,
+        };
+        let mut resource = ResourceEvidence::loaded(
+            request,
+            ResourceSource::VirtualResource,
+            SECRET,
+            SECRET.as_bytes(),
+        );
+        resource.sha256 = Some(SECRET.into());
+        let delegate = DocumentDelegate::default();
+        delegate.resources.borrow_mut().entries = vec![resource; 20];
+        delegate.resources.borrow_mut().observed_events = 20;
+        delegate
+            .console
+            .borrow_mut()
+            .push("error".into(), SECRET.into());
+        delegate.load_complete.set(true);
+        let mut diagnostic = SessionDiagnostics::default();
+        diagnostic.outcome(&DocumentTimeControlReceiveOutcome::ObserveTransportFailure(
+            DocumentTimeControlTransportFailure::DeserializationFailed(SECRET.repeat(1000)),
+        ));
+        let mut error = SessionError::new(SECRET, SECRET);
+        error.capture_evidence.readiness = Some(serde_json::json!({"payload": SECRET}));
+        let line = diagnostic.failure_line(
+            SessionHostDeadline::start(Duration::from_secs(10)).unwrap(),
+            &error,
+            Some(&delegate),
+        );
+        assert!(line.len() <= MAX_SESSION_DIAGNOSTIC_BYTES);
+        assert_eq!(line.iter().filter(|byte| **byte == b'\n').count(), 1);
+        assert!(!String::from_utf8_lossy(&line).contains(SECRET));
+        let value: serde_json::Value = serde_json::from_slice(&line).unwrap();
+        assert_eq!(value["failure_class"], "OTHER_SESSION_FAILURE");
+        assert_eq!(value["last_outcome"], "transport-failure-or-indeterminate");
+        assert_eq!(value["load_complete"], true);
+        assert_eq!(value["resource_destinations"].as_array().unwrap().len(), 8);
+        assert_eq!(value["resource_destinations"][0], "other");
+        assert_eq!(value["resource_entries"], 20);
+        assert_eq!(value["resource_loaded"], 20);
+        assert!(value["last_observation"].is_null());
+        assert!(value["startup_ms"]["servo_ready"].is_null());
+        diagnostic.last_observation =
+            Some(serde_json::json!({"oversized_internal_detail": "x".repeat(20_000)}));
+        let line = diagnostic.failure_line(
+            SessionHostDeadline::start(Duration::from_secs(10)).unwrap(),
+            &error,
+            Some(&delegate),
+        );
+        assert!(line.len() <= MAX_SESSION_DIAGNOSTIC_BYTES);
+        let value: serde_json::Value = serde_json::from_slice(&line).unwrap();
+        assert_eq!(value["encoding_failed"], true);
+    }
+
+    #[test]
+    fn session_diagnostics_timeout_sites_and_startup_are_private_metadata() {
+        for phase in [
+            "settlement-before-command",
+            "producer-wait-before-check",
+            "producer-owner-after-spin",
+            "producer-wake-deadline",
+            "response-before-spin",
+            "response-after-spin",
+            "response-wake-deadline",
+        ] {
+            let diagnostic = std::cell::RefCell::new(super::SessionDiagnostics {
+                startup_ms: [Some(10.0), Some(20.0), Some(30.0)],
+                ..Default::default()
+            });
+            let error = super::SessionDiagnostics::settlement_timeout(Some(&diagnostic), phase);
+            let disabled = super::SessionDiagnostics::settlement_timeout(None, phase);
+            assert_eq!(error, disabled);
+            let line = diagnostic.borrow().failure_line(
+                SessionHostDeadline::start(Duration::from_secs(10)).unwrap(),
+                &error,
+                None,
+            );
+            let value: serde_json::Value = serde_json::from_slice(&line).unwrap();
+            assert_eq!(value["timeout_site"], phase);
+            assert_eq!(value["failure_class"], "SETTLEMENT_TIMEOUT");
+            assert_eq!(value["startup_ms"]["webview_ready"], 30.0);
+            assert_eq!(value["host_limit_ms"], 10_000.0);
+            assert_eq!(error.code, "SETTLEMENT_TIMEOUT");
+            assert_eq!(
+                error.message,
+                "controlled settlement exceeded the normalized host-wall limit"
+            );
+            assert!(value["load_complete"].is_null());
+        }
+    }
+
+    #[test]
+    fn session_diagnostics_stderr_only() {
+        use super::{SESSION_DIAGNOSTICS_ENV, SessionDiagnostics};
+        const CHILD: &str = "PLIEGO_SESSION_DIAGNOSTICS_TEST_CHILD";
+        const MARKER: &str = "pliego-session-diagnostics-v1";
+        if std::env::var_os(CHILD).as_deref() == Some(std::ffi::OsStr::new("1")) {
+            if SessionDiagnostics::enabled(
+                std::env::var_os(SESSION_DIAGNOSTICS_ENV).as_deref(),
+                true,
+            ) {
+                let mut diagnostic = SessionDiagnostics {
+                    phase: "test-failure",
+                    ..Default::default()
+                };
+                let deadline = SessionHostDeadline::start(Duration::from_secs(10)).unwrap();
+                let error = SessionError::new("SETTLEMENT_TIMEOUT", "unchanged product failure");
+                diagnostic.emit_failure(deadline, &error, None);
+                diagnostic.emit_failure(deadline, &error, None);
+            }
+            println!("SESSION_DIAGNOSTIC_STDOUT_SENTINEL");
+            return;
+        }
+        for activation in [None, Some("0"), Some("1")] {
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--exact",
+                    "document_session::tests::session_diagnostics_stderr_only",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env_remove(SESSION_DIAGNOSTICS_ENV);
+            if let Some(value) = activation {
+                command.env(SESSION_DIAGNOSTICS_ENV, value);
+            }
+            let output = command.output().unwrap();
+            assert!(output.status.success(), "{output:?}");
+            let stdout = String::from_utf8(output.stdout).unwrap();
+            assert!(stdout.contains("SESSION_DIAGNOSTIC_STDOUT_SENTINEL"));
+            assert!(!stdout.contains(MARKER));
+            if activation == Some("1") {
+                let stderr = String::from_utf8(output.stderr).unwrap();
+                assert_eq!(stderr.lines().count(), 1);
+                let value: serde_json::Value = serde_json::from_str(stderr.trim()).unwrap();
+                assert_eq!(value["diagnostic"], MARKER);
+                assert_eq!(value["timeout_site"], "test-failure");
+            } else {
+                assert!(output.stderr.is_empty());
+            }
+        }
     }
 
     #[test]

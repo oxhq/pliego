@@ -132,6 +132,7 @@ jobs:
           for test_name in \
             pages::tests::fixed_subtrees_cannot_claim_or_extend_the_final_page_count \
             pages::tests::out_of_flow_placeholders_preserve_breaks_and_source_child_indices \
+            positioned::paged_fixed_tests::computed_vertical_writing_modes_are_rejected \
             display_list::debug_capture_tests::empty_paint_area_requires_exact_valid_zero_extent \
             display_list::debug_capture_tests::partial_horizontal_rules_preserve_tracks_gaps_and_row_ownership \
             table::collapsed_border_profile_tests::horizontal_rules_accept_zero_width_gaps_in_either_column \

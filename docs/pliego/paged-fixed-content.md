@@ -48,6 +48,14 @@ unresolved retained counter text records `unresolved-page-counter`. API 2 must r
 an artifact failure with `SCENE_ENCODING_FAILED` and no success delivery, never a
 plausible PDF with missing footers or repeated page-one numbers.
 
+The pinned Stylo `layout.writing-mode.enabled` preference is disabled. Authored
+`writing-mode: vertical-rl` therefore does not create a vertical computed style;
+it follows the ordinary horizontal fallback. The native fallback case records
+actual `CSS.supports` false and an unavailable CSSOM property, then checks the
+full horizontal scene/PDF geometry. A separate Rust predicate test rejects
+computed vertical/sideways writing modes. This is not vertical-layout support
+or a claim that the ignored author declaration produces an API 2 rejection.
+
 Continuous Servo layout is unchanged. The page-root path requires explicit Pliego
 page configuration; a viewport-fixed element in an ordinary document is not a
 printed-page replica.

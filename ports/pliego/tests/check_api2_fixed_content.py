@@ -11,6 +11,10 @@ including the 9-to-10 width change. Exact Ahem baselines and text extents bind
 centering and margin placement to source geometry. Fixed siblings cannot alter
 body rows or pagination. Unsupported descendants/insets/counter forms must fail
 closed with the specific retained unsupported marker, never an arbitrary error.
+The pinned Stylo writing-mode preference is disabled: the separately named
+fallback case proves CSS.supports/CSSOM absence plus exact horizontal output,
+not vertical-layout support. A Rust predicate unit covers computed vertical
+rejection independently of that disabled author-property surface.
 This is a native scene/PDF regression, not general CSS fixed-content support,
 business-document visual qualification, or a performance benchmark.
 """
@@ -72,7 +76,7 @@ CASES = (
     {"name": "reject-counter-form", "pages": 1, "reject": "form"},
     {"name": "reject-counter-name", "pages": 1, "reject": "name"},
     {"name": "reject-counter-style", "pages": 1, "reject": "style"},
-    {"name": "reject-vertical-fixed", "pages": 1, "reject": "vertical"},
+    {"name": "disabled-writing-mode-fallback", "pages": 1, "disabled_writing_mode": True},
     {"name": "reject-relative-inline", "pages": 1, "reject": "relative"},
     {"name": "reject-counter-transform", "pages": 1, "reject": "transform"},
     {"name": "reject-counter-security", "pages": 1, "reject": "security"},
@@ -94,6 +98,20 @@ def footer_top(case: dict[str, Any]) -> int:
     if case.get("top"):
         return MARGINS["top"] - 25 * 60
     return PAGE_SIZE["height"] - MARGINS["bottom"] + 40 * 60 - LINE_HEIGHT
+
+
+def check_disabled_writing_mode(diagnostics: list[dict[str, Any]]) -> dict[str, Any]:
+    payloads = [item.get("readiness", {}).get("payload") for item in diagnostics if "readiness" in item]
+    expected = {
+        "fixture": "disabled-writing-mode-fallback",
+        "supports": False,
+        "computedWritingMode": "",
+    }
+    require(
+        payloads == [expected] and type(payloads[0]["supports"]) is bool,
+        "disabled writing-mode CSSOM/support evidence differs or is missing",
+    )
+    return expected
 
 
 def text_bounds(operations: list[dict[str, Any]]) -> tuple[int, int, int]:
@@ -286,6 +304,15 @@ def build_fixture(repository: Path, root: Path, case: dict[str, Any]) -> tuple[b
     body = "".join(parts)
     if case.get("wrapper"):
         body = f"<main><article>{body}</article></main>"
+    if case.get("disabled_writing_mode"):
+        # The pinned Stylo pref disables the property and its CSSOM getter.
+        # Retain actual feature/computed-style evidence without altering text.
+        body += (
+            '<script>window.pliego.defer();addEventListener("load",()=>window.pliego.ready({'
+            'fixture:"disabled-writing-mode-fallback",supports:CSS.supports("writing-mode","vertical-rl"),'
+            'computedWritingMode:getComputedStyle(document.querySelector(".fixed")).getPropertyValue("writing-mode")'
+            "}));</script>"
+        )
     html = (
         '<!doctype html><html lang="en-US"><head><meta charset="utf-8"><link rel="stylesheet" href="styles.css"><title>Fixed page content</title></head><body>'
         + body
@@ -308,14 +335,14 @@ def build_fixture(repository: Path, root: Path, case: dict[str, Any]) -> tuple[b
     css += f".fixed{{position:fixed;left:0;right:0;{inset};height:20px;text-align:center}}.counter::after{{content:{counter}}}"
     if reject == "outside":
         css += ".row:first-child::after{content:counter(page)}"
-    elif reject == "vertical":
-        css += ".fixed{writing-mode:vertical-rl}"
     elif reject == "relative":
         css += ".counter{position:relative;left:1px}"
     elif reject == "transform":
         css += ".counter{text-transform:full-width}"
     elif reject == "security":
         css += ".counter{-webkit-text-security:disc}"
+    if case.get("disabled_writing_mode"):
+        css += ".fixed{writing-mode:vertical-rl}"
     (source / "input/document.html").write_text(html, encoding="utf-8", newline="\n")
     (source / "input/styles.css").write_text(css + "\n", encoding="utf-8", newline="\n")
     manifest = json.loads((source / "input-manifest.json").read_bytes())
@@ -439,6 +466,10 @@ def run_case(
     font_binding = resolve_font_resource(delivery, bundle)
     evidence = check_scene(json.loads((delivery / "scene.json").read_bytes()), case, font_binding["resolved_sha256"])
     evidence["font_binding"] = font_binding
+    if case.get("disabled_writing_mode"):
+        evidence["disabled_writing_mode"] = check_disabled_writing_mode(
+            [json.loads(path.read_bytes()) for path in paths if path.suffix == ".json"]
+        )
     text_tool = shutil.which("pdftotext")
     if text_tool:
         extracted = subprocess.run(
@@ -494,7 +525,22 @@ def fake_scene(case: dict[str, Any]) -> dict[str, Any]:
 
 
 def self_test() -> None:
-    require(len(CASES) == 23 and sum(bool(case.get("reject")) for case in CASES) == 14, "case inventory changed")
+    require(len(CASES) == 23 and sum(bool(case.get("reject")) for case in CASES) == 13, "case inventory changed")
+    fallback = {"fixture": "disabled-writing-mode-fallback", "supports": False, "computedWritingMode": ""}
+    check_disabled_writing_mode([{"readiness": {"payload": fallback}}])
+    for payload in (
+        None,
+        {},
+        dict(fallback, supports=True),
+        dict(fallback, supports=0),
+        dict(fallback, computedWritingMode="vertical-rl"),
+    ):
+        try:
+            check_disabled_writing_mode([{"readiness": {"payload": payload}}])
+        except AssertionError:
+            pass
+        else:
+            raise AssertionError("disabled-property fallback accepted absent or changed runtime evidence")
     font = FONT_PATH.read_bytes()
     font_resource = sha256_file(FONT_PATH)
     tables = {
@@ -630,6 +676,15 @@ def self_test() -> None:
         require(
             first == second and json.loads(first)["resources"] == {"network": "deny", "host_fonts": "deny"},
             "fixture closure is not repeatable/offline",
+        )
+        fallback_case = next(item for item in CASES if item.get("disabled_writing_mode"))
+        _, fallback_source = build_fixture(repository, root / "fallback", fallback_case)
+        fallback_html = (fallback_source / "input/document.html").read_text(encoding="utf-8")
+        require(
+            'CSS.supports("writing-mode","vertical-rl")' in fallback_html
+            and 'getComputedStyle(document.querySelector(".fixed")).getPropertyValue("writing-mode")' in fallback_html
+            and "window.pliego.defer()" in fallback_html,
+            "fallback evidence must come from actual runtime CSSOM/support calls",
         )
         real_run = subprocess.run
 

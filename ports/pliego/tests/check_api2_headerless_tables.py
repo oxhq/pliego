@@ -16,7 +16,9 @@ Horizontal rules retain their centered source width, intersect only their owning
 page, and are never duplicated onto a following page. Their exact source geometry
 is tied to the authored line box/padding and pinned Ahem glyph baselines. Partial
 rules preserve exact fixed-layout column and colspan extents, without filling
-zero-width gaps. Positive-width invisible joins remain outside this profile. The
+zero-width gaps. Each cell retains its independently derived middle alignment and
+collapsed half-borders; cells in a partial-rule row need not share a baseline.
+Positive-width invisible joins remain outside this profile. The
 uniform-grid oracle does not establish absolute text/edge alignment; visual
 document qualification remains separate.
 """
@@ -97,7 +99,7 @@ BORDER_COLOR = {"r": 34, "g": 34, "b": 34, "a": 255}
 LINE_HEIGHT_PX = 16
 CELL_PADDING_PX = 8
 FONT_SIZE_PX = 12
-HORIZONTAL_RULE_POLICY = "centered-source-rule-intersect-owning-page-v1"
+HORIZONTAL_RULE_POLICY = "centered-source-rule-and-cell-middle-alignment-v2"
 
 
 def require(condition: bool, message: str) -> None:
@@ -153,13 +155,50 @@ def check_borders(paths: list[dict[str, Any]], rows: int) -> None:
         check_coverage(intervals, top, bottom)
 
 
+def horizontal_row_geometry(case: dict[str, Any], row: int | None, row_start: int) -> dict[str, Any]:
+    """Derive this fixed fixture's row from CSS/Ahem, never from captured text/path positions.
+
+    Servo's pinned UA makes cells middle-aligned. table/layout.rs uses collapsed
+    edge width / 2 per cell, maximum outer cell height per row, then half the free
+    content-space as the middle offset. A repeated header does not change the
+    original top half-border of the following body row (row > 0 still uses its
+    predecessor's one-pixel edge). Colspan changes widths, not these block sizes.
+    """
+
+    def body_bottom(index: int) -> list[int]:
+        return ([0, 30] if index % 2 == 0 else [30, 0]) if case.get("partial") else [30, 30]
+
+    top = [0, 0] if row is None else ([60, 60] if row == 0 else body_bottom(row - 1))
+    bottom = [60, 60] if row is None else body_bottom(row)
+    line_height, padding = LINE_HEIGHT_PX * 60, CELL_PADDING_PX * 60
+    outer_heights = [line_height + 2 * padding + before + after for before, after in zip(top, bottom)]
+    row_height = max(outer_heights)
+    require(
+        all((row_height - height) % 2 == 0 for height in outer_heights), "fixture needs nonintegral middle alignment"
+    )
+    middle = [(row_height - height) // 2 for height in outer_heights]
+    baseline_in_line = (LINE_HEIGHT_PX - FONT_SIZE_PX) * 60 // 2 + FONT_SIZE_PX * 60 * 4 // 5
+    baselines = [row_start + before + padding + offset + baseline_in_line for before, offset in zip(top, middle)]
+    rule_height = 2 * max(bottom)
+    return {
+        "row_start_au": row_start,
+        "row_height_au": row_height,
+        "top_half_au": top,
+        "bottom_half_au": bottom,
+        "middle_offset_au": middle,
+        "baselines_au": baselines,
+        "rule_top_au": row_start + row_height - rule_height // 2,
+        "rule_height_au": rule_height,
+    }
+
+
 def check_horizontal_borders(
     paths: list[dict[str, Any]],
     body: list[str],
     operations: list[dict[str, Any]],
     page_size: dict[str, int],
     case: dict[str, Any],
-) -> None:
+) -> list[dict[str, Any]]:
     row_tokens = [("HDRL", "HDRR"), *zip(body[::2], body[1::2])]
     require(len(paths) == len(row_tokens), "horizontal invoice rules lost or duplicated a row boundary")
     baselines = {}
@@ -178,18 +217,26 @@ def check_horizontal_borders(
         (min(baselines[left][0], baselines[right][0]), max(baselines[left][1], baselines[right][1]))
         for left, right in row_tokens
     ]
-    # The committed Ahem has 1000 units/em, ascent 800, descent 200 and no
-    # line gap (asserted in self_test). The rule starts after the line box's
-    # descent/half-leading and bottom padding, before its centered border.
-    baseline_to_rule_top = (LINE_HEIGHT_PX - FONT_SIZE_PX) * 60 // 2 + FONT_SIZE_PX * 60 // 5 + CELL_PADDING_PX * 60
+    # Ahem's 1000 units/em, 800 ascent, 200 descent and zero line gap are
+    # checked below. Keep both cell baselines: taking min/max cannot establish
+    # the row edge when unequal collapsed halves change middle alignment.
     ordered = sorted(paths, key=lambda path: path["bounds"]["y"])
     last_bottom = -1
+    row_start = 0
+    retained_geometry = []
     for index, path in enumerate(ordered):
         bounds = path["bounds"]
+        require(all(type(bounds[key]) is int for key in ("x", "y", "width", "height")), "invoice rule is not exact Au")
         require(path.get("fill") == BORDER_COLOR and bool(path.get("data")), "invoice rule paint differs")
+        row = None if index == 0 else int(row_tokens[index][0][1:4])
+        geometry = horizontal_row_geometry(case, row, row_start)
+        for token, expected_baseline in zip(row_tokens[index], geometry["baselines_au"]):
+            require(
+                baselines[token] == (expected_baseline, expected_baseline),
+                f"{token} differs from its exact cell baseline",
+            )
         expected_x, expected_width = 0, 420 * 60
         if case.get("partial") and index > 0:
-            row = int(row_tokens[index][0][1:4])
             first_cell_width = 280 * 60 if case.get("colspan") else 210 * 60
             # The paired fixtures alternate the empty amount-rule side. The
             # colspan variant has three explicit equal fixed-layout tracks.
@@ -201,9 +248,8 @@ def check_horizontal_borders(
             bounds["x"] == expected_x and bounds["width"] == expected_width,
             "invoice rule does not match its exact visible column segment",
         )
-        require(row_baselines[index][0] == row_baselines[index][1], "fixture row baselines differ")
-        source_y = row_baselines[index][1] + baseline_to_rule_top
-        source_height = 120 if index == 0 else 60
+        source_y = geometry["rule_top_au"]
+        source_height = geometry["rule_height_au"]
         require(bounds["y"] == source_y, "invoice rule differs from its exact authored row edge")
         require(
             0 <= source_y and source_y + source_height // 2 <= page_size["height"],
@@ -220,6 +266,15 @@ def check_horizontal_borders(
         require(bounds["y"] > row_baselines[index][1], "invoice rule does not follow its row baseline")
         if index + 1 < len(row_baselines):
             require(last_bottom < row_baselines[index + 1][0], "invoice rule does not precede the next row baseline")
+        retained_geometry.append(
+            {
+                "tokens": row_tokens[index],
+                **geometry,
+                "observed_baselines_au": [baselines[token] for token in row_tokens[index]],
+            }
+        )
+        row_start += geometry["row_height_au"]
+    return retained_geometry
 
 
 def check_scene(scene: dict[str, Any], case: dict[str, Any]) -> dict[str, Any]:
@@ -230,6 +285,7 @@ def check_scene(scene: dict[str, Any], case: dict[str, Any]) -> dict[str, Any]:
     all_text = []
     path_counts = []
     rows_per_page = []
+    horizontal_geometry = []
     for index, page in enumerate(pages):
         require(page.get("number") == index + 1, "page numbering is not sequential")
         operations = page.get("operations", [])
@@ -256,7 +312,7 @@ def check_scene(scene: dict[str, Any], case: dict[str, Any]) -> dict[str, Any]:
         if case.get("borders") in ("none", "transparent", "hidden"):
             require(not paths, "invisible collapsed borders emitted artificial paths")
         elif case.get("borders") == "horizontal":
-            check_horizontal_borders(paths, body, operations, page["size_app_units"], case)
+            horizontal_geometry.append(check_horizontal_borders(paths, body, operations, page["size_app_units"], case))
         else:
             check_borders(paths, len(body) // 2 + int(case["header"]))
         for operation in operations:
@@ -272,7 +328,10 @@ def check_scene(scene: dict[str, Any], case: dict[str, Any]) -> dict[str, Any]:
         path_counts.append(len(paths))
         rows_per_page.append(len(body) // 2)
     check_text(" ".join(all_text), case["rows"], len(pages) if case["header"] else 0)
-    return {"pages": len(pages), "rows_per_page": rows_per_page, "border_paths_per_page": path_counts}
+    evidence = {"pages": len(pages), "rows_per_page": rows_per_page, "border_paths_per_page": path_counts}
+    if horizontal_geometry:
+        evidence["horizontal_row_geometry"] = horizontal_geometry
+    return evidence
 
 
 def build_fixture(repository: Path, root: Path, case: dict[str, Any]) -> tuple[bytes, Path]:
@@ -625,9 +684,36 @@ def self_test() -> None:
         partial_operations = partial_scene["pages"][0]["operations"]
         first_width = 16800 if colspan else 12600
         partial_operations[1]["bounds"].update(x=first_width, width=25200 - first_width)
-        partial_operations[2]["bounds"].update(width=first_width)
-        check_scene(partial_scene, partial_case)
-        for change in ("missing-segment", "extra-segment", "filled-gap", "wrong-side", "wrong-width", "wrong-colspan"):
+        partial_operations[2]["bounds"].update(y=5910, width=first_width)
+        partial_operations[5]["glyphs"][0]["y"] = 3231
+        partial_operations[7]["glyphs"][0]["y"] = 5166
+        geometry = check_scene(partial_scene, partial_case)["horizontal_row_geometry"][0]
+        require([row["row_height_au"] for row in geometry] == [1980, 2010, 1950], "partial row heights changed")
+        require([row["top_half_au"] for row in geometry] == [[0, 0], [60, 60], [0, 30]], "partial top halves changed")
+        require(
+            [row["bottom_half_au"] for row in geometry] == [[60, 60], [0, 30], [30, 0]], "partial bottom halves changed"
+        )
+        require(
+            [row["baselines_au"] for row in geometry] == [[1176, 1176], [3231, 3216], [5166, 5196]],
+            "partial baseline derivation changed",
+        )
+        require(geometry[1]["middle_offset_au"] == [15, 0], "partial middle offset changed")
+        for change in (
+            "missing-segment",
+            "extra-segment",
+            "filled-gap",
+            "wrong-side",
+            "wrong-width",
+            "wrong-colspan",
+            "legacy-equal-baselines",
+            "invisible-cell-baseline",
+            "visible-cell-baseline",
+            "top-half-removed",
+            "row-height-shift",
+            "rule-center-half",
+            "swapped-cell-baselines",
+            "split-glyph-baseline",
+        ):
             invalid = copy.deepcopy(partial_scene)
             operations = invalid["pages"][0]["operations"]
             if change == "missing-segment":
@@ -642,9 +728,29 @@ def self_test() -> None:
                 operations[1]["bounds"]["x"] = 0
             elif change == "wrong-width":
                 operations[1]["bounds"]["width"] -= 1
-            else:
+            elif change == "wrong-colspan":
                 alternate_width = 12600 if colspan else 16800
                 operations[1]["bounds"].update(x=alternate_width, width=25200 - alternate_width)
+            elif change == "legacy-equal-baselines":
+                operations[5]["glyphs"][0]["y"] = 3216
+                operations[7]["glyphs"][0]["y"] = 5196
+                operations[2]["bounds"]["y"] = 5940
+            elif change == "invisible-cell-baseline":
+                operations[5]["glyphs"][0]["y"] += 1
+            elif change == "visible-cell-baseline":
+                operations[6]["glyphs"][0]["y"] += 1
+            elif change == "top-half-removed":
+                operations[8]["glyphs"][0]["y"] -= 30
+            elif change == "row-height-shift":
+                for operation in operations[7:9]:
+                    operation["glyphs"][0]["y"] += 30
+                operations[2]["bounds"]["y"] += 30
+            elif change == "rule-center-half":
+                operations[2]["bounds"]["y"] += 30
+            elif change == "swapped-cell-baselines":
+                operations[5]["glyphs"][0]["y"], operations[6]["glyphs"][0]["y"] = 3216, 3231
+            else:
+                operations[5]["glyphs"].append({"x": 120, "y": 3232})
             try:
                 check_scene(invalid, partial_case)
             except AssertionError:

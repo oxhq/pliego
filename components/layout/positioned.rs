@@ -40,6 +40,10 @@ pub(crate) struct AbsolutelyPositionedBox {
     pub context: IndependentFormattingContext,
 }
 
+fn paged_fixed_writing_modes_supported(style: WritingMode, containing_block: WritingMode) -> bool {
+    style.is_horizontal() && containing_block.is_horizontal()
+}
+
 #[derive(Clone, MallocSizeOf)]
 pub(crate) struct HoistedAbsolutelyPositionedBox {
     absolutely_positioned_box: ArcRefCell<AbsolutelyPositionedBox>,
@@ -583,8 +587,10 @@ impl HoistedAbsolutelyPositionedBox {
         let source = self.absolutely_positioned_box.borrow();
         let style = &source.context.base.style;
         if page_count == 0 ||
-            !style.writing_mode.is_horizontal() ||
-            !containing_block.style.writing_mode.is_horizontal() ||
+            !paged_fixed_writing_modes_supported(
+                style.writing_mode,
+                containing_block.style.writing_mode,
+            ) ||
             !style
                 .box_offsets(containing_block.style.writing_mode)
                 .block_sides()
@@ -1233,5 +1239,39 @@ impl LayoutRootLayoutInputs {
 
         shared_fragment.borrow_mut().fragment = Some(Fragment::Box(box_fragment));
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod paged_fixed_tests {
+    use style::logical_geometry::WritingMode;
+
+    use super::paged_fixed_writing_modes_supported;
+
+    #[test]
+    fn computed_vertical_writing_modes_are_rejected() {
+        let horizontal = WritingMode::WRITING_MODE_HORIZONTAL_TB;
+        let horizontal_rtl = horizontal | WritingMode::RTL | WritingMode::INLINE_REVERSED;
+        assert!(paged_fixed_writing_modes_supported(horizontal, horizontal));
+        assert!(paged_fixed_writing_modes_supported(
+            horizontal_rtl,
+            horizontal
+        ));
+        assert!(paged_fixed_writing_modes_supported(
+            horizontal,
+            horizontal_rtl
+        ));
+        // Author CSS cannot exercise this guard while Stylo's writing-mode
+        // preference is disabled. Test the actual computed-mode predicate.
+        for vertical in [
+            WritingMode::WRITING_MODE_VERTICAL_RL,
+            WritingMode::WRITING_MODE_VERTICAL_LR,
+            WritingMode::WRITING_MODE_SIDEWAYS_RL,
+            WritingMode::WRITING_MODE_SIDEWAYS_LR,
+        ] {
+            assert!(!paged_fixed_writing_modes_supported(vertical, horizontal));
+            assert!(!paged_fixed_writing_modes_supported(horizontal, vertical));
+            assert!(!paged_fixed_writing_modes_supported(vertical, vertical));
+        }
     }
 }
