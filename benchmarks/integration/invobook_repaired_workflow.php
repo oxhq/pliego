@@ -38,7 +38,7 @@ function workflowSameBytes(string $first, string $second): bool
     return filesize($first) === filesize($second) && hash_file('sha256', $first) === hash_file('sha256', $second);
 }
 
-$options = getopt('', ['app:', 'output:', 'template:', 'provider:', 'sdk:', 'binary:', 'chrome:', 'node:', 'node-modules:']);
+$options = getopt('', ['app:', 'output:', 'template:', 'provider:', 'sdk:', 'binary:', 'chrome:', 'node:', 'node-modules:', 'simple-pdf-media:', 'simple-pdf-repair:']);
 $phase = 'setup';
 $output = null;
 $report = ['schema' => 'pliego.invobook-repaired-workflow.v1', 'status' => 'setup_failure',
@@ -46,6 +46,7 @@ $report = ['schema' => 'pliego.invobook-repaired-workflow.v1', 'status' => 'setu
 $transaction = false;
 $storagePath = null;
 $sourceHashes = [];
+$deliveryAssets = [];
 try {
     foreach (['app', 'output', 'template', 'provider'] as $key) {
         if (!isset($options[$key]) || !is_string($options[$key]) || $options[$key] === '') {
@@ -60,6 +61,20 @@ try {
     $provider = $report['provider'] = $options['provider'];
     if (!in_array($template, ['default', 'simple', 'elegant'], true) || !in_array($provider, ['html', 'browsershot', 'pliego'], true)) {
         throw new RuntimeException('Unsupported template/provider');
+    }
+    $repairFull = isset($options['simple-pdf-repair']);
+    if ($repairFull && ($template !== 'simple' || $options['simple-pdf-repair'] !== 'quantity-fonts')) {
+        throw new RuntimeException('--simple-pdf-repair quantity-fonts is allowed only for the simple template');
+    }
+    $repairMedia = isset($options['simple-pdf-media']) || $repairFull;
+    if (isset($options['simple-pdf-media']) && ($template !== 'simple' || $options['simple-pdf-media'] !== 'all')) {
+        throw new RuntimeException('--simple-pdf-media all is allowed only for the simple template');
+    }
+    if ($repairMedia) {
+        $report['track'] = 'shared-currency-and-simple-media-repair-html-delivery';
+    }
+    if ($repairFull) {
+        $report['track'] = 'shared-currency-media-quantity-font-repair-html-delivery';
     }
     $parent = realpath(dirname($options['output']));
     if ($parent === false || file_exists($options['output']) || is_link($options['output'])) {
@@ -101,8 +116,111 @@ try {
         'runnerSha256' => hash_file('sha256', __FILE__), 'builtAssetSha256' => $builtAssets,
         'originalCreateInvoiceSha256' => hash('sha256', $original), 'repairPatchSha256' => hash_file('sha256', $output.'/application.patch'),
         'applicationSources' => $sourceHashes, 'templateChanged' => false, 'generateActionChanged' => false];
+    if ($repairFull) {
+        $relative = 'app/Actions/GenerateInvoicePdf.php';
+        $originalAction = (string) file_get_contents(workflowFile($appPath.'/'.$relative));
+        if (str_replace("\r\n", "\n", $originalAction) !== workflowGit($appPath, ['show', 'HEAD:'.$relative])) {
+            throw new RuntimeException('GenerateInvoicePdf differs from the pinned source');
+        }
+        $newline = str_contains($originalAction, "\r\n") ? "\r\n" : "\n";
+        $before = '                    ->pricePerUnit($item->rate_in_cents / 100)';
+        $addition = '                    ->quantity($item->total_duration / 3600)';
+        $repairedAction = str_replace($before, $before.$newline.$addition, $originalAction, $count);
+        if ($count !== 1 || class_exists(App\Actions\GenerateInvoicePdf::class, false)) {
+            throw new RuntimeException('Quantity repair requires one exact source site and an unloaded action class');
+        }
+        $line = substr_count(substr($originalAction, 0, strpos($originalAction, $before)), "\n") + 1;
+        $patch = "--- a/{$relative}\n+++ b/{$relative}\n@@ -{$line} +{$line},2 @@\n {$before}\n+{$addition}\n";
+        mkdir($output.'/action-override', 0700);
+        workflowWrite($output.'/action.original.php', $originalAction);
+        workflowWrite($output.'/action-override/GenerateInvoicePdf.php', $repairedAction);
+        workflowWrite($output.'/action-repair.patch', $patch);
+        require $output.'/action-override/GenerateInvoicePdf.php';
+        if (realpath((new ReflectionClass(App\Actions\GenerateInvoicePdf::class))->getFileName()) !== realpath($output.'/action-override/GenerateInvoicePdf.php')) {
+            throw new RuntimeException('Quantity-repaired action did not load from its retained source');
+        }
+        $report['provenance']['generateActionChanged'] = true;
+        $report['provenance']['actionRepair'] = ['name' => 'hour-duration-quantity', 'sourcePath' => $relative,
+            'originalSha256' => hash('sha256', $originalAction), 'repairedSha256' => hash('sha256', $repairedAction),
+            'patchSha256' => hash('sha256', $patch), 'replacementCount' => $count,
+            'addition' => trim($addition), 'applicationActionUnchanged' => true];
+        mkdir($output.'/fonts', 0700);
+        $fontSources = [
+            'DejaVuSans.ttf' => '7da195a74c55bef988d0d48f9508bd5d849425c1770dba5d7bfc6ce9ed848954',
+            'DejaVuSans-Bold.ttf' => 'e6476c1b80502924294eed40894c5b18e06c181444ca953e5334262df9c27724',
+        ];
+        $fontEvidence = [];
+        foreach ($fontSources as $name => $expectedSha256) {
+            $relative = 'vendor/dompdf/dompdf/lib/fonts/'.$name;
+            $source = workflowFile($appPath.'/'.$relative);
+            if (hash_file('sha256', $source) !== $expectedSha256) {
+                throw new RuntimeException('Original bundled font hash mismatch: '.$name);
+            }
+            $font = FontLib\Font::load($source);
+            $font->parse();
+            $license = $font->getNameTableString(13);
+            if ($font->getFontName() !== 'DejaVu Sans' || $font->getFontVersion() !== 'Version 2.37' || !is_string($license) || $license === '') {
+                throw new RuntimeException('Bundled font identity or embedded license is missing');
+            }
+            workflowWrite($output.'/fonts/'.$name, (string) file_get_contents($source));
+            workflowWrite($output.'/fonts/'.$name.'.LICENSE.txt', $font->getFontCopyright()."\n".$license."\n");
+            $deliveryAssets['fonts/'.$name] = $output.'/fonts/'.$name;
+            $sourceHashes[$relative] = $expectedSha256;
+            $fontEvidence[] = ['sourcePath' => $relative, 'path' => 'fonts/'.$name, 'sha256' => $expectedSha256,
+                'family' => $font->getFontName(), 'postscriptName' => $font->getFontPostscriptName(),
+                'version' => $font->getFontVersion(), 'licenseSource' => 'original font name table records 0 and 13',
+                'licenseSha256' => hash_file('sha256', $output.'/fonts/'.$name.'.LICENSE.txt')];
+        }
+        $report['provenance']['fontRepair'] = ['name' => 'original-bundled-dejavu-resource-closure',
+            'package' => 'dompdf/dompdf', 'version' => Composer\InstalledVersions::getPrettyVersion('dompdf/dompdf'),
+            'reference' => Composer\InstalledVersions::getReference('dompdf/dompdf'), 'fonts' => $fontEvidence];
+        $report['provenance']['applicationSources'] = $sourceHashes;
+        workflowWrite($output.'/font-provenance.json', json_encode($report['provenance']['fontRepair'], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR)."\n");
+    }
+    if ($repairMedia) {
+        $relative = 'resources/views/vendor/invoices/templates/simple.blade.php';
+        $originalTemplate = (string) file_get_contents(workflowFile($appPath.'/'.$relative));
+        if (str_replace("\r\n", "\n", $originalTemplate) !== workflowGit($appPath, ['show', 'HEAD:'.$relative])) {
+            throw new RuntimeException('Simple template differs from the pinned source');
+        }
+        $mediaBefore = '<style type="text/css" media="screen">';
+        $mediaAfter = '<style type="text/css" media="all">';
+        $fontRules = $repairFull ? [
+            '            @font-face { font-family: "DejaVu Sans"; font-style: normal; font-weight: 400; src: url("fonts/DejaVuSans.ttf") format("truetype"); }',
+            '            @font-face { font-family: "DejaVu Sans"; font-style: normal; font-weight: 700; src: url("fonts/DejaVuSans-Bold.ttf") format("truetype"); }',
+        ] : [];
+        $newline = str_contains($originalTemplate, "\r\n") ? "\r\n" : "\n";
+        $styleAfter = $mediaAfter.($repairFull ? $newline.implode($newline, $fontRules) : '');
+        $repairedTemplate = str_replace($mediaBefore, $styleAfter, $originalTemplate, $count);
+        if ($count !== 1) {
+            throw new RuntimeException('Simple media repair requires exactly one recorded stylesheet tag');
+        }
+        mkdir($output.'/template-override/templates', 0700, true);
+        workflowWrite($output.'/template.original.blade.php', $originalTemplate);
+        workflowWrite($output.'/template-override/templates/simple.blade.php', $repairedTemplate);
+        $hunk = $repairFull ? '@@ -7 +7,3 @@' : '@@ -7 +7 @@';
+        $patch = "--- a/{$relative}\n+++ b/{$relative}\n{$hunk}\n"
+            ."-        {$mediaBefore}\n+        {$mediaAfter}\n"
+            .($repairFull ? '+'.implode("\n+", $fontRules)."\n" : '');
+        workflowWrite($output.'/template-repair.patch', $patch);
+        // The pinned application has no standalone LICENSE file; preserve its
+        // README attribution and MIT declaration rather than inventing one.
+        workflowWrite($output.'/application.README.md', workflowGit($appPath, ['show', 'HEAD:README.md']));
+        $report['provenance']['templateChanged'] = true;
+        $report['provenance']['templateRepair'] = [
+            'name' => $repairFull ? 'simple-pdf-css-media-all-and-original-dejavu' : 'simple-pdf-css-media-all',
+            'scope' => 'same output-owned Blade override for both providers',
+            'sourcePath' => $relative, 'originalSha256' => hash('sha256', $originalTemplate),
+            'repairedSha256' => hash('sha256', $repairedTemplate), 'patchSha256' => hash('sha256', $patch),
+            'replacementCount' => $count, 'before' => $mediaBefore, 'after' => $mediaAfter,
+            'applicationTemplateUnchanged' => true,
+        ];
+        if ($repairFull) {
+            $report['provenance']['templateRepair']['fontFaceRules'] = $fontRules;
+        }
+    }
     $report['proofBoundary'] = [
-        'businessAction' => 'unchanged App\\Actions\\GenerateInvoicePdf in HTML mode; CreateInvoice currency line repaired for both providers',
+        'businessAction' => ($repairFull ? 'exact quantity-setter repair in' : 'unchanged').' App\\Actions\\GenerateInvoicePdf in HTML mode; CreateInvoice currency line repaired for both providers',
         'deliveryAdaptation' => 'returned Blade view delivered in-process; original URL, browser authentication and Livewire preview are not exercised',
         'storage' => 'isolated Laravel local disk; database commit only after stored bytes match render bytes',
         'sdk' => 'PHP SDK development source; candidate Laravel SDK targets Illuminate 12/13 while this app locks Laravel 11.31.0; no constraint bypass',
@@ -138,6 +256,11 @@ try {
     $app->useStoragePath($output.'/storage')->useEnvironmentPath($output.'/environment');
     $kernel = $app->make(Illuminate\Contracts\Console\Kernel::class);
     $kernel->bootstrap();
+    if ($repairMedia) {
+        // Only this one view is shadowed; the real business action and every
+        // other invoice view continue resolving from the installed application.
+        $app['view']->getFinder()->prependNamespace('invoices', $output.'/template-override');
+    }
     Illuminate\Support\Facades\Http::preventStrayRequests();
     Carbon\Carbon::setTestNow(Carbon\Carbon::parse('2026-09-04 12:00:00', config('app.timezone')));
     config(['filesystems.disks.benchmark' => ['driver' => 'local', 'root' => $output.'/storage/app/documents', 'throw' => true]]);
@@ -179,10 +302,29 @@ try {
         throw new RuntimeException('Action did not return a Laravel view');
     }
     $phase = 'view_render';
+    if ($repairMedia && realpath($view->getPath()) !== realpath($output.'/template-override/templates/simple.blade.php')) {
+        throw new RuntimeException('Invoice action did not resolve the allowlisted simple Blade override');
+    }
     $html = $view->render();
     workflowWrite($output.'/input.html', $html);
     $report['inputSha256'] = hash('sha256', $html);
     $report['expectedPdfFacts'] = ['Fixture Seller', 'Fixture Buyer', 'Fixture consultation', 'Fixture implementation', '€450.00'];
+    if ($repairFull) {
+        $invoice = $view->getData()['invoice'];
+        $facts = $invoice->items->map(static fn ($item) => ['title' => $item->title, 'quantity' => (float) $item->quantity,
+            'unitPrice' => (float) $item->price_per_unit, 'subtotal' => (float) $item->sub_total_price])->values()->all();
+        $expectedFacts = [
+            ['title' => 'Fixture consultation', 'quantity' => 1.0, 'unitPrice' => 125.0, 'subtotal' => 125.0],
+            ['title' => 'Fixture implementation', 'quantity' => 2.0, 'unitPrice' => 125.0, 'subtotal' => 250.0],
+        ];
+        if ($facts !== $expectedFacts) {
+            throw new RuntimeException('Quantity repair did not preserve the exact hour/rate/subtotal fixture equations');
+        }
+        $report['invoiceItemFacts'] = $facts;
+        $report['expectedPdfFacts'][] = 'Fixture consultation 1 €125.00 €125.00';
+        $report['expectedPdfFacts'][] = 'Fixture implementation 2 €125.00 €250.00';
+        $report['expectedFontFamilies'] = ['DejaVuSans', 'DejaVuSans-Bold'];
+    }
     $report['databaseBeforeDelivery'] = App\Models\Invoice::firstOrFail()->only(['subtotal_in_cents', 'vat_in_cents', 'total_in_cents']);
     if (array_map('intval', array_values($report['databaseBeforeDelivery'])) !== [37500, 7500, 45000]
         || App\Models\InvoiceItem::count() !== 2 || App\Models\InvoiceItem::where('currency', 'EUR')->count() !== 2) {
@@ -202,9 +344,13 @@ try {
                 throw new RuntimeException('--sdk must point to the Pliego sdk directory');
             }
             require workflowFile($sdk.'/php/vendor/autoload.php');
-            $engine = new Pliego\Php\DocumentEngine([workflowFile($options['binary'] ?? '')], $output.'/jobs', 65, 65);
+            $binary = workflowFile($options['binary'] ?? '');
+            $engine = new Pliego\Php\DocumentEngine([$binary], $output.'/jobs', 65, 65);
+            $report['providerIdentity'] = ['binaryPath' => $binary, 'binarySha256' => hash_file('sha256', $binary),
+                'runtimeContract' => $engine->contract()->toArray(),
+                'documentEngineSha256' => hash_file('sha256', workflowFile($sdk.'/php/src/DocumentEngine.php'))];
             $rendered = $engine->render($html,
-                new Pliego\Php\RenderOptions(pageSize: 'A4', pageMargins: '0,0,0,0', diagnosticsRetention: 'always'));
+                new Pliego\Php\RenderOptions(pageSize: 'A4', pageMargins: '0,0,0,0', diagnosticsRetention: 'always'), $deliveryAssets);
             $sourcePdf = $rendered->pdfPath;
             $report['retainedJobPath'] = $rendered->jobPath;
             $report['renderApi'] = 'Pliego\\Php\\DocumentEngine::render';
@@ -215,8 +361,18 @@ try {
             }
             putenv('NODE_PATH='.$modules);
             $_SERVER['NODE_PATH'] = $modules;
+            $chrome = workflowFile($options['chrome'] ?? '');
+            $node = workflowFile($options['node'] ?? '');
+            $puppeteer = json_decode((string) file_get_contents($modules.'/puppeteer/package.json'), true, flags: JSON_THROW_ON_ERROR);
+            $report['providerIdentity'] = [
+                'browsershotVersion' => Composer\InstalledVersions::getPrettyVersion('spatie/browsershot'),
+                'chromePath' => $chrome, 'chromeSha256' => hash_file('sha256', $chrome),
+                'nodePath' => $node, 'nodeSha256' => hash_file('sha256', $node),
+                'puppeteerVersion' => $puppeteer['version'],
+                'puppeteerManifestSha256' => hash_file('sha256', $modules.'/puppeteer/package.json'),
+            ];
             $shot = Spatie\Browsershot\Browsershot::htmlFromFilePath(str_replace('\\', '/', $output.'/input.html'))
-                ->setChromePath(workflowFile($options['chrome'] ?? ''))->setNodeBinary(workflowFile($options['node'] ?? ''))
+                ->setChromePath($chrome)->setNodeBinary($node)
                 ->setNodeModulePath($modules)->setCustomTempPath($output)->setUserDataDir($output.'/chrome-profile')
                 ->format('A4')->margins(0, 0, 0, 0)->showBackground()->timeout(65)
                 ->blockUrls(['http://', 'https://', 'ws://', 'wss://', 'ftp://'])->disableRedirects()
