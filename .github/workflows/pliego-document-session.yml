@@ -175,7 +175,7 @@ jobs:
           npm ci --prefix "$fixture" --ignore-scripts --no-audit --no-fund
           PLIEGO_DOCUMENT_SESSION_CHARTJS_INPUT="$fixture/index.html" \
             cargo test -p pliego --test document_session --locked \
-              document_session::tests::installed_chartjs_fixture_matches_the_legacy_oracle_twice \
+              document_session::tests::installed_chartjs_fixture_matches_the_reviewed_snapshot_twice \
               -- --exact --ignored --nocapture
 
       - name: Retain exact Chart.js reference scene and PDF

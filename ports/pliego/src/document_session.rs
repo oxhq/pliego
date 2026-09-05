@@ -2838,10 +2838,12 @@ mod tests {
     const CHARTJS_INPUT: &str =
         "sha256:2c5d37327bbde05b8369fcb5ea75cfec7fba437b1232848f1c2e20d5f2978995";
     const CHARTJS_UMD: &str = "ecc3cd1eeb8c34d2178e3f59fd63ec5a3d84358c11730af0b9958dc886d7652a";
-    const PRE_SESSION_CHARTJS_SCENE: &str =
-        "sha256:7649335813f3638eecfb8836e04374f98d5b62bfcea530c1787bfdee60964fde";
-    const PRE_SESSION_CHARTJS_PDF: &str =
-        "sha256:c6f00765c85aace6cc6f2eacbb7c314ea579a4de66b6c2fe43793fc3ef546c9f";
+    // Reviewed original-Au projection snapshot, not unchanged pre-session bytes.
+    // See docs/pliego/chartjs-regression-snapshot.md for full differential provenance.
+    const CHARTJS_SCENE: &str =
+        "sha256:13afbbf91aae65fe9c1befdde9d50f99a34efe94ae67f1281d62cdcd329b4b47";
+    const CHARTJS_PDF: &str =
+        "sha256:1a6aa73f9fb3bfe50949c804ac1bf484b27f977c3a60e56a29b268f4486e0e91";
     const PRE_SESSION_CHARTJS_CANVAS: &str =
         "sha256:3625ec653c27b9e1c8d0fa969acbd88cc161804eeea4cd3046795d411e8118c9";
 
@@ -3068,8 +3070,8 @@ mod tests {
                 "chartjs-report" => (
                     CHARTJS_ORACLE_EVIDENCE_ENV,
                     CHARTJS_INPUT,
-                    PRE_SESSION_CHARTJS_SCENE,
-                    PRE_SESSION_CHARTJS_PDF,
+                    CHARTJS_SCENE,
+                    CHARTJS_PDF,
                     1,
                     "ReportSans.ttf",
                 ),
@@ -4252,7 +4254,7 @@ document.fonts.ready
 
     #[test]
     #[ignore = "requires the lockfile-installed Chart.js fixture input"]
-    fn installed_chartjs_fixture_matches_the_legacy_oracle_twice() {
+    fn installed_chartjs_fixture_matches_the_reviewed_snapshot_twice() {
         let input = std::env::var(CHARTJS_INPUT_ENV)
             .expect("PLIEGO_DOCUMENT_SESSION_CHARTJS_INPUT should name the installed fixture");
         assert!(Path::new(&input).is_file());
@@ -5833,8 +5835,8 @@ document.fonts.ready.then(() => {
                     250
                 );
                 assert_eq!(resource.resource, PRE_SESSION_CHARTJS_CANVAS);
-                assert_eq!(content_address(&scene), PRE_SESSION_CHARTJS_SCENE);
-                assert_eq!(content_address(&outcome.pdf), PRE_SESSION_CHARTJS_PDF);
+                assert_eq!(content_address(&scene), CHARTJS_SCENE);
+                assert_eq!(content_address(&outcome.pdf), CHARTJS_PDF);
                 let chartjs = outcome
                     .resources
                     .iter()
