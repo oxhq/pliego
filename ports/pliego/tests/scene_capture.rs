@@ -1201,7 +1201,11 @@ fn retains_typed_paged_fixed_and_counter_exclusions() {
     let events = snapshot["paint_events"].as_array_mut().unwrap();
     let first = events.len();
     for kind in ["paged-fixed-content", "unresolved-page-counter"] {
-        events.push(json!({"sequence": events.len(), "kind": kind}));
+        events.push(json!({
+            "sequence": events.len(),
+            "kind": kind,
+            "spatial_node_id": 0
+        }));
     }
     let capture = convert(&serde_json::to_vec(&snapshot).unwrap());
     for (sequence, kind) in [
