@@ -199,9 +199,14 @@ def validate_measurement(sample: dict) -> None:
     validate_result.validate(
         {**sample, "index": max(0, sample["index"])}, schema["definitions"]["sample"], "$.sample", violations, schema
     )
-    require(not violations, f"Invalid sample structure: {violations[:1]}")
+    require(not violations, f"Invalid sample structure: {'; '.join(map(str, violations[:1]))}")
     validate_result.validate_resource_usage(sample, "$.sample", violations)
-    require(not violations, f"Invalid resource accounting: {violations[:1]}")
+    require(not violations, f"Invalid resource accounting: {'; '.join(map(str, violations[:1]))}")
+    deadline = sample["resource_usage"].get("root_wall_deadline")
+    require(
+        isinstance(deadline, dict) and deadline["limit_ms"] == DEADLINE_MS,
+        "Campaign requires the exact 65000ms root wall deadline",
+    )
 
 
 def check_success_evidence(root: Path, phase: str, target: str, identity: dict, sample: dict, retained: Path) -> dict:
@@ -512,6 +517,7 @@ def run_campaign(args: argparse.Namespace) -> None:
         Path(harness.__file__),
         Path(comparison_metrics.__file__),
         Path(validate_result.__file__),
+        harness.DEFAULT_SCHEMA,
         HERE / "real_document_requirements.txt",
         HERE / "real_documents/manufacturing_requirements.txt",
     ]:

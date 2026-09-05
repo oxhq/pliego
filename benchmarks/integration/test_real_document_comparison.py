@@ -50,6 +50,13 @@ def measured_sample(index: int, binary_sha: str) -> dict:
         "engine_namespace": "net:[2]",
         "interfaces": ["lo"],
     }
+    # Exact opt-in shape observed in both retained hosted samples from run
+    # 33959359097; omitting it previously hid the strict-schema integration bug.
+    usage["root_wall_deadline"] = {
+        "limit_ms": 65000.0,
+        "outcome": "root-exited",
+        "boundary": "root-SIGCONT-through-pidfd-observed-exit",
+    }
     return sample
 
 
@@ -285,13 +292,11 @@ class CampaignTests(unittest.TestCase):
                     campaign.acceptance(path, identity)
 
     def test_complete_population_uses_existing_validated_metrics(self) -> None:
-        from test_comparison_metrics import passing_sample
-
         plan = campaign.schedule("synthetic", "legacy", 1)
         attempts = []
         for phase in ("preflight", "warmup", "timed"):
             for entry in plan[phase]:
-                sample = passing_sample("alpha", entry["iteration"])
+                sample = measured_sample(entry["iteration"], "a" * 64)
                 attempts.append(
                     {
                         "phase": phase,
@@ -301,26 +306,101 @@ class CampaignTests(unittest.TestCase):
                         "timing": {"tree_wall_ms": sample["wall_ms"] + 0.5},
                     }
                 )
-        # Synthetic helper samples explicitly have unavailable accounting; mock
-        # only that live-resource gate while exercising real schema/statistics.
-        with self.assertRaisesRegex(ValueError, "Missing cgroup"):
-            campaign.aggregate(plan, attempts, True)
-        with patch.object(campaign, "validate_measurement"):
-            result = campaign.aggregate(plan, attempts, True)
+        before = copy.deepcopy(attempts)
+        result = campaign.aggregate(plan, attempts, True)
+        self.assertEqual(attempts, before)
         self.assertEqual(result["metrics"]["sample_count_per_target"], 100)
-        self.assertEqual(result["tree_wall_ms"][campaign.TARGET]["p50"], 50.5)
+        self.assertEqual(result["tree_wall_ms"][campaign.TARGET]["p50"], sample["wall_ms"] + 0.5)
+        self.assertEqual(
+            result["interleaved"]["raw_samples"][0]["sample"]["resource_usage"]["root_wall_deadline"],
+            sample["resource_usage"]["root_wall_deadline"],
+        )
+        corrupted = copy.deepcopy(attempts)
+        corrupted[-1]["sample"]["measurement_method"] = "unavailable"
+        with self.assertRaisesRegex(ValueError, "Missing cgroup"):
+            campaign.aggregate(plan, corrupted, True)
         corrupted = copy.deepcopy(attempts)
         corrupted[-1]["sample"]["retained"] = {
             "output_dir": "test",
             "artifacts_dir": "test",
             "evidence_dir": "wrong-extra-key",
         }
-        with patch.object(campaign, "validate_measurement"), self.assertRaises(ValueError):
+        with self.assertRaises(ValueError):
             campaign.aggregate(plan, corrupted, True)
         corrupted = copy.deepcopy(attempts)
         corrupted[-1]["outcome"] = "incorrect"
         with self.assertRaises(ValueError):
             campaign.aggregate(plan, corrupted, True)
+
+    def test_hosted_deadline_shape_and_failure_are_not_mutated(self) -> None:
+        for ok, exit_code in ((True, 0), (False, 1)):
+            sample = measured_sample(-1000000, "a" * 64)
+            sample.update(ok=ok, exit_code=exit_code)
+            sample["resource_usage"]["exit_code"] = exit_code
+            before = copy.deepcopy(sample)
+            campaign.validate_measurement(sample)
+            self.assertEqual(sample, before)
+
+    def test_deadline_and_unknown_fields_remain_strict(self) -> None:
+        sample = measured_sample(-1000000, "a" * 64)
+        deadline = sample["resource_usage"]["root_wall_deadline"]
+        for malformed in (
+            None,
+            {},
+            {**deadline, "extra": 0},
+            {**deadline, "limit_ms": True},
+            {**deadline, "limit_ms": "65000"},
+            {**deadline, "limit_ms": 0},
+            {**deadline, "limit_ms": float("inf")},
+            {**deadline, "limit_ms": 64000},
+            {**deadline, "outcome": "ROOT_WALL_TIMEOUT"},
+            {**deadline, "boundary": "process-open-through-exit"},
+        ):
+            bad = copy.deepcopy(sample)
+            bad["resource_usage"]["root_wall_deadline"] = malformed
+            with self.subTest(deadline=malformed), self.assertRaises(ValueError):
+                campaign.validate_measurement(bad)
+        bad = copy.deepcopy(sample)
+        del bad["resource_usage"]["root_wall_deadline"]
+        with self.assertRaisesRegex(ValueError, "exact 65000ms"):
+            campaign.validate_measurement(bad)
+        bad = copy.deepcopy(sample)
+        bad["resource_usage"]["unexpected_extension"] = True
+        with self.assertRaisesRegex(ValueError, r"Invalid sample structure: \$\.sample\.resource_usage"):
+            campaign.validate_measurement(bad)
+
+    def test_failed_native_sample_remains_a_renderer_failure(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="campaign-render-failure-") as temporary:
+            root = Path(temporary)
+            binary = root / "candidate"
+            binary.write_bytes(b"synthetic")
+            binary_sha = campaign.digest(binary)
+            sample = measured_sample(-1000000, binary_sha)
+            sample.update(ok=False, exit_code=1, failure={"code": "SCENE_ENCODING_FAILED", "published_pdf": False})
+            sample["resource_usage"]["exit_code"] = 1
+            sample["correctness"]["pass"] = False
+            retained = root / "retained"
+            retained.mkdir()
+            replace_json(retained / "manifest.json", {})
+            args = Namespace(candidate_binary=binary, php=Path("php"), track="synthetic", poppler_dir=Path("poppler"))
+            identity = {
+                "fixture_identity": ["b" * 64, "c" * 64],
+                "targets": {campaign.TARGET: {"binary_sha256": binary_sha}},
+            }
+            with (
+                patch.object(campaign.harness, "build_command", return_value=["synthetic"]),
+                patch.object(campaign.harness, "fixture_identity", return_value=tuple(identity["fixture_identity"])),
+                patch.object(campaign, "inspect_retention", return_value=(retained, sample, {"timing": {}})),
+                patch.object(
+                    campaign, "capture", return_value=subprocess.CompletedProcess(["synthetic"], 1, b"", b"")
+                ) as capture,
+            ):
+                entry = {"target_id": campaign.TARGET, "iteration": 0, "position": 0}
+                record = campaign.execute_attempt(args, {}, {}, root, identity, entry, "preflight", root, None)
+            capture.assert_called_once()
+            self.assertEqual(record["outcome"], "renderer-or-correctness-failure")
+            self.assertEqual(record["failure"]["code"], "SCENE_ENCODING_FAILED")
+            self.assertEqual(record["sample"], sample)
 
     def test_outer_timeout_is_not_safe_to_continue(self) -> None:
         import subprocess
