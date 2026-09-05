@@ -54,6 +54,16 @@ These are cold renderer processes, not end-to-end Laravel request, database,
 Blade rendering or durable storage latency. Application/storage and comparative
 concurrency proofs remain separate gates.
 
+The inherited measurement recipe deliberately uses fresh per-attempt temporary
+state on ext4 with synchronous file and directory updates (`FS_SYNC_FL` and
+`FS_DIRSYNC_FL`). Pliego and dompdf retain the absent, non-writable engine-account
+home. This **non-default storage condition** includes font preparation and
+synchronous metadata/publication costs; it is not a typical warm-cache Laravel
+deployment. Disclose it alongside every latency comparison, together with CPU,
+whole-cgroup memory and I/O. See the [full sampler boundary](../README.md).
+GitHub-hosted repeats are exploratory, not dedicated-host production rankings;
+neither host variation nor a timeout alone proves its underlying cause.
+
 ## Hosted preflight
 
 `pliego-real-document-preflight.yml` accepts an exact development Linux package
