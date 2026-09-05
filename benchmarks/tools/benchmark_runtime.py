@@ -11,6 +11,7 @@ from typing import Sequence
 
 BROWSERSHOT_ADAPTER_SUFFIX = ("benchmarks", "adapters", "browsershot", "adapter.php")
 INVOBOOK_ADAPTER_SUFFIX = ("benchmarks", "adapters", "invobook-browsershot", "adapter.php")
+INVOBOOK_LARAVEL12_ADAPTER_SUFFIX = ("benchmarks", "adapters", "invobook-browsershot-laravel12", "adapter.php")
 BROWSERSHOT_TARGET = "browsershot-adapter-v1"
 GENERIC_TARGET = "generic-benchmark-engine-v1"
 PRIVATE_RUNTIME_CONTRACT = "fresh-private-home-xdg-v1"
@@ -23,6 +24,7 @@ def runtime_target(argv: Sequence[str]) -> str:
         if tuple(parts[-len(BROWSERSHOT_ADAPTER_SUFFIX) :]) in (
             BROWSERSHOT_ADAPTER_SUFFIX,
             INVOBOOK_ADAPTER_SUFFIX,
+            INVOBOOK_LARAVEL12_ADAPTER_SUFFIX,
         ):
             return BROWSERSHOT_TARGET
     return GENERIC_TARGET

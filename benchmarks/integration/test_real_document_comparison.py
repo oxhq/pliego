@@ -20,6 +20,37 @@ from unittest.mock import patch
 import run_real_document_comparison as campaign
 
 
+class ModernizedIdentityTests(unittest.TestCase):
+    def test_wrapper_cannot_hide_changed_lifecycle_or_baseline(self) -> None:
+        manifest = campaign.HERE / "real_documents.json"
+        track, _, _ = campaign.configuration(manifest, "invobook-simple-laravel12-repaired")
+        adapter = campaign.ROOT / track["adapter"]
+        shared = campaign.ROOT / "benchmarks/adapters/invobook-browsershot/adapter.php"
+        baseline = campaign.read(campaign.HERE / "invobook_modernized_baseline.json")
+        identity = {
+            "target": track["legacy"],
+            "adapter_sha256": campaign.digest(adapter),
+            "shared_adapter_path": str(shared.resolve()),
+            "shared_adapter_sha256": campaign.digest(shared),
+            "composer_lock_sha256": baseline["changedFiles"]["composer.lock"],
+            "packages": {
+                name: {"version": baseline["installedPackages"][name]}
+                for name in ("laravel/framework", "spatie/browsershot")
+            },
+        }
+        campaign.check_legacy_identity(track, adapter, identity)
+        for field in ("shared_adapter_path", "shared_adapter_sha256", "composer_lock_sha256", "packages"):
+            with self.subTest(field=field):
+                changed = copy.deepcopy(identity)
+                del changed[field]
+                with self.assertRaises(ValueError):
+                    campaign.check_legacy_identity(track, adapter, changed)
+        changed = copy.deepcopy(identity)
+        changed["packages"]["spatie/browsershot"]["version"] = "5.0.5"
+        with self.assertRaisesRegex(ValueError, "package identity"):
+            campaign.check_legacy_identity(track, adapter, changed)
+
+
 def replace_json(path: Path, value: object) -> None:
     """Reseal deliberately corrupted synthetic evidence, not a production writer."""
     path.write_bytes(campaign.harness.canonical_json_bytes(value) + b"\n")

@@ -47,7 +47,11 @@ check(api2_page_margins('2268,2268,5669,0au') === ['top' => 2268, 'right' => 226
 check(root_wall_timeout_option(null) === null && root_wall_timeout_option('1.5') === 1.5, 'deadline option changed');
 check(is_browsershot_adapter_path('/repo/benchmarks/adapters/invobook-browsershot/adapter.php'), 'Invobook classification missing');
 check(is_browsershot_adapter_path('C:\repo\benchmarks\adapters\invobook-browsershot\adapter.php'), 'Windows classification missing');
-foreach (['/repo/invobook-browsershot/adapter.php', '/repo/benchmarks/adapters/invobook-browsershot/adapter.php.bad', '/repo/benchmarks/adapters/aureus-dompdf/adapter.php'] as $path) {
+check(is_browsershot_adapter_path('/repo/benchmarks/adapters/invobook-browsershot-laravel12/adapter.php'), 'Modernized Invobook classification missing');
+check(is_browsershot_adapter_path('C:\repo\benchmarks\adapters\invobook-browsershot-laravel12\adapter.php'), 'Modernized Windows classification missing');
+foreach (['/repo/invobook-browsershot/adapter.php', '/repo/benchmarks/adapters/invobook-browsershot/adapter.php.bad', '/repo/benchmarks/adapters/aureus-dompdf/adapter.php',
+    '/repo/invobook-browsershot-laravel12/adapter.php', '/repo/benchmarks/adapters/invobook-browsershot-laravel12/adapter.php.bad',
+    '/repo/benchmarks/adapters/invobook-browsershot-laravel12-evil/adapter.php'] as $path) {
     check(!is_browsershot_adapter_path($path), 'overbroad browser classification');
 }
 

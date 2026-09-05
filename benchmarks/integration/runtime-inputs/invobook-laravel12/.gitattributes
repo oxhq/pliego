@@ -1,0 +1,5 @@
+# Reviewed byte identities include a mixed-line-ending upstream fork manifest.
+* -text
+** -text
+# Retain CR bytes in this exact reviewed data file, still checking other whitespace.
+packages/glow-chart/composer.json whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol

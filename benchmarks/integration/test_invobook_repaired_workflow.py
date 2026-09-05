@@ -7,12 +7,15 @@
 Set PLIEGO_INVOBOOK_REPAIRED_APP and PLIEGO_INVOBOOK_PHP to installed, pinned
 paths. The application must contain exactly invobook-currency.patch. Each test
 owns a new evidence directory and the HTML action rolls back its invoice rows.
+Set PLIEGO_INVOBOOK_BASELINE=modernized-laravel12 only for the separately pinned
+modernization; the default remains the historical currency-only baseline.
 """
 
 from __future__ import annotations
 
 import json
 import hashlib
+import copy
 import os
 from pathlib import Path
 import subprocess
@@ -23,6 +26,57 @@ import unittest
 SCRIPT = Path(__file__).with_name("invobook_repaired_workflow.php")
 APP = os.environ.get("PLIEGO_INVOBOOK_REPAIRED_APP")
 PHP = os.environ.get("PLIEGO_INVOBOOK_PHP")
+BASELINE = os.environ.get("PLIEGO_INVOBOOK_BASELINE", "historical")
+MANIFEST = SCRIPT.with_name("invobook_modernized_baseline.json")
+
+
+@unittest.skipUnless(PHP, "set explicit PHP path for baseline guard tests")
+class ModernizedSourceGuardTests(unittest.TestCase):
+    def check_snapshot(self, snapshot: dict) -> subprocess.CompletedProcess:
+        code = (
+            "define('PLIEGO_INVOBOOK_WORKFLOW_LIBRARY', true); require $argv[1]; "
+            "$manifest=json_decode(file_get_contents(dirname($argv[1]).'/invobook_modernized_baseline.json'),true,flags:JSON_THROW_ON_ERROR); "
+            "$snapshot=json_decode($argv[2],true,flags:JSON_THROW_ON_ERROR); "
+            "try {workflowValidateModernizedSources($manifest,$snapshot); echo 'accepted';} "
+            "catch (Throwable $error) {fwrite(STDERR,$error->getMessage()); exit(1);}"
+        )
+        return subprocess.run(
+            [str(PHP), "-d", "auto_prepend_file=", "-r", code, str(SCRIPT), json.dumps(snapshot)],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=10,
+        )
+
+    def test_exact_modernized_source_snapshot_and_mutations(self) -> None:
+        manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
+        snapshot = {
+            "commit": manifest["applicationCommit"],
+            "modified": list(manifest["changedFiles"]),
+            "untracked": manifest["untracked"],
+            "hashes": manifest["changedFiles"],
+        }
+        self.assertEqual(self.check_snapshot(snapshot).returncode, 0)
+        changes = {
+            "wrong-base": {"commit": "0" * 40},
+            "historical-paths": {"modified": ["app/Actions/CreateInvoice.php"]},
+            "extra-source": {"modified": snapshot["modified"] + ["app/Actions/GenerateInvoicePdf.php"]},
+            "duplicate-source": {"modified": snapshot["modified"] + ["composer.json"]},
+            "missing-fork": {"untracked": []},
+            "extra-untracked": {"untracked": snapshot["untracked"] + ["app/Injected.php"]},
+            "wrong-lock": {"hashes": {**snapshot["hashes"], "composer.lock": "0" * 64}},
+            "wrong-frontend": {"hashes": {**snapshot["hashes"], "package-lock.json": "0" * 64}},
+            "missing-hash": {
+                "hashes": {key: value for key, value in snapshot["hashes"].items() if key != "composer.json"}
+            },
+            "extra-hash": {"hashes": {**snapshot["hashes"], "other.json": "0" * 64}},
+        }
+        for name, change in changes.items():
+            with self.subTest(mutation=name):
+                changed = {**copy.deepcopy(snapshot), **change}
+                result = self.check_snapshot(changed)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn("mismatch", result.stderr)
 
 
 @unittest.skipUnless(APP and PHP, "set explicit installed Invobook and PHP paths for real-application tests")
@@ -44,6 +98,8 @@ class RepairedWorkflowTests(unittest.TestCase):
         output = self.root / name
         command = [
             str(PHP),
+            "-d",
+            "auto_prepend_file=",
             str(SCRIPT),
             "--app",
             str(APP),
@@ -53,6 +109,8 @@ class RepairedWorkflowTests(unittest.TestCase):
             template,
             "--provider",
             provider,
+            "--baseline",
+            BASELINE,
         ]
         if repair_media:
             command += ["--simple-pdf-media", "all"]
@@ -70,11 +128,60 @@ class RepairedWorkflowTests(unittest.TestCase):
         self.assertTrue(report.is_file(), result.stdout + result.stderr)
         return result, json.loads(report.read_text(encoding="utf-8"))
 
+    def expected_track(self, historical: str) -> str:
+        return ("modernized-laravel12-" if BASELINE == "modernized-laravel12" else "") + historical
+
     def assert_rolled_back(self, report: dict) -> None:
         self.assertEqual(report["persistedInvoiceCount"], 0)
         self.assertEqual(report["persistedInvoiceItemCount"], 0)
         self.assertTrue(report["sourceFilesUnchangedDuringRun"])
         self.assertFalse(report["performanceQualified"])
+        self.assertEqual(report["baseline"], BASELINE)
+        if BASELINE == "modernized-laravel12":
+            self.assertTrue(report["modernizedBaselineUnchangedDuringRun"])
+            identity = report["provenance"]["modernization"]
+            self.assertEqual(identity["manifestSha256"], hashlib.sha256(MANIFEST.read_bytes()).hexdigest())
+            self.assertEqual(identity["installedPackages"]["laravel/framework"]["version"], "12.69.1")
+            self.assertEqual(identity["installedPackages"]["spatie/browsershot"]["version"], "5.4.0")
+            self.assertTrue(identity["forkSources"])
+            self.assertTrue(identity["installedForkSources"])
+
+    def test_unknown_and_cross_profile_baselines_reject_before_app_action(self) -> None:
+        for baseline in ("unknown", "historical" if BASELINE == "modernized-laravel12" else "modernized-laravel12"):
+            with self.subTest(baseline=baseline):
+                output = self.root / baseline
+                result = subprocess.run(
+                    [
+                        str(PHP),
+                        "-d",
+                        "auto_prepend_file=",
+                        str(SCRIPT),
+                        "--app",
+                        str(APP),
+                        "--output",
+                        str(output),
+                        "--template",
+                        "simple",
+                        "--provider",
+                        "html",
+                        "--baseline",
+                        baseline,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    timeout=30,
+                )
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                report = json.loads(result.stdout)
+                self.assertEqual(report["failurePhase"], "setup")
+                self.assertFalse(output.exists())
+                self.assertIn(
+                    "baseline"
+                    if baseline == "unknown"
+                    else ("Only the recorded" if baseline == "historical" else "allowlist mismatch"),
+                    report["error"]["message"],
+                )
 
     def test_simple_action_preserves_totals_currency_and_deterministic_html(self) -> None:
         first, first_report = self.invoke("simple", "first")
@@ -109,7 +216,7 @@ class RepairedWorkflowTests(unittest.TestCase):
         self.assertEqual(original_html.replace(before, after), repaired_html)
         self.assertEqual(first["inputSha256"], second["inputSha256"])
         self.assertNotEqual(first["inputSha256"], original["inputSha256"])
-        self.assertEqual(first["track"], "shared-currency-and-simple-media-repair-html-delivery")
+        self.assertEqual(first["track"], self.expected_track("shared-currency-and-simple-media-repair-html-delivery"))
         self.assertTrue(first["provenance"]["templateChanged"])
         self.assertFalse(first["provenance"]["generateActionChanged"])
         repair = first["provenance"]["templateRepair"]
@@ -133,6 +240,8 @@ class RepairedWorkflowTests(unittest.TestCase):
             result = subprocess.run(
                 [
                     str(PHP),
+                    "-d",
+                    "auto_prepend_file=",
                     str(SCRIPT),
                     "--app",
                     str(APP),
@@ -162,7 +271,9 @@ class RepairedWorkflowTests(unittest.TestCase):
         for result, report in [(first_result, first), (second_result, second)]:
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assert_rolled_back(report)
-            self.assertEqual(report["track"], "shared-currency-media-quantity-font-repair-html-delivery")
+            self.assertEqual(
+                report["track"], self.expected_track("shared-currency-media-quantity-font-repair-html-delivery")
+            )
             self.assertTrue(report["provenance"]["generateActionChanged"])
             self.assertEqual(
                 report["invoiceItemFacts"],

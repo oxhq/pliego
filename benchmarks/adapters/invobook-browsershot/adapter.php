@@ -12,10 +12,54 @@ require __DIR__.'/../real_document_runtime.php';
 const INVOBOOK_LOCK = '24f563534a57775144db27b746011117b8db209aa39dee35f5c0ba01ed96ca74';
 const INVOBOOK_HTML = 'afd286bca202309923fd66bee1f71e732bdd340d1b05a2307094feb535fa7195';
 
-function invobook_runtime(): array
+/** Reviewed application bindings only; runtime.json cannot supply versions or pins. */
+function invobook_profile(string $name = 'legacy'): array
 {
-    $runtime = rd_runtime(__DIR__, INVOBOOK_LOCK);
-    rd_package('spatie/browsershot', '5.0.5');
+    $profiles = [
+        'legacy' => [
+            'entrypoint' => __FILE__, 'lock' => INVOBOOK_LOCK, 'html' => INVOBOOK_HTML,
+            'target' => 'invobook-browsershot-5.0.5-puppeteer-25.8.0',
+            'packages' => ['spatie/browsershot' => '5.0.5'],
+            'node_environment_binding' => 'scoped inherited TMPDIR; Browsershot5.0.5 has no setNodeEnv',
+        ],
+        'modernized-laravel12' => [
+            'entrypoint' => __DIR__.'/../invobook-browsershot-laravel12/adapter.php',
+            'lock' => '2d88395bf904aaa2bdddf63d38168a240190c6cc89cbf5333fc1124c569ec21d',
+            // Two newly generated repaired actions produced the same frozen document.
+            'html' => INVOBOOK_HTML,
+            'target' => 'invobook-browsershot-5.4.0-puppeteer-25.8.0',
+            'packages' => ['laravel/framework' => '12.69.1', 'spatie/browsershot' => '5.4.0'],
+            'node_environment_binding' => 'scoped inherited TMPDIR; shared historical launch policy',
+        ],
+    ];
+    rd_require(isset($profiles[$name]), 'Unknown reviewed Invobook profile.');
+
+    return $profiles[$name];
+}
+
+function invobook_check_input(string $sha256, string $baseline = 'legacy'): void
+{
+    rd_require($sha256 === invobook_profile($baseline)['html'], 'Input differs from the frozen repaired invoice.');
+}
+
+/** Include the thin entrypoint and the shared lifecycle in campaign identity. */
+function invobook_source_identity(string $baseline = 'legacy'): array
+{
+    $entrypoint = required_file(invobook_profile($baseline)['entrypoint']);
+
+    return [
+        'adapter_path' => $entrypoint, 'adapter_sha256' => hash_file('sha256', $entrypoint),
+        'shared_adapter_path' => realpath(__FILE__), 'shared_adapter_sha256' => hash_file('sha256', __FILE__),
+    ];
+}
+
+function invobook_runtime(string $baseline = 'legacy'): array
+{
+    $definition = invobook_profile($baseline);
+    $runtime = rd_runtime(dirname($definition['entrypoint']), $definition['lock']);
+    foreach ($definition['packages'] as $package => $version) {
+        rd_package($package, $version);
+    }
     foreach (['node_path', 'chrome_path', 'node_modules'] as $key) {
         rd_require(is_string($runtime[$key] ?? null), 'Missing runtime binding: '.$key);
         $resolved = realpath($runtime[$key]);
@@ -71,14 +115,15 @@ function invobook_with_node_temp(?string $directory, callable $render): void
     }
 }
 
-function invobook_render(array $arguments): void
+function invobook_render(array $arguments, string $baseline = 'legacy'): void
 {
     rd_require(PHP_OS_FAMILY === 'Linux', 'Measured application adapters require the Linux cgroup/durability recipe.');
     [$input, $options, $artifacts] = rd_render_paths($arguments);
-    rd_require(hash_file('sha256', $input) === INVOBOOK_HTML, 'Input differs from the frozen repaired invoice.');
+    $definition = invobook_profile($baseline);
+    invobook_check_input(hash_file('sha256', $input), $baseline);
     $inputFonts = rd_font_closure(dirname($input).'/fonts', 2);
     rd_require($options['--page-size'] === '47622x67351au' && $options['--page-margins'] === '0,0,0,0au', 'Invoice requires original A4 portrait with zero margins.');
-    $runtime = invobook_runtime();
+    $runtime = invobook_runtime($baseline);
     $privateRoot = private_runtime_root();
     $sharedMemory = browser_shared_memory_directory($privateRoot);
     $profile = $privateRoot === null ? null : $privateRoot.DIRECTORY_SEPARATOR.PRIVATE_BROWSER_PROFILE;
@@ -87,7 +132,7 @@ function invobook_render(array $arguments): void
     $temporary = $parent.'/.invoice-'.bin2hex(random_bytes(8)).'.pdf';
     $report = [];
     run_browser_with_finalizer(
-        static function (callable $markDescendantsPossible) use ($input, $inputFonts, $artifacts, $runtime, $privateRoot, $sharedMemory, $profile, $temporary, &$report): void {
+        static function (callable $markDescendantsPossible) use ($input, $inputFonts, $artifacts, $runtime, $privateRoot, $sharedMemory, $profile, $temporary, $definition, &$report): void {
             rd_require(create_private_browser_profile($privateRoot) === $profile, 'Private profile identity changed.');
             rd_require(($privateRoot === null) === ($sharedMemory === null), 'Incomplete private runtime binding.');
             $shot = Browsershot::htmlFromFilePath(str_replace('\\', '/', $input))
@@ -108,10 +153,10 @@ function invobook_render(array $arguments): void
                 strtolower((string) parse_url($request['url'], PHP_URL_SCHEME)), ['file', 'data', 'about'], true,
             )));
             $report = [
-                'input_sha256' => INVOBOOK_HTML, 'input_fonts' => $inputFonts, 'requests' => $requests, 'external_requests' => $external,
+                'input_sha256' => $definition['html'], 'input_fonts' => $inputFonts, 'requests' => $requests, 'external_requests' => $external,
                 'failed_requests' => $browser->getFailedRequests() ?? [], 'page_errors' => $browser->getPageErrors() ?? [],
                 'node_tmpdir' => $sharedMemory, 'profile' => $profile,
-                'node_environment_binding' => 'scoped inherited TMPDIR; Browsershot5.0.5 has no setNodeEnv',
+                'node_environment_binding' => $definition['node_environment_binding'],
             ];
             rd_write_report($artifacts.'/renderer.json', $report);
             rd_require($external === [] && $report['failed_requests'] === [] && $report['page_errors'] === [], 'Browser resource or script failure.');
@@ -130,10 +175,13 @@ if (defined('PLIEGO_REAL_DOCUMENT_ADAPTER_LIBRARY') && PLIEGO_REAL_DOCUMENT_ADAP
 }
 
 try {
+    $baseline = defined('PLIEGO_INVOBOOK_ADAPTER_PROFILE') ? PLIEGO_INVOBOOK_ADAPTER_PROFILE : 'legacy';
+    $definition = invobook_profile($baseline);
     $mode = $argv[1] ?? '';
     if ($mode === 'identity') {
-        $runtime = invobook_runtime();
-        $identity = rd_identity($runtime, __FILE__, __DIR__.'/../browsershot/adapter.php', 'invobook-browsershot-5.0.5-puppeteer-25.8.0', ['spatie/browsershot' => '5.0.5']);
+        $runtime = invobook_runtime($baseline);
+        $identity = rd_identity($runtime, $definition['entrypoint'], __DIR__.'/../browsershot/adapter.php', $definition['target'], $definition['packages']);
+        $identity += invobook_source_identity($baseline);
         foreach (['node', 'chrome'] as $name) {
             $path = $runtime[$name.'_path'];
             // chrome.exe --version can open an existing user's browser session
@@ -151,7 +199,7 @@ try {
         ];
         echo json_encode($identity, JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES).PHP_EOL;
     } elseif ($mode === 'render') {
-        invobook_render(array_slice($argv, 2));
+        invobook_render(array_slice($argv, 2), $baseline);
     } else {
         throw new RuntimeException('Expected identity or render.');
     }

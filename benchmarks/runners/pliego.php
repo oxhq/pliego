@@ -1933,7 +1933,8 @@ function is_browsershot_adapter_path(string $path): bool
 {
     $normalized = str_replace('\\', '/', $path);
     return str_ends_with($normalized, '/benchmarks/adapters/browsershot/adapter.php')
-        || str_ends_with($normalized, '/benchmarks/adapters/invobook-browsershot/adapter.php');
+        || str_ends_with($normalized, '/benchmarks/adapters/invobook-browsershot/adapter.php')
+        || str_ends_with($normalized, '/benchmarks/adapters/invobook-browsershot-laravel12/adapter.php');
 }
 
 function browser_runtime_path_within_budget(string $path): bool

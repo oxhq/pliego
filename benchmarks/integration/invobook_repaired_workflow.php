@@ -38,7 +38,133 @@ function workflowSameBytes(string $first, string $second): bool
     return filesize($first) === filesize($second) && hash_file('sha256', $first) === hash_file('sha256', $second);
 }
 
-$options = getopt('', ['app:', 'output:', 'template:', 'provider:', 'sdk:', 'binary:', 'chrome:', 'node:', 'node-modules:', 'simple-pdf-media:', 'simple-pdf-repair:']);
+function workflowExactSet(array $actual, array $expected, string $message): void
+{
+    sort($actual, SORT_STRING);
+    sort($expected, SORT_STRING);
+    if ($actual !== $expected) {
+        throw new RuntimeException($message);
+    }
+}
+
+/** Pure guard, also exercised with deliberately invalid snapshots without editing an app. */
+function workflowValidateModernizedSources(array $manifest, array $snapshot): void
+{
+    if ($snapshot['commit'] !== $manifest['applicationCommit']) {
+        throw new RuntimeException('Modernized application source commit mismatch');
+    }
+    workflowExactSet($snapshot['modified'], array_keys($manifest['changedFiles']), 'Modernized application changed-file allowlist mismatch');
+    workflowExactSet($snapshot['untracked'], $manifest['untracked'], 'Modernized application untracked-file allowlist mismatch');
+    workflowExactSet(array_keys($snapshot['hashes']), array_keys($manifest['changedFiles']), 'Modernized application hash inventory mismatch');
+    foreach ($manifest['changedFiles'] as $relative => $hash) {
+        if ($snapshot['hashes'][$relative] !== $hash) {
+            throw new RuntimeException('Modernized application source hash mismatch: '.$relative);
+        }
+    }
+}
+
+function workflowGitPaths(string $root, array $arguments): array
+{
+    return array_values(array_filter(explode("\0", workflowGit($root, $arguments)), static fn (string $path): bool => $path !== ''));
+}
+
+/** The caller cannot choose a manifest or supply permissive hashes. */
+function workflowModernizedBaseline(string $appPath): array
+{
+    $manifestPath = __DIR__.'/invobook_modernized_baseline.json';
+    $manifest = json_decode((string) file_get_contents(workflowFile($manifestPath)), true, flags: JSON_THROW_ON_ERROR);
+    if ($manifest['schema'] !== 'pliego.invobook-modernized-baseline.v1' || $manifest['name'] !== 'modernized-laravel12') {
+        throw new RuntimeException('Unexpected modernized baseline manifest');
+    }
+    $hashes = [];
+    foreach ($manifest['changedFiles'] as $relative => $_hash) {
+        $hashes[$relative] = hash_file('sha256', workflowFile($appPath.'/'.$relative));
+    }
+    workflowValidateModernizedSources($manifest, [
+        'commit' => trim(workflowGit($appPath, ['rev-parse', 'HEAD'])),
+        'modified' => workflowGitPaths($appPath, ['diff', '--no-ext-diff', 'HEAD', '--name-only', '-z']),
+        'untracked' => workflowGitPaths($appPath, ['ls-files', '--others', '--exclude-standard', '-z']),
+        'hashes' => $hashes,
+    ]);
+    $fork = $manifest['fork'];
+    $forkPath = $appPath.'/'.$fork['path'];
+    if (trim(workflowGit($forkPath, ['rev-parse', 'HEAD'])) !== $fork['sourceCommit']) {
+        throw new RuntimeException('GlowChart source commit mismatch');
+    }
+    workflowExactSet(workflowGitPaths($forkPath, ['diff', '--no-ext-diff', 'HEAD', '--name-only', '-z']),
+        array_keys($fork['changedFiles']), 'GlowChart changed-file allowlist mismatch');
+    workflowExactSet(workflowGitPaths($forkPath, ['ls-files', '--others', '--exclude-standard', '-z']),
+        array_keys($fork['untrackedFiles']), 'GlowChart untracked-file allowlist mismatch');
+    foreach ($fork['changedFiles'] + $fork['untrackedFiles'] as $relative => $hash) {
+        if (hash_file('sha256', workflowFile($forkPath.'/'.$relative)) !== $hash) {
+            throw new RuntimeException('GlowChart overlay hash mismatch: '.$relative);
+        }
+    }
+    $forkOriginal = json_decode(workflowGit($forkPath, ['show', 'HEAD:composer.json']), true, flags: JSON_THROW_ON_ERROR);
+    $forkOriginal['require']['php'] = '^8.2';
+    $forkOriginal['require']['illuminate/contracts'] = '^10.0|^11.0|^12.0';
+    $forkOriginal['require']['flowframe/laravel-trend'] = '^0.5';
+    if (json_decode((string) file_get_contents($forkPath.'/composer.json'), true, flags: JSON_THROW_ON_ERROR) !== $forkOriginal) {
+        throw new RuntimeException('GlowChart differs from the three approved manifest constraints');
+    }
+    $forkSources = [];
+    $mirrorSources = [];
+    $paths = [...workflowGitPaths($forkPath, ['ls-files', '-z']), ...array_keys($fork['untrackedFiles'])];
+    foreach ($paths as $relative) {
+        $source = workflowFile($forkPath.'/'.$relative);
+        $hash = hash_file('sha256', $source);
+        $forkSources[$relative] = $hash;
+        $hashes[$fork['path'].'/'.$relative] = $hash;
+        if (str_starts_with($relative, 'src/') || str_starts_with($relative, 'resources/')
+            || in_array($relative, ['composer.json', 'LICENSE.md', 'PLIEGO-COMPATIBILITY.md'], true)) {
+            $mirror = 'vendor/'.$fork['applicationPackage'].'/'.$relative;
+            if (is_link($appPath.'/'.$mirror) || !workflowSameBytes($source, workflowFile($appPath.'/'.$mirror))) {
+                throw new RuntimeException('Installed GlowChart mirror differs from source: '.$relative);
+            }
+            $mirrorSources[$relative] = $hash;
+            $hashes[$mirror] = $hash;
+        }
+    }
+    $mirrorRoot = $appPath.'/vendor/'.$fork['applicationPackage'];
+    if (is_link($mirrorRoot)) {
+        throw new RuntimeException('Installed GlowChart must be a mirrored directory');
+    }
+    $mirrorPaths = ['composer.json', 'LICENSE.md', 'PLIEGO-COMPATIBILITY.md'];
+    foreach (['src', 'resources'] as $directory) {
+        $iterator = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($mirrorRoot.'/'.$directory, FilesystemIterator::SKIP_DOTS));
+        foreach ($iterator as $entry) {
+            if ($entry->isLink() || !$entry->isFile()) {
+                throw new RuntimeException('Installed GlowChart runtime contains a non-regular file');
+            }
+            $mirrorPaths[] = substr(str_replace('\\', '/', $entry->getPathname()), strlen(str_replace('\\', '/', $mirrorRoot)) + 1);
+        }
+    }
+    workflowExactSet($mirrorPaths, array_keys($mirrorSources), 'Installed GlowChart runtime inventory mismatch');
+    $packages = [];
+    foreach ($manifest['installedPackages'] as $package => $version) {
+        if (ltrim((string) Composer\InstalledVersions::getPrettyVersion($package), 'v') !== $version) {
+            throw new RuntimeException('Modernized installed package version mismatch: '.$package);
+        }
+        $packages[$package] = ['version' => $version, 'reference' => Composer\InstalledVersions::getReference($package)];
+    }
+    if ($packages[$fork['applicationPackage']]['reference'] !== $fork['pathReference']) {
+        throw new RuntimeException('Installed GlowChart path reference mismatch');
+    }
+    foreach (['vendor/composer/installed.json', 'vendor/composer/installed.php'] as $relative) {
+        $hashes[$relative] = hash_file('sha256', workflowFile($appPath.'/'.$relative));
+    }
+    return ['name' => $manifest['name'], 'manifestSha256' => hash_file('sha256', $manifestPath),
+        'applicationCommit' => $manifest['applicationCommit'], 'approvedRootSources' => $manifest['changedFiles'],
+        'forkCommit' => $fork['sourceCommit'], 'forkSources' => $forkSources, 'installedForkSources' => $mirrorSources,
+        'installedPackages' => $packages, 'sourceHashes' => $hashes,
+        'boundary' => 'Exact shared modernization; path reference is not full-source integrity; no security or PDF acceptance claim'];
+}
+
+if (defined('PLIEGO_INVOBOOK_WORKFLOW_LIBRARY') && PLIEGO_INVOBOOK_WORKFLOW_LIBRARY === true) {
+    return;
+}
+
+$options = getopt('', ['app:', 'output:', 'template:', 'provider:', 'baseline:', 'sdk:', 'binary:', 'chrome:', 'node:', 'node-modules:', 'simple-pdf-media:', 'simple-pdf-repair:']);
 $phase = 'setup';
 $output = null;
 $report = ['schema' => 'pliego.invobook-repaired-workflow.v1', 'status' => 'setup_failure',
@@ -47,11 +173,16 @@ $transaction = false;
 $storagePath = null;
 $sourceHashes = [];
 $deliveryAssets = [];
+$modernization = null;
 try {
     foreach (['app', 'output', 'template', 'provider'] as $key) {
         if (!isset($options[$key]) || !is_string($options[$key]) || $options[$key] === '') {
             throw new RuntimeException('Missing --'.$key);
         }
+    }
+    $baseline = $report['baseline'] = $options['baseline'] ?? 'historical';
+    if (!in_array($baseline, ['historical', 'modernized-laravel12'], true)) {
+        throw new RuntimeException('Unsupported baseline');
     }
     $appPath = realpath($options['app']);
     if ($appPath === false || !is_dir($appPath)) {
@@ -76,6 +207,9 @@ try {
     if ($repairFull) {
         $report['track'] = 'shared-currency-media-quantity-font-repair-html-delivery';
     }
+    if ($baseline === 'modernized-laravel12') {
+        $report['track'] = 'modernized-laravel12-'.$report['track'];
+    }
     $parent = realpath(dirname($options['output']));
     if ($parent === false || file_exists($options['output']) || is_link($options['output'])) {
         throw new RuntimeException('Output must be a fresh directory under an existing parent');
@@ -89,9 +223,14 @@ try {
     if (trim(workflowGit($appPath, ['rev-parse', 'HEAD'])) !== $pin) {
         throw new RuntimeException('Application must be pinned to '.$pin);
     }
-    $modified = trim(workflowGit($appPath, ['diff', 'HEAD', '--name-only']));
-    if ($modified !== 'app/Actions/CreateInvoice.php') {
-        throw new RuntimeException('Only the recorded CreateInvoice currency repair is allowed');
+    if ($baseline === 'historical') {
+        $modified = trim(workflowGit($appPath, ['diff', 'HEAD', '--name-only']));
+        if ($modified !== 'app/Actions/CreateInvoice.php') {
+            throw new RuntimeException('Only the recorded CreateInvoice currency repair is allowed');
+        }
+    } else {
+        $modernization = workflowModernizedBaseline($appPath);
+        $sourceHashes = $modernization['sourceHashes'];
     }
     $original = workflowGit($appPath, ['show', 'HEAD:app/Actions/CreateInvoice.php']);
     $needle = "                'amount_in_cents' => \$item->sub_total_price * 100,\n";
@@ -102,20 +241,24 @@ try {
     }
     mkdir($output, 0700);
     workflowWrite($output.'/application.patch', workflowGit($appPath, ['diff', '--no-ext-diff', '--no-color', 'HEAD', '--', 'app/Actions/CreateInvoice.php']));
-    foreach (['app/Actions/CreateInvoice.php', 'app/Actions/GenerateInvoicePdf.php', 'composer.lock', 'package-lock.json',
+    foreach (['app/Actions/CreateInvoice.php', 'app/Actions/GenerateInvoicePdf.php', 'composer.json', 'composer.lock', 'package.json', 'package-lock.json',
         'resources/views/vendor/invoices/templates/'.$template.'.blade.php', 'resources/views/components/layouts/invoice.blade.php'] as $relative) {
         $sourceHashes[$relative] = hash_file('sha256', workflowFile($appPath.'/'.$relative));
     }
     $builtAssets = [];
     foreach ([$appPath.'/public/build/manifest.json', ...glob($appPath.'/public/build/assets/*')] as $file) {
         if (is_file($file)) {
-            $builtAssets[substr(str_replace('\\', '/', $file), strlen(str_replace('\\', '/', $appPath)) + 1)] = hash_file('sha256', $file);
+            $relative = substr(str_replace('\\', '/', $file), strlen(str_replace('\\', '/', $appPath)) + 1);
+            $builtAssets[$relative] = $sourceHashes[$relative] = hash_file('sha256', $file);
         }
     }
     $report['provenance'] = ['applicationCommit' => $pin, 'applicationPath' => $appPath,
         'runnerSha256' => hash_file('sha256', __FILE__), 'builtAssetSha256' => $builtAssets,
         'originalCreateInvoiceSha256' => hash('sha256', $original), 'repairPatchSha256' => hash_file('sha256', $output.'/application.patch'),
         'applicationSources' => $sourceHashes, 'templateChanged' => false, 'generateActionChanged' => false];
+    if ($modernization !== null) {
+        $report['provenance']['modernization'] = $modernization;
+    }
     if ($repairFull) {
         $relative = 'app/Actions/GenerateInvoicePdf.php';
         $originalAction = (string) file_get_contents(workflowFile($appPath.'/'.$relative));
@@ -223,7 +366,9 @@ try {
         'businessAction' => ($repairFull ? 'exact quantity-setter repair in' : 'unchanged').' App\\Actions\\GenerateInvoicePdf in HTML mode; CreateInvoice currency line repaired for both providers',
         'deliveryAdaptation' => 'returned Blade view delivered in-process; original URL, browser authentication and Livewire preview are not exercised',
         'storage' => 'isolated Laravel local disk; database commit only after stored bytes match render bytes',
-        'sdk' => 'PHP SDK development source; candidate Laravel SDK targets Illuminate 12/13 while this app locks Laravel 11.31.0; no constraint bypass',
+        'sdk' => $baseline === 'historical'
+            ? 'PHP SDK development source; candidate Laravel SDK targets Illuminate 12/13 while this app locks Laravel 11.31.0; no constraint bypass'
+            : 'PHP SDK development source in the exact shared Laravel 12.69.1 app; no packaged Laravel SDK install or constraint bypass claim',
         'correctness' => 'storage integrity and database facts only; PDF facts and visual acceptance remain separate gates',
         'queue' => 'synchronous command; no queue-worker proof',
     ];
@@ -442,6 +587,15 @@ try {
         if (hash_file('sha256', $appPath.'/'.$relative) !== $hash) {
             $report['sourceFilesUnchangedDuringRun'] = false;
         }
+    }
+    if ($modernization !== null) {
+        try {
+            $report['modernizedBaselineUnchangedDuringRun'] = workflowModernizedBaseline($appPath) === $modernization;
+        } catch (Throwable $error) {
+            $report['modernizedBaselineUnchangedDuringRun'] = false;
+            $report['baselineRecheckError'] = ['class' => get_class($error), 'message' => $error->getMessage()];
+        }
+        $report['sourceFilesUnchangedDuringRun'] = $report['sourceFilesUnchangedDuringRun'] && $report['modernizedBaselineUnchangedDuringRun'];
     }
     $json = json_encode($report, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE | JSON_THROW_ON_ERROR)."\n";
     if ($output !== null && is_dir($output)) {

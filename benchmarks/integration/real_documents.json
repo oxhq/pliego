@@ -2,6 +2,20 @@
   "schema": "pliego.real-document-tracks.v1",
   "boundary": "Frozen shared-repaired application HTML; cold renderer processes, not Laravel request or storage latency. No independent-adoption claim.",
   "tracks": {
+    "invobook-simple-laravel12-repaired": {
+      "family": "invobook",
+      "corpus": "real_documents/fixtures/invobook",
+      "input": "input.html",
+      "input_sha256": "afd286bca202309923fd66bee1f71e732bdd340d1b05a2307094feb535fa7195",
+      "assets": ["fonts/DejaVuSans.ttf", "fonts/DejaVuSans-Bold.ttf"],
+      "page_size": "47622x67351au",
+      "page_margins": "0,0,0,0au",
+      "legacy": "invobook-browsershot-5.4.0-puppeteer-25.8.0",
+      "adapter": "benchmarks/adapters/invobook-browsershot-laravel12/adapter.php",
+      "application_baseline": "modernized-laravel12",
+      "input_provenance": "Both modernized full repaired HTML actions regenerated the exact historical document bytes. CI repeats regeneration before comparison; old corpus provenance remains historical, and no old PDF or timings qualify this target.",
+      "correctness": {"page_count": 1, "text_contains": ["450.00", "EUR"]}
+    },
     "invobook-simple-repaired": {
       "family": "invobook",
       "corpus": "real_documents/fixtures/invobook",

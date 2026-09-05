@@ -130,6 +130,30 @@ def configuration(manifest: Path, track_id: str) -> tuple[dict, dict, Path]:
     return track, fixture, corpus
 
 
+def check_legacy_identity(track: dict, adapter: Path, identity: dict) -> None:
+    require(
+        identity.get("target") == track["legacy"] and identity.get("adapter_sha256") == digest(adapter),
+        "Wrong legacy adapter identity",
+    )
+    if track.get("application_baseline") == "modernized-laravel12":
+        shared = ROOT / "benchmarks/adapters/invobook-browsershot/adapter.php"
+        require(
+            identity.get("shared_adapter_path") == str(shared.resolve())
+            and identity.get("shared_adapter_sha256") == digest(shared),
+            "Wrong shared Invobook lifecycle identity",
+        )
+        baseline = read(HERE / "invobook_modernized_baseline.json")
+        require(
+            identity.get("composer_lock_sha256") == baseline["changedFiles"]["composer.lock"],
+            "Wrong modernized application lock",
+        )
+        for package in ("laravel/framework", "spatie/browsershot"):
+            require(
+                identity.get("packages", {}).get(package, {}).get("version") == baseline["installedPackages"][package],
+                "Wrong modernized package identity",
+            )
+
+
 def schedule(track_id: str, legacy: str, repeat: int) -> dict:
     require(type(repeat) is int and 1 <= repeat <= 3, "Repeat must be 1, 2 or 3")
     targets = sorted([TARGET, legacy])
@@ -506,10 +530,7 @@ def run_campaign(args: argparse.Namespace) -> None:
     legacy_run = capture([str(args.php), str(adapter), "identity"], output, "legacy-identity", 120)
     require(legacy_run.returncode == 0, "Legacy dependency identity failed")
     legacy = json.loads(legacy_run.stdout)
-    require(
-        legacy.get("target") == track["legacy"] and legacy.get("adapter_sha256") == digest(adapter),
-        "Wrong legacy adapter identity",
-    )
+    check_legacy_identity(track, adapter, legacy)
     probe = capture([str(args.candidate_binary), "--contract-probe"], output, "candidate-probe", 30)
     require(probe.returncode == 0, "Candidate contract discovery failed")
     contract = json.loads(probe.stdout)
@@ -540,6 +561,13 @@ def run_campaign(args: argparse.Namespace) -> None:
         HERE / "real_documents/manufacturing_requirements.txt",
     ]:
         code[path.relative_to(ROOT).as_posix()] = digest(path)
+    if track.get("application_baseline") == "modernized-laravel12":
+        for path in [
+            HERE / "invobook_modernized_baseline.json",
+            HERE / "prepare_invobook_modernized.py",
+            HERE / "invobook_repaired_workflow.php",
+        ]:
+            code[path.relative_to(ROOT).as_posix()] = digest(path)
     identity = {
         "track": args.track,
         "family": track["family"],

@@ -33,6 +33,9 @@ files = [
     "./benchmarks/integration/real_documents/ledger/report-data.json",
     "./benchmarks/integration/real_documents/ledger/source-action-facts.json",
     "./benchmarks/integration/real_documents/ledger/synthetic-input.json",
+    # Exact approved upstream-fork manifest bytes include CRLF; checked by the
+    # modernized baseline hash and the three-constraint structural guard.
+    "./benchmarks/integration/runtime-inputs/invobook-laravel12/packages/glow-chart/composer.json",
     "./components/shared/net/tests/parsable_mime/text",
     "./components/default-resources/resources/hsts_preload.fstmap",
     "./tests/wpt/meta/MANIFEST.json",
