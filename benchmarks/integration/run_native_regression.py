@@ -167,6 +167,34 @@ def target_identity(target: str, metadata: dict, probe: dict, binary_hash: str, 
     return {"source_sha": source, "binary_sha256": binary_hash, "binary_bytes": binary_bytes, "probe": probe}
 
 
+def retained_target_identity(target: str, root: Path, current: dict) -> dict:
+    # Identity JSON is key-sorted for hashing. Validate wire order from the
+    # original probe, then use that parsed object for downstream strict checks.
+    raw = (root / "probe.stdout").read_bytes()
+    probe = contracts.strict_json(raw)
+    require(contracts.canonical_json(probe) == raw, "Noncanonical retained probe stdout")
+    checked = target_identity(
+        target, read(root / "package-identity.json"), probe, current["binary"]["sha256"], current["binary"]["bytes"]
+    )
+    require(checked == current["identity"], "Changed native package/probe binding")
+    return checked
+
+
+def native_stderr_diagnostics(raw: bytes) -> list[str]:
+    # Exact bytes observed in the existing immutable-home Linux sampler recipe
+    # (33968228049 and the accepted e179 Aureus preflight). Do not alter its
+    # environment/cache policy or filter captured streams. No other stderr is
+    # admitted, including repeated lines, control bytes or extra diagnostics.
+    if raw == b"":
+        return []
+    require(
+        raw == b"error: XDG_RUNTIME_DIR is invalid or not set in the environment.\n"
+        b"Failed to create /nonexistent for shader cache (Permission denied)---disabling.\n",
+        "Unexpected native stderr (outside exact sandbox graphics diagnostics)",
+    )
+    return ["xdg-runtime-dir-unset", "shader-cache-disabled-immutable-home"]
+
+
 def verify_measurement(value: dict, *, require_success: bool = True) -> None:
     harness.canonical_json_bytes(value)
     schema = read(harness.DEFAULT_SCHEMA)
@@ -251,7 +279,7 @@ def verify_batch_envelope(prepared: dict, measured: dict, expected_binary: dict)
                 len(raw) <= batch.MAX_STREAM and hashlib.sha256(raw).hexdigest() == worker[stream + "_sha256"],
                 "Changed worker output",
             )
-        require(worker["stderr_base64"] == "", "Native worker stderr is not empty")
+        native_stderr_diagnostics(base64.b64decode(worker["stderr_base64"], validate=True))
     return result
 
 
@@ -303,7 +331,10 @@ def oracle_command(value: dict, pdf: Path) -> list[str]:
     return result + ["--raster-sha256", expected["normalized_raster_sha256"]]
 
 
-def qualify_worker(root: Path, job: Path, payload: bytes, raw: bytes, code: int, probe: dict, value: dict) -> dict:
+def qualify_worker(
+    root: Path, job: Path, payload: bytes, raw: bytes, code: int, probe: dict, value: dict, *, stderr: bytes
+) -> dict:
+    diagnostics = native_stderr_diagnostics(stderr)
     verify_input(payload, job)
     protocol = contracts.validate_result(raw, code, payload, probe, job)
     save(root / "protocol.json", protocol)
@@ -318,6 +349,7 @@ def qualify_worker(root: Path, job: Path, payload: bytes, raw: bytes, code: int,
         "protocol": protocol,
         "oracle": facts,
         "request_sha256": hashlib.sha256(payload).hexdigest(),
+        "stderr_diagnostics": diagnostics,
     }
 
 
@@ -373,7 +405,6 @@ def serial_attempt(args: argparse.Namespace, root: Path, entry: dict, value: dic
         root, sample_index, phase, target["identity"]["binary_sha256"], harness.fixture_identity(value)
     )
     require(process.returncode == 0 and sample["ok"] is True, "Serial runner failed")
-    require((retained / "stderr.txt").read_bytes() == b"", "Native serial stderr is not empty")
     if phase == "timed":
         require(json.loads(process.stdout) == sample, "Raw serial sample changed")
     facts = qualify_worker(
@@ -384,6 +415,7 @@ def serial_attempt(args: argparse.Namespace, root: Path, entry: dict, value: dic
         sample["exit_code"],
         target["identity"]["probe"],
         value,
+        stderr=(retained / "stderr.txt").read_bytes(),
     )
     verify_measurement(sample)
     return {"measurement": sample, "documents": [facts], "overlap": None}
@@ -476,6 +508,7 @@ def concurrent_attempt(args: argparse.Namespace, root: Path, entry: dict, value:
                 worker["exit_code"],
                 target["identity"]["probe"],
                 value,
+                stderr=(output / "stderr.txt").read_bytes(),
             )
         )
     # Safe cleanup only after identity-bound post-snapshot and exact retention.
@@ -736,19 +769,11 @@ def verify(root: Path) -> dict:
     require(identity["source_files"] == source_closure(), "Use the campaign's exact pinned verifier/source")
     for name in TARGETS:
         current = targets[name]
-        package = read(root / name / "package-identity.json")
         require(
-            current["identity"] == identity["targets"][name]
-            and read(root / name / "probe.stdout") == current["identity"]["probe"],
+            current["identity"] == identity["targets"][name],
             "Unbound target identity",
         )
-        require(
-            current["identity"]
-            == target_identity(
-                name, package, current["identity"]["probe"], current["binary"]["sha256"], current["binary"]["bytes"]
-            ),
-            "Changed native package/probe binding",
-        )
+        targets[name] = {**current, "identity": retained_target_identity(name, root / name, current)}
     entries = schedule(summary["repeat"], summary["mode"])
     require(entries == read(root / "schedule.json"), "Changed schedule")
     require(
@@ -815,7 +840,7 @@ def verify(root: Path) -> dict:
                 protocol = contracts.validate_result(raw, 0, payload, target["identity"]["probe"], worker / "job")
                 pdf = worker / "job/delivery/document.pdf"
                 require(
-                    (worker / "stderr.txt").read_bytes() == b""
+                    native_stderr_diagnostics((worker / "stderr.txt").read_bytes()) == facts["stderr_diagnostics"]
                     and protocol == facts["protocol"]
                     and digest(pdf) == facts["pdf_sha256"]
                     and pdf.stat().st_size == facts["pdf_bytes"],

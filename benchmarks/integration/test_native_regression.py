@@ -91,6 +91,132 @@ def envelope() -> tuple[dict, dict, dict]:
 
 
 class NativeRegressionTests(unittest.TestCase):
+    def test_exact_sandbox_stderr_classification_rejects_all_other_bytes(self) -> None:
+        raw = (
+            b"error: XDG_RUNTIME_DIR is invalid or not set in the environment.\n"
+            b"Failed to create /nonexistent for shader cache (Permission denied)---disabling.\n"
+        )
+        self.assertEqual(campaign.native_stderr_diagnostics(b""), [])
+        self.assertEqual(
+            campaign.native_stderr_diagnostics(raw),
+            ["xdg-runtime-dir-unset", "shader-cache-disabled-immutable-home"],
+        )
+        self.assertEqual(len(raw), 145)
+        self.assertEqual(
+            hashlib.sha256(raw).hexdigest(), "5ac03de1a2c980e37064a5caa48c848c4b677065acccbb96087c10564576fa5b"
+        )
+        first, second, _ = raw.split(b"\n")
+        for corrupt in (
+            b"unexpected warning\n",
+            raw + b"\n",
+            raw + b"panic: failure\n",
+            raw * 2,
+            first + b"\n" + raw,
+            raw + second,
+            raw.replace(b"\n", b"\r\n"),
+            raw + b"\x00",
+            raw.replace(b"error:", b"\x1b[31merror:"),
+            raw[:-1],
+            first + b"\n",
+            second,
+            b" " + raw,
+            raw.replace(b"/nonexistent", b"/tmp"),
+        ):
+            with self.subTest(corrupt=corrupt), self.assertRaisesRegex(ValueError, "Unexpected native stderr"):
+                campaign.native_stderr_diagnostics(corrupt)
+        with patch.object(campaign, "verify_input") as verify_input:
+            with self.assertRaisesRegex(ValueError, "Unexpected native stderr"):
+                campaign.qualify_worker(Path("unused"), Path("unused"), b"", b"", 0, {}, {}, stderr=b"panic\n")
+            verify_input.assert_not_called()
+        # Known warnings cannot turn a failed canonical native outcome into a
+        # qualified PDF; the ordinary success/oracle checks remain mandatory.
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch.object(campaign, "verify_input"),
+            patch.object(campaign.contracts, "validate_result", return_value={"status": "failed"}),
+            patch.object(campaign, "invoke") as oracle,
+        ):
+            with self.assertRaisesRegex(ValueError, "Native PDF failed"):
+                campaign.qualify_worker(Path(temporary), Path(temporary), b"", b"", 1, {}, {}, stderr=raw)
+            oracle.assert_not_called()
+
+    def test_batch_worker_stderr_uses_same_exact_classification_without_stream_rewrite(self) -> None:
+        prepared, measured, binary = envelope()
+        raw = (
+            b"error: XDG_RUNTIME_DIR is invalid or not set in the environment.\n"
+            b"Failed to create /nonexistent for shader cache (Permission denied)---disabling.\n"
+        )
+        record = json.loads(measured["stdout"])
+        for worker in record["workers"]:
+            worker["stderr_base64"] = base64.b64encode(raw).decode()
+            worker["stderr_sha256"] = hashlib.sha256(raw).hexdigest()
+        measured["stdout"] = json.dumps(record)
+        self.assertEqual(campaign.verify_batch_envelope(prepared, measured, binary), record)
+        for corrupt in (raw + b"\n", raw * 2, raw + b"panic: native failure\n"):
+            changed = copy.deepcopy(record)
+            changed["workers"][0]["stderr_base64"] = base64.b64encode(corrupt).decode()
+            changed["workers"][0]["stderr_sha256"] = hashlib.sha256(corrupt).hexdigest()
+            with self.assertRaisesRegex(ValueError, "Unexpected native stderr"):
+                campaign.verify_batch_envelope(prepared, {**measured, "stdout": json.dumps(changed)}, binary)
+
+    def test_original_probe_survives_sorted_identity_roundtrip_without_order_waiver(self) -> None:
+        public = campaign.tomllib.loads((campaign.ROOT / "benchmarks/manifest.toml").read_text())["targets"][
+            "pliego-0.3.3"
+        ]
+        public = {**public, "schema": "pliego.verified-release"}
+        candidate = {
+            "source_sha": "a" * 40,
+            "binary_sha256": "b" * 64,
+            "binary_bytes": 123,
+            "profile": "release",
+            "bundle": "linux-x86_64",
+            "version": "0.4.0",
+            "provenance": {"servo_base": public["servo_base"]},
+        }
+        for target, metadata, version in (("candidate", candidate, "0.4.0"), ("v0.3.3", public, "0.3.3")):
+            with self.subTest(target=target), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                probe = campaign.read(campaign.ROOT / "contracts/api2/goldens/accepted/runtime-contract.json")
+                probe["engine"]["version"] = version
+                probe["engine"]["source_commit"] = metadata.get("source_sha", metadata.get("commit"))
+                probe["engine"]["runtime"]["binary_sha256"] = "sha256:" + metadata["binary_sha256"]
+                raw = campaign.contracts.canonical_json(probe)
+                (root / "probe.stdout").write_bytes(raw)
+                campaign.save(root / "package-identity.json", metadata)
+                identity = campaign.target_identity(
+                    target, metadata, probe, metadata["binary_sha256"], metadata["binary_bytes"]
+                )
+                campaign.save(
+                    root / "target.json",
+                    {
+                        "identity": identity,
+                        "binary": {"sha256": metadata["binary_sha256"], "bytes": metadata["binary_bytes"]},
+                    },
+                )
+                sorted_current = campaign.read(root / "target.json")
+                self.assertNotEqual(list(sorted_current["identity"]["probe"]), list(probe))
+                with self.assertRaisesRegex(ValueError, "probe keys"):
+                    campaign.target_identity(
+                        target,
+                        metadata,
+                        sorted_current["identity"]["probe"],
+                        metadata["binary_sha256"],
+                        metadata["binary_bytes"],
+                    )
+                before = (root / "target.json").read_bytes()
+                restored = campaign.retained_target_identity(target, root, sorted_current)
+                self.assertEqual(campaign.contracts.canonical_json(restored["probe"]), raw)
+                self.assertEqual((root / "target.json").read_bytes(), before)
+                for corrupt in (raw + b"\n", campaign.harness.canonical_json_bytes(probe) + b"\n"):
+                    (root / "probe.stdout").write_bytes(corrupt)
+                    with self.assertRaises((ValueError, AssertionError)):
+                        campaign.retained_target_identity(target, root, sorted_current)
+                (root / "probe.stdout").write_bytes(raw)
+                changed = copy.deepcopy(sorted_current)
+                changed["identity"]["source_sha"] = "c" * 40
+                with self.assertRaisesRegex(ValueError, "package/probe binding"):
+                    campaign.retained_target_identity(target, root, changed)
+
     def test_failed_native_batch_retains_both_trees_and_streams_before_rejection(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary).resolve()
