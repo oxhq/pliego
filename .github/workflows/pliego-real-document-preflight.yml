@@ -202,6 +202,9 @@ jobs:
           php benchmarks/tools/test_real_document_adapters.php aureus-dompdf
           php benchmarks/tools/test_real_document_adapters.php invobook-browsershot
           "$RUNNER_TEMP/real-document-python/bin/python" benchmarks/integration/test_real_document_comparison.py
+          "$RUNNER_TEMP/real-document-python/bin/python" benchmarks/integration/real_documents/ledger_font_runs_test.py
+          "$RUNNER_TEMP/real-document-python/bin/python" -O benchmarks/integration/real_documents/ledger_font_runs_test.py
+          "$RUNNER_TEMP/real-document-python/bin/python" benchmarks/integration/real_documents/manufacturing_font_test.py
       - name: Verify exact development bundle and prepare read-only engine closure
         id: runtime
         env:

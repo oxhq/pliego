@@ -28,6 +28,7 @@ def test_bundle(root: Path, sources: dict[str, tuple[Path, str]]) -> tuple[Path,
     page = writer.add_blank_page(width=595.28, height=841.89)
     fonts = DictionaryObject()
     operations = []
+    painted_runs = []
     for index, (name, (source, _)) in enumerate(sources.items()):
         raw = source.read_bytes()
         resource = ledger_fonts.digest(raw)
@@ -49,6 +50,7 @@ def test_bundle(root: Path, sources: dict[str, tuple[Path, str]]) -> tuple[Path,
         descriptor = DictionaryObject({NameObject("/FontFile2"): writer._add_object(stream)})
         descendant = DictionaryObject(
             {
+                NameObject("/Subtype"): NameObject("/CIDFontType2"),
                 NameObject("/FontDescriptor"): writer._add_object(descriptor),
                 NameObject("/BaseFont"): NameObject("/ABCDEF+" + name.removesuffix(".ttf")),
                 NameObject("/CIDToGIDMap"): NameObject("/Identity"),
@@ -66,6 +68,7 @@ def test_bundle(root: Path, sources: dict[str, tuple[Path, str]]) -> tuple[Path,
             }
         )
         fonts[NameObject(f"/F{index}")] = writer._add_object(font)
+        painted_runs.append(f"BT /F{index} 12 Tf <{reduced.getGlyphID('A'):04X}> Tj ET")
         operations.append(
             {
                 "type": "text",
@@ -80,6 +83,9 @@ def test_bundle(root: Path, sources: dict[str, tuple[Path, str]]) -> tuple[Path,
             }
         )
     page[NameObject("/Resources")] = DictionaryObject({NameObject("/Font"): fonts})
+    contents = DecodedStreamObject()
+    contents.set_data("\n".join(painted_runs).encode("ascii"))
+    page[NameObject("/Contents")] = writer._add_object(contents)
     pdf = root / "document.pdf"
     writer.write(pdf)
     scene = root / "scene.json"

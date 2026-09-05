@@ -5,12 +5,14 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import math
 import re
 from functools import lru_cache
 from pathlib import Path
 
 from fontTools.ttLib import TTFont
 from pypdf import PdfReader
+from pypdf.generic import ByteStringObject, ContentStream, DictionaryObject, TextStringObject
 
 from ledger_checks import closed_path, plain_path, require
 
@@ -137,6 +139,121 @@ def unicode_map(font: dict) -> dict[int, str]:
     return result
 
 
+def painted_text_runs(operations: list, fonts: dict[str, dict]) -> tuple[list[tuple[str, str, str]], int]:
+    """Observed Krilla text profile; never infer painted usage from resources.
+
+    TJ positioning may split a scene run into many strings. Preserve the glyph
+    sequence across those splits. The observed alias override is narrower:
+    one inline /Span ActualText scopes exactly one show containing one CID.
+    Multi-glyph clusters, nested marks and Form XObjects require a separate
+    qualification, not an implicit page-font fallback.
+    """
+    result, stack = [], []
+    font_name = None
+    in_text = False
+    actual_text = None
+    actual_shows = 0
+    overrides = 0
+    graphics = {b"cm", b"rg", b"RG", b"m", b"l", b"h", b"f", b"f*", b"re", b"n", b"W", b"W*"}
+    for operands, operator in operations:
+        if operator == b"q":
+            require(not in_text and actual_text is None, "Unqualified graphics save inside text")
+            stack.append(font_name)
+        elif operator == b"Q":
+            require(not in_text and actual_text is None and stack, "Unbalanced text graphics restore")
+            font_name = stack.pop()
+        elif operator == b"BT":
+            require(not in_text and actual_text is None, "Nested/unscoped text object")
+            in_text = True
+        elif operator == b"ET":
+            require(in_text and actual_text is None, "Unbalanced text object/ActualText")
+            in_text = False
+        elif operator == b"Tf":
+            require(in_text and len(operands) == 2, "Unscoped/malformed font selection")
+            font_name = str(operands[0])
+            require(
+                font_name in fonts and math.isfinite(float(operands[1])) and float(operands[1]) > 0,
+                "Unbound font or invalid text size",
+            )
+        elif operator == b"Tr":
+            require(in_text and operands == [0], "Only actual filled glyphs qualify")
+        elif operator == b"Tm":
+            require(
+                in_text and len(operands) == 6 and all(math.isfinite(float(value)) for value in operands),
+                "Invalid text matrix",
+            )
+        elif operator == b"BDC":
+            require(
+                in_text and actual_text is None and len(operands) == 2 and str(operands[0]) == "/Span",
+                "Nested/unscoped ActualText",
+            )
+            properties = operands[1]
+            require(
+                isinstance(properties, DictionaryObject) and set(properties) == {"/ActualText"},
+                "Only inline, explicitly scoped ActualText qualifies",
+            )
+            actual_text = properties["/ActualText"]
+            require(isinstance(actual_text, TextStringObject) and bool(actual_text), "Invalid ActualText string")
+            actual_text.encode("utf-8", errors="strict")
+            actual_shows = 0
+        elif operator == b"EMC":
+            require(
+                in_text and actual_text is not None and actual_shows == 1,
+                "ActualText must bind exactly one painted glyph show",
+            )
+            actual_text = None
+        elif operator in (b"Tj", b"TJ"):
+            require(in_text and font_name in fonts and len(operands) == 1, "Unscoped/unbound text show")
+            values = operands[0] if operator == b"TJ" else operands
+            require(isinstance(values, list) and bool(values), "Malformed text show")
+            cids, chunks = [], 0
+            for value in values:
+                if isinstance(value, (ByteStringObject, TextStringObject)):
+                    raw = value.original_bytes
+                    require(raw and len(raw) % 2 == 0, "Expected nonempty Identity-H CID bytes")
+                    cids.extend(int.from_bytes(raw[offset : offset + 2], "big") for offset in range(0, len(raw), 2))
+                    chunks += 1
+                else:
+                    require(
+                        operator == b"TJ"
+                        and not isinstance(value, bool)
+                        and isinstance(value, (int, float))
+                        and math.isfinite(float(value)),
+                        "Invalid TJ position adjustment",
+                    )
+            require(cids, "Text show contains no painted CIDs")
+            if actual_text is not None:
+                actual_shows += 1
+                require(
+                    actual_shows == 1 and len(cids) == 1 and chunks == 1,
+                    "ActualText run segmentation is outside the qualified single-CID profile",
+                )
+                overrides += 1
+            model = fonts[font_name]
+            for cid in cids:
+                require(
+                    0 < cid < len(model["order"]) and cid in model["mapping"],
+                    "Used CID has no verified glyph/Unicode mapping",
+                )
+                result.append(
+                    (
+                        model["source"],
+                        model["order"][cid],
+                        str(actual_text) if actual_text is not None else model["mapping"][cid],
+                    )
+                )
+        else:
+            # In particular Do/BMC, external property dictionaries, text in a
+            # Form, invisible Tr and unknown text operators cannot be laundered
+            # through the page's otherwise valid font resource dictionary.
+            require(
+                operator in graphics and not in_text and actual_text is None,
+                "Unqualified PDF content operator/text-bearing Form",
+            )
+    require(not stack and not in_text and actual_text is None, "Unclosed graphics/text/ActualText scope")
+    return result, overrides
+
+
 def qualify_fonts(
     reader: PdfReader,
     fixture: Path,
@@ -169,10 +286,12 @@ def qualify_fonts(
     require(required_faces <= sources.keys(), "Required source font is absent")
     resources = {}
     scene_glyphs = set()
+    scene_pages = []
     if provider == "pliego":
         require(scene_path is not None and bundle_path is not None, "Candidate font proof requires scene and bundle")
         scene, entries = checked_bundle(bundle_path, scene_path, pdf)
         for page in scene["pages"]:
+            painted = []
             for operation in page["operations"]:
                 if operation["type"] != "text":
                     continue
@@ -216,20 +335,27 @@ def qualify_fonts(
                         "Ledger qualification requirement failed: 0 <= span['start'] < span['end'] <= len(text)",
                     )
                     unicode = text[span["start"] : span["end"]].decode("utf-8")
-                    scene_glyphs.add((selected["source"], order[glyph["id"]], unicode))
+                    require(type(glyph["id"]) is int and 0 < glyph["id"] < len(order), "Invalid scene glyph id")
+                    identity = (selected["source"], order[glyph["id"]], unicode)
+                    scene_glyphs.add(identity)
+                    painted.append(identity)
+            scene_pages.append(painted)
         require({r["source"] for r in resources.values()} == required_faces, "Required scene faces differ")
 
     seen = set()
     embedded = []
     pdf_glyphs = set()
-    seen_objects = set()
+    font_models = {}
+    pdf_pages = []
+    actual_text_overrides = 0
     for page in reader.pages:
-        for reference in page["/Resources"]["/Font"].values():
+        page_fonts = {}
+        for font_name, reference in page["/Resources"]["/Font"].items():
             font = reference.get_object()
             identity = (reference.idnum, reference.generation) if hasattr(reference, "idnum") else id(font)
-            if identity in seen_objects:
+            if identity in font_models:
+                page_fonts[str(font_name)] = font_models[identity]
                 continue
-            seen_objects.add(identity)
             descendant = font.get("/DescendantFonts", [font])[0].get_object()
             descriptor = descendant["/FontDescriptor"].get_object()
             require("/FontFile2" in descriptor, "Unembedded or non-TrueType ledger font")
@@ -242,24 +368,44 @@ def qualify_fonts(
                     "Legacy embedded font is not original unsubsetted bytes",
                 )
                 source = matches[0]
+                font_models[identity] = {}
             else:
+                require(
+                    font.get("/Subtype") == "/Type0"
+                    and font.get("/Encoding") == "/Identity-H"
+                    and descendant.get("/Subtype") == "/CIDFontType2",
+                    "Expected Type0/Identity-H/CIDFontType2 candidate font",
+                )
                 source, subset = match_subset_program(raw, sources, required_faces)
                 require(descendant["/CIDToGIDMap"] == "/Identity", "Unqualified CID-to-glyph remapping")
                 order = subset.getGlyphOrder()
-                for cid, unicode in unicode_map(font).items():
+                mapping = unicode_map(font)
+                for cid in mapping:
                     require(0 < cid < len(order), "Invalid PDF subset glyph id")
-                    pdf_glyphs.add((source, order[cid], unicode))
+                font_models[identity] = {"source": source, "order": order, "mapping": mapping}
+                page_fonts[str(font_name)] = font_models[identity]
             seen.add(source)
             embedded.append({"pdfName": str(descendant["/BaseFont"]), "source": source, "embeddedSha256": embedded_sha})
+        if provider == "pliego":
+            require("/Contents" in page, "PDF page has no actual painted text content")
+            painted, overrides = painted_text_runs(ContentStream(page["/Contents"], reader).operations, page_fonts)
+            pdf_pages.append(painted)
+            pdf_glyphs.update(painted)
+            actual_text_overrides += overrides
     require(seen == required_faces, "Required embedded faces differ")
     if provider == "pliego":
-        require(pdf_glyphs == scene_glyphs, "PDF Unicode/glyph identities differ from the hash-bound captured scene")
+        require(
+            pdf_pages == scene_pages and pdf_glyphs == scene_glyphs,
+            "Actual painted PDF glyph/Unicode order/count differs from the hash-bound scene",
+        )
     return {
         "outcome": "passed",
         "policy": "original-whole-font-bytes"
         if provider == "dompdf"
-        else "source-outline-metric-cmap-style-and-scene-subset-glyph-closure-v1",
+        else "source-outline-metric-cmap-style-and-used-scene-subset-glyph-closure-v2",
         "embedded": embedded,
         "sceneResources": [{k: r[k] for k in ("source", "sha256", "semantic")} for r in resources.values()],
         "scenePdfGlyphMappings": len(pdf_glyphs),
+        "paintedGlyphCount": sum(len(page) for page in pdf_pages),
+        "scopedActualTextOverrides": actual_text_overrides,
     }

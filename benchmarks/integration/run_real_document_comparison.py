@@ -272,7 +272,9 @@ def check_success_evidence(root: Path, phase: str, target: str, identity: dict, 
         require(report["pdfBytes"] == pdf.stat().st_size, "Oracle PDF size differs")
     font_proof = report.get("fonts" if family == "ledger" else "fontProof", {})
     policies = {
-        "pliego": "source-outline-metric-cmap-style-and-scene-subset-glyph-closure-v1",
+        # Current campaigns require actual painted usage. Historical development
+        # preflights retain their exact pinned verifier; no v1 acceptance here.
+        "pliego": "source-outline-metric-cmap-style-and-used-scene-subset-glyph-closure-v2",
         "dompdf": "original-whole-font-bytes",
         "browsershot": "chrome-identity-h-painted-cid-source-unicode-outline-metric-style-v1",
     }
@@ -286,6 +288,17 @@ def check_success_evidence(root: Path, phase: str, target: str, identity: dict, 
         require(
             bool(font_proof.get("sceneResources")) and font_proof.get("scenePdfGlyphMappings", 0) > 0,
             "Missing scene/subset font closure",
+        )
+        mappings = font_proof.get("scenePdfGlyphMappings")
+        painted = font_proof.get("paintedGlyphCount")
+        overrides = font_proof.get("scopedActualTextOverrides")
+        require(
+            type(mappings) is int
+            and type(painted) is int
+            and type(overrides) is int
+            and 0 < mappings <= painted
+            and 0 <= overrides <= painted,
+            "Missing or inconsistent actual painted-glyph proof counters",
         )
     if provider == "browsershot":
         require(font_proof.get("paintedGlyphMappings", 0) > 0, "Missing painted Chrome glyph proof")

@@ -79,6 +79,15 @@ text operators and graphics-state font selection fail closed. Twelve mutations
 of the actual retained Chrome PDF cover these boundaries. This proves the
 observed producer profile, not every future Chromium subset format.
 
+The current Pliego v2 font proof additionally checks actual active-font CID
+shows in exact per-page scene order and multiplicity. It supports the observed
+single-CID, single-show inline ActualText alias, with strict balanced scope.
+Unused CMap entries do not count as painted text. The original invoice uses
+this legitimate override when the same zero glyph has different text spans.
+`ledger_font_runs_test.py` covers this alias and rejects resealed encoding,
+scope, count, order, glyph and Unicode corruptions without changing input/PDF
+bytes or weakening the source-font proof.
+
 `report.json` retains `pdfSha256`, `fontProof`, and `layoutFingerprint`, computed
 only from extracted page/text geometry and normalized font facts. Paths, timings,
 metadata, object IDs and random subset prefixes are excluded. Timed samples must

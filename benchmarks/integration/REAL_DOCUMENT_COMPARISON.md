@@ -25,6 +25,16 @@ typed failure, process output, delivered PDF, resource accounting and oracle
 report. Business facts, geometry, font programs/mappings and native bundle
 integrity must pass. Actual PDF visual review is a separate required step.
 
+Current native font proof uses the v2 used-glyph policy: Type0/Identity-H fonts,
+original source and sanitized/subset outline/metric closure, and exact ordered
+per-page glyph/Unicode equality with the scene. A balanced inline ActualText
+override qualifies only for one text-show containing one CID. Unused font/CMap
+entries cannot manufacture painted evidence; unsupported encodings, invisible
+text, nested or multi-glyph overrides and Form XObjects fail closed. Dedicated
+corruption tests run before hosted campaigns. Older developmental v1 preflights
+remain unchanged and use their exact preserved verifier; they do not satisfy
+the current timing gate.
+
 The default is two untimed preflights. Timed mode additionally requires a
 `pliego.real-document-visual-acceptance.v1` record bound to the complete runtime,
 corpus, tool and oracle identity, with reviewed PDF hashes and accepted layout

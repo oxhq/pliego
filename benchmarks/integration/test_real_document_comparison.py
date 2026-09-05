@@ -116,7 +116,7 @@ class SyntheticArchive:
         family = self.identity["family"]
         provider = "pliego" if native else ("browsershot" if family == "invobook" else "dompdf")
         policies = {
-            "pliego": "source-outline-metric-cmap-style-and-scene-subset-glyph-closure-v1",
+            "pliego": "source-outline-metric-cmap-style-and-used-scene-subset-glyph-closure-v2",
             "dompdf": "original-whole-font-bytes",
             "browsershot": "chrome-identity-h-painted-cid-source-unicode-outline-metric-style-v1",
         }
@@ -126,6 +126,8 @@ class SyntheticArchive:
             "embedded": [{"synthetic": True}],
             "sceneResources": [{"synthetic": True}] if native else [],
             "scenePdfGlyphMappings": 1 if native else 0,
+            "paintedGlyphCount": 1 if native else 0,
+            "scopedActualTextOverrides": 0,
             "paintedGlyphMappings": 1,
         }
         report = {
@@ -504,6 +506,18 @@ class CampaignTests(unittest.TestCase):
             ("report", "fonts.embedded", [], "font proof"),
             ("report", "fonts.sceneResources", [], "scene/subset font closure"),
             ("report", "fonts.scenePdfGlyphMappings", 0, "scene/subset font closure"),
+            (
+                "report",
+                "fonts.policy",
+                "source-outline-metric-cmap-style-and-scene-subset-glyph-closure-v1",
+                "font proof",
+            ),
+            ("report", "fonts.paintedGlyphCount", 0, "painted-glyph proof counters"),
+            ("report", "fonts.paintedGlyphCount", None, "painted-glyph proof counters"),
+            ("report", "fonts.paintedGlyphCount", True, "painted-glyph proof counters"),
+            ("report", "fonts.scopedActualTextOverrides", -1, "painted-glyph proof counters"),
+            ("report", "fonts.scopedActualTextOverrides", 2, "painted-glyph proof counters"),
+            ("report", "fonts.scopedActualTextOverrides", None, "painted-glyph proof counters"),
             ("record", "oracle.pdf_sha256", "f" * 64, "oracle identity facts"),
         ]
         for location, key, wrong, error in cases:
