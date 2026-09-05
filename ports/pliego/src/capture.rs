@@ -1966,7 +1966,7 @@ fn translate_positioned_operation_to_page(
         positioned.authority = page_origin_app_units
             .and_then(|origin| translate_operation_authority_y(authority, origin));
     }
-    if is_page_spanning_rect_path(&positioned.operation) &&
+    if is_splittable_rect_path(&positioned.operation) &&
         let Some(CapturedOperationAuthority::Bounds(exact)) = positioned.authority.as_ref()
     {
         // Compatibility geometry follows the translated integers, not a sum of
@@ -2035,7 +2035,7 @@ fn set_positioned_rect_app_units(
 fn solid_rect_app_unit_authority(
     positioned: &PositionedOperation,
 ) -> Result<Option<CapturedRectAppUnits>, CaptureError> {
-    if !is_page_spanning_rect_path(&positioned.operation) {
+    if !is_splittable_rect_path(&positioned.operation) {
         return Ok(None);
     }
     let exact = match &positioned.authority {
@@ -2090,16 +2090,18 @@ fn split_solid_rect_operations(
     let exact_heights = exact_page_heights(pages)?;
     let mut split = Vec::with_capacity(operations.len());
     for operation in operations {
-        if !is_page_spanning_rect_path(&operation.operation) || operation.bounds.height == 0.0 {
-            split.push(operation);
-            continue;
-        }
-
         let exact = solid_rect_app_unit_authority(&operation)?;
         if exact.is_some_and(|exact| operation.bounds != rect_from_app_units(exact)) {
             return Err(CaptureError::InvalidScene(
                 "solid rectangle differs from source app-unit authority",
             ));
+        }
+        if !is_page_spanning_rect_path(&operation.operation) || operation.bounds.height == 0.0 {
+            // Table edges retain their owning row's page; do not duplicate the
+            // centered overhang on the next page. Validate their original
+            // integer geometry here before repeat/page translations instead.
+            split.push(operation);
+            continue;
         }
         if let (Some(exact), Some(heights)) = (exact, exact_heights.as_ref()) {
             let top = i64::from(exact.y);
@@ -2218,10 +2220,27 @@ fn operation_page(
                 .ok_or(CaptureError::InvalidPageGeometryAuthority)?;
             if top >= origin && top < end {
                 if bottom > end {
-                    return Err(CaptureError::OperationCrossesPageBoundary {
-                        sequence: operation.sequence,
-                        page_index,
-                    });
+                    // Collapsed table edges are centered on a row boundary.
+                    // Preserve the existing owning-page clamp, using the
+                    // captured integers rather than dropping authority after
+                    // an f64 intersection. Backgrounds/borders must already
+                    // have been split and cannot take this table-only path.
+                    let maximum_centered_edge_overrun = i64::from(exact.width.min(exact.height));
+                    if is_page_spanning_rect_path(&operation.operation) ||
+                        bottom - end > maximum_centered_edge_overrun
+                    {
+                        return Err(CaptureError::OperationCrossesPageBoundary {
+                            sequence: operation.sequence,
+                            page_index,
+                        });
+                    }
+                    let clipped = CapturedRectAppUnits {
+                        height: i32::try_from(end - top)
+                            .map_err(|_| CaptureError::InvalidPageGeometryAuthority)?,
+                        ..exact
+                    };
+                    set_positioned_rect_app_units(operation, clipped);
+                    operation.authority = Some(CapturedOperationAuthority::Bounds(clipped));
                 }
                 return Ok((page_index, compatibility_origin));
             }
@@ -4806,7 +4825,7 @@ mod tests {
     }
 
     #[test]
-    fn repeated_header_rejects_mismatched_authority_and_does_not_restore_clipped_geometry() {
+    fn repeated_header_rejects_mismatched_authority_and_preserves_exact_edge_clipping() {
         let exact = CaptureTableGroupRepeatAppUnits {
             source_block_start: 1_200,
             target_block_start: 7_380,
@@ -4825,12 +4844,22 @@ mod tests {
             true,
         )
         .unwrap();
-        assert!(clipped.page_operations[1][0].is_none());
+        assert_eq!(
+            clipped.page_operations[1][0],
+            Some(CapturedOperationAuthority::Bounds(CapturedRectAppUnits {
+                x: 600,
+                y: 5700,
+                width: 1200,
+                height: 300,
+            }))
+        );
         let Operation::Path { bounds, .. } = &clipped.pages[1].operations[0] else {
             unreachable!()
         };
         assert_eq!(bounds.y, 95.0);
         assert_eq!(bounds.height, 5.0);
+        let missing_repeat_authority = repeated_header_distribution(195.0, None, true).unwrap();
+        assert!(missing_repeat_authority.page_operations[1][0].is_none());
     }
 
     #[test]
@@ -4938,6 +4967,192 @@ mod tests {
                 },
             },
         }
+    }
+
+    fn exact_table_edge(exact: CapturedRectAppUnits) -> PositionedOperation {
+        let mut operation = exact_split_rectangle(exact);
+        let Operation::Path { meta, .. } = &mut operation.operation else {
+            unreachable!()
+        };
+        meta.semantics.as_mut().unwrap().label = Some("table-border".into());
+        operation
+    }
+
+    #[test]
+    fn exact_table_edges_keep_centered_page_clamps_without_duplicate_overhangs() {
+        let pages = [
+            exact_split_page(0, 47_622, 67_351),
+            exact_split_page(1, 47_622, 67_351),
+        ];
+        let source = CapturedRectAppUnits {
+            x: 123,
+            y: 67_321,
+            width: 25_200,
+            height: 60,
+        };
+        let distributed = distribute_operations(
+            &pages,
+            vec![exact_table_edge(source)],
+            &[],
+            &[],
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert_eq!(distributed.pages[0].operations.len(), 1);
+        assert!(distributed.pages[1].operations.is_empty());
+        let clipped = CapturedRectAppUnits {
+            height: 30,
+            ..source
+        };
+        assert_eq!(
+            distributed.page_operations[0],
+            vec![Some(CapturedOperationAuthority::Bounds(clipped))]
+        );
+        let Operation::Path { bounds, data, .. } = &distributed.pages[0].operations[0] else {
+            unreachable!()
+        };
+        assert_eq!(*bounds, rect_from_app_units(clipped));
+        assert_eq!(*data, rectangle_path_data(bounds));
+    }
+
+    #[test]
+    fn exact_table_edges_use_original_au_for_page_four_and_large_intersections() {
+        let pages = (0..5)
+            .map(|index| exact_split_page(index, 47_622, 67_351))
+            .collect::<Vec<_>>();
+        let source = CapturedRectAppUnits {
+            x: 123,
+            y: 3 * 67_351,
+            width: 601,
+            height: 60,
+        };
+        assert!(f64::from(app_units_to_f32_px(source.y)) < 3.0 * f64::from(pages[0].height));
+        let distributed = distribute_operations(
+            &pages,
+            vec![exact_table_edge(source)],
+            &[],
+            &[],
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            distributed
+                .pages
+                .iter()
+                .map(|page| page.operations.len())
+                .collect::<Vec<_>>(),
+            vec![0, 0, 0, 1, 0]
+        );
+        assert_eq!(
+            distributed.page_operations[3],
+            vec![Some(CapturedOperationAuthority::Bounds(
+                CapturedRectAppUnits { y: 0, ..source }
+            ))]
+        );
+        let Operation::Path { bounds, .. } = &distributed.pages[3].operations[0] else {
+            unreachable!()
+        };
+        assert_eq!(bounds.y, 0.0);
+
+        let large = CapturedRectAppUnits {
+            x: 100_000_001,
+            y: 100_000_019,
+            width: 601,
+            height: 60,
+        };
+        let operation = exact_table_edge(large);
+        assert_ne!((operation.bounds.y * 60.0).round() as i32, large.y);
+        let distributed = distribute_operations(
+            &[exact_split_page(0, 200_000_000, 100_000_050)],
+            vec![operation],
+            &[],
+            &[],
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            distributed.page_operations[0],
+            vec![Some(CapturedOperationAuthority::Bounds(
+                CapturedRectAppUnits {
+                    height: 31,
+                    ..large
+                }
+            ))]
+        );
+    }
+
+    #[test]
+    fn table_edge_page_clipping_never_invents_missing_authority() {
+        let source = CapturedRectAppUnits {
+            x: 0,
+            y: 5970,
+            width: 3000,
+            height: 60,
+        };
+        for missing_page in [false, true] {
+            let mut page = exact_split_page(0, 6000, 6000);
+            let mut operation = exact_table_edge(source);
+            if missing_page {
+                page.app_units = None;
+                page.style_source = None;
+            } else {
+                operation.authority = None;
+            }
+            let distributed =
+                distribute_operations(&[page], vec![operation], &[], &[], &HashMap::new()).unwrap();
+            assert_eq!(distributed.page_operations[0], vec![None]);
+        }
+    }
+
+    #[test]
+    fn exact_table_edges_reject_invalid_authority_and_excessive_crossings() {
+        let pages = [exact_split_page(0, 6000, 6000)];
+        let source = CapturedRectAppUnits {
+            x: 0,
+            y: 5970,
+            width: 3000,
+            height: 60,
+        };
+        let mut mismatched = exact_table_edge(source);
+        mismatched.authority = Some(CapturedOperationAuthority::Bounds(CapturedRectAppUnits {
+            width: 3001,
+            ..source
+        }));
+        assert!(split_solid_rect_operations(&pages, vec![mismatched]).is_err());
+        let mut arbitrary = exact_table_edge(source);
+        let Operation::Path { data, .. } = &mut arbitrary.operation else {
+            unreachable!()
+        };
+        *data = "M0 0L1 1Z".into();
+        assert!(split_solid_rect_operations(&pages, vec![arbitrary]).is_err());
+        assert!(
+            split_solid_rect_operations(
+                &pages,
+                vec![exact_table_edge(CapturedRectAppUnits {
+                    x: i32::MAX,
+                    ..source
+                })]
+            )
+            .is_err()
+        );
+        assert!(matches!(
+            distribute_operations(
+                &pages,
+                vec![exact_table_edge(CapturedRectAppUnits {
+                    y: 5000,
+                    width: 60,
+                    height: 3000,
+                    ..source
+                })],
+                &[],
+                &[],
+                &HashMap::new(),
+            ),
+            Err(CaptureError::OperationCrossesPageBoundary {
+                sequence: 4,
+                page_index: 0
+            })
+        ));
     }
 
     #[test]
