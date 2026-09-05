@@ -1,3 +1,7 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
 """Opt-in real-application regressions; no renderer, external HTTP or production DB.
 
 Set PLIEGO_INVOBOOK_REPAIRED_APP and PLIEGO_INVOBOOK_PHP to installed, pinned
