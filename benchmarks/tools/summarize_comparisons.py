@@ -316,7 +316,13 @@ def validate_series(data: Any) -> list[validate_result.Violation]:
         target_ids,
         violations,
     )
-    run_comparison.validate_target_identities(data["targets"], violations)
+    try:
+        reference = run_comparison.benchmark_references.select(data["source"])
+        run_comparison.validate_target_identities(data["targets"], violations, reference)
+        run_comparison.validate_oracle_identity(data["oracle"], violations, reference)
+    except (OSError, ValueError, TypeError) as error:
+        violations.append(validate_result.Violation("$.source", f"cannot verify identity reference: {error}"))
+        return violations
     for target_index, target in enumerate(data["summary"]["targets"]):
         for metric_name, metric in target["metrics"].items():
             if metric_name in comparison_metrics.RAW_ONLY_COMPARATIVE_METRICS:
