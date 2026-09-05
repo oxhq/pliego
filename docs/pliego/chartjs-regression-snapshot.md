@@ -71,9 +71,9 @@ Poppler 26.07.0 renders have zero changed pixels at both 144 DPI (1140x1260) and
 metadata, KPIs, chart, account table and footer. This does not imply equality at
 every resolution or accessibility conformity.
 
-## Snapshot hashes
+## First reviewed snapshot hashes
 
-| Artifact | Historical SHA-256 | Reviewed current SHA-256 |
+| Artifact | Historical SHA-256 | First reviewed SHA-256 |
 | --- | --- | --- |
 | Scene | `7649335813f3638eecfb8836e04374f98d5b62bfcea530c1787bfdee60964fde` | `13afbbf91aae65fe9c1befdde9d50f99a34efe94ae67f1281d62cdcd329b4b47` |
 | PDF | `c6f00765c85aace6cc6f2eacbb7c314ea579a4de66b6c2fe43793fc3ef546c9f` | `1a6aa73f9fb3bfe50949c804ac1bf484b27f977c3a60e56a29b268f4486e0e91` |
@@ -82,3 +82,48 @@ The active constants are deliberately named `CHARTJS_SCENE` and `CHARTJS_PDF`,
 not `PRE_SESSION_*`. Input, dependency, font and canvas expectations are unchanged.
 The twice-fresh-session regression and all direct/packaged gates must run again
 after this reviewed update. Explained golden drift is not a waiver of those gates.
+
+## Second review: original-Au ordinary borders
+
+Also reviewed on 2026-09-05, using Linux x86_64 source
+`aca33ebf8d84bff2e670fb7eb6b315ab5b6b6ed3`,
+[run 33959370205](https://github.com/oxhq/pliego/actions/runs/33959370205),
+job `101288421710`, artifact `9967937144` (`pliego-direct-chartjs-oracle`).
+The 1,013,032-byte ZIP SHA-256 is
+`4dfbb9eed7a2f4fece2e9d14d059e744996fc005944bae0ada44a9d126e67de3`.
+Its transport inventory and every retained manifest entry were verified. The run
+failed the first reviewed scene assertion; this review does not relabel it green.
+
+The prior reviewed output above and this candidate have identical HTML, font,
+Chart.js, canvas, package files and session evidence. The original `974f7eedb61d`
+layout bundle supplies unchanged integer source rectangles. All 216 scene
+operations retain their order, text, resources and page. Exactly 25 ordinary
+border strips now carry original-Au authority, derived independently from those
+source rectangles plus the authored padding/borders. The WebRender paint path
+is unchanged; no integer authority is reconstructed from floating-point bounds.
+
+Only thirteen projected border rectangles change: operations
+9/10/89/90/92/102/103/105/113/114/124/135/144. The maximum delta is
+0.000030517578125 CSS px. Applying only the independently derived bounds and
+rectangle paths reconstructs all 122,457 candidate scene bytes exactly. The other
+twelve newly authoritative borders have unchanged projections.
+
+Complete PDF inspection finds fourteen changed numeric operands in six existing
+graphics-state blocks (9/10/89/90/92/124), with no operator, text or resource
+addition, removal or reordering. The object inventory differs only in the content
+stream and its content-derived XMP/trailer IDs. PDF size changes from 35,350 to
+35,333 bytes. This diagnostic inspection again uses pypdf 6.10.0.
+
+Same-Poppler 26.07.0 comparisons have zero changed pixels at both 144 and 288 DPI.
+Full-page visual review finds no changed clipping, overlap or missing content.
+The unchanged canvas remains a bitmap; this proves neither vector chart text nor
+API 2 Chart.js support, accessibility, cross-platform identity or performance.
+
+| Artifact | Active reviewed SHA-256 |
+| --- | --- |
+| Scene | `5711745bb1adb142493dd487b81ece7f521eea35df5873bd13baef15bb0b55bf` |
+| PDF | `790dde4a113267ca3816bd048f3dd9ed68f98917b30dae44c587f094c44ed65e` |
+
+Only `CHARTJS_SCENE` and `CHARTJS_PDF` change after this second review. All input,
+font, dependency, canvas, readiness and page expectations remain unchanged.
+Fresh direct and package gates are still required.

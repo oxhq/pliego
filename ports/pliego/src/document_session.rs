@@ -3327,9 +3327,9 @@ mod tests {
     // Reviewed original-Au projection snapshot, not unchanged pre-session bytes.
     // See docs/pliego/chartjs-regression-snapshot.md for full differential provenance.
     const CHARTJS_SCENE: &str =
-        "sha256:13afbbf91aae65fe9c1befdde9d50f99a34efe94ae67f1281d62cdcd329b4b47";
+        "sha256:5711745bb1adb142493dd487b81ece7f521eea35df5873bd13baef15bb0b55bf";
     const CHARTJS_PDF: &str =
-        "sha256:1a6aa73f9fb3bfe50949c804ac1bf484b27f977c3a60e56a29b268f4486e0e91";
+        "sha256:790dde4a113267ca3816bd048f3dd9ed68f98917b30dae44c587f094c44ed65e";
     const PRE_SESSION_CHARTJS_CANVAS: &str =
         "sha256:3625ec653c27b9e1c8d0fa969acbd88cc161804eeea4cd3046795d411e8118c9";
 
