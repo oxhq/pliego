@@ -354,7 +354,7 @@ def scene_links(scene: dict[str, Any], case: dict[str, Any]) -> list[list[dict[s
                     )
                     require(
                         operation.get("data") == f"M {x} {y} L {x + w} {y} L {x + w} {y + h} L {x} {y + h} Z"
-                        and operation.get("fill_rule") == "non_zero",
+                        and operation.get("fill_rule") == "non-zero",
                         "ordinary border path is not its exact closed rectangle",
                     )
                 paints.append([rect, rgba])
@@ -681,7 +681,7 @@ def self_test() -> None:
             "bounds": dict(zip(("x", "y", "width", "height"), rect)),
             "fill": dict(zip(("r", "g", "b", "a"), rgba)),
             "data": f"M {x} {y} L {x + w} {y} L {x + w} {y + h} L {x} {y + h} Z",
-            "fill_rule": "non_zero",
+            "fill_rule": "non-zero",
         }
 
     border_scene = {
@@ -698,7 +698,18 @@ def self_test() -> None:
         ],
     }
     scene_links(border_scene, border_case)
-    for corruption in ("shifted", "width", "overlap", "missing", "duplicate", "reordered", "color", "path", "float"):
+    for corruption in (
+        "shifted",
+        "width",
+        "overlap",
+        "missing",
+        "duplicate",
+        "reordered",
+        "color",
+        "path",
+        "fill-rule",
+        "float",
+    ):
         wrong = copy.deepcopy(border_scene)
         operations = wrong["pages"][0]["operations"]
         if corruption in ("shifted", "width", "overlap"):
@@ -726,6 +737,8 @@ def self_test() -> None:
             operations[0]["fill"]["r"] = 0
         elif corruption == "path":
             operations[0]["data"] = operations[0]["data"].removesuffix(" Z")
+        elif corruption == "fill-rule":
+            operations[0]["fill_rule"] = "non_zero"
         else:
             operations[0]["bounds"]["x"] = float(operations[0]["bounds"]["x"])
         try:
