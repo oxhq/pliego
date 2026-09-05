@@ -11,6 +11,14 @@ on:
         description: Exact 40-character package source SHA with opt-in session diagnostics
         type: string
         required: true
+      census:
+        description: Fixed matched controls or exact link/table fixture order; no retry-until-pass
+        type: choice
+        required: true
+        default: matched-controls
+        options:
+          - matched-controls
+          - package-order
 
 permissions:
   contents: read
@@ -23,7 +31,7 @@ concurrency:
 jobs:
   diagnostics:
     runs-on: macos-15-intel
-    timeout-minutes: 15
+    timeout-minutes: ${{ inputs.census == 'package-order' && 25 || 15 }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
@@ -68,10 +76,11 @@ jobs:
             --artifact-id "$ARTIFACT_ID" --source-sha "$SOURCE_SHA" --bundle macos-x86_64 \
             --out "$RUNNER_TEMP/session-diagnostic-candidate")"
           printf 'binary=%s\n' "$binary" >> "$GITHUB_OUTPUT"
-      - name: Run fixed nine-attempt census with unchanged budgets
+      - name: Run selected fixed census with unchanged per-render budgets
         env:
           BINARY: ${{ steps.runtime.outputs.binary }}
           SOURCE_SHA: ${{ inputs.source_sha }}
+          CENSUS_MODE: ${{ inputs.census }}
         run: |
           set -euo pipefail
           # The checker enables its private flag only for render-api2 children.
@@ -79,6 +88,7 @@ jobs:
           # process timeout aborts the census; it is not a successful diagnosis.
           "$RUNNER_TEMP/session-diagnostic-python/bin/python" ports/pliego/tests/check_api2_session_diagnostics.py \
             --binary "$BINARY" --source-commit "$SOURCE_SHA" \
+            --census "$CENSUS_MODE" \
             --proof-directory "$RUNNER_TEMP/session-diagnostic-census" \
             2>&1 | tee "$RUNNER_TEMP/session-diagnostic-setup/census.log"
       - name: Retain all outcomes and provenance, excluding the large executable

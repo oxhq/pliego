@@ -13,6 +13,10 @@ and private failure-only stderr are checked independently. Empty stderr on a
 success or artifact rejection does not imply any unobserved session milestone.
 An outer process timeout retains partial streams and stops the entire census;
 subprocess.run reaps its direct child, but descendant cleanup is not proven.
+
+The optional package-order census runs the exact link and table-background
+fixture lists in their original order three times. It observes session outcomes,
+not their PDF geometry or the intervening package suites; no result is retried.
 """
 
 from __future__ import annotations
@@ -47,6 +51,7 @@ from check_api2_contract import (
     verify_artifact,
 )
 from check_api2_links import CASES, HTTPS, build_fixture, require, verify_delivery
+from check_api2_table_backgrounds import CASES as TABLE_BACKGROUND_CASES
 
 
 REPOSITORY = Path(__file__).resolve().parents[3]
@@ -65,6 +70,8 @@ HOST_MS = 10000
 MAX_LINE = 8192
 REPEATS = 3
 NAMES = ("unsafe-javascript", "https-control", "no-href-control")
+MODES = ("matched-controls", "package-order")
+PACKAGE_CASES = {"links": CASES, "table-backgrounds": TABLE_BACKGROUND_CASES}
 UNSAFE = next(case for case in CASES if case["name"] == NAMES[0])
 TIMEOUT_CLASSES = {"SETTLEMENT_TIMEOUT", "READINESS_TIMEOUT", "CONTROLLED_CAPTURE_TIMEOUT"}
 REJECTIONS = {"event-loop-unavailable", "target-changed", "advance-state-changed", "timer-rejected", "other-rejection"}
@@ -395,7 +402,12 @@ def diagnostic_facts(raw: bytes, protocol: dict[str, Any]) -> dict[str, Any]:
     return {"valid": True, "available": True, "disposition": "emitted", "milestones": record}
 
 
-def case_for(name: str) -> dict[str, Any]:
+def case_for(name: str, suite: str | None = None) -> dict[str, Any]:
+    if suite is not None:
+        require(suite in PACKAGE_CASES, "unknown diagnostic suite")
+        matches = [case for case in PACKAGE_CASES[suite] if case["name"] == name]
+        require(len(matches) == 1, "unknown or ambiguous diagnostic suite case")
+        return copy.deepcopy(matches[0])
     require(name in NAMES, "unknown diagnostic case")
     if name == NAMES[0]:
         return copy.deepcopy(UNSAFE)
@@ -403,7 +415,15 @@ def case_for(name: str) -> dict[str, Any]:
     return {"name": name, "body": body, "text": ["UNSAFE"]}
 
 
-def schedule() -> list[dict[str, Any]]:
+def schedule(mode: str = "matched-controls") -> list[dict[str, Any]]:
+    require(mode in MODES, "unknown census mode")
+    if mode == "package-order":
+        return [
+            {"repeat": repeat + 1, "suite": suite, "name": case["name"]}
+            for repeat in range(REPEATS)
+            for suite, cases in PACKAGE_CASES.items()
+            for case in cases
+        ]
     # Rotate first position; this is one predetermined census, not retries.
     return [
         {"repeat": repeat + 1, "name": name} for repeat in range(REPEATS) for name in NAMES[repeat:] + NAMES[:repeat]
@@ -461,7 +481,7 @@ CHECK_ERRORS = (AssertionError, ValueError, TypeError, KeyError, OSError)
 
 
 def run_attempt(binary: Path, output: Path, item: dict[str, Any], probe: dict[str, Any]) -> dict[str, Any]:
-    payload, source = build_fixture(REPOSITORY, output, case_for(item["name"]))
+    payload, source = build_fixture(REPOSITORY, output, case_for(item["name"], item.get("suite")))
     require(strict_json(payload)["settlement"]["limits"]["host_wall_ms"] == HOST_MS, "fixture budget changed")
     (output / "request.json").write_bytes(payload)
     job = output / "job"
@@ -503,7 +523,7 @@ def run_attempt(binary: Path, output: Path, item: dict[str, Any], probe: dict[st
 
 
 def run_census(binary: Path, output: Path, probe: dict[str, Any], report: dict[str, Any]) -> None:
-    for index, item in enumerate(schedule(), 1):
+    for index, item in enumerate(report["schedule"], 1):
         target = output / f"{index:02}-{item['name']}"
         try:
             row = run_attempt(binary, target, item, probe)
@@ -520,7 +540,7 @@ def run_census(binary: Path, output: Path, probe: dict[str, Any], report: dict[s
         report["attempts"].append(row)
         (output / "report.json").write_bytes(canonical_json(report))
         print(
-            f"{index}/9 {item['name']}: result={row['protocol'].get('status', 'invalid')}, "
+            f"{index}/{len(report['schedule'])} {item['name']}: result={row['protocol'].get('status', 'invalid')}, "
             f"diagnostic={row['session_diagnostic'].get('disposition', 'invalid')}",
             flush=True,
         )
@@ -533,6 +553,7 @@ def main() -> None:
     parser.add_argument("--proof-directory", type=Path)
     parser.add_argument("--source-commit")
     parser.add_argument("--pypdf-version", default="6.16.2")
+    parser.add_argument("--census", choices=MODES, default="matched-controls")
     args = parser.parse_args()
     require(importlib.metadata.version("pypdf") == args.pypdf_version, "pypdf differs from required parser pin")
     if args.self_test:
@@ -557,7 +578,8 @@ def main() -> None:
         "activation_performed": False,
         "host_wall_ms": HOST_MS,
         "outer_process_seconds": OUTER_SECONDS,
-        "schedule": schedule(),
+        "census_mode": args.census,
+        "schedule": schedule(args.census),
         "attempts": [],
         "census_status": "probing",
         "host": {"system": platform.system(), "machine": platform.machine(), "release": platform.release()},
@@ -781,6 +803,37 @@ class SelfTest(unittest.TestCase):
                 )
                 self.assertEqual((control / "input/document.html").read_bytes(), expected)
 
+    def test_package_order_uses_exact_existing_fixtures_and_budgets(self) -> None:
+        entries = schedule("package-order")
+        original = [(suite, case) for suite, cases in PACKAGE_CASES.items() for case in cases]
+        self.assertEqual(len(original), 36)
+        self.assertEqual(len(entries), 108)
+        self.assertEqual(
+            [(row["repeat"], row["suite"], row["name"]) for row in entries],
+            [(repeat, suite, case["name"]) for repeat in (1, 2, 3) for suite, case in original],
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            for index, (suite, case) in enumerate(original):
+                copied = case_for(case["name"], suite)
+                self.assertEqual(copied, case)
+                self.assertIsNot(copied, case)
+                payload, source = build_fixture(REPOSITORY, root / f"copy-{index}", copied)
+                expected, original_source = build_fixture(REPOSITORY, root / f"original-{index}", case)
+                self.assertEqual(payload, expected)
+                validate_input(payload, source)
+                self.assertEqual(strict_json(payload)["settlement"]["limits"]["host_wall_ms"], HOST_MS)
+                for file in ("document.html", "styles.css", "font.ttf"):
+                    self.assertEqual(
+                        (source / "input" / file).read_bytes(), (original_source / "input" / file).read_bytes()
+                    )
+        with self.assertRaises(AssertionError):
+            schedule("retry-until-pass")
+        with self.assertRaises(AssertionError):
+            case_for("unsafe-javascript", "unknown")
+        with self.assertRaises(AssertionError):
+            case_for("unknown", "links")
+
     def test_successful_closure_and_corruptions(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             job = Path(temp)
@@ -831,7 +884,7 @@ class SelfTest(unittest.TestCase):
             self.assertEqual((root / "stderr.txt").read_bytes(), b"private partial")
             record = strict_json((root / "process.json").read_bytes(), floats=True)
             self.assertFalse(record["descendant_cleanup_verified"])
-            report = {"attempts": [], "census_status": "running"}
+            report = {"attempts": [], "census_status": "running", "schedule": schedule()}
             with patch(__name__ + ".run_attempt", side_effect=OuterTimeout("stop")) as attempt:
                 with self.assertRaises(OuterTimeout):
                     run_census(Path("dummy"), root, {}, report)
