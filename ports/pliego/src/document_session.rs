@@ -3045,10 +3045,13 @@ mod tests {
 
     const INVOICE_INPUT: &str =
         "sha256:b0fa2d0b18e845e84c1229408622bd85e092ecf4d78b0878939006fb26926dce";
-    const PRE_SESSION_INVOICE_SCENE: &str =
-        "sha256:c1874a92a71ecde580f15075fe7d07ad6e5739ec794ad79291c9ba5b9bce1681";
-    const PRE_SESSION_INVOICE_PDF: &str =
-        "sha256:401e756f43adad12a137478cf36abe8273e89405e998b9d537ab62056d2face9";
+    // Current snapshot after reviewed paint-order and original-Au projection changes.
+    // Historical hashes and same-input differential proof remain documented in
+    // docs/pliego/invoice-regression-snapshot.md; these are not unchanged shell bytes.
+    const INVOICE_SCENE: &str =
+        "sha256:97997f0c5863c1ff27cf0511d7a96c22121216d6ca3320191ad369146af790c5";
+    const INVOICE_PDF: &str =
+        "sha256:952988f08a5be37dd7cc262326d2a50c592ff0a329c84ae82b9c1d5381f5f96e";
 
     fn retain_invoice_oracle_evidence(input: &Path, outcome: &DocumentOutcome, scene: &[u8]) {
         let Some(root) = std::env::var_os(INVOICE_ORACLE_EVIDENCE_ENV) else {
@@ -3094,13 +3097,13 @@ mod tests {
             "test": ISOLATED_TEST, "case": "invoice-oracle",
             "source_commit": env!("PLIEGO_SOURCE_COMMIT"),
             "target": env!("PLIEGO_BUILD_TARGET"),
-            "expected": {"input_sha256": INVOICE_INPUT, "scene_sha256": PRE_SESSION_INVOICE_SCENE,
-                "pdf_sha256": PRE_SESSION_INVOICE_PDF, "pages": 2},
+            "expected": {"input_sha256": INVOICE_INPUT, "scene_sha256": INVOICE_SCENE,
+                "pdf_sha256": INVOICE_PDF, "pages": 2},
             "actual": {"input_sha256": input_hash, "scene_sha256": scene_hash,
                 "pdf_sha256": pdf_hash, "pages": outcome.capture.scene.pages.len()},
             "matches": {"input": input_hash == INVOICE_INPUT,
-                "scene": scene_hash == PRE_SESSION_INVOICE_SCENE,
-                "pdf": pdf_hash == PRE_SESSION_INVOICE_PDF,
+                "scene": scene_hash == INVOICE_SCENE,
+                "pdf": pdf_hash == INVOICE_PDF,
                 "pages": outcome.capture.scene.pages.len() == 2},
             "artifacts": artifacts,
             "scope": "Original SceneCapture and emitted bytes; no raw layout snapshot is retained by DocumentOutcome",
@@ -5602,13 +5605,13 @@ document.fonts.ready.then(() => {
                 assert_eq!(outcome.capture.scene.pages.len(), 2);
                 assert_eq!(
                     content_address(&scene),
-                    PRE_SESSION_INVOICE_SCENE,
-                    "direct invoice scene differs from the exact pre-session servoshell oracle"
+                    INVOICE_SCENE,
+                    "direct invoice scene differs from the reviewed current regression snapshot"
                 );
                 assert_eq!(
                     content_address(&outcome.pdf),
-                    PRE_SESSION_INVOICE_PDF,
-                    "direct invoice PDF differs from the exact pre-session servoshell oracle"
+                    INVOICE_PDF,
+                    "direct invoice PDF differs from the reviewed current regression snapshot"
                 );
                 assert_eq!(outcome.environment, RenderEnvironment::default());
                 assert!(!outcome.allow_host_fonts);

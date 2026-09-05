@@ -12,7 +12,9 @@ border styles, mixed colors, rowspan, and headerless pagination remain explicit
 rejection cases. Headed pagination must preserve the exact geometry of repeated
 headers, row text, and every grid edge through the public scene and PDF.
 Entirely invisible collapsed borders must emit no artificial grid paths.
-Horizontal rules are tied to their row glyph baselines and page bounds. The
+Horizontal rules retain their centered source width, intersect only their owning
+page, and are never duplicated onto a following page. Their exact source geometry
+is tied to the authored line box/padding and pinned Ahem glyph baselines. The
 uniform-grid oracle does not establish absolute text/edge alignment; visual
 document qualification remains separate.
 """
@@ -24,6 +26,7 @@ import copy
 import json
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -68,6 +71,8 @@ TOKEN = re.compile(r"R[0-9]{3}C[01]|HDR[LR]")
 BORDER_COLOR = {"r": 34, "g": 34, "b": 34, "a": 255}
 LINE_HEIGHT_PX = 16
 CELL_PADDING_PX = 8
+FONT_SIZE_PX = 12
+HORIZONTAL_RULE_POLICY = "centered-source-rule-intersect-owning-page-v1"
 
 
 def require(condition: bool, message: str) -> None:
@@ -144,13 +149,26 @@ def check_horizontal_borders(
         (min(baselines[left][0], baselines[right][0]), max(baselines[left][1], baselines[right][1]))
         for left, right in row_tokens
     ]
+    # The committed Ahem has 1000 units/em, ascent 800, descent 200 and no
+    # line gap (asserted in self_test). The rule starts after the line box's
+    # descent/half-leading and bottom padding, before its centered border.
+    baseline_to_rule_top = (LINE_HEIGHT_PX - FONT_SIZE_PX) * 60 // 2 + FONT_SIZE_PX * 60 // 5 + CELL_PADDING_PX * 60
     ordered = sorted(paths, key=lambda path: path["bounds"]["y"])
     last_bottom = -1
     for index, path in enumerate(ordered):
         bounds = path["bounds"]
         require(path.get("fill") == BORDER_COLOR and bool(path.get("data")), "invoice rule paint differs")
         require(bounds["x"] == 0 and bounds["width"] == 420 * 60, "invoice rule does not span the exact grid width")
-        require(bounds["height"] == (120 if index == 0 else 60), "header/body invoice rule width differs")
+        require(row_baselines[index][0] == row_baselines[index][1], "fixture row baselines differ")
+        source_y = row_baselines[index][1] + baseline_to_rule_top
+        source_height = 120 if index == 0 else 60
+        require(bounds["y"] == source_y, "invoice rule differs from its exact authored row edge")
+        require(
+            0 <= source_y and source_y + source_height // 2 <= page_size["height"],
+            "owning row edge escaped the page",
+        )
+        expected_height = min(source_y + source_height, page_size["height"]) - source_y
+        require(bounds["height"] == expected_height, "invoice rule differs from its exact owning-page intersection")
         require(bounds["y"] > last_bottom, "invoice rules overlap or are out of order")
         last_bottom = bounds["y"] + bounds["height"]
         require(
@@ -160,12 +178,6 @@ def check_horizontal_borders(
         require(bounds["y"] > row_baselines[index][1], "invoice rule does not follow its row baseline")
         if index + 1 < len(row_baselines):
             require(last_bottom < row_baselines[index + 1][0], "invoice rule does not precede the next row baseline")
-        # A generous metric-independent bound: the entire declared line box,
-        # bottom padding and rule thickness. Do not guess font ascent/descent.
-        require(
-            last_bottom - row_baselines[index][1] <= (LINE_HEIGHT_PX + CELL_PADDING_PX) * 60 + bounds["height"],
-            "invoice rule is too far below its row baseline",
-        )
 
 
 def check_scene(scene: dict[str, Any], case: dict[str, Any]) -> dict[str, Any]:
@@ -235,7 +247,7 @@ def build_fixture(repository: Path, root: Path, case: dict[str, Any]) -> tuple[b
     )
     css = (
         '@font-face{font-family:Ahem;src:url("font.ttf") format("truetype");}'
-        "html,body{margin:0}body{font-family:Ahem;font-size:12px;"
+        f"html,body{{margin:0}}body{{font-family:Ahem;font-size:{FONT_SIZE_PX}px;"
         f"line-height:{LINE_HEIGHT_PX}px;color:#000}}"
         "table{border-collapse:collapse;width:420px}"
         f"td,th{{border:1px solid #222;padding:{CELL_PADDING_PX}px;font-weight:normal;text-align:left}}"
@@ -396,6 +408,17 @@ def run_case(
 
 
 def self_test() -> None:
+    font = (Path(__file__).parent / "fixtures/text-scene/Ahem.ttf").read_bytes()
+    tables = {
+        tag: offset
+        for tag, _, offset, _ in (
+            struct.unpack_from(">4sIII", font, 12 + index * 16)
+            for index in range(struct.unpack_from(">H", font, 4)[0])
+        )
+    }
+    require(struct.unpack_from(">H", font, tables[b"head"] + 18)[0] == 1000, "Ahem units/em changed")
+    for table, offset in ((b"hhea", 4), (b"OS/2", 68)):
+        require(struct.unpack_from(">hhh", font, tables[table] + offset) == (800, -200, 0), "Ahem line metrics changed")
     for valid in ("1", "30", str(PROBE_TIMEOUT_SECONDS)):
         require(process_timeout_seconds(valid) == int(valid), "valid process timeout was changed")
     for invalid in ("0", "-1", str(PROBE_TIMEOUT_SECONDS + 1), "1.5", "nan", "invalid"):
@@ -536,16 +559,45 @@ def self_test() -> None:
             "fill": BORDER_COLOR,
             "data": "M 0 0 Z",
         }
-        for y, height in ((600, 120), (1200, 60), (1800, 60))
+        for y, height in ((1920, 120), (3960, 60), (5940, 60))
     ]
     horizontal_scene = copy.deepcopy(scene)
     horizontal_scene["pages"][0]["operations"] = horizontal + [
         {"type": "text", "text": token, "glyphs": [{"x": 60 + column * 12000, "y": y}]}
-        for row, y in ((["HDRL", "HDRR"], 300), (["R000C0", "R000C1"], 900), (["R001C0", "R001C1"], 1500))
+        for row, y in ((["HDRL", "HDRR"], 1176), (["R000C0", "R000C1"], 3216), (["R001C0", "R001C1"], 5196))
         for column, token in enumerate(row)
     ]
     horizontal_case = {**case, "header": True, "borders": "horizontal"}
     check_scene(horizontal_scene, horizontal_case)
+    clipped = copy.deepcopy(horizontal_scene)
+    clipped["pages"][0]["size_app_units"]["height"] = 5971
+    clipped["pages"][0]["operations"][2]["bounds"]["height"] = 31
+    check_scene(clipped, horizontal_case)
+    for change in ("excess-clip", "unclipped", "wrong-position", "wrong-width", "duplicate", "interior-clip", "edge-outside"):
+        invalid = copy.deepcopy(clipped)
+        operations = invalid["pages"][0]["operations"]
+        if change == "excess-clip":
+            operations[2]["bounds"]["height"] = 30
+        elif change == "unclipped":
+            operations[2]["bounds"]["height"] = 60
+        elif change == "wrong-position":
+            operations[2]["bounds"]["y"] += 1
+            operations[2]["bounds"]["height"] -= 1
+        elif change == "wrong-width":
+            operations[2]["bounds"]["width"] -= 1
+        elif change == "duplicate":
+            operations.append(copy.deepcopy(operations[2]))
+        elif change == "interior-clip":
+            operations[1]["bounds"]["height"] = 31
+        else:
+            invalid["pages"][0]["size_app_units"]["height"] = 5969
+            operations[2]["bounds"]["height"] = 29
+        try:
+            check_scene(invalid, horizontal_case)
+        except AssertionError:
+            pass
+        else:
+            raise AssertionError(f"self-test accepted centered-rule {change} corruption")
     for change in (
         "width",
         "missing",
@@ -654,6 +706,7 @@ def main() -> None:
         "engine": engine,
         "probe_process": probe_process,
         "process_timeout_seconds": args.process_timeout_seconds,
+        "horizontal_rule_policy": HORIZONTAL_RULE_POLICY,
         "cases": [],
     }
     repository = Path(__file__).resolve().parents[3]
