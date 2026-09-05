@@ -222,6 +222,27 @@ pub enum UnsupportedPaintKind {
     SvgInvalidPath,
 }
 
+impl UnsupportedPaintKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Box => "box",
+            Self::RootBackground => "root-background",
+            Self::Outline => "outline",
+            Self::CollapsedTableBorders => "collapsed-table-borders",
+            Self::Iframe => "iframe",
+            Self::TextEffects => "text-effects",
+            Self::ContentGeometry => "content-geometry",
+            Self::SvgAnimation => "svg-animation",
+            Self::SvgCompositing => "svg-compositing",
+            Self::SvgStroke => "svg-stroke",
+            Self::SvgPaint => "svg-paint",
+            Self::SvgImage => "svg-image",
+            Self::SvgText => "svg-text",
+            Self::SvgInvalidPath => "svg-invalid-path",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CanvasCaptureLimit {
     Placements,
