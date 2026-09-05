@@ -58,6 +58,13 @@ Both existing resolvers verify package bytes before this coordinator is invoked.
 The candidate metadata must identify native 0.4.0, not a locally rebuilt 0.3.3.
 Package retention alone does not prove the final release matrix passed.
 
+The manual `pliego-native-regression.yml` workflow is preflight-only: its only
+inputs are the exact candidate artifact and source SHA. It downloads the
+published baseline without an app install, first runs six synthetic Linux
+lifecycle controls, then retains the six-PDF native preflight and its offline
+verification. It has a 900-second owned-service bound and a 35-minute job bound.
+There is no timed-mode dispatch input or automatically generated acceptance.
+
 ```sh
 python benchmarks/integration/run_native_regression.py \
   --candidate /verified/candidate/pliego \
@@ -83,6 +90,16 @@ exit/remaining descendant, bounded-output overflow, scoped cleanup, and the
 unchanged `CGROUP_BUSY` behavior for a competing sampler. These are **not yet
 provided by the portable unit tests**. Do not set an acceptance field merely
 because the source tests passed.
+
+`test_native_batch_lifecycle.py` runs the actual fixed launcher and unchanged
+sampler against an immutable CPython executable with generated scripts in two
+separate owned jobs. The scripts intentionally fail, hang, kill their launcher
+while leaving a descendant, overflow output, or recover; a held real sampler
+lock tests `CGROUP_BUSY`. These are explicitly synthetic control records, not
+PDFs, native timing observations or manufactured native overlap. Their shorter
+1,000/5,000ms test deadlines do not change the native campaign's 65,000ms bound.
+Raw command/output, process identities and both job trees are retained only
+after scoped cleanup is established. An outer timeout stops the control suite.
 
 Only after those gates, retain an owner-reviewed JSON acceptance record:
 
@@ -125,6 +142,7 @@ ratio is calculated. Incomplete/incorrect populations have no aggregate ratio.
 ```sh
 python benchmarks/integration/test_native_regression.py
 python -O benchmarks/integration/test_native_regression.py
+python benchmarks/integration/test_native_batch_lifecycle.py --self-test
 php -l benchmarks/integration/native_batch_broker.php
 ruff check benchmarks/integration/native_batch_launcher.py \
   benchmarks/integration/run_native_regression.py \

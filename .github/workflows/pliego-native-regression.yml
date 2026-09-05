@@ -1,0 +1,223 @@
+name: Pliego native regression preflight
+
+on:
+  workflow_dispatch:
+    inputs:
+      artifact_id:
+        description: Exact Linux x86_64 candidate package artifact ID
+        type: string
+        required: true
+      source_sha:
+        description: Exact 40-character candidate package source SHA
+        type: string
+        required: true
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: pliego-native-preflight-${{ github.ref }}-${{ inputs.source_sha }}
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - name: Validate fixed preflight-only controls
+        env:
+          ARTIFACT_ID: ${{ inputs.artifact_id }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, re
+          from pathlib import Path
+          source, artifact = os.environ['SOURCE_SHA'], os.environ['ARTIFACT_ID']
+          if not re.fullmatch(r'[0-9a-f]{40}', source) or not re.fullmatch(r'[1-9][0-9]{0,19}', artifact):
+              raise SystemExit('Exact source SHA and positive artifact ID required')
+          setup = Path(os.environ['RUNNER_TEMP']) / 'native-regression-setup'
+          setup.mkdir()
+          controls = {'mode': 'preflight', 'repeat': 1, 'source_sha': source, 'artifact_id': int(artifact),
+                      'observations': 4, 'pdfs': 6, 'timed_observations': 0, 'sample_root_wall_deadline_ms': 65000,
+                      'service_seconds': 900, 'job_minutes': 35, 'applications_booted': 0, 'rust_build': False,
+                      'synthetic_lifecycle_controls': 6,
+                      'interruption_boundary': 'Raw prefix is not a complete qualified campaign.'}
+          (setup / 'controls.json').write_text(json.dumps(controls, sort_keys=True) + '\n')
+          PY
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - uses: shivammathur/setup-php@b604ade2a87db23f8871b7182e69ec5e75effb45 # v2
+        with:
+          php-version: '8.4'
+          coverage: none
+          tools: none
+      - name: Install pinned PDF oracle and run portable source tests
+        run: |
+          set -euo pipefail
+          setup="$RUNNER_TEMP/native-regression-setup"
+          sudo apt-get update
+          sudo apt-get install --yes acl ca-certificates e2fsprogs iproute2 libegl1 libfontconfig1 libgl1-mesa-dri poppler-utils util-linux
+          python -m venv "$RUNNER_TEMP/native-regression-python"
+          py="$RUNNER_TEMP/native-regression-python/bin/python"
+          "$py" -m pip install --require-hashes -r benchmarks/integration/real_document_requirements.txt --report "$setup/pip-report.json"
+          "$py" -m pip --version > "$setup/pip-version.txt"
+          dpkg-query -W > "$setup/dpkg-packages.txt"
+          php --version > "$setup/php-version.txt"
+          "$py" benchmarks/integration/test_native_regression.py 2>&1 | tee "$setup/source-tests.log"
+          "$py" -O benchmarks/integration/test_native_regression.py 2>&1 | tee "$setup/optimized-guard-tests.log"
+          "$py" benchmarks/integration/test_native_batch_lifecycle.py --self-test 2>&1 | tee "$setup/lifecycle-source-tests.log"
+          php -l benchmarks/integration/native_batch_broker.php > "$setup/broker-lint.txt"
+      - name: Verify candidate and published v0.3.3; prepare immutable execution closure
+        id: runtime
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ inputs.artifact_id }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          candidate="$(python benchmarks/integration/resolve_development_candidate.py \
+            --artifact-id "$ARTIFACT_ID" --source-sha "$SOURCE_SHA" --out "$RUNNER_TEMP/native-regression-candidate")"
+          baseline="$(python benchmarks/tools/resolve_release.py --target pliego-0.3.3 \
+            --cache "$RUNNER_TEMP/native-regression-v033-cache" --metadata-out "$RUNNER_TEMP/native-regression-setup/v033-identity.json")"
+          runtime=/usr/lib/pliego-native-regression
+          test ! -e "$runtime"
+          sudo install -d -o root -g root -m 0555 "$runtime"
+          sudo install -o root -g root -m 0555 "$candidate" "$runtime/candidate"
+          sudo install -o root -g root -m 0555 "$baseline" "$runtime/baseline"
+          cmp -- "$candidate" "$runtime/candidate"
+          cmp -- "$baseline" "$runtime/baseline"
+          sha256sum "$runtime/candidate" "$runtime/baseline" > "$RUNNER_TEMP/native-regression-setup/installed-binaries.sha256"
+          if ! getent passwd pliego-benchmark-engine >/dev/null; then
+            sudo useradd --system --no-create-home --home-dir /nonexistent/pliego-benchmark-engine --shell /usr/sbin/nologin pliego-benchmark-engine
+          fi
+          test "$(id -u pliego-benchmark-engine)" -gt 0
+          test "$(id -g pliego-benchmark-engine)" -gt 0
+          test "$(getent passwd pliego-benchmark-engine | cut -d: -f6)" = /nonexistent/pliego-benchmark-engine
+          test ! -e /nonexistent/pliego-benchmark-engine
+          engine_temp=/var/lib/pliego-benchmark-engine-temp
+          test ! -e "$engine_temp"
+          sudo install -d -o root -g root -m 0711 "$engine_temp"
+          sudo chattr +A +S +D "$engine_temp"
+          test "$(findmnt -T "$engine_temp" -n -o FSTYPE)" = ext4
+          attributes="$(sudo lsattr -d "$engine_temp" | awk '{print $1}')"
+          [[ "$attributes" == *A* && "$attributes" == *S* && "$attributes" == *D* ]]
+          engine=(sudo setpriv --reuid="$(id -u pliego-benchmark-engine)" --regid="$(id -g pliego-benchmark-engine)" --clear-groups --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs)
+          sudo chown -R root:root "$GITHUB_WORKSPACE/benchmarks" "$GITHUB_WORKSPACE/contracts" "$GITHUB_WORKSPACE/ports/pliego/tests"
+          sudo chmod -R a+rX,go-w "$GITHUB_WORKSPACE/benchmarks" "$GITHUB_WORKSPACE/contracts" "$GITHUB_WORKSPACE/ports/pliego/tests"
+          sudo chmod 0755 "$GITHUB_WORKSPACE/benchmarks/integration/native_batch_launcher.py"
+          ancestors=()
+          ancestor="$GITHUB_WORKSPACE"
+          while [[ "$ancestor" != / ]]; do
+            ancestors+=("$ancestor")
+            ancestor="$(dirname "$ancestor")"
+          done
+          # Root-to-leaf traversal avoids accidentally shadowing readable leaves
+          # with an execute-only ACL when an earlier ancestor was inaccessible.
+          for ((index=${#ancestors[@]} - 1; index >= 0; index--)); do
+            ancestor="${ancestors[$index]}"
+            if ! (cd / && "${engine[@]}" /usr/bin/test -x "$ancestor"); then
+              sudo setfacl -m u:pliego-benchmark-engine:--x "$ancestor"
+            fi
+          done
+          for closure in "$runtime" "$GITHUB_WORKSPACE/benchmarks" "$GITHUB_WORKSPACE/contracts" "$GITHUB_WORKSPACE/ports/pliego/tests"; do
+            "${engine[@]}" /usr/bin/test -r "$closure"
+            "${engine[@]}" /usr/bin/test -x "$closure"
+            test -z "$("${engine[@]}" /usr/bin/find "$closure" -writable -print -quit)"
+          done
+          "${engine[@]}" /usr/bin/test -x "$runtime/candidate"
+          "${engine[@]}" /usr/bin/test -x "$runtime/baseline"
+          "${engine[@]}" /usr/bin/test -x "$GITHUB_WORKSPACE/benchmarks/integration/native_batch_launcher.py"
+          printf 'candidate=%s\nbaseline=%s\npython=%s\nphp=%s\n' "$runtime/candidate" "$runtime/baseline" \
+            "$RUNNER_TEMP/native-regression-python/bin/python" "$(readlink -f "$(command -v php)")" >> "$GITHUB_OUTPUT"
+      - name: Run finite lifecycle controls then six-PDF preflight and offline verification
+        env:
+          CANDIDATE: ${{ steps.runtime.outputs.candidate }}
+          BASELINE: ${{ steps.runtime.outputs.baseline }}
+          PYTHON: ${{ steps.runtime.outputs.python }}
+          PHP: ${{ steps.runtime.outputs.php }}
+        run: |
+          set -euo pipefail
+          setup="$RUNNER_TEMP/native-regression-setup"
+          unit="pliego-native-regression-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.service"
+          test "$(sudo systemctl show "$unit" --property=LoadState --value)" = not-found
+          printf '%s\n' "$unit" > "$setup/service-unit.txt"
+          # Services inherit only public host provenance, never GH_TOKEN or a
+          # whole workflow environment. No network credentials enter the engine.
+          metadata=()
+          for name in GITHUB_ACTIONS GITHUB_RUN_ID GITHUB_RUN_ATTEMPT GITHUB_SHA GITHUB_WORKFLOW_REF GITHUB_REPOSITORY GITHUB_SERVER_URL ImageOS ImageVersion; do
+            if [[ -v "$name" ]]; then
+              metadata+=("--setenv=$name=${!name}")
+            fi
+          done
+          test "$GITHUB_ACTIONS" = true
+          service_status=0
+          sudo systemd-run --quiet --wait --pipe --collect --expand-environment=no --unit="$unit" \
+            "${metadata[@]}" -p Type=exec -p Delegate=yes -p DelegateSubgroup=harness \
+            -p KillMode=control-group -p TimeoutStopSec=10s -p RuntimeMaxSec=900s \
+            -p "WorkingDirectory=$GITHUB_WORKSPACE" \
+            /bin/bash -c '
+              set -euo pipefail
+              unified="$(grep -E "^0::/" /proc/self/cgroup)"
+              test "$(grep -Ec "^0::/" /proc/self/cgroup)" -eq 1
+              relative="${unified#0::}"
+              case "$relative" in */harness) ;; *) exit 1 ;; esac
+              parent="/sys/fs/cgroup${relative%/harness}"
+              printf "+cpu +io +memory +pids" > "$parent/cgroup.subtree_control"
+              export PLIEGO_BENCHMARK_CGROUP_PARENT="$parent"
+              export PLIEGO_BENCHMARK_ENGINE_TEMP_ROOT=/var/lib/pliego-benchmark-engine-temp
+              export GIT_OPTIONAL_LOCKS=0
+              /usr/bin/python3 -E -s benchmarks/tools/process_tree_sampler.py --probe-network-isolation
+              "$1" benchmarks/integration/test_native_batch_lifecycle.py --php "$2" --out "$8"
+              "$1" benchmarks/integration/run_native_regression.py --mode preflight --repeat 1 \
+                --candidate "$3" --candidate-metadata "$4" --baseline "$5" --baseline-metadata "$6" \
+                --php "$2" --out "$7"
+              exec "$1" benchmarks/integration/run_native_regression.py --verify "$7"
+            ' pliego-native-regression "$PYTHON" "$PHP" "$CANDIDATE" \
+              "$RUNNER_TEMP/native-regression-candidate/candidate-identity.json" "$BASELINE" \
+              "$setup/v033-identity.json" "$RUNNER_TEMP/native-regression-preflight" \
+              "$RUNNER_TEMP/native-regression-lifecycle" \
+              2>&1 | tee "$setup/service.log" || service_status=$?
+          printf '%s\n' "$service_status" > "$setup/service.exit"
+          exit "$service_status"
+      - name: Stop only the owned service and expose retained small proof
+        if: always()
+        run: |
+          set -euo pipefail
+          unit="pliego-native-regression-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.service"
+          if [[ "$(sudo systemctl show "$unit" --property=LoadState --value)" != not-found ]]; then
+            sudo systemctl stop "$unit"
+          fi
+          state="$(sudo systemctl show "$unit" --property=ActiveState --value)"
+          [[ "$state" == inactive || "$state" == failed ]]
+          if [[ -d "$RUNNER_TEMP/native-regression-setup" && ! -L "$RUNNER_TEMP/native-regression-setup" ]]; then
+            printf 'unit=%s\nactive_state=%s\n' "$unit" "$state" > "$RUNNER_TEMP/native-regression-setup/service-cleanup.txt"
+          fi
+          for name in native-regression-preflight native-regression-lifecycle native-regression-setup; do
+            path="$RUNNER_TEMP/$name"
+            if [[ -d "$path" && ! -L "$path" ]]; then
+              sudo chown -R "$(id -u):$(id -g)" "$path"
+            fi
+          done
+      - name: Retain every outcome and exact runtime provenance, never native archives
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: pliego-native-preflight-${{ inputs.source_sha }}-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/native-regression-preflight/
+            ${{ runner.temp }}/native-regression-lifecycle/
+            ${{ runner.temp }}/native-regression-setup/
+            ${{ runner.temp }}/native-regression-candidate/candidate-identity.json
+            ${{ runner.temp }}/native-regression-candidate/artifact.json
+            ${{ runner.temp }}/native-regression-candidate/run.json
+          if-no-files-found: error
+          overwrite: false
+          include-hidden-files: true
+          retention-days: 30
