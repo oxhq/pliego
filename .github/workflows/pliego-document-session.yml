@@ -125,13 +125,17 @@ jobs:
           cargo test -p servo-canvas --lib retained_canvas::tests --locked
           cargo test -p pliego --lib --no-default-features --locked
 
-      - name: Prove the bounded paginated fixed-content profile
+      - name: Prove bounded paginated and nonpainting content
         run: |
           set -euo pipefail
           selected="$(cargo test -p servo-layout --lib --locked -- --list)"
           for test_name in \
             pages::tests::fixed_subtrees_cannot_claim_or_extend_the_final_page_count \
             pages::tests::out_of_flow_placeholders_preserve_breaks_and_source_child_indices \
+            display_list::debug_capture_tests::empty_paint_area_requires_exact_valid_zero_extent \
+            display_list::debug_capture_tests::partial_horizontal_rules_preserve_tracks_gaps_and_row_ownership \
+            table::collapsed_border_profile_tests::horizontal_rules_accept_zero_width_gaps_in_either_column \
+            table::collapsed_border_profile_tests::horizontal_rules_reject_dashed_nonzero_invisible_and_nonuniform_lines \
             flow::inline::page_counter_tests::page_counter_realization_preserves_literal_zero_and_utf8_controls \
             flow::inline::page_counter_tests::page_counter_realization_rejects_invalid_context_and_unowned_ranges \
             flow::inline::page_counter_tests::page_counter_offset_rejects_split_token_and_overflow; do
@@ -142,10 +146,18 @@ jobs:
             retains_typed_paged_fixed_and_counter_exclusions -- --exact
           cargo build -p pliego --bin pliego --locked
           python ports/pliego/tests/check_api2_fixed_content.py --self-test
+          fixed_status=0
           python ports/pliego/tests/check_api2_fixed_content.py \
             --binary "$PWD/target/debug/pliego" \
             --source-commit "$(git rev-parse HEAD)" --process-timeout-seconds 180 \
-            --proof-directory "$RUNNER_TEMP/pliego-fixed-content" --require-pdf-text
+            --proof-directory "$RUNNER_TEMP/pliego-fixed-content" --require-pdf-text || fixed_status=$?
+          python ports/pliego/tests/check_api2_nonpainting_content.py --self-test
+          nonpainting_status=0
+          python ports/pliego/tests/check_api2_nonpainting_content.py \
+            --binary "$PWD/target/debug/pliego" \
+            --source-commit "$(git rev-parse HEAD)" --process-timeout-seconds 180 \
+            --proof-directory "$RUNNER_TEMP/pliego-nonpainting-content" --require-pdf-text || nonpainting_status=$?
+          test "$fixed_status" -eq 0 && test "$nonpainting_status" -eq 0
 
       - name: Retain paginated fixed-content proof
         if: always()
@@ -153,6 +165,16 @@ jobs:
         with:
           name: pliego-direct-fixed-content-proof
           path: ${{ runner.temp }}/pliego-fixed-content
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Retain nonpainting-content proof
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: pliego-direct-nonpainting-content-proof
+          path: ${{ runner.temp }}/pliego-nonpainting-content
           include-hidden-files: true
           if-no-files-found: warn
           retention-days: 30

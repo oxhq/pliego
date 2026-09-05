@@ -1125,8 +1125,13 @@ impl PaintTraversalHandler for DisplayListBuilder<'_> {
                 state,
             );
         }
-        self.debug_capture
-            .record_fragment("text", fragment, fragment.base.tag, state);
+        // A zero-size font has no glyph ink. Keep the fragment/layout and the
+        // effect/geometry exclusions above, but do not invent a zero-size PDF
+        // text operation. Barcode generators commonly retain an NBSP this way.
+        if fragment.font.descriptor.pt_size != Au::zero() {
+            self.debug_capture
+                .record_fragment("text", fragment, fragment.base.tag, state);
+        }
         Fragment::build_display_list_for_text_fragment(fragment, self, state, &containing_block);
     }
 
@@ -2767,7 +2772,15 @@ fn box_has_unsupported_paint(
         .border_rect()
         .translate(state.origin.to_vector())
         .to_webrender();
+    let empty_solid_background = geometry_supported &&
+        matches!(&fragment.background_mode, BackgroundMode::Normal) &&
+        background::solid_color_uses_border_box(
+            fragment.style(),
+            fragment.style().get_background().background_image.0.len() - 1,
+        ) &&
+        has_exact_empty_paint_area(fragment.border_rect().translate(state.origin.to_vector()));
     let background_is_unsupported = paints_background &&
+        !empty_solid_background &&
         (!geometry_supported ||
             !paint_rect_geometry_is_supported(border_rect) ||
             match &fragment.background_mode {
@@ -3155,6 +3168,20 @@ fn paint_rect_geometry_is_supported(rect: LayoutRect) -> bool {
         rect.height() > 0.0
 }
 
+/// Only a valid, source-owned zero-area rectangle is nonpainting. Do not confuse
+/// this with rounded-to-zero float geometry or admit negative/overflowing extents.
+fn has_exact_empty_paint_area(rect: PhysicalRect<Au>) -> bool {
+    let (x, y) = (rect.origin.x.0, rect.origin.y.0);
+    let (width, height) = (rect.size.width.0, rect.size.height.0);
+    x >= 0 &&
+        y >= 0 &&
+        width >= 0 &&
+        height >= 0 &&
+        (width == 0 || height == 0) &&
+        x.checked_add(width).is_some_and(|end| end <= MAX_AU.0) &&
+        y.checked_add(height).is_some_and(|end| end <= MAX_AU.0)
+}
+
 fn separate_table_grid_border_rows(
     fragment: &BoxFragmentWithStyle<'_>,
     containing_block_origin: PhysicalPoint<Au>,
@@ -3480,7 +3507,10 @@ fn horizontal_collapsed_table_row_borders(
     row_rect: PhysicalRect<Au>,
     grid_inline_start: Au,
 ) -> Option<Vec<LayoutDebugTableBorder>> {
-    let width = table_info.track_sizes.x.iter().sum::<Au>();
+    let tracks = &table_info.track_sizes.x;
+    if tracks.is_empty() || tracks.iter().any(|width| *width <= Au::zero()) {
+        return None;
+    }
     let mut borders = Vec::with_capacity(2);
     // Match WebRender ownership: only row zero paints its top edge, and each
     // row owns its bottom edge. Keep asymmetric odd-Au half-width rounding.
@@ -3491,23 +3521,43 @@ fn horizontal_collapsed_table_row_borders(
         if top && row_index != 0 {
             continue;
         }
-        let border = table_info.collapsed_borders.y.get(boundary)?.first()?;
-        if border.is_invisible() {
-            continue;
+        let line = table_info.collapsed_borders.y.get(boundary)?;
+        if line.len() != tracks.len() {
+            return None;
         }
+        let Some(border) = line.iter().find(|border| !border.is_invisible()) else {
+            continue;
+        };
         let y = if top {
             y - border.width / 2
         } else {
             y + border.width / 2 - border.width
         };
-        append_solid_table_border(
-            &mut borders,
-            PhysicalRect::new(
-                PhysicalPoint::new(grid_inline_start, y),
-                PhysicalSize::new(width, border.width),
-            ),
-            &border.style_color,
-        );
+        // Resolved tracks retain colspan boundaries. Coalesce only adjacent
+        // visible tracks; never bridge a zero-width hole in an amount rule.
+        let mut column = 0;
+        let mut x = grid_inline_start;
+        while column < line.len() {
+            let start = x;
+            let visible = !line[column].is_invisible();
+            while column < line.len() && line[column].is_invisible() != visible {
+                x = Au(x
+                    .0
+                    .checked_add(tracks[column].0)
+                    .filter(|end| *end <= MAX_AU.0)?);
+                column += 1;
+            }
+            if visible {
+                append_solid_table_border(
+                    &mut borders,
+                    PhysicalRect::new(
+                        PhysicalPoint::new(start, y),
+                        PhysicalSize::new(x - start, border.width),
+                    ),
+                    &border.style_color,
+                );
+            }
+        }
     }
     Some(borders)
 }
@@ -3984,6 +4034,29 @@ mod debug_capture_tests {
     }
 
     #[test]
+    fn empty_paint_area_requires_exact_valid_zero_extent() {
+        let rect = |x, y, width, height| {
+            PhysicalRect::new(
+                PhysicalPoint::new(Au(x), Au(y)),
+                PhysicalSize::new(Au(width), Au(height)),
+            )
+        };
+        assert!(has_exact_empty_paint_area(rect(61, 121, 0, 1800)));
+        assert!(has_exact_empty_paint_area(rect(61, 121, 1800, 0)));
+        assert!(has_exact_empty_paint_area(rect(0, 0, 0, 0)));
+        for invalid in [
+            rect(61, 121, 1, 1800),
+            rect(61, 121, -1, 0),
+            rect(-1, 121, 0, 1800),
+            rect(61, -1, 1800, 0),
+            rect(MAX_AU.0, 0, 1, 0),
+            rect(0, i32::MAX, 0, 1),
+        ] {
+            assert!(!has_exact_empty_paint_area(invalid));
+        }
+    }
+
+    #[test]
     fn ordinary_background_authority_belongs_to_the_original_owner_rectangle() {
         let style =
             ComputedValues::initial_values_with_font_override(Font::initial_values()).to_arc();
@@ -4146,6 +4219,79 @@ mod debug_capture_tests {
             horizontal_collapsed_table_row_borders(&info, 0, first_row, Au(300))
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn partial_horizontal_rules_preserve_tracks_gaps_and_row_ownership() {
+        let border = |width| crate::table::CollapsedBorder {
+            width: Au(width),
+            style_color: BorderStyleColor::new(
+                BorderStyle::Solid,
+                AbsoluteColor::new(ColorSpace::Srgb, 0.5, 0.25, 0.0, 1.0),
+            ),
+        };
+        let mut info = crate::table::SpecificTableGridInfo {
+            collapsed_borders: PhysicalVec::new(
+                vec![vec![border(0); 2]; 4],
+                vec![
+                    vec![border(0), border(61), border(61)],
+                    vec![border(121), border(0), border(121)],
+                    vec![border(0), border(0), border(61)],
+                ],
+            ),
+            track_sizes: PhysicalVec::new(
+                vec![Au(10003), Au(15197), Au(7001)],
+                vec![Au(1200), Au(1800)],
+            ),
+        };
+        assert!(info.has_solid_horizontal_borders());
+        let row = |y, height| {
+            PhysicalRect::new(
+                PhysicalPoint::new(Au(300), Au(y)),
+                PhysicalSize::new(Au(32201), Au(height)),
+            )
+        };
+        let rects = |borders: Vec<LayoutDebugTableBorder>| {
+            borders
+                .iter()
+                .map(|border| {
+                    let rect = border.rect.app_units.as_ref().unwrap();
+                    (rect.x, rect.y, rect.width, rect.height)
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            rects(
+                horizontal_collapsed_table_row_borders(&info, 0, row(120, 1200), Au(300)).unwrap()
+            ),
+            vec![
+                (10303, 90, 22198, 61),
+                (300, 1259, 10003, 121),
+                (25500, 1259, 7001, 121),
+            ]
+        );
+        assert_eq!(
+            rects(
+                horizontal_collapsed_table_row_borders(&info, 1, row(1320, 1800), Au(300)).unwrap()
+            ),
+            vec![(25500, 3089, 7001, 61)]
+        );
+        info.collapsed_borders.y[2].pop();
+        assert!(
+            horizontal_collapsed_table_row_borders(&info, 1, row(1320, 1800), Au(300)).is_none()
+        );
+        info.collapsed_borders.y[2].push(border(61));
+        assert!(
+            horizontal_collapsed_table_row_borders(&info, 1, row(1320, 1800), MAX_AU).is_none()
+        );
+        info.track_sizes.x[1] = Au(i32::MAX);
+        assert!(
+            horizontal_collapsed_table_row_borders(&info, 1, row(1320, 1800), Au(300)).is_none()
+        );
+        info.track_sizes.x[1] = Au::zero();
+        assert!(
+            horizontal_collapsed_table_row_borders(&info, 1, row(1320, 1800), Au(300)).is_none()
         );
     }
 

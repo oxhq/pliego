@@ -433,9 +433,9 @@ impl SpecificTableGridInfo {
         borders.peek().is_some() && borders.all(CollapsedBorder::is_invisible)
     }
 
-    // This profile captures uninterrupted row rules, not arbitrary collapsed
-    // grids. Even transparent vertical edges must have zero width: WebRender
-    // uses their widths for horizontal segment bounds and corner joins.
+    // This profile captures solid row-rule runs separated by zero-width gaps,
+    // not arbitrary collapsed grids. Even transparent vertical edges must have
+    // zero width: WebRender uses their widths for segment bounds and joins.
     pub(crate) fn has_solid_horizontal_borders(&self) -> bool {
         if self.collapsed_borders.x.is_empty() ||
             self.collapsed_borders
@@ -448,15 +448,12 @@ impl SpecificTableGridInfo {
 
         let mut has_visible_line = false;
         for line in &self.collapsed_borders.y {
-            let Some(first) = line.first() else {
+            if line.is_empty() {
                 return false;
-            };
-            if first.is_invisible() {
-                if !line.iter().all(CollapsedBorder::is_invisible) {
-                    return false;
-                }
-                continue;
             }
+            let Some(first) = line.iter().find(|border| !border.is_invisible()) else {
+                continue;
+            };
             let color = first
                 .style_color
                 .color
@@ -466,6 +463,11 @@ impl SpecificTableGridInfo {
                 first.style_color.style != BorderStyle::Solid ||
                 !(color.alpha > 0.0) ||
                 line.iter().any(|border| {
+                    // A positive-width invisible winner can alter a join;
+                    // only authored/resolved zero-width holes are admitted.
+                    if border.is_invisible() {
+                        return !border.width.is_zero();
+                    }
                     border.width != first.width ||
                         border.style_color.style != BorderStyle::Solid ||
                         border
@@ -603,11 +605,21 @@ mod collapsed_border_profile_tests {
     }
 
     #[test]
-    fn horizontal_rules_reject_dashed_partial_and_nonuniform_lines() {
+    fn horizontal_rules_accept_zero_width_gaps_in_either_column() {
+        for column in 0..2 {
+            let mut info = horizontal_grid();
+            info.collapsed_borders.y[1][column] = border(0, 0.0);
+            assert!(info.has_solid_horizontal_borders());
+            assert!(!info.has_no_visible_borders());
+        }
+    }
+
+    #[test]
+    fn horizontal_rules_reject_dashed_nonzero_invisible_and_nonuniform_lines() {
         let mut info = horizontal_grid();
         info.collapsed_borders.y[1][0].style_color.style = BorderStyle::Dashed;
         assert!(!info.has_solid_horizontal_borders());
-        for invisible in invisible_borders() {
+        for invisible in invisible_borders().into_iter().skip(1) {
             for column in 0..2 {
                 let mut info = horizontal_grid();
                 info.collapsed_borders.y[1][column] = invisible.clone();

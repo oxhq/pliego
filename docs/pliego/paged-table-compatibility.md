@@ -27,6 +27,16 @@ positive-width `solid` borders. Repeated headers keep their original coordinates
 widths, and colors on each page. Shared fragment seams and repeated-header edges are
 emitted once.
 
+The 0.4 development API 2 profile also retains partial horizontal amount rules:
+adjacent visible resolved tracks form one segment, and zero-width gaps remain
+unpainted. Colspans preserve their resolved track extents. All visible segments on
+one boundary must have the same positive solid width and color; vertical edges
+must have zero width. A positive-width invisible edge alongside visible segments
+is excluded because it can change border joins. This is not arbitrary collapsed
+border conflict or colgroup-layout support. Exact native checks are in
+`ports/pliego/tests/check_api2_headerless_tables.py`; publication status still
+depends on the exact release artifacts, not this development document.
+
 Complex border styles, border images, radii, mixed resolved styles, vertical or RTL
 table writing modes, bordered oversized rows, and cross-page rowspans are outside
 this profile. They must remain observable as a fallback rather than being silently

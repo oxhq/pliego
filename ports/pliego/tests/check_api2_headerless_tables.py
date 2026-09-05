@@ -14,7 +14,9 @@ headers, row text, and every grid edge through the public scene and PDF.
 Entirely invisible collapsed borders must emit no artificial grid paths.
 Horizontal rules retain their centered source width, intersect only their owning
 page, and are never duplicated onto a following page. Their exact source geometry
-is tied to the authored line box/padding and pinned Ahem glyph baselines. The
+is tied to the authored line box/padding and pinned Ahem glyph baselines. Partial
+rules preserve exact fixed-layout column and colspan extents, without filling
+zero-width gaps. Positive-width invisible joins remain outside this profile. The
 uniform-grid oracle does not establish absolute text/edge alignment; visual
 document qualification remains separate.
 """
@@ -60,12 +62,35 @@ CASES = (
     {"name": "hidden-one-page", "rows": 2, "header": False, "borders": "hidden"},
     {"name": "horizontal-one-page", "rows": 2, "header": True, "borders": "horizontal"},
     {"name": "horizontal-multi-page", "rows": 90, "header": True, "borders": "horizontal"},
+    {"name": "horizontal-partial-two-columns", "rows": 2, "header": True, "borders": "horizontal", "partial": True},
+    {"name": "horizontal-colspan-control", "rows": 2, "header": True, "borders": "horizontal", "colspan": True},
+    {
+        "name": "horizontal-partial-colspan",
+        "rows": 2,
+        "header": True,
+        "borders": "horizontal",
+        "colspan": True,
+        "partial": True,
+    },
     {"name": "reject-headerless-multi-page", "rows": 90, "header": False, "reject": "pagination"},
     {"name": "reject-mixed-color", "rows": 2, "header": False, "reject": "mixed-color"},
     {"name": "reject-dashed", "rows": 2, "header": False, "reject": "dashed"},
     {"name": "reject-rowspan", "rows": 2, "header": False, "reject": "rowspan"},
     {"name": "reject-partially-visible", "rows": 2, "header": False, "reject": "partially-visible"},
-    {"name": "reject-partial-horizontal", "rows": 2, "header": True, "reject": "partial-horizontal"},
+    {
+        "name": "reject-horizontal-mixed-color",
+        "rows": 2,
+        "header": True,
+        "borders": "horizontal",
+        "reject": "horizontal-mixed-color",
+    },
+    {
+        "name": "reject-horizontal-nonzero-invisible",
+        "rows": 2,
+        "header": True,
+        "borders": "horizontal",
+        "reject": "horizontal-nonzero-invisible",
+    },
 )
 TOKEN = re.compile(r"R[0-9]{3}C[01]|HDR[LR]")
 BORDER_COLOR = {"r": 34, "g": 34, "b": 34, "a": 255}
@@ -129,7 +154,11 @@ def check_borders(paths: list[dict[str, Any]], rows: int) -> None:
 
 
 def check_horizontal_borders(
-    paths: list[dict[str, Any]], body: list[str], operations: list[dict[str, Any]], page_size: dict[str, int]
+    paths: list[dict[str, Any]],
+    body: list[str],
+    operations: list[dict[str, Any]],
+    page_size: dict[str, int],
+    case: dict[str, Any],
 ) -> None:
     row_tokens = [("HDRL", "HDRR"), *zip(body[::2], body[1::2])]
     require(len(paths) == len(row_tokens), "horizontal invoice rules lost or duplicated a row boundary")
@@ -158,7 +187,20 @@ def check_horizontal_borders(
     for index, path in enumerate(ordered):
         bounds = path["bounds"]
         require(path.get("fill") == BORDER_COLOR and bool(path.get("data")), "invoice rule paint differs")
-        require(bounds["x"] == 0 and bounds["width"] == 420 * 60, "invoice rule does not span the exact grid width")
+        expected_x, expected_width = 0, 420 * 60
+        if case.get("partial") and index > 0:
+            row = int(row_tokens[index][0][1:4])
+            first_cell_width = 280 * 60 if case.get("colspan") else 210 * 60
+            # The paired fixtures alternate the empty amount-rule side. The
+            # colspan variant has three explicit equal fixed-layout tracks.
+            if row % 2 == 0:
+                expected_x, expected_width = first_cell_width, 420 * 60 - first_cell_width
+            else:
+                expected_width = first_cell_width
+        require(
+            bounds["x"] == expected_x and bounds["width"] == expected_width,
+            "invoice rule does not match its exact visible column segment",
+        )
         require(row_baselines[index][0] == row_baselines[index][1], "fixture row baselines differ")
         source_y = row_baselines[index][1] + baseline_to_rule_top
         source_height = 120 if index == 0 else 60
@@ -214,7 +256,7 @@ def check_scene(scene: dict[str, Any], case: dict[str, Any]) -> dict[str, Any]:
         if case.get("borders") in ("none", "transparent", "hidden"):
             require(not paths, "invisible collapsed borders emitted artificial paths")
         elif case.get("borders") == "horizontal":
-            check_horizontal_borders(paths, body, operations, page["size_app_units"])
+            check_horizontal_borders(paths, body, operations, page["size_app_units"], case)
         else:
             check_borders(paths, len(body) // 2 + int(case["header"]))
         for operation in operations:
@@ -238,6 +280,9 @@ def build_fixture(repository: Path, root: Path, case: dict[str, Any]) -> tuple[b
     payload, source = build_execution_fixture(repository, root, template)
     header = "<thead><tr><th>HDRL</th><th>HDRR</th></tr></thead>" if case["header"] else ""
     rows = "".join(f"<tr><td>R{row:03}C0</td><td>R{row:03}C1</td></tr>" for row in range(case["rows"]))
+    if case.get("colspan"):
+        header = "<thead><tr><th>HDRL</th><th></th><th>HDRR</th></tr></thead>"
+        rows = "".join(f'<tr><td colspan="2">R{row:03}C0</td><td>R{row:03}C1</td></tr>' for row in range(case["rows"]))
     if case.get("reject") == "rowspan":
         rows = '<tr><td rowspan="2">R000C0</td><td>R000C1</td></tr><tr><td>R001C1</td></tr>'
     html = (
@@ -266,10 +311,16 @@ def build_fixture(repository: Path, root: Path, case: dict[str, Any]) -> tuple[b
         css += "td,th{border-color:transparent}"
     elif case.get("borders") == "hidden":
         css += "td,th{border-style:hidden}"
-    elif case.get("borders") == "horizontal" or case.get("reject") == "partial-horizontal":
+    elif case.get("borders") == "horizontal":
         css += "td,th{border:0}td{border-bottom:1px solid #222}th{border-bottom:2px solid #222}"
-        if case.get("reject") == "partial-horizontal":
-            css += "td:last-child{border-bottom:0}"
+        if case.get("partial") or case.get("colspan"):
+            css += "table{table-layout:fixed}"
+        if case.get("partial"):
+            css += "tbody tr:nth-child(odd) td:first-child,tbody tr:nth-child(even) td:last-child{border-bottom:0}"
+        if case.get("reject") == "horizontal-mixed-color":
+            css += "td:last-child{border-bottom-color:#d00}"
+        elif case.get("reject") == "horizontal-nonzero-invisible":
+            css += "td:last-child{border-bottom:1px solid transparent}"
     (source / "input/document.html").write_text(html, encoding="utf-8", newline="\n")
     (source / "input/styles.css").write_text(css + "\n", encoding="utf-8", newline="\n")
     manifest = json.loads((source / "input-manifest.json").read_bytes())
@@ -280,7 +331,7 @@ def build_fixture(repository: Path, root: Path, case: dict[str, Any]) -> tuple[b
     (source / "input-manifest.json").write_bytes(manifest_bytes)
     request = json.loads(payload)
     request["input"]["manifest"].update(sha256=sha256_bytes(manifest_bytes), bytes=len(manifest_bytes))
-    if case.get("borders") == "horizontal" or case.get("reject") == "partial-horizontal":
+    if case.get("borders") == "horizontal":
         # Match the invoice minimizer's zero-margin page, so grid x=0 is exact.
         request["page"]["margins_app_units"] = dict.fromkeys(("top", "right", "bottom", "left"), 0)
     request["settlement"]["limits"]["host_wall_ms"] = 10000
@@ -412,8 +463,7 @@ def self_test() -> None:
     tables = {
         tag: offset
         for tag, _, offset, _ in (
-            struct.unpack_from(">4sIII", font, 12 + index * 16)
-            for index in range(struct.unpack_from(">H", font, 4)[0])
+            struct.unpack_from(">4sIII", font, 12 + index * 16) for index in range(struct.unpack_from(">H", font, 4)[0])
         )
     }
     require(struct.unpack_from(">H", font, tables[b"head"] + 18)[0] == 1000, "Ahem units/em changed")
@@ -455,7 +505,7 @@ def self_test() -> None:
         process = json.loads((output / "process.json").read_bytes())
         require(process["outcome"] == "host-timeout" and process["limit_seconds"] == 180, "timeout identity changed")
         require(process["wall_seconds"] >= 0, "missing process wall time")
-    require(len(CASES) == 16 and sum(bool(case.get("reject")) for case in CASES) == 6, "case inventory changed")
+    require(len(CASES) == 20 and sum(bool(case.get("reject")) for case in CASES) == 7, "case inventory changed")
     case = CASES[1]
     paths = [
         {
@@ -569,11 +619,51 @@ def self_test() -> None:
     ]
     horizontal_case = {**case, "header": True, "borders": "horizontal"}
     check_scene(horizontal_scene, horizontal_case)
+    for colspan in (False, True):
+        partial_case = {**horizontal_case, "partial": True, "colspan": colspan}
+        partial_scene = copy.deepcopy(horizontal_scene)
+        partial_operations = partial_scene["pages"][0]["operations"]
+        first_width = 16800 if colspan else 12600
+        partial_operations[1]["bounds"].update(x=first_width, width=25200 - first_width)
+        partial_operations[2]["bounds"].update(width=first_width)
+        check_scene(partial_scene, partial_case)
+        for change in ("missing-segment", "extra-segment", "filled-gap", "wrong-side", "wrong-width", "wrong-colspan"):
+            invalid = copy.deepcopy(partial_scene)
+            operations = invalid["pages"][0]["operations"]
+            if change == "missing-segment":
+                operations.pop(1)
+            elif change == "extra-segment":
+                extra = copy.deepcopy(operations[1])
+                extra["bounds"].update(x=0, width=first_width)
+                operations.append(extra)
+            elif change == "filled-gap":
+                operations[1]["bounds"].update(x=0, width=25200)
+            elif change == "wrong-side":
+                operations[1]["bounds"]["x"] = 0
+            elif change == "wrong-width":
+                operations[1]["bounds"]["width"] -= 1
+            else:
+                alternate_width = 12600 if colspan else 16800
+                operations[1]["bounds"].update(x=alternate_width, width=25200 - alternate_width)
+            try:
+                check_scene(invalid, partial_case)
+            except AssertionError:
+                pass
+            else:
+                raise AssertionError(f"self-test accepted partial-rule {change} corruption (colspan={colspan})")
     clipped = copy.deepcopy(horizontal_scene)
     clipped["pages"][0]["size_app_units"]["height"] = 5971
     clipped["pages"][0]["operations"][2]["bounds"]["height"] = 31
     check_scene(clipped, horizontal_case)
-    for change in ("excess-clip", "unclipped", "wrong-position", "wrong-width", "duplicate", "interior-clip", "edge-outside"):
+    for change in (
+        "excess-clip",
+        "unclipped",
+        "wrong-position",
+        "wrong-width",
+        "duplicate",
+        "interior-clip",
+        "edge-outside",
+    ):
         invalid = copy.deepcopy(clipped)
         operations = invalid["pages"][0]["operations"]
         if change == "excess-clip":
@@ -653,6 +743,17 @@ def self_test() -> None:
         require(
             json.loads(first)["resources"] == {"network": "deny", "host_fonts": "deny"},
             "fixture resource policy changed",
+        )
+        partial_case = next(case for case in CASES if case["name"] == "horizontal-partial-colspan")
+        _, partial_source = build_fixture(
+            Path(__file__).resolve().parents[3], Path(temporary) / "partial", partial_case
+        )
+        partial_html = (partial_source / "input/document.html").read_text(encoding="utf-8")
+        partial_css = (partial_source / "input/styles.css").read_text(encoding="utf-8")
+        require(partial_html.count("<th>") == 3, "colspan fixture lost its exact three fixed-layout tracks")
+        require(partial_html.count('colspan="2"') == 2, "colspan fixture lost a spanning cell")
+        require(
+            "table-layout:fixed" in partial_css and "nth-child(odd)" in partial_css, "partial fixture lost rule policy"
         )
     print("API 2 headerless table checker self-test: ok")
 
