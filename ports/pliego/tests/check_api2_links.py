@@ -13,6 +13,8 @@ PDF coordinates permit 0.02pt writer rounding. No PDF metadata determinism claim
 Plain solid backgrounds require authored scene geometry and color as well as
 the link annotation proof. Rounded, fixed, clipped and image-layer backgrounds
 remain excluded. This does not replace visual document qualification.
+Ordinary one-sided/same-color solid borders additionally require exact authored
+Au rectangle decomposition; this is not general CSS border support.
 """
 
 from __future__ import annotations
@@ -141,6 +143,64 @@ CASES = (
     ),
     *(
         {
+            "name": f"ordinary-border-bottom-{thickness}px",
+            "body": '<div class="border"></div><p>AFTER</p>',
+            "css": "body{padding:0.35px 0 0 0.35px}.border{width:100.35px;height:20.35px;"
+            f"border-bottom:{thickness}px solid #ccc}}",
+            "links": {},
+            "text": ["AFTER"],
+            "exact_rects": [],
+            # 48px request margin + 0.35px padding => 2880 + 21 Au.
+            # Content height 20.35px => 1221 Au; width 100.35px => 6021 Au.
+            # These odd Au values are deliberately not binary-exact CSS pixels.
+            "solid_paths": [[[[2901, 4122, 6021, thickness * 60], [204, 204, 204, 255]]]],
+        }
+        for thickness in (1, 2)
+    ),
+    {
+        "name": "ordinary-border-four-sides",
+        "body": '<div class="border"></div><p>AFTER</p>',
+        "css": "body{padding:0.35px 0 0 0.35px}.border{width:100.35px;height:20.35px;"
+        "border-style:solid;border-color:#ccc;border-width:1px 2px 3px 4px}",
+        "links": {},
+        "text": ["AFTER"],
+        "exact_rects": [],
+        # Outer box: [2901,2901,6381,1461] Au. Horizontal strips own corners;
+        # vertical strips occupy only the 1221 Au content-height interior.
+        "solid_paths": [
+            [
+                [[2901, 2901, 6381, 60], [204, 204, 204, 255]],
+                [[2901, 4182, 6381, 180], [204, 204, 204, 255]],
+                [[2901, 2961, 240, 1221], [204, 204, 204, 255]],
+                [[9162, 2961, 120, 1221], [204, 204, 204, 255]],
+            ]
+        ],
+    },
+    *(
+        {
+            "name": f"ordinary-border-unsupported-{name}",
+            "body": '<div class="border"></div><p>AFTER</p>',
+            "css": ".border{width:100.35px;height:20.35px;border:1px solid #ccc;" + css + "}",
+            "exclude": f"ordinary-border-{name}",
+            "failure": ["artifact", "SCENE_ENCODING_FAILED"],
+            "failure_message_contains": "unsupported paint kinds: box",
+        }
+        for name, css in (("mixed-color", "border-bottom-color:#333"), ("rounded", "border-radius:4px"))
+    ),
+    {
+        "name": "ordinary-border-unsupported-transparent-corners",
+        "body": '<div class="border"></div><p>AFTER</p>',
+        # The 4x4px border box has zero content area. Its opaque right border
+        # paints a triangular corner even though the other three 2px sides are
+        # transparent. Nonoverlapping rectangular strips cannot represent it.
+        "css": ".border{box-sizing:border-box;width:4px;height:4px;"
+        "border:2px solid transparent;border-right-color:#d00}",
+        "exclude": "ordinary-border-transparent-corners",
+        "failure": ["artifact", "SCENE_ENCODING_FAILED"],
+        "failure_message_contains": "unsupported paint kinds: box",
+    },
+    *(
+        {
             "name": f"unsupported-background-{name}",
             "body": f'<a class="box" href="{HTTPS}">EXCLUDED</a>',
             "css": ".box{display:block;width:120px;height:40px;background-color:#eee;" + css + "}",
@@ -194,7 +254,9 @@ def require(condition: bool, message: str) -> None:
         raise AssertionError(message)
 
 
-def check_excluded_failure(case: dict[str, Any], kind: str, codes: list[str]) -> None:
+def check_excluded_failure(
+    case: dict[str, Any], kind: str, codes: list[str], messages: list[str] | None = None
+) -> None:
     require(bool(case.get("exclude")), f"supported link failed: kind={kind}, codes={codes}")
     # These pairs are observed in the retained v0.3.3 baseline. In particular,
     # unsafe/internal failures can precede URL validation at missing authority;
@@ -203,6 +265,11 @@ def check_excluded_failure(case: dict[str, Any], kind: str, codes: list[str]) ->
     require(
         kind == expected_kind and codes == [expected_code], f"excluded link failure changed: kind={kind}, codes={codes}"
     )
+    if "failure_message_contains" in case:
+        require(
+            any(case["failure_message_contains"] in message for message in messages or []),
+            "excluded ordinary border did not retain its unsupported-paint cause",
+        )
 
 
 def build_fixture(repository: Path, root: Path, case: dict[str, Any]) -> tuple[bytes, Path]:
@@ -269,17 +336,29 @@ def scene_links(scene: dict[str, Any], case: dict[str, Any]) -> list[list[dict[s
             # scene and PDF from passing a merely self-consistent comparison.
             expected_rects = case["exact_rects"] if index + 1 == case.get("link_page", 1) else []
             require(exact_rects == expected_rects, "link placement differs from the authored fixture geometry")
-        if "backgrounds" in case:
-            backgrounds = []
+        paint_key = "solid_paths" if "solid_paths" in case else "backgrounds"
+        if paint_key in case:
+            paints = []
             for operation in page["operations"]:
                 if operation["type"] != "path":
                     continue
                 bounds, fill = operation["bounds"], operation["fill"]
                 rect = [bounds[key] for key in ("x", "y", "width", "height")]
                 rgba = [fill[key] for key in ("r", "g", "b", "a")]
-                require(all(type(value) is int for value in rect + rgba), "background authority is not integer")
-                backgrounds.append([rect, rgba])
-            require(backgrounds == case["backgrounds"][index], "solid background geometry/color changed")
+                require(all(type(value) is int for value in rect + rgba), "solid paint authority is not integer")
+                if paint_key == "solid_paths":
+                    x, y, w, h = rect
+                    require(
+                        x >= 0 and y >= 0 and w > 0 and h > 0 and x + w <= width and y + h <= height,
+                        "ordinary border is empty, clipped or outside its page",
+                    )
+                    require(
+                        operation.get("data") == f"M {x} {y} L {x + w} {y} L {x + w} {y + h} L {x} {y + h} Z"
+                        and operation.get("fill_rule") == "non_zero",
+                        "ordinary border path is not its exact closed rectangle",
+                    )
+                paints.append([rect, rgba])
+            require(paints == case[paint_key][index], "solid paint geometry/color/order changed")
         keys = [(link["uri"], tuple(link["rect"])) for link in links]
         require(len(keys) == len(set(keys)), "scene emitted a duplicate link rectangle")
         links_by_page.append(links)
@@ -440,11 +519,13 @@ def run_case(
             "failed render published partial delivery or wrong process status",
         )
         kind = result.get("error", {}).get("kind")
-        codes = [json.loads(path.read_bytes()).get("code") for path in diagnostics if path.suffix == ".json"]
+        diagnostic_records = [json.loads(path.read_bytes()) for path in diagnostics if path.suffix == ".json"]
+        codes = [record.get("code") for record in diagnostic_records]
         codes = [code for code in codes if isinstance(code, str) and code]
+        messages = [record["message"] for record in diagnostic_records if isinstance(record.get("message"), str)]
         require(isinstance(kind, str) and bool(kind) and bool(codes), "failure has no typed retained cause")
-        check_excluded_failure(case, kind, codes)
-        return {"outcome": "rejected-as-excluded", "error_kind": kind, "codes": codes}
+        check_excluded_failure(case, kind, codes, messages)
+        return {"outcome": "rejected-as-excluded", "error_kind": kind, "codes": codes, "messages": messages}
     require(
         completed.returncode == 0 and result.get("status") == "success" and result.get("error") is None,
         "render did not succeed",
@@ -530,7 +611,8 @@ def self_test() -> None:
         require(process["wall_seconds"] >= 0, "missing process wall time")
     for excluded in (case for case in CASES if case.get("exclude")):
         kind, code = excluded["failure"]
-        check_excluded_failure(excluded, kind, [code])
+        messages = [excluded.get("failure_message_contains", "")]
+        check_excluded_failure(excluded, kind, [code], messages)
         for wrong_kind, wrong_codes in (("input", [code]), (kind, ["WRONG_CODE"]), (kind, []), (kind, [code, code])):
             try:
                 check_excluded_failure(excluded, wrong_kind, wrong_codes)
@@ -538,6 +620,14 @@ def self_test() -> None:
                 pass
             else:
                 raise AssertionError("exclusion oracle accepted a changed failure pair")
+        if "failure_message_contains" in excluded:
+            for wrong_messages in (None, [], ["page 1 operation 0 has no exact fixed-point authority"]):
+                try:
+                    check_excluded_failure(excluded, kind, [code], wrong_messages)
+                except AssertionError:
+                    pass
+                else:
+                    raise AssertionError("ordinary-border exclusion accepted an unrelated encoding failure")
     case = {"links": {HTTPS: 1}, "pages": 2, "exact_rects": [[HTTPS, [800, 1600, 2400, 800]]]}
     scene = {
         "schema": "pliego.document-scene",
@@ -582,6 +672,68 @@ def self_test() -> None:
             pass
         else:
             raise AssertionError(f"background oracle accepted {corruption} corruption")
+    border_case = next(case for case in CASES if case["name"] == "ordinary-border-four-sides")
+
+    def border_operation(rect: list[int], rgba: list[int]) -> dict[str, Any]:
+        x, y, w, h = rect
+        return {
+            "type": "path",
+            "bounds": dict(zip(("x", "y", "width", "height"), rect)),
+            "fill": dict(zip(("r", "g", "b", "a"), rgba)),
+            "data": f"M {x} {y} L {x + w} {y} L {x + w} {y + h} L {x} {y + h} Z",
+            "fill_rule": "non_zero",
+        }
+
+    border_scene = {
+        "schema": "pliego.document-scene",
+        "version": 2,
+        "app_units_per_css_px": 60,
+        "pages": [
+            {
+                "number": 1,
+                "size_app_units": {"width": 47622, "height": 67351},
+                "operations": [border_operation(rect, rgba) for rect, rgba in border_case["solid_paths"][0]]
+                + [{"type": "text", "text": "AFTER"}],
+            }
+        ],
+    }
+    scene_links(border_scene, border_case)
+    for corruption in ("shifted", "width", "overlap", "missing", "duplicate", "reordered", "color", "path", "float"):
+        wrong = copy.deepcopy(border_scene)
+        operations = wrong["pages"][0]["operations"]
+        if corruption in ("shifted", "width", "overlap"):
+            if corruption == "shifted":
+                for operation in operations[:-1]:
+                    operation["bounds"]["x"] += 60
+            elif corruption == "width":
+                operations[0]["bounds"]["width"] -= 1
+            else:
+                operations[2]["bounds"]["y"] -= 60
+                operations[2]["bounds"]["height"] += 60
+            # Keep each corrupt path self-consistent with its bounds; only the
+            # independently authored geometry should reject these mutations.
+            for index, operation in enumerate(operations[:-1]):
+                rect = [operation["bounds"][key] for key in ("x", "y", "width", "height")]
+                rgba = [operation["fill"][key] for key in ("r", "g", "b", "a")]
+                operations[index] = border_operation(rect, rgba)
+        elif corruption == "missing":
+            operations.pop(0)
+        elif corruption == "duplicate":
+            operations.insert(0, copy.deepcopy(operations[0]))
+        elif corruption == "reordered":
+            operations[0], operations[1] = operations[1], operations[0]
+        elif corruption == "color":
+            operations[0]["fill"]["r"] = 0
+        elif corruption == "path":
+            operations[0]["data"] = operations[0]["data"].removesuffix(" Z")
+        else:
+            operations[0]["bounds"]["x"] = float(operations[0]["bounds"]["x"])
+        try:
+            scene_links(wrong, border_case)
+        except AssertionError:
+            pass
+        else:
+            raise AssertionError(f"ordinary-border oracle accepted {corruption} corruption")
     for corruption in ("uri", "missing", "duplicate", "rect", "page", "page-count"):
         wrong = copy.deepcopy(expected)
         if corruption == "uri":

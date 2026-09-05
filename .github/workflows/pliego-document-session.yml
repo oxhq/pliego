@@ -135,6 +135,8 @@ jobs:
             positioned::paged_fixed_tests::computed_vertical_writing_modes_are_rejected \
             display_list::debug_capture_tests::empty_paint_area_requires_exact_valid_zero_extent \
             display_list::debug_capture_tests::partial_horizontal_rules_preserve_tracks_gaps_and_row_ownership \
+            display_list::debug_capture_tests::ordinary_solid_borders_keep_source_app_units \
+            display_list::debug_capture_tests::retained_rectangles_reject_negative_origins_and_mixed_border_colors \
             table::collapsed_border_profile_tests::horizontal_rules_accept_zero_width_gaps_in_either_column \
             table::collapsed_border_profile_tests::horizontal_rules_reject_dashed_nonzero_invisible_and_nonuniform_lines \
             flow::inline::page_counter_tests::page_counter_realization_preserves_literal_zero_and_utf8_controls \

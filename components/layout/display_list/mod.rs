@@ -2405,7 +2405,14 @@ impl<'a> BuilderForBoxFragment<'a> {
         let captured_border_rects =
             (!separate_table_border_is_captured(self.fragment, self.containing_block_origin) &&
                 box_paint_geometry_is_supported(builder, state, self.fragment))
-            .then(|| solid_border_paint_rects(self.border_rect, border_widths, &style_color))
+            .then(|| {
+                solid_border_paint_rects(
+                    self.fragment.border_rect(),
+                    self.containing_block_origin,
+                    self.fragment.border,
+                    &style_color,
+                )
+            })
             .flatten();
         let details = wr::BorderDetails::Normal(wr::NormalBorder {
             top: self.build_border_side(style_color.top),
@@ -2801,7 +2808,7 @@ fn box_has_unsupported_paint(
                 (!matches!(
                     &fragment.style().get_border().border_image_source,
                     Image::None
-                ) || ordinary_border_paint_rects(fragment).is_none())));
+                ) || ordinary_border_paint_rects(fragment, state.origin).is_none())));
 
     background_is_unsupported ||
         paints_shadow ||
@@ -2897,13 +2904,15 @@ fn background_has_image(style: &ComputedValues) -> bool {
 
 fn ordinary_border_paint_rects(
     fragment: &BoxFragmentWithStyle<'_>,
+    containing_block_origin: PhysicalPoint<Au>,
 ) -> Option<Vec<LayoutDebugPaintRect>> {
     let style = fragment.style();
     let current_color = style.get_inherited_text().clone_color();
     let colors = BorderStyleColor::from_border(style.get_border(), &current_color);
     solid_border_paint_rects(
-        fragment.border_rect().to_webrender(),
-        fragment.border.to_webrender(),
+        fragment.border_rect(),
+        containing_block_origin,
+        fragment.border,
         &colors,
     )
 }
@@ -2917,25 +2926,37 @@ fn separate_table_border_is_captured(
 }
 
 fn solid_border_paint_rects(
-    rect: LayoutRect,
-    widths: SideOffsets2D<f32, LayoutPixel>,
+    rect: PhysicalRect<Au>,
+    containing_block_origin: PhysicalPoint<Au>,
+    widths: PhysicalSides<Au>,
     colors: &PhysicalSides<BorderStyleColor>,
 ) -> Option<Vec<LayoutDebugPaintRect>> {
-    if !rect.min.x.is_finite() ||
-        !rect.min.y.is_finite() ||
-        !rect.max.x.is_finite() ||
-        !rect.max.y.is_finite() ||
-        rect.min.x < 0.0 ||
-        rect.min.y < 0.0 ||
-        rect.width() < 0.0 ||
-        rect.height() < 0.0 ||
-        widths.top + widths.bottom > rect.height() ||
-        widths.left + widths.right > rect.width()
+    // Keep source app units through decomposition. Recovering them from the
+    // WebRender border floats would invent authority at fractional positions.
+    // Eligibility and emission use the same translated geometry. Check raw
+    // integer addition before Au's saturating arithmetic can hide overflow.
+    let x = rect.origin.x.0.checked_add(containing_block_origin.x.0)?;
+    let y = rect.origin.y.0.checked_add(containing_block_origin.y.0)?;
+    let (width, height) = (rect.size.width.0, rect.size.height.0);
+    let right = x.checked_add(width)?;
+    let bottom = y.checked_add(height)?;
+    if x < 0 ||
+        y < 0 ||
+        width < 0 ||
+        height < 0 ||
+        right > MAX_AU.0 ||
+        bottom > MAX_AU.0 ||
+        [widths.top, widths.right, widths.bottom, widths.left]
+            .iter()
+            .any(|width| *width < Au::zero()) ||
+        widths.top.0.checked_add(widths.bottom.0)? > height ||
+        widths.left.0.checked_add(widths.right.0)? > width
     {
         return None;
     }
 
     let mut visible_color: Option<&AbsoluteColor> = None;
+    let mut invisible_width = false;
     for (width, side) in [
         (widths.top, &colors.top),
         (widths.right, &colors.right),
@@ -2943,10 +2964,11 @@ fn solid_border_paint_rects(
         (widths.left, &colors.left),
     ] {
         let color = rgba(side.color);
-        if width <= 0.0 ||
-            color.a <= 0.0 ||
-            matches!(side.style, BorderStyle::None | BorderStyle::Hidden)
-        {
+        if width <= Au::zero() {
+            continue;
+        }
+        if color.a <= 0.0 || matches!(side.style, BorderStyle::None | BorderStyle::Hidden) {
+            invisible_width = true;
             continue;
         }
         if side.style != BorderStyle::Solid ||
@@ -2956,39 +2978,44 @@ fn solid_border_paint_rects(
         }
         visible_color = Some(&side.color);
     }
+    // Rectangular strips own whole corners only for a shared visible color.
+    // A positive-width transparent neighbor can leave a visible CSS triangle;
+    // excluding it is safer than omitting that corner or inventing its shape.
+    if invisible_width && visible_color.is_some() {
+        return None;
+    }
 
+    let source_rect = |x, y, width, height| {
+        PhysicalRect::new(
+            PhysicalPoint::new(Au(x), Au(y)),
+            PhysicalSize::new(Au(width), Au(height)),
+        )
+    };
     let mut paint_rects = Vec::with_capacity(4);
     append_solid_border_paint_rect(
         &mut paint_rects,
-        LayoutRect::new(
-            rect.min,
-            LayoutPoint::new(rect.max.x, rect.min.y + widths.top),
-        ),
+        source_rect(x, y, width, widths.top.0),
         &colors.top,
     )?;
     append_solid_border_paint_rect(
         &mut paint_rects,
-        LayoutRect::new(
-            LayoutPoint::new(rect.min.x, rect.max.y - widths.bottom),
-            rect.max,
-        ),
+        source_rect(x, bottom - widths.bottom.0, width, widths.bottom.0),
         &colors.bottom,
     )?;
-    let vertical_min_y = rect.min.y + widths.top;
-    let vertical_max_y = rect.max.y - widths.bottom;
+    let vertical_min_y = y + widths.top.0;
+    let vertical_height = height - widths.top.0 - widths.bottom.0;
     append_solid_border_paint_rect(
         &mut paint_rects,
-        LayoutRect::new(
-            LayoutPoint::new(rect.min.x, vertical_min_y),
-            LayoutPoint::new(rect.min.x + widths.left, vertical_max_y),
-        ),
+        source_rect(x, vertical_min_y, widths.left.0, vertical_height),
         &colors.left,
     )?;
     append_solid_border_paint_rect(
         &mut paint_rects,
-        LayoutRect::new(
-            LayoutPoint::new(rect.max.x - widths.right, vertical_min_y),
-            LayoutPoint::new(rect.max.x, vertical_max_y),
+        source_rect(
+            right - widths.right.0,
+            vertical_min_y,
+            widths.right.0,
+            vertical_height,
         ),
         &colors.right,
     )?;
@@ -2997,10 +3024,10 @@ fn solid_border_paint_rects(
 
 fn append_solid_border_paint_rect(
     paint_rects: &mut Vec<LayoutDebugPaintRect>,
-    rect: LayoutRect,
+    rect: PhysicalRect<Au>,
     style_color: &BorderStyleColor,
 ) -> Option<()> {
-    if rect.width() <= 0.0 || rect.height() <= 0.0 {
+    if rect.size.width <= Au::zero() || rect.size.height <= Au::zero() {
         return Some(());
     }
     let color = rgba(style_color.color);
@@ -3010,7 +3037,7 @@ fn append_solid_border_paint_rect(
     if style_color.style != BorderStyle::Solid {
         return None;
     }
-    paint_rects.push(debug_paint_rect(
+    paint_rects.push(debug_paint_rect_app_units(
         rect,
         color,
         LayoutDebugPaintRectKind::Border,
@@ -4342,9 +4369,122 @@ mod debug_capture_tests {
     }
 
     #[test]
+    fn ordinary_solid_borders_keep_source_app_units() {
+        let rect = |x, y, width, height| {
+            PhysicalRect::new(
+                PhysicalPoint::new(Au(x), Au(y)),
+                PhysicalSize::new(Au(width), Au(height)),
+            )
+        };
+        let side = BorderStyleColor::new(
+            BorderStyle::Solid,
+            AbsoluteColor::new(ColorSpace::Srgb, 0.5, 0.5, 0.5, 1.0),
+        );
+        let colors = PhysicalSides::new(side.clone(), side.clone(), side.clone(), side);
+        let exact = |paint: Vec<LayoutDebugPaintRect>| {
+            paint
+                .into_iter()
+                .map(|paint| {
+                    let original = paint.rect.app_units.unwrap();
+                    assert_eq!(paint.rect.x, Au(original.x).to_f32_px());
+                    assert_eq!(paint.rect.y, Au(original.y).to_f32_px());
+                    assert_eq!(paint.rect.width, Au(original.width).to_f32_px());
+                    assert_eq!(paint.rect.height, Au(original.height).to_f32_px());
+                    (original.x, original.y, original.width, original.height)
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            exact(
+                solid_border_paint_rects(
+                    rect(101, 203, 10001, 7003),
+                    PhysicalPoint::zero(),
+                    PhysicalSides::new(Au(61), Au(119), Au(181), Au(239)),
+                    &colors,
+                )
+                .unwrap()
+            ),
+            vec![
+                (101, 203, 10001, 61),
+                (101, 7025, 10001, 181),
+                (101, 264, 239, 6761),
+                (9983, 264, 119, 6761)
+            ],
+        );
+        assert_eq!(
+            exact(
+                solid_border_paint_rects(
+                    rect(2721, 2721, 42180, 1812),
+                    PhysicalPoint::zero(),
+                    PhysicalSides::new(Au(0), Au(0), Au(60), Au(0)),
+                    &colors,
+                )
+                .unwrap()
+            ),
+            vec![(2721, 4473, 42180, 60)],
+        );
+        let none = PhysicalSides::zero();
+        assert!(
+            solid_border_paint_rects(rect(1, 1, 100, 100), PhysicalPoint::zero(), none, &colors)
+                .unwrap()
+                .is_empty()
+        );
+        for invalid in [
+            rect(-1, 0, 100, 100),
+            rect(0, -1, 100, 100),
+            rect(0, 0, -1, 100),
+            rect(0, 0, 100, -1),
+            rect(MAX_AU.0, 0, 1, 100),
+            rect(0, i32::MAX, 100, 1),
+        ] {
+            assert!(
+                solid_border_paint_rects(invalid, PhysicalPoint::zero(), none, &colors).is_none()
+            );
+        }
+        for invalid in [
+            PhysicalSides::new(Au(-1), Au(0), Au(0), Au(0)),
+            PhysicalSides::new(Au(61), Au(0), Au(40), Au(0)),
+            PhysicalSides::new(Au(0), Au(61), Au(0), Au(40)),
+            PhysicalSides::new(Au(i32::MAX), Au(0), Au(1), Au(0)),
+        ] {
+            assert!(
+                solid_border_paint_rects(
+                    rect(0, 0, 100, 100),
+                    PhysicalPoint::zero(),
+                    invalid,
+                    &colors
+                )
+                .is_none()
+            );
+        }
+        let local = rect(MAX_AU.0 - 100, 0, 99, 100);
+        assert!(solid_border_paint_rects(local, PhysicalPoint::zero(), none, &colors).is_some());
+        assert!(
+            solid_border_paint_rects(local, PhysicalPoint::new(Au(1), Au(0)), none, &colors)
+                .is_some()
+        );
+        assert!(
+            solid_border_paint_rects(local, PhysicalPoint::new(Au(2), Au(0)), none, &colors)
+                .is_none()
+        );
+        assert!(
+            solid_border_paint_rects(
+                local,
+                PhysicalPoint::new(Au(i32::MAX), Au(0)),
+                none,
+                &colors
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
     fn retained_rectangles_reject_negative_origins_and_mixed_border_colors() {
-        let rect = LayoutRect::new(LayoutPoint::new(0.0, 0.0), LayoutPoint::new(20.0, 20.0));
-        let widths = SideOffsets2D::new(3.0, 1.0, 1.0, 1.0);
+        let rect = PhysicalRect::new(
+            PhysicalPoint::new(Au(0), Au(0)),
+            PhysicalSize::new(Au(1200), Au(1200)),
+        );
+        let widths = PhysicalSides::new(Au(180), Au(60), Au(60), Au(60));
         let blue = BorderStyleColor::new(
             BorderStyle::Solid,
             AbsoluteColor::new(ColorSpace::Srgb, 0.0, 0.25, 1.0, 1.0),
@@ -4355,9 +4495,56 @@ mod debug_capture_tests {
         );
         let uniform = PhysicalSides::new(blue.clone(), blue.clone(), blue.clone(), blue.clone());
         let mixed = PhysicalSides::new(blue.clone(), gray.clone(), gray.clone(), gray);
+        let transparent = BorderStyleColor::new(
+            BorderStyle::Solid,
+            AbsoluteColor::new(ColorSpace::Srgb, 0.0, 0.0, 0.0, 0.0),
+        );
+        let mut transparent_sides = PhysicalSides::new(
+            transparent.clone(),
+            transparent.clone(),
+            transparent.clone(),
+            transparent,
+        );
+        let triangle_rect =
+            PhysicalRect::new(PhysicalPoint::zero(), PhysicalSize::new(Au(240), Au(240)));
+        let triangle_widths = PhysicalSides::new(Au(120), Au(120), Au(120), Au(120));
+        assert!(
+            solid_border_paint_rects(
+                triangle_rect,
+                PhysicalPoint::zero(),
+                triangle_widths,
+                &transparent_sides
+            )
+            .unwrap()
+            .is_empty()
+        );
+        transparent_sides.right = blue.clone();
+        assert!(
+            solid_border_paint_rects(
+                triangle_rect,
+                PhysicalPoint::zero(),
+                triangle_widths,
+                &transparent_sides
+            )
+            .is_none()
+        );
+        // Invisible zero-width sides have no corner area; one visible side is
+        // still exactly rectangular and is the real-document header profile.
+        let single = PhysicalSides::new(Au(0), Au(120), Au(0), Au(0));
+        assert_eq!(
+            solid_border_paint_rects(
+                triangle_rect,
+                PhysicalPoint::zero(),
+                single,
+                &transparent_sides
+            )
+            .unwrap()
+            .len(),
+            1
+        );
 
-        assert!(solid_border_paint_rects(rect, widths, &uniform).is_some());
-        assert!(solid_border_paint_rects(rect, widths, &mixed).is_none());
+        assert!(solid_border_paint_rects(rect, PhysicalPoint::zero(), widths, &uniform).is_some());
+        assert!(solid_border_paint_rects(rect, PhysicalPoint::zero(), widths, &mixed).is_none());
         assert!(!paint_rect_geometry_is_supported(LayoutRect::new(
             LayoutPoint::new(-1.0, 0.0),
             LayoutPoint::new(20.0, 20.0),
