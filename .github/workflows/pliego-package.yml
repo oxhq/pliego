@@ -423,7 +423,17 @@ jobs:
             --binary "$binary" --source-commit "$source_commit" \
             --proof-directory "$PWD/dist/api2-nonpainting-content-${{ matrix.bundle }}" \
             "$@" || nonpainting_status=$?
-          test "$table_status" -eq 0 && test "$link_status" -eq 0 && test "$background_status" -eq 0 && test "$fixed_status" -eq 0 && test "$nonpainting_status" -eq 0
+          python ports/pliego/tests/check_webcrypto_policy.py --self-test
+          crypto_status=0
+          set -- python ports/pliego/tests/check_webcrypto_policy.py \
+            --binary "$binary" --source-commit "$source_commit" \
+            --proof-directory "$PWD/dist/webcrypto-policy-${{ matrix.bundle }}"
+          if [[ '${{ runner.os }}' == 'Linux' ]]; then
+            xvfb-run --auto-servernum "$@" || crypto_status=$?
+          else
+            "$@" || crypto_status=$?
+          fi
+          test "$table_status" -eq 0 && test "$link_status" -eq 0 && test "$background_status" -eq 0 && test "$fixed_status" -eq 0 && test "$nonpainting_status" -eq 0 && test "$crypto_status" -eq 0
 
       - name: Set up PHP for the packaged Linux consumer boundary
         if: runner.os == 'Linux'
@@ -496,6 +506,7 @@ jobs:
             dist/api2-fixed-content-${{ matrix.bundle }}
             dist/api2-nonpainting-content-${{ matrix.bundle }}
             dist/api2-native-consumer-${{ matrix.bundle }}
+            dist/webcrypto-policy-${{ matrix.bundle }}
           if-no-files-found: error
           retention-days: 30
 

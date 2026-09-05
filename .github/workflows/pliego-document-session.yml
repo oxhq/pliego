@@ -14,6 +14,7 @@ on:
       - "rust-toolchain.toml"
       - "ports/pliego/**"
       - "components/canvas/**"
+      - "components/config/**"
       - "components/constellation/**"
       - "components/fonts/**"
       - "components/layout/**"
@@ -111,7 +112,9 @@ jobs:
       - name: Test the production document session and build identity helpers
         env:
           PLIEGO_INVOICE_ORACLE_EVIDENCE_ROOT: ${{ runner.temp }}/pliego-invoice-oracle
-        run: cargo test -p pliego --test document_session --test build_script --locked
+        run: |
+          cargo test -p servo-config --lib host_policy_tests --locked
+          cargo test -p pliego --test document_session --test build_script --locked
 
       - name: Retain exact invoice reference scene and PDF
         if: always()
@@ -183,6 +186,14 @@ jobs:
           include-hidden-files: true
           if-no-files-found: warn
           retention-days: 30
+
+      - name: Prove the document WebCrypto host policy
+        run: |
+          python ports/pliego/tests/check_webcrypto_policy.py --self-test
+          xvfb-run --auto-servernum python ports/pliego/tests/check_webcrypto_policy.py \
+            --binary "$PWD/target/debug/pliego" --source-commit "$(git rev-parse HEAD)" \
+            --process-timeout-seconds 180 \
+            --proof-directory "$RUNNER_TEMP/pliego-webcrypto-policy"
 
       - name: Set up Node for the locked Chart.js fixture
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
@@ -336,6 +347,7 @@ jobs:
           path: |
             ${{ runner.temp }}/pliego-controlled-capture
             ${{ runner.temp }}/pliego-controlled-chartjs
+            ${{ runner.temp }}/pliego-webcrypto-policy
           if-no-files-found: error
           retention-days: 7
 

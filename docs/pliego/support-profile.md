@@ -21,12 +21,37 @@ advertised. The additions are bounded by these source and regression contracts:
 | Fixed page text | Page-root Flow text with explicit top or bottom placement, fresh per-page layout and decimal physical `counter(page)`/`counter(pages)`. Authors reserve footer space. No general CSS counter engine, positioned/replaced descendants or arbitrary fixed layout is implied; see [fixed-content exclusions](paged-fixed-content.md). |
 | Nonpainting barcode markup | Exact zero-area ordinary backgrounds and actual zero-font-size text emit no ink while positive-size descendants remain. See [nonpainting-content capture](nonpainting-content.md); this alone is not barcode decoding evidence. |
 | SDK compatibility | Maintained Laravel 12/13 dependency ranges and exact integer `au` page/margin tuples using the existing request schema. Published 0.3.3 remains Laravel 13-only and lacks the `au` input syntax. |
+| Document crypto policy | RSA-OAEP decryption/unwrapping and RSA-PSS/RSASSA-PKCS1-v1_5 signing are disabled at the native operation boundary. Public RSA operations, key generation/import/export and unrelated crypto remain available where the Web Platform exposes them. See the security boundary below. |
 
 These are candidate implementation boundaries, not a completed four-platform
 release or a promise that every document using these features passes. The
 [candidate notes](../releases/v0.4.0.md) list the outstanding corpus, comparison
 and packaged-consumer gates. Everything below describes the published v0.3.3
 baseline unless it explicitly names the candidate.
+
+### Candidate WebCrypto security boundary
+
+The candidate restricts private RSA operations because the bundled `rsa`
+dependency is affected by [RUSTSEC-2023-0071](https://rustsec.org/advisories/RUSTSEC-2023-0071.html).
+The advisory has no patched version as of 2026-09-05. This is an exposure
+restriction, not a dependency fix or a general security guarantee. Attempts to
+sign with RSA or decrypt/unwrap with RSA-OAEP reject with `NotSupportedError`;
+`SubtleCrypto.supports()` reflects the restriction. The common document startup
+also disables `navigator.servo`, including privileged `about:` pages, so authored
+content cannot change the host preferences through that internal API.
+
+API 1 file documents are secure contexts and can exercise these guarded
+operations. API 2's `pliego-input:///` documents currently are not secure contexts:
+`crypto.subtle` and `crypto.randomUUID` are absent; `getRandomValues` remains
+available. That absence is a separate exposure boundary, not evidence that an
+RSA operation was rejected. No new secure-context scheme is introduced here.
+
+The package test runs generated, imported and cloned synthetic keys through both
+API 1 compatibility commands, and checks API 2's existing exposure separately.
+A native realtime-session test checks `srcdoc` internal-API exposure; this is not
+a supported nested-frame claim for the controlled product runtime. Ordinary
+Servo keeps its default preferences. These checks still require successful
+execution on the new source; previous candidate packages do not prove the policy.
 
 ## Intended documents
 

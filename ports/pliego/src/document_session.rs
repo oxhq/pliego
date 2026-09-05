@@ -1519,6 +1519,12 @@ impl DocumentSession {
         }
 
         let mut preferences = Preferences::default();
+        // No request, HTML or CLI preference override can enable private RSA
+        // arithmetic in a production document session (RUSTSEC-2023-0071).
+        preferences.dom_crypto_rsa_private_operations_enabled = false;
+        // In particular, about:srcdoc must not expose setBoolPreference and
+        // allow authored content to change the host policy above.
+        preferences.servo_internals_enabled = false;
         preferences.fonts_host_enabled = allow_host_fonts;
         preferences.intl_locale_override = environment.locale.into();
         preferences.network_http_proxy_uri.clear();
@@ -4280,6 +4286,7 @@ window.pliego?.defer();
             "canvas-missing-snapshot",
             "state-seed",
             "state-clean",
+            "webcrypto-policy",
         ] {
             let output = run_isolated(case, &server.base_url);
             let stdout = String::from_utf8_lossy(&output.stdout);
@@ -4771,6 +4778,7 @@ document.fonts.ready
                 "metadata-denied-non-icon" | "same-url-role-split" | "metadata-allowed-icon" => {
                     10_000
                 },
+                "webcrypto-policy" => 30_000,
                 _ => 1_000,
             },
             wait_for_fonts: false,
@@ -5057,6 +5065,16 @@ document.fonts.ready.then(() => {
                 if case == "http-timeout" {
                     resources.timeout_ms = 25;
                 }
+                _bundle = Some(bundle);
+                input
+            },
+            "webcrypto-policy" => {
+                let body = include_str!("../tests/fixtures/webcrypto-policy/index.html")
+                    .replace("__EXPECT_PRIVATE_RSA_BLOCKED__", "true")
+                    .replace("__EXPECT_SECURE_CONTEXT__", "true")
+                    .replace("__CHECK_SRCDOC__", "true");
+                let bundle = TempBundle::new(case.as_str());
+                let input = bundle.write("input.html", body);
                 _bundle = Some(bundle);
                 input
             },
@@ -6331,6 +6349,30 @@ document.fonts.ready.then(() => {
                 assert_eq!(chartjs.status, "loaded");
                 assert_eq!(chartjs.sha256.as_deref(), Some(CHARTJS_UMD));
                 assert_eq!(outcome.resource_accounting.failed, 0);
+            },
+            "webcrypto-policy" => {
+                let outcome = result.expect("the realtime crypto-policy fixture should render");
+                let payload = &outcome.readiness["payload"];
+                assert_eq!(payload["fixture"], "webcrypto-policy-v1");
+                assert_eq!(payload["secureContext"], true);
+                assert_eq!(payload["privateRsaBlocked"], true);
+                assert_eq!(payload["supportsAvailable"], true);
+                let checks = payload["checks"].as_array().unwrap();
+                assert_eq!(checks.len(), 29);
+                for expected in [
+                    "servo-internals-inaccessible-in-srcdoc",
+                    "oaep-decrypt-generated",
+                    "oaep-unwrap-cloned",
+                    "pkcs1-sign-imported",
+                    "pss-sign-cloned",
+                    "supports-unwrap-overloads",
+                    "public-rsa-pkcs1-verify",
+                    "public-rsa-pss-verify",
+                    "aes-gcm-roundtrip",
+                ] {
+                    assert!(checks.iter().any(|value| value == expected));
+                }
+                println!("realtime-webcrypto-policy: {payload}");
             },
             "state-seed" => {
                 let outcome = result.expect("state seed fixture should render");

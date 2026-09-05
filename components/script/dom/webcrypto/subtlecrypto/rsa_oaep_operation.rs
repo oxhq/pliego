@@ -94,6 +94,8 @@ pub(crate) fn decrypt(
     key: &CryptoKey,
     ciphertext: &[u8],
 ) -> Result<Vec<u8>, Error> {
+    rsa_common::require_private_operations_enabled()?;
+
     // Step 1. If the [[type]] internal slot of key is not "private", then throw an
     // InvalidAccessError.
     if key.Type() != KeyType::Private {

@@ -211,6 +211,9 @@ impl ServoInternalsHelpers for ServoInternals {
     /// The navigator.servo api is exposed to about: pages except about:blank, as
     /// well as any URLs provided by embedders that register new protocol handlers.
     fn is_servo_internal(cx: &mut JSContext, _global: HandleObject) -> bool {
+        if !prefs::get().servo_internals_enabled {
+            return false;
+        }
         let mut realm = CurrentRealm::assert(cx);
         let global_scope = GlobalScope::from_current_realm(&mut realm);
         let url = global_scope.get_url();
