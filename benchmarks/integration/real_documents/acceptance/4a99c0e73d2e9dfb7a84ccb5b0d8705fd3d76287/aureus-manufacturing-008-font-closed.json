@@ -1,0 +1,28 @@
+{
+  "schema": "pliego.real-document-visual-acceptance.v1",
+  "identity_sha256": "23b96c42e0eab73ad2fcd08e5ae04d76aeef80065debbc94040d5d87286f2536",
+  "targets": {
+    "pliego-candidate": {
+      "reviewed": true,
+      "notes": "One-page work order: all quantities, operation durations and three decoded Code128 values pass, with strict used-font v2 or original-whole-font closure. Actual retained full page reviewed: readable labels/tables, intact barcodes and unobstructed metadata. Accepted functional layout, not pixel parity.",
+      "layout_fingerprints": [
+        "2c338660ad4a81ddb793b7da744e321bf1ee1165a9ab075dd39eeb8cdf4afb61"
+      ],
+      "pdf_sha256": [
+        "b056e1de3ef78740f1641ddf42817be454f705220322d2dc09aad3b81300d64a"
+      ],
+      "evidence": "https://github.com/oxhq/pliego/actions/runs/33964829162; retained transport/inventory and actual PDF review described in benchmarks/integration/real_documents/acceptance/4a99c0e73d2e9dfb7a84ccb5b0d8705fd3d76287/review.md"
+    },
+    "aureus-dompdf-3.1.6": {
+      "reviewed": true,
+      "notes": "One-page work order: all quantities, operation durations and three decoded Code128 values pass, with strict used-font v2 or original-whole-font closure. Actual retained full page reviewed: readable labels/tables, intact barcodes and unobstructed metadata. Accepted functional layout, not pixel parity.",
+      "layout_fingerprints": [
+        "bc70c36390a471f2e5105d90c34534b8d49dddf24d779e7d1b7d065a9aa74639"
+      ],
+      "pdf_sha256": [
+        "4fc6f7c80d351b43f9cd0a94eae32c4bba430498c2c3714b4b1c74e9d1a0a306"
+      ],
+      "evidence": "https://github.com/oxhq/pliego/actions/runs/33964829162; retained transport/inventory and actual PDF review described in benchmarks/integration/real_documents/acceptance/4a99c0e73d2e9dfb7a84ccb5b0d8705fd3d76287/review.md"
+    }
+  }
+}
