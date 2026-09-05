@@ -3,6 +3,11 @@
 PHP 8.3+ 64-bit client for controlled, one-document-per-process Pliego rendering.
 The current stable package is 0.3.3; new integrations should use `DocumentEngine` and API 2.
 
+This source tree prepares the unreleased 0.4.0 package. The command below installs
+the current public package, not the candidate. The candidate retains the same
+profile-null API 2 tuple and adds the bounded rendering changes described in the
+[0.4.0 candidate notes](https://github.com/oxhq/pliego/blob/main/docs/releases/v0.4.0.md).
+
 ```sh
 composer require oxhq/pliego-php:^0.3.3
 ```
@@ -38,7 +43,7 @@ $result = $engine->render(
 file_put_contents('/srv/my-app/storage/invoice.pdf', $result->bytes());
 ```
 
-The 0.3.3 client negotiates only Pliego's profile-null API 2 tuple. It requests no semantic or
+The client negotiates only Pliego's profile-null API 2 tuple. It requests no semantic or
 accessibility conformance profile and makes no PDF/UA claim. API 2 always denies live network access
 and host-font discovery. Fetch remote resources before the render, stage them as local files, and
 pass their paths through `InputAsset` entries in `assets`. `allowedHttpRoots` remains only for the
@@ -54,7 +59,7 @@ the SDK converts it to exact 60-app-unit geometry. `pageSize: 'A4'` selects name
 timezones are `UTC` and `America/Tijuana`; `PST8PDT` is accepted as a deprecated input alias and
 normalized to `America/Tijuana` in the request.
 
-Development toward 0.4 also accepts exact API 2 app-unit geometry: append `au`
+The unreleased 0.4.0 candidate also accepts exact API 2 app-unit geometry: append `au`
 to the whole size or margin tuple. For example,
 `new RenderOptions(pageSize: '67351x47622au', pageMargins: '2268,2268,5669,2268au')`
 requests A4 landscape with 1 cm top/right/left and 2.5 cm bottom margins,
@@ -91,9 +96,10 @@ failures also throw `TransportException`; an unavailable exact tuple throws
 
 ## API 1 compatibility
 
-`CliRenderer` is deprecated since 0.3.0 and remains available only as an explicit 0.3.x migration
-boundary. It continues to invoke `pliego render` and preserve its existing `RenderResult` and
-exception behavior. New integrations and framework bindings should use `DocumentEngine`; API 1 is
+`CliRenderer` is deprecated since 0.3.0 and remains available as an explicit migration
+boundary, including in the 0.4.0 candidate. It continues to invoke `pliego render`
+and preserve its existing `RenderResult` and exception behavior. New integrations
+and framework bindings should use `DocumentEngine`; API 1 is
 not the default.
 
 See the project [support profile](https://github.com/oxhq/pliego/blob/main/docs/pliego/support-profile.md)

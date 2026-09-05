@@ -5,6 +5,22 @@ controlled runtime and its profile-null engine API 2 integration. It complements
 capability limits in the [support profile](../pliego/support-profile.md). It is not
 a claim that the engine is safe for hostile HTML.
 
+The unreleased 0.4.0 candidate preserves this trust boundary. Its narrow URI-link
+profile checks canonical HTTP/HTTPS/mailto destinations and exact annotation
+geometry; an allowed scheme does not make a destination trustworthy. Applications
+must still validate user-derived links, and PDF viewers enforce their own opening
+policy. Internal destinations and unsafe schemes remain excluded. The published
+v0.3.3 limitation below is retained as release history, not the candidate's link
+implementation status.
+
+API 2 bounds request JSON to 1 MiB, the manifest to 16 MiB, and aggregate HTML plus
+asset bytes to 64 MiB. Those input bounds do not limit decoded memory, layout
+complexity or a synchronous JavaScript turn. The candidate's
+[native consumer checks](../pliego/native-consumer-checks.md) exercise one Linux
+deadline/forced-cancellation/local-storage/queue recipe. Their exact-source reports
+do not establish a hostile-input sandbox, graceful cancellation or universal
+descendant, resource or remote-storage guarantees.
+
 ## Scope and trust boundary
 
 Pliego is designed to render templates, HTML, JavaScript, fonts, images, and other

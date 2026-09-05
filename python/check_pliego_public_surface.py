@@ -28,7 +28,12 @@ PUBLIC_MARKDOWN = (
     ROOT / "docs" / "project-overview.md",
     ROOT / "docs" / "releases" / "v0.3.md",
     ROOT / "docs" / "releases" / "v0.3.3.md",
+    ROOT / "docs" / "releases" / "v0.4.0.md",
     ROOT / "docs" / "pliego" / "support-profile.md",
+    ROOT / "docs" / "pliego" / "paged-table-compatibility.md",
+    ROOT / "docs" / "pliego" / "paged-fixed-content.md",
+    ROOT / "docs" / "pliego" / "nonpainting-content.md",
+    ROOT / "docs" / "pliego" / "native-consumer-checks.md",
     ROOT / "docs" / "security" / "threat-model.md",
     ROOT / "docs" / "funding" / "2026.md",
     ROOT / "docs" / "benchmarks" / "README.md",
@@ -168,6 +173,39 @@ def verify_current_copy(published_benchmark: bool) -> None:
         require(needle in launch, f"launch overview omits scoped v0.3.3 consumer evidence: {needle!r}")
 
 
+def verify_candidate_copy() -> None:
+    """Keep source preparation distinct from an actually published release."""
+    notes = read(ROOT / "docs" / "releases" / "v0.4.0.md")
+    require(notes.startswith("# Pliego v0.4.0\n"), "candidate notes do not match the promotion tag header")
+    readme = read(ROOT / "README.md")
+    support = read(ROOT / "docs" / "pliego" / "support-profile.md")
+    php = read(ROOT / "sdk" / "php" / "README.md")
+    laravel = read(ROOT / "sdk" / "laravel" / "README.md")
+    manifest = json.loads(read(ROOT / "sdk" / "laravel" / "resources" / "runtimes.json"))
+    require(
+        manifest.get("version") == "0.4.0" and manifest.get("release_ready") is False,
+        "0.4.0 candidate metadata must remain non-publishable until explicit finalization",
+    )
+    for package in ("php", "laravel"):
+        require(read(ROOT / "sdk" / package / "VERSION").strip() == "0.4.0", "candidate SDK version differs")
+    for needle in (
+        "**Status: unreleased.**",
+        "public recommendation remains v0.3.3",
+        "release_ready: false",
+        "No candidate timing results are claimed",
+        "upgrade/rollback",
+        "fresh public-only consumer",
+    ):
+        require(needle in notes, f"candidate notes omit the publication boundary: {needle!r}")
+    require("**Unreleased candidate:** 0.4.0" in readme, "README does not distinguish candidate source")
+    require("## Unreleased 0.4.0 candidate" in support, "support profile merges released and candidate scope")
+    for needle in ("URI links", "Collapsed tables", "Solid paint", "Fixed page text", "Nonpainting barcode markup"):
+        require(needle in support, f"candidate support omits a bounded addition: {needle!r}")
+    require("unreleased 0.4.0 package" in php, "PHP source guide misstates candidate publication")
+    require("unreleased 0.4.0 source candidate supports Laravel 12/13" in laravel, "Laravel candidate range is unclear")
+    require("not yet available through Packagist" in laravel, "Laravel guide implies premature publication")
+
+
 def verified_manifest_path(relative: str) -> Path:
     require(isinstance(relative, str) and len(relative) > 0, "showcase file path must be a non-empty string")
     relative_path = Path(relative)
@@ -267,6 +305,7 @@ def main() -> int:
     try:
         published_benchmark = verify_benchmark_publication()
         verify_current_copy(published_benchmark)
+        verify_candidate_copy()
         verify_showcase()
         verify_local_links()
     except (

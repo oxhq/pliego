@@ -238,6 +238,14 @@ release; any public contract or behavior change requires the next minor release.
 Goal: make representative business documents reliable through the actual
 PHP/Laravel render, storage, retrieval, and queue workflow.
 
+Status: the source tree prepares an **unreleased 0.4.0 candidate**. Bounded
+table, link, solid-paint and physical-page-footer implementations and their
+native oracles are present; source implementation is not completion of the
+release gates below. The selected operational family is a one-page Aureus
+manufacturing work order with three Code128 barcodes; the separate 300-entry
+ledger supplies long-document coverage. Neither replaces the invoice gate.
+See [candidate notes](docs/releases/v0.4.0.md) for the remaining evidence boundary.
+
 Done means:
 
 - a frozen corpus covers an invoice, a long statement, and an operational report,
