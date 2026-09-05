@@ -395,6 +395,51 @@ jobs:
             --proof-directory "$PWD/dist/api2-links-${{ matrix.bundle }}" || link_status=$?
           test "$table_status" -eq 0 && test "$link_status" -eq 0
 
+      - name: Set up PHP for the packaged Linux consumer boundary
+        if: runner.os == 'Linux'
+        uses: shivammathur/setup-php@b604ade2a87db23f8871b7182e69ec5e75effb45 # v2
+        with:
+          php-version: '8.4'
+          coverage: none
+          extensions: mbstring, dom, xml, fileinfo, pdo_sqlite, zip
+
+      - name: Prove packaged Linux caller deadline and Laravel storage
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          proof="$PWD/dist/api2-native-consumer-${{ matrix.bundle }}"
+          binary="$RUNNER_TEMP/pliego-packaged-api2-${{ matrix.bundle }}/pliego-${PLIEGO_VERSION}-${{ matrix.bundle }}/${{ matrix.executable }}"
+          test -f "$binary"
+          test ! -e "$proof"
+          mkdir "$proof"
+          php --version | tee "$proof/php-version.txt"
+          composer --version | tee "$proof/composer-version.txt"
+          # Resolve the existing pinned full-framework fixture without booting
+          # its app or executing its scripts. SDK classes come from this source.
+          composer --no-interaction --no-plugins --no-scripts --working-dir=sdk/php \
+            install --prefer-dist --no-progress 2>&1 | tee "$proof/php-install.log"
+          composer --no-interaction --no-plugins --no-scripts --working-dir=tests/pliego/laravel-invoice \
+            install --prefer-dist --no-progress 2>&1 | tee "$proof/framework-install.log"
+          composer --no-interaction --no-plugins --working-dir=tests/pliego/laravel-invoice \
+            check-platform-reqs --format=json | tee "$proof/platform-requirements.json"
+          composer --no-interaction --no-plugins --working-dir=tests/pliego/laravel-invoice \
+            audit --format=json | tee "$proof/audit.json"
+          cp tests/pliego/laravel-invoice/composer.json "$proof/consumer-composer.json"
+          cp tests/pliego/laravel-invoice/composer.lock "$proof/consumer-composer.lock"
+          # The 1s caller test requires an optimized packaged executable: a
+          # multi-GB unoptimized debug self-hash is not this deployment recipe.
+          deadline_status=0
+          timeout --kill-after=5s 45s php sdk/php/tests/production_deadline_test.php \
+            "$binary" "$proof/caller-deadline" 1 \
+            2>&1 | tee "$proof/caller-deadline.log" || deadline_status=$?
+          storage_status=0
+          PLIEGO_TEST_AUTOLOAD="$PWD/tests/pliego/laravel-invoice/vendor/autoload.php" \
+            timeout --kill-after=5s 90s php sdk/laravel/tests/production_storage_test.php \
+            "$binary" "$proof/laravel-storage" \
+            2>&1 | tee "$proof/laravel-storage.log" || storage_status=$?
+          test "$deadline_status" -eq 0 && test "$storage_status" -eq 0
+
       - name: Upload packaged API 2 executable proof
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -404,6 +449,7 @@ jobs:
             dist/api2-executable-proof-${{ matrix.bundle }}.json
             dist/api2-headerless-tables-${{ matrix.bundle }}
             dist/api2-links-${{ matrix.bundle }}
+            dist/api2-native-consumer-${{ matrix.bundle }}
           if-no-files-found: error
           retention-days: 30
 
