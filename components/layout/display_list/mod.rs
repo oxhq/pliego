@@ -6,7 +6,7 @@ use std::cell::{OnceCell, RefCell};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use app_units::{AU_PER_PX, Au};
+use app_units::{AU_PER_PX, Au, MAX_AU};
 pub(crate) use clip::ClipId;
 use clip::{Clip, StackingContextTreeClipStore};
 use euclid::{Box2D, Point2D, Rect, Scale, SideOffsets2D, Size2D, UnknownUnit, Vector2D};
@@ -71,6 +71,7 @@ use crate::fragment_tree::{
 use crate::geom::{
     LengthPercentageOrAuto, PhysicalPoint, PhysicalRect, PhysicalSides, PhysicalSize,
 };
+use crate::pages::{Page, PageSequence};
 use crate::replaced::NaturalSizes;
 use crate::style_ext::{
     BorderStyleColor, ComputedValuesExt, Display as LayoutDisplay, DisplayGeneratingBox,
@@ -95,6 +96,9 @@ const INSERTION_POINT_LOGICAL_WIDTH: Au = Au(AU_PER_PX);
 pub(crate) struct DisplayListBuilder<'a> {
     /// The [`FragmentTree`] that we are building a display list for.
     fragment_tree: &'a FragmentTree,
+
+    /// Resolved pages from the same root layout, absent for continuous documents.
+    page_sequence: Option<&'a PageSequence>,
 
     /// The current [`ScrollTreeNodeId`] for this [`DisplayListBuilder`]. This is
     /// necessary because some pieces of fragments as backgrounds with
@@ -313,6 +317,7 @@ impl DisplayListBuilder<'_> {
     pub(crate) fn build(
         stacking_context_tree: &mut StackingContextTree,
         fragment_tree: &FragmentTree,
+        page_sequence: Option<&PageSequence>,
         image_resolver: Arc<ImageResolver>,
         device_pixel_ratio: Scale<f32, StyloCSSPixel, StyloDevicePixel>,
         highlighted_dom_node: Option<OpaqueNode>,
@@ -338,6 +343,7 @@ impl DisplayListBuilder<'_> {
         let _span = profile_traits::trace_span!("DisplayListBuilder::build").entered();
         let mut builder = DisplayListBuilder {
             fragment_tree,
+            page_sequence,
             current_reference_frame_scroll_node_id: paint_info.root_reference_frame_id,
             webrender_display_list_builder: &mut webrender_display_list_builder,
             paint_info,
@@ -1089,7 +1095,7 @@ impl PaintTraversalHandler for DisplayListBuilder<'_> {
         };
         let fragment = fragment.with_style();
 
-        let source_style = {
+        let (source_style, source_geometry_supported) = {
             // > For documents whose root element is an HTML HTML element or an XHTML html element
             // > [HTML]: if the computed value of background-image on the root element is none and its
             // > background-color is transparent, user agents must instead propagate the computed
@@ -1099,11 +1105,26 @@ impl PaintTraversalHandler for DisplayListBuilder<'_> {
             if root_fragment_style.background_is_transparent() {
                 let body_fragment = self.fragment_tree.body_fragment();
                 self.paint_body_background = body_fragment.is_none();
-                body_fragment
-                    .map(|body_fragment| body_fragment.style().clone())
-                    .unwrap_or(fragment.style().clone())
+                body_fragment.map_or_else(
+                    || {
+                        (
+                            fragment.style().clone(),
+                            box_paint_geometry_is_supported(self, state, &fragment),
+                        )
+                    },
+                    |body_fragment| {
+                        let body_fragment = body_fragment.with_style();
+                        (
+                            body_fragment.style().clone(),
+                            box_paint_geometry_is_supported(self, state, &body_fragment),
+                        )
+                    },
+                )
             } else {
-                root_fragment_style.clone()
+                (
+                    root_fragment_style.clone(),
+                    box_paint_geometry_is_supported(self, state, &fragment),
+                )
             }
         };
 
@@ -1119,27 +1140,85 @@ impl PaintTraversalHandler for DisplayListBuilder<'_> {
         // If the document is smaller than the viewport (and doesn’t scroll),
         // we still want to paint the rest of the viewport.
         // If it’s larger, we also want to paint areas reachable after scrolling.
-        let painting_area = self
+        let painting_area_app_units = self
             .fragment_tree
             .initial_containing_block
-            .union(&self.fragment_tree.scrollable_overflow())
-            .to_webrender();
+            .union(&self.fragment_tree.scrollable_overflow());
+        let painting_area = painting_area_app_units.to_webrender();
 
         let background_color =
             source_style.resolve_color(&source_style.get_background().background_color);
         if background_color.alpha > 0.0 {
-            let common = self.common_properties(state, painting_area, &source_style);
             let color = rgba(background_color);
-            self.wr().push_rect(&common, painting_area, color);
-            if paint_state_is_axis_aligned(self.paint_info.root_scroll_node_id, state) {
+            let layer_index = source_style.get_background().background_image.0.len() - 1;
+            let exact_paints = (source_geometry_supported &&
+                box_paint_geometry_is_supported(self, state, &fragment) &&
+                background::solid_color_uses_border_box(&source_style, layer_index))
+            .then(|| match self.page_sequence {
+                Some(sequence) => paged_root_background_areas(
+                    &sequence.pages,
+                    self.fragment_tree.initial_containing_block,
+                ),
+                None => Some(vec![painting_area_app_units]),
+            })
+            .flatten()
+            .and_then(|areas| {
+                areas
+                    .into_iter()
+                    .map(|area| {
+                        Some((
+                            area,
+                            debug_paint_rect_app_units(
+                                area,
+                                color,
+                                LayoutDebugPaintRectKind::Background,
+                            )?,
+                        ))
+                    })
+                    .collect::<Option<Vec<_>>>()
+            });
+            if let Some(paints) = exact_paints {
+                let mut paint_rects = Vec::with_capacity(paints.len());
+                for (area, paint_rect) in paints {
+                    // The renderer and retained authority consume the same original Au rectangle.
+                    let render_area = area.to_webrender();
+                    let common = self.common_properties(state, render_area, &source_style);
+                    self.wr().push_rect(&common, render_area, color);
+                    paint_rects.push(paint_rect);
+                }
                 self.debug_capture.record_paint_rects(
                     fragment.box_fragment,
                     fragment.base.tag,
                     state,
-                    debug_paint_rect(painting_area, color, LayoutDebugPaintRectKind::Background)
+                    paint_rects,
+                );
+            } else {
+                // Unsupported paged geometry retains the diagnostic-only legacy path. In
+                // particular, an invalid page sequence must not gain authority from this union.
+                let common = self.common_properties(state, painting_area, &source_style);
+                self.wr().push_rect(&common, painting_area, color);
+                if self.page_sequence.is_some() {
+                    self.debug_capture.record_fragment(
+                        "root-background",
+                        fragment.box_fragment,
+                        fragment.base.tag,
+                        state,
+                    );
+                }
+                if paint_state_is_axis_aligned(self.paint_info.root_scroll_node_id, state) {
+                    self.debug_capture.record_paint_rects(
+                        fragment.box_fragment,
+                        fragment.base.tag,
+                        state,
+                        debug_paint_rect(
+                            painting_area,
+                            color,
+                            LayoutDebugPaintRectKind::Background,
+                        )
                         .into_iter()
                         .collect(),
-                );
+                    );
+                }
             }
 
             // From <https://www.w3.org/TR/paint-timing/#sec-terminology>:
@@ -1848,17 +1927,26 @@ impl<'a> BuilderForBoxFragment<'a> {
                 .wr()
                 .push_rect(&common, bounds, rgba(background_color));
             if box_paint_geometry_is_supported(builder, state, self.fragment) {
+                let color = rgba(background_color);
+                let exact = painter
+                    .solid_color_area_app_units(self, layer_index)
+                    .and_then(|rect| {
+                        debug_paint_rect_app_units(
+                            rect,
+                            color,
+                            LayoutDebugPaintRectKind::Background,
+                        )
+                    });
                 builder.debug_capture.record_paint_rects(
                     self.fragment.box_fragment,
                     self.fragment.base.tag,
                     state,
-                    debug_paint_rect(
-                        bounds,
-                        rgba(background_color),
-                        LayoutDebugPaintRectKind::Background,
-                    )
-                    .into_iter()
-                    .collect(),
+                    exact
+                        .or_else(|| {
+                            debug_paint_rect(bounds, color, LayoutDebugPaintRectKind::Background)
+                        })
+                        .into_iter()
+                        .collect(),
                 );
             }
 
@@ -2716,9 +2804,23 @@ fn box_paint_geometry_is_supported(
     state: &TraversalState,
     fragment: &BoxFragmentWithStyle<'_>,
 ) -> bool {
-    paint_state_is_axis_aligned(builder.paint_info.root_scroll_node_id, state) &&
-        fragment.border_radius() == BorderRadius::default() &&
-        style_effects_are_supported(fragment.style(), fragment.base.flags)
+    paint_geometry_is_supported(
+        builder.paint_info.root_scroll_node_id,
+        state,
+        fragment.border_radius(),
+        style_effects_are_supported(fragment.style(), fragment.base.flags),
+    )
+}
+
+fn paint_geometry_is_supported(
+    root_scroll_node_id: ScrollTreeNodeId,
+    state: &TraversalState,
+    radii: BorderRadius,
+    effects_supported: bool,
+) -> bool {
+    paint_state_is_axis_aligned(root_scroll_node_id, state) &&
+        radii == BorderRadius::default() &&
+        effects_supported
 }
 
 fn background_has_image(style: &ComputedValues) -> bool {
@@ -2851,6 +2953,113 @@ fn append_solid_border_paint_rect(
         LayoutDebugPaintRectKind::Border,
     )?);
     Some(())
+}
+
+/// The unlayered document canvas covers each page's border box, not its margin box:
+/// <https://www.w3.org/TR/css-page-3/#painting>. With the current request-defined pages
+/// (no page padding or border), that is exactly the resolved content rectangle on each page.
+/// Do not use scrollable overflow: it is neither a page sequence nor a page-local canvas extent.
+fn paged_root_background_areas(
+    pages: &[Page],
+    initial_containing_block: PhysicalRect<Au>,
+) -> Option<Vec<PhysicalRect<Au>>> {
+    if pages.is_empty() {
+        return None;
+    }
+    let mut page_origin = 0i32;
+    let mut areas = Vec::with_capacity(pages.len());
+    for (index, page) in pages.iter().enumerate() {
+        let geometry = page.definition.debug_app_units();
+        if page.fragmentainer.page_index != index ||
+            geometry.width <= 0 ||
+            geometry.height <= 0 ||
+            geometry.width > MAX_AU.0 ||
+            geometry.height > MAX_AU.0 ||
+            geometry.margin_top < 0 ||
+            geometry.margin_right < 0 ||
+            geometry.margin_bottom < 0 ||
+            geometry.margin_left < 0 ||
+            geometry.available_inline_size <= 0 ||
+            geometry.available_block_size <= 0 ||
+            page.fragmentainer.available_inline_size.0 != geometry.available_inline_size ||
+            page.fragmentainer.available_block_size.0 != geometry.available_block_size
+        {
+            return None;
+        }
+        let right = geometry
+            .margin_left
+            .checked_add(geometry.available_inline_size)?;
+        let bottom = geometry
+            .margin_top
+            .checked_add(geometry.available_block_size)?;
+        if right.checked_add(geometry.margin_right)? != geometry.width ||
+            bottom.checked_add(geometry.margin_bottom)? != geometry.height
+        {
+            return None;
+        }
+        let next_page_origin = page_origin.checked_add(geometry.height)?;
+        if next_page_origin > MAX_AU.0 {
+            return None;
+        }
+        let area = PhysicalRect::new(
+            PhysicalPoint::new(
+                Au(geometry.margin_left),
+                Au(page_origin.checked_add(geometry.margin_top)?),
+            ),
+            PhysicalSize::new(
+                Au(geometry.available_inline_size),
+                Au(geometry.available_block_size),
+            ),
+        );
+        if index == 0 && area != initial_containing_block {
+            return None;
+        }
+        areas.push(area);
+        page_origin = next_page_origin;
+    }
+    Some(areas)
+}
+
+fn debug_paint_rect_app_units(
+    rect: PhysicalRect<Au>,
+    color: ColorF,
+    kind: LayoutDebugPaintRectKind,
+) -> Option<LayoutDebugPaintRect> {
+    if rect.origin.x < Au::zero() ||
+        rect.origin.y < Au::zero() ||
+        rect.size.width <= Au::zero() ||
+        rect.size.height <= Au::zero() ||
+        rect.origin.x.0.checked_add(rect.size.width.0).is_none() ||
+        rect.origin.y.0.checked_add(rect.size.height.0).is_none() ||
+        !color.r.is_finite() ||
+        !color.g.is_finite() ||
+        !color.b.is_finite() ||
+        !color.a.is_finite() ||
+        color.a <= 0.0
+    {
+        return None;
+    }
+    Some(LayoutDebugPaintRect {
+        rect: LayoutDebugRect {
+            x: rect.origin.x.to_f32_px(),
+            y: rect.origin.y.to_f32_px(),
+            width: rect.size.width.to_f32_px(),
+            height: rect.size.height.to_f32_px(),
+            app_units: Some(LayoutDebugRectAppUnits {
+                x: rect.origin.x.0,
+                y: rect.origin.y.0,
+                width: rect.size.width.0,
+                height: rect.size.height.0,
+            }),
+        },
+        color: LayoutDebugColor {
+            r: color.r.clamp(0.0, 1.0),
+            g: color.g.clamp(0.0, 1.0),
+            b: color.b.clamp(0.0, 1.0),
+            a: color.a.clamp(0.0, 1.0),
+        },
+        kind,
+    })
 }
 
 fn debug_paint_rect(
@@ -3562,8 +3771,264 @@ impl BaseFragment {
 
 #[cfg(test)]
 mod debug_capture_tests {
+    use style::properties::style_structs::Font;
+
     use super::*;
+    use crate::fragment_tree::BaseFragmentInfo;
     use crate::geom::PhysicalVec;
+    use crate::pages::{FragmentainerContext, FragmentainerOverflow, PageDefinition};
+
+    fn background_page(index: usize, width: i32, height: i32, margins: [i32; 4]) -> Page {
+        let definition = PageDefinition::from_app_units(width, height, margins).unwrap();
+        let geometry = definition.debug_app_units();
+        Page {
+            definition,
+            fragmentainer: FragmentainerContext {
+                page_index: index,
+                available_inline_size: Au(geometry.available_inline_size),
+                available_block_size: Au(geometry.available_block_size),
+                continuation: None,
+                overflow: FragmentainerOverflow::RetainInFragmentTree,
+            },
+        }
+    }
+
+    #[test]
+    fn paged_canvas_covers_all_four_a4_content_areas_in_original_app_units() {
+        let pages: Vec<_> = (0..4)
+            .map(|index| background_page(index, 47_622, 67_351, [2880; 4]))
+            .collect();
+        let initial_containing_block = PhysicalRect::new(
+            PhysicalPoint::new(Au(2880), Au(2880)),
+            PhysicalSize::new(Au(41_862), Au(61_591)),
+        );
+        let areas = paged_root_background_areas(&pages, initial_containing_block).unwrap();
+        assert_eq!(areas.len(), 4);
+        for (index, area) in areas.into_iter().enumerate() {
+            assert_eq!(area.origin.x, Au(2880));
+            assert_eq!(area.origin.y, Au(index as i32 * 67_351 + 2880));
+            assert_eq!(area.size, initial_containing_block.size);
+            let paint = debug_paint_rect_app_units(
+                area,
+                ColorF::WHITE,
+                LayoutDebugPaintRectKind::Background,
+            )
+            .unwrap();
+            let exact = paint.rect.app_units.unwrap();
+            assert_eq!(exact.y, index as i32 * 67_351 + 2880);
+            assert_eq!(exact.height, 61_591);
+            assert_eq!(area.to_webrender().min.y, Au(exact.y).to_f32_px());
+        }
+    }
+
+    #[test]
+    fn paged_canvas_uses_each_resolved_page_size_and_margins() {
+        let pages = [
+            background_page(0, 10_001, 14_003, [601, 607, 613, 617]),
+            background_page(1, 11_003, 15_007, [701, 709, 719, 727]),
+        ];
+        let first = PhysicalRect::new(
+            PhysicalPoint::new(Au(617), Au(601)),
+            PhysicalSize::new(Au(8777), Au(12_789)),
+        );
+        assert_eq!(
+            paged_root_background_areas(&pages, first).unwrap(),
+            vec![
+                first,
+                PhysicalRect::new(
+                    PhysicalPoint::new(Au(727), Au(14_704)),
+                    PhysicalSize::new(Au(9567), Au(13_587)),
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn paged_canvas_rejects_incomplete_or_inconsistent_page_authority() {
+        let first = PhysicalRect::new(
+            PhysicalPoint::new(Au(2880), Au(2880)),
+            PhysicalSize::new(Au(41_862), Au(61_591)),
+        );
+        assert!(paged_root_background_areas(&[], first).is_none());
+        let valid = background_page(0, 47_622, 67_351, [2880; 4]);
+        let mut malformed = valid;
+        malformed.fragmentainer.page_index = 1;
+        assert!(paged_root_background_areas(&[malformed], first).is_none());
+        malformed = valid;
+        malformed.fragmentainer.available_inline_size = Au(-1);
+        assert!(paged_root_background_areas(&[malformed], first).is_none());
+        malformed = valid;
+        malformed.fragmentainer.available_block_size.0 -= 1;
+        assert!(paged_root_background_areas(&[malformed], first).is_none());
+        assert!(paged_root_background_areas(&[valid, valid], first).is_none());
+        let mut shifted = first;
+        shifted.origin.y.0 += 1;
+        assert!(paged_root_background_areas(&[valid], shifted).is_none());
+        let mut narrowed = first;
+        narrowed.size.width.0 -= 1;
+        assert!(paged_root_background_areas(&[valid], narrowed).is_none());
+    }
+
+    #[test]
+    fn paged_canvas_rejects_extents_that_would_clamp_or_overflow_app_units() {
+        let height = MAX_AU.0 / 2 + 1;
+        let first = PhysicalRect::new(
+            PhysicalPoint::zero(),
+            PhysicalSize::new(Au(1200), Au(height)),
+        );
+        let pages = [
+            background_page(0, 1200, height, [0; 4]),
+            background_page(1, 1200, height, [0; 4]),
+        ];
+        assert!(paged_root_background_areas(&pages[..1], first).is_some());
+        assert!(paged_root_background_areas(&pages, first).is_none());
+        let oversized = background_page(0, 1200, i32::MAX, [0; 4]);
+        assert!(paged_root_background_areas(&[oversized], first).is_none());
+    }
+
+    #[test]
+    fn background_rectangles_keep_original_app_units_without_float_recovery() {
+        let rect = PhysicalRect::new(
+            PhysicalPoint::new(Au(100_000_001), Au(100_000_019)),
+            PhysicalSize::new(Au(601), Au(121)),
+        );
+        let paint =
+            debug_paint_rect_app_units(rect, ColorF::BLACK, LayoutDebugPaintRectKind::Background)
+                .unwrap();
+        let exact = paint.rect.app_units.as_ref().unwrap();
+        assert_eq!(
+            (exact.x, exact.y, exact.width, exact.height),
+            (100_000_001, 100_000_019, 601, 121)
+        );
+        assert_ne!((paint.rect.x * AU_PER_PX as f32).round() as i32, exact.x);
+        assert_ne!((paint.rect.y * AU_PER_PX as f32).round() as i32, exact.y);
+        assert_eq!(paint.rect.width, Au(601).to_f32_px());
+
+        // Continuous-mode root propagation owns the union, not a viewport float.
+        let canvas =
+            PhysicalRect::new(PhysicalPoint::zero(), PhysicalSize::new(Au(1200), Au(2400)));
+        let overflow =
+            PhysicalRect::new(PhysicalPoint::zero(), PhysicalSize::new(Au(1201), Au(2403)));
+        let paint = debug_paint_rect_app_units(
+            canvas.union(&overflow),
+            ColorF::WHITE,
+            LayoutDebugPaintRectKind::Background,
+        )
+        .unwrap();
+        let exact = paint.rect.app_units.as_ref().unwrap();
+        assert_eq!(
+            (exact.x, exact.y, exact.width, exact.height),
+            (0, 0, 1201, 2403)
+        );
+        assert!(
+            debug_paint_rect(
+                rect.to_webrender(),
+                ColorF::BLACK,
+                LayoutDebugPaintRectKind::Background
+            )
+            .unwrap()
+            .rect
+            .app_units
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn ordinary_background_authority_belongs_to_the_original_owner_rectangle() {
+        let style =
+            ComputedValues::initial_values_with_font_override(Font::initial_values()).to_arc();
+        let fragment = Arc::new(BoxFragment::new(
+            BaseFragmentInfo::anonymous(),
+            style,
+            Vec::new(),
+            PhysicalRect::new(
+                PhysicalPoint::new(Au(100_000_001), Au(61)),
+                PhysicalSize::new(Au(1201), Au(601)),
+            ),
+            PhysicalSides::new(Au(3), Au(5), Au(7), Au(11)),
+            PhysicalSides::new(Au(13), Au(17), Au(19), Au(23)),
+            PhysicalSides::zero(),
+            None,
+        ));
+        let fragment = fragment.with_style();
+        let builder = BuilderForBoxFragment::new(&fragment, PhysicalPoint::new(Au(2), Au(29)));
+        let mut painter = BackgroundPainter {
+            style: fragment.style(),
+            painting_area_override: None,
+            positioning_area_override: None,
+        };
+        let rect = painter.solid_color_area_app_units(&builder, 0).unwrap();
+        assert_eq!(
+            (
+                rect.origin.x.0,
+                rect.origin.y.0,
+                rect.size.width.0,
+                rect.size.height.0
+            ),
+            (99_999_969, 74, 1257, 643)
+        );
+        painter.painting_area_override = Some(builder.border_rect);
+        assert!(painter.solid_color_area_app_units(&builder, 0).is_none());
+        painter.painting_area_override = None;
+        painter.positioning_area_override = Some(builder.border_rect);
+        assert!(painter.solid_color_area_app_units(&builder, 0).is_none());
+    }
+
+    #[test]
+    fn background_authority_keeps_geometry_and_effect_exclusions() {
+        let root = ScrollTreeNodeId { index: 1 };
+        let mut state = TraversalState {
+            spatial_id: root,
+            clip_id: ClipId::INVALID,
+            ..Default::default()
+        };
+        assert!(paint_geometry_is_supported(
+            root,
+            &state,
+            BorderRadius::zero(),
+            true
+        ));
+        assert!(!paint_geometry_is_supported(
+            root,
+            &state,
+            BorderRadius::zero(),
+            false
+        ));
+        let rounded = BorderRadius {
+            top_left: LayoutSize::new(1.0, 1.0),
+            ..BorderRadius::zero()
+        };
+        assert!(!paint_geometry_is_supported(root, &state, rounded, true));
+        state.clip_id = ClipId(0);
+        assert!(!paint_geometry_is_supported(
+            root,
+            &state,
+            BorderRadius::zero(),
+            true
+        ));
+        state.clip_id = ClipId::INVALID;
+        state.spatial_id = ScrollTreeNodeId { index: 2 };
+        assert!(!paint_geometry_is_supported(
+            root,
+            &state,
+            BorderRadius::zero(),
+            true
+        ));
+
+        for (x, width) in [(-1, 60), (0, 0), (0, -1), (i32::MAX, 1)] {
+            assert!(
+                debug_paint_rect_app_units(
+                    PhysicalRect::new(
+                        PhysicalPoint::new(Au(x), Au(0)),
+                        PhysicalSize::new(Au(width), Au(60))
+                    ),
+                    ColorF::BLACK,
+                    LayoutDebugPaintRectKind::Background,
+                )
+                .is_none()
+            );
+        }
+    }
 
     #[test]
     fn horizontal_table_rules_retain_exact_geometry_and_row_ownership() {

@@ -1822,9 +1822,11 @@ impl LayoutThread {
             },
         };
 
+        let page_sequence = self.page_sequence.borrow();
         let (built_display_list, display_list_debug_capture) = DisplayListBuilder::build(
             stacking_context_tree,
             fragment_tree,
+            page_sequence.as_ref(),
             image_resolver.clone(),
             self.device().device_pixel_ratio(),
             reflow_request.highlighted_dom_node,

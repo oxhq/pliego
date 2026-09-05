@@ -1926,6 +1926,11 @@ fn distribute_operations(
         pages.iter().zip(positioned_pages).zip(repeated_operations)
     {
         repeated.append(&mut positioned);
+        // Captured events have dense, increasing sequence numbers. Copies keep their source
+        // sequence so the canvas and ancestor backgrounds still paint below the repeated header.
+        // The stable sort preserves rectangle/link order within one event and keeps a repeated
+        // copy before a same-sequence positioned operation, matching the previous tie behavior.
+        repeated.sort_by_key(|operation| operation.sequence);
         let (operations, authority) = repeated
             .into_iter()
             .map(|positioned| (positioned.operation, positioned.authority))
@@ -4933,6 +4938,177 @@ mod tests {
                 },
             },
         }
+    }
+
+    #[test]
+    fn repeated_header_paint_order_keeps_opaque_canvas_below_text_and_same_event_borders() {
+        let pages = [
+            exact_split_page(0, 6000, 6000),
+            exact_split_page(1, 6000, 6000),
+        ];
+        let text_operation = |sequence, top, text: &str| {
+            let exact = CapturedGlyphAppUnits {
+                x: 600,
+                y: top + 600,
+                advance: 420,
+            };
+            PositionedOperation {
+                sequence,
+                structural_fragment_index: None,
+                bounds: rect_from_app_units(CapturedRectAppUnits {
+                    x: 600,
+                    y: top,
+                    width: 1200,
+                    height: 600,
+                }),
+                authority: Some(CapturedOperationAuthority::Text {
+                    font_size_app_units: 720,
+                    glyphs: vec![exact],
+                }),
+                operation: Operation::Text {
+                    text: text.into(),
+                    font: "font".into(),
+                    font_size: 12.0,
+                    color: Color::default(),
+                    glyphs: vec![Glyph {
+                        id: 1,
+                        x: f64::from(app_units_to_f32_px(exact.x)),
+                        y: f64::from(app_units_to_f32_px(exact.y)),
+                        advance: f64::from(app_units_to_f32_px(exact.advance)),
+                        text_range: None,
+                    }],
+                    meta: OperationMeta::default(),
+                },
+            }
+        };
+        let mut canvas = exact_split_rectangle(CapturedRectAppUnits {
+            x: 0,
+            y: 0,
+            width: 6000,
+            height: 12000,
+        });
+        canvas.sequence = 0;
+        let Operation::Path { fill, .. } = &mut canvas.operation else {
+            unreachable!()
+        };
+        *fill = Some(Color {
+            r: 1.0,
+            g: 1.0,
+            b: 1.0,
+            a: 1.0,
+        });
+        let borders = [600, 1200].map(|x| {
+            let mut border = exact_split_rectangle(CapturedRectAppUnits {
+                x,
+                y: 1860,
+                width: 600,
+                height: 60,
+            });
+            border.sequence = 2;
+            let Operation::Path { meta, .. } = &mut border.operation else {
+                unreachable!()
+            };
+            meta.semantics.as_mut().unwrap().label = Some("border".into());
+            border
+        });
+        let mut operations = vec![canvas, text_operation(1, 1200, "header")];
+        operations.extend(borders);
+        operations.push(text_operation(3, 9000, "body"));
+        let paint_events = [1, 5, 6, 7]
+            .into_iter()
+            .enumerate()
+            .map(|(sequence, fragment_id)| CapturePaintEvent {
+                sequence,
+                kind: "paint-rect".into(),
+                fragment_id: Some(fragment_id),
+                tag_id: None,
+                _spatial_node_id: 0,
+                _clip_id: None,
+                table_borders: Vec::new(),
+                paint_rects: Vec::new(),
+            })
+            .collect::<Vec<_>>();
+        let repeats = [CaptureTableGroupRepeat {
+            page_index: 1,
+            _table_node: Some(1),
+            header_tag_id: 9,
+            _row_group_index: 0,
+            source_block_start: 20.0,
+            target_block_start: 120.0,
+            block_size: 12.0,
+            app_units: Some(CaptureTableGroupRepeatAppUnits {
+                source_block_start: 1200,
+                target_block_start: 7200,
+                block_size: 720,
+            }),
+        }];
+        let repeated_fragments = HashMap::from([(
+            9,
+            RepeatedTableHeaderFragments {
+                fragment_indices: 0..0,
+                paint_fragment_ids: HashSet::from([5, 6]),
+            },
+        )]);
+        let distributed = distribute_operations(
+            &pages,
+            operations,
+            &paint_events,
+            &repeats,
+            &repeated_fragments,
+        )
+        .unwrap();
+        let second_page = &distributed.pages[1].operations;
+        assert_eq!(second_page.len(), 5);
+        assert!(
+            matches!(&second_page[0], Operation::Path { fill: Some(color), .. }
+            if *color == Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 })
+        );
+        assert!(matches!(&second_page[1], Operation::Text { text, .. } if text == "header"));
+        for (operation, x) in second_page[2..4].iter().zip([10.0, 20.0]) {
+            assert!(matches!(operation, Operation::Path { bounds, meta, .. }
+                if bounds.x == x && meta.semantics.as_ref().unwrap().label.as_deref()
+                    == Some("repeated-table-header")));
+        }
+        assert!(matches!(&second_page[4], Operation::Text { text, .. } if text == "body"));
+        assert_eq!(
+            distributed.page_operations[1],
+            vec![
+                Some(CapturedOperationAuthority::Bounds(CapturedRectAppUnits {
+                    x: 0,
+                    y: 0,
+                    width: 6000,
+                    height: 6000,
+                })),
+                Some(CapturedOperationAuthority::Text {
+                    font_size_app_units: 720,
+                    glyphs: vec![CapturedGlyphAppUnits {
+                        x: 600,
+                        y: 1800,
+                        advance: 420
+                    }],
+                }),
+                Some(CapturedOperationAuthority::Bounds(CapturedRectAppUnits {
+                    x: 600,
+                    y: 1860,
+                    width: 600,
+                    height: 60,
+                })),
+                Some(CapturedOperationAuthority::Bounds(CapturedRectAppUnits {
+                    x: 1200,
+                    y: 1860,
+                    width: 600,
+                    height: 60,
+                })),
+                Some(CapturedOperationAuthority::Text {
+                    font_size_app_units: 720,
+                    glyphs: vec![CapturedGlyphAppUnits {
+                        x: 600,
+                        y: 3600,
+                        advance: 420
+                    }],
+                }),
+            ]
+        );
     }
 
     #[test]

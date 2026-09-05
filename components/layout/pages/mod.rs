@@ -156,7 +156,7 @@ impl PageDefinition {
         }
     }
 
-    fn debug_app_units(&self) -> LayoutDebugPageAppUnits {
+    pub(crate) fn debug_app_units(&self) -> LayoutDebugPageAppUnits {
         LayoutDebugPageAppUnits {
             width: self.size.width.0,
             height: self.size.height.0,

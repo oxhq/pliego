@@ -18,6 +18,7 @@ use webrender_api::{self as wr, units};
 use wr::ClipChainId;
 
 use crate::display_list::{DisplayListBuilder, TraversalState};
+use crate::geom::PhysicalRect;
 use crate::replaced::NaturalSizes;
 
 pub(super) struct BackgroundLayer {
@@ -41,6 +42,23 @@ pub(crate) fn get_cyclic<T>(values: &[T], layer_index: usize) -> &T {
     &values[layer_index % values.len()]
 }
 
+fn exact_color_area_is_supported(
+    attachment: BackgroundAttachment,
+    clip: Clip,
+    has_image: bool,
+) -> bool {
+    attachment == BackgroundAttachment::Scroll && clip == Clip::BorderBox && !has_image
+}
+
+pub(super) fn solid_color_uses_border_box(style: &ComputedValues, layer_index: usize) -> bool {
+    let background = style.get_background();
+    exact_color_area_is_supported(
+        *get_cyclic(&background.background_attachment.0, layer_index),
+        *get_cyclic(&background.background_clip.0, layer_index),
+        super::background_has_image(style),
+    )
+}
+
 pub(super) struct BackgroundPainter<'a> {
     pub style: &'a ComputedValues,
     pub positioning_area_override: Option<units::LayoutRect>,
@@ -48,6 +66,27 @@ pub(super) struct BackgroundPainter<'a> {
 }
 
 impl<'a> BackgroundPainter<'a> {
+    /// Retain the source rectangle only for the ordinary solid-color path.
+    /// Overrides, fixed backgrounds and other clip modes need their own authority.
+    pub(super) fn solid_color_area_app_units(
+        &self,
+        fragment_builder: &super::BuilderForBoxFragment,
+        layer_index: usize,
+    ) -> Option<PhysicalRect<Au>> {
+        if self.painting_area_override.is_some() ||
+            self.positioning_area_override.is_some() ||
+            !solid_color_uses_border_box(self.style, layer_index)
+        {
+            return None;
+        }
+        Some(
+            fragment_builder
+                .fragment
+                .border_rect()
+                .translate(fragment_builder.containing_block_origin.to_vector()),
+        )
+    }
+
     /// Get the painting area for this background, which is the actual rectangle in the
     /// current coordinate system that the background will be painted.
     pub(super) fn painting_area(
@@ -163,6 +202,38 @@ impl<'a> BackgroundPainter<'a> {
             },
             BackgroundAttachment::Fixed => builder.paint_info.viewport_details.layout_size().into(),
         }
+    }
+}
+
+#[cfg(test)]
+mod exact_color_area_tests {
+    use super::*;
+
+    #[test]
+    fn only_unlayered_scroll_border_box_color_has_exact_area_authority() {
+        assert!(exact_color_area_is_supported(
+            BackgroundAttachment::Scroll,
+            Clip::BorderBox,
+            false
+        ));
+        assert!(!exact_color_area_is_supported(
+            BackgroundAttachment::Fixed,
+            Clip::BorderBox,
+            false
+        ));
+        for clip in [Clip::PaddingBox, Clip::ContentBox, Clip::BorderArea] {
+            assert!(!exact_color_area_is_supported(
+                BackgroundAttachment::Scroll,
+                clip,
+                false
+            ));
+        }
+        // Gradients and URL images both occupy a non-None background-image layer.
+        assert!(!exact_color_area_is_supported(
+            BackgroundAttachment::Scroll,
+            Clip::BorderBox,
+            true
+        ));
     }
 }
 
