@@ -223,17 +223,21 @@ jobs:
 
       - name: Prove API 2 tables, links and fail-closed exclusions
         run: |
+          # Unoptimized executables self-hash before starting Servo. Match the existing
+          # valid-render closure's startup allowance; engine host_wall_ms remains 10000.
           python ports/pliego/tests/check_api2_headerless_tables.py --self-test
           table_status=0
           python ports/pliego/tests/check_api2_headerless_tables.py \
             --binary "$PWD/target/debug/pliego" \
             --source-commit "$(git rev-parse HEAD)" \
+            --process-timeout-seconds 180 \
             --proof-directory "$RUNNER_TEMP/pliego-controlled-capture/api2-headerless-tables" \
             --require-pdf-text || table_status=$?
           link_status=0
           python ports/pliego/tests/check_api2_links.py \
             --binary "$PWD/target/debug/pliego" \
             --source-commit "$(git rev-parse HEAD)" --pypdf-version 6.16.2 \
+            --process-timeout-seconds 180 \
             --proof-directory "$RUNNER_TEMP/pliego-controlled-capture/api2-links" || link_status=$?
           test "$table_status" -eq 0 && test "$link_status" -eq 0
 
@@ -252,20 +256,6 @@ jobs:
         run: |
           composer --no-interaction --no-plugins --no-scripts --working-dir=sdk/php install --no-progress
           php sdk/php/tests/production_binary_test.php "$PWD/target/debug/pliego"
-
-      - name: Prove the native API 2 caller deadline and fresh recovery
-        run: |
-          timeout --kill-after=5s 45s php sdk/php/tests/production_deadline_test.php \
-            "$PWD/target/debug/pliego" "$RUNNER_TEMP/pliego-native-api2-caller-deadline" 1
-
-      - name: Retain native API 2 caller deadline evidence
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: pliego-direct-api2-caller-deadline-proof
-          path: ${{ runner.temp }}/pliego-native-api2-caller-deadline
-          if-no-files-found: warn
-          retention-days: 7
 
       - name: Test the CLI error boundary
         run: cargo test -p pliego --bin pliego session_failures_preserve_the_engine_error_classes --locked

@@ -26,9 +26,11 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from collections import Counter
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import pypdf
 from pypdf import PdfReader, PdfWriter
@@ -36,6 +38,7 @@ from pypdf.errors import PyPdfError
 from pypdf.generic import ArrayObject, DictionaryObject, FloatObject, NameObject, TextStringObject
 
 from check_api2_contract import (
+    PROBE_TIMEOUT_SECONDS,
     SHA256_RE,
     build_execution_fixture,
     canonical_json,
@@ -361,13 +364,31 @@ def verify_delivery(job: Path, result: dict[str, Any]) -> tuple[dict[str, Any], 
     return scene, delivery / "document.pdf"
 
 
-def run_case(binary: Path, repository: Path, root: Path, case: dict[str, Any], probe: dict[str, Any]) -> dict[str, Any]:
+def process_timeout_seconds(value: str) -> int:
+    try:
+        seconds = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("process timeout must be an integer") from error
+    if not 1 <= seconds <= PROBE_TIMEOUT_SECONDS:
+        raise argparse.ArgumentTypeError(f"process timeout must be between 1 and {PROBE_TIMEOUT_SECONDS} seconds")
+    return seconds
+
+
+def run_case(
+    binary: Path,
+    repository: Path,
+    root: Path,
+    case: dict[str, Any],
+    probe: dict[str, Any],
+    process_timeout: int = 30,
+) -> dict[str, Any]:
     payload, source = build_fixture(repository, root, case)
     (root / "request.json").write_bytes(payload)
     job = root / "job"
     create_private_job_root(job)
     shutil.copy2(source / "input-manifest.json", job / "input-manifest.json")
     shutil.copytree(source / "input", job / "input")
+    started = time.monotonic()
     try:
         completed = subprocess.run(
             [str(binary), "render-api2"],
@@ -376,16 +397,34 @@ def run_case(binary: Path, repository: Path, root: Path, case: dict[str, Any], p
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             check=False,
-            timeout=30,
+            timeout=process_timeout,
         )
     except subprocess.TimeoutExpired as error:
+        elapsed = time.monotonic() - started
         (root / "stdout.json").write_bytes(error.stdout or b"")
         (root / "stderr.txt").write_bytes(error.stderr or b"")
-        (root / "process.json").write_bytes(canonical_json({"outcome": "host-timeout", "limit_seconds": 30}))
+        (root / "process.json").write_bytes(
+            canonical_json(
+                {
+                    "outcome": "host-timeout",
+                    "limit_seconds": process_timeout,
+                    "wall_seconds": elapsed,
+                }
+            )
+        )
         raise
+    elapsed = time.monotonic() - started
     (root / "stdout.json").write_bytes(completed.stdout)
     (root / "stderr.txt").write_bytes(completed.stderr)
-    (root / "process.json").write_bytes(canonical_json({"exit_code": completed.returncode}))
+    (root / "process.json").write_bytes(
+        canonical_json(
+            {
+                "exit_code": completed.returncode,
+                "limit_seconds": process_timeout,
+                "wall_seconds": elapsed,
+            }
+        )
+    )
     result = json.loads(completed.stdout)
     require(not completed.stderr and canonical_json(result) == completed.stdout, "noncanonical result/stderr")
     require(
@@ -453,6 +492,42 @@ def synthetic_pdf(pages: list[list[dict[str, Any]]]) -> PdfReader:
 
 
 def self_test() -> None:
+    for valid in ("1", "30", str(PROBE_TIMEOUT_SECONDS)):
+        require(process_timeout_seconds(valid) == int(valid), "valid process timeout was changed")
+    for invalid in ("0", "-1", str(PROBE_TIMEOUT_SECONDS + 1), "1.5", "nan", "invalid"):
+        try:
+            process_timeout_seconds(invalid)
+        except argparse.ArgumentTypeError:
+            pass
+        else:
+            raise AssertionError(f"process timeout accepted {invalid!r}")
+    with tempfile.TemporaryDirectory(prefix="pliego-process-timeout-self-test-") as temporary:
+        binary = Path(sys.executable)
+        output = Path(temporary) / "case"
+        real_run = subprocess.run
+
+        def timeout_run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess:
+            if command == [str(binary), "render-api2"]:
+                raise subprocess.TimeoutExpired(
+                    command,
+                    kwargs["timeout"],
+                    output=b"partial-output",
+                    stderr=b"partial-error",
+                )
+            return real_run(command, **kwargs)
+
+        with patch.object(subprocess, "run", side_effect=timeout_run):
+            try:
+                run_case(binary, Path(__file__).resolve().parents[3], output, CASES[0], {}, 180)
+            except subprocess.TimeoutExpired:
+                pass
+            else:
+                raise AssertionError("process timeout did not propagate")
+        require((output / "stdout.json").read_bytes() == b"partial-output", "timeout stdout was lost")
+        require((output / "stderr.txt").read_bytes() == b"partial-error", "timeout stderr was lost")
+        process = json.loads((output / "process.json").read_bytes())
+        require(process["outcome"] == "host-timeout" and process["limit_seconds"] == 180, "timeout identity changed")
+        require(process["wall_seconds"] >= 0, "missing process wall time")
     for excluded in (case for case in CASES if case.get("exclude")):
         kind, code = excluded["failure"]
         check_excluded_failure(excluded, kind, [code])
@@ -565,6 +640,12 @@ def main() -> None:
     parser.add_argument("--binary", type=Path)
     parser.add_argument("--proof-directory", type=Path)
     parser.add_argument("--source-commit")
+    parser.add_argument(
+        "--process-timeout-seconds",
+        type=process_timeout_seconds,
+        default=30,
+        help="Caller process bound including executable self-hashing; default 30, direct debug CI uses 180.",
+    )
     parser.add_argument("--pypdf-version", help="Require the pinned CI parser version")
     args = parser.parse_args()
     require(
@@ -577,7 +658,15 @@ def main() -> None:
         parser.error("--binary and --proof-directory are required")
     binary, output = args.binary.resolve(strict=True), args.proof_directory.resolve()
     output.mkdir(parents=True, exist_ok=False)
-    probe, raw = run_probe(binary)
+    probe_process = {"binary_bytes": binary.stat().st_size, "limit_seconds": PROBE_TIMEOUT_SECONDS, "outcome": "failed"}
+    probe_started = time.monotonic()
+    try:
+        probe, raw = run_probe(binary)
+        probe_process["outcome"] = "success"
+    finally:
+        probe_process["wall_seconds"] = time.monotonic() - probe_started
+        (output / "probe-process.json").write_bytes(canonical_json(probe_process))
+        print(f"Contract probe process: {json.dumps(probe_process, sort_keys=True)}", flush=True)
     (output / "probe.json").write_bytes(raw)
     engine = probe["engine"]
     validate_probe(
@@ -592,6 +681,8 @@ def main() -> None:
         "schema": "pliego.api2-links-proof",
         "version": 1,
         "engine": engine,
+        "probe_process": probe_process,
+        "process_timeout_seconds": args.process_timeout_seconds,
         "pypdf_version": pypdf.__version__,
         "pdf_tolerance_pt": TOLERANCE_PT,
         "cases": [],
@@ -600,7 +691,15 @@ def main() -> None:
         row = {"case": case, "passed": False}
         try:
             row.update(
-                run_case(binary, Path(__file__).resolve().parents[3], output / case["name"], case, probe), passed=True
+                run_case(
+                    binary,
+                    Path(__file__).resolve().parents[3],
+                    output / case["name"],
+                    case,
+                    probe,
+                    args.process_timeout_seconds,
+                ),
+                passed=True,
             )
         except (
             AssertionError,
@@ -612,9 +711,12 @@ def main() -> None:
             PyPdfError,
         ) as error:
             row["failure"] = str(error)
+        process_record = output / case["name"] / "process.json"
+        if process_record.is_file():
+            row["process"] = json.loads(process_record.read_bytes())
         report["cases"].append(row)
         (output / "report.json").write_bytes(canonical_json(report))
-        print(f"{case['name']}: {row.get('outcome', row.get('failure'))}")
+        print(f"{case['name']}: {row.get('outcome', row.get('failure'))}", flush=True)
     require(all(row["passed"] for row in report["cases"]), f"link gate failed; retained evidence: {output}")
 
 
