@@ -213,6 +213,8 @@ pub enum UnsupportedPaintKind {
     Iframe,
     TextEffects,
     ContentGeometry,
+    PagedFixedContent,
+    UnresolvedPageCounter,
     SvgAnimation,
     SvgCompositing,
     SvgStroke,
@@ -232,6 +234,8 @@ impl UnsupportedPaintKind {
             Self::Iframe => "iframe",
             Self::TextEffects => "text-effects",
             Self::ContentGeometry => "content-geometry",
+            Self::PagedFixedContent => "paged-fixed-content",
+            Self::UnresolvedPageCounter => "unresolved-page-counter",
             Self::SvgAnimation => "svg-animation",
             Self::SvgCompositing => "svg-compositing",
             Self::SvgStroke => "svg-stroke",
@@ -1379,6 +1383,8 @@ fn capture_layout_with_canvas_limits(
             "collapsed-table-borders" |
             "iframe" |
             "text-effects" |
+            "paged-fixed-content" |
+            "unresolved-page-counter" |
             "content-geometry") => {
                 unsupported_events.push(UnsupportedPaintEvent {
                     sequence: event.sequence,
@@ -1390,6 +1396,8 @@ fn capture_layout_with_canvas_limits(
                         "iframe" => UnsupportedPaintKind::Iframe,
                         "text-effects" => UnsupportedPaintKind::TextEffects,
                         "content-geometry" => UnsupportedPaintKind::ContentGeometry,
+                        "paged-fixed-content" => UnsupportedPaintKind::PagedFixedContent,
+                        "unresolved-page-counter" => UnsupportedPaintKind::UnresolvedPageCounter,
                         _ => {
                             return Err(CaptureError::UnknownPaintEvent {
                                 sequence: event.sequence,
@@ -2557,6 +2565,8 @@ fn collect_box_link_placements(
                     "collapsed-table-borders" |
                     "iframe" |
                     "text-effects" |
+                    "paged-fixed-content" |
+                    "unresolved-page-counter" |
                     "content-geometry"
             )
         })

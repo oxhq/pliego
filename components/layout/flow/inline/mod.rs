@@ -101,6 +101,7 @@ use script::layout_dom::ServoLayoutNode;
 use servo_arc::Arc as ServoArc;
 use style::Zero;
 use style::computed_values::line_break::T as LineBreak;
+use style::computed_values::position::T as Position;
 use style::computed_values::text_wrap_mode::T as TextWrapMode;
 use style::computed_values::white_space_collapse::T as WhiteSpaceCollapse;
 use style::computed_values::word_break::T as WordBreak;
@@ -121,7 +122,7 @@ use super::{IndependentFloatOrAtomicLayoutResult, IndependentFormattingContextLa
 use crate::cell::{ArcRefCell, WeakRefCell};
 use crate::context::LayoutContext;
 use crate::dom::WeakLayoutBox;
-use crate::dom_traversal::NodeAndStyleInfo;
+use crate::dom_traversal::{NodeAndStyleInfo, PageCounterKind};
 use crate::flow::float::{FloatBox, SequentialLayoutState};
 use crate::flow::inline::line::TextRunOffsets;
 use crate::flow::inline::text_run::{FontAndScriptInfo, TextRunItem, TextRunSegment};
@@ -146,6 +147,156 @@ static FONT_SUBSCRIPT_OFFSET_RATIO: f32 = 0.20;
 static FONT_SUPERSCRIPT_OFFSET_RATIO: f32 = 0.34;
 
 #[derive(Debug, MallocSizeOf)]
+pub(super) struct PageCounterRange {
+    range: Range<usize>,
+    kind: PageCounterKind,
+}
+
+type PageTextReplacement = (Range<usize>, Range<usize>);
+
+/// Replace only ranges recorded from parsed generated-counter tokens. Literal
+/// zeroes and intervening bidi/control characters remain byte-for-byte intact.
+fn resolve_page_counter_text(
+    source: &str,
+    counters: &[PageCounterRange],
+    page_index: usize,
+    page_count: usize,
+) -> Option<(String, Vec<PageTextReplacement>)> {
+    if page_index == 0 || page_index > page_count {
+        return None;
+    }
+    let mut text = String::new();
+    let mut replacements = Vec::with_capacity(counters.len());
+    let mut previous_end = 0;
+    for counter in counters {
+        if counter.range.start < previous_end || source.get(counter.range.clone())? != "0" {
+            return None;
+        }
+        text.push_str(source.get(previous_end..counter.range.start)?);
+        let start = text.len();
+        text.push_str(&match counter.kind {
+            PageCounterKind::Page => page_index.to_string(),
+            PageCounterKind::Pages => page_count.to_string(),
+            PageCounterKind::Unsupported => return None,
+        });
+        replacements.push((counter.range.clone(), start..text.len()));
+        previous_end = counter.range.end;
+    }
+    text.push_str(source.get(previous_end..)?);
+    Some((text, replacements))
+}
+
+fn remap_page_text_offset(offset: usize, replacements: &[PageTextReplacement]) -> Option<usize> {
+    let mut previous_old_end = 0;
+    let mut previous_new_end = 0;
+    for (old, new) in replacements {
+        if offset <= old.start {
+            break;
+        }
+        if offset < old.end {
+            return None;
+        }
+        previous_old_end = old.end;
+        previous_new_end = new.end;
+    }
+    previous_new_end.checked_add(offset.checked_sub(previous_old_end)?)
+}
+
+#[cfg(test)]
+mod page_counter_tests {
+    use super::*;
+
+    #[test]
+    fn page_counter_realization_preserves_literal_zero_and_utf8_controls() {
+        let source = "é0 \u{2066}Page 0 of 0\u{2069}!";
+        let page_start = source.find("0 of").unwrap();
+        let pages_start = source.rfind('0').unwrap();
+        let counters = [
+            PageCounterRange {
+                range: page_start..page_start + 1,
+                kind: PageCounterKind::Page,
+            },
+            PageCounterRange {
+                range: pages_start..pages_start + 1,
+                kind: PageCounterKind::Pages,
+            },
+        ];
+        let (text, replacements) = resolve_page_counter_text(source, &counters, 10, 15).unwrap();
+        assert_eq!(text, "é0 \u{2066}Page 10 of 15\u{2069}!");
+        assert_eq!(
+            remap_page_text_offset(page_start, &replacements),
+            Some(page_start)
+        );
+        assert_eq!(
+            remap_page_text_offset(page_start + 1, &replacements),
+            Some(page_start + 2)
+        );
+        assert_eq!(
+            remap_page_text_offset(pages_start, &replacements),
+            Some(pages_start + 1)
+        );
+        assert_eq!(
+            remap_page_text_offset(source.len(), &replacements),
+            Some(text.len())
+        );
+        // Re-realization always starts from immutable source, not the previous page's digits.
+        assert_eq!(
+            resolve_page_counter_text(source, &counters, 9, 15)
+                .unwrap()
+                .0,
+            "é0 \u{2066}Page 9 of 15\u{2069}!"
+        );
+        assert_eq!(source, "é0 \u{2066}Page 0 of 0\u{2069}!");
+    }
+
+    #[test]
+    fn page_counter_realization_rejects_invalid_context_and_unowned_ranges() {
+        let counter = |range, kind| PageCounterRange { range, kind };
+        assert!(resolve_page_counter_text("0", &[], 0, 1).is_none());
+        assert!(resolve_page_counter_text("0", &[], 2, 1).is_none());
+        assert!(
+            resolve_page_counter_text("0", &[counter(0..1, PageCounterKind::Unsupported)], 1, 1)
+                .is_none()
+        );
+        assert!(
+            resolve_page_counter_text("x", &[counter(0..1, PageCounterKind::Page)], 1, 1).is_none()
+        );
+        assert!(
+            resolve_page_counter_text("é0", &[counter(1..2, PageCounterKind::Page)], 1, 1)
+                .is_none()
+        );
+        assert!(
+            resolve_page_counter_text(
+                "0",
+                &[
+                    counter(0..1, PageCounterKind::Page),
+                    counter(0..1, PageCounterKind::Pages)
+                ],
+                1,
+                1
+            )
+            .is_none()
+        );
+        assert!(
+            resolve_page_counter_text("0", &[counter(1..2, PageCounterKind::Page)], 1, 1).is_none()
+        );
+        assert!(
+            resolve_page_counter_text("0", &[counter(1..0, PageCounterKind::Page)], 1, 1).is_none()
+        );
+        assert_eq!(
+            resolve_page_counter_text("literal 0", &[], 1, 1).unwrap().0,
+            "literal 0"
+        );
+    }
+
+    #[test]
+    fn page_counter_offset_rejects_split_token_and_overflow() {
+        assert_eq!(remap_page_text_offset(2, &[(1..3, 1..2)]), None);
+        assert_eq!(remap_page_text_offset(usize::MAX, &[(0..1, 0..2)]), None);
+    }
+}
+
+#[derive(Debug, MallocSizeOf)]
 pub(crate) struct InlineFormattingContext {
     /// All [`InlineItem`]s in this [`InlineFormattingContext`] stored in a flat array.
     /// [`InlineItem::StartInlineBox`] and [`InlineItem::EndInlineBox`] allow representing
@@ -160,6 +311,8 @@ pub(crate) struct InlineFormattingContext {
     /// The text content of this inline formatting context.
     #[conditional_malloc_size_of]
     text_content: Arc<String>,
+    page_counters: Vec<PageCounterRange>,
+    starting_bidi_level: Level,
 
     /// The [`SharedInlineStyles`] for the root of this [`InlineFormattingContext`] that are used to
     /// share styles with all [`TextRun`] children.
@@ -208,6 +361,13 @@ pub(crate) struct SharedInlineStyles {
 }
 
 impl SharedInlineStyles {
+    /// A style snapshot with no shared mutable wrapper from the source layout.
+    pub(crate) fn fresh_for_page(&self) -> Self {
+        Self {
+            style: SharedStyle::new(self.style.borrow().clone()),
+            selected: SharedStyle::new(self.selected.borrow().clone()),
+        }
+    }
     pub(crate) fn ptr_eq(&self, other: &Self) -> bool {
         self.style.ptr_eq(&other.style) && self.selected.ptr_eq(&other.selected)
     }
@@ -2035,6 +2195,8 @@ impl InlineFormattingContext {
         let has_right_to_left_content = bidi_levels.info.as_ref().is_some_and(BidiInfo::has_rtl);
         InlineFormattingContext {
             text_content: Arc::new(text_content),
+            page_counters: builder.page_counters,
+            starting_bidi_level,
             inline_items: builder.inline_items,
             inline_boxes: builder.inline_boxes,
             shared_inline_styles,
@@ -2046,6 +2208,126 @@ impl InlineFormattingContext {
             shared_selection: builder.shared_selection,
             tab_size_multiplier: Default::default(),
         }
+    }
+
+    pub(crate) fn has_unresolved_page_counters(&self) -> bool {
+        !self.page_counters.is_empty()
+    }
+
+    /// Realize a source-owned text/inline-only IFC for one final page. All mutable
+    /// boxes, runs and fragment caches are fresh; normal Servo shaping is reused.
+    pub(crate) fn for_page(
+        &self,
+        context: &LayoutContext,
+        page_index: usize,
+        page_count: usize,
+    ) -> Option<Self> {
+        if self.contains_floats || self.is_single_line_text_input || self.shared_selection.is_some()
+        {
+            return None;
+        }
+        let (text, replacements) = resolve_page_counter_text(
+            &self.text_content,
+            &self.page_counters,
+            page_index,
+            page_count,
+        )?;
+        let mut inline_items = Vec::with_capacity(self.inline_items.len());
+        let mut inline_boxes = InlineBoxes::default();
+        let mut box_stack = Vec::new();
+        let mut realized_counters = 0;
+        let mut previous_text_styles: Option<SharedInlineStyles> = None;
+        for item in &self.inline_items {
+            match item {
+                InlineItem::StartInlineBox(source) => {
+                    previous_text_styles = None;
+                    let source = source.borrow();
+                    if source.base.style.clone_position() != Position::Static {
+                        return None;
+                    }
+                    let fresh = ArcRefCell::new(InlineBox {
+                        base: source.base.fresh_for_page(),
+                        shared_inline_styles: source.shared_inline_styles.fresh_for_page(),
+                        identifier: InlineBoxIdentifier::default(),
+                        default_font: None,
+                    });
+                    box_stack.push(inline_boxes.start_inline_box(fresh.clone()));
+                    inline_items.push(InlineItem::StartInlineBox(fresh));
+                },
+                InlineItem::EndInlineBox => {
+                    previous_text_styles = None;
+                    inline_boxes.end_inline_box(box_stack.pop()?);
+                    inline_items.push(InlineItem::EndInlineBox);
+                },
+                InlineItem::TextRun(source) => {
+                    let source = source.borrow();
+                    let is_counter = self
+                        .page_counters
+                        .iter()
+                        .any(|counter| counter.range == source.text_range);
+                    if is_counter !=
+                        source
+                            .base_fragment_info
+                            .flags
+                            .contains(FragmentFlags::UNRESOLVED_PAGE_COUNTER)
+                    {
+                        return None;
+                    }
+                    realized_counters += usize::from(is_counter);
+                    let start = remap_page_text_offset(source.text_range.start, &replacements)?;
+                    let end = remap_page_text_offset(source.text_range.end, &replacements)?;
+                    if start > end || text.get(start..end).is_none() {
+                        return None;
+                    }
+                    let character_end = text[..end].chars().count();
+                    // Tokens had separate unresolved flags during construction. Once
+                    // resolved, restore normal equal-style coalescing before shaping.
+                    if previous_text_styles
+                        .as_ref()
+                        .is_some_and(|styles| styles.ptr_eq(&source.inline_styles)) &&
+                        let Some(InlineItem::TextRun(previous)) = inline_items.last() &&
+                        previous.borrow().text_range.end == start
+                    {
+                        let mut previous = previous.borrow_mut();
+                        previous.text_range.end = end;
+                        previous.character_range.end = character_end;
+                        continue;
+                    }
+                    let mut base = source.base_fragment_info;
+                    base.flags.remove(FragmentFlags::UNRESOLVED_PAGE_COUNTER);
+                    let run = TextRun::new(
+                        base,
+                        source.inline_styles.fresh_for_page(),
+                        start..end,
+                        text[..start].chars().count()..character_end,
+                        None,
+                    );
+                    inline_items.push(InlineItem::TextRun(ArcRefCell::new(run)));
+                    previous_text_styles = Some(source.inline_styles.clone());
+                },
+                InlineItem::OutOfFlowAbsolutelyPositionedBox(..) |
+                InlineItem::OutOfFlowFloatBox(..) |
+                InlineItem::Atomic(..) |
+                InlineItem::BlockLevel(..) => return None,
+            }
+        }
+        if !box_stack.is_empty() || realized_counters != self.page_counters.len() {
+            return None;
+        }
+        let builder = InlineFormattingContextBuilder::for_page(
+            text,
+            self.shared_inline_styles.fresh_for_page(),
+            inline_items,
+            inline_boxes,
+            self.has_right_to_left_content,
+        );
+        Some(Self::new_with_builder(
+            builder,
+            context,
+            self.has_first_formatted_line,
+            false,
+            self.starting_bidi_level,
+        ))
     }
 
     pub(crate) fn repair_style(

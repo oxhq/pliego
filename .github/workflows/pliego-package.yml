@@ -406,7 +406,13 @@ jobs:
             --binary "$binary" --source-commit "$source_commit" \
             --pypdf-version 6.16.2 \
             --proof-directory "$PWD/dist/api2-links-${{ matrix.bundle }}" || link_status=$?
-          test "$table_status" -eq 0 && test "$link_status" -eq 0
+          python ports/pliego/tests/check_api2_fixed_content.py --self-test
+          fixed_status=0
+          python ports/pliego/tests/check_api2_fixed_content.py \
+            --binary "$binary" --source-commit "$source_commit" \
+            --proof-directory "$PWD/dist/api2-fixed-content-${{ matrix.bundle }}" \
+            "$@" || fixed_status=$?
+          test "$table_status" -eq 0 && test "$link_status" -eq 0 && test "$fixed_status" -eq 0
 
       - name: Set up PHP for the packaged Linux consumer boundary
         if: runner.os == 'Linux'
@@ -475,6 +481,7 @@ jobs:
             dist/api2-executable-proof-${{ matrix.bundle }}.json
             dist/api2-headerless-tables-${{ matrix.bundle }}
             dist/api2-links-${{ matrix.bundle }}
+            dist/api2-fixed-content-${{ matrix.bundle }}
             dist/api2-native-consumer-${{ matrix.bundle }}
           if-no-files-found: error
           retention-days: 30

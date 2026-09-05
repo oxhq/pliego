@@ -34,6 +34,10 @@ use crate::fragment_tree::FragmentTree;
 use crate::geom::PhysicalSides;
 
 static PROCESS_PAGE_DEFINITION: OnceLock<PageDefinition> = OnceLock::new();
+
+pub(crate) fn has_paged_document_configuration() -> bool {
+    PROCESS_PAGE_DEFINITION.get().is_some()
+}
 static PROCESS_PAGE_CONFIGURATION_STATE: AtomicU8 = AtomicU8::new(PAGE_CONFIGURATION_AVAILABLE);
 const PAGE_CONFIGURATION_AVAILABLE: u8 = 0;
 const PAGE_CONFIGURATION_RESERVED: u8 = 1;
@@ -530,6 +534,10 @@ pub(crate) struct BlockPaginationController {
 }
 
 impl BlockPaginationController {
+    pub(crate) fn is_active(&self) -> bool {
+        self.state.lock().request.is_some()
+    }
+
     fn begin(&self, definition: PageDefinition) {
         *self.state.lock() = BlockPaginationControllerState {
             request: Some(BlockPaginationRequest {
@@ -560,6 +568,23 @@ impl BlockPaginationController {
         debug_assert!(state.claimed);
         debug_assert!(state.outcome.is_none());
         state.outcome = Some(outcome);
+    }
+
+    /// Normal flow has completed before initial-containing-block fixed children
+    /// are laid out. Freeze that page count; fixed content cannot add pages.
+    pub(crate) fn fixed_page_layout(&self) -> Option<(usize, Au)> {
+        let mut state = self.state.lock();
+        let request = state.request?;
+        // No flow claim may originate in a fixed subtree, including when the
+        // document itself was empty or had only one unfragmentable wrapper.
+        state.claimed = true;
+        Some((
+            state
+                .outcome
+                .as_ref()
+                .map_or(1, |outcome| outcome.page_count.max(1)),
+            request.page_stride,
+        ))
     }
 
     fn finish(&self) -> BlockPaginationOutcome {
@@ -664,6 +689,13 @@ impl BlockPageBuilder {
 
     pub(crate) fn available_block_size(&self) -> Au {
         self.request.available_block_size
+    }
+
+    /// Preserve source child indices without letting an out-of-flow placeholder
+    /// consume space, change a pending break, or create an empty page.
+    pub(crate) fn skip_out_of_flow_child(&mut self, child_index: usize) {
+        assert_eq!(child_index, self.next_child_index);
+        self.next_child_index += 1;
     }
 
     pub(crate) fn place_child(
@@ -2227,8 +2259,9 @@ fn layout_one_page(
     context: PageSequenceContext,
 ) -> RootLayout {
     layout_context.block_pagination.begin(context.definition);
-    let fragment_tree =
+    let mut fragment_tree =
         box_tree.layout_in_containing_block(layout_context, context.definition.content_rect());
+    fragment_tree.is_paged = true;
     let page_sequence = context.page_sequence(layout_context.block_pagination.finish());
     RootLayout {
         fragment_tree,
@@ -3749,6 +3782,77 @@ mod tests {
         controller.begin(page());
         assert!(controller.claim(1, true, false).is_none());
         assert!(controller.claim(1, true, true).is_some());
+    }
+
+    #[test]
+    fn fixed_subtrees_cannot_claim_or_extend_the_final_page_count() {
+        let controller = BlockPaginationController::default();
+        assert_eq!(controller.fixed_page_layout(), None);
+        controller.begin(page());
+        let stride = page().size.height;
+        assert_eq!(controller.fixed_page_layout(), Some((1, stride)));
+        assert!(controller.claim(12, true, false).is_none());
+        assert_eq!(controller.finish().page_count, 0);
+
+        controller.begin(page());
+        assert!(controller.claim(12, true, false).is_some());
+        controller.complete(BlockPaginationOutcome {
+            page_count: 12,
+            ..Default::default()
+        });
+        assert_eq!(controller.fixed_page_layout(), Some((12, stride)));
+        assert_eq!(controller.fixed_page_layout(), Some((12, stride)));
+        assert!(controller.claim(100, true, false).is_none());
+        assert_eq!(controller.finish().page_count, 12);
+        assert_eq!(controller.fixed_page_layout(), None);
+    }
+
+    #[test]
+    fn out_of_flow_placeholders_preserve_breaks_and_source_child_indices() {
+        let mut builder = BlockPageBuilder::new(BlockPaginationRequest {
+            available_block_size: Au::from_px(100),
+            page_stride: Au::from_px(120),
+        });
+        builder.skip_out_of_flow_child(0);
+        assert_eq!(
+            builder.place_child(
+                1,
+                Some(10),
+                Au::zero(),
+                Au::from_px(20),
+                Au::from_px(20),
+                ChildPageBreaks {
+                    after: true,
+                    ..Default::default()
+                },
+            ),
+            BlockBoundaryPlacement::CurrentPage
+        );
+        builder.skip_out_of_flow_child(2);
+        assert_eq!(
+            builder.place_child(
+                3,
+                Some(20),
+                Au::from_px(20),
+                Au::from_px(20),
+                Au::from_px(20),
+                ChildPageBreaks::default(),
+            ),
+            BlockBoundaryPlacement::NewPage {
+                block_origin: Au::from_px(120),
+            }
+        );
+        builder.skip_out_of_flow_child(4);
+        let outcome = builder.finish();
+        assert_eq!(outcome.page_count, 2);
+        assert!(outcome.warnings.is_empty());
+        assert!(matches!(
+            outcome.continuations[0].token,
+            FragmentainerContinuation::Block(BlockContinuationToken {
+                next_child_index: 3,
+                ..
+            })
+        ));
     }
 
     #[test]

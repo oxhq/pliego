@@ -125,6 +125,38 @@ jobs:
           cargo test -p servo-canvas --lib retained_canvas::tests --locked
           cargo test -p pliego --lib --no-default-features --locked
 
+      - name: Prove the bounded paginated fixed-content profile
+        run: |
+          set -euo pipefail
+          selected="$(cargo test -p servo-layout --lib --locked -- --list)"
+          for test_name in \
+            pages::tests::fixed_subtrees_cannot_claim_or_extend_the_final_page_count \
+            pages::tests::out_of_flow_placeholders_preserve_breaks_and_source_child_indices \
+            flow::inline::page_counter_tests::page_counter_realization_preserves_literal_zero_and_utf8_controls \
+            flow::inline::page_counter_tests::page_counter_realization_rejects_invalid_context_and_unowned_ranges \
+            flow::inline::page_counter_tests::page_counter_offset_rejects_split_token_and_overflow; do
+            printf '%s\n' "$selected" | grep -Fx "$test_name: test"
+            cargo test -p servo-layout --lib --locked "$test_name" -- --exact
+          done
+          cargo test -p pliego --test scene_capture --locked \
+            retains_typed_paged_fixed_and_counter_exclusions -- --exact
+          cargo build -p pliego --bin pliego --locked
+          python ports/pliego/tests/check_api2_fixed_content.py --self-test
+          python ports/pliego/tests/check_api2_fixed_content.py \
+            --binary "$PWD/target/debug/pliego" \
+            --source-commit "$(git rev-parse HEAD)" --process-timeout-seconds 180 \
+            --proof-directory "$RUNNER_TEMP/pliego-fixed-content" --require-pdf-text
+
+      - name: Retain paginated fixed-content proof
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: pliego-direct-fixed-content-proof
+          path: ${{ runner.temp }}/pliego-fixed-content
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 30
+
       - name: Set up Node for the locked Chart.js fixture
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:

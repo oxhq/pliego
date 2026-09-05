@@ -21,15 +21,16 @@ use unicode_categories::UnicodeCategories;
 use super::text_run::TextRun;
 use super::{
     InlineBox, InlineBoxIdentifier, InlineBoxes, InlineFormattingContext, InlineItem,
-    SharedInlineStyles,
+    PageCounterRange, SharedInlineStyles,
 };
 use crate::cell::ArcRefCell;
 use crate::context::LayoutContext;
 use crate::dom::{LayoutBox, NodeExt};
-use crate::dom_traversal::NodeAndStyleInfo;
+use crate::dom_traversal::{NodeAndStyleInfo, PageCounterKind};
 use crate::flow::BlockLevelBox;
 use crate::flow::float::FloatBox;
 use crate::formatting_contexts::IndependentFormattingContext;
+use crate::fragment_tree::{BaseFragmentInfo, FragmentFlags};
 use crate::positioned::AbsolutelyPositionedBox;
 use crate::style_ext::ComputedValuesExt;
 
@@ -44,6 +45,7 @@ pub(crate) struct InlineFormattingContextBuilder {
     /// The collection of text strings that make up this [`InlineFormattingContext`] under
     /// construction.
     pub text_segments: Vec<String>,
+    pub(super) page_counters: Vec<PageCounterRange>,
 
     /// The current offset in the final text string of this [`InlineFormattingContext`],
     /// used to properly set the text range of new [`InlineItem::TextRun`]s.
@@ -108,6 +110,26 @@ pub(crate) struct InlineFormattingContextBuilder {
 }
 
 impl InlineFormattingContextBuilder {
+    /// Input has already undergone source whitespace/text transformation. Do not
+    /// run it through DOM-facing push_text again or duplicate bidi controls.
+    pub(super) fn for_page(
+        text: String,
+        styles: SharedInlineStyles,
+        inline_items: Vec<InlineItem>,
+        inline_boxes: InlineBoxes,
+        has_right_to_left_content: bool,
+    ) -> Self {
+        Self {
+            current_text_offset: text.len(),
+            current_character_offset: text.chars().count(),
+            text_segments: vec![text],
+            shared_inline_styles_stack: vec![styles],
+            inline_items,
+            inline_boxes,
+            has_right_to_left_content,
+            ..Default::default()
+        }
+    }
     /// <https://drafts.csswg.org/css-text/#white-space>:
     /// > Except where specified otherwise, white space processing in CSS affects only the document
     /// > white space characters: spaces (U+0020), tabs (U+0009), and segment breaks.
@@ -314,12 +336,15 @@ impl InlineFormattingContextBuilder {
             return false;
         }
 
-        let Some(first_letter_info) =
+        let Some(mut first_letter_info) =
             container_info.with_pseudo_element(layout_context, PseudoElement::FirstLetter)
         else {
             self.push_text(text, info);
             return false;
         };
+
+        // Page-dependent first-letter expansion is outside the initial fixed-footer profile.
+        first_letter_info.page_counter = info.page_counter.map(|_| PageCounterKind::Unsupported);
 
         let first_letter_range = first_letter_range(&text[..]);
         if first_letter_range.is_empty() {
@@ -440,11 +465,31 @@ impl InlineFormattingContextBuilder {
             self.current_character_offset..self.current_character_offset + character_count;
         self.current_character_offset = new_character_range.end;
 
+        if let Some(mut kind) = info.page_counter {
+            // Do not resolve a transformed/security-obscured placeholder as ordinary digits.
+            if new_text != "0" ||
+                !info.style.clone_text_transform().is_none() ||
+                info.style.clone__webkit_text_security() != WebKitTextSecurity::None
+            {
+                kind = PageCounterKind::Unsupported;
+            }
+            self.page_counters.push(PageCounterRange {
+                range: new_range.clone(),
+                kind,
+            });
+        }
+
         self.text_segments.push(new_text);
 
         let current_inline_styles = self.shared_inline_styles();
 
-        if let Some(InlineItem::TextRun(text_run)) = self.inline_items.last() &&
+        if info.page_counter.is_none() &&
+            let Some(InlineItem::TextRun(text_run)) = self.inline_items.last() &&
+            !text_run
+                .borrow()
+                .base_fragment_info
+                .flags
+                .contains(FragmentFlags::UNRESOLVED_PAGE_COUNTER) &&
             text_run
                 .borrow()
                 .inline_styles
@@ -472,8 +517,14 @@ impl InlineFormattingContextBuilder {
         }
 
         let box_slot = info.node.is_text_node().then(|| info.node.box_slot());
+        let mut base_fragment_info: BaseFragmentInfo = info.into();
+        if info.page_counter.is_some() {
+            base_fragment_info
+                .flags
+                .insert(FragmentFlags::UNRESOLVED_PAGE_COUNTER);
+        }
         let text_run = ArcRefCell::new(TextRun::new(
-            info.into(),
+            base_fragment_info,
             current_inline_styles,
             new_range,
             new_character_range,

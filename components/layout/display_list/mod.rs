@@ -894,9 +894,48 @@ impl PaintTraversalHandler for DisplayListBuilder<'_> {
             self.inspector_highlight = Some(inspector_highlight);
         }
 
+        // This bounded paged profile exposes the physical page number and count,
+        // not the general CSS counter-state machine. Reject parsed changes to
+        // either counter, including on an ancestor or a hidden sibling whose
+        // counter state could otherwise affect visible generated content.
+        let counters = fragment.style().get_counters();
+        if crate::pages::has_paged_document_configuration() &&
+            counters
+                .counter_reset
+                .iter()
+                .map(|counter| &counter.name)
+                .chain(
+                    counters
+                        .counter_increment
+                        .iter()
+                        .map(|counter| &counter.name),
+                )
+                .any(|name| matches!(name.0.as_ref(), "page" | "pages"))
+        {
+            self.debug_capture.record_fragment(
+                "unresolved-page-counter",
+                fragment.box_fragment,
+                fragment.base.tag,
+                state,
+            );
+        }
+
         if fragment.style().get_inherited_box().visibility != Visibility::Visible {
             return;
         };
+
+        if fragment
+            .base
+            .flags
+            .contains(FragmentFlags::UNSUPPORTED_PAGED_FIXED)
+        {
+            self.debug_capture.record_fragment(
+                "paged-fixed-content",
+                fragment.box_fragment,
+                fragment.base.tag,
+                state,
+            );
+        }
 
         if box_has_unsupported_paint(
             fragment,
@@ -935,7 +974,6 @@ impl PaintTraversalHandler for DisplayListBuilder<'_> {
         if style.get_inherited_box().visibility != Visibility::Visible {
             return;
         }
-
         self.debug_capture
             .record_fragment("iframe", fragment, fragment.base.tag, state);
         let rect = fragment.base.rect().translate(state.origin.to_vector());
@@ -1057,6 +1095,18 @@ impl PaintTraversalHandler for DisplayListBuilder<'_> {
         let style = fragment.base.style();
         if style.get_inherited_box().visibility != Visibility::Visible {
             return;
+        }
+        if fragment
+            .base
+            .flags
+            .contains(FragmentFlags::UNRESOLVED_PAGE_COUNTER)
+        {
+            self.debug_capture.record_fragment(
+                "unresolved-page-counter",
+                fragment,
+                fragment.base.tag,
+                state,
+            );
         }
         if !style.get_inherited_text().text_shadow.0.is_empty() ||
             state

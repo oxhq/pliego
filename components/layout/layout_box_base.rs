@@ -92,6 +92,14 @@ impl LayoutBoxBase {
         self.subtree_size.load(Ordering::Relaxed)
     }
 
+    /// A page-local fixed subtree shares source identity/style, never fragments
+    /// or intrinsic/layout caches with another page.
+    pub(crate) fn fresh_for_page(&self) -> Self {
+        let fresh = Self::new(self.base_fragment_info, self.style.clone());
+        fresh.set_subtree_size(self.subtree_size());
+        fresh
+    }
+
     /// Get the inline content sizes of a box tree node that extends this [`LayoutBoxBase`], fetch
     /// the result from a cache when possible.
     pub(crate) fn inline_content_sizes(
