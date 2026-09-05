@@ -4,7 +4,14 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-"""Run one fixed benchmark render command as an unprivileged account in a root-owned cgroup."""
+"""Run one fixed benchmark render command as an unprivileged account in a root-owned cgroup.
+
+wall_ms is root SIGCONT to observed root exit. Add drain_ms for the observed
+whole-tree wall interval; accounting settlement is outside both. The PHP runner
+separately records sampler launch-through-exit wall time. An optional root wall
+deadline is not an accounting/total-invocation deadline and never yields a
+successful timed sample on expiration.
+"""
 
 from __future__ import annotations
 
@@ -3118,6 +3125,35 @@ def wait_for_accounting_quiescence(
         previous = snapshot
 
 
+def root_wall_deadline(started: float, timeout_ms: float | None) -> float | None:
+    if timeout_ms is None:
+        return None
+    if not math.isfinite(timeout_ms) or timeout_ms <= 0:
+        raise incomplete("ROOT_WALL_TIMEOUT_INVALID", "root wall timeout must be finite and positive")
+    deadline = started + timeout_ms / 1000.0
+    if not math.isfinite(deadline):
+        raise incomplete("ROOT_WALL_TIMEOUT_INVALID", "root wall deadline is not finite")
+    return deadline
+
+
+def root_wait_timeout_ms(now: float, next_sample: float, deadline: float | None) -> int:
+    next_event = next_sample if deadline is None else min(next_sample, deadline)
+    return math.ceil(max(0.0, next_event - now) * 1000.0)
+
+
+def check_root_wall_deadline(
+    now: float, deadline: float | None, started: float, root_identity: tuple[int, int]
+) -> None:
+    if deadline is not None and now >= deadline:
+        raise incomplete(
+            "ROOT_WALL_TIMEOUT",
+            f"root PID {root_identity[0]} start_ticks={root_identity[1]} exceeded "
+            f"{(deadline - started) * 1000.0:.3f} ms from SIGCONT; "
+            f"observed_elapsed_ms={(now - started) * 1000.0:.3f}; "
+            "failed-sample cleanup must kill and drain the bound render cgroup",
+        )
+
+
 def sample_command(
     command: list[str],
     cwd: str,
@@ -3134,7 +3170,9 @@ def sample_command(
     isolate_network: bool = False,
     stdin_path: str | None = None,
     temporary_directory: str | None = None,
+    root_wall_timeout_ms: float | None = None,
 ) -> dict[str, Any]:
+    root_wall_deadline(0.0, root_wall_timeout_ms)  # Reject invalid limits before creating resources.
     if resource is None:
         raise incomplete("CGROUP_V2_REQUIRED", "Linux resource accounting is unavailable")
     if not hasattr(os, "pidfd_open"):
@@ -3307,6 +3345,7 @@ def sample_command(
             poller = select.poll()
             poller.register(pidfd, select.POLLIN)
             started = time.monotonic()
+            deadline = root_wall_deadline(started, root_wall_timeout_ms)
             next_pss = started + pss_interval_ms / 1000.0
             os.kill(root_pid, signal.SIGCONT)
             next_sample = started + interval_ms / 1000.0
@@ -3315,8 +3354,7 @@ def sample_command(
             root_exit_observation: dict[str, Any] | None = None
             try:
                 while status_value is None:
-                    timeout = max(0.0, next_sample - time.monotonic())
-                    ready = poller.poll(math.ceil(timeout * 1000.0))
+                    ready = poller.poll(root_wait_timeout_ms(time.monotonic(), next_sample, deadline))
                     now = time.monotonic()
                     if ready:
                         waited, status_value = os.waitpid(root_pid, 0)
@@ -3324,6 +3362,11 @@ def sample_command(
                             raise incomplete("ROOT_WAIT_INVALID", f"waited for unexpected PID {waited}")
                         root_reaped = True
                         root_ended = now
+                    # The budget uses the observed boundary, even if an exit
+                    # is first observed after the deadline. Raising reaches
+                    # bound cgroup.kill, owned-child reap, and verified drain.
+                    # Do not kill the sampler or fabricate timing success.
+                    check_root_wall_deadline(now, deadline, started, root_identity)
                     if now >= next_sample or ready:
                         take_sample(started, now)
                         if ready:
@@ -3537,6 +3580,12 @@ def sample_command(
                 "sampler_cpu_sys_ms": round((usage_end.ru_stime - usage_start.ru_stime) * 1000.0, 3),
             }
             sampler_cpu_ms = result["sampler_cpu_user_ms"] + result["sampler_cpu_sys_ms"]
+            if root_wall_timeout_ms is not None:
+                result["root_wall_deadline"] = {
+                    "limit_ms": root_wall_timeout_ms,
+                    "outcome": "root-exited",
+                    "boundary": "root-SIGCONT-through-pidfd-observed-exit",
+                }
             result["sampler_cpu_percent_of_wall"] = round(
                 sampler_cpu_ms * 100.0 / result["wall_ms"] if result["wall_ms"] > 0 else 0.0,
                 3,
@@ -3577,6 +3626,9 @@ def main() -> int:
     parser.add_argument("--pss-interval-ms", type=float, default=250.0)
     parser.add_argument("--descendant-grace-ms", type=float, default=1000.0)
     parser.add_argument("--settle-timeout-ms", type=float, default=10000.0)
+    parser.add_argument(
+        "--root-wall-timeout-ms", type=float, help="opt-in root execution deadline; scoped cleanup on expiry"
+    )
     parser.add_argument("--isolate-network", action="store_true")
     parser.add_argument("--probe-network-isolation", action="store_true")
     parser.add_argument("command", nargs=argparse.REMAINDER)
@@ -3626,6 +3678,7 @@ def main() -> int:
             isolate_network=args.isolate_network,
             stdin_path=args.stdin,
             temporary_directory=args.temporary_directory,
+            root_wall_timeout_ms=args.root_wall_timeout_ms,
         )
     except (MeasurementIncomplete, OSError) as error:
         code = error.code if isinstance(error, MeasurementIncomplete) else "CGROUP_IO_ERROR"

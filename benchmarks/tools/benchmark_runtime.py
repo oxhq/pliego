@@ -10,6 +10,7 @@ from pathlib import PurePosixPath
 from typing import Sequence
 
 BROWSERSHOT_ADAPTER_SUFFIX = ("benchmarks", "adapters", "browsershot", "adapter.php")
+INVOBOOK_ADAPTER_SUFFIX = ("benchmarks", "adapters", "invobook-browsershot", "adapter.php")
 BROWSERSHOT_TARGET = "browsershot-adapter-v1"
 GENERIC_TARGET = "generic-benchmark-engine-v1"
 PRIVATE_RUNTIME_CONTRACT = "fresh-private-home-xdg-v1"
@@ -19,7 +20,10 @@ FIXED_HOME_CONTRACT = "fixed-account-home-v1"
 def runtime_target(argv: Sequence[str]) -> str:
     if len(argv) >= 2 and argv[1] == "render":
         parts = PurePosixPath(argv[0]).parts
-        if tuple(parts[-len(BROWSERSHOT_ADAPTER_SUFFIX) :]) == BROWSERSHOT_ADAPTER_SUFFIX:
+        if tuple(parts[-len(BROWSERSHOT_ADAPTER_SUFFIX) :]) in (
+            BROWSERSHOT_ADAPTER_SUFFIX,
+            INVOBOOK_ADAPTER_SUFFIX,
+        ):
             return BROWSERSHOT_TARGET
     return GENERIC_TARGET
 
