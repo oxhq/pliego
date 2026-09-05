@@ -1,4 +1,4 @@
-name: Pliego real-document development preflight
+name: Pliego real-document development comparison
 
 on:
   workflow_dispatch:
@@ -11,8 +11,25 @@ on:
         description: Exact 40-character package source SHA
         type: string
         required: true
+      mode:
+        description: Timed requires an exact reviewed acceptance file committed in this checkout
+        type: choice
+        required: true
+        default: preflight
+        options:
+          - preflight
+          - timed
+      repeat:
+        description: One independent repeat per job; timed runs keep 100 samples per provider
+        type: choice
+        required: true
+        default: '1'
+        options:
+          - '1'
+          - '2'
+          - '3'
       tracks:
-        description: Selected independent preflights (Invobook remains subject to its original lock audit)
+        description: Timed requires one named track; preflight may select a group. Original lock audits remain required.
         type: choice
         required: true
         default: aureus
@@ -34,7 +51,7 @@ concurrency:
 jobs:
   preflight:
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: ${{ inputs.mode == 'timed' && 120 || 45 }}
     strategy:
       fail-fast: false
       matrix:
@@ -44,6 +61,82 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ github.sha }}
+      - name: Validate fixed campaign controls and reviewed acceptance path
+        id: controls
+        env:
+          REQUEST_MODE: ${{ inputs.mode }}
+          REQUEST_REPEAT: ${{ inputs.repeat }}
+          REQUEST_TRACKS: ${{ inputs.tracks }}
+          TRACK: ${{ matrix.track }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          ARTIFACT_ID: ${{ inputs.artifact_id }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib, json, os, re, stat, subprocess
+          from pathlib import Path
+
+          def require(condition, message):
+              if not condition:
+                  raise SystemExit(message)
+
+          tracks = {
+              'invobook-simple-repaired': 'invobook-browsershot-5.0.5-puppeteer-25.8.0',
+              'aureus-ledger-300-repaired': 'aureus-dompdf-3.1.6',
+              'aureus-manufacturing-008-font-closed': 'aureus-dompdf-3.1.6',
+          }
+          mode, repeat = os.environ['REQUEST_MODE'], os.environ['REQUEST_REPEAT']
+          selected, track = os.environ['REQUEST_TRACKS'], os.environ['TRACK']
+          source, artifact = os.environ['SOURCE_SHA'], os.environ['ARTIFACT_ID']
+          require(mode in {'preflight', 'timed'}, 'Unknown campaign mode')
+          require(repeat in {'1', '2', '3'}, 'Repeat must be 1, 2 or 3')
+          require(selected in {*tracks, 'aureus', 'all'} and track in tracks, 'Unknown track')
+          expected = set(tracks) if selected == 'all' else ({t for t in tracks if t.startswith('aureus-')} if selected == 'aureus' else {selected})
+          require(track in expected, 'Matrix track differs from selected input')
+          require(mode != 'timed' or selected == track, 'Timed mode requires one named track')
+          require(re.fullmatch(r'[0-9a-f]{40}', source), 'Exact source SHA required')
+          require(re.fullmatch(r'[1-9][0-9]{0,19}', artifact), 'Positive artifact ID required')
+          acceptance_relative, acceptance_sha256 = '', None
+          if mode == 'timed':
+              # No free-form acceptance path and no current-run generated acceptance.
+              acceptance_relative = f'benchmarks/integration/real_documents/acceptance/{source}/{track}.json'
+              path = Path.cwd()
+              for part in acceptance_relative.split('/'):
+                  path = path / part
+                  require(not path.is_symlink(), 'Acceptance path contains a symlink')
+              require(path.is_file(), 'Missing committed reviewed acceptance')
+              info = path.stat()
+              require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and 0 < info.st_size <= 65536, 'Unbounded or non-regular acceptance')
+              raw = path.read_bytes()
+              committed = subprocess.run(['git', 'show', f'HEAD:{acceptance_relative}'], capture_output=True, timeout=10)
+              require(committed.returncode == 0 and committed.stdout == raw, 'Acceptance must match committed checkout bytes')
+              value = json.loads(raw)
+              require(value.get('schema') == 'pliego.real-document-visual-acceptance.v1', 'Wrong acceptance schema')
+              require(isinstance(value.get('identity_sha256'), str) and re.fullmatch(r'[0-9a-f]{64}', value['identity_sha256']), 'Missing exact accepted identity')
+              require(isinstance(value.get('targets'), dict) and set(value['targets']) == {'pliego-candidate', tracks[track]}, 'Wrong accepted providers')
+              for target in value['targets'].values():
+                  require(isinstance(target, dict) and target.get('reviewed') is True, 'Actual PDF review required')
+                  require(all(isinstance(target.get(key), str) and target[key].strip() for key in ('notes', 'evidence')), 'Review notes and evidence required')
+                  for key in ('layout_fingerprints', 'pdf_sha256'):
+                      hashes = target.get(key)
+                      require(isinstance(hashes, list) and hashes and all(isinstance(h, str) and re.fullmatch(r'[0-9a-f]{64}', h) for h in hashes), 'Missing reviewed PDF/layout hashes')
+              acceptance_sha256 = hashlib.sha256(raw).hexdigest()
+          # These are whole-campaign caps, not changes to any render/oracle deadline.
+          service_seconds = 90 * 60 if mode == 'timed' else 15 * 60
+          controls = {'mode': mode, 'repeat': int(repeat), 'track': track, 'source_sha': source,
+                      'artifact_id': int(artifact), 'acceptance_relative': acceptance_relative,
+                      'acceptance_sha256': acceptance_sha256, 'service_seconds': service_seconds,
+                      'job_minutes': 120 if mode == 'timed' else 45,
+                      'scheduled_attempts': 2 * (1 + 10 + 100) if mode == 'timed' else 2,
+                      'sample_root_wall_deadline_ms': 65000,
+                      'interruption_boundary': 'Raw prefix may remain; a missing final inventory/report is not a complete verifiable or qualified campaign.'}
+          setup = Path(os.environ['RUNNER_TEMP']) / 'real-document-setup'
+          setup.mkdir()
+          (setup / 'campaign-controls.json').write_text(json.dumps(controls, sort_keys=True) + '\n')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              for key, value in {'mode': mode, 'repeat': repeat, 'acceptance_relative': acceptance_relative, 'service_seconds': service_seconds}.items():
+                  output.write(f'{key}={value}\n')
+          PY
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: '3.12'
@@ -60,7 +153,7 @@ jobs:
         run: |
           set -euo pipefail
           setup="$RUNNER_TEMP/real-document-setup"
-          mkdir "$setup"
+          test -d "$setup"
           # Never inherit a Composer home, plugin configuration or credentials.
           export COMPOSER_HOME="$RUNNER_TEMP/real-document-composer-home"
           export COMPOSER_CACHE_DIR="$RUNNER_TEMP/real-document-composer-cache"
@@ -212,12 +305,16 @@ jobs:
           fi
           "${engine[@]}" /usr/bin/test -r "$RD_APPS/$app/vendor/autoload.php"
           printf 'binary=%s\npython=%s\nphp=%s\n' "$runtime/pliego" "$RUNNER_TEMP/real-document-python/bin/python" "$(readlink -f "$(command -v php)")" >> "$GITHUB_OUTPUT"
-      - name: Run correctness preflight under bounded delegated cgroup service
+      - name: Run reviewed campaign under bounded delegated cgroup service
         env:
           BINARY: ${{ steps.runtime.outputs.binary }}
           PYTHON: ${{ steps.runtime.outputs.python }}
           PHP: ${{ steps.runtime.outputs.php }}
           TRACK: ${{ matrix.track }}
+          MODE: ${{ steps.controls.outputs.mode }}
+          REPEAT: ${{ steps.controls.outputs.repeat }}
+          ACCEPTANCE_RELATIVE: ${{ steps.controls.outputs.acceptance_relative }}
+          SERVICE_SECONDS: ${{ steps.controls.outputs.service_seconds }}
         run: |
           set -euo pipefail
           output="$RUNNER_TEMP/real-document-preflight"
@@ -238,7 +335,7 @@ jobs:
           sudo systemd-run --quiet --wait --pipe --collect --expand-environment=no --unit="$unit" \
             "${metadata[@]}" \
             -p Type=exec -p Delegate=yes -p DelegateSubgroup=harness \
-            -p KillMode=control-group -p TimeoutStopSec=10s -p RuntimeMaxSec=15min \
+            -p KillMode=control-group -p TimeoutStopSec=10s -p "RuntimeMaxSec=${SERVICE_SECONDS}s" \
             -p "WorkingDirectory=$GITHUB_WORKSPACE" \
             /bin/bash -c '
               set -euo pipefail
@@ -253,11 +350,16 @@ jobs:
               export GIT_OPTIONAL_LOCKS=0
               /usr/bin/python3 -E -s benchmarks/tools/test_process_tree_sampler.py --root-deadline
               /usr/bin/python3 -E -s benchmarks/tools/process_tree_sampler.py --probe-network-isolation
+              acceptance=()
+              if [[ "$7" == timed ]]; then
+                acceptance=(--acceptance "$9")
+              fi
               exec "$1" benchmarks/integration/run_real_document_comparison.py \
-                --mode preflight --track "$2" --candidate-binary "$3" \
-                --candidate-identity "$4" --php "$5" --poppler-dir /usr/bin --out "$6"
+                --mode "$7" --repeat "$8" --track "$2" --candidate-binary "$3" \
+                --candidate-identity "$4" --php "$5" --poppler-dir /usr/bin --out "$6" "${acceptance[@]}"
             ' pliego-real-document "$PYTHON" "$TRACK" "$BINARY" \
               "$RUNNER_TEMP/real-document-candidate/candidate-identity.json" "$PHP" "$output" \
+              "$MODE" "$REPEAT" "$GITHUB_WORKSPACE/$ACCEPTANCE_RELATIVE" \
               2>&1 | tee "$setup/service.log" || service_status=$?
           printf '%s\n' "$service_status" > "$setup/service.exit"
           exit "$service_status"
@@ -288,7 +390,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: pliego-real-document-preflight-${{ matrix.track }}-${{ github.sha }}-${{ github.run_id }}
+          name: pliego-real-document-${{ inputs.mode }}-${{ matrix.track }}-repeat-${{ inputs.repeat }}-${{ github.sha }}-${{ github.run_id }}
           path: |
             ${{ runner.temp }}/real-document-preflight/
             ${{ runner.temp }}/real-document-setup/
