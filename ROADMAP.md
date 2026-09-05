@@ -9,8 +9,8 @@ and available funding.
 This roadmap started from Pliego v0.1.1. The v0.2.x line established the controlled
 API 1 runtime for trusted, application-owned HTML. Pliego v0.3.0 then released the
 exact profile-null API 2 tuple while retaining API 1 as a temporary compatibility
-route. **v0.3.3 is the current recommended API 2 build**, and the active 0.3.x lane is
-real-application adoption plus backwards-compatible compatibility work. GitHub
+route. **v0.3.3 is the current recommended API 2 build**. Compatible maintenance
+continues on 0.3.x while 0.4 targets dependable business documents through API 2. GitHub
 Releases is authoritative for the latest exact version and publication status. The
 support and deployment boundary is documented in the
 [support profile](docs/pliego/support-profile.md).
@@ -18,9 +18,11 @@ support and deployment boundary is documented in the
 API 2 uses a strict probe, request decoder, fixed cwd-v1 input closure, one-shot
 render, canonical result and bundle, and exact SDK tuple negotiation. It does not
 advertise a semantic or accessible-PDF profile.
-The repository now has the published Pliego v0.3.3 identity, version-locked dompdf
-and Browsershot adapter graphs, and a shared correctness slice. Comparative
-performance results have not yet been published from the benchmark protocol.
+The published [v0.3.3 minimal-static comparison](docs/benchmarks/results/v0.3.3-minimal-static-github-hosted/all-repeats.md)
+retains three GitHub-hosted repeats and 900 timed PDFs that passed the shared
+correctness oracle, with version-locked dompdf and Browsershot adapter graphs.
+This is evidence for that fixture and environment, not a general production ranking
+or proof of real-document coverage.
 
 ## Versioning policy and intended release train
 
@@ -49,9 +51,10 @@ the upstream engine.
 | **0.2.0 — Pliego-owned controlled document runtime (released)** | Make the default `render` command and supported SDK path use the Pliego-owned `DocumentSession` controlled transaction. The normal Pliego package graph has no `servoshell` dependency, fallback, or runtime entry. | Released with packaged controlled-time, generation-bound capture, fail-closed publication, and API 1 compatibility evidence. |
 | **0.2.x — compatible runtime and SDK fixes (released)** | Correct API 1 failure-evidence promotion and add the Laravel durable-storage handoff without inventing a new product milestone. | v0.2.1 and v0.2.2 shipped as backwards-compatible patches with focused package and consumer evidence. |
 | **0.3.0 — public API 2 base engine (released)** | Graduate the empty-contract executable foundation into one complete advertised profile-null tuple and make exact-tuple negotiation the preferred PHP/Laravel path. API 1 enters a documented deprecation period with a migration bridge. | Released with `--contract-probe`, canonical request/result transport, typed errors, artifact manifest, render identity, compatibility rules, goldens, package smoke tests, cross-platform conformance, deprecation behavior, and API 1 migration behavior. |
-| **0.3.x — API 2 adoption and compatibility (active; v0.3.3 recommended)** | Exercise API 2 in representative PHP/Laravel applications and ship only backwards-compatible packaging, platform, documentation, and SDK fixes. | Real applications cover install, doctor, render, durable storage/retrieval, typed failure, queues, concurrency, paths, permissions, containers, and binary updates across meaningfully different environments. |
-| **0.4.0 — semantic document layer and one accessible profile** | Make a canonical semantic `DocumentScene` the source of one precisely named tagged/accessible-PDF profile and its diagnostics. This is not a blanket claim of “PDF/UA support.” | OXH-339 selects the exact profile and validator versions; OXH-346 freezes its semantic/evidence contract; structure, language, alternate text, reading order, provenance, pagination, authoring diagnostics, validator output, failure policy, fixtures, and retained evidence are independently reproducible from the advertised API 2 tuple. |
-| **0.5.0 — hardened operational support boundary** | Make Pliego deployable and maintainable without project-author involvement: documented limits, supply-chain evidence, support diagnostics, repeated Servo synchronization, and correctness-first comparative reports. | The reviewed threat model, deployment/resource limits, signed and verifiable release assets, SBOM/notices/provenance, support bundle, security policy, repeated upstream-sync reports, packaged consumer, conformance matrix, and internal/dompdf/Browsershot reports are public and reproducible against exact tagged binaries. |
+| **0.3.x — API 2 maintenance (active; v0.3.3 recommended)** | Preserve the published base through backwards-compatible packaging, platform, documentation, and SDK fixes. | Compatible findings pass packaged and clean-consumer checks; new accepted capabilities follow the minor-release policy. |
+| **0.4.0 — dependable API 2 business documents** | Render, store, and retrieve representative invoices, long statements, and operational reports with supported links, paged tables, and bounded failures. | A frozen real-document corpus, reproducible application integration, comparison against the application's original PDF provider, actual API 2 failure tests, and four-platform packaged-consumer evidence pass. Independent adoption is not a release gate. |
+| **0.5.0 — semantic document layer and one accessible profile** | Make a canonical semantic `DocumentScene` the source of one precisely named tagged/accessible-PDF profile and its diagnostics. This is not a blanket claim of “PDF/UA support.” | OXH-339 selects the exact profile and validator versions; OXH-346 freezes its semantic/evidence contract; live capture, structure, pagination, tagged output, authoring diagnostics, validator results, and reader/assistive-technology evidence are independently reproducible from the advertised API 2 tuple. Independent adoption is not a release gate. |
+| **0.6.0 — hardened operational support boundary** | Make Pliego deployable and maintainable without project-author involvement: documented limits, supply-chain evidence, support diagnostics, repeated Servo synchronization, and correctness-first comparative reports. | The reviewed threat model, deployment/resource limits, signed and verifiable release assets, SBOM/notices/provenance, support bundle, security policy, repeated upstream-sync reports, packaged consumer, conformance matrix, and candidate-specific comparative reports are public and reproducible against exact tagged binaries. Independent adoption proceeds alongside this work and gates 1.0. |
 | **1.0.0 — stable supported contract** | Freeze only the runtime, protocol, semantic profile, SDK, compatibility, security-reporting, and maintenance commitments that real consumers and repeated releases have shown the project can preserve. | Every 1.0 gate below passes on immutable artifacts; API 2 and the semantic profile have representative external use; installation and updates are routine; multiple Servo syncs have completed; and no known required contract change remains. An unmet gate keeps Pliego on 0.x. |
 
 Package reduction, code hygiene, dependency security, benchmark infrastructure, and
@@ -60,10 +63,12 @@ version numbers. A compatible result may ship in a patch release with real fixes
 public behavior change follows the minor-release rule above.
 
 The installed base was small enough to release API 2 without waiting for broad API 1
-adoption. That release is now complete. Representative-application evidence belongs
-to the active 0.3.x lane and tests the preferred contract rather than preserving the
-weaker one. API 1 remains only as an explicit transition and rollback boundary. A
-later pre-1.0 minor may remove it after packaged migration proof; removal is not
+adoption. That release is now complete. The 0.4 and 0.5 engineering gates use
+representative application code and documents, including integrations operated by
+the project. Independent adoption follows the semantic/accessibility release; its
+three-application evidence target gates 1.0, not 0.4 or 0.5. API 1 remains only as
+an explicit transition and rollback boundary. A later pre-1.0 minor may remove it
+after packaged migration proof; removal is not
 conditioned on reaching an arbitrary consumer count.
 
 The explicit 0.2 API 1 migration boundary is that deterministic publication
@@ -150,8 +155,8 @@ v0.2.2 was a Laravel-only patch under the pre-0.3 release policy. From 0.3 onwar
 the native runtime and supported PHP/Laravel SDKs use the coordinated version line
 described above.
 
-The representative-application target moved to the active 0.3.x lane once API 2
-became the preferred public contract.
+API 2 is now the preferred public contract. Real-application engineering evidence
+is part of 0.4; the independent-adoption target is part of the path from 0.5 to 1.0.
 
 ### 3. Pliego 0.3 public API 2 release line
 
@@ -188,21 +193,11 @@ The final all-profile 1.0 contract tracked by
 [OXH-326](https://linear.app/oxhq/issue/OXH-326) is not reused as the 0.3 base-tuple
 gate. Issue tracking must keep those two freezes distinct.
 
-### 4. Pliego 0.3.x API 2 adoption and compatibility
+### 4. Pliego 0.3.x API 2 maintenance
 
-Goal: learn where the public API 2, package, and operational boundaries fail in real
-applications before freezing a semantic profile or a 1.0 contract.
-
-The active evidence target is:
-
-- at least three real PHP/Laravel applications cover distinct deployment shapes,
-  including at least one independently maintained or design-partner consumer;
-- the evidence set includes Linux container/CI and at least one supported desktop
-  package rather than copies of the same environment;
-- install, provisioning, binary update, `doctor`, API 2 render, durable storage and
-  retrieval, typed failure, artifacts, font discovery, unusual paths, permissions,
-  queues, and concurrent renders are exercised without fixture-only assumptions; and
-- compatible findings ship as 0.3.x patches with packaged and clean-consumer proof.
+Goal: preserve the released API 2 base while the next document capability is developed.
+Compatible findings ship as 0.3.x patches with packaged and clean-consumer proof.
+New accepted inputs or output semantics belong in a minor release.
 
 A fresh public-only Windows Laravel 13 consumer now proves the v0.3.3
 install/doctor/API 2 render/store/read-stream/typed-failure path in 53 focused
@@ -238,7 +233,54 @@ The current methodology and honest evidence boundary are in the
 [benchmark guide](docs/benchmarks/README.md). Compatible cleanup may accompany a patch
 release; any public contract or behavior change requires the next minor release.
 
-### 6. Pliego 0.4.0 semantic document layer and accessible profile
+### 6. Pliego 0.4.0 dependable API 2 business documents
+
+Goal: make representative business documents reliable through the actual
+PHP/Laravel render, storage, retrieval, and queue workflow.
+
+Done means:
+
+- a frozen corpus covers an invoice, a long statement, and an operational report,
+  with pinned source templates, data, fonts/assets, expected document facts, and a
+  recorded compatibility blocker inventory;
+- the declared API 2 boundary preserves required text, totals, rows, pagination,
+  fonts/images, and PDF links, including link geometry and destinations;
+- document-driven table, layout, and paint blockers are closed, with remaining
+  exclusions and every template adaptation recorded alongside the original input;
+- a real PHP/Laravel application's selected PDF workflows run through Pliego while
+  retaining their original provider for comparison; all PDF entry points in that
+  selected scope are inventoried, and existing application tests are preserved;
+- a reproducible comparison runs Pliego and that original provider on pinned
+  eligible inputs, retains their PDFs and diagnostics, and verifies required text,
+  totals, pagination, links, and reviewed visual output before performance claims;
+- comparison results report correct, incorrect, unsupported, baseline/setup,
+  timeout/crash, and delivery/storage outcomes with their denominators. Raw timing
+  samples, p50/p95 wall time, stated-concurrency throughput, CPU, process-tree peak
+  memory, I/O, and PDF size are retained where measurable. End-to-end workflow and
+  renderer-only costs, cold/warm modes, and template adaptations stay separate;
+- install/update, `doctor`, render, store/readback, typed failure, evidence access,
+  fonts, paths, permissions, queues, retention, and concurrency pass through the
+  actual API 2 SDK route on Linux container/CI and a supported desktop;
+- one documented deployment recipe demonstrates an outer process deadline and
+  cancellation, accounts for relevant descendants, states host resource and
+  retention settings, and proves that failed invocations do not return successful
+  delivery or stored-document records;
+- storage readback matches the validated PDF; denied writes and adapter false/throw
+  outcomes retain actionable failures. Remote object verification, visibility,
+  retry, and partial-object cleanup policies are explicit for the selected adapter;
+- candidate measurements also compare against v0.3.3 on shared eligible inputs,
+  retaining incompatibilities and failures without calculating speedups from them; and
+- all four native package targets, API 2 conformance, PHP/Laravel package consumers,
+  upgrade/rollback, and coordinated publication checks pass on the exact candidate.
+
+The existing benchmark harness and minimal-static report are a starting point;
+they do not replace this real-document comparison. No performance win is required.
+An internally operated fork provides external-code engineering evidence, not
+independent adoption. Neither an independent maintainer nor a three-application
+quota is required for 0.4. Full resource-exhaustion, signing, and support programs
+remain part of 0.6.
+
+### 7. Pliego 0.5.0 semantic document layer and accessible profile
 
 Goal: make Pliego understand and retain document semantics, then generate one precisely
 named accessible-PDF profile from that canonical source.
@@ -264,7 +306,12 @@ Done means:
 Reusable scenes, alternate rendering backends, and additional archival/accessibility
 profiles remain later work until demand and a concrete contract justify them.
 
-### 7. Pliego 0.5.0 operational support boundary
+The live semantic model, pagination associations, tagged writer, and validation
+pipeline are implementation checkpoints toward this release. A schema-only result
+does not satisfy the profile gate. Reproducible application and assistive-technology
+tests establish this release boundary; independent application adoption follows it.
+
+### 8. Pliego 0.6.0 operational support boundary
 
 Goal: make the trust, deployment, supply-chain, support, and maintenance boundary
 independently operable without project-author involvement.
@@ -291,23 +338,33 @@ Done means:
 
 This milestone does not turn Pliego into a sandbox for hostile HTML.
 
-### 8. Pliego 1.0 decision
+Independent adoption proceeds after 0.5 alongside this operational work. The full
+three-application evidence target below gates 1.0, rather than automatically blocking
+0.6 publication. A first bounded Servo-sync rehearsal starts before deep semantic
+work; repeated completed synchronizations remain required for operational closure.
+
+### 9. Pliego 1.0 decision
 
 Goal: release 1.0 only if the supported product surface has durable evidence.
 
 Done means:
 
-- every preceding 0.2.0-0.5.0 gate remains satisfied on the release candidate,
+- every preceding 0.2.0-0.6.0 gate remains satisfied on the release candidate,
   including the correctness-gated internal, dompdf, and Browsershot evidence;
 - a release candidate passes native package and engine-API smoke checks on Linux
   x86_64, Windows x86_64, macOS x86_64, and macOS arm64;
-- representative real consumers exercise API 2 and the semantic profile, including at
-  least one independently maintained application rather than only repository fixtures;
+- at least three real PHP/Laravel applications in distinct deployment environments
+  exercise API 2, with representative semantic-profile use and at least one
+  independently maintained or design-partner consumer. Across the set, Linux
+  container/CI and a supported desktop cover install/update, `doctor`, render,
+  store/readback, typed failures, evidence, fonts, paths, permissions, queues, and
+  concurrency; an internally operated fork alone does not establish independent use;
 - versioned PHP/Laravel consumers exercise the documented install, update, doctor,
   render, failure, and artifact paths using the packaged runtime;
 - controlled-capture acceptance and protocol conformance artifacts are reproducible
   for the declared fixture set from published commands;
 - compatibility, support, security-reporting, and maintenance policies are published;
+- the final versioned contract has no known mandatory breaking change remaining;
 - more than one Servo synchronization has completed through the documented process;
   and
 - immutable source, native archives, checksums, notices, and SDK versions are promoted
