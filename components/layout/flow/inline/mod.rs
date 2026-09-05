@@ -2210,10 +2210,6 @@ impl InlineFormattingContext {
         }
     }
 
-    pub(crate) fn has_unresolved_page_counters(&self) -> bool {
-        !self.page_counters.is_empty()
-    }
-
     /// Realize a source-owned text/inline-only IFC for one final page. All mutable
     /// boxes, runs and fragment caches are fresh; normal Servo shaping is reused.
     pub(crate) fn for_page(

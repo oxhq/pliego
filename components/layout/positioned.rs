@@ -637,6 +637,7 @@ impl HoistedAbsolutelyPositionedBox {
                 return false;
             };
             base.set_rect_origin(PhysicalPoint::new(base.rect().origin.x, Au(y)));
+            drop(base);
             pages.push(fragment);
         }
         let mut pages = pages.into_iter();
