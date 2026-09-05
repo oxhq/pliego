@@ -2405,14 +2405,7 @@ impl<'a> BuilderForBoxFragment<'a> {
         let captured_border_rects =
             (!separate_table_border_is_captured(self.fragment, self.containing_block_origin) &&
                 box_paint_geometry_is_supported(builder, state, self.fragment))
-            .then(|| {
-                solid_border_paint_rects(
-                    self.fragment.border_rect(),
-                    self.containing_block_origin,
-                    self.fragment.border,
-                    &style_color,
-                )
-            })
+            .then(|| ordinary_border_paint_rects(self.fragment, self.containing_block_origin))
             .flatten();
         let details = wr::BorderDetails::Normal(wr::NormalBorder {
             top: self.build_border_side(style_color.top),
@@ -2906,6 +2899,11 @@ fn ordinary_border_paint_rects(
     fragment: &BoxFragmentWithStyle<'_>,
     containing_block_origin: PhysicalPoint<Au>,
 ) -> Option<Vec<LayoutDebugPaintRect>> {
+    // An unsupported table fallback must not regain its suppressed borders
+    // through ordinary box paint. Use this gate for eligibility and emission.
+    if !fragment.box_fragment.captures_table_borders() {
+        return None;
+    }
     let style = fragment.style();
     let current_color = style.get_inherited_text().clone_color();
     let colors = BorderStyleColor::from_border(style.get_border(), &current_color);
@@ -4374,6 +4372,31 @@ mod debug_capture_tests {
                 (2, "image", Some(1), 8, Some(9)),
             ]
         );
+    }
+
+    #[test]
+    fn ordinary_border_capture_respects_table_fallback_suppression() {
+        let style =
+            ComputedValues::initial_values_with_font_override(Font::initial_values()).to_arc();
+        let fragment = Arc::new(BoxFragment::new(
+            BaseFragmentInfo::anonymous(),
+            style,
+            Vec::new(),
+            PhysicalRect::new(
+                PhysicalPoint::new(Au(120), Au(120)),
+                PhysicalSize::new(Au(1200), Au(600)),
+            ),
+            PhysicalSides::zero(),
+            PhysicalSides::zero(),
+            PhysicalSides::zero(),
+            None,
+        ));
+        let capture = || ordinary_border_paint_rects(&fragment.with_style(), PhysicalPoint::zero());
+        assert!(capture().is_some());
+        fragment.set_table_border_capture_suppressed(true);
+        assert!(capture().is_none());
+        fragment.set_table_border_capture_suppressed(false);
+        assert!(capture().is_some());
     }
 
     #[test]
