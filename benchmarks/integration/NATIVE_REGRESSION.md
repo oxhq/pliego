@@ -61,12 +61,20 @@ exact label for each target without rewriting either resolver's evidence.
 The candidate metadata must identify native 0.4.0, not a locally rebuilt 0.3.3.
 Package retention alone does not prove the final release matrix passed.
 
-The manual `pliego-native-regression.yml` workflow is preflight-only: its only
-inputs are the exact candidate artifact and source SHA. It downloads the
-published baseline without an app install, first runs six synthetic Linux
-lifecycle controls, then retains the six-PDF native preflight and its offline
-verification. It has a 900-second owned-service bound and a 35-minute job bound.
-There is no timed-mode dispatch input or automatically generated acceptance.
+The manual `pliego-native-regression.yml` workflow defaults to preflight. It
+accepts the exact candidate artifact/source, mode, and planned repeat 1, 2 or 3.
+It downloads the published baseline without an app install, first runs six
+synthetic Linux lifecycle controls, then retains the native campaign and strict
+offline verification. Preflight keeps the 900-second service/35-minute job bounds.
+
+Timed mode additionally requires committed owner-reviewed `acceptance.json` and
+`origin.json` under `native_regression_acceptance/<native-source>/`. The origin
+binds an exact successful preflight run, attempt, source and artifact ZIP. The
+workflow verifies the committed bytes, public GitHub metadata, bounded transport,
+safe inventory and original strict Linux proof before timing. No review is
+generated automatically. Timed repeats use a 5,400-second service/120-minute job
+bound; individual native root limits remain 65,000 ms. All outcomes and the
+reviewed original ZIP are retained; incomplete populations cannot qualify.
 
 ```sh
 python benchmarks/integration/run_native_regression.py \
