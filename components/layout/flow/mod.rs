@@ -1372,11 +1372,12 @@ fn retained_table_rows<'a>(
             else {
                 unreachable!();
             };
-            if table_info.uniform_solid_visible_border().is_none() {
+            let no_visible_borders = table_info.has_no_visible_borders();
+            if !no_visible_borders && table_info.uniform_solid_visible_border().is_none() {
                 return Err(TableGroupUnsupportedReason::CollapsedBorders);
             }
             collapsed_grid = true;
-            has_borders = true;
+            has_borders |= !no_visible_borders;
         } else if child.is_table_grid() {
             has_borders |= separate_table_border_profile(child)
                 .ok_or(TableGroupUnsupportedReason::UnsupportedLayout)?;

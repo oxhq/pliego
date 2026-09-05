@@ -11,6 +11,7 @@ Every render uses a closed input manifest and the committed Ahem font. Unsupport
 border styles, mixed colors, rowspan, and headerless pagination remain explicit
 rejection cases. Headed pagination must preserve the exact geometry of repeated
 headers, row text, and every grid edge through the public scene and PDF.
+Entirely invisible collapsed borders must emit no artificial grid paths.
 """
 
 from __future__ import annotations
@@ -43,10 +44,15 @@ CASES = (
     {"name": "header-one-page", "rows": 2, "header": True},
     {"name": "headerless-one-page", "rows": 2, "header": False},
     {"name": "header-multi-page", "rows": 90, "header": True},
+    {"name": "borderless-one-page", "rows": 2, "header": False, "borders": "none"},
+    {"name": "borderless-multi-page", "rows": 90, "header": False, "borders": "none"},
+    {"name": "transparent-one-page", "rows": 2, "header": False, "borders": "transparent"},
+    {"name": "hidden-one-page", "rows": 2, "header": False, "borders": "hidden"},
     {"name": "reject-headerless-multi-page", "rows": 90, "header": False, "reject": "pagination"},
     {"name": "reject-mixed-color", "rows": 2, "header": False, "reject": "mixed-color"},
     {"name": "reject-dashed", "rows": 2, "header": False, "reject": "dashed"},
     {"name": "reject-rowspan", "rows": 2, "header": False, "reject": "rowspan"},
+    {"name": "reject-partially-visible", "rows": 2, "header": False, "reject": "partially-visible"},
 )
 TOKEN = re.compile(r"R[0-9]{3}C[01]|HDR[LR]")
 BORDER_COLOR = {"r": 34, "g": 34, "b": 34, "a": 255}
@@ -126,7 +132,10 @@ def check_scene(scene: dict[str, Any], case: dict[str, Any]) -> dict[str, Any]:
             require(left.endswith("C0") and right == left[:-1] + "1", "row cells do not share a page")
         headers = [token for token in tokens if token.startswith("HDR")]
         require(headers == (["HDRL", "HDRR"] if case["header"] else []), "implicit or missing page header")
-        check_borders(paths, len(body) // 2 + int(case["header"]))
+        if case.get("borders") in ("none", "transparent", "hidden"):
+            require(not paths, "invisible collapsed borders emitted artificial paths")
+        else:
+            check_borders(paths, len(body) // 2 + int(case["header"]))
         for operation in operations:
             if operation.get("type") == "text":
                 require(bool(operation.get("glyphs")), "captured row text has no glyphs")
@@ -165,6 +174,14 @@ def build_fixture(repository: Path, root: Path, case: dict[str, Any]) -> tuple[b
         css += "td:first-child{border-color:#d00}"
     elif case.get("reject") == "dashed":
         css += "td{border-style:dashed}"
+    elif case.get("reject") == "partially-visible":
+        css += "td{border-color:transparent}td:first-child{border-left-color:#222}"
+    elif case.get("borders") == "none":
+        css += "td,th{border:none}"
+    elif case.get("borders") == "transparent":
+        css += "td,th{border-color:transparent}"
+    elif case.get("borders") == "hidden":
+        css += "td,th{border-style:hidden}"
     (source / "input/document.html").write_text(html, encoding="utf-8", newline="\n")
     (source / "input/styles.css").write_text(css + "\n", encoding="utf-8", newline="\n")
     manifest = json.loads((source / "input-manifest.json").read_bytes())
@@ -258,7 +275,7 @@ def run_case(binary: Path, repository: Path, root: Path, case: dict[str, Any], p
 
 
 def self_test() -> None:
-    require(len(CASES) == 7 and sum(bool(case.get("reject")) for case in CASES) == 4, "case inventory changed")
+    require(len(CASES) == 12 and sum(bool(case.get("reject")) for case in CASES) == 5, "case inventory changed")
     case = CASES[1]
     paths = [
         {
@@ -314,6 +331,19 @@ def self_test() -> None:
             pass
         else:
             raise AssertionError(f"self-test accepted {change} corruption")
+    invisible = copy.deepcopy(scene)
+    invisible["pages"][0]["operations"] = [
+        operation for operation in invisible["pages"][0]["operations"] if operation["type"] == "text"
+    ]
+    for border_kind in ("none", "transparent", "hidden"):
+        invisible_case = {**case, "borders": border_kind}
+        check_scene(invisible, invisible_case)
+        try:
+            check_scene(scene, invisible_case)
+        except AssertionError:
+            pass
+        else:
+            raise AssertionError(f"self-test accepted artificial {border_kind} borders")
     with tempfile.TemporaryDirectory(prefix="pliego-headerless-self-test-") as temporary:
         first, source = build_fixture(Path(__file__).resolve().parents[3], Path(temporary) / "first", case)
         second, _ = build_fixture(Path(__file__).resolve().parents[3], Path(temporary) / "second", case)

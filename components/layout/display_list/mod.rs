@@ -3049,7 +3049,8 @@ fn collapsed_table_border_rows(
             .y
             .iter()
             .any(|line| line.len() != column_count) ||
-        table_info.uniform_solid_visible_border().is_none()
+        (!table_info.has_no_visible_borders() &&
+            table_info.uniform_solid_visible_border().is_none())
     {
         return None;
     }
@@ -3130,6 +3131,10 @@ fn append_collapsed_table_row<'a>(
         return None;
     }
 
+    if table_info.has_no_visible_borders() {
+        rows.push((row, Vec::new()));
+        return Some(());
+    }
     let border = table_info.uniform_solid_visible_border()?;
     let border_width = border.width;
     let half_border_width = border_width / 2;

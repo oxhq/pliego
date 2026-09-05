@@ -24,6 +24,8 @@ $cases = [
     'collapse-screen' => '<style media="screen">'.$collapseCss.'</style>'.$table,
     'collapse-print' => '<style media="print">'.$collapseCss.'</style>'.$table,
     'collapse-all' => '<style>'.$collapseCss.'</style>'.$table,
+    'collapse-borderless' => '<style>table{border-collapse:collapse}td{border:none}</style>'.$table,
+    'collapse-horizontal' => '<style>table{border-collapse:collapse}td{border:0;border-bottom:1px solid #222}th{border:0;border-bottom:2px solid #222}</style><table><thead><tr><th>Invoice</th><th>450.00</th></tr></thead><tbody><tr><td>Item</td><td>450.00</td></tr></tbody></table>',
     'collapse-2px' => '<style>table{border-collapse:collapse}td{border:2px solid #222}</style>'.$table,
     'collapse-fixed' => '<style>table{border-collapse:collapse;table-layout:fixed;width:240px}td{border:1px solid #222}</style>'.$table,
     'collapse-black' => '<style>table{border-collapse:collapse}td{border:1px solid black}</style>'.$table,

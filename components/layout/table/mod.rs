@@ -403,6 +403,34 @@ pub(crate) struct SpecificTableGridInfo {
 }
 
 impl SpecificTableGridInfo {
+    // Inspect the resolved edges, not authored styles: an invisible winner can
+    // still reserve border width, but must not produce synthetic border paint.
+    pub(crate) fn has_no_visible_borders(&self) -> bool {
+        let mut borders = self
+            .collapsed_borders
+            .x
+            .iter()
+            .chain(&self.collapsed_borders.y)
+            .flat_map(|line| line.iter())
+            .peekable();
+        borders.peek().is_some() &&
+            borders.all(|border| {
+                border.width >= Au::zero() &&
+                    (border.width.is_zero() ||
+                        matches!(
+                            border.style_color.style,
+                            BorderStyle::None | BorderStyle::Hidden
+                        ) ||
+                        border
+                            .style_color
+                            .color
+                            .clone()
+                            .to_color_space(ColorSpace::Srgb)
+                            .alpha <=
+                            0.0)
+            })
+    }
+
     pub(crate) fn uniform_solid_visible_border(&self) -> Option<&CollapsedBorder> {
         let mut borders = self
             .collapsed_borders
@@ -447,6 +475,72 @@ mod collapsed_border_profile_tests {
             ),
             width: Au::from_px(width),
         }
+    }
+
+    fn one_cell_grid(border: CollapsedBorder) -> SpecificTableGridInfo {
+        SpecificTableGridInfo {
+            collapsed_borders: PhysicalVec::new(
+                vec![vec![border.clone()], vec![border.clone()]],
+                vec![vec![border.clone()], vec![border]],
+            ),
+            track_sizes: PhysicalVec::new(vec![Au::from_px(10)], vec![Au::from_px(10)]),
+        }
+    }
+
+    fn invisible_borders() -> [CollapsedBorder; 4] {
+        let mut none = border(3, 0.5);
+        none.style_color.style = BorderStyle::None;
+        let mut hidden = border(3, 0.5);
+        hidden.style_color.style = BorderStyle::Hidden;
+        let transparent = CollapsedBorder {
+            style_color: BorderStyleColor::new(
+                BorderStyle::Dashed,
+                AbsoluteColor::new(ColorSpace::Srgb, 0.5, 0.0, 0.0, 0.0),
+            ),
+            width: Au::from_px(4),
+        };
+        [border(0, 0.5), none, hidden, transparent]
+    }
+
+    #[test]
+    fn accepts_only_entirely_invisible_resolved_borders() {
+        for invisible in invisible_borders() {
+            let info = one_cell_grid(invisible);
+            assert!(info.has_no_visible_borders());
+            assert!(info.uniform_solid_visible_border().is_none());
+        }
+
+        let [zero, none, hidden, transparent] = invisible_borders();
+        let mut info = one_cell_grid(zero);
+        info.collapsed_borders.x[1][0] = none;
+        info.collapsed_borders.y[0][0] = hidden;
+        info.collapsed_borders.y[1][0] = transparent;
+        assert!(info.has_no_visible_borders());
+        assert!(info.uniform_solid_visible_border().is_none());
+    }
+
+    #[test]
+    fn rejects_mixed_visible_and_invisible_resolved_borders() {
+        assert!(!one_cell_grid(border(2, 0.5)).has_no_visible_borders());
+        for invisible in invisible_borders() {
+            let mut info = one_cell_grid(border(2, 0.5));
+            info.collapsed_borders.y[1][0] = invisible;
+            assert!(!info.has_no_visible_borders());
+            assert!(info.uniform_solid_visible_border().is_none());
+        }
+    }
+
+    #[test]
+    fn invisible_borders_do_not_accept_negative_widths_or_empty_edges() {
+        for mut invisible in invisible_borders() {
+            invisible.width = Au(-1);
+            assert!(!one_cell_grid(invisible).has_no_visible_borders());
+        }
+        let mut empty = one_cell_grid(border(0, 0.5));
+        empty.collapsed_borders.x.clear();
+        empty.collapsed_borders.y.clear();
+        assert!(!empty.has_no_visible_borders());
+        assert!(empty.uniform_solid_visible_border().is_none());
     }
 
     #[test]
