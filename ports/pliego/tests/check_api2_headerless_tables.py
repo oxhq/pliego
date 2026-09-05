@@ -12,6 +12,9 @@ border styles, mixed colors, rowspan, and headerless pagination remain explicit
 rejection cases. Headed pagination must preserve the exact geometry of repeated
 headers, row text, and every grid edge through the public scene and PDF.
 Entirely invisible collapsed borders must emit no artificial grid paths.
+Horizontal rules are tied to their row glyph baselines and page bounds. The
+uniform-grid oracle does not establish absolute text/edge alignment; visual
+document qualification remains separate.
 """
 
 from __future__ import annotations
@@ -59,6 +62,8 @@ CASES = (
 )
 TOKEN = re.compile(r"R[0-9]{3}C[01]|HDR[LR]")
 BORDER_COLOR = {"r": 34, "g": 34, "b": 34, "a": 255}
+LINE_HEIGHT_PX = 16
+CELL_PADDING_PX = 8
 
 
 def require(condition: bool, message: str) -> None:
@@ -114,8 +119,27 @@ def check_borders(paths: list[dict[str, Any]], rows: int) -> None:
         check_coverage(intervals, top, bottom)
 
 
-def check_horizontal_borders(paths: list[dict[str, Any]], body_rows: int) -> None:
-    require(len(paths) == body_rows + 1, "horizontal invoice rules lost or duplicated a row boundary")
+def check_horizontal_borders(
+    paths: list[dict[str, Any]], body: list[str], operations: list[dict[str, Any]], page_size: dict[str, int]
+) -> None:
+    row_tokens = [("HDRL", "HDRR"), *zip(body[::2], body[1::2])]
+    require(len(paths) == len(row_tokens), "horizontal invoice rules lost or duplicated a row boundary")
+    baselines = {}
+    for operation in operations:
+        if operation.get("type") != "text":
+            continue
+        tokens = TOKEN.findall(operation["text"])
+        if not tokens:
+            continue
+        require(len(tokens) == 1 and tokens[0] not in baselines, "fixture cell baseline is ambiguous or duplicated")
+        ys = [glyph["y"] for glyph in operation.get("glyphs", [])]
+        require(bool(ys) and all(type(y) is int for y in ys), "fixture cell has no exact glyph baselines")
+        baselines[tokens[0]] = (min(ys), max(ys))
+    require(all(token in baselines for row in row_tokens for token in row), "fixture row baseline is missing")
+    row_baselines = [
+        (min(baselines[left][0], baselines[right][0]), max(baselines[left][1], baselines[right][1]))
+        for left, right in row_tokens
+    ]
     ordered = sorted(paths, key=lambda path: path["bounds"]["y"])
     last_bottom = -1
     for index, path in enumerate(ordered):
@@ -125,6 +149,19 @@ def check_horizontal_borders(paths: list[dict[str, Any]], body_rows: int) -> Non
         require(bounds["height"] == (120 if index == 0 else 60), "header/body invoice rule width differs")
         require(bounds["y"] > last_bottom, "invoice rules overlap or are out of order")
         last_bottom = bounds["y"] + bounds["height"]
+        require(
+            bounds["x"] + bounds["width"] <= page_size["width"] and last_bottom <= page_size["height"],
+            "invoice rule escaped the page",
+        )
+        require(bounds["y"] > row_baselines[index][1], "invoice rule does not follow its row baseline")
+        if index + 1 < len(row_baselines):
+            require(last_bottom < row_baselines[index + 1][0], "invoice rule does not precede the next row baseline")
+        # A generous metric-independent bound: the entire declared line box,
+        # bottom padding and rule thickness. Do not guess font ascent/descent.
+        require(
+            last_bottom - row_baselines[index][1] <= (LINE_HEIGHT_PX + CELL_PADDING_PX) * 60 + bounds["height"],
+            "invoice rule is too far below its row baseline",
+        )
 
 
 def check_scene(scene: dict[str, Any], case: dict[str, Any]) -> dict[str, Any]:
@@ -151,7 +188,7 @@ def check_scene(scene: dict[str, Any], case: dict[str, Any]) -> dict[str, Any]:
         if case.get("borders") in ("none", "transparent", "hidden"):
             require(not paths, "invisible collapsed borders emitted artificial paths")
         elif case.get("borders") == "horizontal":
-            check_horizontal_borders(paths, len(body) // 2)
+            check_horizontal_borders(paths, body, operations, page["size_app_units"])
         else:
             check_borders(paths, len(body) // 2 + int(case["header"]))
         for operation in operations:
@@ -184,9 +221,10 @@ def build_fixture(repository: Path, root: Path, case: dict[str, Any]) -> tuple[b
     )
     css = (
         '@font-face{font-family:Ahem;src:url("font.ttf") format("truetype");}'
-        "html,body{margin:0}body{font-family:Ahem;font-size:12px;line-height:16px;color:#000}"
+        "html,body{margin:0}body{font-family:Ahem;font-size:12px;"
+        f"line-height:{LINE_HEIGHT_PX}px;color:#000}}"
         "table{border-collapse:collapse;width:420px}"
-        "td,th{border:1px solid #222;padding:8px;font-weight:normal;text-align:left}"
+        f"td,th{{border:1px solid #222;padding:{CELL_PADDING_PX}px;font-weight:normal;text-align:left}}"
     )
     if case.get("reject") == "mixed-color":
         css += "td:first-child{border-color:#d00}"
@@ -370,24 +408,65 @@ def self_test() -> None:
         else:
             raise AssertionError(f"self-test accepted artificial {border_kind} borders")
     horizontal = [
-        {"bounds": {"x": 0, "y": y, "width": 25200, "height": height}, "fill": BORDER_COLOR, "data": "M 0 0 Z"}
+        {
+            "type": "path",
+            "bounds": {"x": 0, "y": y, "width": 25200, "height": height},
+            "fill": BORDER_COLOR,
+            "data": "M 0 0 Z",
+        }
         for y, height in ((600, 120), (1200, 60), (1800, 60))
     ]
-    check_horizontal_borders(horizontal, 2)
-    for change in ("width", "missing", "duplicate", "header-thickness", "overlap"):
-        invalid = copy.deepcopy(horizontal)
+    horizontal_scene = copy.deepcopy(scene)
+    horizontal_scene["pages"][0]["operations"] = horizontal + [
+        {"type": "text", "text": token, "glyphs": [{"x": 60 + column * 12000, "y": y}]}
+        for row, y in ((["HDRL", "HDRR"], 300), (["R000C0", "R000C1"], 900), (["R001C0", "R001C1"], 1500))
+        for column, token in enumerate(row)
+    ]
+    horizontal_case = {**case, "header": True, "borders": "horizontal"}
+    check_scene(horizontal_scene, horizontal_case)
+    for change in (
+        "width",
+        "missing",
+        "duplicate",
+        "header-thickness",
+        "overlap",
+        "displaced-rules",
+        "final-rule-off-page",
+        "header-body-reordered",
+        "before-baseline",
+        "after-next-baseline",
+        "excessive-gap",
+    ):
+        invalid = copy.deepcopy(horizontal_scene)
+        operations = invalid["pages"][0]["operations"]
         if change == "width":
-            invalid[1]["bounds"]["width"] -= 60
+            operations[1]["bounds"]["width"] -= 60
         elif change == "missing":
-            invalid.pop()
+            operations.pop(2)
         elif change == "duplicate":
-            invalid.append(copy.deepcopy(invalid[-1]))
+            operations.append(copy.deepcopy(operations[2]))
         elif change == "header-thickness":
-            invalid[0]["bounds"]["height"] = 60
+            operations[0]["bounds"]["height"] = 60
+        elif change == "displaced-rules":
+            for rule in operations[:3]:
+                rule["bounds"]["y"] += 40000
+        elif change == "final-rule-off-page":
+            operations[2]["bounds"]["y"] = 67340
+        elif change == "header-body-reordered":
+            for cell in operations[3:5]:
+                cell["glyphs"][0]["y"] = 900
+            for cell in operations[5:7]:
+                cell["glyphs"][0]["y"] = 300
+        elif change == "before-baseline":
+            operations[1]["bounds"]["y"] = 850
+        elif change == "after-next-baseline":
+            operations[1]["bounds"]["y"] = 1460
+        elif change == "excessive-gap":
+            operations[2]["bounds"]["y"] = 3000
         else:
-            invalid[1]["bounds"]["y"] = 610
+            operations[1]["bounds"]["y"] = 610
         try:
-            check_horizontal_borders(invalid, 2)
+            check_scene(invalid, horizontal_case)
         except AssertionError:
             pass
         else:

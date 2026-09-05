@@ -57,6 +57,11 @@ CASES = (
         f'<p><a href="{HTTPS}">HTTPS</a></p><p><a href="mailto:reader@example.test">MAIL</a></p>',
         "links": {"http://example.test/plain": 1, HTTPS: 1, "mailto:reader@example.test": 1},
         "text": ["HTTP", "HTTPS", "MAIL"],
+        "exact_rects": [
+            ["http://example.test/plain", [2880, 3060, 2880, 720]],
+            [HTTPS, [2880, 4140, 3600, 720]],
+            ["mailto:reader@example.test", [2880, 5220, 2880, 720]],
+        ],
     },
     {
         "name": "descendant-box",
@@ -65,6 +70,7 @@ CASES = (
         "text": ["BOX"],
         "css": ".box{display:block;width:120px;height:40px}",
         "bounds_size": [7200, 2400],
+        "exact_rects": [[HTTPS, [2880, 2880, 7200, 2400]]],
     },
     {
         "name": "wrapped-inline",
@@ -72,6 +78,11 @@ CASES = (
         "links": {HTTPS: 3},
         "text": ["FIRST", "SECOND", "THIRD"],
         "css": ".wrap{width:72px}",
+        "exact_rects": [
+            [HTTPS, [2880, 3060, 3600, 720]],
+            [HTTPS, [2880, 4140, 4320, 720]],
+            [HTTPS, [2880, 5220, 3600, 720]],
+        ],
     },
     {
         "name": "second-page",
@@ -81,12 +92,14 @@ CASES = (
         "pages": 2,
         "link_page": 2,
         "css": ".next{break-before:page}",
+        "exact_rects": [[HTTPS, [2880, 3060, 7200, 720]]],
     },
     {
         "name": "duplicate-suppression",
         "body": f'<a href="{HTTPS}"><span>FIRST</span><span>SECOND</span></a>',
         "links": {HTTPS: 1},
         "text": ["FIRST", "SECOND"],
+        "exact_rects": [[HTTPS, [2880, 3060, 7920, 720]]],
     },
     {
         "name": "unsupported-inline-background",
@@ -181,7 +194,7 @@ def scene_links(scene: dict[str, Any], case: dict[str, Any]) -> list[list[dict[s
         require(page["number"] == index + 1, "scene page identity changed")
         width, height = (page["size_app_units"][axis] for axis in ("width", "height"))
         require(type(width) is int and type(height) is int and min(width, height) > 0, "invalid exact page size")
-        links = []
+        links, exact_rects = [], []
         for operation in page["operations"]:
             if operation["type"] == "text":
                 text.append(operation["text"])
@@ -200,8 +213,14 @@ def scene_links(scene: dict[str, Any], case: dict[str, Any]) -> list[list[dict[s
             links.append(
                 {"uri": operation["target"], "rect": [x / 80, (height - y - h) / 80, (x + w) / 80, (height - y) / 80]}
             )
+            exact_rects.append([operation["target"], [x, y, w, h]])
         expected = case.get("links", {}) if index + 1 == case.get("link_page", 1) else {}
         require(Counter(link["uri"] for link in links) == Counter(expected), "scene URI count/page differs")
+        if "exact_rects" in case:
+            # These authored-Ahem expectations also prevent a jointly shifted
+            # scene and PDF from passing a merely self-consistent comparison.
+            expected_rects = case["exact_rects"] if index + 1 == case.get("link_page", 1) else []
+            require(exact_rects == expected_rects, "link placement differs from the authored fixture geometry")
         keys = [(link["uri"], tuple(link["rect"])) for link in links]
         require(len(keys) == len(set(keys)), "scene emitted a duplicate link rectangle")
         links_by_page.append(links)
@@ -388,7 +407,7 @@ def self_test() -> None:
                 pass
             else:
                 raise AssertionError("exclusion oracle accepted a changed failure pair")
-    case = {"links": {HTTPS: 1}, "pages": 2}
+    case = {"links": {HTTPS: 1}, "pages": 2, "exact_rects": [[HTTPS, [800, 1600, 2400, 800]]]}
     scene = {
         "schema": "pliego.document-scene",
         "version": 2,
@@ -423,15 +442,17 @@ def self_test() -> None:
             pass
         else:
             raise AssertionError(f"oracle accepted {corruption} corruption")
-    for corruption in ("float", "duplicate", "outside"):
+    for corruption in ("float", "duplicate", "outside", "shifted"):
         wrong = copy.deepcopy(scene)
         link = wrong["pages"][0]["operations"][0]
         if corruption == "float":
             link["bounds"]["x"] = 800.0
         elif corruption == "duplicate":
             wrong["pages"][0]["operations"].append(copy.deepcopy(link))
-        else:
+        elif corruption == "outside":
             link["bounds"]["y"] = 16000
+        else:
+            link["bounds"]["x"] += 80
         try:
             scene_links(wrong, case)
         except AssertionError:
