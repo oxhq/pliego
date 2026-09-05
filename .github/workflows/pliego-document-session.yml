@@ -303,7 +303,7 @@ jobs:
       - name: Prove API 2 tables, links and fail-closed exclusions
         run: |
           # Unoptimized executables self-hash before starting Servo. Match the existing
-          # valid-render closure's startup allowance; engine host_wall_ms remains 10000.
+          # valid-render closure's startup allowance; engine host_wall_ms uses API default 60000.
           python ports/pliego/tests/check_api2_headerless_tables.py --self-test
           table_status=0
           python ports/pliego/tests/check_api2_headerless_tables.py \

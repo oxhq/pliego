@@ -460,12 +460,9 @@ def budgets(mode: str) -> tuple[int, int]:
 
 def build_census_fixture(output: Path, item: dict[str, Any], mode: str) -> tuple[bytes, Path]:
     host_ms, _ = budgets(mode)
-    payload, source = build_fixture(REPOSITORY, output, case_for(item["name"], item.get("suite")))
+    payload, source = build_fixture(REPOSITORY, output, case_for(item["name"], item.get("suite")), host_wall_ms=host_ms)
     request = strict_json(payload)
-    require(request["settlement"]["limits"]["host_wall_ms"] == HOST_MS, "original fixture budget changed")
-    if host_ms != HOST_MS:
-        request["settlement"]["limits"]["host_wall_ms"] = host_ms
-        payload = canonical_json(request)
+    require(request["settlement"]["limits"]["host_wall_ms"] == host_ms, "selected diagnostic budget changed")
     return payload, source
 
 
@@ -816,7 +813,7 @@ class SelfTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             frozen = []
             for name in NAMES:
-                payload, source = build_fixture(REPOSITORY, Path(temp) / name, case_for(name))
+                payload, source = build_fixture(REPOSITORY, Path(temp) / name, case_for(name), host_wall_ms=HOST_MS)
                 request = strict_json(payload)
                 validate_input(payload, source)
                 self.assertEqual(request["settlement"]["limits"]["host_wall_ms"], HOST_MS)
@@ -861,8 +858,10 @@ class SelfTest(unittest.TestCase):
                 copied = case_for(case["name"], suite)
                 self.assertEqual(copied, case)
                 self.assertIsNot(copied, case)
-                payload, source = build_fixture(REPOSITORY, root / f"copy-{index}", copied)
-                expected, original_source = build_fixture(REPOSITORY, root / f"original-{index}", case)
+                payload, source = build_fixture(REPOSITORY, root / f"copy-{index}", copied, host_wall_ms=HOST_MS)
+                expected, original_source = build_fixture(
+                    REPOSITORY, root / f"original-{index}", case, host_wall_ms=HOST_MS
+                )
                 self.assertEqual(payload, expected)
                 validate_input(payload, source)
                 self.assertEqual(strict_json(payload)["settlement"]["limits"]["host_wall_ms"], HOST_MS)
@@ -915,7 +914,10 @@ class SelfTest(unittest.TestCase):
                 primary, source = build_census_fixture(root / f"primary-{index}", item, PAIR_MODES[0])
                 other, other_source = build_census_fixture(root / f"counterfactual-{index}", item, PAIR_MODES[1])
                 original, original_source = build_fixture(
-                    REPOSITORY, root / f"original-{index}", case_for(item["name"], item.get("suite"))
+                    REPOSITORY,
+                    root / f"original-{index}",
+                    case_for(item["name"], item.get("suite")),
+                    host_wall_ms=HOST_MS,
                 )
                 self.assertEqual(primary, original)
                 validate_input(primary, source)
@@ -951,6 +953,40 @@ class SelfTest(unittest.TestCase):
             for incorrect in (True, float(host_ms), 30000, 60000 if host_ms == HOST_MS else HOST_MS):
                 with self.subTest(expected=host_ms, incorrect=incorrect), self.assertRaises(CHECK_ERRORS):
                     diagnostic_facts(raw, failure, host_ms=incorrect)
+
+    def test_all_diagnostic_request_sequences_preserve_reviewed_bytes(self) -> None:
+        # Captured from reviewed 4d4451e364 before qualification defaults changed.
+        # Requests bind all original HTML/styles/font bytes through the manifest.
+        expected = {
+            "matched-controls": "sha256:38f7f03252a66bde69477dcdb9056e9370e4b7cd8671b6c021a0cf570ebb7ad6",
+            "package-order": "sha256:42e143275956fa649fe512b537646dade656c3cf659c7bb2d2cec7533dc91aa3",
+            "gradient-pairs": "sha256:d6cdd707722ef76050379e865bf2d940fb2776f6c75dbf289079ed034ec14aca",
+            "gradient-pairs-default-budget": "sha256:ac48d40278922e825d449bc3251b618554b9904d485f986722b72ffced2273c7",
+        }
+        with tempfile.TemporaryDirectory() as temp:
+            for mode, digest in expected.items():
+                rows = []
+                for index, item in enumerate(schedule(mode)):
+                    payload, _ = build_census_fixture(Path(temp) / mode / str(index), item, mode)
+                    rows.append({**item, "request_sha256": sha256_bytes(payload)})
+                self.assertEqual(sha256_bytes(canonical_json(rows)), digest)
+
+    def test_qualification_cli_defaults_and_debug_override(self) -> None:
+        real_parse = argparse.ArgumentParser.parse_args
+        for name in ("links", "headerless_tables", "fixed_content", "nonpainting_content", "table_backgrounds"):
+            module = importlib.import_module("check_api2_" + name)
+            for arguments, expected in (([], 65), (["--process-timeout-seconds", "180"], 180)):
+                parsed = []
+
+                def capture(parser: argparse.ArgumentParser) -> argparse.Namespace:
+                    value = real_parse(parser, ["--self-test", *arguments])
+                    parsed.append(value)
+                    return value
+
+                with patch.object(argparse.ArgumentParser, "parse_args", capture), patch.object(module, "self_test"):
+                    module.main()
+                self.assertEqual(len(parsed), 1)
+                self.assertEqual(parsed[0].process_timeout_seconds, expected)
 
     def test_counterfactual_executes_once_with_declared_budgets(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

@@ -75,7 +75,8 @@ geometry, body order, per-page footer text, centering, top/bottom placement, lit
 zero preservation, wrapper/table siblings and explicit exclusions. Pure negative
 checks mutate missing/duplicated/aliased text, placement, font and page count so the
 oracle cannot accept them. The direct-debug caller allowance is 180 seconds;
-optimized bundles use 30 seconds. The engine's host-wall budget remains 10 seconds.
+optimized bundles use 65 seconds. The engine uses the API default 60-second
+host-wall budget; see the [qualification-budget decision](api2-qualification-budgets.md).
 These functional timings are not performance-comparison samples.
 
 The four-platform package workflow retains every case's input, canonical request,

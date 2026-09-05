@@ -167,7 +167,6 @@ def build_fixture(repository: Path, root: Path, case: dict[str, Any]) -> tuple[b
     request["input"]["manifest"].update(sha256=sha256_bytes(manifest_bytes), bytes=len(manifest_bytes))
     request["page"]["size"] = {"width_app_units": SIZE["width"], "height_app_units": SIZE["height"]}
     request["page"]["margins_app_units"] = MARGINS
-    request["settlement"]["limits"]["host_wall_ms"] = 10000
     return canonical_json(request), source
 
 
@@ -375,6 +374,12 @@ def self_test() -> None:
     with tempfile.TemporaryDirectory(prefix="pliego-nonpainting-self-test-") as temporary:
         first, _ = build_fixture(repository, Path(temporary) / "first", CASES[0])
         second, _ = build_fixture(repository, Path(temporary) / "second", CASES[0])
+        golden = json.loads((repository / "contracts/api2/goldens/accepted/render-request.a4.json").read_bytes())
+        require(
+            json.loads(first)["settlement"]["limits"] == golden["settlement"]["limits"]
+            and golden["settlement"]["limits"]["host_wall_ms"] == 60000,
+            "qualification changed API default limits",
+        )
         require(
             first == second and json.loads(first)["resources"] == {"network": "deny", "host_fonts": "deny"},
             "fixture closure changed/is not offline",
@@ -388,7 +393,7 @@ def main() -> None:
     parser.add_argument("--binary", type=Path)
     parser.add_argument("--out", "--proof-directory", dest="out", type=Path)
     parser.add_argument("--source-commit")
-    parser.add_argument("--process-timeout-seconds", type=process_timeout_seconds, default=30)
+    parser.add_argument("--process-timeout-seconds", type=process_timeout_seconds, default=65)
     parser.add_argument("--require-pdf-text", action="store_true")
     args = parser.parse_args()
     if args.self_test:

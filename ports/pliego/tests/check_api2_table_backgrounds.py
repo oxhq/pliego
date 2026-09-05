@@ -308,12 +308,18 @@ def self_test() -> None:
     else:
         raise AssertionError("table-background oracle accepted last-page alias")
     repository = Path(__file__).resolve().parents[3]
+    golden = json.loads((repository / "contracts/api2/goldens/accepted/render-request.a4.json").read_bytes())
     with tempfile.TemporaryDirectory(prefix="pliego-table-background-self-test-") as temporary:
         for case in CASES:
             root = Path(temporary) / case["name"]
             first, _ = build_fixture(repository, root / "first", case)
             second, _ = build_fixture(repository, root / "second", case)
             require(first == second, "nonrepeatable fixture closure")
+            require(
+                json.loads(first)["settlement"]["limits"] == golden["settlement"]["limits"]
+                and golden["settlement"]["limits"]["host_wall_ms"] == 60000,
+                "qualification changed API default limits",
+            )
             require(
                 json.loads(first)["resources"] == {"network": "deny", "host_fonts": "deny"}, "fixture is not closed"
             )
@@ -326,7 +332,7 @@ def main() -> None:
     parser.add_argument("--binary", type=Path)
     parser.add_argument("--out", "--proof-directory", dest="out", type=Path)
     parser.add_argument("--source-commit")
-    parser.add_argument("--process-timeout-seconds", type=process_timeout_seconds, default=30)
+    parser.add_argument("--process-timeout-seconds", type=process_timeout_seconds, default=65)
     parser.add_argument("--case", choices=[case["name"] for case in CASES], action="append")
     args = parser.parse_args()
     if args.self_test:

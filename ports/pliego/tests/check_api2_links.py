@@ -272,7 +272,13 @@ def check_excluded_failure(
         )
 
 
-def build_fixture(repository: Path, root: Path, case: dict[str, Any]) -> tuple[bytes, Path]:
+def build_fixture(
+    repository: Path, root: Path, case: dict[str, Any], *, host_wall_ms: int | None = None
+) -> tuple[bytes, Path]:
+    require(
+        host_wall_ms is None or (type(host_wall_ms) is int and host_wall_ms in (10000, 60000)),
+        "unknown fixture diagnostic budget",
+    )
     template = (repository / "contracts/api2/goldens/accepted/render-request.a4.json").read_bytes()
     payload, source = build_execution_fixture(repository, root, template)
     html = (
@@ -295,7 +301,10 @@ def build_fixture(repository: Path, root: Path, case: dict[str, Any]) -> tuple[b
     (source / "input-manifest.json").write_bytes(manifest_bytes)
     request = json.loads(payload)
     request["input"]["manifest"].update(sha256=sha256_bytes(manifest_bytes), bytes=len(manifest_bytes))
-    request["settlement"]["limits"]["host_wall_ms"] = 10000
+    # Qualification preserves the API golden default; historical diagnostics
+    # explicitly select their original 10s budget instead.
+    if host_wall_ms is not None:
+        request["settlement"]["limits"]["host_wall_ms"] = host_wall_ms
     return canonical_json(request), source
 
 
@@ -459,7 +468,7 @@ def run_case(
     root: Path,
     case: dict[str, Any],
     probe: dict[str, Any],
-    process_timeout: int = 30,
+    process_timeout: int = 65,
 ) -> dict[str, Any]:
     payload, source = build_fixture(repository, root, case)
     (root / "request.json").write_bytes(payload)
@@ -573,7 +582,7 @@ def synthetic_pdf(pages: list[list[dict[str, Any]]]) -> PdfReader:
 
 
 def self_test() -> None:
-    for valid in ("1", "30", str(PROBE_TIMEOUT_SECONDS)):
+    for valid in ("1", "30", "65", str(PROBE_TIMEOUT_SECONDS)):
         require(process_timeout_seconds(valid) == int(valid), "valid process timeout was changed")
     for invalid in ("0", "-1", str(PROBE_TIMEOUT_SECONDS + 1), "1.5", "nan", "invalid"):
         try:
@@ -785,13 +794,25 @@ def self_test() -> None:
         else:
             raise AssertionError(f"scene oracle accepted {corruption} corruption")
     repository = Path(__file__).resolve().parents[3]
+    golden_limits = json.loads((repository / "contracts/api2/goldens/accepted/render-request.a4.json").read_bytes())[
+        "settlement"
+    ]["limits"]
+    require(golden_limits["host_wall_ms"] == 60000, "API default budget changed")
     with tempfile.TemporaryDirectory(prefix="pliego-links-self-test-") as temporary:
+        for invalid in (True, 10000.0, 0, -1, 30000, 65000):
+            try:
+                build_fixture(repository, Path(temporary) / "invalid", CASES[0], host_wall_ms=invalid)
+            except AssertionError:
+                pass
+            else:
+                raise AssertionError("invalid diagnostic budget accepted")
         for fixture in CASES:
             root = Path(temporary) / fixture["name"]
             first, source = build_fixture(repository, root / "a", fixture)
             second, _ = build_fixture(repository, root / "b", fixture)
             require(first == second, "fixture input closure is not repeatable")
             request = json.loads(first)
+            require(request["settlement"]["limits"] == golden_limits, "qualification changed API default limits")
             require(request["resources"] == {"network": "deny", "host_fonts": "deny"}, "open fixture resources")
             verify_artifact(source, request["input"]["manifest"])
             for entry in json.loads((source / "input-manifest.json").read_bytes())["entries"]:
@@ -808,8 +829,8 @@ def main() -> None:
     parser.add_argument(
         "--process-timeout-seconds",
         type=process_timeout_seconds,
-        default=30,
-        help="Caller process bound including executable self-hashing; default 30, direct debug CI uses 180.",
+        default=65,
+        help="Caller process bound including startup/self-hashing; default 65, direct debug CI uses 180.",
     )
     parser.add_argument("--pypdf-version", help="Require the pinned CI parser version")
     args = parser.parse_args()

@@ -359,7 +359,6 @@ def build_fixture(repository: Path, root: Path, case: dict[str, Any]) -> tuple[b
     request["input"]["manifest"].update(sha256=sha256_bytes(manifest_bytes), bytes=len(manifest_bytes))
     request["page"]["size"] = {"width_app_units": PAGE_SIZE["width"], "height_app_units": PAGE_SIZE["height"]}
     request["page"]["margins_app_units"] = MARGINS
-    request["settlement"]["limits"]["host_wall_ms"] = 10000
     return canonical_json(request), source
 
 
@@ -659,7 +658,7 @@ def self_test() -> None:
                 pass
             else:
                 raise AssertionError(f"exclusion oracle accepted unrelated {mutation}")
-    for valid in ("1", "30", str(PROBE_TIMEOUT_SECONDS)):
+    for valid in ("1", "30", "65", str(PROBE_TIMEOUT_SECONDS)):
         require(process_timeout_seconds(valid) == int(valid), "valid timeout changed")
     for invalid in ("0", "-1", "1.5", "nan", str(PROBE_TIMEOUT_SECONDS + 1)):
         try:
@@ -673,6 +672,12 @@ def self_test() -> None:
         root = Path(temporary)
         first, _ = build_fixture(repository, root / "first", case)
         second, _ = build_fixture(repository, root / "second", case)
+        golden = json.loads((repository / "contracts/api2/goldens/accepted/render-request.a4.json").read_bytes())
+        require(
+            json.loads(first)["settlement"]["limits"] == golden["settlement"]["limits"]
+            and golden["settlement"]["limits"]["host_wall_ms"] == 60000,
+            "qualification changed API default limits",
+        )
         require(
             first == second and json.loads(first)["resources"] == {"network": "deny", "host_fonts": "deny"},
             "fixture closure is not repeatable/offline",
@@ -719,8 +724,8 @@ def main() -> None:
     parser.add_argument(
         "--process-timeout-seconds",
         type=process_timeout_seconds,
-        default=30,
-        help="Caller bound including startup/self-hashing; optimized default30s, direct-debug allowance180s.",
+        default=65,
+        help="Caller bound including startup/self-hashing; optimized default65s, direct-debug allowance180s.",
     )
     parser.add_argument("--require-pdf-text", action="store_true")
     args = parser.parse_args()

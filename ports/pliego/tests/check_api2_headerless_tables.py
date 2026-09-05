@@ -393,7 +393,6 @@ def build_fixture(repository: Path, root: Path, case: dict[str, Any]) -> tuple[b
     if case.get("borders") == "horizontal":
         # Match the invoice minimizer's zero-margin page, so grid x=0 is exact.
         request["page"]["margins_app_units"] = dict.fromkeys(("top", "right", "bottom", "left"), 0)
-    request["settlement"]["limits"]["host_wall_ms"] = 10000
     return canonical_json(request), source
 
 
@@ -413,7 +412,7 @@ def run_case(
     root: Path,
     case: dict[str, Any],
     probe: dict[str, Any],
-    process_timeout: int = 30,
+    process_timeout: int = 65,
 ) -> dict[str, Any]:
     payload, source = build_fixture(repository, root, case)
     (root / "request.json").write_bytes(payload)
@@ -528,7 +527,7 @@ def self_test() -> None:
     require(struct.unpack_from(">H", font, tables[b"head"] + 18)[0] == 1000, "Ahem units/em changed")
     for table, offset in ((b"hhea", 4), (b"OS/2", 68)):
         require(struct.unpack_from(">hhh", font, tables[table] + offset) == (800, -200, 0), "Ahem line metrics changed")
-    for valid in ("1", "30", str(PROBE_TIMEOUT_SECONDS)):
+    for valid in ("1", "30", "65", str(PROBE_TIMEOUT_SECONDS)):
         require(process_timeout_seconds(valid) == int(valid), "valid process timeout was changed")
     for invalid in ("0", "-1", str(PROBE_TIMEOUT_SECONDS + 1), "1.5", "nan", "invalid"):
         try:
@@ -845,6 +844,16 @@ def self_test() -> None:
         first, source = build_fixture(Path(__file__).resolve().parents[3], Path(temporary) / "first", case)
         second, _ = build_fixture(Path(__file__).resolve().parents[3], Path(temporary) / "second", case)
         require(first == second, "fixture input manifest is not repeatable")
+        golden = json.loads(
+            (
+                Path(__file__).resolve().parents[3] / "contracts/api2/goldens/accepted/render-request.a4.json"
+            ).read_bytes()
+        )
+        require(
+            json.loads(first)["settlement"]["limits"] == golden["settlement"]["limits"]
+            and golden["settlement"]["limits"]["host_wall_ms"] == 60000,
+            "qualification changed API default limits",
+        )
         require(b"<thead>" not in (source / "input/document.html").read_bytes(), "headerless fixture has a header")
         require(
             json.loads(first)["resources"] == {"network": "deny", "host_fonts": "deny"},
@@ -873,8 +882,8 @@ def main() -> None:
     parser.add_argument(
         "--process-timeout-seconds",
         type=process_timeout_seconds,
-        default=30,
-        help="Caller process bound including executable self-hashing; default 30, direct debug CI uses 180.",
+        default=65,
+        help="Caller process bound including startup/self-hashing; default 65, direct debug CI uses 180.",
     )
     parser.add_argument("--require-pdf-text", action="store_true")
     args = parser.parse_args()
