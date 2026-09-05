@@ -12,13 +12,15 @@ on:
         type: string
         required: true
       census:
-        description: Fixed matched controls or exact link/table fixture order; no retry-until-pass
+        description: Fixed diagnostic census; default-budget pairs are a counterfactual, not a release waiver
         type: choice
         required: true
         default: matched-controls
         options:
           - matched-controls
           - package-order
+          - gradient-pairs
+          - gradient-pairs-default-budget
 
 permissions:
   contents: read
@@ -31,7 +33,7 @@ concurrency:
 jobs:
   diagnostics:
     runs-on: macos-15-intel
-    timeout-minutes: ${{ inputs.census == 'package-order' && 25 || 15 }}
+    timeout-minutes: ${{ (inputs.census == 'package-order' || inputs.census == 'gradient-pairs-default-budget') && 25 || 15 }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
@@ -76,7 +78,7 @@ jobs:
             --artifact-id "$ARTIFACT_ID" --source-sha "$SOURCE_SHA" --bundle macos-x86_64 \
             --out "$RUNNER_TEMP/session-diagnostic-candidate")"
           printf 'binary=%s\n' "$binary" >> "$GITHUB_OUTPUT"
-      - name: Run selected fixed census with unchanged per-render budgets
+      - name: Run selected fixed diagnostic census, never a release waiver
         env:
           BINARY: ${{ steps.runtime.outputs.binary }}
           SOURCE_SHA: ${{ inputs.source_sha }}
@@ -84,8 +86,10 @@ jobs:
         run: |
           set -euo pipefail
           # The checker enables its private flag only for render-api2 children.
-          # No action/JS activation, timeout increase, warmup or retries. An outer
-          # process timeout aborts the census; it is not a successful diagnosis.
+          # No action/JS activation, warmup or retries. Primary modes retain 10s/30s.
+          # The explicit default-budget counterfactual uses 60s/65s for the same
+          # 18 inputs, not a changed release gate or automatic retry of a failure.
+          # An outer timeout aborts; a job cap can leave only an incomplete prefix.
           "$RUNNER_TEMP/session-diagnostic-python/bin/python" ports/pliego/tests/check_api2_session_diagnostics.py \
             --binary "$BINARY" --source-commit "$SOURCE_SHA" \
             --census "$CENSUS_MODE" \
