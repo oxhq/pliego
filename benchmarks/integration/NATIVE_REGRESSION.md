@@ -55,6 +55,9 @@ Resolve the candidate with `resolve_development_candidate.py` from the exact
 retained Linux package artifact, and the baseline with
 `benchmarks/tools/resolve_release.py --target pliego-0.3.3 --metadata-out ...`.
 Both existing resolvers verify package bytes before this coordinator is invoked.
+Their retained profile labels remain distinct: the candidate resolver emits
+`release`; the published baseline resolver emits `checked-release`. Require the
+exact label for each target without rewriting either resolver's evidence.
 The candidate metadata must identify native 0.4.0, not a locally rebuilt 0.3.3.
 Package retention alone does not prove the final release matrix passed.
 

@@ -118,6 +118,7 @@ def batch_state(value: dict, identity: tuple[str, str]) -> dict:
 
 
 def target_identity(target: str, metadata: dict, probe: dict, binary_hash: str, binary_bytes: int) -> dict:
+    require(target in TARGETS, "Unknown native comparison target")
     engine = probe["engine"]
     require(
         engine["api"] == 2 and engine["runtime"]["target"] == "x86_64-unknown-linux-gnu",
@@ -144,7 +145,7 @@ def target_identity(target: str, metadata: dict, probe: dict, binary_hash: str, 
     require(
         metadata["binary_sha256"] == binary_hash
         and metadata["binary_bytes"] == binary_bytes
-        and metadata["profile"] == "release",
+        and metadata["profile"] == ("release" if target == "candidate" else "checked-release"),
         "Unverified release-profile binary",
     )
     if target == "v0.3.3":

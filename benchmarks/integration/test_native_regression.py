@@ -475,6 +475,49 @@ class NativeRegressionTests(unittest.TestCase):
             self.assertNotEqual(process.returncode, 0)
             self.assertIn(b"requires Python without -O", process.stderr)
 
+    def test_resolver_profiles_remain_distinct_and_fail_closed(self) -> None:
+        # Focused metadata unit only: real probe schema qualification remains a
+        # separate gate. Derive the public identity from the immutable manifest.
+        expected = campaign.tomllib.loads((campaign.ROOT / "benchmarks/manifest.toml").read_text())["targets"][
+            "pliego-0.3.3"
+        ]
+        public = {**expected, "schema": "pliego.verified-release"}
+        candidate = {
+            "source_sha": "a" * 40,
+            "binary_sha256": "b" * 64,
+            "binary_bytes": 123,
+            "profile": "release",
+            "bundle": "linux-x86_64",
+            "version": "0.4.0",
+            "provenance": {"servo_base": expected["servo_base"]},
+        }
+        self.assertEqual(public["profile"], "checked-release")
+        for target, metadata, version in (("v0.3.3", public, "0.3.3"), ("candidate", candidate, "0.4.0")):
+            source = metadata.get("source_sha", metadata.get("commit"))
+            binary_hash, binary_bytes = metadata["binary_sha256"], metadata["binary_bytes"]
+            probe = {
+                "engine": {
+                    "api": 2,
+                    "version": version,
+                    "source_commit": source,
+                    "runtime": {"target": "x86_64-unknown-linux-gnu", "binary_sha256": "sha256:" + binary_hash},
+                }
+            }
+            with patch.object(campaign.contracts, "validate_probe"):
+                self.assertEqual(
+                    campaign.target_identity(target, metadata, probe, binary_hash, binary_bytes)["source_sha"], source
+                )
+                for profile in ("debug", "", None, "release" if target == "v0.3.3" else "checked-release"):
+                    with (
+                        self.subTest(target=target, profile=profile),
+                        self.assertRaisesRegex(ValueError, "release-profile"),
+                    ):
+                        campaign.target_identity(
+                            target, {**metadata, "profile": profile}, probe, binary_hash, binary_bytes
+                        )
+        with self.assertRaisesRegex(ValueError, "Unknown native comparison target"):
+            campaign.target_identity("another", {}, {}, "b" * 64, 123)
+
     def test_frozen_fixture_and_corrupted_probe_fail_closed(self) -> None:
         self.assertEqual(campaign.harness.fixture_identity(campaign.fixture()), campaign.FIXTURE_HASHES)
         # A version string alone cannot identify a target; no malformed probe
