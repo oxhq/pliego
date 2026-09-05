@@ -62,3 +62,9 @@ consumer proof. The one-second deadline is not applied to the multi-gigabyte
 unoptimized debug executable, whose self-hashing is a different startup cost.
 Debug table/link checks separately disclose their caller process allowance;
 the native request's engine budget and optimized package defaults are unchanged.
+
+The built native archive is retained before subsequent executable acceptance
+checks so a failed candidate can be reproduced. Its presence in Actions does
+not qualify it for release. Promotion still requires the complete successful
+package matrix, exact source/version and the existing proof inventory. Synthetic
+API 2 proof uploads include hidden job-state/staging files for failure auditing.

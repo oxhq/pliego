@@ -347,6 +347,19 @@ jobs:
           $hash = (Get-FileHash "dist/$archive" -Algorithm SHA256).Hash.ToLowerInvariant()
           "$hash  $archive" | Set-Content "dist/$archive.sha256" -Encoding ascii
 
+      # Keep exact built bytes available to diagnose a later acceptance failure.
+      # Artifact existence is not release readiness: promotion still requires
+      # this entire matrix to succeed on an eligible release-proof push.
+      - name: Upload Pliego bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: pliego-${{ matrix.bundle }}
+          path: |
+            dist/pliego-*.${{ matrix.archive_ext }}
+            dist/pliego-*.${{ matrix.archive_ext }}.sha256
+          if-no-files-found: error
+          retention-days: 7
+
       - name: Prove the packaged API 2 executable closure
         shell: bash
         run: |
@@ -445,6 +458,9 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: pliego-${{ matrix.bundle }}-api2-executable-proof
+          # These directories contain only synthetic proof inputs and outputs.
+          # Retain job states and failed publication staging evidence as well.
+          include-hidden-files: true
           path: |
             dist/api2-executable-proof-${{ matrix.bundle }}.json
             dist/api2-headerless-tables-${{ matrix.bundle }}
@@ -516,16 +532,6 @@ jobs:
         with:
           name: pliego-linux-x86_64-controlled-capture-proof
           path: dist/controlled-capture-proof
-          if-no-files-found: error
-          retention-days: 7
-
-      - name: Upload Pliego bundle
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: pliego-${{ matrix.bundle }}
-          path: |
-            dist/pliego-*.${{ matrix.archive_ext }}
-            dist/pliego-*.${{ matrix.archive_ext }}.sha256
           if-no-files-found: error
           retention-days: 7
 
