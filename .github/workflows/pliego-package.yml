@@ -416,7 +416,7 @@ jobs:
           coverage: none
           extensions: mbstring, dom, xml, fileinfo, pdo_sqlite, pcntl, zip
 
-      - name: Prove packaged Linux caller deadline, storage and queues
+      - name: Prove packaged Linux deadlines, cancellation, storage and queues
         if: runner.os == 'Linux'
         shell: bash
         run: |
@@ -440,6 +440,7 @@ jobs:
             audit --format=json | tee "$proof/audit.json"
           cp tests/pliego/laravel-invoice/composer.json "$proof/consumer-composer.json"
           cp tests/pliego/laravel-invoice/composer.lock "$proof/consumer-composer.lock"
+          python -m unittest discover -s sdk/php/tests -p test_production_cancellation.py -v
           # The 1s caller test requires an optimized packaged executable: a
           # multi-GB unoptimized debug self-hash is not this deployment recipe.
           deadline_status=0
@@ -456,7 +457,11 @@ jobs:
             timeout --kill-after=5s 120s php sdk/laravel/tests/production_queue_test.php \
             "$binary" "$proof/laravel-queue" \
             2>&1 | tee "$proof/laravel-queue.log" || queue_status=$?
-          test "$deadline_status" -eq 0 && test "$storage_status" -eq 0 && test "$queue_status" -eq 0
+          cancellation_status=0
+          timeout --kill-after=15s 200s python sdk/php/tests/check_production_cancellation.py \
+            --php "$(command -v php)" --binary "$binary" --output "$proof/caller-cancellation" \
+            2>&1 | tee "$proof/caller-cancellation.log" || cancellation_status=$?
+          test "$deadline_status" -eq 0 && test "$storage_status" -eq 0 && test "$queue_status" -eq 0 && test "$cancellation_status" -eq 0
 
       - name: Upload packaged API 2 executable proof
         if: always()

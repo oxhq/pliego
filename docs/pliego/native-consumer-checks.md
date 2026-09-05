@@ -95,7 +95,25 @@ This script's publication callback is local PHP stream-copy logic, not the
 Laravel storage check above. It does not prove descendant cancellation. Its
 durations are failure-containment measurements, not rendering benchmarks.
 
-The package matrix runs all three checks against the unpacked optimized Linux
+## Forced caller cancellation
+
+The Linux-only `sdk/php/tests/check_production_cancellation.py` orchestrator and
+its PHP driver complement the deadline check. They require a real infinite-JS
+API 2 request, observed CPU growth in the same native ScriptThread, forced
+termination through Linux pidfds, exit proof for every observed native process,
+typed PHP transport failure without delivery/storage success, and fresh-process
+recovery. The PHP caller remains alive during native cancellation. This is
+SIGKILL cancellation, not graceful shutdown or a new SDK cancellation method.
+
+See [the exact recipe](../../sdk/php/tests/PRODUCTION_CANCELLATION.md) for process
+identity, timing/resource observations, cleanup and excluded claims. The package
+gate adds an independent 200-second outer watchdog with 15-second kill grace.
+The test does not claim historical/escaped descendant completeness, daemon or
+hostile-input containment, remote storage guarantees or performance evidence.
+
+## Hosted package boundary
+
+The package matrix runs all four checks against the unpacked optimized Linux
 bundle and retains their evidence inside its existing API 2 proof artifact.
 The pinned framework fixture is installed without application scripts solely
 to supply dependencies; that source-path installation is not public registry
