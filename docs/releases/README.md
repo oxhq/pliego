@@ -15,6 +15,10 @@ commit can contain its own archive hashes.
    runtime manifest version, and the invoice fixture's Composer aliases/lock.
    The Composer dry-run checks all fourteen coordinated version values. Servo's
    workspace version and the API/schema integers are independent; do not bump them.
+   Update both local package labels in the retained Cargo license report at
+   `resources/resource_protocol/license.html` to match their manifests. Preserve
+   third-party notices and run the full source-assets check; a sparse checkout
+   missing those files cannot prove this gate.
 2. Require the hosted package matrix to produce exactly four native bundles, four
    API 2 proofs, four render-supervisor proofs, and one Linux controlled-capture
    proof from one source commit.
