@@ -3,13 +3,19 @@
 This is an executable comparison harness, **not published numerical evidence**.
 The historical `minimal-static` benchmark remains a separate population.
 
-`real_documents.json` pins three shared, repaired application inputs:
+The current hosted campaign selects three shared, repaired application inputs
+from `real_documents.json`:
 
 | Track | Document | Actual incumbent |
 | --- | --- | --- |
-| `invobook-simple-repaired` | One-page invoice | Browsershot 5.0.5; harness Puppeteer 25.8.0 |
+| `invobook-simple-laravel12-repaired` | One-page invoice | Shared Laravel 12.69.1 / Browsershot 5.4.0; harness Puppeteer 25.8.0 |
 | `aureus-ledger-300-repaired` | 300-entry General Ledger | dompdf 3.1.6 |
 | `aureus-manufacturing-008-font-closed` | One-page manufacturing work order | dompdf 3.1.6 |
+
+The historical `invobook-simple-repaired` definition remains for reproducibility,
+not as the current hosted baseline. The [shared modernization](INVOBOOK_REPAIRED_WORKFLOW.md#shared-modernized-baseline)
+preserves identical repaired HTML for both providers; earlier PDF and timing
+results do not qualify the updated dependency graph.
 
 The work order is not a long operational report. These are internally operated
 external applications, not independent adoption. Each corpus retains original
@@ -72,12 +78,13 @@ package contents and executable identity; the runner also checks contract
 discovery. A development artifact is never promotion evidence, even when its
 executable was compiled in release mode.
 
-The workflow defaults to the two Aureus tracks, installs their explicitly
-repaired lock without scripts/plugins, audits dependencies and runs in a bounded
-delegated-cgroup service. Invobook is selectable separately, but its original
-frozen dependency audit must pass before installation. There is no advisory
-bypass or automatic unreviewed lock update. An audit failure is a setup outcome,
-not a renderer benchmark failure.
+The workflow defaults to the two Aureus tracks; `all` includes the modernized
+Invobook track, which is also selectable separately. It installs the explicitly
+repaired locks without package scripts/plugins, audits locked and installed
+dependencies, and runs in a bounded delegated-cgroup service. Invobook also
+checks its approved frontend locks and regenerates the shared repaired HTML.
+There is no advisory bypass or automatic unreviewed lock update. An audit failure
+is a setup outcome, not a renderer benchmark failure.
 
 The owned engine account, read-only closures, private network namespace and
 process deadlines are part of this synthetic measurement recipe. They are not a

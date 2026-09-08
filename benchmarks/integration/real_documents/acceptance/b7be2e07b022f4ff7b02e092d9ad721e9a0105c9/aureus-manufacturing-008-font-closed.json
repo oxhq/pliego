@@ -1,0 +1,28 @@
+{
+  "schema": "pliego.real-document-visual-acceptance.v1",
+  "identity_sha256": "a41d480db45daeeff087b86811056d4265895c929b46010d80bf76fc344eabac",
+  "targets": {
+    "aureus-dompdf-3.1.6": {
+      "reviewed": true,
+      "notes": "The complete one-page PDF was reviewed. Three component rows, two ordered operations, quantities, three barcode regions and page labels are legible and unobstructed. The original pinned Linux oracle passes business, font and all three Code128 checks. Different vertical spacing is accepted; no pixel parity or performance claim.",
+      "layout_fingerprints": [
+        "bc70c36390a471f2e5105d90c34534b8d49dddf24d779e7d1b7d065a9aa74639"
+      ],
+      "pdf_sha256": [
+        "e16dfbaf1e43c00a430d9a1b8677c56314f4996804f5858333497ae117756740"
+      ],
+      "evidence": "https://github.com/oxhq/pliego/actions/runs/34185936368/artifacts/10040543091; adjacent committed review.md"
+    },
+    "pliego-candidate": {
+      "reviewed": true,
+      "notes": "The complete one-page PDF was reviewed. Three component rows, two ordered operations, quantities, three barcode regions and page labels are legible and unobstructed. The original pinned Linux oracle passes business, source/scene/subset font and all three Code128 checks. Different vertical spacing is accepted; no pixel parity or performance claim.",
+      "layout_fingerprints": [
+        "2c338660ad4a81ddb793b7da744e321bf1ee1165a9ab075dd39eeb8cdf4afb61"
+      ],
+      "pdf_sha256": [
+        "b056e1de3ef78740f1641ddf42817be454f705220322d2dc09aad3b81300d64a"
+      ],
+      "evidence": "https://github.com/oxhq/pliego/actions/runs/34185936368/artifacts/10040543091; adjacent committed review.md"
+    }
+  }
+}

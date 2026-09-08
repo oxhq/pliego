@@ -1,0 +1,13 @@
+{
+  "schema": "pliego.native-regression-preflight-origin.v1",
+  "repository": "oxhq/pliego",
+  "repository_id": 1301051584,
+  "native_source_sha": "b7be2e07b022f4ff7b02e092d9ad721e9a0105c9",
+  "run_id": 34185938743,
+  "run_attempt": 1,
+  "head_sha": "c397a93c132087f4a8a26650d41bafcb8ac82eef",
+  "artifact_id": 10040525082,
+  "artifact_name": "pliego-native-preflight-b7be2e07b022f4ff7b02e092d9ad721e9a0105c9-34185938743",
+  "zip_bytes": 504542,
+  "zip_sha256": "85073909b83b0ebaa944b4252d38260a22df958ad19f213245b751b107cc24bf"
+}

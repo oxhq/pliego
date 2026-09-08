@@ -1,0 +1,28 @@
+{
+  "schema": "pliego.real-document-visual-acceptance.v1",
+  "identity_sha256": "9dea5b89933ba6d36e65c35999a62a269aab9b87ce3fdc1e05e46b73d8c3acce",
+  "targets": {
+    "invobook-browsershot-5.4.0-puppeteer-25.8.0": {
+      "reviewed": true,
+      "notes": "The complete one-page invoice was reviewed under the shared modernized Laravel 12 baseline. Seller/buyer details, two line items, notes, dates, currency glyphs and EUR450.00 total are legible and separated, with no missing blocks or clipping. Business, actual-painted-font, geometry and negative checks pass. Minor border/alignment differences are accepted, not pixel parity.",
+      "layout_fingerprints": [
+        "dfa0b576581cf2bae5a6247010d9277e56d08d67d67993a437ae872b7d47c6dc"
+      ],
+      "pdf_sha256": [
+        "d74f1f47efce5e565e712d4f29bf68be1c0ddf77f0767e6b1567a17da4942135"
+      ],
+      "evidence": "https://github.com/oxhq/pliego/actions/runs/34185936368/artifacts/10040557062; adjacent committed review.md"
+    },
+    "pliego-candidate": {
+      "reviewed": true,
+      "notes": "The complete one-page invoice was reviewed under the shared modernized Laravel 12 baseline. Seller/buyer details, two line items, notes, dates, currency glyphs and EUR450.00 total are legible and separated, with no missing blocks or clipping. Business, source/scene/subset-font, geometry and negative checks pass. Minor border/alignment differences are accepted, not pixel parity.",
+      "layout_fingerprints": [
+        "97af561dd44cca13215896ac842cbcf74a910a359b3626d5a44d38a1e7f2cb09"
+      ],
+      "pdf_sha256": [
+        "17e76afb019dd1cde6e2a35160d31cf3ba3cbc9581a96c2f9ff3e1bdbf954aaa"
+      ],
+      "evidence": "https://github.com/oxhq/pliego/actions/runs/34185936368/artifacts/10040557062; adjacent committed review.md"
+    }
+  }
+}

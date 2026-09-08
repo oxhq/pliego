@@ -245,6 +245,25 @@ def verified_manifest_path(relative: str) -> Path:
     return candidate
 
 
+def verify_document_comparison_copy(guide: str, tracks: dict) -> None:
+    current = "invobook-simple-laravel12-repaired"
+    require(current in tracks, "current Invobook comparison track is absent")
+    require(
+        tracks[current]["legacy"] == "invobook-browsershot-5.4.0-puppeteer-25.8.0",
+        "Invobook baseline changed; review its public description",
+    )
+    require(
+        "| `invobook-simple-laravel12-repaired` | One-page invoice | "
+        "Shared Laravel 12.69.1 / Browsershot 5.4.0; harness Puppeteer 25.8.0 |" in guide,
+        "comparison guide omits the current shared Invobook baseline",
+    )
+    require(
+        "The historical `invobook-simple-repaired` definition remains" in guide,
+        "comparison guide conflates historical and current tracks",
+    )
+    require("audits locked and installed" in guide, "comparison guide omits the two dependency audit gates")
+
+
 def verify_showcase() -> None:
     data = json.loads(read(MANIFEST))
     require(data.get("schema") == "pliego.showcase-manifest", "showcase manifest schema changed")
@@ -326,6 +345,10 @@ def main() -> int:
         published_benchmark = verify_benchmark_publication()
         verify_current_copy(published_benchmark)
         verify_candidate_copy()
+        verify_document_comparison_copy(
+            read(ROOT / "benchmarks/integration/REAL_DOCUMENT_COMPARISON.md"),
+            json.loads(read(ROOT / "benchmarks/integration/real_documents.json"))["tracks"],
+        )
         verify_showcase()
         verify_local_links()
     except (
