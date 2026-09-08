@@ -208,11 +208,21 @@ def verify_candidate_copy() -> None:
     advisories = read(ROOT / "docs" / "security" / "dependency-advisories.md")
     for needle in (
         "RUSTSEC-2023-0071",
-        "the engine does not enforce this prohibition",
+        "enforces a native host restriction",
+        "NotSupportedError",
+        "unwrapping",
+        "not a patched dependency",
+        "Later sources and final packages still require their own qualification",
         "not an advisory-free",
         "wnaf-0.14.0-review.md",
     ):
         require(needle in advisories, f"native advisory assessment omits a security boundary: {needle!r}")
+    require(
+        "the engine does not enforce this prohibition" not in advisories,
+        "native advisory assessment retains the superseded operator-only restriction",
+    )
+    require("Browsershot 5.4.0 for both providers" in notes, "candidate notes omit the shared modernized baseline")
+    require("5.0.5 graph remains historical evidence" in notes, "candidate notes obscure the historical baseline")
     require("../security/dependency-advisories.md" in notes, "candidate notes omit dependency advisory status")
 
 

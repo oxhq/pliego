@@ -1,7 +1,9 @@
 # Dependency advisory status
 
-Reviewed on 2026-09-05 for the unreleased 0.4.0 native candidate
-`aaf41109035608ad1b84356d434bfade0bddd582`. This is a bounded dependency assessment,
+Dependency applicability was reviewed on 2026-09-05 at
+`aaf41109035608ad1b84356d434bfade0bddd582`. On 2026-09-07, the RSA host restriction
+was qualified at `d8df85e3edb40dc14b911490134dd45f34097225`; the lock is unchanged.
+Both are unreleased 0.4.0 sources. This is a bounded dependency assessment,
 not an advisory-free or independently security-audited release claim. A successful
 CI advisory check accepts the exceptions in `deny.toml`; it does not eliminate them.
 
@@ -15,7 +17,7 @@ the operator, and inserted data must be validated and escaped.
 The default native graph includes `rsa 0.10.0-rc.18`. Servo's WebCrypto integration
 uses it for private-key operations, including RSA-OAEP decryption. This is not an
 unused or build-only dependency. [RUSTSEC-2023-0071](https://rustsec.org/advisories/RUSTSEC-2023-0071.html)
-reports possible private-key recovery from observable timing and currently lists
+reports possible private-key recovery from observable timing and, as of 2026-09-07, lists
 no patched version. The prerelease version is not evidence that the advisory is fixed.
 
 Do not supply application signing or decryption keys to the renderer, and do not
@@ -23,8 +25,22 @@ use document JavaScript to perform private-key cryptography. Perform those
 operations outside Pliego with a separately assessed cryptographic implementation.
 In particular, do not expose RSA private operations whose timings an attacker can
 observe. Offline resources, process isolation and timeouts do not fix a timing side
-channel. This is an operator restriction: the WebCrypto APIs remain present, and
-the engine does not enforce this prohibition.
+channel.
+
+The candidate now enforces a native host restriction: RSA-OAEP decryption and
+unwrapping, plus RSA-PSS and RSASSA-PKCS1-v1_5 signing, reject with
+`NotSupportedError` before private arithmetic. `SubtleCrypto.supports()` reflects
+that policy. The common document-session startup also disables `navigator.servo`
+so authored content cannot change the policy through that internal API. Ordinary
+Servo defaults are preserved.
+
+This is an exposure restriction, not a patched dependency. Key generation,
+import/export and cloning, public RSA operations and unrelated cryptography
+remain available where the Web Platform exposes them. API 2's `pliego-input:///`
+is an insecure context without `crypto.subtle`; its exposure test is separate
+from the secure API 1 operation tests. See the
+[candidate security boundary](../pliego/support-profile.md#candidate-webcrypto-security-boundary).
+Keep application secrets outside the document runtime despite this restriction.
 
 The exception is retained for the restricted PDF-rendering profile, not accepted
 for general WebCrypto use. Reassess it on the next crypto/Servo dependency update
@@ -81,7 +97,7 @@ Maintenance debt is not removed merely by leaving an advisory ID in the ignore l
 
 ## Evidence and limits
 
-The exact native package run is [33972319821](https://github.com/oxhq/pliego/actions/runs/33972319821).
+The original dependency-graph package run is [33972319821](https://github.com/oxhq/pliego/actions/runs/33972319821).
 Default graph/build evidence is retained in its
 [Linux x64](https://github.com/oxhq/pliego/actions/runs/33972319821/job/101323047154),
 [Windows x64](https://github.com/oxhq/pliego/actions/runs/33972319821/job/101323047257),
@@ -89,6 +105,18 @@ Default graph/build evidence is retained in its
 and [macOS x64](https://github.com/oxhq/pliego/actions/runs/33972319821/job/101323047121)
 jobs. The lock SHA-256 is
 `cd3e85600546db2db1017f30eecd1c9e933f0898745450ecf3b986211be3a5d7`.
+
+The exact d8df host-policy source passed the four-platform
+[package matrix](https://github.com/oxhq/pliego/actions/runs/33989886653) and
+[direct native job](https://github.com/oxhq/pliego/actions/runs/33989886671/job/101370117688).
+The production checker requires 28 synthetic-key assertions for each API 1
+compatibility command and four separate API 2 exposure assertions. Both API 1
+commands use the controlled runtime. The direct job also passed the
+ordinary-Servo preference test and a realtime-session orchestrator whose child
+asserts 29 checks including `srcdoc` internal-API exclusion. Successful child
+stdout is not independently retained; this last result is source-bound test
+execution, not raw-payload proof or a controlled nested-frame support claim.
+Later sources and final packages still require their own qualification.
 
 This review does not cover every reachable native call, prove constant-time
 cryptography, replace live advisory checks, or audit an application's Composer,

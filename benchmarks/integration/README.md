@@ -8,6 +8,13 @@ of independent adoption.
 
 ## Pinned application and boundaries
 
+The census below preserves the original dependency baseline. New 0.4 hosted
+Invobook comparisons instead select the approved shared
+[`modernized-laravel12` baseline](INVOBOOK_REPAIRED_WORKFLOW.md#shared-modernized-baseline):
+Laravel 12.69.1 / Browsershot 5.4.0, identical repaired HTML for both providers,
+and fresh locked/installed dependency audits. Historical PDF and timing results
+do not qualify the modernized graph.
+
 [Invobook](https://github.com/Hasnayeen/invobook/tree/e5f666cef63543beffadfcc045f6af673408a02e)
 is pinned to `e5f666cef63543beffadfcc045f6af673408a02e`. Its lock resolves Laravel
 11.31.0, LaravelDaily Invoices 4.0.0 and Browsershot 5.0.5. Invobook is MIT-licensed;

@@ -4,6 +4,35 @@ This experiment preserves the original application baseline and tests the actual
 invoice business action after a shared application repair. It is not an
 independent-adoption, completed-migration, or performance result.
 
+## Shared modernized baseline
+
+The runner defaults to the historical currency-repair-only baseline described
+below. New hosted comparisons explicitly use `--baseline modernized-laravel12`
+for **both** providers. Its [checked manifest](invobook_modernized_baseline.json)
+binds the same pinned app source, the currency fix, Laravel 12.69.1 / Filament
+3.3.55 / Browsershot 5.4.0, locked frontend dependencies and a narrowly scoped
+GlowChart compatibility fork. It is not an upstream application release.
+
+`prepare_invobook_modernized.py` applies seven exact source/lock overlays to fresh,
+pinned application and GlowChart checkouts. It rejects unexpected source or cache
+changes and linked write targets; it does not install dependencies or boot the
+app. The hosted workflow separately audits the locked and installed graphs,
+disables package installation hooks, builds the original four frontend entrypoints
+and regenerates the repaired simple HTML twice. No advisory bypass is permitted.
+The original external chart symlink remains untouched; chart serving is unqualified.
+
+Add `--baseline modernized-laravel12 --simple-pdf-repair quantity-fonts` to each
+provider command below. Both select identical 9,419-byte HTML with SHA-256
+`afd286bca202309923fd66bee1f71e732bdd340d1b05a2307094feb535fa7195`.
+The original templates and broader action behavior remain outside this repaired
+simple-invoice claim. In the modernized HTML census, default renders after the
+frontend build; elegant still fails on its undefined `issued_on` property.
+
+This runner still uses the PHP SDK plus Illuminate filesystem, not the Laravel
+SDK's `store()` API. Neither dependency modernization nor identical HTML transfers
+old PDF, storage, visual or performance evidence to the new baseline. Public
+Composer installation, queue behavior and complete UI migration stay separate.
+
 ## Repair and delivery boundary
 
 Use a separate checkout at `e5f666cef63543beffadfcc045f6af673408a02e` and apply
@@ -28,7 +57,7 @@ selection into the actual UI remains a migration step. The original `elegant`
 template expects an Eloquent/Livewire context and is retained as a failure in this
 HTML-action track, not replaced with a different invoice template.
 
-Invobook locks Laravel 11.31.0; the candidate Laravel SDK targets Illuminate 12/13.
+The historical Invobook baseline locks Laravel 11.31.0; the candidate Laravel SDK targets Illuminate 12/13.
 The published v0.3.3 SDK still requires Illuminate 13; candidate framework checks
 do not change that public package's support claim.
 This runner does **not** manually autoload that SDK or bypass Composer constraints.

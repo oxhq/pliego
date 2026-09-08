@@ -33,7 +33,7 @@ baseline unless it explicitly names the candidate.
 
 The candidate restricts private RSA operations because the bundled `rsa`
 dependency is affected by [RUSTSEC-2023-0071](https://rustsec.org/advisories/RUSTSEC-2023-0071.html).
-The advisory has no patched version as of 2026-09-05. This is an exposure
+The advisory has no patched version as of 2026-09-07. This is an exposure
 restriction, not a dependency fix or a general security guarantee. Attempts to
 sign with RSA or decrypt/unwrap with RSA-OAEP reject with `NotSupportedError`;
 `SubtleCrypto.supports()` reflects the restriction. The common document startup
@@ -50,8 +50,10 @@ The package test runs generated, imported and cloned synthetic keys through both
 API 1 compatibility commands, and checks API 2's existing exposure separately.
 A native realtime-session test checks `srcdoc` internal-API exposure; this is not
 a supported nested-frame claim for the controlled product runtime. Ordinary
-Servo keeps its default preferences. These checks still require successful
-execution on the new source; previous candidate packages do not prove the policy.
+Servo keeps its default preferences. The exact d8df source passed these checks;
+the [advisory evidence](../security/dependency-advisories.md#evidence-and-limits)
+distinguishes production checks from the source-bound realtime child test.
+Later candidate and release packages still require their own qualification.
 
 ## Intended documents
 
