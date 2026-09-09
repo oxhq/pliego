@@ -1,0 +1,195 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>WebCrypto host policy</title>
+<style>html, body { margin: 0; } #marker { width: 96px; height: 48px; background: #345; }</style>
+<div id="marker"></div>
+<script>
+  // Defer synchronously, before the first promise or crypto operation.
+  window.pliego.defer();
+
+  const expectedPrivateRsaBlocked = __EXPECT_PRIVATE_RSA_BLOCKED__;
+  const expectedSecureContext = __EXPECT_SECURE_CONTEXT__;
+  const checkSrcdoc = __CHECK_SRCDOC__;
+  const policyMessage = "RSA private-key signing and decryption are disabled by host policy";
+  const checks = [];
+  const bytes = (text) => new TextEncoder().encode(text);
+  const sameBytes = (left, right) => {
+    const a = new Uint8Array(left);
+    const b = new Uint8Array(right);
+    return a.length === b.length && a.every((value, index) => value === b[index]);
+  };
+  const fromBase64 = (value) => Uint8Array.from(atob(value), (char) => char.charCodeAt(0));
+  function requireCheck(condition, name) {
+    if (!condition) throw new Error(name);
+  }
+  function passed(name) {
+    requireCheck(!checks.includes(name), `duplicate check: ${name}`);
+    checks.push(name);
+  }
+
+  // Test-only public material and signatures, generated with Node's RSA-2048
+  // implementation. No application key or synthetic private key is retained.
+  const knownMessage = bytes("Pliego synthetic WebCrypto policy fixture v1");
+  const publicJwk = {
+    kty: "RSA",
+    n: "xRcSmOP052syHDcd6iOqHvKIwukusC2z6TKdzIXeCQf_daJqSNc-orSadWVTYl35zBXyHziVaoP72KTq5Lun5iybxTHnnO78pdklJz8tIGf9oQphCGaBRHK0TqrQF9-1OvqdxPyyT1dZ9_EvwkaeuTQp6mLcFWuNHOkITk5GkrUNFsfKKuu-D7jX5wpLo4Gg7qEqS6cZSsGllhXKK3QObTyL5JxMaqQ2QfleRvw5HOqiAwbo5btVsG0HVroOMv8DKb1JrE7Jtwlq-sQCZH7bbn-KS96jOe48uv7J1Me-EqRd3tzLKErm1UEGcPwcV8yw_tk3gAfl_ZLWMyvyngdbkQ",
+    e: "AQAB",
+  };
+  const pkcs1Signature = fromBase64("fAgGKdyqIcOHYxZuw1eVuKG2qDOHC8O7ScTAHwdlUPeze/eGwtGkQZYTKGVzGj6VLtUiVTchrspJ3A9CnE5ArTlVtsFGik4m3yBP7onjARhSMp1rnttcglLhQwN9EDkoQNdE4FR7TiDmInJC95r2j5kRZJLOFlcQAHM4jnGwwLMKP0r42eJcey0ZNpqff8asW8DPYw+hOxB3Gt/3IXG58ELaDvMf9G6XmOpHSXdUMF2YhnmUd/UN3wvGWnQQ8uQMwFxO3Nh7/yR7rp5V8LPhBDBYCqyMpcPh0QZLitWIfBUcLyxrOOGcJC5ZJ9wMvaTEX0Ml/ee2fRoypzBbWeRDnQ==");
+  const pssSignature = fromBase64("gE37shjnn3UmiyAjk7sUSUG7gbdh0Ol4eTZqcWspG7vBmNDUbTNDXp2vCWSkij5WGiBetSEHkbzUZH+pfsMlCRwlyW5UkIBKUAbsh8C/bhMOu1ykvrOiBUnm9qoyCMj7ld3zZvcZVaMERA/g9Gz/OCvo0ggHfcwX9mHX6A07+rTnZ8Qc3HDrunwcrf7rKWw+CLCC+e5+kOEXXbZ+sFlG2Kr6q8lCH1Un/cgAxLgKaECJZc5+hsx+E4k5+E/QN8gFeQQ6CiLFVaCGUJcAT8dtftBmTKmiVIQSPduEwrw+n/8FuKw4lHvFC1+aNaurdDq53EmWxghUD6Le7ULSYnpslQ==");
+
+  async function privateOperation(name, operation, validatePositiveResult) {
+    let result;
+    try {
+      result = await operation();
+    } catch (error) {
+      requireCheck(expectedPrivateRsaBlocked, `${name}: unexpected rejection`);
+      requireCheck(error.name === "NotSupportedError", `${name}: wrong exception ${error.name}`);
+      requireCheck(error.message === policyMessage, `${name}: wrong policy message`);
+      passed(name);
+      return;
+    }
+    requireCheck(!expectedPrivateRsaBlocked, `${name}: private operation was allowed`);
+    await validatePositiveResult(result);
+    passed(name);
+  }
+
+  async function run() {
+    requireCheck(isSecureContext === expectedSecureContext, "secure-context: unexpected trust");
+    passed("secure-context");
+    const random = new Uint8Array(32);
+    requireCheck(crypto.getRandomValues(random) === random, "crypto-random-values: wrong return");
+    // Check availability and buffer identity, not a probabilistic entropy claim.
+    passed("crypto-random-values");
+    requireCheck(navigator.servo === undefined, "servo-internals-absent-top-level: exposed");
+    passed("servo-internals-absent-top-level");
+    if (!expectedSecureContext) {
+      requireCheck(crypto.subtle === undefined, "subtle-absent-insecure: exposed");
+      requireCheck(crypto.randomUUID === undefined, "subtle-absent-insecure: randomUUID exposed");
+      passed("subtle-absent-insecure");
+      return false;
+    }
+
+    const subtle = crypto.subtle;
+    requireCheck(subtle !== undefined, "subtle-exposed: missing");
+    passed("subtle-exposed");
+    if (checkSrcdoc) {
+      // about:srcdoc formerly exposed preference mutation through navigator.servo.
+      // Require that surface to be absent, rather than mutate any host preference.
+      const frame = document.createElement("iframe");
+      frame.hidden = true;
+      try {
+        await new Promise((resolve, reject) => {
+          frame.onload = resolve;
+          frame.onerror = () => reject(new Error("servo-internals-inaccessible-in-srcdoc: load failed"));
+          frame.srcdoc = "<!doctype html><meta charset='utf-8'>";
+          document.body.appendChild(frame);
+        });
+        requireCheck(frame.contentWindow.navigator.servo === undefined, "servo-internals-inaccessible-in-srcdoc: exposed");
+      } finally {
+        frame.remove();
+      }
+      passed("servo-internals-inaccessible-in-srcdoc");
+    }
+    const digest = new Uint8Array(await subtle.digest("SHA-256", bytes("abc")));
+    const digestHex = Array.from(digest, (value) => value.toString(16).padStart(2, "0")).join("");
+    requireCheck(digestHex === "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", "digest-sha256");
+    passed("digest-sha256");
+
+    // Fixed keys/IVs are deliberately synthetic fixture data, never production advice.
+    const aesBytes = Uint8Array.from({ length: 16 }, (_, index) => index + 1);
+    const aes = await subtle.importKey("raw", aesBytes, "AES-GCM", true, ["encrypt", "decrypt"]);
+    const aesParams = { name: "AES-GCM", iv: new Uint8Array(12), tagLength: 128 };
+    const encrypted = await subtle.encrypt(aesParams, aes, knownMessage);
+    requireCheck(sameBytes(await subtle.decrypt(aesParams, aes, encrypted), knownMessage), "aes-gcm-roundtrip");
+    passed("aes-gcm-roundtrip");
+
+    const knownOaep = await subtle.importKey("jwk", publicJwk, { name: "RSA-OAEP", hash: "SHA-256" }, false, ["encrypt"]);
+    requireCheck((await subtle.encrypt("RSA-OAEP", knownOaep, knownMessage)).byteLength === 256, "public-rsa-oaep-encrypt");
+    passed("public-rsa-oaep-encrypt");
+    const knownPkcs1 = await subtle.importKey("jwk", publicJwk, { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" }, false, ["verify"]);
+    requireCheck(await subtle.verify("RSASSA-PKCS1-v1_5", knownPkcs1, pkcs1Signature, knownMessage), "public-rsa-pkcs1-verify");
+    passed("public-rsa-pkcs1-verify");
+    const knownPss = await subtle.importKey("jwk", publicJwk, { name: "RSA-PSS", hash: "SHA-256" }, false, ["verify"]);
+    requireCheck(await subtle.verify({ name: "RSA-PSS", saltLength: 32 }, knownPss, pssSignature, knownMessage), "public-rsa-pss-verify");
+    passed("public-rsa-pss-verify");
+
+    const supportsAvailable = typeof SubtleCrypto.supports === "function";
+    if (supportsAvailable) {
+      const supports = (...args) => SubtleCrypto.supports(...args);
+      const privateSupport = !expectedPrivateRsaBlocked;
+      requireCheck(supports("decrypt", { name: "rSa-OaEp" }) === privateSupport, "supports-private-rsa: decrypt");
+      requireCheck(supports("sign", "rSaSsA-pKcS1-v1_5") === privateSupport, "supports-private-rsa: pkcs1");
+      requireCheck(supports("sign", { name: "rSa-PsS", saltLength: 32 }) === privateSupport, "supports-private-rsa: pss");
+      passed("supports-private-rsa");
+      requireCheck(supports("unwrapKey", "rSa-OaEp") === privateSupport, "supports-unwrap-overloads: two arguments");
+      requireCheck(supports("unwrapKey", { name: "rSa-OaEp" }, "AES-GCM") === privateSupport, "supports-unwrap-overloads: additional algorithm");
+      passed("supports-unwrap-overloads");
+      requireCheck(supports("encrypt", "rSa-OaEp"), "supports-public-rsa: encrypt");
+      requireCheck(supports("verify", "rSaSsA-pKcS1-v1_5"), "supports-public-rsa: pkcs1");
+      requireCheck(supports("verify", { name: "rSa-PsS", saltLength: 32 }), "supports-public-rsa: pss");
+      requireCheck(supports("digest", "sHa-256"), "supports-public-rsa: digest");
+      passed("supports-public-rsa");
+      requireCheck(supports("generateKey", { name: "RSA-OAEP", modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: "SHA-256" }), "supports-key-handling: generate");
+      requireCheck(supports("importKey", { name: "RSA-OAEP", hash: "SHA-256" }), "supports-key-handling: import");
+      requireCheck(supports("exportKey", "RSA-OAEP"), "supports-key-handling: export");
+      passed("supports-key-handling");
+    }
+
+    // Exactly three ephemeral 2048-bit pairs. No worker, network, polling or sleep.
+    for (const [label, name, usages] of [
+      ["oaep", "RSA-OAEP", ["encrypt", "decrypt", "wrapKey", "unwrapKey"]],
+      ["pkcs1", "RSASSA-PKCS1-v1_5", ["sign", "verify"]],
+      ["pss", "RSA-PSS", ["sign", "verify"]],
+    ]) {
+      const params = { name, modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: "SHA-256" };
+      const pair = await subtle.generateKey(params, true, usages);
+      requireCheck(pair.privateKey.type === "private" && pair.privateKey.algorithm.modulusLength === 2048, `${label}-key-handling: generation`);
+      const jwk = await subtle.exportKey("jwk", pair.privateKey);
+      requireCheck(jwk.kty === "RSA" && typeof jwk.d === "string" && jwk.d.length > 0, `${label}-key-handling: export`);
+      const privateUsages = label === "oaep" ? ["decrypt", "unwrapKey"] : ["sign"];
+      const imported = await subtle.importKey("jwk", jwk, { name, hash: "SHA-256" }, true, privateUsages);
+      const cloned = structuredClone(imported);
+      for (const key of [imported, cloned]) {
+        requireCheck(key.type === "private" && key.algorithm.name === name, `${label}-key-handling: import/clone type`);
+        const roundtrip = await subtle.exportKey("jwk", key);
+        requireCheck(roundtrip.n === jwk.n && roundtrip.d === jwk.d, `${label}-key-handling: import/clone identity`);
+      }
+      passed(`${label}-key-handling`);
+      const operationName = { oaep: "rSa-OaEp", pkcs1: "rSaSsA-pKcS1-v1_5", pss: "rSa-PsS" }[label];
+      const algorithm = label === "pss" ? { name: operationName, saltLength: 32 } : { name: operationName };
+      const ciphertext = label === "oaep" ? await subtle.encrypt(algorithm, pair.publicKey, knownMessage) : null;
+      const wrapped = label === "oaep" ? await subtle.wrapKey("raw", aes, pair.publicKey, algorithm) : null;
+      for (const [source, key] of [["generated", pair.privateKey], ["imported", imported], ["cloned", cloned]]) {
+        if (label === "oaep") {
+          await privateOperation(`oaep-decrypt-${source}`,
+            () => subtle.decrypt(algorithm, key, ciphertext),
+            (result) => requireCheck(sameBytes(result, knownMessage), `oaep-decrypt-${source}: plaintext`));
+          await privateOperation(`oaep-unwrap-${source}`,
+            () => subtle.unwrapKey("raw", wrapped, key, algorithm, "AES-GCM", true, ["encrypt", "decrypt"]),
+            async (result) => requireCheck(sameBytes(await subtle.exportKey("raw", result), aesBytes), `oaep-unwrap-${source}: key bytes`));
+        } else {
+          await privateOperation(`${label}-sign-${source}`,
+            () => subtle.sign(algorithm, key, knownMessage),
+            async (result) => requireCheck(await subtle.verify(algorithm, pair.publicKey, result, knownMessage), `${label}-sign-${source}: verification`));
+        }
+      }
+    }
+    return supportsAvailable;
+  }
+
+  run().then((supportsAvailable) => window.pliego.ready({
+    fixture: "webcrypto-policy-v1",
+    secureContext: isSecureContext,
+    privateRsaBlocked: expectedPrivateRsaBlocked,
+    supportsAvailable,
+    checks,
+  })).catch((error) => window.pliego.fail({
+    code: "WEBCRYPTO_POLICY_ASSERTION",
+    message: `${error.name}: ${error.message}`,
+    fixture: "webcrypto-policy-v1",
+    secureContext: isSecureContext,
+    privateRsaBlocked: expectedPrivateRsaBlocked,
+    checks,
+  }));
+</script>

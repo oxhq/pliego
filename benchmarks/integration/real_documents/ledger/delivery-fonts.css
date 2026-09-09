@@ -1,0 +1,6 @@
+
+        /* Shared resource delivery: original DejaVu bytes, no fallback substitution. */
+        @font-face { font-family: "DejaVu Sans"; font-style: normal; font-weight: 400; src: url("resources/DejaVuSans.ttf") format("truetype"); }
+        @font-face { font-family: "DejaVu Sans"; font-style: normal; font-weight: 700; src: url("resources/DejaVuSans-Bold.ttf") format("truetype"); }
+        @font-face { font-family: "DejaVu Sans"; font-style: italic; font-weight: 400; src: url("resources/DejaVuSans-Oblique.ttf") format("truetype"); }
+        @font-face { font-family: "DejaVu Sans"; font-style: italic; font-weight: 700; src: url("resources/DejaVuSans-BoldOblique.ttf") format("truetype"); }

@@ -43,12 +43,22 @@ jobs:
           python benchmarks/tools/test_run_benchmark.py
           python benchmarks/tools/test_comparison_metrics.py
           python benchmarks/tools/test_run_comparison.py
+          python benchmarks/tools/test_benchmark_references.py
+          python -O benchmarks/tools/test_benchmark_references.py
           python benchmarks/tools/test_summarize_comparisons.py
           python benchmarks/tools/test_package_hosted_evidence.py
           python benchmarks/tools/test_resolve_release.py
           python benchmarks/tools/test_compare_parity.py
           python python/check_pliego_release_archive.py --self-test
           python benchmarks/tools/test_process_tree_sampler.py
+          python benchmarks/tools/test_benchmark_runtime.py
+          python benchmarks/integration/test_prepare_invobook_modernized.py
+          python benchmarks/integration/test_real_document_comparison.py
+          PLIEGO_INVOBOOK_PHP="$(command -v php)" \
+            python benchmarks/integration/test_invobook_repaired_workflow.py ModernizedSourceGuardTests
+          php benchmarks/tools/test_php_runner_options.php
+          php benchmarks/tools/test_real_document_adapters.php invobook-browsershot
+          php benchmarks/tools/test_real_document_adapters.php invobook-browsershot-laravel12
           python benchmarks/tools/generate_fixtures.py --check
           python benchmarks/tools/render_api2_fixture.py --self-test
           php -l benchmarks/runners/pliego.php

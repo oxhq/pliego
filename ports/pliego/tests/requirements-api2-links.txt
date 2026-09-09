@@ -1,0 +1,2 @@
+# Official PyPI wheel; use pip --require-hashes --only-binary=:all:.
+pypdf==6.16.2 --hash=sha256:c8b09a59399062fb45a1b8156c18a787a10a3dae03ac9674397a226712c94604

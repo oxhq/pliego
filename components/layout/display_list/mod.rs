@@ -6,7 +6,7 @@ use std::cell::{OnceCell, RefCell};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use app_units::{AU_PER_PX, Au};
+use app_units::{AU_PER_PX, Au, MAX_AU};
 pub(crate) use clip::ClipId;
 use clip::{Clip, StackingContextTreeClipStore};
 use euclid::{Box2D, Point2D, Rect, Scale, SideOffsets2D, Size2D, UnknownUnit, Vector2D};
@@ -71,6 +71,7 @@ use crate::fragment_tree::{
 use crate::geom::{
     LengthPercentageOrAuto, PhysicalPoint, PhysicalRect, PhysicalSides, PhysicalSize,
 };
+use crate::pages::{Page, PageSequence};
 use crate::replaced::NaturalSizes;
 use crate::style_ext::{
     BorderStyleColor, ComputedValuesExt, Display as LayoutDisplay, DisplayGeneratingBox,
@@ -95,6 +96,9 @@ const INSERTION_POINT_LOGICAL_WIDTH: Au = Au(AU_PER_PX);
 pub(crate) struct DisplayListBuilder<'a> {
     /// The [`FragmentTree`] that we are building a display list for.
     fragment_tree: &'a FragmentTree,
+
+    /// Resolved pages from the same root layout, absent for continuous documents.
+    page_sequence: Option<&'a PageSequence>,
 
     /// The current [`ScrollTreeNodeId`] for this [`DisplayListBuilder`]. This is
     /// necessary because some pieces of fragments as backgrounds with
@@ -313,6 +317,7 @@ impl DisplayListBuilder<'_> {
     pub(crate) fn build(
         stacking_context_tree: &mut StackingContextTree,
         fragment_tree: &FragmentTree,
+        page_sequence: Option<&PageSequence>,
         image_resolver: Arc<ImageResolver>,
         device_pixel_ratio: Scale<f32, StyloCSSPixel, StyloDevicePixel>,
         highlighted_dom_node: Option<OpaqueNode>,
@@ -338,6 +343,7 @@ impl DisplayListBuilder<'_> {
         let _span = profile_traits::trace_span!("DisplayListBuilder::build").entered();
         let mut builder = DisplayListBuilder {
             fragment_tree,
+            page_sequence,
             current_reference_frame_scroll_node_id: paint_info.root_reference_frame_id,
             webrender_display_list_builder: &mut webrender_display_list_builder,
             paint_info,
@@ -888,9 +894,48 @@ impl PaintTraversalHandler for DisplayListBuilder<'_> {
             self.inspector_highlight = Some(inspector_highlight);
         }
 
+        // This bounded paged profile exposes the physical page number and count,
+        // not the general CSS counter-state machine. Reject parsed changes to
+        // either counter, including on an ancestor or a hidden sibling whose
+        // counter state could otherwise affect visible generated content.
+        let counters = fragment.style().get_counters();
+        if crate::pages::has_paged_document_configuration() &&
+            counters
+                .counter_reset
+                .iter()
+                .map(|counter| &counter.name)
+                .chain(
+                    counters
+                        .counter_increment
+                        .iter()
+                        .map(|counter| &counter.name),
+                )
+                .any(|name| matches!(name.0.as_ref(), "page" | "pages"))
+        {
+            self.debug_capture.record_fragment(
+                "unresolved-page-counter",
+                fragment.box_fragment,
+                fragment.base.tag,
+                state,
+            );
+        }
+
         if fragment.style().get_inherited_box().visibility != Visibility::Visible {
             return;
         };
+
+        if fragment
+            .base
+            .flags
+            .contains(FragmentFlags::UNSUPPORTED_PAGED_FIXED)
+        {
+            self.debug_capture.record_fragment(
+                "paged-fixed-content",
+                fragment.box_fragment,
+                fragment.base.tag,
+                state,
+            );
+        }
 
         if box_has_unsupported_paint(
             fragment,
@@ -929,7 +974,6 @@ impl PaintTraversalHandler for DisplayListBuilder<'_> {
         if style.get_inherited_box().visibility != Visibility::Visible {
             return;
         }
-
         self.debug_capture
             .record_fragment("iframe", fragment, fragment.base.tag, state);
         let rect = fragment.base.rect().translate(state.origin.to_vector());
@@ -1052,6 +1096,18 @@ impl PaintTraversalHandler for DisplayListBuilder<'_> {
         if style.get_inherited_box().visibility != Visibility::Visible {
             return;
         }
+        if fragment
+            .base
+            .flags
+            .contains(FragmentFlags::UNRESOLVED_PAGE_COUNTER)
+        {
+            self.debug_capture.record_fragment(
+                "unresolved-page-counter",
+                fragment,
+                fragment.base.tag,
+                state,
+            );
+        }
         if !style.get_inherited_text().text_shadow.0.is_empty() ||
             state
                 .text_decorations
@@ -1069,8 +1125,13 @@ impl PaintTraversalHandler for DisplayListBuilder<'_> {
                 state,
             );
         }
-        self.debug_capture
-            .record_fragment("text", fragment, fragment.base.tag, state);
+        // A zero-size font has no glyph ink. Keep the fragment/layout and the
+        // effect/geometry exclusions above, but do not invent a zero-size PDF
+        // text operation. Barcode generators commonly retain an NBSP this way.
+        if fragment.font.descriptor.pt_size != Au::zero() {
+            self.debug_capture
+                .record_fragment("text", fragment, fragment.base.tag, state);
+        }
         Fragment::build_display_list_for_text_fragment(fragment, self, state, &containing_block);
     }
 
@@ -1089,7 +1150,7 @@ impl PaintTraversalHandler for DisplayListBuilder<'_> {
         };
         let fragment = fragment.with_style();
 
-        let source_style = {
+        let (source_style, source_geometry_supported) = {
             // > For documents whose root element is an HTML HTML element or an XHTML html element
             // > [HTML]: if the computed value of background-image on the root element is none and its
             // > background-color is transparent, user agents must instead propagate the computed
@@ -1099,11 +1160,26 @@ impl PaintTraversalHandler for DisplayListBuilder<'_> {
             if root_fragment_style.background_is_transparent() {
                 let body_fragment = self.fragment_tree.body_fragment();
                 self.paint_body_background = body_fragment.is_none();
-                body_fragment
-                    .map(|body_fragment| body_fragment.style().clone())
-                    .unwrap_or(fragment.style().clone())
+                body_fragment.map_or_else(
+                    || {
+                        (
+                            fragment.style().clone(),
+                            box_paint_geometry_is_supported(self, state, &fragment),
+                        )
+                    },
+                    |body_fragment| {
+                        let body_fragment = body_fragment.with_style();
+                        (
+                            body_fragment.style().clone(),
+                            box_paint_geometry_is_supported(self, state, &body_fragment),
+                        )
+                    },
+                )
             } else {
-                root_fragment_style.clone()
+                (
+                    root_fragment_style.clone(),
+                    box_paint_geometry_is_supported(self, state, &fragment),
+                )
             }
         };
 
@@ -1119,27 +1195,85 @@ impl PaintTraversalHandler for DisplayListBuilder<'_> {
         // If the document is smaller than the viewport (and doesn’t scroll),
         // we still want to paint the rest of the viewport.
         // If it’s larger, we also want to paint areas reachable after scrolling.
-        let painting_area = self
+        let painting_area_app_units = self
             .fragment_tree
             .initial_containing_block
-            .union(&self.fragment_tree.scrollable_overflow())
-            .to_webrender();
+            .union(&self.fragment_tree.scrollable_overflow());
+        let painting_area = painting_area_app_units.to_webrender();
 
         let background_color =
             source_style.resolve_color(&source_style.get_background().background_color);
         if background_color.alpha > 0.0 {
-            let common = self.common_properties(state, painting_area, &source_style);
             let color = rgba(background_color);
-            self.wr().push_rect(&common, painting_area, color);
-            if paint_state_is_axis_aligned(self.paint_info.root_scroll_node_id, state) {
+            let layer_index = source_style.get_background().background_image.0.len() - 1;
+            let exact_paints = (source_geometry_supported &&
+                box_paint_geometry_is_supported(self, state, &fragment) &&
+                background::solid_color_uses_border_box(&source_style, layer_index))
+            .then(|| match self.page_sequence {
+                Some(sequence) => paged_root_background_areas(
+                    &sequence.pages,
+                    self.fragment_tree.initial_containing_block,
+                ),
+                None => Some(vec![painting_area_app_units]),
+            })
+            .flatten()
+            .and_then(|areas| {
+                areas
+                    .into_iter()
+                    .map(|area| {
+                        Some((
+                            area,
+                            debug_paint_rect_app_units(
+                                area,
+                                color,
+                                LayoutDebugPaintRectKind::Background,
+                            )?,
+                        ))
+                    })
+                    .collect::<Option<Vec<_>>>()
+            });
+            if let Some(paints) = exact_paints {
+                let mut paint_rects = Vec::with_capacity(paints.len());
+                for (area, paint_rect) in paints {
+                    // The renderer and retained authority consume the same original Au rectangle.
+                    let render_area = area.to_webrender();
+                    let common = self.common_properties(state, render_area, &source_style);
+                    self.wr().push_rect(&common, render_area, color);
+                    paint_rects.push(paint_rect);
+                }
                 self.debug_capture.record_paint_rects(
                     fragment.box_fragment,
                     fragment.base.tag,
                     state,
-                    debug_paint_rect(painting_area, color, LayoutDebugPaintRectKind::Background)
+                    paint_rects,
+                );
+            } else {
+                // Unsupported paged geometry retains the diagnostic-only legacy path. In
+                // particular, an invalid page sequence must not gain authority from this union.
+                let common = self.common_properties(state, painting_area, &source_style);
+                self.wr().push_rect(&common, painting_area, color);
+                if self.page_sequence.is_some() {
+                    self.debug_capture.record_fragment(
+                        "root-background",
+                        fragment.box_fragment,
+                        fragment.base.tag,
+                        state,
+                    );
+                }
+                if paint_state_is_axis_aligned(self.paint_info.root_scroll_node_id, state) {
+                    self.debug_capture.record_paint_rects(
+                        fragment.box_fragment,
+                        fragment.base.tag,
+                        state,
+                        debug_paint_rect(
+                            painting_area,
+                            color,
+                            LayoutDebugPaintRectKind::Background,
+                        )
                         .into_iter()
                         .collect(),
-                );
+                    );
+                }
             }
 
             // From <https://www.w3.org/TR/paint-timing/#sec-terminology>:
@@ -1848,17 +1982,26 @@ impl<'a> BuilderForBoxFragment<'a> {
                 .wr()
                 .push_rect(&common, bounds, rgba(background_color));
             if box_paint_geometry_is_supported(builder, state, self.fragment) {
+                let color = rgba(background_color);
+                let exact = painter
+                    .solid_color_area_app_units(self, layer_index)
+                    .and_then(|rect| {
+                        debug_paint_rect_app_units(
+                            rect,
+                            color,
+                            LayoutDebugPaintRectKind::Background,
+                        )
+                    });
                 builder.debug_capture.record_paint_rects(
                     self.fragment.box_fragment,
                     self.fragment.base.tag,
                     state,
-                    debug_paint_rect(
-                        bounds,
-                        rgba(background_color),
-                        LayoutDebugPaintRectKind::Background,
-                    )
-                    .into_iter()
-                    .collect(),
+                    exact
+                        .or_else(|| {
+                            debug_paint_rect(bounds, color, LayoutDebugPaintRectKind::Background)
+                        })
+                        .into_iter()
+                        .collect(),
                 );
             }
 
@@ -2262,7 +2405,7 @@ impl<'a> BuilderForBoxFragment<'a> {
         let captured_border_rects =
             (!separate_table_border_is_captured(self.fragment, self.containing_block_origin) &&
                 box_paint_geometry_is_supported(builder, state, self.fragment))
-            .then(|| solid_border_paint_rects(self.border_rect, border_widths, &style_color))
+            .then(|| ordinary_border_paint_rects(self.fragment, self.containing_block_origin))
             .flatten();
         let details = wr::BorderDetails::Normal(wr::NormalBorder {
             top: self.build_border_side(style_color.top),
@@ -2629,7 +2772,15 @@ fn box_has_unsupported_paint(
         .border_rect()
         .translate(state.origin.to_vector())
         .to_webrender();
+    let empty_solid_background = geometry_supported &&
+        matches!(&fragment.background_mode, BackgroundMode::Normal) &&
+        background::solid_color_uses_border_box(
+            fragment.style(),
+            fragment.style().get_background().background_image.0.len() - 1,
+        ) &&
+        has_exact_empty_paint_area(fragment.border_rect().translate(state.origin.to_vector()));
     let background_is_unsupported = paints_background &&
+        !empty_solid_background &&
         (!geometry_supported ||
             !paint_rect_geometry_is_supported(border_rect) ||
             match &fragment.background_mode {
@@ -2650,7 +2801,7 @@ fn box_has_unsupported_paint(
                 (!matches!(
                     &fragment.style().get_border().border_image_source,
                     Image::None
-                ) || ordinary_border_paint_rects(fragment).is_none())));
+                ) || ordinary_border_paint_rects(fragment, state.origin).is_none())));
 
     background_is_unsupported ||
         paints_shadow ||
@@ -2716,9 +2867,23 @@ fn box_paint_geometry_is_supported(
     state: &TraversalState,
     fragment: &BoxFragmentWithStyle<'_>,
 ) -> bool {
-    paint_state_is_axis_aligned(builder.paint_info.root_scroll_node_id, state) &&
-        fragment.border_radius() == BorderRadius::default() &&
-        style_effects_are_supported(fragment.style(), fragment.base.flags)
+    paint_geometry_is_supported(
+        builder.paint_info.root_scroll_node_id,
+        state,
+        fragment.border_radius(),
+        style_effects_are_supported(fragment.style(), fragment.base.flags),
+    )
+}
+
+fn paint_geometry_is_supported(
+    root_scroll_node_id: ScrollTreeNodeId,
+    state: &TraversalState,
+    radii: BorderRadius,
+    effects_supported: bool,
+) -> bool {
+    paint_state_is_axis_aligned(root_scroll_node_id, state) &&
+        radii == BorderRadius::default() &&
+        effects_supported
 }
 
 fn background_has_image(style: &ComputedValues) -> bool {
@@ -2732,13 +2897,20 @@ fn background_has_image(style: &ComputedValues) -> bool {
 
 fn ordinary_border_paint_rects(
     fragment: &BoxFragmentWithStyle<'_>,
+    containing_block_origin: PhysicalPoint<Au>,
 ) -> Option<Vec<LayoutDebugPaintRect>> {
+    // An unsupported table fallback must not regain its suppressed borders
+    // through ordinary box paint. Use this gate for eligibility and emission.
+    if !fragment.box_fragment.captures_table_borders() {
+        return None;
+    }
     let style = fragment.style();
     let current_color = style.get_inherited_text().clone_color();
     let colors = BorderStyleColor::from_border(style.get_border(), &current_color);
     solid_border_paint_rects(
-        fragment.border_rect().to_webrender(),
-        fragment.border.to_webrender(),
+        fragment.border_rect(),
+        containing_block_origin,
+        fragment.border,
         &colors,
     )
 }
@@ -2752,25 +2924,37 @@ fn separate_table_border_is_captured(
 }
 
 fn solid_border_paint_rects(
-    rect: LayoutRect,
-    widths: SideOffsets2D<f32, LayoutPixel>,
+    rect: PhysicalRect<Au>,
+    containing_block_origin: PhysicalPoint<Au>,
+    widths: PhysicalSides<Au>,
     colors: &PhysicalSides<BorderStyleColor>,
 ) -> Option<Vec<LayoutDebugPaintRect>> {
-    if !rect.min.x.is_finite() ||
-        !rect.min.y.is_finite() ||
-        !rect.max.x.is_finite() ||
-        !rect.max.y.is_finite() ||
-        rect.min.x < 0.0 ||
-        rect.min.y < 0.0 ||
-        rect.width() < 0.0 ||
-        rect.height() < 0.0 ||
-        widths.top + widths.bottom > rect.height() ||
-        widths.left + widths.right > rect.width()
+    // Keep source app units through decomposition. Recovering them from the
+    // WebRender border floats would invent authority at fractional positions.
+    // Eligibility and emission use the same translated geometry. Check raw
+    // integer addition before Au's saturating arithmetic can hide overflow.
+    let x = rect.origin.x.0.checked_add(containing_block_origin.x.0)?;
+    let y = rect.origin.y.0.checked_add(containing_block_origin.y.0)?;
+    let (width, height) = (rect.size.width.0, rect.size.height.0);
+    let right = x.checked_add(width)?;
+    let bottom = y.checked_add(height)?;
+    if x < 0 ||
+        y < 0 ||
+        width < 0 ||
+        height < 0 ||
+        right > MAX_AU.0 ||
+        bottom > MAX_AU.0 ||
+        [widths.top, widths.right, widths.bottom, widths.left]
+            .iter()
+            .any(|width| *width < Au::zero()) ||
+        widths.top.0.checked_add(widths.bottom.0)? > height ||
+        widths.left.0.checked_add(widths.right.0)? > width
     {
         return None;
     }
 
     let mut visible_color: Option<&AbsoluteColor> = None;
+    let mut invisible_width = false;
     for (width, side) in [
         (widths.top, &colors.top),
         (widths.right, &colors.right),
@@ -2778,10 +2962,11 @@ fn solid_border_paint_rects(
         (widths.left, &colors.left),
     ] {
         let color = rgba(side.color);
-        if width <= 0.0 ||
-            color.a <= 0.0 ||
-            matches!(side.style, BorderStyle::None | BorderStyle::Hidden)
-        {
+        if width <= Au::zero() {
+            continue;
+        }
+        if color.a <= 0.0 || matches!(side.style, BorderStyle::None | BorderStyle::Hidden) {
+            invisible_width = true;
             continue;
         }
         if side.style != BorderStyle::Solid ||
@@ -2791,39 +2976,44 @@ fn solid_border_paint_rects(
         }
         visible_color = Some(&side.color);
     }
+    // Rectangular strips own whole corners only for a shared visible color.
+    // A positive-width transparent neighbor can leave a visible CSS triangle;
+    // excluding it is safer than omitting that corner or inventing its shape.
+    if invisible_width && visible_color.is_some() {
+        return None;
+    }
 
+    let source_rect = |x, y, width, height| {
+        PhysicalRect::new(
+            PhysicalPoint::new(Au(x), Au(y)),
+            PhysicalSize::new(Au(width), Au(height)),
+        )
+    };
     let mut paint_rects = Vec::with_capacity(4);
     append_solid_border_paint_rect(
         &mut paint_rects,
-        LayoutRect::new(
-            rect.min,
-            LayoutPoint::new(rect.max.x, rect.min.y + widths.top),
-        ),
+        source_rect(x, y, width, widths.top.0),
         &colors.top,
     )?;
     append_solid_border_paint_rect(
         &mut paint_rects,
-        LayoutRect::new(
-            LayoutPoint::new(rect.min.x, rect.max.y - widths.bottom),
-            rect.max,
-        ),
+        source_rect(x, bottom - widths.bottom.0, width, widths.bottom.0),
         &colors.bottom,
     )?;
-    let vertical_min_y = rect.min.y + widths.top;
-    let vertical_max_y = rect.max.y - widths.bottom;
+    let vertical_min_y = y + widths.top.0;
+    let vertical_height = height - widths.top.0 - widths.bottom.0;
     append_solid_border_paint_rect(
         &mut paint_rects,
-        LayoutRect::new(
-            LayoutPoint::new(rect.min.x, vertical_min_y),
-            LayoutPoint::new(rect.min.x + widths.left, vertical_max_y),
-        ),
+        source_rect(x, vertical_min_y, widths.left.0, vertical_height),
         &colors.left,
     )?;
     append_solid_border_paint_rect(
         &mut paint_rects,
-        LayoutRect::new(
-            LayoutPoint::new(rect.max.x - widths.right, vertical_min_y),
-            LayoutPoint::new(rect.max.x, vertical_max_y),
+        source_rect(
+            right - widths.right.0,
+            vertical_min_y,
+            widths.right.0,
+            vertical_height,
         ),
         &colors.right,
     )?;
@@ -2832,10 +3022,10 @@ fn solid_border_paint_rects(
 
 fn append_solid_border_paint_rect(
     paint_rects: &mut Vec<LayoutDebugPaintRect>,
-    rect: LayoutRect,
+    rect: PhysicalRect<Au>,
     style_color: &BorderStyleColor,
 ) -> Option<()> {
-    if rect.width() <= 0.0 || rect.height() <= 0.0 {
+    if rect.size.width <= Au::zero() || rect.size.height <= Au::zero() {
         return Some(());
     }
     let color = rgba(style_color.color);
@@ -2845,12 +3035,119 @@ fn append_solid_border_paint_rect(
     if style_color.style != BorderStyle::Solid {
         return None;
     }
-    paint_rects.push(debug_paint_rect(
+    paint_rects.push(debug_paint_rect_app_units(
         rect,
         color,
         LayoutDebugPaintRectKind::Border,
     )?);
     Some(())
+}
+
+/// The unlayered document canvas covers each page's border box, not its margin box:
+/// <https://www.w3.org/TR/css-page-3/#painting>. With the current request-defined pages
+/// (no page padding or border), that is exactly the resolved content rectangle on each page.
+/// Do not use scrollable overflow: it is neither a page sequence nor a page-local canvas extent.
+fn paged_root_background_areas(
+    pages: &[Page],
+    initial_containing_block: PhysicalRect<Au>,
+) -> Option<Vec<PhysicalRect<Au>>> {
+    if pages.is_empty() {
+        return None;
+    }
+    let mut page_origin = 0i32;
+    let mut areas = Vec::with_capacity(pages.len());
+    for (index, page) in pages.iter().enumerate() {
+        let geometry = page.definition.debug_app_units();
+        if page.fragmentainer.page_index != index ||
+            geometry.width <= 0 ||
+            geometry.height <= 0 ||
+            geometry.width > MAX_AU.0 ||
+            geometry.height > MAX_AU.0 ||
+            geometry.margin_top < 0 ||
+            geometry.margin_right < 0 ||
+            geometry.margin_bottom < 0 ||
+            geometry.margin_left < 0 ||
+            geometry.available_inline_size <= 0 ||
+            geometry.available_block_size <= 0 ||
+            page.fragmentainer.available_inline_size.0 != geometry.available_inline_size ||
+            page.fragmentainer.available_block_size.0 != geometry.available_block_size
+        {
+            return None;
+        }
+        let right = geometry
+            .margin_left
+            .checked_add(geometry.available_inline_size)?;
+        let bottom = geometry
+            .margin_top
+            .checked_add(geometry.available_block_size)?;
+        if right.checked_add(geometry.margin_right)? != geometry.width ||
+            bottom.checked_add(geometry.margin_bottom)? != geometry.height
+        {
+            return None;
+        }
+        let next_page_origin = page_origin.checked_add(geometry.height)?;
+        if next_page_origin > MAX_AU.0 {
+            return None;
+        }
+        let area = PhysicalRect::new(
+            PhysicalPoint::new(
+                Au(geometry.margin_left),
+                Au(page_origin.checked_add(geometry.margin_top)?),
+            ),
+            PhysicalSize::new(
+                Au(geometry.available_inline_size),
+                Au(geometry.available_block_size),
+            ),
+        );
+        if index == 0 && area != initial_containing_block {
+            return None;
+        }
+        areas.push(area);
+        page_origin = next_page_origin;
+    }
+    Some(areas)
+}
+
+fn debug_paint_rect_app_units(
+    rect: PhysicalRect<Au>,
+    color: ColorF,
+    kind: LayoutDebugPaintRectKind,
+) -> Option<LayoutDebugPaintRect> {
+    if rect.origin.x < Au::zero() ||
+        rect.origin.y < Au::zero() ||
+        rect.size.width <= Au::zero() ||
+        rect.size.height <= Au::zero() ||
+        rect.origin.x.0.checked_add(rect.size.width.0).is_none() ||
+        rect.origin.y.0.checked_add(rect.size.height.0).is_none() ||
+        !color.r.is_finite() ||
+        !color.g.is_finite() ||
+        !color.b.is_finite() ||
+        !color.a.is_finite() ||
+        color.a <= 0.0
+    {
+        return None;
+    }
+    Some(LayoutDebugPaintRect {
+        rect: LayoutDebugRect {
+            x: rect.origin.x.to_f32_px(),
+            y: rect.origin.y.to_f32_px(),
+            width: rect.size.width.to_f32_px(),
+            height: rect.size.height.to_f32_px(),
+            app_units: Some(LayoutDebugRectAppUnits {
+                x: rect.origin.x.0,
+                y: rect.origin.y.0,
+                width: rect.size.width.0,
+                height: rect.size.height.0,
+            }),
+        },
+        color: LayoutDebugColor {
+            r: color.r.clamp(0.0, 1.0),
+            g: color.g.clamp(0.0, 1.0),
+            b: color.b.clamp(0.0, 1.0),
+            a: color.a.clamp(0.0, 1.0),
+        },
+        kind,
+    })
 }
 
 fn debug_paint_rect(
@@ -2894,6 +3191,20 @@ fn paint_rect_geometry_is_supported(rect: LayoutRect) -> bool {
         rect.min.y >= 0.0 &&
         rect.width() > 0.0 &&
         rect.height() > 0.0
+}
+
+/// Only a valid, source-owned zero-area rectangle is nonpainting. Do not confuse
+/// this with rounded-to-zero float geometry or admit negative/overflowing extents.
+fn has_exact_empty_paint_area(rect: PhysicalRect<Au>) -> bool {
+    let (x, y) = (rect.origin.x.0, rect.origin.y.0);
+    let (width, height) = (rect.size.width.0, rect.size.height.0);
+    x >= 0 &&
+        y >= 0 &&
+        width >= 0 &&
+        height >= 0 &&
+        (width == 0 || height == 0) &&
+        x.checked_add(width).is_some_and(|end| end <= MAX_AU.0) &&
+        y.checked_add(height).is_some_and(|end| end <= MAX_AU.0)
 }
 
 fn separate_table_grid_border_rows(
@@ -3049,7 +3360,9 @@ fn collapsed_table_border_rows(
             .y
             .iter()
             .any(|line| line.len() != column_count) ||
-        table_info.uniform_solid_visible_border().is_none()
+        (!table_info.has_no_visible_borders() &&
+            table_info.uniform_solid_visible_border().is_none() &&
+            !table_info.has_solid_horizontal_borders())
     {
         return None;
     }
@@ -3130,6 +3443,22 @@ fn append_collapsed_table_row<'a>(
         return None;
     }
 
+    if table_info.has_no_visible_borders() {
+        rows.push((row, Vec::new()));
+        return Some(());
+    }
+    if table_info.has_solid_horizontal_borders() {
+        rows.push((
+            row,
+            horizontal_collapsed_table_row_borders(
+                table_info,
+                row_index,
+                row_rect,
+                grid_inline_start,
+            )?,
+        ));
+        return Some(());
+    }
     let border = table_info.uniform_solid_visible_border()?;
     let border_width = border.width;
     let half_border_width = border_width / 2;
@@ -3195,6 +3524,67 @@ fn append_collapsed_table_row<'a>(
     }
     rows.push((row, borders));
     Some(())
+}
+
+fn horizontal_collapsed_table_row_borders(
+    table_info: &crate::table::SpecificTableGridInfo,
+    row_index: usize,
+    row_rect: PhysicalRect<Au>,
+    grid_inline_start: Au,
+) -> Option<Vec<LayoutDebugTableBorder>> {
+    let tracks = &table_info.track_sizes.x;
+    if tracks.is_empty() || tracks.iter().any(|width| *width <= Au::zero()) {
+        return None;
+    }
+    let mut borders = Vec::with_capacity(2);
+    // Match WebRender ownership: only row zero paints its top edge, and each
+    // row owns its bottom edge. Keep asymmetric odd-Au half-width rounding.
+    for (boundary, y, top) in [
+        (row_index, row_rect.origin.y, true),
+        (row_index + 1, row_rect.max_y(), false),
+    ] {
+        if top && row_index != 0 {
+            continue;
+        }
+        let line = table_info.collapsed_borders.y.get(boundary)?;
+        if line.len() != tracks.len() {
+            return None;
+        }
+        let Some(border) = line.iter().find(|border| !border.is_invisible()) else {
+            continue;
+        };
+        let y = if top {
+            y - border.width / 2
+        } else {
+            y + border.width / 2 - border.width
+        };
+        // Resolved tracks retain colspan boundaries. Coalesce only adjacent
+        // visible tracks; never bridge a zero-width hole in an amount rule.
+        let mut column = 0;
+        let mut x = grid_inline_start;
+        while column < line.len() {
+            let start = x;
+            let visible = !line[column].is_invisible();
+            while column < line.len() && line[column].is_invisible() != visible {
+                x = Au(x
+                    .0
+                    .checked_add(tracks[column].0)
+                    .filter(|end| *end <= MAX_AU.0)?);
+                column += 1;
+            }
+            if visible {
+                append_solid_table_border(
+                    &mut borders,
+                    PhysicalRect::new(
+                        PhysicalPoint::new(start, y),
+                        PhysicalSize::new(x - start, border.width),
+                    ),
+                    &border.style_color,
+                );
+            }
+        }
+    }
+    Some(borders)
 }
 
 fn append_solid_table_border(
@@ -3506,7 +3896,437 @@ impl BaseFragment {
 
 #[cfg(test)]
 mod debug_capture_tests {
+    use style::properties::style_structs::Font;
+
     use super::*;
+    use crate::fragment_tree::BaseFragmentInfo;
+    use crate::geom::PhysicalVec;
+    use crate::pages::{FragmentainerContext, FragmentainerOverflow, PageDefinition};
+
+    fn background_page(index: usize, width: i32, height: i32, margins: [i32; 4]) -> Page {
+        let definition = PageDefinition::from_app_units(width, height, margins).unwrap();
+        let geometry = definition.debug_app_units();
+        Page {
+            definition,
+            fragmentainer: FragmentainerContext {
+                page_index: index,
+                available_inline_size: Au(geometry.available_inline_size),
+                available_block_size: Au(geometry.available_block_size),
+                continuation: None,
+                overflow: FragmentainerOverflow::RetainInFragmentTree,
+            },
+        }
+    }
+
+    #[test]
+    fn paged_canvas_covers_all_four_a4_content_areas_in_original_app_units() {
+        let pages: Vec<_> = (0..4)
+            .map(|index| background_page(index, 47_622, 67_351, [2880; 4]))
+            .collect();
+        let initial_containing_block = PhysicalRect::new(
+            PhysicalPoint::new(Au(2880), Au(2880)),
+            PhysicalSize::new(Au(41_862), Au(61_591)),
+        );
+        let areas = paged_root_background_areas(&pages, initial_containing_block).unwrap();
+        assert_eq!(areas.len(), 4);
+        for (index, area) in areas.into_iter().enumerate() {
+            assert_eq!(area.origin.x, Au(2880));
+            assert_eq!(area.origin.y, Au(index as i32 * 67_351 + 2880));
+            assert_eq!(area.size, initial_containing_block.size);
+            let paint = debug_paint_rect_app_units(
+                area,
+                ColorF::WHITE,
+                LayoutDebugPaintRectKind::Background,
+            )
+            .unwrap();
+            let exact = paint.rect.app_units.unwrap();
+            assert_eq!(exact.y, index as i32 * 67_351 + 2880);
+            assert_eq!(exact.height, 61_591);
+            assert_eq!(area.to_webrender().min.y, Au(exact.y).to_f32_px());
+        }
+    }
+
+    #[test]
+    fn paged_canvas_uses_each_resolved_page_size_and_margins() {
+        let pages = [
+            background_page(0, 10_001, 14_003, [601, 607, 613, 617]),
+            background_page(1, 11_003, 15_007, [701, 709, 719, 727]),
+        ];
+        let first = PhysicalRect::new(
+            PhysicalPoint::new(Au(617), Au(601)),
+            PhysicalSize::new(Au(8777), Au(12_789)),
+        );
+        assert_eq!(
+            paged_root_background_areas(&pages, first).unwrap(),
+            vec![
+                first,
+                PhysicalRect::new(
+                    PhysicalPoint::new(Au(727), Au(14_704)),
+                    PhysicalSize::new(Au(9567), Au(13_587)),
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn paged_canvas_rejects_incomplete_or_inconsistent_page_authority() {
+        let first = PhysicalRect::new(
+            PhysicalPoint::new(Au(2880), Au(2880)),
+            PhysicalSize::new(Au(41_862), Au(61_591)),
+        );
+        assert!(paged_root_background_areas(&[], first).is_none());
+        let valid = background_page(0, 47_622, 67_351, [2880; 4]);
+        let mut malformed = valid;
+        malformed.fragmentainer.page_index = 1;
+        assert!(paged_root_background_areas(&[malformed], first).is_none());
+        malformed = valid;
+        malformed.fragmentainer.available_inline_size = Au(-1);
+        assert!(paged_root_background_areas(&[malformed], first).is_none());
+        malformed = valid;
+        malformed.fragmentainer.available_block_size.0 -= 1;
+        assert!(paged_root_background_areas(&[malformed], first).is_none());
+        assert!(paged_root_background_areas(&[valid, valid], first).is_none());
+        let mut shifted = first;
+        shifted.origin.y.0 += 1;
+        assert!(paged_root_background_areas(&[valid], shifted).is_none());
+        let mut narrowed = first;
+        narrowed.size.width.0 -= 1;
+        assert!(paged_root_background_areas(&[valid], narrowed).is_none());
+    }
+
+    #[test]
+    fn paged_canvas_rejects_extents_that_would_clamp_or_overflow_app_units() {
+        let height = MAX_AU.0 / 2 + 1;
+        let first = PhysicalRect::new(
+            PhysicalPoint::zero(),
+            PhysicalSize::new(Au(1200), Au(height)),
+        );
+        let pages = [
+            background_page(0, 1200, height, [0; 4]),
+            background_page(1, 1200, height, [0; 4]),
+        ];
+        assert!(paged_root_background_areas(&pages[..1], first).is_some());
+        assert!(paged_root_background_areas(&pages, first).is_none());
+        let oversized = background_page(0, 1200, i32::MAX, [0; 4]);
+        assert!(paged_root_background_areas(&[oversized], first).is_none());
+    }
+
+    #[test]
+    fn background_rectangles_keep_original_app_units_without_float_recovery() {
+        let rect = PhysicalRect::new(
+            PhysicalPoint::new(Au(100_000_001), Au(100_000_019)),
+            PhysicalSize::new(Au(601), Au(121)),
+        );
+        let paint =
+            debug_paint_rect_app_units(rect, ColorF::BLACK, LayoutDebugPaintRectKind::Background)
+                .unwrap();
+        let exact = paint.rect.app_units.as_ref().unwrap();
+        assert_eq!(
+            (exact.x, exact.y, exact.width, exact.height),
+            (100_000_001, 100_000_019, 601, 121)
+        );
+        assert_ne!((paint.rect.x * AU_PER_PX as f32).round() as i32, exact.x);
+        assert_ne!((paint.rect.y * AU_PER_PX as f32).round() as i32, exact.y);
+        assert_eq!(paint.rect.width, Au(601).to_f32_px());
+
+        // Continuous-mode root propagation owns the union, not a viewport float.
+        let canvas =
+            PhysicalRect::new(PhysicalPoint::zero(), PhysicalSize::new(Au(1200), Au(2400)));
+        let overflow =
+            PhysicalRect::new(PhysicalPoint::zero(), PhysicalSize::new(Au(1201), Au(2403)));
+        let paint = debug_paint_rect_app_units(
+            canvas.union(&overflow),
+            ColorF::WHITE,
+            LayoutDebugPaintRectKind::Background,
+        )
+        .unwrap();
+        let exact = paint.rect.app_units.as_ref().unwrap();
+        assert_eq!(
+            (exact.x, exact.y, exact.width, exact.height),
+            (0, 0, 1201, 2403)
+        );
+        assert!(
+            debug_paint_rect(
+                rect.to_webrender(),
+                ColorF::BLACK,
+                LayoutDebugPaintRectKind::Background
+            )
+            .unwrap()
+            .rect
+            .app_units
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn empty_paint_area_requires_exact_valid_zero_extent() {
+        let rect = |x, y, width, height| {
+            PhysicalRect::new(
+                PhysicalPoint::new(Au(x), Au(y)),
+                PhysicalSize::new(Au(width), Au(height)),
+            )
+        };
+        assert!(has_exact_empty_paint_area(rect(61, 121, 0, 1800)));
+        assert!(has_exact_empty_paint_area(rect(61, 121, 1800, 0)));
+        assert!(has_exact_empty_paint_area(rect(0, 0, 0, 0)));
+        for invalid in [
+            rect(61, 121, 1, 1800),
+            rect(61, 121, -1, 0),
+            rect(-1, 121, 0, 1800),
+            rect(61, -1, 1800, 0),
+            rect(MAX_AU.0, 0, 1, 0),
+            rect(0, i32::MAX, 0, 1),
+        ] {
+            assert!(!has_exact_empty_paint_area(invalid));
+        }
+    }
+
+    #[test]
+    fn ordinary_background_authority_belongs_to_the_original_owner_rectangle() {
+        let style =
+            ComputedValues::initial_values_with_font_override(Font::initial_values()).to_arc();
+        let fragment = Arc::new(BoxFragment::new(
+            BaseFragmentInfo::anonymous(),
+            style,
+            Vec::new(),
+            PhysicalRect::new(
+                PhysicalPoint::new(Au(100_000_001), Au(61)),
+                PhysicalSize::new(Au(1201), Au(601)),
+            ),
+            PhysicalSides::new(Au(3), Au(5), Au(7), Au(11)),
+            PhysicalSides::new(Au(13), Au(17), Au(19), Au(23)),
+            PhysicalSides::zero(),
+            None,
+        ));
+        let fragment = fragment.with_style();
+        let builder = BuilderForBoxFragment::new(&fragment, PhysicalPoint::new(Au(2), Au(29)));
+        let mut painter = BackgroundPainter {
+            style: fragment.style(),
+            painting_area_override: None,
+            positioning_area_override: None,
+        };
+        let rect = painter.solid_color_area_app_units(&builder, 0).unwrap();
+        assert_eq!(
+            (
+                rect.origin.x.0,
+                rect.origin.y.0,
+                rect.size.width.0,
+                rect.size.height.0
+            ),
+            (99_999_969, 74, 1257, 643)
+        );
+        painter.painting_area_override = Some(builder.border_rect);
+        assert!(painter.solid_color_area_app_units(&builder, 0).is_none());
+        painter.painting_area_override = None;
+        // A table row/column positions images in its track rectangle, but its
+        // solid color covers each cell's border box. Never use the track's
+        // floating rectangle to reconstruct that cell's exact coverage.
+        painter.positioning_area_override = Some(LayoutRect::new(
+            LayoutPoint::new(-300.25, -200.75),
+            LayoutPoint::new(5000.5, 4000.25),
+        ));
+        assert_eq!(painter.solid_color_area_app_units(&builder, 0), Some(rect));
+        painter.painting_area_override = Some(builder.border_rect);
+        assert!(painter.solid_color_area_app_units(&builder, 0).is_none());
+    }
+
+    #[test]
+    fn background_authority_keeps_geometry_and_effect_exclusions() {
+        let root = ScrollTreeNodeId { index: 1 };
+        let mut state = TraversalState {
+            spatial_id: root,
+            clip_id: ClipId::INVALID,
+            ..Default::default()
+        };
+        assert!(paint_geometry_is_supported(
+            root,
+            &state,
+            BorderRadius::zero(),
+            true
+        ));
+        assert!(!paint_geometry_is_supported(
+            root,
+            &state,
+            BorderRadius::zero(),
+            false
+        ));
+        let rounded = BorderRadius {
+            top_left: LayoutSize::new(1.0, 1.0),
+            ..BorderRadius::zero()
+        };
+        assert!(!paint_geometry_is_supported(root, &state, rounded, true));
+        state.clip_id = ClipId(0);
+        assert!(!paint_geometry_is_supported(
+            root,
+            &state,
+            BorderRadius::zero(),
+            true
+        ));
+        state.clip_id = ClipId::INVALID;
+        state.spatial_id = ScrollTreeNodeId { index: 2 };
+        assert!(!paint_geometry_is_supported(
+            root,
+            &state,
+            BorderRadius::zero(),
+            true
+        ));
+
+        for (x, width) in [(-1, 60), (0, 0), (0, -1), (i32::MAX, 1)] {
+            assert!(
+                debug_paint_rect_app_units(
+                    PhysicalRect::new(
+                        PhysicalPoint::new(Au(x), Au(0)),
+                        PhysicalSize::new(Au(width), Au(60))
+                    ),
+                    ColorF::BLACK,
+                    LayoutDebugPaintRectKind::Background,
+                )
+                .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn horizontal_table_rules_retain_exact_geometry_and_row_ownership() {
+        let border = |width| crate::table::CollapsedBorder {
+            width: Au(width),
+            style_color: BorderStyleColor::new(
+                BorderStyle::Solid,
+                AbsoluteColor::new(ColorSpace::Srgb, 0.5, 0.25, 0.0, 1.0),
+            ),
+        };
+        let mut info = crate::table::SpecificTableGridInfo {
+            collapsed_borders: PhysicalVec::new(
+                vec![vec![border(0); 2]; 3],
+                vec![
+                    vec![border(61); 2],
+                    vec![border(121); 2],
+                    vec![border(61); 2],
+                ],
+            ),
+            track_sizes: PhysicalVec::new(vec![Au(10003), Au(15197)], vec![Au(1200), Au(1800)]),
+        };
+        assert!(info.has_solid_horizontal_borders());
+        let first_row = PhysicalRect::new(
+            PhysicalPoint::new(Au(300), Au(120)),
+            PhysicalSize::new(Au(25200), Au(1200)),
+        );
+        let first = horizontal_collapsed_table_row_borders(&info, 0, first_row, Au(300)).unwrap();
+        let second = horizontal_collapsed_table_row_borders(
+            &info,
+            1,
+            PhysicalRect::new(
+                PhysicalPoint::new(Au(300), Au(1320)),
+                PhysicalSize::new(Au(25200), Au(1800)),
+            ),
+            Au(300),
+        )
+        .unwrap();
+        let rects = |borders: &[LayoutDebugTableBorder]| {
+            borders
+                .iter()
+                .map(|border| {
+                    let rect = border.rect.app_units.as_ref().unwrap();
+                    (rect.x, rect.y, rect.width, rect.height)
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            rects(&first),
+            vec![(300, 90, 25200, 61), (300, 1259, 25200, 121)]
+        );
+        assert_eq!(rects(&second), vec![(300, 3089, 25200, 61)]);
+
+        // An invisible top boundary reserves its layout width but adds no paint.
+        for border in &mut info.collapsed_borders.y[0] {
+            border.style_color.style = BorderStyle::Hidden;
+        }
+        assert!(info.has_solid_horizontal_borders());
+        let first = horizontal_collapsed_table_row_borders(&info, 0, first_row, Au(300)).unwrap();
+        assert_eq!(rects(&first), vec![(300, 1259, 25200, 121)]);
+        for border in &mut info.collapsed_borders.y[1] {
+            border.style_color.style = BorderStyle::Hidden;
+        }
+        assert!(info.has_solid_horizontal_borders());
+        assert!(
+            horizontal_collapsed_table_row_borders(&info, 0, first_row, Au(300))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn partial_horizontal_rules_preserve_tracks_gaps_and_row_ownership() {
+        let border = |width| crate::table::CollapsedBorder {
+            width: Au(width),
+            style_color: BorderStyleColor::new(
+                BorderStyle::Solid,
+                AbsoluteColor::new(ColorSpace::Srgb, 0.5, 0.25, 0.0, 1.0),
+            ),
+        };
+        let mut info = crate::table::SpecificTableGridInfo {
+            collapsed_borders: PhysicalVec::new(
+                vec![vec![border(0); 2]; 4],
+                vec![
+                    vec![border(0), border(61), border(61)],
+                    vec![border(121), border(0), border(121)],
+                    vec![border(0), border(0), border(61)],
+                ],
+            ),
+            track_sizes: PhysicalVec::new(
+                vec![Au(10003), Au(15197), Au(7001)],
+                vec![Au(1200), Au(1800)],
+            ),
+        };
+        assert!(info.has_solid_horizontal_borders());
+        let row = |y, height| {
+            PhysicalRect::new(
+                PhysicalPoint::new(Au(300), Au(y)),
+                PhysicalSize::new(Au(32201), Au(height)),
+            )
+        };
+        let rects = |borders: Vec<LayoutDebugTableBorder>| {
+            borders
+                .iter()
+                .map(|border| {
+                    let rect = border.rect.app_units.as_ref().unwrap();
+                    (rect.x, rect.y, rect.width, rect.height)
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            rects(
+                horizontal_collapsed_table_row_borders(&info, 0, row(120, 1200), Au(300)).unwrap()
+            ),
+            vec![
+                (10303, 90, 22198, 61),
+                (300, 1259, 10003, 121),
+                (25500, 1259, 7001, 121),
+            ]
+        );
+        assert_eq!(
+            rects(
+                horizontal_collapsed_table_row_borders(&info, 1, row(1320, 1800), Au(300)).unwrap()
+            ),
+            vec![(25500, 3089, 7001, 61)]
+        );
+        info.collapsed_borders.y[2].pop();
+        assert!(
+            horizontal_collapsed_table_row_borders(&info, 1, row(1320, 1800), Au(300)).is_none()
+        );
+        info.collapsed_borders.y[2].push(border(61));
+        assert!(
+            horizontal_collapsed_table_row_borders(&info, 1, row(1320, 1800), MAX_AU).is_none()
+        );
+        info.track_sizes.x[1] = Au(i32::MAX);
+        assert!(
+            horizontal_collapsed_table_row_borders(&info, 1, row(1320, 1800), Au(300)).is_none()
+        );
+        info.track_sizes.x[1] = Au::zero();
+        assert!(
+            horizontal_collapsed_table_row_borders(&info, 1, row(1320, 1800), Au(300)).is_none()
+        );
+    }
 
     #[test]
     fn retained_paint_events_match_order_and_fragment_join_fixture() {
@@ -3555,9 +4375,147 @@ mod debug_capture_tests {
     }
 
     #[test]
+    fn ordinary_border_capture_respects_table_fallback_suppression() {
+        let style =
+            ComputedValues::initial_values_with_font_override(Font::initial_values()).to_arc();
+        let fragment = Arc::new(BoxFragment::new(
+            BaseFragmentInfo::anonymous(),
+            style,
+            Vec::new(),
+            PhysicalRect::new(
+                PhysicalPoint::new(Au(120), Au(120)),
+                PhysicalSize::new(Au(1200), Au(600)),
+            ),
+            PhysicalSides::zero(),
+            PhysicalSides::zero(),
+            PhysicalSides::zero(),
+            None,
+        ));
+        let capture = || ordinary_border_paint_rects(&fragment.with_style(), PhysicalPoint::zero());
+        assert!(capture().is_some());
+        fragment.set_table_border_capture_suppressed(true);
+        assert!(capture().is_none());
+        fragment.set_table_border_capture_suppressed(false);
+        assert!(capture().is_some());
+    }
+
+    #[test]
+    fn ordinary_solid_borders_keep_source_app_units() {
+        let rect = |x, y, width, height| {
+            PhysicalRect::new(
+                PhysicalPoint::new(Au(x), Au(y)),
+                PhysicalSize::new(Au(width), Au(height)),
+            )
+        };
+        let side = BorderStyleColor::new(
+            BorderStyle::Solid,
+            AbsoluteColor::new(ColorSpace::Srgb, 0.5, 0.5, 0.5, 1.0),
+        );
+        let colors = PhysicalSides::new(side.clone(), side.clone(), side.clone(), side);
+        let exact = |paint: Vec<LayoutDebugPaintRect>| {
+            paint
+                .into_iter()
+                .map(|paint| {
+                    let original = paint.rect.app_units.unwrap();
+                    assert_eq!(paint.rect.x, Au(original.x).to_f32_px());
+                    assert_eq!(paint.rect.y, Au(original.y).to_f32_px());
+                    assert_eq!(paint.rect.width, Au(original.width).to_f32_px());
+                    assert_eq!(paint.rect.height, Au(original.height).to_f32_px());
+                    (original.x, original.y, original.width, original.height)
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            exact(
+                solid_border_paint_rects(
+                    rect(101, 203, 10001, 7003),
+                    PhysicalPoint::zero(),
+                    PhysicalSides::new(Au(61), Au(119), Au(181), Au(239)),
+                    &colors,
+                )
+                .unwrap()
+            ),
+            vec![
+                (101, 203, 10001, 61),
+                (101, 7025, 10001, 181),
+                (101, 264, 239, 6761),
+                (9983, 264, 119, 6761)
+            ],
+        );
+        assert_eq!(
+            exact(
+                solid_border_paint_rects(
+                    rect(2721, 2721, 42180, 1812),
+                    PhysicalPoint::zero(),
+                    PhysicalSides::new(Au(0), Au(0), Au(60), Au(0)),
+                    &colors,
+                )
+                .unwrap()
+            ),
+            vec![(2721, 4473, 42180, 60)],
+        );
+        let none = PhysicalSides::zero();
+        assert!(
+            solid_border_paint_rects(rect(1, 1, 100, 100), PhysicalPoint::zero(), none, &colors)
+                .unwrap()
+                .is_empty()
+        );
+        for invalid in [
+            rect(-1, 0, 100, 100),
+            rect(0, -1, 100, 100),
+            rect(0, 0, -1, 100),
+            rect(0, 0, 100, -1),
+            rect(MAX_AU.0, 0, 1, 100),
+            rect(0, i32::MAX, 100, 1),
+        ] {
+            assert!(
+                solid_border_paint_rects(invalid, PhysicalPoint::zero(), none, &colors).is_none()
+            );
+        }
+        for invalid in [
+            PhysicalSides::new(Au(-1), Au(0), Au(0), Au(0)),
+            PhysicalSides::new(Au(61), Au(0), Au(40), Au(0)),
+            PhysicalSides::new(Au(0), Au(61), Au(0), Au(40)),
+            PhysicalSides::new(Au(i32::MAX), Au(0), Au(1), Au(0)),
+        ] {
+            assert!(
+                solid_border_paint_rects(
+                    rect(0, 0, 100, 100),
+                    PhysicalPoint::zero(),
+                    invalid,
+                    &colors
+                )
+                .is_none()
+            );
+        }
+        let local = rect(MAX_AU.0 - 100, 0, 99, 100);
+        assert!(solid_border_paint_rects(local, PhysicalPoint::zero(), none, &colors).is_some());
+        assert!(
+            solid_border_paint_rects(local, PhysicalPoint::new(Au(1), Au(0)), none, &colors)
+                .is_some()
+        );
+        assert!(
+            solid_border_paint_rects(local, PhysicalPoint::new(Au(2), Au(0)), none, &colors)
+                .is_none()
+        );
+        assert!(
+            solid_border_paint_rects(
+                local,
+                PhysicalPoint::new(Au(i32::MAX), Au(0)),
+                none,
+                &colors
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
     fn retained_rectangles_reject_negative_origins_and_mixed_border_colors() {
-        let rect = LayoutRect::new(LayoutPoint::new(0.0, 0.0), LayoutPoint::new(20.0, 20.0));
-        let widths = SideOffsets2D::new(3.0, 1.0, 1.0, 1.0);
+        let rect = PhysicalRect::new(
+            PhysicalPoint::new(Au(0), Au(0)),
+            PhysicalSize::new(Au(1200), Au(1200)),
+        );
+        let widths = PhysicalSides::new(Au(180), Au(60), Au(60), Au(60));
         let blue = BorderStyleColor::new(
             BorderStyle::Solid,
             AbsoluteColor::new(ColorSpace::Srgb, 0.0, 0.25, 1.0, 1.0),
@@ -3568,9 +4526,56 @@ mod debug_capture_tests {
         );
         let uniform = PhysicalSides::new(blue.clone(), blue.clone(), blue.clone(), blue.clone());
         let mixed = PhysicalSides::new(blue.clone(), gray.clone(), gray.clone(), gray);
+        let transparent = BorderStyleColor::new(
+            BorderStyle::Solid,
+            AbsoluteColor::new(ColorSpace::Srgb, 0.0, 0.0, 0.0, 0.0),
+        );
+        let mut transparent_sides = PhysicalSides::new(
+            transparent.clone(),
+            transparent.clone(),
+            transparent.clone(),
+            transparent,
+        );
+        let triangle_rect =
+            PhysicalRect::new(PhysicalPoint::zero(), PhysicalSize::new(Au(240), Au(240)));
+        let triangle_widths = PhysicalSides::new(Au(120), Au(120), Au(120), Au(120));
+        assert!(
+            solid_border_paint_rects(
+                triangle_rect,
+                PhysicalPoint::zero(),
+                triangle_widths,
+                &transparent_sides
+            )
+            .unwrap()
+            .is_empty()
+        );
+        transparent_sides.right = blue.clone();
+        assert!(
+            solid_border_paint_rects(
+                triangle_rect,
+                PhysicalPoint::zero(),
+                triangle_widths,
+                &transparent_sides
+            )
+            .is_none()
+        );
+        // Invisible zero-width sides have no corner area; one visible side is
+        // still exactly rectangular and is the real-document header profile.
+        let single = PhysicalSides::new(Au(0), Au(120), Au(0), Au(0));
+        assert_eq!(
+            solid_border_paint_rects(
+                triangle_rect,
+                PhysicalPoint::zero(),
+                single,
+                &transparent_sides
+            )
+            .unwrap()
+            .len(),
+            1
+        );
 
-        assert!(solid_border_paint_rects(rect, widths, &uniform).is_some());
-        assert!(solid_border_paint_rects(rect, widths, &mixed).is_none());
+        assert!(solid_border_paint_rects(rect, PhysicalPoint::zero(), widths, &uniform).is_some());
+        assert!(solid_border_paint_rects(rect, PhysicalPoint::zero(), widths, &mixed).is_none());
         assert!(!paint_rect_geometry_is_supported(LayoutRect::new(
             LayoutPoint::new(-1.0, 0.0),
             LayoutPoint::new(20.0, 20.0),

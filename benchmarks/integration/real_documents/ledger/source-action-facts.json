@@ -1,0 +1,163 @@
+{
+  "outcome": "legacy_action_smoke_succeeded",
+  "pages": 15,
+  "paperOrientation": "portrait",
+  "paperPoints": [
+    0,
+    0,
+    841.89,
+    595.28
+  ],
+  "dompdfConfig": {
+    "show_warnings": false,
+    "public_path": null,
+    "convert_entities": true,
+    "options": {
+      "font_dir": "$APP/storage/fonts",
+      "font_cache": "$APP/storage/fonts",
+      "temp_dir": "$TEMP",
+      "chroot": "$APP",
+      "allowed_protocols": {
+        "data://": {
+          "rules": []
+        },
+        "file://": {
+          "rules": []
+        },
+        "http://": {
+          "rules": []
+        },
+        "https://": {
+          "rules": []
+        }
+      },
+      "artifactPathValidation": null,
+      "log_output_file": null,
+      "enable_font_subsetting": false,
+      "pdf_backend": "CPDF",
+      "default_media_type": "screen",
+      "default_paper_size": "a4",
+      "default_paper_orientation": "portrait",
+      "default_font": "serif",
+      "dpi": 96,
+      "enable_php": false,
+      "enable_javascript": true,
+      "enable_remote": false,
+      "allowed_remote_hosts": null,
+      "font_height_ratio": 1.1,
+      "enable_html5_parser": true
+    }
+  },
+  "options": {
+    "dpi": 96,
+    "remoteEnabled": false,
+    "fontSubsettingEnabled": false,
+    "defaultFont": "serif",
+    "fontDir": "$APP/storage/fonts",
+    "fontCache": "$APP/storage/fonts"
+  },
+  "responseHeaders": {
+    "cache-control": [
+      "no-cache, private"
+    ],
+    "date": [
+      "Sat, 05 Sep 2026 06:28:34 GMT"
+    ],
+    "content-disposition": [
+      "attachment; filename=general-ledger-2026-03-01-2026-03-31.pdf"
+    ]
+  },
+  "pdfBytes": 1313380,
+  "pdfSha256": "ad7c944541b3e03818b840337bcdf4ebede4a5069df42eb6e4911785cbed185d",
+  "bladeHtmlSha256": "58303937ba0162d9d9e2cb0a69a9bc1b26c315b7b61efc39b2be5752654f94cf",
+  "engineHtmlSha256": "58303937ba0162d9d9e2cb0a69a9bc1b26c315b7b61efc39b2be5752654f94cf",
+  "syntheticInputSha256": "b96df3fb5314f2ab09fa57d53bafebd121d33112218a4a4576783af8231041bd",
+  "fonts": [
+    {
+      "style": "normal",
+      "source": "$APP/vendor/dompdf/dompdf/lib/fonts/DejaVuSans.ttf",
+      "file": "DejaVuSans.ttf",
+      "sha256": "7da195a74c55bef988d0d48f9508bd5d849425c1770dba5d7bfc6ce9ed848954",
+      "bytes": 757076
+    },
+    {
+      "style": "bold",
+      "source": "$APP/vendor/dompdf/dompdf/lib/fonts/DejaVuSans-Bold.ttf",
+      "file": "DejaVuSans-Bold.ttf",
+      "sha256": "e6476c1b80502924294eed40894c5b18e06c181444ca953e5334262df9c27724",
+      "bytes": 705684
+    },
+    {
+      "style": "italic",
+      "source": "$APP/vendor/dompdf/dompdf/lib/fonts/DejaVuSans-Oblique.ttf",
+      "file": "DejaVuSans-Oblique.ttf",
+      "sha256": "4af75fa16ee6d3ad43e1ecec41862c24954af26a55c6bb1ebb27bd486a50f5f4",
+      "bytes": 635416
+    },
+    {
+      "style": "bold_italic",
+      "source": "$APP/vendor/dompdf/dompdf/lib/fonts/DejaVuSans-BoldOblique.ttf",
+      "file": "DejaVuSans-BoldOblique.ttf",
+      "sha256": "eb436dca0c2594b73d8b603b892e374fdfd8d885d25ffb4f18df4c4c0b49e50f",
+      "bytes": 643292
+    }
+  ],
+  "sources": [
+    {
+      "source": "plugins/webkul/accounting/src/Filament/Clusters/Reporting/Pages/GeneralLedger.php",
+      "file": "GeneralLedger.php",
+      "sha256": "430c7f4663a94d3eb51e10119930fd05f56048a313c5fa68e2cc75ee96de2664"
+    },
+    {
+      "source": "plugins/webkul/accounting/resources/views/filament/clusters/reporting/pages/pdfs/general-ledger.blade.php",
+      "file": "general-ledger.blade.php",
+      "sha256": "fb57d3cadd3bc8fef2a4486c49f30677bc7fb7cbe86a69f761e64c4b06d95ac5"
+    },
+    {
+      "source": "composer.json",
+      "file": "composer.json",
+      "sha256": "f80ab2da076dc86f6abb68be863416189e1b631ab7579f37404df80d33050ffd"
+    },
+    {
+      "source": "composer.lock",
+      "file": "composer.lock",
+      "sha256": "82133507ad710cc2748d95cba0ea3dfe5d375728c0d8d3587303e91d027c5fae"
+    },
+    {
+      "source": "LICENSE",
+      "file": "LICENSE",
+      "sha256": "c6dca3b0db5b68fd5971277605cf8e50ba151ffba6abdd508d0c42c9cfade7da"
+    },
+    {
+      "source": "vendor/dompdf/dompdf/LICENSE.LGPL",
+      "file": "dompdf-LICENSE.LGPL",
+      "sha256": "a90fe41057cac85869176942a0bca3da94a49e277ee5f8c5284be1aeaa59497e"
+    }
+  ],
+  "templateRepair": {
+    "track": "shared-footer-space",
+    "applicationSourceModified": false,
+    "sourceSha256": "fb57d3cadd3bc8fef2a4486c49f30677bc7fb7cbe86a69f761e64c4b06d95ac5",
+    "repairedBladeSha256": "2f4729d783349c75d69cf6242ca7143637a18941196e31f0d7375cb380982bbf",
+    "patchSha256": "3817dd66b37d828d3426d1ed450a4b91176b05f5e38179734bc84d2a7b0ac742",
+    "declarationsChanged": 2,
+    "retainedFooterPhysicalPosition": true
+  },
+  "generatorSha256": "bb783df4523605e32e9fb3d2d50fc4e134d171d0513a58fde3a0e06f05c020fc",
+  "runnerSha256": "54bff4516b2fcf48bdc44c94046f27b9cbde38782ff0e44c02c5cd375e87e4be",
+  "instrumentation": "Original dompdf wrapper constructor and methods; only loadHTML records original Blade bytes and pure convertEntities output before unchanged parent delegation.",
+  "oracle": {
+    "openingCents": -125000,
+    "debitCents": 828750,
+    "creditCents": 3300000,
+    "closingCents": -2596250
+  },
+  "detailRows": 300,
+  "visualQualified": false,
+  "benchmarkQualified": false,
+  "pathSanitization": {
+    "$APP": "Pinned repaired Aureus checkout",
+    "$TEMP": "Per-sample owned temporary directory",
+    "originalRecordSha256": "e4d3c932186d8ca887743d39cca3b97aa33187af573db0a44ca7a471eea26731"
+  }
+}

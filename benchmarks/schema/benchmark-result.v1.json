@@ -465,6 +465,16 @@
           }
         },
         "sampled_diagnostics": { "$ref": "#/definitions/sampled_diagnostics" },
+        "root_wall_deadline": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["limit_ms", "outcome", "boundary"],
+          "properties": {
+            "limit_ms": { "type": "number", "exclusiveMinimum": 0 },
+            "outcome": { "const": "root-exited" },
+            "boundary": { "const": "root-SIGCONT-through-pidfd-observed-exit" }
+          }
+        },
         "sampler_cpu_user_ms": { "type": "number", "minimum": 0 },
         "sampler_cpu_sys_ms": { "type": "number", "minimum": 0 },
         "sampler_cpu_percent_of_wall": { "type": "number", "minimum": 0 }

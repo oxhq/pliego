@@ -1,8 +1,10 @@
 # oxhq/pliego-laravel
 
-Laravel 13 integration for application-owned Blade documents.
+Integration for application-owned Blade documents. The published 0.3.3 package
+supports Laravel 13. The unreleased 0.4.0 source candidate supports Laravel 12/13
+and pins `oxhq/pliego-php` 0.4.0; it is not yet available through Packagist.
 
-The v0.3 package uses Pliego API 2 and pins `oxhq/pliego-php` 0.3.3:
+Install the current stable API 2 package:
 
 ```sh
 composer require oxhq/pliego-laravel:^0.3.3
@@ -149,6 +151,18 @@ gradients and background-image layers, box and text shadows, text decorations,
 rounded or mixed-color borders, clips, non-solid and image borders, transforms,
 opacity, filters, and blend modes are explicitly unsupported and reported rather
 than approximated.
+
+The 0.4.0 candidate adds narrowly bounded URI links, collapsed tables, solid
+backgrounds/borders and page-owned fixed text with decimal `page`/`pages`
+counters. This is not general CSS or Chart.js support. Its
+[candidate support boundary](https://github.com/oxhq/pliego/blob/main/docs/pliego/support-profile.md#unreleased-040-candidate)
+keeps the admitted geometry and exclusions explicit.
+
+The candidate also accepts exact integer app-unit geometry through
+`->pageSize('67351x47622au')->pageMargins('2268,2268,5669,2268au')`.
+The suffix applies to the whole tuple; unqualified values remain CSS pixels.
+It maps application page settings into the existing API 2 request and does not
+enable CSS `@page` as a second source of page authority.
 
 Blade is rendered first. The API 2 PHP client creates the private cwd-v1 job,
 copies only declared relative assets, records their hashes in the canonical input

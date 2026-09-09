@@ -1,0 +1,15 @@
+diff --git a/plugins/webkul/accounting/resources/views/filament/clusters/reporting/pages/pdfs/general-ledger.blade.php b/plugins/webkul/accounting/resources/views/filament/clusters/reporting/pages/pdfs/general-ledger.blade.php
+--- a/plugins/webkul/accounting/resources/views/filament/clusters/reporting/pages/pdfs/general-ledger.blade.php
++++ b/plugins/webkul/accounting/resources/views/filament/clusters/reporting/pages/pdfs/general-ledger.blade.php
+@@ -20,4 +20,4 @@
+         @page {
+-            margin: 1cm 1cm;
++            margin: 1cm 1cm 2.5cm;
+             size: A4 landscape;
+         }
+@@ -107,4 +107,4 @@
+         .footer {
+             position: fixed;
+-            bottom: 0;
++            bottom: -1.5cm;
+             width: 100%;

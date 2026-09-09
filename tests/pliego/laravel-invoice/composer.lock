@@ -4,7 +4,7 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "47cc3e6b29dc15aae157b31bf1ba9812",
+    "content-hash": "2dad68987be39194cd67a3a72a70c2c6",
     "packages": [
         {
             "name": "brick/math",
@@ -2418,22 +2418,22 @@
         },
         {
             "name": "oxhq/pliego-laravel",
-            "version": "0.3.3",
+            "version": "0.4.0",
             "dist": {
                 "type": "path",
                 "url": "../../../sdk/laravel",
-                "reference": "7acc21ecacdc0c5044653233c93c1286c577bc2e"
+                "reference": "ce35197b281e80c139966b443a9445f92d751c81"
             },
             "require": {
-                "illuminate/console": "^13.0",
-                "illuminate/contracts": "^13.0",
-                "illuminate/http": "^13.0",
-                "illuminate/support": "^13.0",
-                "illuminate/view": "^13.0",
+                "illuminate/console": "^12.0 || ^13.0",
+                "illuminate/contracts": "^12.0 || ^13.0",
+                "illuminate/http": "^12.0 || ^13.0",
+                "illuminate/support": "^12.0 || ^13.0",
+                "illuminate/view": "^12.0 || ^13.0",
                 "league/flysystem": "^3.25.1",
-                "oxhq/pliego-php": "0.3.3",
+                "oxhq/pliego-php": "0.4.0",
                 "php": "^8.3",
-                "symfony/http-foundation": "^7.4 || ^8.0"
+                "symfony/http-foundation": "^7.2 || ^8.0"
             },
             "require-dev": {
                 "laravel/pint": "^1.0"
@@ -2467,6 +2467,9 @@
                 "test:storage": [
                     "@php tests/storage_test.php"
                 ],
+                "test:framework": [
+                    "@php tests/framework_compatibility_test.php"
+                ],
                 "test": [
                     "@test:runtime",
                     "@test:quickstart",
@@ -2485,11 +2488,11 @@
         },
         {
             "name": "oxhq/pliego-php",
-            "version": "0.3.3",
+            "version": "0.4.0",
             "dist": {
                 "type": "path",
                 "url": "../../../sdk/php",
-                "reference": "fe830c716da4d2cd2a820c85377a37edb6c5a577"
+                "reference": "2be689d0730e515321d12632295e574e08f36c1c"
             },
             "require": {
                 "php": "^8.3",

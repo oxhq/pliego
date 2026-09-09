@@ -33,6 +33,19 @@ pub(crate) enum RsaAlgorithm {
     RsaOaep,
 }
 
+/// Checked at the private-arithmetic leaves so decrypt-based unwrap cannot bypass
+/// the host policy. Ordinary Servo retains its default behavior; document hosts
+/// may disable these operations while RUSTSEC-2023-0071 remains unresolved.
+pub(crate) fn require_private_operations_enabled() -> Result<(), Error> {
+    if servo_config::pref!(dom_crypto_rsa_private_operations_enabled) {
+        Ok(())
+    } else {
+        Err(Error::NotSupported(Some(
+            "RSA private-key signing and decryption are disabled by host policy".into(),
+        )))
+    }
+}
+
 /// <https://w3c.github.io/webcrypto/#rsassa-pkcs1-operations-generate-key>
 /// <https://w3c.github.io/webcrypto/#rsa-pss-operations-generate-key>
 /// <https://w3c.github.io/webcrypto/#rsa-oaep-operations-generate-key>

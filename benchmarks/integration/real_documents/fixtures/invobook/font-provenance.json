@@ -1,0 +1,28 @@
+{
+    "name": "original-bundled-dejavu-resource-closure",
+    "package": "dompdf/dompdf",
+    "version": "v2.0.4",
+    "reference": "093f2d9739cec57428e39ddadedfd4f3ae862c0f",
+    "fonts": [
+        {
+            "sourcePath": "vendor/dompdf/dompdf/lib/fonts/DejaVuSans.ttf",
+            "path": "fonts/DejaVuSans.ttf",
+            "sha256": "7da195a74c55bef988d0d48f9508bd5d849425c1770dba5d7bfc6ce9ed848954",
+            "family": "DejaVu Sans",
+            "postscriptName": "DejaVuSans",
+            "version": "Version 2.37",
+            "licenseSource": "original font name table records 0 and 13",
+            "licenseSha256": "32e68a20bbb06fb7b97c55146b75208fbbc5abd91a60030be2707c142f3a9d9e"
+        },
+        {
+            "sourcePath": "vendor/dompdf/dompdf/lib/fonts/DejaVuSans-Bold.ttf",
+            "path": "fonts/DejaVuSans-Bold.ttf",
+            "sha256": "e6476c1b80502924294eed40894c5b18e06c181444ca953e5334262df9c27724",
+            "family": "DejaVu Sans",
+            "postscriptName": "DejaVuSans-Bold",
+            "version": "Version 2.37",
+            "licenseSource": "original font name table records 0 and 13",
+            "licenseSha256": "32e68a20bbb06fb7b97c55146b75208fbbc5abd91a60030be2707c142f3a9d9e"
+        }
+    ]
+}

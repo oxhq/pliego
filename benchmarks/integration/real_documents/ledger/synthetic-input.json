@@ -1,0 +1,3039 @@
+{
+    "schema": "aureus.general-ledger.synthetic.v1",
+    "clock": "2026-03-31 12:00:00 UTC",
+    "period": {
+        "from": "2026-03-01",
+        "to": "2026-03-31"
+    },
+    "count": 300,
+    "amountRuleCents": "10000 + 25*i; i=1..300",
+    "kindRule": "Every fifth entry is a customer credit note; all others are sales.",
+    "expandedScope": "Primary income account only; counterpart summaries remain.",
+    "opening": {
+        "marker": "OPENING-CONTROL",
+        "date": "2026-01-15",
+        "cents": 125000
+    },
+    "controls": [
+        {
+            "marker": "FUTURE-CONTROL",
+            "date": "2026-04-10",
+            "cents": 999900,
+            "posted": true
+        },
+        {
+            "marker": "DRAFT-CONTROL",
+            "date": "2026-03-10",
+            "cents": 777700,
+            "posted": false
+        }
+    ],
+    "entries": [
+        {
+            "index": 1,
+            "marker": "GL300-0001",
+            "date": "2026-03-01",
+            "type": "out_invoice",
+            "cents": 10025,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 10025,
+            "incomeRunningCents": -135025
+        },
+        {
+            "index": 2,
+            "marker": "GL300-0002",
+            "date": "2026-03-01",
+            "type": "out_invoice",
+            "cents": 10050,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 10050,
+            "incomeRunningCents": -145075
+        },
+        {
+            "index": 3,
+            "marker": "GL300-0003",
+            "date": "2026-03-01",
+            "type": "out_invoice",
+            "cents": 10075,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 10075,
+            "incomeRunningCents": -155150
+        },
+        {
+            "index": 4,
+            "marker": "GL300-0004",
+            "date": "2026-03-01",
+            "type": "out_invoice",
+            "cents": 10100,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 10100,
+            "incomeRunningCents": -165250
+        },
+        {
+            "index": 5,
+            "marker": "GL300-0005",
+            "date": "2026-03-01",
+            "type": "out_refund",
+            "cents": 10125,
+            "incomeDebitCents": 10125,
+            "incomeCreditCents": 0,
+            "incomeRunningCents": -155125
+        },
+        {
+            "index": 6,
+            "marker": "GL300-0006",
+            "date": "2026-03-01",
+            "type": "out_invoice",
+            "cents": 10150,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 10150,
+            "incomeRunningCents": -165275
+        },
+        {
+            "index": 7,
+            "marker": "GL300-0007",
+            "date": "2026-03-01",
+            "type": "out_invoice",
+            "cents": 10175,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 10175,
+            "incomeRunningCents": -175450
+        },
+        {
+            "index": 8,
+            "marker": "GL300-0008",
+            "date": "2026-03-01",
+            "type": "out_invoice",
+            "cents": 10200,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 10200,
+            "incomeRunningCents": -185650
+        },
+        {
+            "index": 9,
+            "marker": "GL300-0009",
+            "date": "2026-03-01",
+            "type": "out_invoice",
+            "cents": 10225,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 10225,
+            "incomeRunningCents": -195875
+        },
+        {
+            "index": 10,
+            "marker": "GL300-0010",
+            "date": "2026-03-01",
+            "type": "out_refund",
+            "cents": 10250,
+            "incomeDebitCents": 10250,
+            "incomeCreditCents": 0,
+            "incomeRunningCents": -185625
+        },
+        {
+            "index": 11,
+            "marker": "GL300-0011",
+            "date": "2026-03-02",
+            "type": "out_invoice",
+            "cents": 10275,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 10275,
+            "incomeRunningCents": -195900
+        },
+        {
+            "index": 12,
+            "marker": "GL300-0012",
+            "date": "2026-03-02",
+            "type": "out_invoice",
+            "cents": 10300,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 10300,
+            "incomeRunningCents": -206200
+        },
+        {
+            "index": 13,
+            "marker": "GL300-0013",
+            "date": "2026-03-02",
+            "type": "out_invoice",
+            "cents": 10325,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 10325,
+            "incomeRunningCents": -216525
+        },
+        {
+            "index": 14,
+            "marker": "GL300-0014",
+            "date": "2026-03-02",
+            "type": "out_invoice",
+            "cents": 10350,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 10350,
+            "incomeRunningCents": -226875
+        },
+        {
+            "index": 15,
+            "marker": "GL300-0015",
+            "date": "2026-03-02",
+            "type": "out_refund",
+            "cents": 10375,
+            "incomeDebitCents": 10375,
+            "incomeCreditCents": 0,
+            "incomeRunningCents": -216500
+        },
+        {
+            "index": 16,
+            "marker": "GL300-0016",
+            "date": "2026-03-02",
+            "type": "out_invoice",
+            "cents": 10400,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 10400,
+            "incomeRunningCents": -226900
+        },
+        {
+            "index": 17,
+            "marker": "GL300-0017",
+            "date": "2026-03-02",
+            "type": "out_invoice",
+            "cents": 10425,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 10425,
+            "incomeRunningCents": -237325
+        },
+        {
+            "index": 18,
+            "marker": "GL300-0018",
+            "date": "2026-03-02",
+            "type": "out_invoice",
+            "cents": 10450,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 10450,
+            "incomeRunningCents": -247775
+        },
+        {
+            "index": 19,
+            "marker": "GL300-0019",
+            "date": "2026-03-02",
+            "type": "out_invoice",
+            "cents": 10475,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 10475,
+            "incomeRunningCents": -258250
+        },
+        {
+            "index": 20,
+            "marker": "GL300-0020",
+            "date": "2026-03-02",
+            "type": "out_refund",
+            "cents": 10500,
+            "incomeDebitCents": 10500,
+            "incomeCreditCents": 0,
+            "incomeRunningCents": -247750
+        },
+        {
+            "index": 21,
+            "marker": "GL300-0021",
+            "date": "2026-03-03",
+            "type": "out_invoice",
+            "cents": 10525,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 10525,
+            "incomeRunningCents": -258275
+        },
+        {
+            "index": 22,
+            "marker": "GL300-0022",
+            "date": "2026-03-03",
+            "type": "out_invoice",
+            "cents": 10550,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 10550,
+            "incomeRunningCents": -268825
+        },
+        {
+            "index": 23,
+            "marker": "GL300-0023",
+            "date": "2026-03-03",
+            "type": "out_invoice",
+            "cents": 10575,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 10575,
+            "incomeRunningCents": -279400
+        },
+        {
+            "index": 24,
+            "marker": "GL300-0024",
+            "date": "2026-03-03",
+            "type": "out_invoice",
+            "cents": 10600,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 10600,
+            "incomeRunningCents": -290000
+        },
+        {
+            "index": 25,
+            "marker": "GL300-0025",
+            "date": "2026-03-03",
+            "type": "out_refund",
+            "cents": 10625,
+            "incomeDebitCents": 10625,
+            "incomeCreditCents": 0,
+            "incomeRunningCents": -279375
+        },
+        {
+            "index": 26,
+            "marker": "GL300-0026",
+            "date": "2026-03-03",
+            "type": "out_invoice",
+            "cents": 10650,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 10650,
+            "incomeRunningCents": -290025
+        },
+        {
+            "index": 27,
+            "marker": "GL300-0027",
+            "date": "2026-03-03",
+            "type": "out_invoice",
+            "cents": 10675,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 10675,
+            "incomeRunningCents": -300700
+        },
+        {
+            "index": 28,
+            "marker": "GL300-0028",
+            "date": "2026-03-03",
+            "type": "out_invoice",
+            "cents": 10700,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 10700,
+            "incomeRunningCents": -311400
+        },
+        {
+            "index": 29,
+            "marker": "GL300-0029",
+            "date": "2026-03-03",
+            "type": "out_invoice",
+            "cents": 10725,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 10725,
+            "incomeRunningCents": -322125
+        },
+        {
+            "index": 30,
+            "marker": "GL300-0030",
+            "date": "2026-03-03",
+            "type": "out_refund",
+            "cents": 10750,
+            "incomeDebitCents": 10750,
+            "incomeCreditCents": 0,
+            "incomeRunningCents": -311375
+        },
+        {
+            "index": 31,
+            "marker": "GL300-0031",
+            "date": "2026-03-04",
+            "type": "out_invoice",
+            "cents": 10775,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 10775,
+            "incomeRunningCents": -322150
+        },
+        {
+            "index": 32,
+            "marker": "GL300-0032",
+            "date": "2026-03-04",
+            "type": "out_invoice",
+            "cents": 10800,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 10800,
+            "incomeRunningCents": -332950
+        },
+        {
+            "index": 33,
+            "marker": "GL300-0033",
+            "date": "2026-03-04",
+            "type": "out_invoice",
+            "cents": 10825,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 10825,
+            "incomeRunningCents": -343775
+        },
+        {
+            "index": 34,
+            "marker": "GL300-0034",
+            "date": "2026-03-04",
+            "type": "out_invoice",
+            "cents": 10850,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 10850,
+            "incomeRunningCents": -354625
+        },
+        {
+            "index": 35,
+            "marker": "GL300-0035",
+            "date": "2026-03-04",
+            "type": "out_refund",
+            "cents": 10875,
+            "incomeDebitCents": 10875,
+            "incomeCreditCents": 0,
+            "incomeRunningCents": -343750
+        },
+        {
+            "index": 36,
+            "marker": "GL300-0036",
+            "date": "2026-03-04",
+            "type": "out_invoice",
+            "cents": 10900,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 10900,
+            "incomeRunningCents": -354650
+        },
+        {
+            "index": 37,
+            "marker": "GL300-0037",
+            "date": "2026-03-04",
+            "type": "out_invoice",
+            "cents": 10925,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 10925,
+            "incomeRunningCents": -365575
+        },
+        {
+            "index": 38,
+            "marker": "GL300-0038",
+            "date": "2026-03-04",
+            "type": "out_invoice",
+            "cents": 10950,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 10950,
+            "incomeRunningCents": -376525
+        },
+        {
+            "index": 39,
+            "marker": "GL300-0039",
+            "date": "2026-03-04",
+            "type": "out_invoice",
+            "cents": 10975,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 10975,
+            "incomeRunningCents": -387500
+        },
+        {
+            "index": 40,
+            "marker": "GL300-0040",
+            "date": "2026-03-04",
+            "type": "out_refund",
+            "cents": 11000,
+            "incomeDebitCents": 11000,
+            "incomeCreditCents": 0,
+            "incomeRunningCents": -376500
+        },
+        {
+            "index": 41,
+            "marker": "GL300-0041",
+            "date": "2026-03-05",
+            "type": "out_invoice",
+            "cents": 11025,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 11025,
+            "incomeRunningCents": -387525
+        },
+        {
+            "index": 42,
+            "marker": "GL300-0042",
+            "date": "2026-03-05",
+            "type": "out_invoice",
+            "cents": 11050,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 11050,
+            "incomeRunningCents": -398575
+        },
+        {
+            "index": 43,
+            "marker": "GL300-0043",
+            "date": "2026-03-05",
+            "type": "out_invoice",
+            "cents": 11075,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 11075,
+            "incomeRunningCents": -409650
+        },
+        {
+            "index": 44,
+            "marker": "GL300-0044",
+            "date": "2026-03-05",
+            "type": "out_invoice",
+            "cents": 11100,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 11100,
+            "incomeRunningCents": -420750
+        },
+        {
+            "index": 45,
+            "marker": "GL300-0045",
+            "date": "2026-03-05",
+            "type": "out_refund",
+            "cents": 11125,
+            "incomeDebitCents": 11125,
+            "incomeCreditCents": 0,
+            "incomeRunningCents": -409625
+        },
+        {
+            "index": 46,
+            "marker": "GL300-0046",
+            "date": "2026-03-05",
+            "type": "out_invoice",
+            "cents": 11150,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 11150,
+            "incomeRunningCents": -420775
+        },
+        {
+            "index": 47,
+            "marker": "GL300-0047",
+            "date": "2026-03-05",
+            "type": "out_invoice",
+            "cents": 11175,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 11175,
+            "incomeRunningCents": -431950
+        },
+        {
+            "index": 48,
+            "marker": "GL300-0048",
+            "date": "2026-03-05",
+            "type": "out_invoice",
+            "cents": 11200,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 11200,
+            "incomeRunningCents": -443150
+        },
+        {
+            "index": 49,
+            "marker": "GL300-0049",
+            "date": "2026-03-05",
+            "type": "out_invoice",
+            "cents": 11225,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 11225,
+            "incomeRunningCents": -454375
+        },
+        {
+            "index": 50,
+            "marker": "GL300-0050",
+            "date": "2026-03-05",
+            "type": "out_refund",
+            "cents": 11250,
+            "incomeDebitCents": 11250,
+            "incomeCreditCents": 0,
+            "incomeRunningCents": -443125
+        },
+        {
+            "index": 51,
+            "marker": "GL300-0051",
+            "date": "2026-03-06",
+            "type": "out_invoice",
+            "cents": 11275,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 11275,
+            "incomeRunningCents": -454400
+        },
+        {
+            "index": 52,
+            "marker": "GL300-0052",
+            "date": "2026-03-06",
+            "type": "out_invoice",
+            "cents": 11300,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 11300,
+            "incomeRunningCents": -465700
+        },
+        {
+            "index": 53,
+            "marker": "GL300-0053",
+            "date": "2026-03-06",
+            "type": "out_invoice",
+            "cents": 11325,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 11325,
+            "incomeRunningCents": -477025
+        },
+        {
+            "index": 54,
+            "marker": "GL300-0054",
+            "date": "2026-03-06",
+            "type": "out_invoice",
+            "cents": 11350,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 11350,
+            "incomeRunningCents": -488375
+        },
+        {
+            "index": 55,
+            "marker": "GL300-0055",
+            "date": "2026-03-06",
+            "type": "out_refund",
+            "cents": 11375,
+            "incomeDebitCents": 11375,
+            "incomeCreditCents": 0,
+            "incomeRunningCents": -477000
+        },
+        {
+            "index": 56,
+            "marker": "GL300-0056",
+            "date": "2026-03-06",
+            "type": "out_invoice",
+            "cents": 11400,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 11400,
+            "incomeRunningCents": -488400
+        },
+        {
+            "index": 57,
+            "marker": "GL300-0057",
+            "date": "2026-03-06",
+            "type": "out_invoice",
+            "cents": 11425,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 11425,
+            "incomeRunningCents": -499825
+        },
+        {
+            "index": 58,
+            "marker": "GL300-0058",
+            "date": "2026-03-06",
+            "type": "out_invoice",
+            "cents": 11450,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 11450,
+            "incomeRunningCents": -511275
+        },
+        {
+            "index": 59,
+            "marker": "GL300-0059",
+            "date": "2026-03-06",
+            "type": "out_invoice",
+            "cents": 11475,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 11475,
+            "incomeRunningCents": -522750
+        },
+        {
+            "index": 60,
+            "marker": "GL300-0060",
+            "date": "2026-03-06",
+            "type": "out_refund",
+            "cents": 11500,
+            "incomeDebitCents": 11500,
+            "incomeCreditCents": 0,
+            "incomeRunningCents": -511250
+        },
+        {
+            "index": 61,
+            "marker": "GL300-0061",
+            "date": "2026-03-07",
+            "type": "out_invoice",
+            "cents": 11525,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 11525,
+            "incomeRunningCents": -522775
+        },
+        {
+            "index": 62,
+            "marker": "GL300-0062",
+            "date": "2026-03-07",
+            "type": "out_invoice",
+            "cents": 11550,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 11550,
+            "incomeRunningCents": -534325
+        },
+        {
+            "index": 63,
+            "marker": "GL300-0063",
+            "date": "2026-03-07",
+            "type": "out_invoice",
+            "cents": 11575,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 11575,
+            "incomeRunningCents": -545900
+        },
+        {
+            "index": 64,
+            "marker": "GL300-0064",
+            "date": "2026-03-07",
+            "type": "out_invoice",
+            "cents": 11600,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 11600,
+            "incomeRunningCents": -557500
+        },
+        {
+            "index": 65,
+            "marker": "GL300-0065",
+            "date": "2026-03-07",
+            "type": "out_refund",
+            "cents": 11625,
+            "incomeDebitCents": 11625,
+            "incomeCreditCents": 0,
+            "incomeRunningCents": -545875
+        },
+        {
+            "index": 66,
+            "marker": "GL300-0066",
+            "date": "2026-03-07",
+            "type": "out_invoice",
+            "cents": 11650,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 11650,
+            "incomeRunningCents": -557525
+        },
+        {
+            "index": 67,
+            "marker": "GL300-0067",
+            "date": "2026-03-07",
+            "type": "out_invoice",
+            "cents": 11675,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 11675,
+            "incomeRunningCents": -569200
+        },
+        {
+            "index": 68,
+            "marker": "GL300-0068",
+            "date": "2026-03-07",
+            "type": "out_invoice",
+            "cents": 11700,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 11700,
+            "incomeRunningCents": -580900
+        },
+        {
+            "index": 69,
+            "marker": "GL300-0069",
+            "date": "2026-03-07",
+            "type": "out_invoice",
+            "cents": 11725,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 11725,
+            "incomeRunningCents": -592625
+        },
+        {
+            "index": 70,
+            "marker": "GL300-0070",
+            "date": "2026-03-07",
+            "type": "out_refund",
+            "cents": 11750,
+            "incomeDebitCents": 11750,
+            "incomeCreditCents": 0,
+            "incomeRunningCents": -580875
+        },
+        {
+            "index": 71,
+            "marker": "GL300-0071",
+            "date": "2026-03-08",
+            "type": "out_invoice",
+            "cents": 11775,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 11775,
+            "incomeRunningCents": -592650
+        },
+        {
+            "index": 72,
+            "marker": "GL300-0072",
+            "date": "2026-03-08",
+            "type": "out_invoice",
+            "cents": 11800,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 11800,
+            "incomeRunningCents": -604450
+        },
+        {
+            "index": 73,
+            "marker": "GL300-0073",
+            "date": "2026-03-08",
+            "type": "out_invoice",
+            "cents": 11825,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 11825,
+            "incomeRunningCents": -616275
+        },
+        {
+            "index": 74,
+            "marker": "GL300-0074",
+            "date": "2026-03-08",
+            "type": "out_invoice",
+            "cents": 11850,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 11850,
+            "incomeRunningCents": -628125
+        },
+        {
+            "index": 75,
+            "marker": "GL300-0075",
+            "date": "2026-03-08",
+            "type": "out_refund",
+            "cents": 11875,
+            "incomeDebitCents": 11875,
+            "incomeCreditCents": 0,
+            "incomeRunningCents": -616250
+        },
+        {
+            "index": 76,
+            "marker": "GL300-0076",
+            "date": "2026-03-08",
+            "type": "out_invoice",
+            "cents": 11900,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 11900,
+            "incomeRunningCents": -628150
+        },
+        {
+            "index": 77,
+            "marker": "GL300-0077",
+            "date": "2026-03-08",
+            "type": "out_invoice",
+            "cents": 11925,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 11925,
+            "incomeRunningCents": -640075
+        },
+        {
+            "index": 78,
+            "marker": "GL300-0078",
+            "date": "2026-03-08",
+            "type": "out_invoice",
+            "cents": 11950,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 11950,
+            "incomeRunningCents": -652025
+        },
+        {
+            "index": 79,
+            "marker": "GL300-0079",
+            "date": "2026-03-08",
+            "type": "out_invoice",
+            "cents": 11975,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 11975,
+            "incomeRunningCents": -664000
+        },
+        {
+            "index": 80,
+            "marker": "GL300-0080",
+            "date": "2026-03-08",
+            "type": "out_refund",
+            "cents": 12000,
+            "incomeDebitCents": 12000,
+            "incomeCreditCents": 0,
+            "incomeRunningCents": -652000
+        },
+        {
+            "index": 81,
+            "marker": "GL300-0081",
+            "date": "2026-03-09",
+            "type": "out_invoice",
+            "cents": 12025,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 12025,
+            "incomeRunningCents": -664025
+        },
+        {
+            "index": 82,
+            "marker": "GL300-0082",
+            "date": "2026-03-09",
+            "type": "out_invoice",
+            "cents": 12050,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 12050,
+            "incomeRunningCents": -676075
+        },
+        {
+            "index": 83,
+            "marker": "GL300-0083",
+            "date": "2026-03-09",
+            "type": "out_invoice",
+            "cents": 12075,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 12075,
+            "incomeRunningCents": -688150
+        },
+        {
+            "index": 84,
+            "marker": "GL300-0084",
+            "date": "2026-03-09",
+            "type": "out_invoice",
+            "cents": 12100,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 12100,
+            "incomeRunningCents": -700250
+        },
+        {
+            "index": 85,
+            "marker": "GL300-0085",
+            "date": "2026-03-09",
+            "type": "out_refund",
+            "cents": 12125,
+            "incomeDebitCents": 12125,
+            "incomeCreditCents": 0,
+            "incomeRunningCents": -688125
+        },
+        {
+            "index": 86,
+            "marker": "GL300-0086",
+            "date": "2026-03-09",
+            "type": "out_invoice",
+            "cents": 12150,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 12150,
+            "incomeRunningCents": -700275
+        },
+        {
+            "index": 87,
+            "marker": "GL300-0087",
+            "date": "2026-03-09",
+            "type": "out_invoice",
+            "cents": 12175,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 12175,
+            "incomeRunningCents": -712450
+        },
+        {
+            "index": 88,
+            "marker": "GL300-0088",
+            "date": "2026-03-09",
+            "type": "out_invoice",
+            "cents": 12200,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 12200,
+            "incomeRunningCents": -724650
+        },
+        {
+            "index": 89,
+            "marker": "GL300-0089",
+            "date": "2026-03-09",
+            "type": "out_invoice",
+            "cents": 12225,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 12225,
+            "incomeRunningCents": -736875
+        },
+        {
+            "index": 90,
+            "marker": "GL300-0090",
+            "date": "2026-03-09",
+            "type": "out_refund",
+            "cents": 12250,
+            "incomeDebitCents": 12250,
+            "incomeCreditCents": 0,
+            "incomeRunningCents": -724625
+        },
+        {
+            "index": 91,
+            "marker": "GL300-0091",
+            "date": "2026-03-10",
+            "type": "out_invoice",
+            "cents": 12275,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 12275,
+            "incomeRunningCents": -736900
+        },
+        {
+            "index": 92,
+            "marker": "GL300-0092",
+            "date": "2026-03-10",
+            "type": "out_invoice",
+            "cents": 12300,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 12300,
+            "incomeRunningCents": -749200
+        },
+        {
+            "index": 93,
+            "marker": "GL300-0093",
+            "date": "2026-03-10",
+            "type": "out_invoice",
+            "cents": 12325,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 12325,
+            "incomeRunningCents": -761525
+        },
+        {
+            "index": 94,
+            "marker": "GL300-0094",
+            "date": "2026-03-10",
+            "type": "out_invoice",
+            "cents": 12350,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 12350,
+            "incomeRunningCents": -773875
+        },
+        {
+            "index": 95,
+            "marker": "GL300-0095",
+            "date": "2026-03-10",
+            "type": "out_refund",
+            "cents": 12375,
+            "incomeDebitCents": 12375,
+            "incomeCreditCents": 0,
+            "incomeRunningCents": -761500
+        },
+        {
+            "index": 96,
+            "marker": "GL300-0096",
+            "date": "2026-03-10",
+            "type": "out_invoice",
+            "cents": 12400,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 12400,
+            "incomeRunningCents": -773900
+        },
+        {
+            "index": 97,
+            "marker": "GL300-0097",
+            "date": "2026-03-10",
+            "type": "out_invoice",
+            "cents": 12425,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 12425,
+            "incomeRunningCents": -786325
+        },
+        {
+            "index": 98,
+            "marker": "GL300-0098",
+            "date": "2026-03-10",
+            "type": "out_invoice",
+            "cents": 12450,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 12450,
+            "incomeRunningCents": -798775
+        },
+        {
+            "index": 99,
+            "marker": "GL300-0099",
+            "date": "2026-03-10",
+            "type": "out_invoice",
+            "cents": 12475,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 12475,
+            "incomeRunningCents": -811250
+        },
+        {
+            "index": 100,
+            "marker": "GL300-0100",
+            "date": "2026-03-10",
+            "type": "out_refund",
+            "cents": 12500,
+            "incomeDebitCents": 12500,
+            "incomeCreditCents": 0,
+            "incomeRunningCents": -798750
+        },
+        {
+            "index": 101,
+            "marker": "GL300-0101",
+            "date": "2026-03-11",
+            "type": "out_invoice",
+            "cents": 12525,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 12525,
+            "incomeRunningCents": -811275
+        },
+        {
+            "index": 102,
+            "marker": "GL300-0102",
+            "date": "2026-03-11",
+            "type": "out_invoice",
+            "cents": 12550,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 12550,
+            "incomeRunningCents": -823825
+        },
+        {
+            "index": 103,
+            "marker": "GL300-0103",
+            "date": "2026-03-11",
+            "type": "out_invoice",
+            "cents": 12575,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 12575,
+            "incomeRunningCents": -836400
+        },
+        {
+            "index": 104,
+            "marker": "GL300-0104",
+            "date": "2026-03-11",
+            "type": "out_invoice",
+            "cents": 12600,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 12600,
+            "incomeRunningCents": -849000
+        },
+        {
+            "index": 105,
+            "marker": "GL300-0105",
+            "date": "2026-03-11",
+            "type": "out_refund",
+            "cents": 12625,
+            "incomeDebitCents": 12625,
+            "incomeCreditCents": 0,
+            "incomeRunningCents": -836375
+        },
+        {
+            "index": 106,
+            "marker": "GL300-0106",
+            "date": "2026-03-11",
+            "type": "out_invoice",
+            "cents": 12650,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 12650,
+            "incomeRunningCents": -849025
+        },
+        {
+            "index": 107,
+            "marker": "GL300-0107",
+            "date": "2026-03-11",
+            "type": "out_invoice",
+            "cents": 12675,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 12675,
+            "incomeRunningCents": -861700
+        },
+        {
+            "index": 108,
+            "marker": "GL300-0108",
+            "date": "2026-03-11",
+            "type": "out_invoice",
+            "cents": 12700,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 12700,
+            "incomeRunningCents": -874400
+        },
+        {
+            "index": 109,
+            "marker": "GL300-0109",
+            "date": "2026-03-11",
+            "type": "out_invoice",
+            "cents": 12725,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 12725,
+            "incomeRunningCents": -887125
+        },
+        {
+            "index": 110,
+            "marker": "GL300-0110",
+            "date": "2026-03-11",
+            "type": "out_refund",
+            "cents": 12750,
+            "incomeDebitCents": 12750,
+            "incomeCreditCents": 0,
+            "incomeRunningCents": -874375
+        },
+        {
+            "index": 111,
+            "marker": "GL300-0111",
+            "date": "2026-03-12",
+            "type": "out_invoice",
+            "cents": 12775,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 12775,
+            "incomeRunningCents": -887150
+        },
+        {
+            "index": 112,
+            "marker": "GL300-0112",
+            "date": "2026-03-12",
+            "type": "out_invoice",
+            "cents": 12800,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 12800,
+            "incomeRunningCents": -899950
+        },
+        {
+            "index": 113,
+            "marker": "GL300-0113",
+            "date": "2026-03-12",
+            "type": "out_invoice",
+            "cents": 12825,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 12825,
+            "incomeRunningCents": -912775
+        },
+        {
+            "index": 114,
+            "marker": "GL300-0114",
+            "date": "2026-03-12",
+            "type": "out_invoice",
+            "cents": 12850,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 12850,
+            "incomeRunningCents": -925625
+        },
+        {
+            "index": 115,
+            "marker": "GL300-0115",
+            "date": "2026-03-12",
+            "type": "out_refund",
+            "cents": 12875,
+            "incomeDebitCents": 12875,
+            "incomeCreditCents": 0,
+            "incomeRunningCents": -912750
+        },
+        {
+            "index": 116,
+            "marker": "GL300-0116",
+            "date": "2026-03-12",
+            "type": "out_invoice",
+            "cents": 12900,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 12900,
+            "incomeRunningCents": -925650
+        },
+        {
+            "index": 117,
+            "marker": "GL300-0117",
+            "date": "2026-03-12",
+            "type": "out_invoice",
+            "cents": 12925,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 12925,
+            "incomeRunningCents": -938575
+        },
+        {
+            "index": 118,
+            "marker": "GL300-0118",
+            "date": "2026-03-12",
+            "type": "out_invoice",
+            "cents": 12950,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 12950,
+            "incomeRunningCents": -951525
+        },
+        {
+            "index": 119,
+            "marker": "GL300-0119",
+            "date": "2026-03-12",
+            "type": "out_invoice",
+            "cents": 12975,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 12975,
+            "incomeRunningCents": -964500
+        },
+        {
+            "index": 120,
+            "marker": "GL300-0120",
+            "date": "2026-03-12",
+            "type": "out_refund",
+            "cents": 13000,
+            "incomeDebitCents": 13000,
+            "incomeCreditCents": 0,
+            "incomeRunningCents": -951500
+        },
+        {
+            "index": 121,
+            "marker": "GL300-0121",
+            "date": "2026-03-13",
+            "type": "out_invoice",
+            "cents": 13025,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 13025,
+            "incomeRunningCents": -964525
+        },
+        {
+            "index": 122,
+            "marker": "GL300-0122",
+            "date": "2026-03-13",
+            "type": "out_invoice",
+            "cents": 13050,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 13050,
+            "incomeRunningCents": -977575
+        },
+        {
+            "index": 123,
+            "marker": "GL300-0123",
+            "date": "2026-03-13",
+            "type": "out_invoice",
+            "cents": 13075,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 13075,
+            "incomeRunningCents": -990650
+        },
+        {
+            "index": 124,
+            "marker": "GL300-0124",
+            "date": "2026-03-13",
+            "type": "out_invoice",
+            "cents": 13100,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 13100,
+            "incomeRunningCents": -1003750
+        },
+        {
+            "index": 125,
+            "marker": "GL300-0125",
+            "date": "2026-03-13",
+            "type": "out_refund",
+            "cents": 13125,
+            "incomeDebitCents": 13125,
+            "incomeCreditCents": 0,
+            "incomeRunningCents": -990625
+        },
+        {
+            "index": 126,
+            "marker": "GL300-0126",
+            "date": "2026-03-13",
+            "type": "out_invoice",
+            "cents": 13150,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 13150,
+            "incomeRunningCents": -1003775
+        },
+        {
+            "index": 127,
+            "marker": "GL300-0127",
+            "date": "2026-03-13",
+            "type": "out_invoice",
+            "cents": 13175,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 13175,
+            "incomeRunningCents": -1016950
+        },
+        {
+            "index": 128,
+            "marker": "GL300-0128",
+            "date": "2026-03-13",
+            "type": "out_invoice",
+            "cents": 13200,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 13200,
+            "incomeRunningCents": -1030150
+        },
+        {
+            "index": 129,
+            "marker": "GL300-0129",
+            "date": "2026-03-13",
+            "type": "out_invoice",
+            "cents": 13225,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 13225,
+            "incomeRunningCents": -1043375
+        },
+        {
+            "index": 130,
+            "marker": "GL300-0130",
+            "date": "2026-03-13",
+            "type": "out_refund",
+            "cents": 13250,
+            "incomeDebitCents": 13250,
+            "incomeCreditCents": 0,
+            "incomeRunningCents": -1030125
+        },
+        {
+            "index": 131,
+            "marker": "GL300-0131",
+            "date": "2026-03-14",
+            "type": "out_invoice",
+            "cents": 13275,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 13275,
+            "incomeRunningCents": -1043400
+        },
+        {
+            "index": 132,
+            "marker": "GL300-0132",
+            "date": "2026-03-14",
+            "type": "out_invoice",
+            "cents": 13300,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 13300,
+            "incomeRunningCents": -1056700
+        },
+        {
+            "index": 133,
+            "marker": "GL300-0133",
+            "date": "2026-03-14",
+            "type": "out_invoice",
+            "cents": 13325,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 13325,
+            "incomeRunningCents": -1070025
+        },
+        {
+            "index": 134,
+            "marker": "GL300-0134",
+            "date": "2026-03-14",
+            "type": "out_invoice",
+            "cents": 13350,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 13350,
+            "incomeRunningCents": -1083375
+        },
+        {
+            "index": 135,
+            "marker": "GL300-0135",
+            "date": "2026-03-14",
+            "type": "out_refund",
+            "cents": 13375,
+            "incomeDebitCents": 13375,
+            "incomeCreditCents": 0,
+            "incomeRunningCents": -1070000
+        },
+        {
+            "index": 136,
+            "marker": "GL300-0136",
+            "date": "2026-03-14",
+            "type": "out_invoice",
+            "cents": 13400,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 13400,
+            "incomeRunningCents": -1083400
+        },
+        {
+            "index": 137,
+            "marker": "GL300-0137",
+            "date": "2026-03-14",
+            "type": "out_invoice",
+            "cents": 13425,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 13425,
+            "incomeRunningCents": -1096825
+        },
+        {
+            "index": 138,
+            "marker": "GL300-0138",
+            "date": "2026-03-14",
+            "type": "out_invoice",
+            "cents": 13450,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 13450,
+            "incomeRunningCents": -1110275
+        },
+        {
+            "index": 139,
+            "marker": "GL300-0139",
+            "date": "2026-03-14",
+            "type": "out_invoice",
+            "cents": 13475,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 13475,
+            "incomeRunningCents": -1123750
+        },
+        {
+            "index": 140,
+            "marker": "GL300-0140",
+            "date": "2026-03-14",
+            "type": "out_refund",
+            "cents": 13500,
+            "incomeDebitCents": 13500,
+            "incomeCreditCents": 0,
+            "incomeRunningCents": -1110250
+        },
+        {
+            "index": 141,
+            "marker": "GL300-0141",
+            "date": "2026-03-15",
+            "type": "out_invoice",
+            "cents": 13525,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 13525,
+            "incomeRunningCents": -1123775
+        },
+        {
+            "index": 142,
+            "marker": "GL300-0142",
+            "date": "2026-03-15",
+            "type": "out_invoice",
+            "cents": 13550,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 13550,
+            "incomeRunningCents": -1137325
+        },
+        {
+            "index": 143,
+            "marker": "GL300-0143",
+            "date": "2026-03-15",
+            "type": "out_invoice",
+            "cents": 13575,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 13575,
+            "incomeRunningCents": -1150900
+        },
+        {
+            "index": 144,
+            "marker": "GL300-0144",
+            "date": "2026-03-15",
+            "type": "out_invoice",
+            "cents": 13600,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 13600,
+            "incomeRunningCents": -1164500
+        },
+        {
+            "index": 145,
+            "marker": "GL300-0145",
+            "date": "2026-03-15",
+            "type": "out_refund",
+            "cents": 13625,
+            "incomeDebitCents": 13625,
+            "incomeCreditCents": 0,
+            "incomeRunningCents": -1150875
+        },
+        {
+            "index": 146,
+            "marker": "GL300-0146",
+            "date": "2026-03-15",
+            "type": "out_invoice",
+            "cents": 13650,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 13650,
+            "incomeRunningCents": -1164525
+        },
+        {
+            "index": 147,
+            "marker": "GL300-0147",
+            "date": "2026-03-15",
+            "type": "out_invoice",
+            "cents": 13675,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 13675,
+            "incomeRunningCents": -1178200
+        },
+        {
+            "index": 148,
+            "marker": "GL300-0148",
+            "date": "2026-03-15",
+            "type": "out_invoice",
+            "cents": 13700,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 13700,
+            "incomeRunningCents": -1191900
+        },
+        {
+            "index": 149,
+            "marker": "GL300-0149",
+            "date": "2026-03-15",
+            "type": "out_invoice",
+            "cents": 13725,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 13725,
+            "incomeRunningCents": -1205625
+        },
+        {
+            "index": 150,
+            "marker": "GL300-0150",
+            "date": "2026-03-15",
+            "type": "out_refund",
+            "cents": 13750,
+            "incomeDebitCents": 13750,
+            "incomeCreditCents": 0,
+            "incomeRunningCents": -1191875
+        },
+        {
+            "index": 151,
+            "marker": "GL300-0151",
+            "date": "2026-03-16",
+            "type": "out_invoice",
+            "cents": 13775,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 13775,
+            "incomeRunningCents": -1205650
+        },
+        {
+            "index": 152,
+            "marker": "GL300-0152",
+            "date": "2026-03-16",
+            "type": "out_invoice",
+            "cents": 13800,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 13800,
+            "incomeRunningCents": -1219450
+        },
+        {
+            "index": 153,
+            "marker": "GL300-0153",
+            "date": "2026-03-16",
+            "type": "out_invoice",
+            "cents": 13825,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 13825,
+            "incomeRunningCents": -1233275
+        },
+        {
+            "index": 154,
+            "marker": "GL300-0154",
+            "date": "2026-03-16",
+            "type": "out_invoice",
+            "cents": 13850,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 13850,
+            "incomeRunningCents": -1247125
+        },
+        {
+            "index": 155,
+            "marker": "GL300-0155",
+            "date": "2026-03-16",
+            "type": "out_refund",
+            "cents": 13875,
+            "incomeDebitCents": 13875,
+            "incomeCreditCents": 0,
+            "incomeRunningCents": -1233250
+        },
+        {
+            "index": 156,
+            "marker": "GL300-0156",
+            "date": "2026-03-16",
+            "type": "out_invoice",
+            "cents": 13900,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 13900,
+            "incomeRunningCents": -1247150
+        },
+        {
+            "index": 157,
+            "marker": "GL300-0157",
+            "date": "2026-03-16",
+            "type": "out_invoice",
+            "cents": 13925,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 13925,
+            "incomeRunningCents": -1261075
+        },
+        {
+            "index": 158,
+            "marker": "GL300-0158",
+            "date": "2026-03-16",
+            "type": "out_invoice",
+            "cents": 13950,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 13950,
+            "incomeRunningCents": -1275025
+        },
+        {
+            "index": 159,
+            "marker": "GL300-0159",
+            "date": "2026-03-16",
+            "type": "out_invoice",
+            "cents": 13975,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 13975,
+            "incomeRunningCents": -1289000
+        },
+        {
+            "index": 160,
+            "marker": "GL300-0160",
+            "date": "2026-03-16",
+            "type": "out_refund",
+            "cents": 14000,
+            "incomeDebitCents": 14000,
+            "incomeCreditCents": 0,
+            "incomeRunningCents": -1275000
+        },
+        {
+            "index": 161,
+            "marker": "GL300-0161",
+            "date": "2026-03-17",
+            "type": "out_invoice",
+            "cents": 14025,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 14025,
+            "incomeRunningCents": -1289025
+        },
+        {
+            "index": 162,
+            "marker": "GL300-0162",
+            "date": "2026-03-17",
+            "type": "out_invoice",
+            "cents": 14050,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 14050,
+            "incomeRunningCents": -1303075
+        },
+        {
+            "index": 163,
+            "marker": "GL300-0163",
+            "date": "2026-03-17",
+            "type": "out_invoice",
+            "cents": 14075,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 14075,
+            "incomeRunningCents": -1317150
+        },
+        {
+            "index": 164,
+            "marker": "GL300-0164",
+            "date": "2026-03-17",
+            "type": "out_invoice",
+            "cents": 14100,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 14100,
+            "incomeRunningCents": -1331250
+        },
+        {
+            "index": 165,
+            "marker": "GL300-0165",
+            "date": "2026-03-17",
+            "type": "out_refund",
+            "cents": 14125,
+            "incomeDebitCents": 14125,
+            "incomeCreditCents": 0,
+            "incomeRunningCents": -1317125
+        },
+        {
+            "index": 166,
+            "marker": "GL300-0166",
+            "date": "2026-03-17",
+            "type": "out_invoice",
+            "cents": 14150,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 14150,
+            "incomeRunningCents": -1331275
+        },
+        {
+            "index": 167,
+            "marker": "GL300-0167",
+            "date": "2026-03-17",
+            "type": "out_invoice",
+            "cents": 14175,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 14175,
+            "incomeRunningCents": -1345450
+        },
+        {
+            "index": 168,
+            "marker": "GL300-0168",
+            "date": "2026-03-17",
+            "type": "out_invoice",
+            "cents": 14200,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 14200,
+            "incomeRunningCents": -1359650
+        },
+        {
+            "index": 169,
+            "marker": "GL300-0169",
+            "date": "2026-03-17",
+            "type": "out_invoice",
+            "cents": 14225,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 14225,
+            "incomeRunningCents": -1373875
+        },
+        {
+            "index": 170,
+            "marker": "GL300-0170",
+            "date": "2026-03-17",
+            "type": "out_refund",
+            "cents": 14250,
+            "incomeDebitCents": 14250,
+            "incomeCreditCents": 0,
+            "incomeRunningCents": -1359625
+        },
+        {
+            "index": 171,
+            "marker": "GL300-0171",
+            "date": "2026-03-18",
+            "type": "out_invoice",
+            "cents": 14275,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 14275,
+            "incomeRunningCents": -1373900
+        },
+        {
+            "index": 172,
+            "marker": "GL300-0172",
+            "date": "2026-03-18",
+            "type": "out_invoice",
+            "cents": 14300,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 14300,
+            "incomeRunningCents": -1388200
+        },
+        {
+            "index": 173,
+            "marker": "GL300-0173",
+            "date": "2026-03-18",
+            "type": "out_invoice",
+            "cents": 14325,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 14325,
+            "incomeRunningCents": -1402525
+        },
+        {
+            "index": 174,
+            "marker": "GL300-0174",
+            "date": "2026-03-18",
+            "type": "out_invoice",
+            "cents": 14350,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 14350,
+            "incomeRunningCents": -1416875
+        },
+        {
+            "index": 175,
+            "marker": "GL300-0175",
+            "date": "2026-03-18",
+            "type": "out_refund",
+            "cents": 14375,
+            "incomeDebitCents": 14375,
+            "incomeCreditCents": 0,
+            "incomeRunningCents": -1402500
+        },
+        {
+            "index": 176,
+            "marker": "GL300-0176",
+            "date": "2026-03-18",
+            "type": "out_invoice",
+            "cents": 14400,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 14400,
+            "incomeRunningCents": -1416900
+        },
+        {
+            "index": 177,
+            "marker": "GL300-0177",
+            "date": "2026-03-18",
+            "type": "out_invoice",
+            "cents": 14425,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 14425,
+            "incomeRunningCents": -1431325
+        },
+        {
+            "index": 178,
+            "marker": "GL300-0178",
+            "date": "2026-03-18",
+            "type": "out_invoice",
+            "cents": 14450,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 14450,
+            "incomeRunningCents": -1445775
+        },
+        {
+            "index": 179,
+            "marker": "GL300-0179",
+            "date": "2026-03-18",
+            "type": "out_invoice",
+            "cents": 14475,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 14475,
+            "incomeRunningCents": -1460250
+        },
+        {
+            "index": 180,
+            "marker": "GL300-0180",
+            "date": "2026-03-18",
+            "type": "out_refund",
+            "cents": 14500,
+            "incomeDebitCents": 14500,
+            "incomeCreditCents": 0,
+            "incomeRunningCents": -1445750
+        },
+        {
+            "index": 181,
+            "marker": "GL300-0181",
+            "date": "2026-03-19",
+            "type": "out_invoice",
+            "cents": 14525,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 14525,
+            "incomeRunningCents": -1460275
+        },
+        {
+            "index": 182,
+            "marker": "GL300-0182",
+            "date": "2026-03-19",
+            "type": "out_invoice",
+            "cents": 14550,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 14550,
+            "incomeRunningCents": -1474825
+        },
+        {
+            "index": 183,
+            "marker": "GL300-0183",
+            "date": "2026-03-19",
+            "type": "out_invoice",
+            "cents": 14575,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 14575,
+            "incomeRunningCents": -1489400
+        },
+        {
+            "index": 184,
+            "marker": "GL300-0184",
+            "date": "2026-03-19",
+            "type": "out_invoice",
+            "cents": 14600,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 14600,
+            "incomeRunningCents": -1504000
+        },
+        {
+            "index": 185,
+            "marker": "GL300-0185",
+            "date": "2026-03-19",
+            "type": "out_refund",
+            "cents": 14625,
+            "incomeDebitCents": 14625,
+            "incomeCreditCents": 0,
+            "incomeRunningCents": -1489375
+        },
+        {
+            "index": 186,
+            "marker": "GL300-0186",
+            "date": "2026-03-19",
+            "type": "out_invoice",
+            "cents": 14650,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 14650,
+            "incomeRunningCents": -1504025
+        },
+        {
+            "index": 187,
+            "marker": "GL300-0187",
+            "date": "2026-03-19",
+            "type": "out_invoice",
+            "cents": 14675,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 14675,
+            "incomeRunningCents": -1518700
+        },
+        {
+            "index": 188,
+            "marker": "GL300-0188",
+            "date": "2026-03-19",
+            "type": "out_invoice",
+            "cents": 14700,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 14700,
+            "incomeRunningCents": -1533400
+        },
+        {
+            "index": 189,
+            "marker": "GL300-0189",
+            "date": "2026-03-19",
+            "type": "out_invoice",
+            "cents": 14725,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 14725,
+            "incomeRunningCents": -1548125
+        },
+        {
+            "index": 190,
+            "marker": "GL300-0190",
+            "date": "2026-03-19",
+            "type": "out_refund",
+            "cents": 14750,
+            "incomeDebitCents": 14750,
+            "incomeCreditCents": 0,
+            "incomeRunningCents": -1533375
+        },
+        {
+            "index": 191,
+            "marker": "GL300-0191",
+            "date": "2026-03-20",
+            "type": "out_invoice",
+            "cents": 14775,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 14775,
+            "incomeRunningCents": -1548150
+        },
+        {
+            "index": 192,
+            "marker": "GL300-0192",
+            "date": "2026-03-20",
+            "type": "out_invoice",
+            "cents": 14800,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 14800,
+            "incomeRunningCents": -1562950
+        },
+        {
+            "index": 193,
+            "marker": "GL300-0193",
+            "date": "2026-03-20",
+            "type": "out_invoice",
+            "cents": 14825,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 14825,
+            "incomeRunningCents": -1577775
+        },
+        {
+            "index": 194,
+            "marker": "GL300-0194",
+            "date": "2026-03-20",
+            "type": "out_invoice",
+            "cents": 14850,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 14850,
+            "incomeRunningCents": -1592625
+        },
+        {
+            "index": 195,
+            "marker": "GL300-0195",
+            "date": "2026-03-20",
+            "type": "out_refund",
+            "cents": 14875,
+            "incomeDebitCents": 14875,
+            "incomeCreditCents": 0,
+            "incomeRunningCents": -1577750
+        },
+        {
+            "index": 196,
+            "marker": "GL300-0196",
+            "date": "2026-03-20",
+            "type": "out_invoice",
+            "cents": 14900,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 14900,
+            "incomeRunningCents": -1592650
+        },
+        {
+            "index": 197,
+            "marker": "GL300-0197",
+            "date": "2026-03-20",
+            "type": "out_invoice",
+            "cents": 14925,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 14925,
+            "incomeRunningCents": -1607575
+        },
+        {
+            "index": 198,
+            "marker": "GL300-0198",
+            "date": "2026-03-20",
+            "type": "out_invoice",
+            "cents": 14950,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 14950,
+            "incomeRunningCents": -1622525
+        },
+        {
+            "index": 199,
+            "marker": "GL300-0199",
+            "date": "2026-03-20",
+            "type": "out_invoice",
+            "cents": 14975,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 14975,
+            "incomeRunningCents": -1637500
+        },
+        {
+            "index": 200,
+            "marker": "GL300-0200",
+            "date": "2026-03-20",
+            "type": "out_refund",
+            "cents": 15000,
+            "incomeDebitCents": 15000,
+            "incomeCreditCents": 0,
+            "incomeRunningCents": -1622500
+        },
+        {
+            "index": 201,
+            "marker": "GL300-0201",
+            "date": "2026-03-21",
+            "type": "out_invoice",
+            "cents": 15025,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 15025,
+            "incomeRunningCents": -1637525
+        },
+        {
+            "index": 202,
+            "marker": "GL300-0202",
+            "date": "2026-03-21",
+            "type": "out_invoice",
+            "cents": 15050,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 15050,
+            "incomeRunningCents": -1652575
+        },
+        {
+            "index": 203,
+            "marker": "GL300-0203",
+            "date": "2026-03-21",
+            "type": "out_invoice",
+            "cents": 15075,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 15075,
+            "incomeRunningCents": -1667650
+        },
+        {
+            "index": 204,
+            "marker": "GL300-0204",
+            "date": "2026-03-21",
+            "type": "out_invoice",
+            "cents": 15100,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 15100,
+            "incomeRunningCents": -1682750
+        },
+        {
+            "index": 205,
+            "marker": "GL300-0205",
+            "date": "2026-03-21",
+            "type": "out_refund",
+            "cents": 15125,
+            "incomeDebitCents": 15125,
+            "incomeCreditCents": 0,
+            "incomeRunningCents": -1667625
+        },
+        {
+            "index": 206,
+            "marker": "GL300-0206",
+            "date": "2026-03-21",
+            "type": "out_invoice",
+            "cents": 15150,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 15150,
+            "incomeRunningCents": -1682775
+        },
+        {
+            "index": 207,
+            "marker": "GL300-0207",
+            "date": "2026-03-21",
+            "type": "out_invoice",
+            "cents": 15175,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 15175,
+            "incomeRunningCents": -1697950
+        },
+        {
+            "index": 208,
+            "marker": "GL300-0208",
+            "date": "2026-03-21",
+            "type": "out_invoice",
+            "cents": 15200,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 15200,
+            "incomeRunningCents": -1713150
+        },
+        {
+            "index": 209,
+            "marker": "GL300-0209",
+            "date": "2026-03-21",
+            "type": "out_invoice",
+            "cents": 15225,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 15225,
+            "incomeRunningCents": -1728375
+        },
+        {
+            "index": 210,
+            "marker": "GL300-0210",
+            "date": "2026-03-21",
+            "type": "out_refund",
+            "cents": 15250,
+            "incomeDebitCents": 15250,
+            "incomeCreditCents": 0,
+            "incomeRunningCents": -1713125
+        },
+        {
+            "index": 211,
+            "marker": "GL300-0211",
+            "date": "2026-03-22",
+            "type": "out_invoice",
+            "cents": 15275,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 15275,
+            "incomeRunningCents": -1728400
+        },
+        {
+            "index": 212,
+            "marker": "GL300-0212",
+            "date": "2026-03-22",
+            "type": "out_invoice",
+            "cents": 15300,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 15300,
+            "incomeRunningCents": -1743700
+        },
+        {
+            "index": 213,
+            "marker": "GL300-0213",
+            "date": "2026-03-22",
+            "type": "out_invoice",
+            "cents": 15325,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 15325,
+            "incomeRunningCents": -1759025
+        },
+        {
+            "index": 214,
+            "marker": "GL300-0214",
+            "date": "2026-03-22",
+            "type": "out_invoice",
+            "cents": 15350,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 15350,
+            "incomeRunningCents": -1774375
+        },
+        {
+            "index": 215,
+            "marker": "GL300-0215",
+            "date": "2026-03-22",
+            "type": "out_refund",
+            "cents": 15375,
+            "incomeDebitCents": 15375,
+            "incomeCreditCents": 0,
+            "incomeRunningCents": -1759000
+        },
+        {
+            "index": 216,
+            "marker": "GL300-0216",
+            "date": "2026-03-22",
+            "type": "out_invoice",
+            "cents": 15400,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 15400,
+            "incomeRunningCents": -1774400
+        },
+        {
+            "index": 217,
+            "marker": "GL300-0217",
+            "date": "2026-03-22",
+            "type": "out_invoice",
+            "cents": 15425,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 15425,
+            "incomeRunningCents": -1789825
+        },
+        {
+            "index": 218,
+            "marker": "GL300-0218",
+            "date": "2026-03-22",
+            "type": "out_invoice",
+            "cents": 15450,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 15450,
+            "incomeRunningCents": -1805275
+        },
+        {
+            "index": 219,
+            "marker": "GL300-0219",
+            "date": "2026-03-22",
+            "type": "out_invoice",
+            "cents": 15475,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 15475,
+            "incomeRunningCents": -1820750
+        },
+        {
+            "index": 220,
+            "marker": "GL300-0220",
+            "date": "2026-03-22",
+            "type": "out_refund",
+            "cents": 15500,
+            "incomeDebitCents": 15500,
+            "incomeCreditCents": 0,
+            "incomeRunningCents": -1805250
+        },
+        {
+            "index": 221,
+            "marker": "GL300-0221",
+            "date": "2026-03-23",
+            "type": "out_invoice",
+            "cents": 15525,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 15525,
+            "incomeRunningCents": -1820775
+        },
+        {
+            "index": 222,
+            "marker": "GL300-0222",
+            "date": "2026-03-23",
+            "type": "out_invoice",
+            "cents": 15550,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 15550,
+            "incomeRunningCents": -1836325
+        },
+        {
+            "index": 223,
+            "marker": "GL300-0223",
+            "date": "2026-03-23",
+            "type": "out_invoice",
+            "cents": 15575,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 15575,
+            "incomeRunningCents": -1851900
+        },
+        {
+            "index": 224,
+            "marker": "GL300-0224",
+            "date": "2026-03-23",
+            "type": "out_invoice",
+            "cents": 15600,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 15600,
+            "incomeRunningCents": -1867500
+        },
+        {
+            "index": 225,
+            "marker": "GL300-0225",
+            "date": "2026-03-23",
+            "type": "out_refund",
+            "cents": 15625,
+            "incomeDebitCents": 15625,
+            "incomeCreditCents": 0,
+            "incomeRunningCents": -1851875
+        },
+        {
+            "index": 226,
+            "marker": "GL300-0226",
+            "date": "2026-03-23",
+            "type": "out_invoice",
+            "cents": 15650,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 15650,
+            "incomeRunningCents": -1867525
+        },
+        {
+            "index": 227,
+            "marker": "GL300-0227",
+            "date": "2026-03-23",
+            "type": "out_invoice",
+            "cents": 15675,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 15675,
+            "incomeRunningCents": -1883200
+        },
+        {
+            "index": 228,
+            "marker": "GL300-0228",
+            "date": "2026-03-23",
+            "type": "out_invoice",
+            "cents": 15700,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 15700,
+            "incomeRunningCents": -1898900
+        },
+        {
+            "index": 229,
+            "marker": "GL300-0229",
+            "date": "2026-03-23",
+            "type": "out_invoice",
+            "cents": 15725,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 15725,
+            "incomeRunningCents": -1914625
+        },
+        {
+            "index": 230,
+            "marker": "GL300-0230",
+            "date": "2026-03-23",
+            "type": "out_refund",
+            "cents": 15750,
+            "incomeDebitCents": 15750,
+            "incomeCreditCents": 0,
+            "incomeRunningCents": -1898875
+        },
+        {
+            "index": 231,
+            "marker": "GL300-0231",
+            "date": "2026-03-24",
+            "type": "out_invoice",
+            "cents": 15775,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 15775,
+            "incomeRunningCents": -1914650
+        },
+        {
+            "index": 232,
+            "marker": "GL300-0232",
+            "date": "2026-03-24",
+            "type": "out_invoice",
+            "cents": 15800,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 15800,
+            "incomeRunningCents": -1930450
+        },
+        {
+            "index": 233,
+            "marker": "GL300-0233",
+            "date": "2026-03-24",
+            "type": "out_invoice",
+            "cents": 15825,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 15825,
+            "incomeRunningCents": -1946275
+        },
+        {
+            "index": 234,
+            "marker": "GL300-0234",
+            "date": "2026-03-24",
+            "type": "out_invoice",
+            "cents": 15850,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 15850,
+            "incomeRunningCents": -1962125
+        },
+        {
+            "index": 235,
+            "marker": "GL300-0235",
+            "date": "2026-03-24",
+            "type": "out_refund",
+            "cents": 15875,
+            "incomeDebitCents": 15875,
+            "incomeCreditCents": 0,
+            "incomeRunningCents": -1946250
+        },
+        {
+            "index": 236,
+            "marker": "GL300-0236",
+            "date": "2026-03-24",
+            "type": "out_invoice",
+            "cents": 15900,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 15900,
+            "incomeRunningCents": -1962150
+        },
+        {
+            "index": 237,
+            "marker": "GL300-0237",
+            "date": "2026-03-24",
+            "type": "out_invoice",
+            "cents": 15925,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 15925,
+            "incomeRunningCents": -1978075
+        },
+        {
+            "index": 238,
+            "marker": "GL300-0238",
+            "date": "2026-03-24",
+            "type": "out_invoice",
+            "cents": 15950,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 15950,
+            "incomeRunningCents": -1994025
+        },
+        {
+            "index": 239,
+            "marker": "GL300-0239",
+            "date": "2026-03-24",
+            "type": "out_invoice",
+            "cents": 15975,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 15975,
+            "incomeRunningCents": -2010000
+        },
+        {
+            "index": 240,
+            "marker": "GL300-0240",
+            "date": "2026-03-24",
+            "type": "out_refund",
+            "cents": 16000,
+            "incomeDebitCents": 16000,
+            "incomeCreditCents": 0,
+            "incomeRunningCents": -1994000
+        },
+        {
+            "index": 241,
+            "marker": "GL300-0241",
+            "date": "2026-03-25",
+            "type": "out_invoice",
+            "cents": 16025,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 16025,
+            "incomeRunningCents": -2010025
+        },
+        {
+            "index": 242,
+            "marker": "GL300-0242",
+            "date": "2026-03-25",
+            "type": "out_invoice",
+            "cents": 16050,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 16050,
+            "incomeRunningCents": -2026075
+        },
+        {
+            "index": 243,
+            "marker": "GL300-0243",
+            "date": "2026-03-25",
+            "type": "out_invoice",
+            "cents": 16075,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 16075,
+            "incomeRunningCents": -2042150
+        },
+        {
+            "index": 244,
+            "marker": "GL300-0244",
+            "date": "2026-03-25",
+            "type": "out_invoice",
+            "cents": 16100,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 16100,
+            "incomeRunningCents": -2058250
+        },
+        {
+            "index": 245,
+            "marker": "GL300-0245",
+            "date": "2026-03-25",
+            "type": "out_refund",
+            "cents": 16125,
+            "incomeDebitCents": 16125,
+            "incomeCreditCents": 0,
+            "incomeRunningCents": -2042125
+        },
+        {
+            "index": 246,
+            "marker": "GL300-0246",
+            "date": "2026-03-25",
+            "type": "out_invoice",
+            "cents": 16150,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 16150,
+            "incomeRunningCents": -2058275
+        },
+        {
+            "index": 247,
+            "marker": "GL300-0247",
+            "date": "2026-03-25",
+            "type": "out_invoice",
+            "cents": 16175,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 16175,
+            "incomeRunningCents": -2074450
+        },
+        {
+            "index": 248,
+            "marker": "GL300-0248",
+            "date": "2026-03-25",
+            "type": "out_invoice",
+            "cents": 16200,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 16200,
+            "incomeRunningCents": -2090650
+        },
+        {
+            "index": 249,
+            "marker": "GL300-0249",
+            "date": "2026-03-25",
+            "type": "out_invoice",
+            "cents": 16225,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 16225,
+            "incomeRunningCents": -2106875
+        },
+        {
+            "index": 250,
+            "marker": "GL300-0250",
+            "date": "2026-03-25",
+            "type": "out_refund",
+            "cents": 16250,
+            "incomeDebitCents": 16250,
+            "incomeCreditCents": 0,
+            "incomeRunningCents": -2090625
+        },
+        {
+            "index": 251,
+            "marker": "GL300-0251",
+            "date": "2026-03-26",
+            "type": "out_invoice",
+            "cents": 16275,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 16275,
+            "incomeRunningCents": -2106900
+        },
+        {
+            "index": 252,
+            "marker": "GL300-0252",
+            "date": "2026-03-26",
+            "type": "out_invoice",
+            "cents": 16300,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 16300,
+            "incomeRunningCents": -2123200
+        },
+        {
+            "index": 253,
+            "marker": "GL300-0253",
+            "date": "2026-03-26",
+            "type": "out_invoice",
+            "cents": 16325,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 16325,
+            "incomeRunningCents": -2139525
+        },
+        {
+            "index": 254,
+            "marker": "GL300-0254",
+            "date": "2026-03-26",
+            "type": "out_invoice",
+            "cents": 16350,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 16350,
+            "incomeRunningCents": -2155875
+        },
+        {
+            "index": 255,
+            "marker": "GL300-0255",
+            "date": "2026-03-26",
+            "type": "out_refund",
+            "cents": 16375,
+            "incomeDebitCents": 16375,
+            "incomeCreditCents": 0,
+            "incomeRunningCents": -2139500
+        },
+        {
+            "index": 256,
+            "marker": "GL300-0256",
+            "date": "2026-03-26",
+            "type": "out_invoice",
+            "cents": 16400,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 16400,
+            "incomeRunningCents": -2155900
+        },
+        {
+            "index": 257,
+            "marker": "GL300-0257",
+            "date": "2026-03-26",
+            "type": "out_invoice",
+            "cents": 16425,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 16425,
+            "incomeRunningCents": -2172325
+        },
+        {
+            "index": 258,
+            "marker": "GL300-0258",
+            "date": "2026-03-26",
+            "type": "out_invoice",
+            "cents": 16450,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 16450,
+            "incomeRunningCents": -2188775
+        },
+        {
+            "index": 259,
+            "marker": "GL300-0259",
+            "date": "2026-03-26",
+            "type": "out_invoice",
+            "cents": 16475,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 16475,
+            "incomeRunningCents": -2205250
+        },
+        {
+            "index": 260,
+            "marker": "GL300-0260",
+            "date": "2026-03-26",
+            "type": "out_refund",
+            "cents": 16500,
+            "incomeDebitCents": 16500,
+            "incomeCreditCents": 0,
+            "incomeRunningCents": -2188750
+        },
+        {
+            "index": 261,
+            "marker": "GL300-0261",
+            "date": "2026-03-27",
+            "type": "out_invoice",
+            "cents": 16525,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 16525,
+            "incomeRunningCents": -2205275
+        },
+        {
+            "index": 262,
+            "marker": "GL300-0262",
+            "date": "2026-03-27",
+            "type": "out_invoice",
+            "cents": 16550,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 16550,
+            "incomeRunningCents": -2221825
+        },
+        {
+            "index": 263,
+            "marker": "GL300-0263",
+            "date": "2026-03-27",
+            "type": "out_invoice",
+            "cents": 16575,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 16575,
+            "incomeRunningCents": -2238400
+        },
+        {
+            "index": 264,
+            "marker": "GL300-0264",
+            "date": "2026-03-27",
+            "type": "out_invoice",
+            "cents": 16600,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 16600,
+            "incomeRunningCents": -2255000
+        },
+        {
+            "index": 265,
+            "marker": "GL300-0265",
+            "date": "2026-03-27",
+            "type": "out_refund",
+            "cents": 16625,
+            "incomeDebitCents": 16625,
+            "incomeCreditCents": 0,
+            "incomeRunningCents": -2238375
+        },
+        {
+            "index": 266,
+            "marker": "GL300-0266",
+            "date": "2026-03-27",
+            "type": "out_invoice",
+            "cents": 16650,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 16650,
+            "incomeRunningCents": -2255025
+        },
+        {
+            "index": 267,
+            "marker": "GL300-0267",
+            "date": "2026-03-27",
+            "type": "out_invoice",
+            "cents": 16675,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 16675,
+            "incomeRunningCents": -2271700
+        },
+        {
+            "index": 268,
+            "marker": "GL300-0268",
+            "date": "2026-03-27",
+            "type": "out_invoice",
+            "cents": 16700,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 16700,
+            "incomeRunningCents": -2288400
+        },
+        {
+            "index": 269,
+            "marker": "GL300-0269",
+            "date": "2026-03-27",
+            "type": "out_invoice",
+            "cents": 16725,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 16725,
+            "incomeRunningCents": -2305125
+        },
+        {
+            "index": 270,
+            "marker": "GL300-0270",
+            "date": "2026-03-27",
+            "type": "out_refund",
+            "cents": 16750,
+            "incomeDebitCents": 16750,
+            "incomeCreditCents": 0,
+            "incomeRunningCents": -2288375
+        },
+        {
+            "index": 271,
+            "marker": "GL300-0271",
+            "date": "2026-03-28",
+            "type": "out_invoice",
+            "cents": 16775,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 16775,
+            "incomeRunningCents": -2305150
+        },
+        {
+            "index": 272,
+            "marker": "GL300-0272",
+            "date": "2026-03-28",
+            "type": "out_invoice",
+            "cents": 16800,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 16800,
+            "incomeRunningCents": -2321950
+        },
+        {
+            "index": 273,
+            "marker": "GL300-0273",
+            "date": "2026-03-28",
+            "type": "out_invoice",
+            "cents": 16825,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 16825,
+            "incomeRunningCents": -2338775
+        },
+        {
+            "index": 274,
+            "marker": "GL300-0274",
+            "date": "2026-03-28",
+            "type": "out_invoice",
+            "cents": 16850,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 16850,
+            "incomeRunningCents": -2355625
+        },
+        {
+            "index": 275,
+            "marker": "GL300-0275",
+            "date": "2026-03-28",
+            "type": "out_refund",
+            "cents": 16875,
+            "incomeDebitCents": 16875,
+            "incomeCreditCents": 0,
+            "incomeRunningCents": -2338750
+        },
+        {
+            "index": 276,
+            "marker": "GL300-0276",
+            "date": "2026-03-28",
+            "type": "out_invoice",
+            "cents": 16900,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 16900,
+            "incomeRunningCents": -2355650
+        },
+        {
+            "index": 277,
+            "marker": "GL300-0277",
+            "date": "2026-03-28",
+            "type": "out_invoice",
+            "cents": 16925,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 16925,
+            "incomeRunningCents": -2372575
+        },
+        {
+            "index": 278,
+            "marker": "GL300-0278",
+            "date": "2026-03-28",
+            "type": "out_invoice",
+            "cents": 16950,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 16950,
+            "incomeRunningCents": -2389525
+        },
+        {
+            "index": 279,
+            "marker": "GL300-0279",
+            "date": "2026-03-28",
+            "type": "out_invoice",
+            "cents": 16975,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 16975,
+            "incomeRunningCents": -2406500
+        },
+        {
+            "index": 280,
+            "marker": "GL300-0280",
+            "date": "2026-03-28",
+            "type": "out_refund",
+            "cents": 17000,
+            "incomeDebitCents": 17000,
+            "incomeCreditCents": 0,
+            "incomeRunningCents": -2389500
+        },
+        {
+            "index": 281,
+            "marker": "GL300-0281",
+            "date": "2026-03-29",
+            "type": "out_invoice",
+            "cents": 17025,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 17025,
+            "incomeRunningCents": -2406525
+        },
+        {
+            "index": 282,
+            "marker": "GL300-0282",
+            "date": "2026-03-29",
+            "type": "out_invoice",
+            "cents": 17050,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 17050,
+            "incomeRunningCents": -2423575
+        },
+        {
+            "index": 283,
+            "marker": "GL300-0283",
+            "date": "2026-03-29",
+            "type": "out_invoice",
+            "cents": 17075,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 17075,
+            "incomeRunningCents": -2440650
+        },
+        {
+            "index": 284,
+            "marker": "GL300-0284",
+            "date": "2026-03-29",
+            "type": "out_invoice",
+            "cents": 17100,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 17100,
+            "incomeRunningCents": -2457750
+        },
+        {
+            "index": 285,
+            "marker": "GL300-0285",
+            "date": "2026-03-29",
+            "type": "out_refund",
+            "cents": 17125,
+            "incomeDebitCents": 17125,
+            "incomeCreditCents": 0,
+            "incomeRunningCents": -2440625
+        },
+        {
+            "index": 286,
+            "marker": "GL300-0286",
+            "date": "2026-03-29",
+            "type": "out_invoice",
+            "cents": 17150,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 17150,
+            "incomeRunningCents": -2457775
+        },
+        {
+            "index": 287,
+            "marker": "GL300-0287",
+            "date": "2026-03-29",
+            "type": "out_invoice",
+            "cents": 17175,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 17175,
+            "incomeRunningCents": -2474950
+        },
+        {
+            "index": 288,
+            "marker": "GL300-0288",
+            "date": "2026-03-29",
+            "type": "out_invoice",
+            "cents": 17200,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 17200,
+            "incomeRunningCents": -2492150
+        },
+        {
+            "index": 289,
+            "marker": "GL300-0289",
+            "date": "2026-03-29",
+            "type": "out_invoice",
+            "cents": 17225,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 17225,
+            "incomeRunningCents": -2509375
+        },
+        {
+            "index": 290,
+            "marker": "GL300-0290",
+            "date": "2026-03-29",
+            "type": "out_refund",
+            "cents": 17250,
+            "incomeDebitCents": 17250,
+            "incomeCreditCents": 0,
+            "incomeRunningCents": -2492125
+        },
+        {
+            "index": 291,
+            "marker": "GL300-0291",
+            "date": "2026-03-30",
+            "type": "out_invoice",
+            "cents": 17275,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 17275,
+            "incomeRunningCents": -2509400
+        },
+        {
+            "index": 292,
+            "marker": "GL300-0292",
+            "date": "2026-03-30",
+            "type": "out_invoice",
+            "cents": 17300,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 17300,
+            "incomeRunningCents": -2526700
+        },
+        {
+            "index": 293,
+            "marker": "GL300-0293",
+            "date": "2026-03-30",
+            "type": "out_invoice",
+            "cents": 17325,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 17325,
+            "incomeRunningCents": -2544025
+        },
+        {
+            "index": 294,
+            "marker": "GL300-0294",
+            "date": "2026-03-30",
+            "type": "out_invoice",
+            "cents": 17350,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 17350,
+            "incomeRunningCents": -2561375
+        },
+        {
+            "index": 295,
+            "marker": "GL300-0295",
+            "date": "2026-03-30",
+            "type": "out_refund",
+            "cents": 17375,
+            "incomeDebitCents": 17375,
+            "incomeCreditCents": 0,
+            "incomeRunningCents": -2544000
+        },
+        {
+            "index": 296,
+            "marker": "GL300-0296",
+            "date": "2026-03-30",
+            "type": "out_invoice",
+            "cents": 17400,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 17400,
+            "incomeRunningCents": -2561400
+        },
+        {
+            "index": 297,
+            "marker": "GL300-0297",
+            "date": "2026-03-30",
+            "type": "out_invoice",
+            "cents": 17425,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 17425,
+            "incomeRunningCents": -2578825
+        },
+        {
+            "index": 298,
+            "marker": "GL300-0298",
+            "date": "2026-03-30",
+            "type": "out_invoice",
+            "cents": 17450,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 17450,
+            "incomeRunningCents": -2596275
+        },
+        {
+            "index": 299,
+            "marker": "GL300-0299",
+            "date": "2026-03-30",
+            "type": "out_invoice",
+            "cents": 17475,
+            "incomeDebitCents": 0,
+            "incomeCreditCents": 17475,
+            "incomeRunningCents": -2613750
+        },
+        {
+            "index": 300,
+            "marker": "GL300-0300",
+            "date": "2026-03-30",
+            "type": "out_refund",
+            "cents": 17500,
+            "incomeDebitCents": 17500,
+            "incomeCreditCents": 0,
+            "incomeRunningCents": -2596250
+        }
+    ],
+    "expectedIncome": {
+        "openingCents": -125000,
+        "debitCents": 828750,
+        "creditCents": 3300000,
+        "closingCents": -2596250
+    }
+}

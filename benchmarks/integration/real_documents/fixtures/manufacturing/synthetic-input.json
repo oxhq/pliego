@@ -1,0 +1,43 @@
+{
+    "schema": "aureus.manufacturing-work-order.synthetic.v1",
+    "startClock": "2026-03-31T11:00:00+00:00",
+    "locale": "en",
+    "quantity": 5,
+    "orderName": "V04/MO/001",
+    "product": "V04 Assembly",
+    "company": "Fixture Manufacturing",
+    "operator": "Fixture Operator",
+    "components": [
+        {
+            "name": "V04 Frame",
+            "perUnit": 2,
+            "required": 10
+        },
+        {
+            "name": "V04 Fastener",
+            "perUnit": 1,
+            "required": 5
+        },
+        {
+            "name": "V04 Compound",
+            "perUnit": 0.5,
+            "required": 2.5
+        }
+    ],
+    "operations": [
+        {
+            "name": "Cutting",
+            "workCenter": "V04 Cutting",
+            "seconds": 750,
+            "minutes": 12.5
+        },
+        {
+            "name": "Assembly",
+            "workCenter": "V04 Assembly",
+            "seconds": 1080,
+            "minutes": 18
+        }
+    ],
+    "expectedPages": 1,
+    "templateTrack": "original-unmodified"
+}

@@ -17,6 +17,8 @@ use crate::geom::PhysicalRect;
 
 #[derive(MallocSizeOf)]
 pub struct FragmentTree {
+    /// Paged fixed replicas belong to their individual page, not a viewport overlay.
+    pub(crate) is_paged: bool,
     /// Fragments at the top-level of the tree.
     ///
     /// If the root element has `display: none`, there are zero fragments.
@@ -45,6 +47,7 @@ impl FragmentTree {
         viewport_scroll_sensitivity: AxesScrollSensitivity,
     ) -> Self {
         Self {
+            is_paged: false,
             root_fragments,
             scrollable_overflow: Cell::default(),
             initial_containing_block,

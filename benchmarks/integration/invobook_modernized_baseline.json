@@ -1,0 +1,31 @@
+{
+  "schema": "pliego.invobook-modernized-baseline.v1",
+  "name": "modernized-laravel12",
+  "applicationCommit": "e5f666cef63543beffadfcc045f6af673408a02e",
+  "changedFiles": {
+    "app/Actions/CreateInvoice.php": "3a0bcd968c3a3675a0e839fd9151aca791bd8a897435431431753882c9704417",
+    "composer.json": "87372f9d24efd664cf1a0421de9424d746dacd1c9d98ce8535dd689ec28579f6",
+    "composer.lock": "2d88395bf904aaa2bdddf63d38168a240190c6cc89cbf5333fc1124c569ec21d",
+    "package.json": "db62e7020855a7f3773395c3caab27f65003f5c7e3dc4d7bc3aae1603abc05d8",
+    "package-lock.json": "3a6c697d81ab0c04820eeda18e752ebd374fb1445c96e13e915a0b7edadd10d6"
+  },
+  "untracked": ["packages/glow-chart/"],
+  "fork": {
+    "path": "packages/glow-chart",
+    "applicationPackage": "hasnayeen/glow-chart",
+    "sourceCommit": "f33530c231116a8f4eb3957a779d5b6012ba195d",
+    "changedFiles": {
+      "composer.json": "6ea1642c4536eda86bc919575dd5f8bbec7ba5f427e9a53a1801b5814f77ca47"
+    },
+    "untrackedFiles": {
+      "PLIEGO-COMPATIBILITY.md": "f312e11a7a4f1a9d5807117c459cac0ba28cd0001a04b94191560ecd0c649f49"
+    },
+    "pathReference": "a095a7b343cd6d471edec14d04fb91453471116c"
+  },
+  "installedPackages": {
+    "laravel/framework": "12.69.1",
+    "spatie/browsershot": "5.4.0",
+    "hasnayeen/glow-chart": "dev-pliego-laravel12"
+  },
+  "boundary": "Approved shared application baseline, not an upstream release or security waiver. Exact fork manifest bytes include the original mixed line endings. Original template/action repairs and PDF correctness gates remain separate."
+}

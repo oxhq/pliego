@@ -2543,7 +2543,9 @@ pub(crate) fn check_support_for_algorithm(
             };
 
             match normalized_algorithm {
-                DecryptAlgorithm::RsaOaep(_) => true,
+                DecryptAlgorithm::RsaOaep(_) => {
+                    rsa_common::require_private_operations_enabled().is_ok()
+                },
                 DecryptAlgorithm::AesCtr(normalized_algorithm) => {
                     normalized_algorithm.counter.len() == 16 &&
                         normalized_algorithm.length != 0 &&
@@ -2582,10 +2584,10 @@ pub(crate) fn check_support_for_algorithm(
             };
 
             match normalized_algorithm {
-                SignAlgorithm::RsassaPkcs1V1_5(_) |
-                SignAlgorithm::RsaPss(_) |
-                SignAlgorithm::Ecdsa(_) |
-                SignAlgorithm::Ed25519(_) => true,
+                SignAlgorithm::RsassaPkcs1V1_5(_) | SignAlgorithm::RsaPss(_) => {
+                    rsa_common::require_private_operations_enabled().is_ok()
+                },
+                SignAlgorithm::Ecdsa(_) | SignAlgorithm::Ed25519(_) => true,
                 SignAlgorithm::Ed448(normalized_algorithm) => normalized_algorithm
                     .context
                     .is_none_or(|context| context.len() <= 255),

@@ -6,6 +6,12 @@ CSS into paginated PDFs without Chromium, Node.js, or Java in the runtime.
 
 **Current stable line:** Pliego 0.3 / API 2. **Recommended build:** v0.3.3.
 
+**Unreleased candidate:** 0.4.0 prepares exact API 2 links, bounded collapsed
+tables, solid paint and physical-page footers for real business documents. It
+also adds Laravel 12/13 compatibility and exact app-unit page settings. These
+source changes are not available through the stable install command below.
+See the [candidate scope and remaining release gates](docs/releases/v0.4.0.md).
+
 Pliego focuses on document workflows whose inputs and failure boundaries can be made
 explicit:
 
@@ -139,6 +145,11 @@ separate release and evidence gates are satisfied.
 Link annotations are also outside the advertised v0.3.3 API 2 profile. Inputs that
 produce a link operation without exact fixed-point authority fail closed with
 `SCENE_ENCODING_FAILED`; no PDF is delivered.
+
+The 0.4.0 candidate retains exact link geometry for a narrow URI-link profile;
+it does not add internal destinations, underlines or arbitrary clipped links.
+The [support profile](docs/pliego/support-profile.md#unreleased-040-candidate)
+separates those additions from the published v0.3.3 boundary.
 
 ## Benchmark evidence
 

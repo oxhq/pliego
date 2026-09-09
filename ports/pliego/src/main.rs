@@ -4864,22 +4864,7 @@ fn scene_capture_code(capture: &SceneCapture) -> Option<&'static str> {
 
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
 const fn unsupported_paint_kind_name(kind: UnsupportedPaintKind) -> &'static str {
-    match kind {
-        UnsupportedPaintKind::Box => "box",
-        UnsupportedPaintKind::RootBackground => "root-background",
-        UnsupportedPaintKind::Outline => "outline",
-        UnsupportedPaintKind::CollapsedTableBorders => "collapsed-table-borders",
-        UnsupportedPaintKind::Iframe => "iframe",
-        UnsupportedPaintKind::TextEffects => "text-effects",
-        UnsupportedPaintKind::ContentGeometry => "content-geometry",
-        UnsupportedPaintKind::SvgAnimation => "svg-animation",
-        UnsupportedPaintKind::SvgCompositing => "svg-compositing",
-        UnsupportedPaintKind::SvgStroke => "svg-stroke",
-        UnsupportedPaintKind::SvgPaint => "svg-paint",
-        UnsupportedPaintKind::SvgImage => "svg-image",
-        UnsupportedPaintKind::SvgText => "svg-text",
-        UnsupportedPaintKind::SvgInvalidPath => "svg-invalid-path",
-    }
+    kind.as_str()
 }
 
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]

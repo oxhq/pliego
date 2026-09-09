@@ -1,0 +1,64 @@
+{
+    "orderId": 4,
+    "orderName": "V04/MO/001",
+    "state": "done",
+    "quantity": 5,
+    "quantityProducing": 5,
+    "uom": "Units",
+    "operations": [
+        {
+            "id": 7,
+            "name": "Cutting",
+            "center": "V04 Cutting",
+            "minutes": 12.5,
+            "quantityProduced": 5,
+            "logs": [
+                {
+                    "id": 7,
+                    "start": "2026-03-31T11:00:00+00:00",
+                    "finish": "2026-03-31T11:12:30+00:00",
+                    "minutes": 12.5
+                }
+            ]
+        },
+        {
+            "id": 8,
+            "name": "Assembly",
+            "center": "V04 Assembly",
+            "minutes": 18,
+            "quantityProduced": 5,
+            "logs": [
+                {
+                    "id": 8,
+                    "start": "2026-03-31T11:12:30+00:00",
+                    "finish": "2026-03-31T11:30:30+00:00",
+                    "minutes": 18
+                }
+            ]
+        }
+    ],
+    "components": [
+        {
+            "id": 19,
+            "name": "V04 Frame",
+            "required": 10,
+            "consumed": 10,
+            "uom": "Units"
+        },
+        {
+            "id": 20,
+            "name": "V04 Fastener",
+            "required": 5,
+            "consumed": 5,
+            "uom": "Units"
+        },
+        {
+            "id": 21,
+            "name": "V04 Compound",
+            "required": 2.5,
+            "consumed": 2.5,
+            "uom": "Units"
+        }
+    ],
+    "finalClock": "2026-03-31T11:30:30+00:00"
+}

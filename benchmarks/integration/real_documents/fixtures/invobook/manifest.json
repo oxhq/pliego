@@ -1,0 +1,141 @@
+{
+  "schema": "pliego.real-document.invobook-corpus.v1",
+  "track": "invobook-simple-repaired",
+  "input": "input.html",
+  "expectedFacts": "expected-facts.json",
+  "provenance": "provenance.json",
+  "request": {
+    "pageSize": "47622x67351au",
+    "pageMargins": "0,0,0,0au"
+  },
+  "fonts": [
+    {
+      "path": "fonts/DejaVuSans.ttf",
+      "postscriptName": "DejaVuSans"
+    },
+    {
+      "path": "fonts/DejaVuSans-Bold.ttf",
+      "postscriptName": "DejaVuSans-Bold"
+    }
+  ],
+  "licenses": {
+    "application": "MIT declaration in original Invobook README; no LICENSE at pin",
+    "template": "GPL-3.0-only; isolated LaravelDaily-derived fixture/source",
+    "fonts": "Original embedded DejaVu 2.37 copyright/license records",
+    "packageInclusion": "source benchmark corpus only; exclude from runtime/SDK packages"
+  },
+  "qualification": {
+    "priorLegacyWindows": "one-page real action, storage/readback, machine and visual baseline retained",
+    "portableOracle": "local Windows legacy PDF pass; no candidate/Linux claim",
+    "candidate": "pending exact candidate and provider-specific font closure/visual review",
+    "linux": "not executed",
+    "benchmarkQualified": false
+  },
+  "files": [
+    {
+      "path": ".gitattributes",
+      "bytes": 84,
+      "sha256": "baf08acc71c7a2bbed689766e9f480c58693a763bafe6ebe6aa58f5535be79d5"
+    },
+    {
+      "path": "action-repair.patch",
+      "bytes": 224,
+      "sha256": "ae3d43e9ee59d471976b36f1ca14ee10644c1c591a024f687f503df91bea2c23"
+    },
+    {
+      "path": "application.patch",
+      "bytes": 644,
+      "sha256": "f2e57ac1e11c275fd21e0eff4ea67e313396d2e2e738909502ecc649afeb919b"
+    },
+    {
+      "path": "expected-facts.json",
+      "bytes": 885,
+      "sha256": "ecfe7ef88c4f94d2d7579178757215aa4d43c788958b62591525e777ca652762"
+    },
+    {
+      "path": "font-provenance.json",
+      "bytes": 1253,
+      "sha256": "74f16d89fa2629056e0104e5b7fa0d245f6add2fc34817d63e0cec45f4ac6d3f"
+    },
+    {
+      "path": "fonts/DejaVuSans-Bold.ttf",
+      "bytes": 705684,
+      "sha256": "e6476c1b80502924294eed40894c5b18e06c181444ca953e5334262df9c27724"
+    },
+    {
+      "path": "fonts/DejaVuSans-Bold.ttf.LICENSE.txt",
+      "bytes": 4919,
+      "sha256": "32e68a20bbb06fb7b97c55146b75208fbbc5abd91a60030be2707c142f3a9d9e"
+    },
+    {
+      "path": "fonts/DejaVuSans.ttf",
+      "bytes": 757076,
+      "sha256": "7da195a74c55bef988d0d48f9508bd5d849425c1770dba5d7bfc6ce9ed848954"
+    },
+    {
+      "path": "fonts/DejaVuSans.ttf.LICENSE.txt",
+      "bytes": 4919,
+      "sha256": "32e68a20bbb06fb7b97c55146b75208fbbc5abd91a60030be2707c142f3a9d9e"
+    },
+    {
+      "path": "input.html",
+      "bytes": 9419,
+      "sha256": "afd286bca202309923fd66bee1f71e732bdd340d1b05a2307094feb535fa7195"
+    },
+    {
+      "path": "licenses/Invobook-MIT-declaration.README.md",
+      "bytes": 3202,
+      "sha256": "2ce7a773914d1767ebd04e8aedecedc16fc0ca24dbfa973b0c16134b473b5015"
+    },
+    {
+      "path": "licenses/LaravelDaily-GPL-3.0-only.txt",
+      "bytes": 35149,
+      "sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"
+    },
+    {
+      "path": "licenses/NOTICE.md",
+      "bytes": 1533,
+      "sha256": "de7253776d865fd0f2c9245801d2f65c0afd20b5ccb7c76afc2d2ee2be8bde2d"
+    },
+    {
+      "path": "provenance.json",
+      "bytes": 6258,
+      "sha256": "860252693f93f77f9062cea385a5dece8534f6e2d30dcd7962803b46b7800d15"
+    },
+    {
+      "path": "reference-observation.json",
+      "bytes": 10897,
+      "sha256": "1f24e4340ed6e8bf68cf7653f5fe36dd0866f7399d3ef63f56ca46a7e611abe7"
+    },
+    {
+      "path": "source/GenerateInvoicePdf.original.php",
+      "bytes": 3543,
+      "sha256": "12a042d792954c5598d739a33206a7d7022f857aceba697b0f073f05477c61e1"
+    },
+    {
+      "path": "source/GenerateInvoicePdf.repaired.php",
+      "bytes": 3604,
+      "sha256": "e971a26d9c08e3aa94cef9453626514ba801939426f1d27262732aa1d095d4d8"
+    },
+    {
+      "path": "source/simple.original.blade.php",
+      "bytes": 14969,
+      "sha256": "a12906706b309201e811817664479d27de1f687d6f670958b109af47bef36149"
+    },
+    {
+      "path": "source/simple.repaired.blade.php",
+      "bytes": 15263,
+      "sha256": "48e03271bd8f6d5835d72f2d423e7d7c90cb8061a5a66b286eb8308b8130e532"
+    },
+    {
+      "path": "template-repair.patch",
+      "bytes": 536,
+      "sha256": "49f1a1fc5cc3dd51690cf7e2ae94af944151ff137d7451980a440292bad3a92d"
+    }
+  ],
+  "referenceObservation": {
+    "pdfSha256": "254edb6e5582942c9093ff04db904e8ffa0de97fb1474dada5396982a0b1ed20",
+    "provider": "Browsershot 5.0.5 + harness Puppeteer 25.8.0",
+    "role": "Untimed pure-test reference only; live oracle re-extracts actual PDF."
+  }
+}

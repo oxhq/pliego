@@ -1,0 +1,4 @@
+# Frozen third-party source, HTML and evidence retain their original bytes,
+# including trailing whitespace/CRLF. Do not format away their pinned hashes.
+fixtures/** -whitespace
+ledger/** -whitespace

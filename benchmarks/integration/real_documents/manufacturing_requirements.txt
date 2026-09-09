@@ -1,0 +1,15 @@
+# CPython 3.12/3.13, Linux x86_64 (glibc >= 2.27) or Windows amd64.
+# PyPI release JSON checked 2026-09-05; hashes bind wheels, not source builds.
+--only-binary=:all:
+zxing-cpp==2.3.0 \
+    --hash=sha256:dec2805c0e9dec0d7707c97ca5196f98d2730d2dfcea80442807123b9f8ec850 \
+    --hash=sha256:3771e5b0255d8b3bd457573fb6d57d29a346b6c45682320509d8e1ecb49d07ea \
+    --hash=sha256:7ba641ca5a0f19b97d7bc6a0212e61dab267a2b1a52a84946d02bdcd859ec318 \
+    --hash=sha256:971dad40c4765eeb74a4f4557889053b934484ad8c7f9d64c412d3a3d8441f3f
+Pillow==11.3.0 \
+    --hash=sha256:67172f2944ebba3d4a7b54f2e95c786a3a50c21b88456329314caaa28cda70f6 \
+    --hash=sha256:676b2815362456b5b3216b4fd5bd89d362100dc6f4945154ff172e206a22c024 \
+    --hash=sha256:a6444696fce635783440b7f7a9fc24b3ad10a9ea3f0ab66c5905be1c19ccf17d \
+    --hash=sha256:f0f5d8f4a08090c6d6d578351a2b91acf519a54986c055af27e7a93feae6d3f1 \
+    --hash=sha256:13f87d581e71d9189ab21fe0efb5a23e9f28552d5be6979e84001d3b8505abe8 \
+    --hash=sha256:0bce5c4fd0921f99d2e858dc4d4d64193407e1b99478bc5cacecba2311abde51

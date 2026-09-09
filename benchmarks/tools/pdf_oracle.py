@@ -38,7 +38,7 @@ def resolve_tool(name: str) -> Path:
 
 
 def tool_version(path: Path) -> str:
-    result = subprocess.run([str(path), "-v"], capture_output=True, text=True, timeout=30)
+    result = subprocess.run([str(path), "-v"], capture_output=True, text=True, encoding="utf-8", timeout=30)
     text = (result.stdout + result.stderr).strip()
     if result.returncode != 0 or not text:
         raise RuntimeError(f"cannot identify {path}: {text or f'exit {result.returncode}'}")
@@ -82,7 +82,9 @@ def pdf_envelope(path: Path) -> tuple[bool, str]:
 
 
 def run_tool(command: list[str]) -> str:
-    result = subprocess.run(command, capture_output=True, text=True, timeout=60)
+    # pdftotext is explicitly invoked with -enc UTF-8. Do not decode that
+    # output with Windows' locale code page and corrupt currencies/names.
+    result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", timeout=60)
     if result.returncode != 0:
         detail = (result.stderr or result.stdout).strip()
         raise RuntimeError(f"{Path(command[0]).name} failed: {detail or f'exit {result.returncode}'}")

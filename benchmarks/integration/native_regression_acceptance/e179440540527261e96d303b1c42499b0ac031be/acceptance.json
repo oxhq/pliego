@@ -1,0 +1,9 @@
+{
+  "schema": "pliego.native-regression.v1.acceptance",
+  "identity_sha256": "ae52620586626e4e6c9d537c3b4ae2d79da91fd6e16fb2a820849161a906d8e1",
+  "preflight_directory": "/var/lib/pliego-native-regression-acceptance/preflight",
+  "preflight_manifest_sha256": "e7b44e8b38fd34013617f3ed0b24b9619c3894b64db8150f689fb5d32ae717a0",
+  "reviewed": true,
+  "linux_lifecycle_controls_reviewed": true,
+  "evidence": "https://github.com/oxhq/pliego/actions/runs/33969575451; exact source/ZIP/manifest, six identical PDFs, original hosted strict oracle, lifecycle and main visual review: benchmarks/integration/native_regression_acceptance/e179440540527261e96d303b1c42499b0ac031be/review.md"
+}

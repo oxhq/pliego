@@ -12,6 +12,8 @@
       #too-tall tfoot tr { height: 110px; }
       #rowspan tbody tr { height: 60px; }
       #collapsed { border-collapse: collapse; }
+      /* Borderless collapsed tables are supported; dashed visible borders are not. */
+      #collapsed th, #collapsed td { border: 2px dashed black; }
       .flex { display: flex; }
     </style>
   </head>

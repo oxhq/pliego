@@ -155,7 +155,14 @@ impl StackingContextTree {
         );
         let cb_for_fixed_descendants = ContainingBlock::new(
             fragment_tree.initial_containing_block,
-            paint_info.root_reference_frame_id,
+            // A retained fixed replica is attached to its printed page. In the
+            // stacked-page preview it scrolls with that page, not the viewport.
+            // Continuous documents retain Servo's viewport-fixed behavior.
+            if fragment_tree.is_paged {
+                root_scroll_node_id
+            } else {
+                paint_info.root_reference_frame_id
+            },
             None,
             ClipId::INVALID,
             PhysicalVec::zero(),
@@ -523,6 +530,15 @@ impl Fragment {
                     StackingContextBuildMode::IncludeHoisted,
                     &Default::default(),
                 );
+                for replica in &shared_fragment.page_replicas {
+                    replica.build_stacking_context_tree(
+                        stacking_context_tree,
+                        containing_block_info,
+                        stacking_context,
+                        StackingContextBuildMode::IncludeHoisted,
+                        &Default::default(),
+                    );
+                }
             },
             Fragment::Positioning(fragment) => {
                 fragment.build_stacking_context_tree(

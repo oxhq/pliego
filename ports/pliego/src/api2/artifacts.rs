@@ -284,9 +284,37 @@ pub(crate) fn encode_profile_null_scene<'a>(
     let (request_width, request_height) = request_page_dimensions(&request_page);
 
     if !capture.unsupported_events.is_empty() || !capture.text_mapping_gaps.is_empty() {
-        return Err(ArtifactError::new(
-            "capture contains unsupported paint events or missing text mappings",
-        ));
+        // Keep diagnostics bounded by the finite kind set, not document size. The
+        // first event/glyph location permits a minimized input to explain a failure
+        // without publishing partial scene data or exposing document text.
+        let mut kinds = Vec::new();
+        for event in &capture.unsupported_events {
+            let kind = event.kind.as_str();
+            if !kinds.contains(&kind) {
+                kinds.push(kind);
+            }
+        }
+        let mut limitations = Vec::new();
+        if let Some(first) = capture.unsupported_events.first() {
+            limitations.push(format!(
+                "unsupported paint kinds: {} ({} events; first sequence {})",
+                kinds.join(", "),
+                capture.unsupported_events.len(),
+                first.sequence,
+            ));
+        }
+        if let Some(first) = capture.text_mapping_gaps.first() {
+            limitations.push(format!(
+                "text mapping gaps: {} (first sequence {}, glyph {})",
+                capture.text_mapping_gaps.len(),
+                first.sequence,
+                first.glyph_index,
+            ));
+        }
+        return Err(ArtifactError::new(format!(
+            "capture is incomplete: {}",
+            limitations.join("; "),
+        )));
     }
     if capture.scene.pages.is_empty() {
         return Err(ArtifactError::new(
@@ -1632,6 +1660,52 @@ mod tests {
         assert_eq!(encoded.resources[FONT_RESOURCE].bytes, FONT_BYTES);
         assert_eq!(encoded.resources[IMAGE_RESOURCE].media_type, "image/png");
         assert_eq!(encoded.resources[IMAGE_RESOURCE].bytes, IMAGE_BYTES);
+    }
+
+    #[test]
+    fn incomplete_capture_reports_bounded_kinds_and_first_locations() {
+        use pliego::capture::{MissingTextMapping, UnsupportedPaintEvent, UnsupportedPaintKind};
+
+        let request: Value = serde_json::from_slice(REQUEST).unwrap();
+        let mut capture = fixture_capture();
+        capture.unsupported_events = vec![
+            UnsupportedPaintEvent {
+                sequence: 2,
+                kind: UnsupportedPaintKind::CollapsedTableBorders,
+            },
+            UnsupportedPaintEvent {
+                sequence: 3,
+                kind: UnsupportedPaintKind::Outline,
+            },
+        ];
+        capture
+            .unsupported_events
+            .extend((4..10_004).map(|sequence| UnsupportedPaintEvent {
+                sequence,
+                kind: UnsupportedPaintKind::CollapsedTableBorders,
+            }));
+        let error = encode_profile_null_scene(&request, &capture, |_| None).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "capture is incomplete: unsupported paint kinds: collapsed-table-borders, outline (10002 events; first sequence 2)"
+        );
+
+        capture.text_mapping_gaps.push(MissingTextMapping {
+            sequence: 9,
+            glyph_index: 4,
+        });
+        let error = encode_profile_null_scene(&request, &capture, |_| None).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .ends_with("; text mapping gaps: 1 (first sequence 9, glyph 4)")
+        );
+        capture.unsupported_events.clear();
+        let error = encode_profile_null_scene(&request, &capture, |_| None).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "capture is incomplete: text mapping gaps: 1 (first sequence 9, glyph 4)"
+        );
     }
 
     #[test]

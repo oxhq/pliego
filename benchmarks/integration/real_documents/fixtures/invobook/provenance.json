@@ -1,0 +1,102 @@
+{
+  "schema": "pliego.invobook-corpus-provenance.v1",
+  "sourceRepository": "https://github.com/Hasnayeen/invobook",
+  "sourceCommit": "e5f666cef63543beffadfcc045f6af673408a02e",
+  "composerLockSha256": "24f563534a57775144db27b746011117b8db209aa39dee35f5c0ba01ed96ca74",
+  "packageLockSha256": "f960968dd796de4289312e7750eee06d577e7034fc59a09ae377aa06d7ce31ac",
+  "applicationLicense": "MIT as declared by original README/composer; no LICENSE file present at this pin",
+  "templateLicense": "GPL-3.0-only; published LaravelDaily-derived invoice template; separate third-party fixture, not engine code",
+  "laravelDaily": {
+    "version": "4.0.0",
+    "sourceReference": "d9fa7eca22a7836fb9b09ee7fc2a97b4dfd7b228",
+    "repository": "https://github.com/LaravelDaily/laravel-invoices"
+  },
+  "originalSourceHashes": {
+    "app/Actions/CreateInvoice.php": "3a0bcd968c3a3675a0e839fd9151aca791bd8a897435431431753882c9704417",
+    "app/Actions/GenerateInvoicePdf.php": "12a042d792954c5598d739a33206a7d7022f857aceba697b0f073f05477c61e1",
+    "composer.lock": "24f563534a57775144db27b746011117b8db209aa39dee35f5c0ba01ed96ca74",
+    "package-lock.json": "f960968dd796de4289312e7750eee06d577e7034fc59a09ae377aa06d7ce31ac",
+    "resources/views/vendor/invoices/templates/simple.blade.php": "a12906706b309201e811817664479d27de1f687d6f670958b109af47bef36149",
+    "resources/views/components/layouts/invoice.blade.php": "cccb52fea85fe2805b737433e5f76270a1dbb8f231fbd2c8499b2198e072a9a0",
+    "vendor/dompdf/dompdf/lib/fonts/DejaVuSans.ttf": "7da195a74c55bef988d0d48f9508bd5d849425c1770dba5d7bfc6ce9ed848954",
+    "vendor/dompdf/dompdf/lib/fonts/DejaVuSans-Bold.ttf": "e6476c1b80502924294eed40894c5b18e06c181444ca953e5334262df9c27724"
+  },
+  "actionRepair": {
+    "name": "hour-duration-quantity",
+    "sourcePath": "app/Actions/GenerateInvoicePdf.php",
+    "originalSha256": "12a042d792954c5598d739a33206a7d7022f857aceba697b0f073f05477c61e1",
+    "repairedSha256": "e971a26d9c08e3aa94cef9453626514ba801939426f1d27262732aa1d095d4d8",
+    "patchSha256": "ae3d43e9ee59d471976b36f1ca14ee10644c1c591a024f687f503df91bea2c23",
+    "replacementCount": 1,
+    "addition": "->quantity($item->total_duration / 3600)",
+    "applicationActionUnchanged": true
+  },
+  "templateRepair": {
+    "name": "simple-pdf-css-media-all-and-original-dejavu",
+    "scope": "same output-owned Blade override for both providers",
+    "sourcePath": "resources/views/vendor/invoices/templates/simple.blade.php",
+    "originalSha256": "a12906706b309201e811817664479d27de1f687d6f670958b109af47bef36149",
+    "repairedSha256": "48e03271bd8f6d5835d72f2d423e7d7c90cb8061a5a66b286eb8308b8130e532",
+    "patchSha256": "49f1a1fc5cc3dd51690cf7e2ae94af944151ff137d7451980a440292bad3a92d",
+    "replacementCount": 1,
+    "before": "<style type=\"text/css\" media=\"screen\">",
+    "after": "<style type=\"text/css\" media=\"all\">",
+    "applicationTemplateUnchanged": true,
+    "fontFaceRules": [
+      "            @font-face { font-family: \"DejaVu Sans\"; font-style: normal; font-weight: 400; src: url(\"fonts/DejaVuSans.ttf\") format(\"truetype\"); }",
+      "            @font-face { font-family: \"DejaVu Sans\"; font-style: normal; font-weight: 700; src: url(\"fonts/DejaVuSans-Bold.ttf\") format(\"truetype\"); }"
+    ]
+  },
+  "fontRepair": {
+    "name": "original-bundled-dejavu-resource-closure",
+    "package": "dompdf/dompdf",
+    "version": "v2.0.4",
+    "reference": "093f2d9739cec57428e39ddadedfd4f3ae862c0f",
+    "fonts": [
+      {
+        "sourcePath": "vendor/dompdf/dompdf/lib/fonts/DejaVuSans.ttf",
+        "path": "fonts/DejaVuSans.ttf",
+        "sha256": "7da195a74c55bef988d0d48f9508bd5d849425c1770dba5d7bfc6ce9ed848954",
+        "family": "DejaVu Sans",
+        "postscriptName": "DejaVuSans",
+        "version": "Version 2.37",
+        "licenseSource": "original font name table records 0 and 13",
+        "licenseSha256": "32e68a20bbb06fb7b97c55146b75208fbbc5abd91a60030be2707c142f3a9d9e"
+      },
+      {
+        "sourcePath": "vendor/dompdf/dompdf/lib/fonts/DejaVuSans-Bold.ttf",
+        "path": "fonts/DejaVuSans-Bold.ttf",
+        "sha256": "e6476c1b80502924294eed40894c5b18e06c181444ca953e5334262df9c27724",
+        "family": "DejaVu Sans",
+        "postscriptName": "DejaVuSans-Bold",
+        "version": "Version 2.37",
+        "licenseSource": "original font name table records 0 and 13",
+        "licenseSha256": "32e68a20bbb06fb7b97c55146b75208fbbc5abd91a60030be2707c142f3a9d9e"
+      }
+    ]
+  },
+  "proofBoundary": {
+    "businessAction": "exact quantity-setter repair in App\\Actions\\GenerateInvoicePdf in HTML mode; CreateInvoice currency line repaired for both providers",
+    "deliveryAdaptation": "returned Blade view delivered in-process; original URL, browser authentication and Livewire preview are not exercised",
+    "storage": "isolated Laravel local disk; database commit only after stored bytes match render bytes",
+    "sdk": "PHP SDK development source; candidate Laravel SDK targets Illuminate 12/13 while this app locks Laravel 11.31.0; no constraint bypass",
+    "correctness": "storage integrity and database facts only; PDF facts and visual acceptance remain separate gates",
+    "queue": "synchronous command; no queue-worker proof"
+  },
+  "sourceReportSha256": "9bee44cda650f62ab3bc05ea5fcf3411cb1c5ace3505c0ebf01119b6f8510e4b",
+  "originalCreateInvoiceSha256": "dd105ce46c6be6f6c7d2bf46dd405db462d3f459c22a82ecc8fc573cd90d82f8",
+  "currencyRepairPatchSha256": "f2e57ac1e11c275fd21e0eff4ea67e313396d2e2e738909502ecc649afeb919b",
+  "workflowSource": "benchmarks/integration/invobook_repaired_workflow.php",
+  "workflowSourceSha256AtCapture": "c44c836029eef411e0ba8327c576d8df6004bdb4201ed8f6d99fd1081d957020",
+  "priorLegacyPdfSha256": "254edb6e5582942c9093ff04db904e8ffa0de97fb1474dada5396982a0b1ed20",
+  "priorLegacyPdfBytes": 34242,
+  "priorLegacyTools": {
+    "browsershotVersion": "5.0.5",
+    "browsershotReference": "c0fa14c2386df2b4444e803ddc11e592b16d3a20",
+    "harnessPuppeteerVersion": "25.8.0",
+    "chromeSha256": "17b09f4c2e7806a05b0b648e7d459c3e3868f215adc93fa887adc3892bc704c0",
+    "nodeSha256": "98843732431bad6c2c165908bb7dde6fe2a221ddbc491a955d548a2e6ab9ebff"
+  },
+  "adaptedTrack": true,
+  "regenerationIncludedInTiming": false
+}

@@ -1,0 +1,11 @@
+diff --git a/app/Actions/CreateInvoice.php b/app/Actions/CreateInvoice.php
+--- a/app/Actions/CreateInvoice.php
++++ b/app/Actions/CreateInvoice.php
+@@ -26,6 +26,7 @@ class CreateInvoice
+                 'description' => $item->title,
+                 'duration_in_seconds' => $item->totalDuration,
+                 'amount_in_cents' => $item->sub_total_price * 100,
++                'currency' => $data->currency_code,
+                 'task_id' => $item->taskId,
+                 'project_id' => $item->projectId,
+                 'invoice_id' => $invoice->id,

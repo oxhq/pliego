@@ -746,6 +746,12 @@ function render(array $arguments): void
     commit_pdf_output($temporary, $output);
 }
 
+// The app-specific adapter reuses private-runtime/publication helpers, never
+// this adapter's version or dependency loader. Ordinary CLI behavior is unchanged.
+if (defined('PLIEGO_BENCHMARK_ADAPTER_LIBRARY') && PLIEGO_BENCHMARK_ADAPTER_LIBRARY === true) {
+    return;
+}
+
 $mode = $argv[1] ?? '';
 if ($mode === 'identity') {
     identity();

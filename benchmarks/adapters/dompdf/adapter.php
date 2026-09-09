@@ -309,6 +309,12 @@ function render(array $arguments): void
     publish_pdf($options['--output'], $dompdf->output());
 }
 
+// The app-specific adapter reuses publication/identity helpers, never this
+// adapter's default renderer configuration. Ordinary CLI behavior is unchanged.
+if (defined('PLIEGO_BENCHMARK_ADAPTER_LIBRARY') && PLIEGO_BENCHMARK_ADAPTER_LIBRARY === true) {
+    return;
+}
+
 $mode = $argv[1] ?? '';
 if ($mode === 'identity') {
     identity();

@@ -401,6 +401,16 @@ pub struct LayoutDebugTableGroupRepeat {
     pub source_block_start: f32,
     pub target_block_start: f32,
     pub block_size: f32,
+    /// Original layout coordinates; compatibility floats must not be used to recover these.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_units: Option<LayoutDebugTableGroupRepeatAppUnits>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LayoutDebugTableGroupRepeatAppUnits {
+    pub source_block_start: i32,
+    pub target_block_start: i32,
+    pub block_size: i32,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

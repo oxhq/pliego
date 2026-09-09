@@ -1,0 +1,2 @@
+# Frozen source/input/resource hashes refer to bytes, including line endings.
+* -text

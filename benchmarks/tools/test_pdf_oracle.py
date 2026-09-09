@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import importlib.util
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
@@ -46,6 +47,20 @@ def mixed_embedding_tool(command: list[str], **kwargs: object) -> subprocess.Com
 
 
 def main() -> None:
+    currency_text = "Invoice €450.00 — José\n"
+    with patch.object(
+        oracle.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, currency_text, "")
+    ) as run:
+        assert oracle.run_tool(["pdftotext", "-enc", "UTF-8", "invoice.pdf", "-"]) == currency_text
+        assert run.call_args.kwargs["encoding"] == "utf-8"
+    # Exercise bytes, not merely a mocked Unicode return value.
+    assert (
+        oracle.run_tool(
+            [sys.executable, "-c", "import sys; sys.stdout.buffer.write(bytes.fromhex('e282ac3435302e3030'))"]
+        )
+        == "€450.00"
+    )
+
     pages, dimensions = oracle.parse_pdfinfo("Pages: 2\nPage 1 size: 100 x 200 pts\nPage 2 size: 100 x 200 pts\n")
     assert pages == 2 and dimensions == [(100.0, 200.0), (100.0, 200.0)]
 

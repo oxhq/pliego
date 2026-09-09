@@ -1767,6 +1767,7 @@ def sampled(
     browser_target: bool = False,
     expected_failure_code: str | None = None,
     expected_linked_temporary_file: str | None = None,
+    root_wall_timeout_ms: float | None = None,
 ) -> dict:
     account = process_tree_sampler.resolve_engine_account()
     temporary_root = os.environ.get("PLIEGO_BENCHMARK_ENGINE_TEMP_ROOT")
@@ -1817,6 +1818,11 @@ def sampled(
                     str(stdout_path),
                     "--stderr",
                     str(stderr_path),
+                    *(
+                        ["--root-wall-timeout-ms", str(root_wall_timeout_ms)]
+                        if root_wall_timeout_ms is not None
+                        else []
+                    ),
                     "--",
                     *launched_command,
                 ],
@@ -1831,6 +1837,7 @@ def sampled(
     if expected_failure_code is not None:
         assert result.returncode == 2, result.stderr
         assert f"measurement-incomplete[{expected_failure_code}]" in result.stderr, result.stderr
+        assert result.stdout == "", "a failed measurement must not emit a successful timing record"
         return {"stderr": result.stderr}
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout)
@@ -2544,12 +2551,35 @@ def acceptance_overhead_proof() -> tuple[dict, dict]:
     return observer_effect, sampler_cpu_diagnostic
 
 
-def main(live: bool, php_integration: bool, acceptance_overhead: bool) -> None:
+def root_deadline_proof() -> dict:
+    """Linux-only synthetic sampler test, not native renderer/operational proof."""
+    parent = Path(os.environ["PLIEGO_BENCHMARK_CGROUP_PARENT"])
+    before = {path.name for path in parent.iterdir() if path.is_dir()}
+    started = time.monotonic()
+    with workload_engine(["--workload-parent", "1", "10"]) as engine:
+        failed = sampled(
+            workload_command(engine), expected_failure_code="ROOT_WALL_TIMEOUT", root_wall_timeout_ms=250.0
+        )
+    elapsed = time.monotonic() - started
+    after = {path.name for path in parent.iterdir() if path.is_dir()}
+    assert after == before, (before, after)
+    assert "CGROUP_CLEANUP_FAILED" not in failed["stderr"], failed
+    assert elapsed < 8.0, elapsed
+    with workload_engine(["--workload-parent", "1", "0.1"]) as engine:
+        recovery = sampled(workload_command(engine), root_wall_timeout_ms=5000.0)
+    assert recovery["exit_code"] == 0 and recovery["cgroup_drained"] is True
+    assert recovery["root_wall_deadline"]["outcome"] == "root-exited"
+    return {"limit_ms": 250.0, "failure": failed, "elapsed_seconds": elapsed, "recovery": recovery}
+
+
+def main(live: bool, php_integration: bool, acceptance_overhead: bool, root_deadline: bool = False) -> None:
     fixture_proofs()
     proof = live_cgroup_proofs() if live or acceptance_overhead else None
     if php_integration:
         php_integration_proof()
     output: dict = {"fixture_proofs": "passed", "live": proof}
+    if root_deadline:
+        output["root_deadline"] = root_deadline_proof()
     if acceptance_overhead:
         observer_effect, sampler_cpu = acceptance_overhead_proof()
         output["observer_effect"] = observer_effect
@@ -2563,6 +2593,7 @@ if __name__ == "__main__":
     parser.add_argument("--live", action="store_true")
     parser.add_argument("--php-integration", action="store_true")
     parser.add_argument("--acceptance-overhead", action="store_true")
+    parser.add_argument("--root-deadline", action="store_true")
     parser.add_argument("--workload-child", nargs=2, metavar=("MEBIBYTES", "DURATION"))
     parser.add_argument("--workload-parent", nargs=2, metavar=("MEBIBYTES", "DURATION"))
     parser.add_argument("--workload-leak", metavar="PID_PATH")
@@ -2576,4 +2607,4 @@ if __name__ == "__main__":
         raise SystemExit(leaking_parent(args.workload_leak))
     if args.workload_migration_attack:
         raise SystemExit(migration_attack(args.workload_migration_attack))
-    main(args.live, args.php_integration, args.acceptance_overhead)
+    main(args.live, args.php_integration, args.acceptance_overhead, args.root_deadline)

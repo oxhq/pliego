@@ -10,11 +10,13 @@ import json
 import math
 import os
 import re
+import stat
 import subprocess
 import sys
 import tempfile
 from collections import Counter
-from contextlib import redirect_stderr
+from collections.abc import Iterator
+from contextlib import contextmanager, redirect_stderr
 from io import StringIO
 from pathlib import Path
 from typing import Any
@@ -648,6 +650,92 @@ def verify_fallback_capture(scene: dict[str, Any], layout: dict[str, Any]) -> No
 
 
 def self_test() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    with tempfile.TemporaryDirectory(prefix="pliego-table-border-output-self-test-") as temp:
+        root = Path(temp)
+        binary = str(Path(__file__).resolve())
+        require(parse_arguments([binary]) == (Path(binary), None), "one-binary invocation changed")
+        empty = root / "empty"
+        empty.mkdir()
+        occupied = root / "occupied"
+        occupied.mkdir()
+        sentinel = occupied / "keep"
+        sentinel.write_text("unchanged", encoding="utf-8")
+        for arguments in (
+            [],
+            [str(root / "missing-binary")],
+            [binary, str(root), "extra"],
+            [binary, str(occupied)],
+            [binary, str(sentinel)],
+        ):
+            with redirect_stderr(StringIO()):
+                try:
+                    parse_arguments(arguments)
+                except SystemExit:
+                    continue
+            fail(f"self-test accepted invalid arguments/destination: {arguments!r}")
+        require(sentinel.read_text(encoding="utf-8") == "unchanged", "occupied output changed")
+        linked_output = root / "linked-output"
+        original_lstat = Path.lstat
+        for metadata in (
+            SimpleNamespace(st_mode=stat.S_IFLNK),
+            SimpleNamespace(st_mode=stat.S_IFDIR, st_file_attributes=stat.FILE_ATTRIBUTE_REPARSE_POINT),
+        ):
+            with (
+                patch.object(Path, "lstat", lambda path: metadata if path == root else original_lstat(path)),
+                redirect_stderr(StringIO()),
+            ):
+                try:
+                    parse_arguments([binary, str(linked_output)])
+                except SystemExit:
+                    pass
+                else:
+                    fail("self-test accepted an output path with a linked ancestor")
+        require(not linked_output.exists(), "linked output was created before rejection")
+        for destination in (empty, root / "new-parent" / "new"):
+            _, output = parse_arguments([binary, str(destination)])
+            require(output == destination.resolve() and output.is_dir(), "fresh output was not prepared")
+            for name in ("table-borders-first", "table-borders-second", "table-border-fallbacks"):
+                try:
+                    with capture_directory(output, name) as capture:
+                        (capture / "partial").write_text("retained", encoding="utf-8")
+                        raise RuntimeError("simulated capture failure")
+                except RuntimeError:
+                    pass
+                require((capture / "partial").is_file(), f"failed {name} capture was removed")
+        with capture_directory(None, "table-borders-first") as temporary:
+            require(temporary.is_dir(), "default temporary capture is absent")
+        require(not temporary.exists(), "default temporary capture was retained")
+        for index, result in enumerate(
+            (
+                subprocess.CompletedProcess([], 1, "partial stdout", "partial stderr"),
+                subprocess.CompletedProcess([], 0, "not JSON", "partial stderr"),
+                subprocess.TimeoutExpired([], 60, output=b"partial stdout", stderr=b"partial stderr"),
+            )
+        ):
+            capture = root / f"process-failure-{index}"
+            capture.mkdir()
+            with patch("subprocess.run") as process, redirect_stderr(StringIO()):
+                if isinstance(result, subprocess.TimeoutExpired):
+                    process.side_effect = result
+                else:
+                    process.return_value = result
+                try:
+                    render(Path(binary), capture, "table-borders")
+                except (SystemExit, subprocess.TimeoutExpired) as error:
+                    if isinstance(result, subprocess.TimeoutExpired):
+                        require(error is result, "capture changed the original timeout exception")
+                    pass
+                else:
+                    fail("self-test accepted a failed capture")
+            require(
+                (capture / "stdout.log").read_bytes() == (b"not JSON" if index == 1 else b"partial stdout"),
+                "failed capture lost stdout",
+            )
+            require((capture / "stderr.log").read_bytes() == b"partial stderr", "failed capture lost stderr")
+
     fixture = Path(__file__).resolve().parent / "fixtures/table-borders/index.html"
     html = fixture.read_text(encoding="utf-8")
     require(
@@ -916,24 +1004,31 @@ def render(binary: Path, temp: Path, fixture_name: str) -> dict[str, Any]:
     fixture = Path(__file__).resolve().parent / f"fixtures/{fixture_name}"
     environment = os.environ.copy()
     environment.update({"TMPDIR": str(temp), "TMP": str(temp), "TEMP": str(temp)})
-    result = subprocess.run(
-        [
-            str(binary),
-            *(["--allow-partial-scene"] if fixture_name == "table-border-fallbacks" else []),
-            "--allow-host-fonts",
-            "--page-size",
-            "240x140",
-            "--page-margins",
-            "10,10,10,10",
-            "index.html",
-        ],
-        cwd=fixture,
-        env=environment,
-        capture_output=True,
-        text=True,
-        timeout=60,
-        check=False,
-    )
+    try:
+        result = subprocess.run(
+            [
+                str(binary),
+                *(["--allow-partial-scene"] if fixture_name == "table-border-fallbacks" else []),
+                "--allow-host-fonts",
+                "--page-size",
+                "240x140",
+                "--page-margins",
+                "10,10,10,10",
+                "index.html",
+            ],
+            cwd=fixture,
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as error:
+        (temp / "stdout.log").write_bytes(error.stdout or b"")
+        (temp / "stderr.log").write_bytes(error.stderr or b"")
+        raise
+    (temp / "stdout.log").write_text(result.stdout, encoding="utf-8")
+    (temp / "stderr.log").write_text(result.stderr, encoding="utf-8")
     require(result.returncode == 0, f"Pliego exited with {result.returncode}: {result.stderr[-4000:]}")
     summary = final_summary(result)
     require(summary.get("status") == "rendered", f"Pliego did not render: {summary!r}")
@@ -948,23 +1043,56 @@ def run(binary: Path, temp: Path) -> tuple[dict[str, Any], tuple[str, ...]]:
     )
 
 
+def parse_arguments(arguments: list[str]) -> tuple[Path, Path | None]:
+    if len(arguments) not in (1, 2):
+        fail(f"usage: {Path(sys.argv[0]).name} <pliego-binary> [output-directory] | --self-test", 2)
+    binary = Path(arguments[0]).expanduser().resolve()
+    require(binary.is_file(), f"Pliego binary does not exist: {binary}")
+    output = Path(arguments[1]).expanduser().absolute() if len(arguments) == 2 else None
+    if output is not None:
+        for component in (output, *output.parents):
+            try:
+                metadata = component.lstat()
+            except FileNotFoundError:
+                continue
+            require(
+                not stat.S_ISLNK(metadata.st_mode)
+                and not getattr(metadata, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT,
+                f"output path contains a link: {component}",
+            )
+        if output.exists():
+            require(output.is_dir() and not any(output.iterdir()), f"output is not an empty directory: {output}")
+        else:
+            output.mkdir(parents=True)
+        output = output.resolve()
+    return binary, output
+
+
+@contextmanager
+def capture_directory(output: Path | None, name: str) -> Iterator[Path]:
+    if output is None:
+        with tempfile.TemporaryDirectory(prefix=f"pliego-{name}-") as temporary:
+            yield Path(temporary)
+    else:
+        capture = output / name
+        capture.mkdir()
+        yield capture
+
+
 def main() -> int:
     arguments = sys.argv[1:]
     if arguments == ["--self-test"]:
         self_test()
         print("table border self-test: ok")
         return 0
-    if len(arguments) != 1:
-        fail(f"usage: {Path(sys.argv[0]).name} <pliego-binary> | --self-test", 2)
-    binary = Path(arguments[0]).expanduser().resolve()
-    require(binary.is_file(), f"Pliego binary does not exist: {binary}")
-    with tempfile.TemporaryDirectory(prefix="pliego-table-borders-first-") as first:
-        first_scene, first_hashes = run(binary, Path(first))
-    with tempfile.TemporaryDirectory(prefix="pliego-table-borders-second-") as second:
-        second_scene, second_hashes = run(binary, Path(second))
+    binary, output = parse_arguments(arguments)
+    with capture_directory(output, "table-borders-first") as first:
+        first_scene, first_hashes = run(binary, first)
+    with capture_directory(output, "table-borders-second") as second:
+        second_scene, second_hashes = run(binary, second)
     verify(first_scene, second_scene, first_hashes, second_hashes)
-    with tempfile.TemporaryDirectory(prefix="pliego-table-border-fallbacks-") as fallback:
-        summary = render(binary, Path(fallback), "table-border-fallbacks")
+    with capture_directory(output, "table-border-fallbacks") as fallback:
+        summary = render(binary, fallback, "table-border-fallbacks")
         verify_fallback_capture(
             read_json(summary.get("scene_artifact"), "fallback scene artifact"),
             read_json(summary.get("layout_debug"), "fallback layout debug"),

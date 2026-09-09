@@ -123,6 +123,50 @@ try {
     api2RenderExpect($a4->metadata['request']['page']['size'] === ['name' => 'A4'], 'named A4 is supported');
     api2RenderExpect(!is_dir($a4->diagnosticsPath), 'diagnostics none retains no runtime directory');
 
+    $landscape = $engine->render(
+        '<!doctype html><p>Exact landscape geometry</p>',
+        new RenderOptions(pageSize: '67351x47622au', pageMargins: '2268,2268,5669,2268au'),
+    );
+    api2RenderExpect($landscape->metadata['request']['page'] === [
+        'size' => ['width_app_units' => 67_351, 'height_app_units' => 47_622],
+        'margins_app_units' => ['top' => 2_268, 'right' => 2_268, 'bottom' => 5_669, 'left' => 2_268],
+        'geometry_authority' => 'request-only-v1',
+    ], 'exact app units pass through the public render request without pixel rounding');
+
+    // Parser bounds, not a claim that huge pages are renderable by the native engine.
+    $sizeParser = new ReflectionMethod(DocumentEngine::class, 'pageSize');
+    $marginParser = new ReflectionMethod(DocumentEngine::class, 'pageMargins');
+    foreach ([
+        ['1x1au', 1, 1],
+        ['2147483647x2147483647au', 2_147_483_647, 2_147_483_647],
+        ['35791394x1', 2_147_483_640, 60],
+    ] as [$input, $width, $height]) {
+        api2RenderExpect($sizeParser->invoke($engine, $input) === [
+            'width_app_units' => $width, 'height_app_units' => $height,
+        ], "exact size parser boundary: {$input}");
+    }
+    api2RenderExpect($marginParser->invoke($engine, '000,1,59,2147483647au') === [
+        'top' => 0, 'right' => 1, 'bottom' => 59, 'left' => 2_147_483_647,
+    ], 'app-unit margins preserve subpixel values and signed integer limit');
+    foreach (['0x1au', '1x0au', '-1x2au', '1.5x2au', '1aux2au', '1x2AU', '1x2mm',
+        '01x2au', '2147483648x1au', '1x2147483648au', '35791395x1', '1x35791395',
+        '999999999999999999999x1au', "1x2au\n"] as $input) {
+        try {
+            $sizeParser->invoke($engine, $input);
+            throw new RuntimeException("invalid size was accepted: {$input}");
+        } catch (InvalidArgumentException) {
+        }
+    }
+    foreach (['0,0,0au', '0,0,0,0,0au', '1au,2au,3au,4au', '0,0,0,-1au',
+        '0,0,0,0.5au', '0,0,0,1mm', '0,0,0,2147483648au', '0,0,0,35791395',
+        '0,0,0,999999999999999999999au', "0,0,0,1au\n"] as $input) {
+        try {
+            $marginParser->invoke($engine, $input);
+            throw new RuntimeException("invalid margins were accepted: {$input}");
+        } catch (InvalidArgumentException) {
+        }
+    }
+
     putenv('PLIEGO_API2_RENDER_FAKE_MODE=failed');
     try {
         $engine->render('<!doctype html><p>fail</p>');

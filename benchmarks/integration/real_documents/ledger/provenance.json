@@ -1,0 +1,68 @@
+{
+  "schema": "pliego.frozen-aureus-ledger.v1",
+  "track": "aureus-ledger-300-repaired",
+  "application": {
+    "repository": "https://github.com/aureuserp/aureuserp",
+    "commit": "d7e0ad85ae8fdea91d1cb1895a81000c332e830c",
+    "repairedLockSha256": "82133507ad710cc2748d95cba0ea3dfe5d375728c0d8d3587303e91d027c5fae",
+    "sharedDependencyRepair": [
+      {
+        "name": "guzzlehttp/guzzle",
+        "before": "7.15.1",
+        "after": "7.15.2"
+      },
+      {
+        "name": "league/commonmark",
+        "before": "2.8.3",
+        "after": "2.10.0"
+      },
+      {
+        "name": "livewire/livewire",
+        "before": "v4.3.3",
+        "after": "v4.4.3"
+      }
+    ]
+  },
+  "legacy": {
+    "dompdf": "3.1.6",
+    "laravel-dompdf": "3.1.2",
+    "fontSubsettingEnabled": false
+  },
+  "sourceCapture": "Original GeneralLedger action, real Eloquent accounting fixtures, 300 expanded posted entries plus opening/draft/future controls. Frozen data is synthetic, not independent adoption.",
+  "sharedIsolation": [
+    "Dedicated empty PostgreSQL database; no existing business data",
+    "Sole installer update-telemetry listener suppressed in an external per-boot test provider",
+    "Original test-bootstrap cache refresh before accounting plugin installation",
+    "Configured seeded income account resolution and explicit real journal/currency fixture attributes"
+  ],
+  "sharedAdaptations": [
+    "Two footer declarations changed as source/shared-footer-space.patch; footer content, page counter and physical position preserved",
+    "Four explicit font-face declarations with original DejaVu bytes; identical final HTML for both providers"
+  ],
+  "page": {
+    "sizeAppUnits": {
+      "width": 67351,
+      "height": 47622
+    },
+    "marginsAppUnits": {
+      "top": 2268,
+      "right": 2268,
+      "bottom": 5669,
+      "left": 2268
+    }
+  },
+  "htmlSha256": "ccb11d4c713a66d71fe7798e03bfbeb3b7fe90b74229790c7e9c1a512a7aa105",
+  "priorLegacyReview": {
+    "pages": 15,
+    "sampledPages": [
+      1,
+      8,
+      15
+    ],
+    "footerClearance": "passed",
+    "machineOracle": "300 rows, independent money columns, all headings, fonts, footer"
+  },
+  "visualQualifiedForCandidate": false,
+  "benchmarkQualified": false,
+  "boundary": "Frozen renderer-only comparison input; excludes database/application generation from timing. Candidate pagination/appearance requires separate retained visual approval."
+}

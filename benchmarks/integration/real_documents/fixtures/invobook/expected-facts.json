@@ -1,0 +1,31 @@
+{
+  "schema": "pliego.invobook-invoice-facts.v1",
+  "currency": "EUR",
+  "seller": "Fixture Seller",
+  "buyer": "Fixture Buyer",
+  "serial": "01K4A000000000000000000100",
+  "invoiceDate": "2026-09-04",
+  "dueDate": "2026-09-07",
+  "items": [
+    {
+      "title": "Fixture consultation",
+      "quantity": 1,
+      "unitPriceCents": 12500,
+      "subtotalCents": 12500
+    },
+    {
+      "title": "Fixture implementation",
+      "quantity": 2,
+      "unitPriceCents": 12500,
+      "subtotalCents": 25000
+    }
+  ],
+  "subtotalCents": 37500,
+  "taxCents": 7500,
+  "totalCents": 45000,
+  "notes": "Notes: Pliego compatibility fixture",
+  "amountInWords": "Amount in words: Four hundred fifty EUR and zero ct.",
+  "buyerAddress": "Address: 123 Fixture Street Example City",
+  "sourceReportSha256": "9bee44cda650f62ab3bc05ea5fcf3411cb1c5ace3505c0ebf01119b6f8510e4b",
+  "expectedPages": 1
+}

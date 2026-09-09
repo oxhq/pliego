@@ -1,0 +1,152 @@
+name: Pliego final public consumer
+
+on:
+  workflow_dispatch:
+    inputs:
+      native_source:
+        description: Exact reviewed 40-character native v0.4.0 release commit
+        type: string
+        required: true
+      php_source:
+        description: Exact reviewed 40-character public pliego-php 0.4.0 source/dist commit
+        type: string
+        required: true
+      laravel_source:
+        description: Exact reviewed 40-character public pliego-laravel 0.4.0 source/dist commit
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pliego-public-consumer-${{ github.ref }}-${{ inputs.native_source }}-${{ inputs.php_source }}-${{ inputs.laravel_source }}
+  cancel-in-progress: false
+
+jobs:
+  consumer:
+    if: github.event_name == 'workflow_dispatch'
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: linux-x86_64
+          - os: windows-2022
+            target: windows-x86_64
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      NATIVE_SOURCE: ${{ inputs.native_source }}
+      PHP_SOURCE: ${{ inputs.php_source }}
+      LARAVEL_SOURCE: ${{ inputs.laravel_source }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - name: Reject unspecified or abbreviated publication identities
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($value in @($env:NATIVE_SOURCE, $env:PHP_SOURCE, $env:LARAVEL_SOURCE)) {
+            if ($value -cnotmatch '^[0-9a-f]{40}$') { throw 'Three exact lowercase 40-character reviewed release commits are required.' }
+          }
+          $parent = Join-Path $env:RUNNER_TEMP 'pliego-public-consumer'
+          New-Item -ItemType Directory -Path $parent -ErrorAction Stop | Out-Null
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value "PUBLIC_CONSUMER_PARENT=$parent" -Encoding utf8
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - uses: shivammathur/setup-php@b604ade2a87db23f8871b7182e69ec5e75effb45 # v2
+        with:
+          php-version: '8.4'
+          extensions: mbstring, dom, xml, fileinfo, pdo_sqlite, zip, curl, tokenizer, xmlwriter, intl, bcmath
+          tools: composer:2.10.1
+          coverage: none
+      - name: Install supported Linux headless system prerequisites
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends ca-certificates libegl1 libfontconfig1 libgl1-mesa-dri
+          install -d -m 0700 "$RUNNER_TEMP/pliego-public-xdg"
+          printf 'XDG_RUNTIME_DIR=%s\n' "$RUNNER_TEMP/pliego-public-xdg" >> "$GITHUB_ENV"
+          dpkg-query -W ca-certificates libegl1 libfontconfig1 libgl1-mesa-dri > "$PUBLIC_CONSUMER_PARENT/system-prerequisites.txt"
+      - name: Verify Windows runtime prerequisite
+        if: runner.os == 'Windows'
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $runtime = Get-Item -LiteralPath "$env:SystemRoot/System32/vcruntime140.dll" -ErrorAction Stop
+          $runtime.VersionInfo | Format-List FileVersion, ProductVersion | Out-File -Encoding utf8 "$env:PUBLIC_CONSUMER_PARENT/system-prerequisites.txt"
+      - name: Install exact hash-pinned independent PDF parser
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python -m pip install --disable-pip-version-check --only-binary=:all: --require-hashes -r ports/pliego/tests/requirements-api2-links.txt --report "$env:PUBLIC_CONSUMER_PARENT/pip-report.json"
+          if ($LASTEXITCODE -ne 0) { throw 'Pinned PDF parser installation failed.' }
+      - name: Check portable recipe without installing a consumer
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python tests/pliego/public-consumer/test_recipe.py
+          if ($LASTEXITCODE -ne 0) { throw 'Recipe self-tests failed.' }
+          python -O tests/pliego/public-consumer/test_recipe.py
+          if ($LASTEXITCODE -ne 0) { throw 'Optimized recipe self-tests failed.' }
+          php -d auto_prepend_file= -l tests/pliego/public-consumer/consumer.php
+          if ($LASTEXITCODE -ne 0) { throw 'Consumer PHP syntax check failed.' }
+      - name: Public install, same-app upgrade and exact rollback, then fresh Laravel 12
+        # Leave time for always-retained raw evidence before the 25-minute job cap.
+        timeout-minutes: 20
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($name in @('COMPOSER','COMPOSER_AUTH','COMPOSER_TOKEN','COMPOSER_AUTH_JSON','PACKAGIST_TOKEN','GH_TOKEN','GITHUB_TOKEN','PLIEGO_BINARY','PLIEGO_TEST_AUTOLOAD','LIBGL_ALWAYS_SOFTWARE','EGL_LOG_LEVEL','MESA_LOG_LEVEL')) {
+            [Environment]::SetEnvironmentVariable($name, $null, 'Process')
+          }
+          $phpCommand = (Get-Command php -CommandType Application -ErrorAction Stop).Source
+          $php = (& $phpCommand -d auto_prepend_file= -r 'echo PHP_BINARY;').Trim()
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $php -PathType Leaf)) { throw 'Cannot identify actual PHP executable.' }
+          $composer = (Get-Command composer -CommandType Application -ErrorAction Stop).Source
+          if ($IsWindows) {
+            # Pinned setup-php keeps the PHAR beside its composer.bat wrapper.
+            $composer = Join-Path (Split-Path -Parent $composer) 'composer.phar'
+          }
+          if (-not (Test-Path -LiteralPath $composer -PathType Leaf)) { throw 'Cannot identify actual Composer PHAR.' }
+          python tests/pliego/public-consumer/run.py --php "$php" --composer "$composer" --out "$env:PUBLIC_CONSUMER_PARENT/proof" --native-source "$env:NATIVE_SOURCE" --php-source "$env:PHP_SOURCE" --laravel-source "$env:LARAVEL_SOURCE"
+          if ($LASTEXITCODE -ne 0) { throw 'Public consumer proof failed; inspect retained raw prefix.' }
+      - name: Retain public identities, locks, diagnostics and PDFs, including failures
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: pliego-public-consumer-${{ matrix.target }}
+          if-no-files-found: warn
+          include-hidden-files: true
+          retention-days: 14
+          # Positive inventory: never upload vendor, Composer homes/caches, or
+          # storage/app/pliego-runtime native downloads. All inputs are synthetic.
+          path: |
+            ${{ env.PUBLIC_CONSUMER_PARENT }}/system-prerequisites.txt
+            ${{ env.PUBLIC_CONSUMER_PARENT }}/pip-report.json
+            ${{ env.PUBLIC_CONSUMER_PARENT }}/proof/report.json
+            ${{ env.PUBLIC_CONSUMER_PARENT }}/proof/source-hashes.json
+            ${{ env.PUBLIC_CONSUMER_PARENT }}/proof/tools.json
+            ${{ env.PUBLIC_CONSUMER_PARENT }}/proof/upgrade-package-diff.json
+            ${{ env.PUBLIC_CONSUMER_PARENT }}/proof/logs/
+            ${{ env.PUBLIC_CONSUMER_PARENT }}/proof/production-storage/
+            ${{ env.PUBLIC_CONSUMER_PARENT }}/proof/production-queue/
+            ${{ env.PUBLIC_CONSUMER_PARENT }}/proof/same-app/composer.json
+            ${{ env.PUBLIC_CONSUMER_PARENT }}/proof/same-app/composer.lock
+            ${{ env.PUBLIC_CONSUMER_PARENT }}/proof/same-app/rollback-lock/
+            ${{ env.PUBLIC_CONSUMER_PARENT }}/proof/same-app/public-identity/
+            ${{ env.PUBLIC_CONSUMER_PARENT }}/proof/same-app/evidence/
+            ${{ env.PUBLIC_CONSUMER_PARENT }}/proof/same-app/records/
+            ${{ env.PUBLIC_CONSUMER_PARENT }}/proof/same-app/resources/views/
+            ${{ env.PUBLIC_CONSUMER_PARENT }}/proof/same-app/storage/app/pdfs/
+            ${{ env.PUBLIC_CONSUMER_PARENT }}/proof/fresh-laravel12/composer.json
+            ${{ env.PUBLIC_CONSUMER_PARENT }}/proof/fresh-laravel12/composer.lock
+            ${{ env.PUBLIC_CONSUMER_PARENT }}/proof/fresh-laravel12/public-identity/
+            ${{ env.PUBLIC_CONSUMER_PARENT }}/proof/fresh-laravel12/evidence/
+            ${{ env.PUBLIC_CONSUMER_PARENT }}/proof/fresh-laravel12/records/
+            ${{ env.PUBLIC_CONSUMER_PARENT }}/proof/fresh-laravel12/resources/views/
+            ${{ env.PUBLIC_CONSUMER_PARENT }}/proof/fresh-laravel12/storage/app/pdfs/

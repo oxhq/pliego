@@ -57,6 +57,7 @@ REQUIRED_BUNDLE_FILES = frozenset(
 )
 
 sys.path.insert(0, str(TOOLS))
+import benchmark_references  # noqa: E402
 import comparison_metrics  # noqa: E402
 import run_benchmark  # noqa: E402
 import validate_result  # noqa: E402
@@ -324,10 +325,12 @@ def _require_hash(path: str, value: Any, violations: list[validate_result.Violat
 def validate_target_identities(
     targets: list[dict[str, Any]],
     violations: list[validate_result.Violation],
+    reference: benchmark_references.Reference | None = None,
 ) -> None:
     expected_ids = sorted(TARGET_IDS)
     validate_result.require_equal("$.targets", [target["id"] for target in targets], expected_ids, violations)
-    manifest = tomllib.loads(MANIFEST.read_text(encoding="utf-8"))
+    reference = reference or benchmark_references.select()
+    manifest = reference.manifest()
     for index, identity in enumerate(targets):
         path = f"$.targets[{index}]"
         target_id = identity["id"]
@@ -382,12 +385,12 @@ def validate_target_identities(
             validate_result.require_equal(f"{path}.runtime", runtime, pliego_runtime_identity(engine), violations)
             continue
 
-        adapter = (ROOT / target["adapter"]).resolve()
+        adapter_sha256, adapter_bytes = reference.fingerprint(target["adapter"])
         validate_result.require_equal(
-            f"{path}.engine.binary_sha256", engine.get("binary_sha256"), run_benchmark.file_sha256(adapter), violations
+            f"{path}.engine.binary_sha256", engine.get("binary_sha256"), adapter_sha256, violations
         )
         validate_result.require_equal(
-            f"{path}.engine.binary_bytes", engine.get("binary_bytes"), adapter.stat().st_size, violations
+            f"{path}.engine.binary_bytes", engine.get("binary_bytes"), adapter_bytes, violations
         )
         expected_runtime = {
             "contract": "pliego.benchmark-adapter.v1",
@@ -398,9 +401,9 @@ def validate_target_identities(
             "adapter_sha256": engine["binary_sha256"],
         }
         for lock_name in target.get("lockfiles", []):
-            lock = (ROOT / lock_name).resolve()
+            lock = Path(lock_name)
             key = f"{lock.name.removesuffix('.json').replace('-', '_').replace('.', '_')}_sha256"
-            expected_runtime[key] = run_benchmark.file_sha256(lock)
+            expected_runtime[key] = reference.fingerprint(lock_name)[0]
         for key, expected in expected_runtime.items():
             validate_result.require_equal(f"{path}.runtime.{key}", runtime.get(key), expected, violations)
         required_hashes = ["composer_vendor_sha256", "php_sha256"]
@@ -441,7 +444,9 @@ def evidence_binding_sha256(data: dict[str, Any]) -> str:
 def validate_oracle_identity(
     oracle: dict[str, Any],
     violations: list[validate_result.Violation],
+    reference: benchmark_references.Reference | None = None,
 ) -> None:
+    reference = reference or benchmark_references.select()
     validate_result.require_equal("$.oracle.contract", oracle.get("contract"), "pliego.pdf-oracle.v1", violations)
     oracle_path = oracle.get("oracle_path")
     if not _canonical_absolute_path(oracle_path) or not str(oracle_path).endswith("/benchmarks/tools/pdf_oracle.py"):
@@ -453,7 +458,7 @@ def validate_oracle_identity(
     validate_result.require_equal(
         "$.oracle.oracle_sha256",
         oracle.get("oracle_sha256"),
-        run_benchmark.file_sha256(run_benchmark.PDF_ORACLE),
+        reference.fingerprint("benchmarks/tools/pdf_oracle.py")[0],
         violations,
     )
     for tool in run_benchmark.POPPLER_TOOLS:
@@ -486,8 +491,13 @@ def validate_comparison(data: Any, artifact: Any) -> list[validate_result.Violat
             for violation in artifact_violations
         ]
     assert isinstance(data, dict) and isinstance(artifact, dict)
-    validate_target_identities(data["targets"], violations)
-    validate_oracle_identity(data["oracle"], violations)
+    try:
+        reference = benchmark_references.select(data["source"])
+        validate_target_identities(data["targets"], violations, reference)
+        validate_oracle_identity(data["oracle"], violations, reference)
+    except (OSError, ValueError, TypeError) as error:
+        violations.append(validate_result.Violation("$.source", f"cannot verify identity reference: {error}"))
+        return violations
     violations.extend(sample_evidence_violations(artifact, data["targets"]))
     validate_result.require_equal("$.claim_boundary", data["claim_boundary"], CLAIM_BOUNDARY, violations)
     validate_result.require_equal("$.comparison_sha256", data["comparison_sha256"], comparison_sha256(data), violations)

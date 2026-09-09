@@ -2541,6 +2541,8 @@ enum UnsupportedPaintKindArtifact {
     Iframe,
     TextEffects,
     ContentGeometry,
+    PagedFixedContent,
+    UnresolvedPageCounter,
     SvgAnimation,
     SvgCompositing,
     SvgStroke,

@@ -12,6 +12,9 @@ feature-depth = 1
 # https://embarkstudios.github.io/cargo-deny/checks/advisories/cfg.html
 [advisories]
 ignore = [
+    # Yank-only, exact-source applicability review; keep the live RustSec/global yank policy.
+    # Enforced before Clippy by python/check_pliego_wnaf_exception.py.
+    { crate = "wnaf@0.14.0", reason = "Pinned big-endian Pliego graph; docs/security/wnaf-0.14.0-review.md. Remove on crypto update/before 0.5." },
     # The crate `paste` is no longer maintained.
     "RUSTSEC-2024-0436",
     # The crate `unic-char-range` is unmaintained.

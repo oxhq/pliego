@@ -268,6 +268,11 @@ bitflags! {
         /// Whether or not the node that created this Fragment is a `<input>` element.
         const IS_INPUT_ELEMENT = 1 << 12;
 
+        /// Generated page text has not been realized in an admitted page context.
+        const UNRESOLVED_PAGE_COUNTER = 1 << 13;
+        /// A paged fixed subtree was outside the admitted page-root Flow profile.
+        const UNSUPPORTED_PAGED_FIXED = 1 << 14;
+
     }
 }
 
